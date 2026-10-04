@@ -3,7 +3,7 @@ use target::build_target_tmdb_client;
 use tuliprox_core::{model::ProxyConfig, utils::network::request::create_tmdb_client};
 
 #[tokio::test]
-async fn curation_tmdb_client_construction_reports_only_safe_phases_and_keeps_publication_closed() {
+async fn curation_tmdb_client_construction_reports_safe_phases_and_continues_publication() {
     for policy in ["full", "curated"] {
         for phase in ["phase=profile_configuration", "phase=client_build"] {
             let server = DiscoveryServer::start().await;
@@ -12,7 +12,6 @@ async fn curation_tmdb_client_construction_reports_only_safe_phases_and_keeps_pu
                 if previously_published {
                     run.publish().await.unwrap();
                 }
-                let files = file_snapshot(run.directory.path());
                 let cache = run.cache_signature().await;
                 assert_eq!(!cache.is_empty(), previously_published);
                 let before = server.requests.lock().unwrap().len();
@@ -43,7 +42,7 @@ async fn curation_tmdb_client_construction_reports_only_safe_phases_and_keeps_pu
                 assert_eq!(diagnostics, [phase]);
                 assert!(!diagnostics[0].contains("synthetic-"));
                 let mut changed = catalog();
-                changed[0].channels[0].header.title = "Must not publish".intern();
+                changed[0].channels[0].header.title = "Updated Live".intern();
                 let prepared = PreparedTarget {
                     target: run.target.clone(),
                     playlist: changed,
@@ -62,12 +61,12 @@ async fn curation_tmdb_client_construction_reports_only_safe_phases_and_keeps_pu
                 )
                 .await
                 .unwrap();
-                assert!(result.is_err());
+                assert!(result.is_ok());
                 assert!(errors.is_empty());
-                assert_eq!(file_snapshot(run.directory.path()), files);
-                assert_eq!(run.cache_signature().await, cache);
+                assert!(run.xtream_rows().await.iter().any(|row| row.title.as_ref() == "Updated Live"));
+                assert_ne!(run.cache_signature().await, cache);
                 let requests = server.requests.lock().unwrap();
-                assert_eq!(requests.len(), before + 1, "complete Trakt sibling cannot authorize publication");
+                assert_eq!(requests.len(), before + 1, "failed TMDB transport must not use the generic client");
                 assert!(requests[before].starts_with(&format!("GET {TRAKT} ")));
             }
         }

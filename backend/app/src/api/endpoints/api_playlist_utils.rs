@@ -168,7 +168,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
         } else if input.input_type.is_stalker() {
             // TODO refactor
             let stalker_cluster = stalker_cluster(cluster);
-            let client = app_state.http_client.load();
+            let client = app_state.http_clients.default.load();
             let fetch = download_stalker_playlist(
                 &app_state.app_config,
                 client.as_ref(),

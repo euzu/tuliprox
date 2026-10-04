@@ -265,7 +265,37 @@ impl InputFetchMethod {
     pub fn is_default(value: &InputFetchMethod) -> bool { matches!(value, Self::GET) }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::EnumIter,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FlussonicHlsCatchup {
+    #[default]
+    Native,
+    BoundedArchive,
+}
+
+impl FlussonicHlsCatchup {
+    pub fn is_native(value: &Self) -> bool { matches!(value, Self::Native) }
+}
+
+pub const fn default_flussonic_hls_catchup_max_duration_secs() -> u32 { 4 * 60 * 60 }
+
+fn is_default_flussonic_hls_catchup_max_duration_secs(value: &u32) -> bool {
+    *value == default_flussonic_hls_catchup_max_duration_secs()
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInputOptionsDto {
@@ -283,8 +313,19 @@ pub struct ConfigInputOptionsDto {
     pub xtream_live_stream_without_extension: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_hls_streaming: bool,
+    #[serde(default, skip_serializing_if = "FlussonicHlsCatchup::is_native")]
+    pub flussonic_hls_catchup: FlussonicHlsCatchup,
+    #[serde(
+        default = "default_flussonic_hls_catchup_max_duration_secs",
+        skip_serializing_if = "is_default_flussonic_hls_catchup_max_duration_secs"
+    )]
+    pub flussonic_hls_catchup_max_duration_secs: u32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_agent_stream_index: bool,
+    /// Labels fragmented-MP4 objects below Flussonic `tracks-a<N>` paths as `audio/mp4` when the
+    /// provider sends no specific Content-Type.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flussonic_hls_audio_tracks: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_tmdb: bool,
     #[serde(default = "default_resolve_background", skip_serializing_if = "is_true")]
@@ -332,7 +373,10 @@ impl Default for ConfigInputOptionsDto {
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             disable_hls_streaming: false,
+            flussonic_hls_catchup: FlussonicHlsCatchup::Native,
+            flussonic_hls_catchup_max_duration_secs: default_flussonic_hls_catchup_max_duration_secs(),
             user_agent_stream_index: false,
+            flussonic_hls_audio_tracks: false,
             resolve_tmdb: false,
             resolve_background: default_resolve_background(),
             resolve_series: false,
@@ -361,7 +405,10 @@ impl ConfigInputOptionsDto {
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.disable_hls_streaming
+            && FlussonicHlsCatchup::is_native(&self.flussonic_hls_catchup)
+            && is_default_flussonic_hls_catchup_max_duration_secs(&self.flussonic_hls_catchup_max_duration_secs)
             && !self.user_agent_stream_index
+            && !self.flussonic_hls_audio_tracks
             && !self.resolve_tmdb
             && self.resolve_background
             && !self.resolve_series
@@ -385,7 +432,10 @@ impl ConfigInputOptionsDto {
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.disable_hls_streaming = false;
+        self.flussonic_hls_catchup = FlussonicHlsCatchup::Native;
+        self.flussonic_hls_catchup_max_duration_secs = default_flussonic_hls_catchup_max_duration_secs();
         self.user_agent_stream_index = false;
+        self.flussonic_hls_audio_tracks = false;
         self.resolve_tmdb = false;
         self.resolve_background = default_as_true();
         self.resolve_series = false;
@@ -409,6 +459,11 @@ impl Prepare for ConfigInputOptionsDto {
 
     fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.update_quality.prepare(())?;
+        if !(1..=7 * 24 * 60 * 60).contains(&self.flussonic_hls_catchup_max_duration_secs) {
+            return Err(TuliproxError::ConfigInput(
+                "flussonic_hls_catchup_max_duration_secs must be between 1 and 604800 seconds".to_string(),
+            ));
+        }
         if let Some(raw_filter) = &self.resolve_filter {
             self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
         }
@@ -492,6 +547,9 @@ pub struct ConfigInputDto {
     pub persist: Option<String>,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Excludes the root account while keeping enabled aliases available.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub account_disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequential_group: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,6 +597,7 @@ impl Default for ConfigInputDto {
             password: None,
             persist: None,
             enabled: default_as_true(),
+            account_disabled: false,
             sequential_group: None,
             options: None,
             media_server: None,
@@ -902,7 +961,6 @@ impl ConfigInputDto {
         Ok(())
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub fn prepare(
         &mut self,
         index: u16,
@@ -1130,9 +1188,13 @@ impl ConfigInputDto {
         exp_date: i64,
         disable: bool,
     ) -> Result<bool, TuliproxError> {
-        let (expiration, enabled) = if self.name.as_ref() == account_name {
-            (&mut self.exp_date, &mut self.enabled)
-        } else if let Some(alias) = self
+        if self.name.as_ref() == account_name {
+            let changed = self.exp_date != Some(exp_date) || disable && !self.account_disabled;
+            self.exp_date = Some(exp_date);
+            self.account_disabled |= disable;
+            return Ok(changed);
+        }
+        let (expiration, enabled) = if let Some(alias) = self
             .aliases
             .as_mut()
             .and_then(|aliases| aliases.iter_mut().find(|alias| alias.name.as_ref() == account_name))
@@ -2100,6 +2162,44 @@ mod tests {
     }
 
     #[test]
+    fn flussonic_archive_window_config_validates_and_cleans() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::model::Prepare;
+        let mut options: ConfigInputOptionsDto = serde_json::from_str(
+            r#"{"flussonic_hls_catchup":"bounded_archive","flussonic_hls_catchup_max_duration_secs":1800}"#,
+        )?;
+        options.prepare(None)?;
+        assert_eq!(options.flussonic_hls_catchup_max_duration_secs, 1800);
+        assert_eq!(serde_json::from_str::<ConfigInputOptionsDto>(&serde_json::to_string(&options)?)?, options);
+        for value in [0, 604801, u32::MAX] {
+            options.flussonic_hls_catchup_max_duration_secs = value;
+            assert!(options.prepare(None).is_err());
+        }
+        options.clean();
+        assert_eq!(options.flussonic_hls_catchup_max_duration_secs, 14400);
+        assert!(options.is_empty());
+        assert!(serde_json::to_value(options)?.get("flussonic_hls_catchup_max_duration_secs").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn flussonic_hls_catchup_round_trips_and_cleans() -> Result<(), serde_json::Error> {
+        let defaults: ConfigInputOptionsDto = serde_json::from_str("{}")?;
+        assert_eq!(defaults.flussonic_hls_catchup, super::FlussonicHlsCatchup::Native);
+        assert!(serde_json::to_value(defaults)?.get("flussonic_hls_catchup").is_none());
+        let mut options: ConfigInputOptionsDto =
+            serde_json::from_str(r#"{"flussonic_hls_catchup":"bounded_archive"}"#)?;
+        assert_eq!(options.flussonic_hls_catchup, super::FlussonicHlsCatchup::BoundedArchive);
+        assert!(!options.is_empty());
+        assert_eq!(serde_json::to_value(&options)?, serde_json::json!({"flussonic_hls_catchup": "bounded_archive"}));
+        assert_eq!(serde_json::from_str::<ConfigInputOptionsDto>(&serde_json::to_string(&options)?)?, options);
+        assert!(serde_json::from_str::<ConfigInputOptionsDto>(r#"{"flussonic_hls_catchup":"unknown"}"#).is_err());
+        options.clean();
+        assert_eq!(options.flussonic_hls_catchup, super::FlussonicHlsCatchup::Native);
+        assert!(options.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn disable_hls_streaming_defaults_to_false() -> Result<(), serde_json::Error> {
         let options: ConfigInputOptionsDto = serde_json::from_str("{}")?;
         assert!(!options.disable_hls_streaming);
@@ -2123,6 +2223,22 @@ mod tests {
         let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
 
         assert!(restored.disable_hls_streaming);
+        Ok(())
+    }
+
+    #[test]
+    fn flussonic_hls_audio_tracks_round_trips_defaults_off_and_cleans() -> Result<(), serde_json::Error> {
+        assert!(!ConfigInputOptionsDto::default().flussonic_hls_audio_tracks);
+        let mut options =
+            ConfigInputOptionsDto { flussonic_hls_audio_tracks: true, ..ConfigInputOptionsDto::default() };
+        let json = serde_json::to_string(&options)?;
+        let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
+
+        assert!(restored.flussonic_hls_audio_tracks);
+        assert!(!options.is_empty());
+        options.clean();
+        assert!(!options.flussonic_hls_audio_tracks);
+        assert!(options.is_empty());
         Ok(())
     }
 

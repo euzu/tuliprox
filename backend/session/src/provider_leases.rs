@@ -39,6 +39,164 @@ use tuliprox_core::model::{
 /// capacity, independently of the configured reconnect TTL.
 pub const STARTING_LEASE_TTL_SECS: u64 = 5;
 
+/// How long a playback keeps preferring its provider after its last confirmed
+/// media activity, on top of the lease's reconnect window.
+///
+/// Affinity reserves no capacity. It only orders the provider candidates of a
+/// re-entry, so a player that pauses requests longer than the reconnect TTL
+/// returns to the same account instead of rerunning priority selection.
+/// Configured by `reverse_proxy.stream.provider_affinity_ttl_secs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAffinityTtl(pub u64);
+
+impl Default for ProviderAffinityTtl {
+    fn default() -> Self { Self(shared::defaults::default_provider_affinity_ttl_secs()) }
+}
+
+/// Provider preference of one playback owner that outlives its capacity lease.
+///
+/// The binding tag and the requests still attached when the lease ended identify
+/// which cleanups may end the preference, so a delayed failure of an older binding
+/// cannot erase the preference of its successor.
+#[derive(Debug, Clone)]
+struct ProviderAffinity {
+    provider_name: Arc<str>,
+    binding_tag: ProviderBindingTag,
+    orphaned_request_ids: HashSet<PlaybackRequestId>,
+    orphaned_request_tokens: HashSet<Arc<str>>,
+    expires_at: TokioInstant,
+}
+
+/// Upper bound for any affinity or token deadline offset, so a large configured TTL
+/// can never overflow monotonic instant arithmetic.
+const MAX_DEADLINE_OFFSET_SECS: u64 = 86_400 * 2;
+
+/// `now + secs`, capped so the addition can never panic.
+fn deadline_after(now: TokioInstant, secs: u64) -> TokioInstant {
+    now + Duration::from_secs(secs.min(MAX_DEADLINE_OFFSET_SECS))
+}
+
+/// Provider preferences of playback owners that outlive their capacity leases.
+#[derive(Debug, Default)]
+struct ProviderAffinities {
+    entries: HashMap<Arc<str>, ProviderAffinity>,
+    // Earliest deadline, so pruning scans the map only when an entry can have expired.
+    sweep_at: Option<TokioInstant>,
+    ttl: ProviderAffinityTtl,
+}
+
+impl ProviderAffinities {
+    fn with_ttl(ttl: ProviderAffinityTtl) -> Self { Self { ttl, ..Self::default() } }
+
+    /// Records that real media of `lease.owner` flowed from `lease.provider_name`.
+    ///
+    /// Only reconnect-capable playback (HLS, DASH, catchup, VOD) returns through
+    /// separate requests; a one-shot live TS response has nothing to return to.
+    fn remember(&mut self, lease: &ProviderSlotLease, now: TokioInstant) {
+        if !lease.kind.is_reconnect_capable() {
+            return;
+        }
+        let expires_at = deadline_after(now, lease.idle_ttl_secs.saturating_add(self.ttl.0));
+        let binding_tag = ProviderBindingTag::new(lease.id, lease.binding_generation);
+        match self.entries.get_mut(&lease.owner) {
+            Some(affinity) => {
+                if affinity.binding_tag != binding_tag {
+                    affinity.provider_name = Arc::clone(&lease.provider_name);
+                    affinity.binding_tag = binding_tag;
+                    affinity.orphaned_request_ids.clear();
+                    affinity.orphaned_request_tokens.clear();
+                }
+                affinity.expires_at = expires_at;
+            }
+            None => {
+                self.entries.insert(
+                    Arc::clone(&lease.owner),
+                    ProviderAffinity {
+                        provider_name: Arc::clone(&lease.provider_name),
+                        binding_tag,
+                        orphaned_request_ids: HashSet::new(),
+                        orphaned_request_tokens: HashSet::new(),
+                        expires_at,
+                    },
+                );
+            }
+        }
+        if self.sweep_at.is_none_or(|sweep_at| expires_at < sweep_at) {
+            self.sweep_at = Some(expires_at);
+        }
+    }
+
+    /// Keeps the cleanup rights of requests and tokens that were still attached when
+    /// the lease behind the preference ended.
+    fn orphan(&mut self, lease: &ProviderSlotLease) {
+        let Some(affinity) = self.entries.get_mut(&lease.owner) else {
+            return;
+        };
+        if affinity.binding_tag != ProviderBindingTag::new(lease.id, lease.binding_generation) {
+            return;
+        }
+        affinity.orphaned_request_ids.clone_from(&lease.request_ids);
+        // A token released just before the lease ended still held its right then.
+        let ended_at = lease.state.expires_at().min(TokioInstant::now());
+        affinity.orphaned_request_tokens = lease.request_tokens.live_tokens_at(ended_at);
+    }
+
+    fn forget(&mut self, owner: &str) { self.entries.remove(owner); }
+
+    /// Ends the preference only while it points at `provider_name`: a failure on a
+    /// fallback provider says nothing about the preferred one.
+    fn forget_for_provider(&mut self, owner: &str, provider_name: &Arc<str>) {
+        if self.entries.get(owner).is_some_and(|affinity| affinity.provider_name == *provider_name) {
+            self.entries.remove(owner);
+        }
+    }
+
+    fn forget_identified(&mut self, owner: &str, provider_name: &Arc<str>, binding_tag: ProviderBindingTag) -> bool {
+        let matches = self
+            .entries
+            .get(owner)
+            .is_some_and(|affinity| affinity.provider_name == *provider_name && affinity.binding_tag == binding_tag);
+        if matches {
+            self.entries.remove(owner);
+        }
+        matches
+    }
+
+    /// Applies the outcome of a request whose lease already ended. Only a request that
+    /// was still attached to the binding behind the preference may end it.
+    fn finish_orphaned_request(&mut self, owner: &str, request_id: PlaybackRequestId, outcome: PlaybackRequestOutcome) {
+        let Some(affinity) = self.entries.get_mut(owner) else {
+            return;
+        };
+        if affinity.orphaned_request_ids.remove(&request_id) && !outcome.keeps_idle_lease() {
+            self.entries.remove(owner);
+        }
+    }
+
+    fn terminate_orphaned_token(&mut self, owner: &str, token: &str) -> bool {
+        let orphaned = self.entries.get(owner).is_some_and(|affinity| affinity.orphaned_request_tokens.contains(token));
+        if orphaned {
+            self.entries.remove(owner);
+        }
+        orphaned
+    }
+
+    fn provider_for(&self, owner: &str, now: TokioInstant) -> Option<Arc<str>> {
+        self.entries
+            .get(owner)
+            .filter(|affinity| affinity.expires_at > now)
+            .map(|affinity| Arc::clone(&affinity.provider_name))
+    }
+
+    fn prune(&mut self, now: TokioInstant) {
+        if self.sweep_at.is_none_or(|sweep_at| sweep_at > now) {
+            return;
+        }
+        self.entries.retain(|_, affinity| affinity.expires_at > now);
+        self.sweep_at = self.entries.values().map(|affinity| affinity.expires_at).min();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ProviderLeaseState {
     Starting { expires_at: TokioInstant },
@@ -72,6 +230,79 @@ impl ProviderLeaseState {
     }
 }
 
+/// Delete right of one public session token on a binding incarnation.
+#[derive(Debug, Clone, Copy)]
+struct TokenClaim {
+    active_requests: usize,
+    /// Deadline after the token's last request finished. An idle session keeps its
+    /// cleanup right for the reconnect window; a token without requests and past this
+    /// deadline is dropped so retries cannot grow the set without bound.
+    expires_at: TokioInstant,
+}
+
+impl TokenClaim {
+    #[inline]
+    fn is_live_at(&self, at: TokioInstant) -> bool { self.active_requests > 0 || self.expires_at > at }
+}
+
+/// Public session tokens that acquired a binding incarnation, keyed by the requests
+/// that hold them.
+#[derive(Debug, Clone, Default)]
+struct RequestTokenClaims {
+    claims: HashMap<Arc<str>, TokenClaim>,
+    by_request: HashMap<PlaybackRequestId, Arc<str>>,
+}
+
+impl RequestTokenClaims {
+    fn clear(&mut self) {
+        self.claims.clear();
+        self.by_request.clear();
+    }
+
+    fn attach(&mut self, request_id: PlaybackRequestId, token: &str, now: TokioInstant) {
+        self.prune(now);
+        if self.by_request.contains_key(&request_id) {
+            return;
+        }
+        let token = match self.claims.get_key_value(token) {
+            Some((key, _)) => Arc::clone(key),
+            None => Arc::from(token),
+        };
+        self.claims
+            .entry(Arc::clone(&token))
+            .or_insert(TokenClaim { active_requests: 0, expires_at: now })
+            .active_requests += 1;
+        self.by_request.insert(request_id, token);
+    }
+
+    fn release(&mut self, request_id: PlaybackRequestId, now: TokioInstant, idle_ttl_secs: u64) {
+        let Some(token) = self.by_request.remove(&request_id) else {
+            return;
+        };
+        if let Some(claim) = self.claims.get_mut(&token) {
+            claim.active_requests = claim.active_requests.saturating_sub(1);
+            if claim.active_requests == 0 {
+                claim.expires_at = deadline_after(now, idle_ttl_secs.max(STARTING_LEASE_TTL_SECS));
+            }
+        }
+    }
+
+    fn prune(&mut self, now: TokioInstant) { self.claims.retain(|_, claim| claim.is_live_at(now)); }
+
+    fn holds(&self, token: &str, now: TokioInstant) -> bool {
+        self.claims.get(token).is_some_and(|claim| claim.is_live_at(now))
+    }
+
+    /// Tokens whose claim was still valid when the lease ended at `ended_at`.
+    fn live_tokens_at(&self, ended_at: TokioInstant) -> HashSet<Arc<str>> {
+        self.claims
+            .iter()
+            .filter(|(_, claim)| claim.active_requests > 0 || claim.expires_at >= ended_at)
+            .map(|(token, _)| Arc::clone(token))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderSlotLease {
     pub id: PlaybackLeaseId,
@@ -86,6 +317,10 @@ pub struct ProviderSlotLease {
     /// Requests attached to the current binding incarnation. Parallel segment and
     /// range requests remain valid until that incarnation is explicitly rebound.
     request_ids: HashSet<PlaybackRequestId>,
+    /// Public session tokens (for example per-retry HLS tokens) that acquired the
+    /// current binding incarnation. An administrative end of one of these tokens may
+    /// end this binding; a token of an older incarnation may not.
+    request_tokens: RequestTokenClaims,
     /// Reconnect window configured for this playback; `0` means the endpoint wants no
     /// reservation, so the lease never blocks foreign capacity.
     pub idle_ttl_secs: u64,
@@ -152,9 +387,15 @@ pub struct ProviderLeaseTable {
     // Exactly one deadline per lease; renewals replace entries rather than leaving
     // stale heap entries that grow with the number of segment requests.
     expirations: BTreeSet<(TokioInstant, PlaybackLeaseId)>,
+    affinity: ProviderAffinities,
+    // Providers whose leases ended since the last drain; their capacity waiters get woken.
+    released_providers: Vec<Arc<str>>,
 }
 
 impl ProviderLeaseTable {
+    /// Providers whose leases ended since the last call.
+    pub fn take_released_providers(&mut self) -> Vec<Arc<str>> { std::mem::take(&mut self.released_providers) }
+
     #[inline]
     pub fn is_empty(&self) -> bool { self.leases.is_empty() }
 
@@ -162,7 +403,14 @@ impl ProviderLeaseTable {
     pub fn len(&self) -> usize { self.leases.len() }
 
     /// Removes every lease during terminal server shutdown.
-    pub fn clear(&mut self) { *self = Self::default(); }
+    pub fn clear(&mut self) { *self = Self::with_affinity_ttl(self.affinity.ttl); }
+
+    pub fn with_affinity_ttl(affinity_ttl: ProviderAffinityTtl) -> Self {
+        Self { affinity: ProviderAffinities::with_ttl(affinity_ttl), ..Self::default() }
+    }
+
+    /// Applies a reloaded affinity window to affinities recorded from now on.
+    pub fn set_affinity_ttl(&mut self, affinity_ttl: ProviderAffinityTtl) { self.affinity.ttl = affinity_ttl; }
 
     pub fn lease(&self, id: PlaybackLeaseId) -> Option<&ProviderSlotLease> { self.leases.get(&id) }
 
@@ -191,6 +439,8 @@ impl ProviderLeaseTable {
         let lease = self.leases.remove(&id)?;
         self.expirations.remove(&(lease.state.expires_at(), id));
         Self::deindex(&mut self.by_owner, &mut self.by_provider, &lease);
+        self.affinity.orphan(&lease);
+        self.released_providers.push(Arc::clone(&lease.provider_name));
         Some(lease)
     }
 
@@ -207,13 +457,65 @@ impl ProviderLeaseTable {
         }
     }
 
+    /// Ends the provider preference of an owner whose playback was ended administratively.
+    pub fn forget_affinity(&mut self, owner: &str) { self.affinity.forget(owner); }
+
+    /// Ends the preference only if it still belongs to the exact provider binding.
+    pub fn forget_identified_affinity(
+        &mut self,
+        owner: &str,
+        provider_name: &Arc<str>,
+        binding_tag: ProviderBindingTag,
+    ) -> bool {
+        self.affinity.forget_identified(owner, provider_name, binding_tag)
+    }
+
+    /// Records the public session token that acquired the current binding of a lease.
+    pub fn attach_request_token(&mut self, id: PlaybackLeaseId, request_id: PlaybackRequestId, token: &str) {
+        if let Some(lease) = self.leases.get_mut(&id) {
+            lease.request_tokens.attach(request_id, token, TokioInstant::now());
+        }
+    }
+
+    /// Number of public tokens holding a claim on the owner's current binding.
+    #[cfg(test)]
+    pub(crate) fn request_token_claims(&self, owner: &str) -> usize {
+        self.lease_of_owner(owner).map_or(0, |lease| lease.request_tokens.claims.len())
+    }
+
+    /// Administrative end of the playback that `token` belongs to.
+    ///
+    /// Only the binding the token actually acquired is ended: the current lease when
+    /// the token is attached to it, otherwise the provider preference left behind by
+    /// the token's expired binding. A token of an older incarnation never touches a
+    /// newer binding of the same owner.
+    pub fn terminate_identified_token(&mut self, owner: &str, token: &str) -> bool {
+        if let Some(id) = self.by_owner.get(owner).copied() {
+            let now = TokioInstant::now();
+            if self.leases.get(&id).is_some_and(|lease| lease.request_tokens.holds(token, now)) {
+                self.forget_affinity(owner);
+                self.remove_lease(id);
+                return true;
+            }
+        }
+        self.affinity.terminate_orphaned_token(owner, token)
+    }
+
+    /// The provider a recently confirmed playback of `owner` should return to.
+    ///
+    /// Unlike [`Self::provider_for_owner`] this survives lease expiry and never
+    /// implies a capacity reservation.
+    pub fn affinity_provider_for_owner(&self, owner: &str) -> Option<Arc<str>> {
+        self.affinity.provider_for(owner, TokioInstant::now())
+    }
+
     fn startup_expiry(now: TokioInstant, idle_ttl_secs: u64) -> TokioInstant {
         let ttl = if idle_ttl_secs == 0 { STARTING_LEASE_TTL_SECS } else { STARTING_LEASE_TTL_SECS.min(idle_ttl_secs) };
         now + Duration::from_secs(ttl)
     }
 
     fn confirmed_expiry(now: TokioInstant, idle_ttl_secs: u64) -> TokioInstant {
-        now + Duration::from_secs(idle_ttl_secs.max(1))
+        deadline_after(now, idle_ttl_secs.max(1))
     }
 
     /// Claims a slot for one playback at allocation time, before any media flows.
@@ -239,12 +541,14 @@ impl ProviderLeaseTable {
                     Self::rebind_lease_provider(&mut self.by_owner, &mut self.by_provider, lease, provider_name);
                     lease.binding_generation = lease.binding_generation.saturating_add(1);
                     lease.request_ids.clear();
+                    lease.request_tokens.clear();
                     lease.created_at = now;
                     lease.idle_ttl_secs = 0;
                     lease.state = ProviderLeaseState::Starting { expires_at: Self::startup_expiry(now, 0) };
                 } else if lease.state.is_idle() {
                     lease.binding_generation = lease.binding_generation.saturating_add(1);
                     lease.request_ids.clear();
+                    lease.request_tokens.clear();
                     lease.created_at = now;
                     lease.state =
                         ProviderLeaseState::Starting { expires_at: Self::startup_expiry(now, lease.idle_ttl_secs) };
@@ -273,6 +577,7 @@ impl ProviderLeaseTable {
             request_id,
             binding_generation: 1,
             request_ids: HashSet::from([request_id]),
+            request_tokens: RequestTokenClaims::default(),
             idle_ttl_secs: 0,
             created_at: now,
             last_activity_at: now,
@@ -329,6 +634,9 @@ impl ProviderLeaseTable {
                 ProviderLeaseState::Starting { expires_at: Self::startup_expiry(lease.created_at, idle_ttl_secs) }
             };
             self.expirations.insert((lease.state.expires_at(), id));
+            if was_confirmed {
+                self.affinity.remember(lease, now);
+            }
             return Some(id);
         }
         None
@@ -418,6 +726,7 @@ impl ProviderLeaseTable {
             expires_at: Self::confirmed_expiry(now, lease.idle_ttl_secs),
         };
         self.expirations.insert((lease.state.expires_at(), id));
+        self.affinity.remember(lease, now);
         Some(id)
     }
 
@@ -434,7 +743,7 @@ impl ProviderLeaseTable {
     ) -> Option<ProviderSlotLease> {
         let id = self.by_owner.get(owner).copied()?;
         let now = TokioInstant::now();
-        let keep_idle = {
+        let (keep_idle, provider_name) = {
             let lease = self.leases.get_mut(&id)?;
             lease.last_activity_at = now;
             let ttl = idle_ttl_secs.unwrap_or(lease.idle_ttl_secs);
@@ -445,11 +754,16 @@ impl ProviderLeaseTable {
             if keep {
                 self.expirations.remove(&(lease.state.expires_at(), id));
                 lease.idle_ttl_secs = ttl;
-                lease.state = ProviderLeaseState::Idle { expires_at: now + Duration::from_secs(ttl) };
+                lease.state = ProviderLeaseState::Idle { expires_at: deadline_after(now, ttl) };
                 self.expirations.insert((lease.state.expires_at(), id));
+                self.affinity.remember(lease, now);
             }
-            keep
+            (keep, Arc::clone(&lease.provider_name))
         };
+        if !outcome.keeps_idle_lease() {
+            // A failed or forcibly ended playback may fall back to another provider.
+            self.affinity.forget_for_provider(owner, &provider_name);
+        }
         if keep_idle {
             return None;
         }
@@ -496,13 +810,22 @@ impl ProviderLeaseTable {
         outcome: PlaybackRequestOutcome,
         idle_ttl_secs: Option<u64>,
     ) -> Option<ProviderSlotLease> {
-        let id = self.by_owner.get(owner).copied()?;
+        let Some(id) = self.by_owner.get(owner).copied() else {
+            self.affinity.finish_orphaned_request(owner, request_id, outcome);
+            return None;
+        };
+        if !self.leases.get(&id).is_some_and(|lease| lease.contains_request(request_id)) {
+            // A request of the binding that preceded the current lease.
+            self.affinity.finish_orphaned_request(owner, request_id, outcome);
+            return None;
+        }
         let now = TokioInstant::now();
-        let keep_idle = {
+        let (keep_idle, provider_name) = {
             let lease = self.leases.get_mut(&id)?;
             if !lease.request_ids.remove(&request_id) {
                 return None;
             }
+            lease.request_tokens.release(request_id, now, idle_ttl_secs.unwrap_or(lease.idle_ttl_secs));
             if !lease.request_ids.is_empty() {
                 if lease.request_id == request_id {
                     if let Some(next) = lease.request_ids.iter().next().copied() {
@@ -520,11 +843,16 @@ impl ProviderLeaseTable {
             if keep {
                 self.expirations.remove(&(lease.state.expires_at(), id));
                 lease.idle_ttl_secs = ttl;
-                lease.state = ProviderLeaseState::Idle { expires_at: now + Duration::from_secs(ttl) };
+                lease.state = ProviderLeaseState::Idle { expires_at: deadline_after(now, ttl) };
                 self.expirations.insert((lease.state.expires_at(), id));
+                self.affinity.remember(lease, now);
             }
-            keep
+            (keep, Arc::clone(&lease.provider_name))
         };
+        if !outcome.keeps_idle_lease() {
+            // A failed or forcibly ended playback may fall back to another provider.
+            self.affinity.forget_for_provider(owner, &provider_name);
+        }
         if keep_idle {
             None
         } else {
@@ -543,6 +871,7 @@ impl ProviderLeaseTable {
         if !lease.request_ids.remove(&request_id) {
             return None;
         }
+        lease.request_tokens.release(request_id, TokioInstant::now(), lease.idle_ttl_secs);
         if let Some(next) = lease.request_ids.iter().next().copied() {
             if lease.request_id == request_id {
                 lease.request_id = next;
@@ -563,6 +892,7 @@ impl ProviderLeaseTable {
         if !lease.request_ids.remove(&request_id) {
             return false;
         }
+        lease.request_tokens.release(request_id, TokioInstant::now(), lease.idle_ttl_secs);
         if lease.request_id == request_id {
             if let Some(next) = lease.request_ids.iter().next().copied() {
                 lease.request_id = next;
@@ -616,6 +946,9 @@ impl ProviderLeaseTable {
             .count()
     }
 
+    /// Earliest instant at which any lease may expire and release reserved capacity.
+    pub fn next_expiry(&self) -> Option<TokioInstant> { self.expirations.first().map(|(deadline, _)| *deadline) }
+
     pub fn has_foreign_reserved_lease(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
         let Some(ids) = self.by_provider.get(provider_name) else {
             return false;
@@ -626,8 +959,9 @@ impl ProviderLeaseTable {
             .any(|lease| session_owner != Some(lease.owner.as_ref()))
     }
 
-    /// Removes expired leases of any state.
+    /// Removes expired leases of any state and expired provider affinities.
     pub fn prune(&mut self, now: TokioInstant) -> Vec<ProviderSlotLease> {
+        self.affinity.prune(now);
         if self.leases.is_empty() {
             return Vec::new();
         }

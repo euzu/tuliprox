@@ -6,9 +6,9 @@ use shared::{
     error::TuliproxError,
     model::{
         EventMessage, EventSink, InputType, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
-        ProviderAccountEvent, ProviderAccountState, ProviderId, ProxyUserStatus, SeriesStreamProperties,
-        StreamProperties, UpdateQualityPolicy, VideoStreamProperties, XtreamCluster, XtreamLoginInfo,
-        XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
+        ProviderAccountEvent, ProviderAccountIdentity, ProviderAccountState, ProviderId, ProxyUserStatus,
+        SeriesStreamProperties, StreamProperties, UpdateQualityPolicy, VideoStreamProperties, XtreamCluster,
+        XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
         extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info,
@@ -383,6 +383,29 @@ const ACTIONS: [(XtreamCluster, &str, &str); 3] = [
     ),
 ];
 
+/// The configured root or alias account a login for `input`/`username` belongs to.
+pub fn login_account_identity(
+    app_config: &AppConfig,
+    input: &InputSource,
+    username: &str,
+) -> Option<(Arc<str>, ProviderAccountIdentity)> {
+    let sources = app_config.sources.load();
+    let is_login_account = |name: &Arc<str>, user: Option<&str>, pass: &Option<String>| {
+        *name == input.name && user == Some(username) && *pass == input.password
+    };
+    sources.inputs.iter().find_map(|configured| {
+        if is_login_account(&configured.name, configured.username.as_deref(), &configured.password) {
+            return Some((Arc::clone(&configured.name), configured.account_identity()));
+        }
+        configured
+            .aliases
+            .iter()
+            .flatten()
+            .find(|alias| is_login_account(&alias.name, alias.username.as_deref(), &alias.password))
+            .map(|alias| (Arc::clone(&alias.name), alias.account_identity()))
+    })
+}
+
 pub async fn xtream_login<E: EventSink>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -390,6 +413,9 @@ pub async fn xtream_login<E: EventSink>(
     input: &InputSource,
     username: &str,
 ) -> Result<Option<XtreamLoginInfo>, TuliproxError> {
+    // Captured before the request: a response must never be attributed to an account whose URL or
+    // credentials changed while the request was in flight.
+    let account = login_account_identity(app_config, input, username);
     let content = if let Ok(content) = request::get_input_json_content(app_config, client, input, None, false).await {
         content
     } else {
@@ -435,6 +461,11 @@ pub async fn xtream_login<E: EventSink>(
         }
     }
 
+    if login_info.exp_date.is_some() || login_info.status.is_some() {
+        if let Some((name, identity)) = account {
+            events.observe_provider_account(name, identity, login_info.status, login_info.exp_date);
+        }
+    }
     if login_info.exp_date.is_none() && login_info.status.is_none() {
         Ok(None)
     } else {
@@ -649,6 +680,21 @@ where
     Ok(())
 }
 
+async fn verify_xtream_playlist_account<E: EventSink>(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    events: &E,
+    source: &InputSource,
+    username: &str,
+) -> Result<(), TuliproxError> {
+    let info = xtream_login(app_config, client, events, source, username).await?;
+    if info.is_some_and(|info| info.status.is_some_and(|status| !status.is_usable()) || is_input_expired(info.exp_date))
+    {
+        return Err(TuliproxError::ConfigInput(format!("Provider account {} is blocked or expired", source.name)));
+    }
+    Ok(())
+}
+
 /// Downloads xtream clusters from a single source (either main input or staged input).
 async fn download_xtream_from_source<E: EventSink>(
     app_config: &Arc<AppConfig>,
@@ -675,7 +721,7 @@ async fn download_xtream_from_source<E: EventSink>(
     let base_url = get_xtream_stream_url_base(&base_input_url, username, password);
     let input_source_login = input_source.with_url(base_url.clone());
 
-    if let Err(err) = xtream_login(app_config, client, events, &input_source_login, username).await {
+    if let Err(err) = verify_xtream_playlist_account(app_config, client, events, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
         return PlaylistFetch { failed_clusters: clusters.to_vec(), ..PlaylistFetch::failed(err) };
     }
@@ -777,7 +823,16 @@ async fn download_xtream_playlist_with_scope<E: EventSink>(
 
     if !main_clusters.is_empty() {
         check_alias_user_state(events, input);
-        let source: InputSource = input.into();
+        let Some(account) = input.playlist_account() else {
+            return PlaylistFetch {
+                failed_clusters: main_clusters,
+                ..PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+                    "No available provider account for {}",
+                    input.name
+                )))
+            };
+        };
+        let source: InputSource = account.as_ref().into();
         let mut source_fetch = download_xtream_from_source(
             app_config,
             client,

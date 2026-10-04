@@ -233,7 +233,6 @@ impl ConfigTargetOptions {
     pub fn share_live_any_enabled(&self) -> bool { self.share_live_hls_enabled() || self.share_live_mpeg_ts_enabled() }
 }
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct XtreamTargetOutputDto {
@@ -454,7 +453,6 @@ impl Default for ConfigTargetDto {
 }
 
 impl ConfigTargetDto {
-    #[allow(clippy::too_many_lines)]
     pub fn prepare(
         &mut self,
         id: u16,

@@ -481,12 +481,12 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
     fallback_status: StatusCode,
 ) -> Option<axum::response::Response> {
     let now_ms = current_time_millis();
-    app_state.hls_provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
+    app_state.hls.provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
     let provisioning_enabled = can_provision_on_exhausted(app_state.as_ref(), input);
     if provisioning_enabled {
         start_hls_panel_provisioning_once(app_state, input);
     }
-    let status = if let Some(status) = app_state.hls_provisioning.consumer_status(&input.name, virtual_id, now_ms) {
+    let status = if let Some(status) = app_state.hls.provisioning.consumer_status(&input.name, virtual_id, now_ms) {
         status
     } else if provisioning_enabled {
         HlsProvisioningStatus::InProgress
@@ -528,7 +528,7 @@ pub(crate) fn start_hls_panel_provisioning_once(app_state: &Arc<AppState>, input
     }
     let key = Arc::clone(&input.name);
     let now_ms = current_time_millis();
-    let jobs_to_start = app_state.hls_provisioning.start_jobs_for_waiting_consumers(&key, now_ms);
+    let jobs_to_start = app_state.hls.provisioning.start_jobs_for_waiting_consumers(&key, now_ms);
     if jobs_to_start == 0 {
         return false;
     }
@@ -545,9 +545,9 @@ pub(crate) fn start_hls_panel_provisioning_once(app_state: &Arc<AppState>, input
             let ready = outcome.is_some();
             let finished_at_ms = current_time_millis();
             if ready {
-                app_state.hls_provisioning.mark_job_ready(Arc::clone(&key), finished_at_ms);
+                app_state.hls.provisioning.mark_job_ready(Arc::clone(&key), finished_at_ms);
             } else {
-                app_state.hls_provisioning.mark_job_provider_exhausted(Arc::clone(&key), finished_at_ms);
+                app_state.hls.provisioning.mark_job_provider_exhausted(Arc::clone(&key), finished_at_ms);
             }
             debug!(
                 "HLS panel provisioning completed: input={} outcome={} ready={}",

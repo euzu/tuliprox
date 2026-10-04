@@ -339,7 +339,7 @@ async fn release_connection_parts(
     if matches!(reason, DisconnectReason::ClientKicked) {
         for stream_info in &removed.removed_streams {
             if let Some(session_token) = stream_info.session_token.as_deref() {
-                deps.provider_manager.clear_provider_reservation(session_token);
+                deps.provider_manager.terminate_identified_playback_owner(session_token);
             }
         }
         // Explicitly terminate all sessions for the kicked addr. This expires them
@@ -1294,7 +1294,7 @@ impl ConnectionManager {
         // Provider release and capacity notification are deferred via `release_provider_deferred`.
         for stream_info in &removed.removed_streams {
             if let Some(session_token) = stream_info.session_token.as_deref() {
-                self.provider_manager.clear_provider_reservation(session_token);
+                self.provider_manager.terminate_identified_playback_owner(session_token);
             }
         }
         for username in &removed.disconnected_users {
@@ -1477,7 +1477,27 @@ impl ConnectionManager {
         uid: u32,
         provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
     ) -> RegisteredPlaybackRequest {
-        self.update_connection_with_uid_impl(update, history_mode, uid, provider_request_id, false).await
+        self.update_connection_with_uid_and_session_registration(update, history_mode, uid, provider_request_id, None)
+            .await
+    }
+
+    pub async fn update_connection_with_uid_and_session_registration(
+        &self,
+        update: ConnectionParams<'_>,
+        history_mode: ConnectionHistoryMode,
+        uid: u32,
+        provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
+        session_registration: Option<&crate::PlaybackSessionRegistration>,
+    ) -> RegisteredPlaybackRequest {
+        self.update_connection_with_uid_impl(
+            update,
+            history_mode,
+            uid,
+            provider_request_id,
+            false,
+            session_registration,
+        )
+        .await
     }
 
     /// Registers a request whose enclosing shared-subscriber body already owns the
@@ -1489,8 +1509,15 @@ impl ConnectionManager {
         capability: SharedCleanupCapability,
         provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
     ) -> RegisteredPlaybackRequest {
-        self.update_connection_with_uid_impl(update, history_mode, capability.stream_uid(), provider_request_id, true)
-            .await
+        self.update_connection_with_uid_impl(
+            update,
+            history_mode,
+            capability.stream_uid(),
+            provider_request_id,
+            true,
+            None,
+        )
+        .await
     }
 
     async fn update_connection_with_uid_impl(
@@ -1500,6 +1527,7 @@ impl ConnectionManager {
         uid: u32,
         provider_request_id: Option<tuliprox_core::model::PlaybackRequestId>,
         cleanup_owned_by_shared_subscriber: bool,
+        session_registration: Option<&crate::PlaybackSessionRegistration>,
     ) -> RegisteredPlaybackRequest {
         let username = update.username;
         let fingerprint = update.fingerprint;
@@ -1540,21 +1568,24 @@ impl ConnectionManager {
         };
         if let Some(stream_info) = self
             .user_manager
-            .update_connection(ActiveUserConnectionParams {
-                uid,
-                meter_uid: update.meter_uid,
-                username,
-                max_connections: update.max_connections,
-                soft_connections: update.soft_connections,
-                connection_kind: update.connection_kind,
-                priority: update.priority,
-                soft_priority: update.soft_priority,
-                fingerprint,
-                provider: update.provider,
-                stream_channel: update.stream_channel,
-                user_agent: update.user_agent,
-                session_token: update.session_token,
-            })
+            .update_connection_with_session_registration(
+                ActiveUserConnectionParams {
+                    uid,
+                    meter_uid: update.meter_uid,
+                    username,
+                    max_connections: update.max_connections,
+                    soft_connections: update.soft_connections,
+                    connection_kind: update.connection_kind,
+                    priority: update.priority,
+                    soft_priority: update.soft_priority,
+                    fingerprint,
+                    provider: update.provider,
+                    stream_channel: update.stream_channel,
+                    user_agent: update.user_agent,
+                    session_token: update.session_token,
+                },
+                session_registration,
+            )
             .await
         {
             self.event_manager.register_meter_client(stream_info.uid, stream_info.meter_uid).await;

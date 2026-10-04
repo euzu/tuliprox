@@ -155,6 +155,8 @@ struct LatchedEvents {
 }
 
 pub struct EventManager {
+    pub(crate) account_provider:
+        std::sync::OnceLock<std::sync::Weak<crate::active_provider_manager::ActiveProviderManagerCore>>,
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
     stats: Arc<EventBusStats>,
@@ -196,6 +198,7 @@ impl EventManager {
         let (channel_tx, _channel_rx) = tokio::sync::broadcast::channel(capacity.max(1));
         Self {
             channel_tx,
+            account_provider: std::sync::OnceLock::new(),
             meters: StreamMeterRegistry::new(),
             stats: Arc::new(EventBusStats::default()),
             last_nudge: Mutex::new(HashMap::new()),
@@ -398,6 +401,22 @@ impl EventManager {
 
 impl EventSink for EventManager {
     fn emit(&self, event: EventMessage) { self.send_event(event); }
+    fn observe_provider_account(
+        &self,
+        name: Arc<str>,
+        identity: shared::model::ProviderAccountIdentity,
+        status: Option<shared::model::ProxyUserStatus>,
+        exp_date: Option<i64>,
+    ) {
+        if let Some(provider) = self.account_provider.get().and_then(std::sync::Weak::upgrade) {
+            let _ = provider.providers.observe_account(tuliprox_core::model::ProviderAccountObservation {
+                name,
+                identity,
+                status,
+                exp_date,
+            });
+        }
+    }
 }
 
 impl Default for EventManager {

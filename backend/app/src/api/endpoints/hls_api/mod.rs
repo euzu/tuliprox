@@ -15,11 +15,11 @@ use crate::{
     api::{
         api_utils::{
             connection_priority_for_kind, create_api_proxy_user, create_m3u_catchup_session_key,
-            create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response,
+            create_playback_session_fingerprint, create_session_fingerprint, force_hls_resource_response,
             get_headers_from_request, get_hls_session_ttl_secs, get_stream_alternative_url,
-            is_hls_stream_share_enabled, is_seekable_media_request, local_stream_response,
-            record_connect_failed_attempt, resolve_playback_request_admission, select_provider_stream_url,
-            try_option_bad_request, try_unwrap_body, ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
+            is_hls_stream_share_enabled, local_stream_response, record_connect_failed_attempt,
+            resolve_playback_request_admission, select_provider_stream_url, try_option_bad_request, try_unwrap_body,
+            ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
         },
         model::{
             hls_cache::initial_strip::{
@@ -66,8 +66,8 @@ use shared::{
         StreamProperties, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
-        extract_extension_from_url, generate_random_string, is_hls_url, is_m3u_catchup_session_token,
-        replace_url_extension, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX,
+        generate_random_string, is_m3u_catchup_session_token, replace_url_extension, sanitize_sensitive_info,
+        Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
@@ -171,11 +171,13 @@ pub(super) struct HlsProxyResourcePathParams {
 
 mod catchup;
 mod manifest;
+mod owner_token;
 mod segment;
 mod session;
 
 pub(in crate::api) use catchup::*;
 pub(in crate::api) use manifest::*;
+pub(in crate::api) use owner_token::*;
 pub(in crate::api) use segment::*;
 pub(in crate::api) use session::*;
 

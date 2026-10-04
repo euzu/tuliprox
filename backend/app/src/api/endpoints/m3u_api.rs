@@ -13,7 +13,8 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, HlsEntryStreamContext,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, user_allows_entry_content,
+                HlsEntryOutputScope, HlsEntryStreamContext, HlsRequestStage,
             },
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
@@ -162,9 +163,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
 
     let is_hls_manifest_request = effective_playback_extension(pli.item_type, &pli.url, stream_ext) == Some(HLS_EXT);
 
-    if !user.allows_item_type(pli.item_type)
-        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)))
-    {
+    if !user_allows_entry_content(&user, HlsEntryOutputScope::ItemType(pli.item_type), &pli) {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
                 app_state,
@@ -266,6 +265,16 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         }
     };
 
+    let stream_channel = || {
+        let mut channel = pli.to_stream_channel(target.id);
+        if input.input_type == shared::model::InputType::Xtream && pli.item_type == PlaylistItemType::Video {
+            if let Some(provider_id) = pli.get_input_stream_id().and_then(|id| id.parse().ok()) {
+                channel.provider_id = provider_id;
+            }
+        }
+        channel
+    };
+
     debug_if_enabled!("M3U playback for virtual_id={virtual_id}, item_type={}", pli.item_type);
     let effective_stream_ext = effective_playback_extension(pli.item_type, &pli.url, stream_ext);
     let extension = effective_stream_ext.unwrap_or_default();
@@ -301,7 +310,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                     app_state,
                     fingerprint,
                     &user,
-                    pli.to_stream_channel(target.id),
+                    stream_channel(),
                     session.provider.clone(),
                     req_headers,
                     ConnectFailureReason::UserConnectionsExhausted,
@@ -312,7 +321,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 app_state,
                 fingerprint,
                 &user,
-                pli.to_stream_channel(target.id),
+                stream_channel(),
                 session.provider.clone(),
                 req_headers,
                 ConnectFailureReason::UserConnectionsExhausted,
@@ -325,7 +334,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                     app_state,
                     fingerprint,
                     &user,
-                    pli.to_stream_channel(target.id),
+                    stream_channel(),
                     session.provider.clone(),
                     req_headers,
                     ConnectFailureReason::ProviderConnectionsExhausted,
@@ -336,7 +345,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 app_state,
                 fingerprint,
                 &user,
-                pli.to_stream_channel(target.id),
+                stream_channel(),
                 session.provider.clone(),
                 req_headers,
                 ConnectFailureReason::ProviderConnectionsExhausted,
@@ -348,7 +357,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 fingerprint,
                 app_state,
                 session,
-                pli.to_stream_channel(target.id),
+                stream_channel(),
                 crate::api::api_utils::ForceStreamRequestContext {
                     req_headers,
                     input: &input,
@@ -403,7 +412,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 app_state,
                 fingerprint,
                 &user,
-                pli.to_stream_channel(target.id),
+                stream_channel(),
                 input.name.clone(),
                 req_headers,
                 ConnectFailureReason::UserConnectionsExhausted,
@@ -414,7 +423,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             app_state,
             fingerprint,
             &user,
-            pli.to_stream_channel(target.id),
+            stream_channel(),
             input.name.clone(),
             req_headers,
             ConnectFailureReason::UserConnectionsExhausted,
@@ -486,6 +495,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             connection_permission,
             Some(connection_kind),
             &original_hls_entry_path,
+            HlsRequestStage::Entry,
         )
         .await
         .into_response();
@@ -507,7 +517,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         app_state,
         &session_key,
         Some(request_class),
-        pli.to_stream_channel(target.id).with_epg_reference_ts(archive_reference),
+        stream_channel().with_epg_reference_ts(archive_reference),
         &session_url,
         pinned_provider,
         req_headers,

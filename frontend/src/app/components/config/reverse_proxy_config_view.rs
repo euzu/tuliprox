@@ -56,6 +56,8 @@ const LABEL_GRACE_PERIOD_TIMEOUT_SECS: &str = "LABEL.GRACE_PERIOD_TIMEOUT_SECS";
 const LABEL_GRACE_PERIOD_HOLD_STREAM: &str = "LABEL.GRACE_PERIOD_HOLD_STREAM";
 const LABEL_HLS_SESSION_TTL_SECS: &str = "LABEL.HLS_SESSION_TTL_SECS";
 const LABEL_CATCHUP_SESSION_TTL_SECS: &str = "LABEL.CATCHUP_SESSION_TTL_SECS";
+const LABEL_PROVIDER_AFFINITY_TTL_SECS: &str = "LABEL.PROVIDER_AFFINITY_TTL_SECS";
+const LABEL_HLS_WRAP_MEDIA_PLAYLIST: &str = "LABEL.HLS_WRAP_MEDIA_PLAYLIST";
 const LABEL_THROTTLE_KBPS: &str = "LABEL.THROTTLE_KBPS";
 const LABEL_STREAM_BUFFER: &str = "LABEL.STREAM_BUFFER";
 const LABEL_BUFFER_ENABLED: &str = "LABEL.BUFFER_ENABLED";
@@ -188,6 +190,8 @@ generate_form_reducer!(
         GracePeriodHoldStream => grace_period_hold_stream: bool,
         HlsSessionTtlSecs => hls_session_ttl_secs: u64,
         CatchupSessionTtlSecs => catchup_session_ttl_secs: u64,
+        ProviderAffinityTtlSecs => provider_affinity_ttl_secs: u64,
+        HlsWrapMediaPlaylist => hls_wrap_media_playlist: bool,
     }
 );
 
@@ -1171,6 +1175,8 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_STREAM_SESSION)}</h1>
                 { config_field!(stream_state.form, translate.t(LABEL_HLS_SESSION_TTL_SECS), hls_session_ttl_secs) }
                 { config_field!(stream_state.form, translate.t(LABEL_CATCHUP_SESSION_TTL_SECS), catchup_session_ttl_secs) }
+                { config_field!(stream_state.form, translate.t(LABEL_PROVIDER_AFFINITY_TTL_SECS), provider_affinity_ttl_secs) }
+                { config_field_bool!(stream_state.form, translate.t(LABEL_HLS_WRAP_MEDIA_PLAYLIST), hls_wrap_media_playlist) }
             </Card>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_ADMISSION_STRATEGIES)}</h1>
@@ -1394,6 +1400,8 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_STREAM_SESSION)}</h1>
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_HLS_SESSION_TTL_SECS), hls_session_ttl_secs, StreamConfigFormAction::HlsSessionTtlSecs) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_CATCHUP_SESSION_TTL_SECS), catchup_session_ttl_secs, StreamConfigFormAction::CatchupSessionTtlSecs) }
+                { edit_field_number_u64!(stream_state, translate.t(LABEL_PROVIDER_AFFINITY_TTL_SECS), provider_affinity_ttl_secs, StreamConfigFormAction::ProviderAffinityTtlSecs) }
+                { edit_field_bool!(stream_state, translate.t(LABEL_HLS_WRAP_MEDIA_PLAYLIST), hls_wrap_media_playlist, StreamConfigFormAction::HlsWrapMediaPlaylist) }
             </Card>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_ADMISSION_STRATEGIES)}</h1>

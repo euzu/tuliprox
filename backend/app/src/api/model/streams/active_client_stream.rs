@@ -6,8 +6,9 @@ use crate::{
             },
             open_provider_stream_with_lifecycle, uses_direct_body_idle_timeout, AppState, BoxedProviderStream,
             CleanupEvent, ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream,
-            PendingProviderWakeSource, ProviderStreamFactoryOptions, ProviderStreamOpenLifecycle, StreamDetails,
-            StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer, DIRECT_BODY_IDLE_TIMEOUT_SECS,
+            PendingProviderWakeSource, ProviderStreamFactoryOptions, ProviderStreamOpen, ProviderStreamOpenLifecycle,
+            StreamDetails, StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
+            DIRECT_BODY_IDLE_TIMEOUT_SECS,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -34,7 +35,10 @@ use std::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
-use tuliprox_session::{stream_options::get_stream_options, ConnectionRejectionReason};
+use tuliprox_session::{
+    stream_options::{get_stream_options, StreamResponseMode},
+    ConnectionRejectionReason,
+};
 
 const BODY_IDLE_TIMEOUT_ERROR_CLASS: &str = "body_idle_timeout";
 const DIRECT_BODY_SOCKET_ACTIVITY_TOUCH_SECS: u64 = 1;
@@ -228,6 +232,7 @@ impl DirectBodyIdleTimeout {
 
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveClientStreamState {
+    response_mode: StreamResponseMode,
     inner: Option<BoxedProviderStream>,
     send_custom_stream_flag: Option<Arc<AtomicU8>>,
     provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
@@ -436,6 +441,12 @@ impl ActiveClientStreamState {
     }
 
     fn stop_provider_stream_preempted(&mut self) -> bool {
+        if self.response_mode == StreamResponseMode::HlsResource {
+            self.provider_end_reason.store(PROVIDER_END_PREEMPTED, Ordering::Relaxed);
+            self.provider_error_class = Some("preempted");
+            self.terminate_quietly();
+            return false;
+        }
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
@@ -565,7 +576,12 @@ impl ActiveClientStreamState {
         self.custom_video_timeout_sleep = None;
     }
 
-    fn enter_custom_mode(&mut self, mode: StreamMode) {
+    /// Returns whether the custom state can serve a body; finite HLS objects terminate on entry.
+    fn enter_custom_mode(&mut self, mode: StreamMode) -> bool {
+        if self.response_mode == StreamResponseMode::HlsResource {
+            self.terminate_quietly();
+            return false;
+        }
         if self.custom_video_timeout_mode != Some(mode) {
             self.custom_video_timeout_mode = Some(mode);
             self.custom_video_timeout_sleep = if self.custom_video_timeout_secs > 0 {
@@ -584,6 +600,7 @@ impl ActiveClientStreamState {
             );
             self.stop_provider_stream(mode);
         }
+        true
     }
 
     fn custom_video_timed_out(&mut self, cx: &mut Context<'_>, mode: StreamMode) -> bool {
@@ -648,7 +665,7 @@ fn create_deferred_provider_open_future(
     let request_url = stream_details.request_url.as_deref()?;
     let input = find_input_by_provider_name(app_state.as_ref(), provider_name)?;
     let stream_url = url::Url::parse(request_url).ok()?;
-    let stream_options = get_stream_options(&app_state.app_config);
+    let stream_options = get_stream_options(&app_state.app_config, stream_details.response_mode);
     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
     let disabled_headers = app_state.get_disabled_headers();
     let mut provider_stream_factory_options =
@@ -676,6 +693,7 @@ fn create_deferred_provider_open_future(
         }
     }
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
+    provider_stream_factory_options.apply_input_options(&input);
 
     Some(DeferredProviderOpenState::Pending(Box::new(DeferredProviderOpenContext {
         app_state: Arc::clone(app_state),
@@ -751,7 +769,7 @@ impl Stream for ActiveClientStream {
                                 DeferredProviderOpenState::Pending(context) => {
                                     let app_state = Arc::clone(&context.app_state);
                                     let client = {
-                                        let http_client = app_state.http_client.load();
+                                        let http_client = app_state.http_clients.default.load();
                                         http_client.as_ref().clone()
                                     };
                                     let lifecycle = self
@@ -768,7 +786,9 @@ impl Stream for ActiveClientStream {
                                         )
                                         .await
                                         {
-                                            Some(response) if matches!(response.info, Some((_, _, _, Some(_)))) => {
+                                            Some(ProviderStreamOpen::Stream(response))
+                                                if matches!(response.info, Some((_, _, _, Some(_)))) =>
+                                            {
                                                 let Some((_headers, _status, _response_url, Some(custom_video_type))) =
                                                     response.info
                                                 else {
@@ -780,8 +800,12 @@ impl Stream for ActiveClientStream {
                                                         DeferredProviderOpenOutcome::Mode,
                                                     )
                                             }
-                                            Some(response) => DeferredProviderOpenOutcome::Stream(response.stream),
-                                            None => DeferredProviderOpenOutcome::Failed,
+                                            Some(ProviderStreamOpen::Stream(response)) => {
+                                                DeferredProviderOpenOutcome::Stream(response.stream)
+                                            }
+                                            Some(ProviderStreamOpen::UpstreamStatus { .. }) | None => {
+                                                DeferredProviderOpenOutcome::Failed
+                                            }
                                         }
                                     });
                                     self.state.deferred_provider_open =
@@ -801,11 +825,15 @@ impl Stream for ActiveClientStream {
                                         continue;
                                     }
                                     Poll::Ready(DeferredProviderOpenOutcome::Mode(mode)) => {
-                                        self.state.enter_custom_mode(mode);
+                                        if !self.state.enter_custom_mode(mode) {
+                                            return Poll::Ready(None);
+                                        }
                                         continue;
                                     }
                                     Poll::Ready(DeferredProviderOpenOutcome::Failed) => {
-                                        self.state.enter_custom_mode(StreamMode::ChannelUnavailable);
+                                        if !self.state.enter_custom_mode(StreamMode::ChannelUnavailable) {
+                                            return Poll::Ready(None);
+                                        }
                                         continue;
                                     }
                                 },
@@ -882,8 +910,10 @@ impl Stream for ActiveClientStream {
 
                 // Custom video modes: serve the appropriate buffer
                 video_mode => {
-                    if self.state.custom_video_timeout_mode != Some(video_mode) {
-                        self.state.enter_custom_mode(video_mode);
+                    if self.state.custom_video_timeout_mode != Some(video_mode)
+                        && !self.state.enter_custom_mode(video_mode)
+                    {
+                        return Poll::Ready(None);
                     }
 
                     if self.state.custom_video_timed_out(cx, video_mode) {
@@ -979,6 +1009,7 @@ pub(crate) async fn create_active_client_stream(
     if connection_permission == UserConnectionPermission::Exhausted {
         error!("Something is wrong this should not happen");
     }
+    let response_mode = stream_details.response_mode;
     let grant_user_grace_period = connection_permission == UserConnectionPermission::GracePeriod;
     let username = user.username.as_str();
     let provider_name = stream_details.provider_name.clone().unwrap_or_else(|| "unknown".intern());
@@ -1035,11 +1066,12 @@ pub(crate) async fn create_active_client_stream(
     } else {
         app_state
             .connection_manager
-            .update_connection_with_uid(
+            .update_connection_with_uid_and_session_registration(
                 connection,
                 tuliprox_session::ConnectionHistoryMode::EmitConnect,
                 request_uid,
                 provider_request_id,
+                stream_details.session_registration.as_ref(),
             )
             .await
     };
@@ -1158,7 +1190,7 @@ pub(crate) async fn create_active_client_stream(
     let cfg = &app_state.app_config;
     let custom_response = cfg.custom_stream_response.load();
     let custom_video_timeout_secs = cfg.config.load().custom_stream_response_timeout_secs;
-    let custom_video = custom_response.as_ref().map_or(
+    let custom_video = custom_response.as_ref().filter(|_| response_mode == StreamResponseMode::Stream).map_or(
         CustomVideoBuffers {
             user_exhausted: None,
             provider_exhausted: None,
@@ -1211,6 +1243,7 @@ pub(crate) async fn create_active_client_stream(
     }
 
     let state = ActiveClientStreamState {
+        response_mode,
         inner: stream,
         deferred_provider_open,
         timed_stream_context,
@@ -1601,12 +1634,12 @@ mod tests {
             BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
             EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
             ProviderContentRepresentationMode, ProviderHandle, RecordingQueue, SharedStreamManager, StreamDetails,
-            StreamError, UpdateGuard,
+            StreamError,
         },
         auth::Fingerprint,
         model::{
-            AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets,
-            ProxyUserCredentials, SourcesConfig, StreamConfig,
+            AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProxyUserCredentials,
+            SourcesConfig, StreamConfig,
         },
         repository::GeoIp,
         utils::FileLockManager,
@@ -1616,7 +1649,6 @@ mod tests {
     use bytes::Bytes;
     use futures::{pin_mut, StreamExt};
     use http_body_util::BodyExt;
-    use reqwest::Client;
     use shared::{
         model::{
             AdmissionStrategy, ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, StreamChannel,
@@ -1635,7 +1667,7 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
-    use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio::sync::{oneshot, Notify};
     use tokio_util::sync::CancellationToken;
 
     fn create_test_app_config() -> AppConfig {
@@ -1716,48 +1748,29 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
                 Arc::clone(&active_provider),
                 Arc::clone(&connection_manager),
             ),
-            forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: app_cfg,
-            http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         })
     }
 
@@ -1801,48 +1814,29 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
                 Arc::clone(&active_provider),
                 Arc::clone(&connection_manager),
             ),
-            forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: Arc::new(app_cfg),
-            http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         })
     }
 
@@ -2083,7 +2077,7 @@ mod tests {
             provider_name: Some(Arc::clone(provider_name)),
             request_url: Some("http://provider-1.example/live/1".intern()),
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: true,
@@ -2093,6 +2087,8 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
             custom_reason: None,
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         }
     }
 
@@ -2160,11 +2156,12 @@ mod tests {
         )
     }
 
-    async fn assert_missing_custom_video_terminates(mode: StreamMode, provisionable: bool) {
+    fn custom_video_test_state(mode: StreamMode, provisionable: bool) -> ActiveClientStreamState {
         let connection_manager = create_test_connection_manager();
-        let addr = "127.0.0.1:55001".parse().unwrap_or_else(|_| unreachable!());
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 55001));
 
-        let state = ActiveClientStreamState {
+        ActiveClientStreamState {
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
             inner: None,
             send_custom_stream_flag: Some(Arc::new(AtomicU8::new(mode as u8))),
             provider_handle: None,
@@ -2203,13 +2200,52 @@ mod tests {
             lease_confirmed: false,
             lease_request_id: None,
             request_cleanup: None,
-        };
+        }
+    }
 
-        let stream = ActiveClientStream { state };
+    async fn assert_missing_custom_video_terminates(mode: StreamMode, provisionable: bool) {
+        let stream = ActiveClientStream { state: custom_video_test_state(mode, provisionable) };
         pin_mut!(stream);
+        assert!(stream.next().await.is_none());
+    }
 
-        let result = stream.next().await;
-        assert!(result.is_none());
+    #[tokio::test]
+    async fn custom_response_modes_preserve_ts_fallback_and_terminate_hls_resources(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer;
+        use tuliprox_session::stream_options::StreamResponseMode;
+
+        let mut packet = [0xff_u8; 188];
+        packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        let fallback = TransportStreamBuffer::new(packet.repeat(8));
+        for mode in [
+            StreamMode::UserExhausted,
+            StreamMode::ProviderExhausted,
+            StreamMode::ChannelUnavailable,
+            StreamMode::Provisioning,
+            StreamMode::LowPriorityPreempted,
+        ] {
+            for response_mode in [StreamResponseMode::Stream, StreamResponseMode::HlsResource] {
+                let mut state = custom_video_test_state(mode, true);
+                state.response_mode = response_mode;
+                state.custom_video = CustomVideoBuffers {
+                    user_exhausted: Some(fallback.clone()),
+                    provider_exhausted: Some(fallback.clone()),
+                    unavailable: Some(fallback.clone()),
+                    provisioning: Some(fallback.clone()),
+                    low_priority_preempted: Some(fallback.clone()),
+                };
+                let mut stream = ActiveClientStream { state };
+                let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next()).await?;
+                if response_mode == StreamResponseMode::Stream {
+                    let bytes = chunk.ok_or("TS fallback missing")??;
+                    assert_eq!(bytes.first(), Some(&0x47), "{mode:?}");
+                } else {
+                    assert!(chunk.is_none(), "HLS must terminate without TS bytes in {mode:?}");
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -2704,6 +2740,7 @@ mod tests {
         let connection_manager = create_test_connection_manager();
         let addr = "127.0.0.1:55020".parse().unwrap_or_else(|_| unreachable!());
         let state = ActiveClientStreamState {
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
             inner: None,
             send_custom_stream_flag: Some(Arc::new(AtomicU8::new(StreamMode::Inner as u8))),
             provider_handle: None,
@@ -2876,6 +2913,8 @@ mod tests {
             grace_period_hold_stream: true,
             hls_session_ttl_secs: 10,
             catchup_session_ttl_secs: 10,
+            provider_affinity_ttl_secs: 120,
+            hls_wrap_media_playlist: true,
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
@@ -3054,7 +3093,7 @@ mod tests {
             provider_name: Some(provider_name),
             request_url: Some("http://provider-1.example/live/2.ts".intern()),
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: false,
@@ -3064,6 +3103,8 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: Some(grace_context.clone()),
             custom_reason: None,
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         };
 
         let (flag, grace_task) = stream_grace_period(GracePeriodParams {
@@ -3151,6 +3192,8 @@ mod tests {
             grace_period_hold_stream: true,
             hls_session_ttl_secs: 10,
             catchup_session_ttl_secs: 10,
+            provider_affinity_ttl_secs: 120,
+            hls_wrap_media_playlist: true,
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
@@ -3305,7 +3348,7 @@ mod tests {
             provider_name: Some(provider_name),
             request_url: Some("http://provider-1.example/live/2.ts".intern()),
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: false,
@@ -3315,6 +3358,8 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: Some(grace_context.clone()),
             custom_reason: None,
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         };
 
         let (flag, grace_task) = stream_grace_period(GracePeriodParams {

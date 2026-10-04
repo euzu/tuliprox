@@ -1042,6 +1042,53 @@
 
 ## 🐛 Fixes
 
+- **Proxied live HLS keeps its provider account when the client IP changes.** A player that refreshes its playlist
+  from alternating client IPs (dual-stack IPv4/IPv6, WLAN/mobile switching behind a reverse proxy) created a new
+  playback owner on every IP change. The new owner had no lease or provider affinity, went through normal lineup
+  selection and could land on another provider account, so the provider saw one playback on two accounts. With the
+  shared HLS cache off, an entry request whose provider returns a media playlist is now answered with a single-variant
+  master playlist. Its variant URI is a sealed token that carries the session token, so every refresh keeps the original
+  owner, lease and affinity. The playlist downloaded on the entry request is handed to the immediate variant request,
+  so channel start does not fetch the same playlist twice. A refresh after the session has expired recreates the
+  session from the token and runs the same access checks and admission as the entry route; a session that was
+  evicted, kicked or terminated is not recreated.
+- **HLS tokens carry an explicit resource kind.** Manifest and media references are classified from the playlist and
+  the tag that references them instead of the `.m3u8` extension, so catch-up manifests behind `.ts` or extensionless
+  URLs are admitted as playlist requests and rewritten as playlists, also with a `Range` header. Playlists that list
+  other playlists under `#EXTINF` count as master playlists. Child manifests are only fetched from the provider account
+  that resolved them (a stale one answers `404` without ending the playback), and a media URI resolved by another
+  account answers `404` instead of being fetched with that account's credentials; manifest refreshes forward the provider
+  session cookies stored for the playback, only to the host that set them, and catch-up refreshes renew the lease with
+  `catchup_session_ttl_secs`. Provider session cookies now survive URL changes on the same host.
+- **An upstream response that is not an HLS playlist is a failed manifest.** HTML or JSON bodies answered with `200`
+  were rewritten and served as a playlist. On an entry request they now end the session and return the
+  channel-unavailable manifest; on a playlist refresh they answer `502` and keep the session, so the player retries.
+
+- **A continuing playback keeps its provider after its reconnect window ends.** When an HLS player paused requests
+  longer than `hls_session_ttl_secs`, its lease expired and the next request ran priority selection again, so a playback
+  that had fallen back to an alias moved back to the primary account and then back to the alias. A playback now returns
+  to the provider that last delivered its media for `provider_affinity_ttl_secs` after the reconnect window. This
+  preference holds no connection slot and never causes a grace over-allocation while another provider has a free slot:
+  a full provider still falls back to the lineup. Provider errors on the preferred provider, preemption, kicks and
+  timeouts end it immediately; a failure on a fallback provider keeps it. It applies to reconnect-capable playback
+  (HLS, DASH, Catchup, VOD), not to one-shot live MPEG-TS responses. A delayed failure of an older binding cannot end the preference of its
+  successor. Terminating an HLS session or kicking its client now also releases the provider lease and preference of
+  the binding that session acquired, which the per-retry public HLS token previously left in place. Terminating an
+  unknown or outdated session token leaves a newer playback of the same client, user and channel untouched.
+
+- **Banned, disabled or expired provider accounts are excluded from allocation and remembered.** A login or expiry
+  response that reports `Banned`, `Disabled` or `Expired` excludes the account immediately and stores the exclusion in
+  `source.yml` (`account_disabled: true` for a root account) or the alias CSV (`enabled` = `0`). `Pending` and other
+  non-terminal states only exclude the account at runtime until the provider reports it as usable again. A stream
+  rejected with HTTP 401/403 sends no request of its own; it only asks the Xtream expiry worker to check the account,
+  which still queries each account at most once per 24 hours and each panel at most every 5 minutes. A stored
+  exclusion is cleared by a panel renewal or credential update of that account (this also re-enables an alias that was
+  disabled by hand), or by resetting the flag in the file. An expired root
+  account no longer disables the whole input; playlist updates use the first usable alias instead. Configuration
+  backups are now named `<file>-<path hash>-<timestamp>-<random>`, and the latest ten are kept per source file. Backups
+  written in the previous format (`<file>_<timestamp>…`) are not pruned automatically; delete them manually if they are
+  no longer needed.
+
 - **Stalker playback resolution now says why it failed, retries a rejected session, and can fall back to the stored
   command.** A playback request that could not be resolved reported a single message naming the requested item's portal
   id, while the actual cause — no published catalog for the configured portal identity, an item missing from the active
@@ -1455,6 +1502,15 @@
 
 ## ⚙️ New Settings
 
+- **config.yml (`reverse_proxy.stream`)**:
+  - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media
+    playlist with a single-variant master playlist, so playlist refreshes keep their provider account across client
+    IP changes. Applies only while the shared HLS cache is off for the target. Disable it for players that mishandle a
+    master playlist. Editable in the Web UI under Reverse Proxy → Stream.
+  - `provider_affinity_ttl_secs` (default `120`): seconds a playback keeps preferring its last provider after the
+    reconnect window has ended. It reserves no capacity. `0` ends the preference together with the reconnect window;
+    values above `86400` are rejected. Editable in the Web UI under Reverse Proxy → Stream.
+
 - **Runtime diagnostics (environment variables)**:
   - `TULIPROX_WATCHDOG` (default unset = off) is a mode selector: `1` (`true`/`on`/`yes`/`enabled`) observes and logs
     stalls, `2` (`restart`) additionally exits the process after the stall persists so a supervisor restarts it.
@@ -1602,6 +1658,11 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **Testkit scenarios can pause and tune reconnect windows.** A step with only `pause_millis` (1 to 300000) idles the
+  scenario, and `policy_contract` accepts `hls_session_ttl_secs` and `provider_affinity_ttl_secs`. The new scenario
+  `m3u-hls-provider-affinity-after-lease-expiry` uses both to prove that a returning HLS playback stays on its
+  fallback account after its reconnect window lapsed and falls back to priority selection once the affinity ended.
 
 - **The testkit can now drive a Stalker/Ministra input.** The fixture origin emulates a portal
   (`handshake`, `get_profile`, `get_genres`, `get_ordered_list`, `create_link`), a scenario selects it with

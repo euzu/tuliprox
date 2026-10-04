@@ -205,10 +205,13 @@ $epg-border-size: 4px;
       }
     }
 
-    &-menu.tp__icon-button {
+    &-record {
       position: absolute;
-      top: 2px;
-      right: 2px;
+      top: 6px;
+      z-index: 10; /* above programs, below the now line */
+    }
+
+    &-menu.tp__icon-button {
       width: 18px;
       height: 18px;
       min-width: 18px;

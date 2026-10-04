@@ -34,7 +34,7 @@ use shared::{
     error::TuliproxError,
     model::{
         ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, ConfigInputUpdateQualityDto,
-        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType,
+        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, FlussonicHlsCatchup, InputFetchMethod, InputType,
         MediaServerInputConfigDto, MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy,
         StagedInputType, StalkerDeviceProfileDto, StalkerInputConfigDto,
     },
@@ -87,6 +87,7 @@ const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX"
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
 const LABEL_DISABLE_HLS_STREAMING: &str = "LABEL.DISABLE_HLS_STREAMING";
 const LABEL_USER_AGENT_STREAM_INDEX: &str = "LABEL.USER_AGENT_STREAM_INDEX";
+const LABEL_FLUSSONIC_HLS_AUDIO_TRACKS: &str = "LABEL.FLUSSONIC_HLS_AUDIO_TRACKS";
 const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
 const LABEL_RESOLVE: &str = "LABEL.RESOLVE";
 const LABEL_PROBE: &str = "LABEL.PROBE";
@@ -366,7 +367,10 @@ generate_form_reducer!(
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       DisableHlsStreaming => disable_hls_streaming: bool,
+      FlussonicHlsCatchup => flussonic_hls_catchup: FlussonicHlsCatchup,
+      FlussonicHlsCatchupMaxDurationSecs => flussonic_hls_catchup_max_duration_secs: u32,
       UserAgentStreamIndex => user_agent_stream_index: bool,
+      FlussonicHlsAudioTracks => flussonic_hls_audio_tracks: bool,
       ResolveTmdb => resolve_tmdb: bool,
       ResolveBackground => resolve_background: bool,
       ResolveSeries => resolve_series: bool,
@@ -1523,6 +1527,31 @@ mod tests {
         assert!(state.modified());
         let applied = state.form.clone();
         assert_eq!(applied.update_quality, updated);
+    }
+
+    #[test]
+    fn flussonic_catchup_reducer_loads_changes_and_serializes_select_values() -> Result<(), serde_json::Error> {
+        let loaded = ConfigInputOptionsDto {
+            flussonic_hls_catchup: FlussonicHlsCatchup::BoundedArchive,
+            user_agent_stream_index: true,
+            ..ConfigInputOptionsDto::default()
+        };
+        let state = Rc::new(ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false })
+            .reduce(ConfigInputOptionsFormAction::SetAll(loaded.clone()));
+        assert_eq!(state.form, loaded);
+        assert!(!state.modified());
+        let state = state.reduce(ConfigInputOptionsFormAction::FlussonicHlsCatchupMaxDurationSecs(1800));
+        assert!(state.modified());
+        for value in [FlussonicHlsCatchup::Native, FlussonicHlsCatchup::BoundedArchive] {
+            let changed = state.clone().reduce(ConfigInputOptionsFormAction::FlussonicHlsCatchup(value));
+            assert!(changed.modified());
+            assert!(changed.form.user_agent_stream_index);
+            let saved = serde_json::to_string(changed.data())?;
+            let reloaded: ConfigInputOptionsDto = serde_json::from_str(&saved)?;
+            assert_eq!(reloaded.flussonic_hls_catchup, value);
+            assert_eq!(reloaded.flussonic_hls_catchup_max_duration_secs, 1800);
+        }
+        Ok(())
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub struct StreamConfig {
     pub grace_period_hold_stream: bool,
     pub hls_session_ttl_secs: u64,
     pub catchup_session_ttl_secs: u64,
+    pub provider_affinity_ttl_secs: u64,
+    pub hls_wrap_media_playlist: bool,
     pub throttle_str: Option<String>,
     pub throttle_kbps: u64,
     pub shared_burst_buffer_mb: u64,
@@ -59,6 +61,8 @@ impl Default for StreamConfig {
             grace_period_hold_stream: true,
             hls_session_ttl_secs: 15,
             catchup_session_ttl_secs: 45,
+            provider_affinity_ttl_secs: shared::defaults::default_provider_affinity_ttl_secs(),
+            hls_wrap_media_playlist: true,
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 12,
@@ -80,6 +84,8 @@ impl From<&StreamConfigDto> for StreamConfig {
             grace_period_hold_stream: dto.grace_period_hold_stream,
             hls_session_ttl_secs: dto.hls_session_ttl_secs,
             catchup_session_ttl_secs: dto.catchup_session_ttl_secs,
+            provider_affinity_ttl_secs: dto.provider_affinity_ttl_secs,
+            hls_wrap_media_playlist: dto.hls_wrap_media_playlist,
             throttle_str: dto.throttle.clone(),
             throttle_kbps: dto.throttle.as_ref().map_or(0u64, |throttle| parse_to_kbps(throttle).unwrap_or(0u64)),
             shared_burst_buffer_mb: dto.shared_burst_buffer_mb,
@@ -102,6 +108,8 @@ impl From<&StreamConfig> for StreamConfigDto {
             grace_period_hold_stream: instance.grace_period_hold_stream,
             hls_session_ttl_secs: instance.hls_session_ttl_secs,
             catchup_session_ttl_secs: instance.catchup_session_ttl_secs,
+            provider_affinity_ttl_secs: instance.provider_affinity_ttl_secs,
+            hls_wrap_media_playlist: instance.hls_wrap_media_playlist,
             throttle: instance.throttle_str.clone(),
             throttle_kbps: instance.throttle_kbps,
             shared_burst_buffer_mb: instance.shared_burst_buffer_mb,
@@ -158,6 +166,8 @@ mod tests {
             grace_period_hold_stream: true,
             hls_session_ttl_secs: 5,
             catchup_session_ttl_secs: 5,
+            provider_affinity_ttl_secs: 30,
+            hls_wrap_media_playlist: false,
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
@@ -173,6 +183,10 @@ mod tests {
 
         let dto = StreamConfigDto::from(&domain);
         assert_eq!(dto.recent_eviction_reentry_ttl_ms, 2_500);
+        assert_eq!(dto.provider_affinity_ttl_secs, 30);
+        assert_eq!(StreamConfig::from(&dto).provider_affinity_ttl_secs, 30);
+        assert!(!dto.hls_wrap_media_playlist);
+        assert!(!StreamConfig::from(&dto).hls_wrap_media_playlist);
         assert_eq!(
             dto.admission_strategies,
             Some(vec![

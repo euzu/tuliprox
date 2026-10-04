@@ -2751,9 +2751,7 @@ fn persist_filter_can_select_a_base_group() {
 async fn trakt_target_curation_is_a_noop_without_xtream_configuration() {
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let views = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, Vec::new())
-        .await
-        .expect("unconfigured curation should not fail");
+    let views = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, Vec::new()).await;
 
     assert!(views.base.is_empty());
     assert!(views.xtream.is_none());
@@ -2761,7 +2759,7 @@ async fn trakt_target_curation_is_a_noop_without_xtream_configuration() {
 }
 
 #[tokio::test]
-async fn unavailable_required_selector_returns_target_failure_instead_of_base_fallback() {
+async fn unavailable_required_selector_continues_with_the_base_catalog() {
     let target = ConfigTarget::from(&ConfigTargetDto {
         name: "curation-failure".to_string(),
         output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto {
@@ -2794,11 +2792,11 @@ async fn unavailable_required_selector_returns_target_failure_instead_of_base_fa
         xtream_cluster: XtreamCluster::Video,
     }];
 
-    let error = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, base)
-        .await
-        .expect_err("missing credentials must stop target publication");
-
-    assert!(error.message().contains("existing finalized artifacts were retained"));
+    let views = prepare_target_playlist_views(&reqwest::Client::new(), None, &target, base).await;
+    assert_eq!(views.base.len(), 1);
+    assert_eq!(views.base[0].channels[0].header.title.as_ref(), "Base movie");
+    assert!(views.xtream.is_none());
+    assert_eq!(views.publication_plan, PlaylistPublicationPlan::Ordinary);
 }
 
 mod curation_effect_gate {
@@ -2933,12 +2931,12 @@ mod curation_effect_gate {
     }
 
     #[tokio::test]
-    async fn unavailable_curation_retains_seeded_artifacts_cache_and_watch_state() {
-        assert_curation_retains_seeded_state(None).await;
+    async fn unavailable_curation_preserves_the_empty_mixed_output_guard() {
+        assert_curation_preserves_empty_mixed_output_guard(None).await;
     }
 
     #[tokio::test]
-    async fn tmdb_and_mixed_failures_preserve_files_ids_cache_and_watches_under_full_and_curated() {
+    async fn tmdb_and_mixed_failures_preserve_the_empty_mixed_output_guard() {
         for policy in ["full", "curated"] {
             for mixed in [false, true] {
                 let (url, server) = empty_trakt_server().await;
@@ -2948,7 +2946,7 @@ mod curation_effect_gate {
                 }
                 let mut dto: shared::model::CurationConfigDto = serde_json::from_value(value).unwrap();
                 dto.prepare(&[TargetOutputDto::Xtream(XtreamTargetOutputDto::default())]).unwrap();
-                assert_curation_retains_seeded_state(Some(dto)).await;
+                assert_curation_preserves_empty_mixed_output_guard(Some(dto)).await;
                 if mixed {
                     server.await.unwrap();
                 } else {
@@ -2958,7 +2956,7 @@ mod curation_effect_gate {
         }
     }
 
-    async fn assert_curation_retains_seeded_state(canonical: Option<shared::model::CurationConfigDto>) {
+    async fn assert_curation_preserves_empty_mixed_output_guard(canonical: Option<shared::model::CurationConfigDto>) {
         let directory = tempdir().expect("tempdir");
         let app_config = app_config(directory.path());
         let playlist_state = Arc::new(PlaylistStorageState::new());
@@ -3040,7 +3038,9 @@ mod curation_effect_gate {
 
         let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
 
-        assert!(result.is_err());
+        assert!(result.is_err_and(|errors| errors.iter().any(|error| {
+            error.message().contains("non-Xtream outputs that cannot safely publish a fully empty forced result")
+        })));
         assert!(errors.is_empty());
         assert_eq!(file_snapshot(directory.path()), before_files);
         let after_cache_len = playlist_state
@@ -3050,6 +3050,7 @@ mod curation_effect_gate {
             .get("curation-effect-gate")
             .and_then(|storage| storage.xtream.as_ref())
             .map_or(0, |storage| storage.vod.len());
+        assert!(before_cache_len > 0);
         assert_eq!(after_cache_len, before_cache_len);
     }
 
@@ -3179,7 +3180,7 @@ fn tmdb_complete_target_selection_preserves_live_and_keeps_xtream_aliases_out_of
             CurationMediaKind::Movie,
             0,
         )]));
-        let views = target::curation_playlist_views(&target, playlist.clone(), &config, outcome).unwrap();
+        let views = target::curation_playlist_views(&target, playlist.clone(), &config, outcome);
         assert_eq!(
             views.base.iter().flat_map(|g| &g.channels).map(|i| i.header.uuid).collect::<Vec<_>>(),
             [live_id, id]
@@ -3192,7 +3193,7 @@ fn tmdb_complete_target_selection_preserves_live_and_keeps_xtream_aliases_out_of
             assert!(views.xtream.is_none());
         }
         let empty = CurationRunOutcome::Complete(complete_catalog_evaluation(Vec::new()));
-        let empty_views = target::curation_playlist_views(&target, playlist, &config, empty).unwrap();
+        let empty_views = target::curation_playlist_views(&target, playlist, &config, empty);
         assert_eq!(empty_views.base.len(), 1);
         assert_eq!(empty_views.base[0].xtream_cluster, XtreamCluster::Live);
         assert_ne!(empty_views.publication_plan, PlaylistPublicationPlan::Ordinary);

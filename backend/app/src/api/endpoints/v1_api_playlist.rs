@@ -105,6 +105,8 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
+            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
         }),
         ..Default::default()
     }
@@ -127,6 +129,8 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
+            flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+            flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
         }),
         ..Default::default()
     }
@@ -211,6 +215,22 @@ pub(in crate::api) struct ResolvedRecordingSource {
     pub downloadable: bool,
 }
 
+fn recording_candidate(
+    virtual_id: VirtualId,
+    input_name: &str,
+    title: &str,
+    url: &str,
+    item_type: PlaylistItemType,
+) -> ResolvedRecordingSource {
+    ResolvedRecordingSource {
+        virtual_id: virtual_id.get(),
+        input_name: input_name.to_string(),
+        title: title.to_string(),
+        extension: shared::utils::extract_extension_from_url(url).map(str::to_string),
+        downloadable: item_type != PlaylistItemType::SeriesInfo,
+    }
+}
+
 pub(in crate::api) async fn resolve_target_recording_source(
     app_config: &crate::model::AppConfig,
     target_name: &str,
@@ -219,19 +239,20 @@ pub(in crate::api) async fn resolve_target_recording_source(
     cluster: XtreamCluster,
 ) -> Option<ResolvedRecordingSource> {
     let target = resolve_recording_target(app_config, target_name, input_name)?;
+    let wanted = VirtualId::new(virtual_id);
     let mut resolved = None;
     if target.has_output(TargetType::Xtream) {
         if let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, cluster).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.virtual_id == VirtualId::new(virtual_id) {
-                    resolved = Some(ResolvedRecordingSource {
-                        virtual_id: item.virtual_id.get(),
-                        input_name: item.input_name.to_string(),
-                        title: item.title.to_string(),
-                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
-                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
-                    });
+                if item.virtual_id == wanted {
+                    resolved = Some(recording_candidate(
+                        item.virtual_id,
+                        &item.input_name,
+                        &item.title,
+                        &item.url,
+                        item.item_type,
+                    ));
                     break;
                 }
             }
@@ -241,14 +262,14 @@ pub(in crate::api) async fn resolve_target_recording_source(
         if let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(cluster)).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.virtual_id == VirtualId::new(virtual_id) {
-                    resolved = Some(ResolvedRecordingSource {
-                        virtual_id: item.virtual_id.get(),
-                        input_name: item.input_name.to_string(),
-                        title: item.title.to_string(),
-                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
-                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
-                    });
+                if item.virtual_id == wanted {
+                    resolved = Some(recording_candidate(
+                        item.virtual_id,
+                        &item.input_name,
+                        &item.title,
+                        &item.url,
+                        item.item_type,
+                    ));
                     break;
                 }
             }
@@ -274,10 +295,36 @@ fn epg_channel_id_matches(
         .is_some_and(|item_id| canonicalize_output_epg_id(item_id, output_case).as_ref() == requested.as_ref())
 }
 
+/// Picks the channel to record from every live item that carries the requested
+/// EPG channel id.
+///
+/// Providers commonly publish one EPG id for several streams of the same
+/// channel (HD, FHD, 4K, backup feeds). The web UI shows them as one EPG row
+/// labelled with one of their titles, so that title is the best hint for
+/// which stream the user meant. Without a matching title every candidate airs
+/// the same programme, and the first one in playlist order is taken.
+fn select_epg_channel_candidate(
+    candidates: Vec<ResolvedRecordingSource>,
+    channel_name: Option<&str>,
+) -> Option<ResolvedRecordingSource> {
+    let hint = channel_name.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(hint) = hint {
+        if let Some(index) = candidates.iter().position(|candidate| candidate.title == hint) {
+            return candidates.into_iter().nth(index);
+        }
+        let hint = hint.to_lowercase();
+        if let Some(index) = candidates.iter().position(|candidate| candidate.title.to_lowercase() == hint) {
+            return candidates.into_iter().nth(index);
+        }
+    }
+    candidates.into_iter().next()
+}
+
 pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
     app_config: &crate::model::AppConfig,
     target_name: &str,
     epg_channel_id: &str,
+    channel_name: Option<&str>,
 ) -> Option<ResolvedRecordingSource> {
     let targets = app_config
         .sources
@@ -288,7 +335,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
         .filter(|target| target.name == target_name)
         .cloned()
         .collect::<Vec<_>>();
-    let mut resolved = None;
+    let mut candidates = Vec::new();
     for target in targets {
         let output_case = EpgIdOutputCase::from_lowercase(
             target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids),
@@ -302,16 +349,13 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
-                    let candidate = ResolvedRecordingSource {
-                        virtual_id: item.virtual_id.get(),
-                        input_name: item.input_name.to_string(),
-                        title: item.title.to_string(),
-                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
-                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
-                    };
-                    if resolved.replace(candidate).is_some() {
-                        return None;
-                    }
+                    candidates.push(recording_candidate(
+                        item.virtual_id,
+                        &item.input_name,
+                        &item.title,
+                        &item.url,
+                        item.item_type,
+                    ));
                 }
             }
         } else if target.has_output(TargetType::M3u) {
@@ -322,21 +366,18 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
-                    let candidate = ResolvedRecordingSource {
-                        virtual_id: item.virtual_id.get(),
-                        input_name: item.input_name.to_string(),
-                        title: item.title.to_string(),
-                        extension: shared::utils::extract_extension_from_url(&item.url).map(str::to_string),
-                        downloadable: item.item_type != PlaylistItemType::SeriesInfo,
-                    };
-                    if resolved.replace(candidate).is_some() {
-                        return None;
-                    }
+                    candidates.push(recording_candidate(
+                        item.virtual_id,
+                        &item.input_name,
+                        &item.title,
+                        &item.url,
+                        item.item_type,
+                    ));
                 }
             }
         }
     }
-    resolved
+    select_epg_channel_candidate(candidates, channel_name)
 }
 
 #[cfg(test)]
@@ -365,7 +406,7 @@ async fn load_xmltv_epg_source_channels(
         }
     }
 
-    parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_client.load(), resolved_url).await
+    parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_clients.default.load(), resolved_url).await
 }
 
 async fn load_ics_epg_source_channels(
@@ -408,7 +449,7 @@ async fn load_ics_epg_source_channels(
         }
     }
 
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     request::get_input_epg_content_as_file(
         &app_state.app_config,
         &client,
@@ -534,7 +575,11 @@ async fn playlist_update(
     match process_targets {
         Ok(valid_targets) => {
             let valid_targets = Arc::new(valid_targets);
-            match enqueue_manual_playlist_update(&app_state.manual_update_sender, valid_targets, input_action) {
+            match enqueue_manual_playlist_update(
+                &app_state.playlist_updates.manual_update_sender,
+                valid_targets,
+                input_action,
+            ) {
                 Ok(run_id) => {
                     (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted::playlist_update(run_id)))
                         .into_response()
@@ -719,7 +764,7 @@ async fn playlist_content(
     playlist_req: &PlaylistRequest,
     cluster: XtreamCluster,
 ) -> impl IntoResponse + Send {
-    let client = app_state.http_client.load();
+    let client = app_state.http_clients.default.load();
     match playlist_req {
         PlaylistRequest::Target(target_id) => get_playlist_for_target(
             app_state.app_config.get_target_by_id(*target_id).as_deref(),
@@ -825,7 +870,7 @@ async fn playlist_series_info(
                             let input_source = InputSource::from(input.as_ref()).with_url(resolved_url.to_string());
                             if let Ok(content) = xtream::get_xtream_stream_info_content(
                                 &app_state.app_config,
-                                &app_state.http_client.load(),
+                                &app_state.http_clients.default.load(),
                                 &input_source,
                                 false,
                             )
@@ -850,7 +895,7 @@ async fn playlist_series_info(
                     let input_source = InputSource::from(&input).with_url(info_url);
                     if let Ok(content) = xtream::get_xtream_stream_info_content(
                         &app_state.app_config,
-                        &app_state.http_client.load(),
+                        &app_state.http_clients.default.load(),
                         &input_source,
                         false,
                     )
@@ -1060,7 +1105,9 @@ async fn playlist_epg(
                 )
                     .into_response();
             }
-            match parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_client.load(), &url).await {
+            match parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_clients.default.load(), &url)
+                .await
+            {
                 Ok(epg) => {
                     let config = app_state.app_config.config.load();
                     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
@@ -1129,7 +1176,7 @@ async fn stalker_resource_response(
         XtreamCluster::Video => StalkerStreamKind::Movie,
         XtreamCluster::Series => StalkerStreamKind::Episode,
     };
-    let client = app_state.http_client.load().as_ref().clone();
+    let client = app_state.http_clients.default.load().as_ref().clone();
     match re_resolve_stalker_url(&app_state.app_config, &client, &input, provider_id, kind, false).await {
         Ok(Some(resolved_url)) => {
             let Ok(url) = Url::parse(&resolved_url) else {
@@ -1415,6 +1462,51 @@ async fn playlist_episode_item(
         }
     }
     axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod epg_channel_candidate_tests {
+    use super::{select_epg_channel_candidate, ResolvedRecordingSource};
+
+    fn candidate(virtual_id: u32, title: &str) -> ResolvedRecordingSource {
+        ResolvedRecordingSource {
+            virtual_id,
+            input_name: "input".to_string(),
+            title: title.to_string(),
+            extension: None,
+            downloadable: true,
+        }
+    }
+
+    fn shared_epg_id_candidates() -> Vec<ResolvedRecordingSource> {
+        vec![candidate(1, "┃NL┃ SBS 6 4K"), candidate(2, "┃CANAL+┃ SBS 6 HD"), candidate(3, "┃NLZIET┃ SBS 6 HD")]
+    }
+
+    #[test]
+    fn shared_epg_id_prefers_exact_channel_name() {
+        let selected = select_epg_channel_candidate(shared_epg_id_candidates(), Some("┃NLZIET┃ SBS 6 HD"));
+        assert_eq!(selected.map(|c| c.virtual_id), Some(3));
+    }
+
+    #[test]
+    fn shared_epg_id_matches_lowercased_display_name() {
+        let selected = select_epg_channel_candidate(shared_epg_id_candidates(), Some(" ┃canal+┃ sbs 6 hd "));
+        assert_eq!(selected.map(|c| c.virtual_id), Some(2));
+    }
+
+    #[test]
+    fn shared_epg_id_without_matching_name_takes_first() {
+        assert_eq!(
+            select_epg_channel_candidate(shared_epg_id_candidates(), Some("SBS 6")).map(|c| c.virtual_id),
+            Some(1)
+        );
+        assert_eq!(select_epg_channel_candidate(shared_epg_id_candidates(), None).map(|c| c.virtual_id), Some(1));
+    }
+
+    #[test]
+    fn no_candidate_resolves_nothing() {
+        assert!(select_epg_channel_candidate(Vec::new(), Some("SBS 6")).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -2642,41 +2734,23 @@ mod tests {
                 Arc::clone(&active_provider),
                 Arc::clone(&connection_manager),
             ),
-            forced_targets: Arc::new(ArcSwap::from_pointee(crate::model::ProcessTargets {
-                enabled: false,
-                inputs: Vec::new(),
-                targets: Vec::new(),
-                target_names: Vec::new(),
-            })),
             app_config: app_cfg,
-            http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_clients: Arc::default(),
             recordings: Arc::new(crate::api::model::RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
-            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-            stalker_resolve_coordinator: Arc::default(),
+            hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+            stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,
             event_manager,
-            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            cancel_tokens: ArcSwap::from_pointee(tokens),
             playlists: Arc::new(PlaylistStorageState::new()),
             geoip,
-            update_guard: crate::api::model::UpdateGuard::new(),
             metadata_manager,
-            identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                std::path::PathBuf::new(),
-            )),
-            login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-            token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                std::path::PathBuf::new(),
-            )),
-            manual_update_sender,
+            auth: crate::api::model::AuthState::for_tests(),
+            playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
         })
     }
 
@@ -3437,6 +3511,9 @@ mod tests {
                 probe_live_interval_hours: 120,
                 resolve_filter: None,
                 probe_filter: None,
+                flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+                flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(
+                ),
             }),
             stalker: Some(crate::model::StalkerInputConfig {
                 device: None,
@@ -3584,6 +3661,9 @@ mod tests {
                 probe_live_interval_hours: 120,
                 resolve_filter: None,
                 probe_filter: None,
+                flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
+                flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(
+                ),
             }),
             stalker: Some(crate::model::StalkerInputConfig {
                 device: None,

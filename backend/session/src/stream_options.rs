@@ -6,12 +6,21 @@
 use crate::streams::buffered_stream::MAX_BUFFER_BYTES;
 use tuliprox_core::model::AppConfig;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamResponseMode {
+    #[default]
+    Stream,
+    HlsResource,
+}
+
 pub struct StreamOptions {
     pub stream_retry: bool,
     pub buffer_enabled: bool,
     pub buffer_size: usize,
     pub buffer_max_bytes: usize,
     pub pipe_provider_stream: bool,
+    /// Finite HLS objects retain their upstream errors instead of serving a TS fallback.
+    pub response_mode: StreamResponseMode,
 }
 
 /// Constructs a `StreamOptions` object based on the application's reverse proxy configuration.
@@ -29,8 +38,10 @@ pub struct StreamOptions {
 /// Additionally, it computes `pipe_provider_stream` as `!stream_retry && !buffer_enabled`.
 /// This means direct provider piping is enabled only when retry is disabled and buffering is disabled.
 ///
+/// `response_mode` is explicit so finite HLS resources cannot silently fall back to a TS stream.
+///
 /// Returns a `StreamOptions` instance with the resolved configuration.
-pub fn get_stream_options(app_config: &AppConfig) -> StreamOptions {
+pub fn get_stream_options(app_config: &AppConfig, response_mode: StreamResponseMode) -> StreamOptions {
     let (stream_retry, buffer_enabled, buffer_size, buffer_max_bytes) =
         app_config.config.load().reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.stream.as_ref()).map_or(
             (true, false, 0, MAX_BUFFER_BYTES),
@@ -45,5 +56,5 @@ pub fn get_stream_options(app_config: &AppConfig) -> StreamOptions {
             },
         );
     let pipe_provider_stream = !stream_retry && !buffer_enabled;
-    StreamOptions { stream_retry, buffer_enabled, buffer_size, buffer_max_bytes, pipe_provider_stream }
+    StreamOptions { stream_retry, buffer_enabled, buffer_size, buffer_max_bytes, pipe_provider_stream, response_mode }
 }

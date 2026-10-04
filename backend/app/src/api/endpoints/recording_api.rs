@@ -123,6 +123,7 @@ pub async fn create_recording_request(
         &mut source.virtual_id,
         &mut source.input_name,
         source.cluster,
+        body.channel_name.as_deref(),
     )
     .await
     else {
@@ -707,6 +708,7 @@ async fn resolve_recording_source(
     virtual_id: &mut String,
     input_name: &mut String,
     cluster: XtreamCluster,
+    channel_name: Option<&str>,
 ) -> Option<crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource> {
     if recording_virtual_id(virtual_id).is_none() {
         if cluster != XtreamCluster::Live {
@@ -716,6 +718,7 @@ async fn resolve_recording_source(
             &app_state.app_config,
             target_name,
             virtual_id,
+            channel_name,
         )
         .await?;
         if !accept_resolved_recording_source(virtual_id, input_name, &resolved) {
@@ -784,6 +787,7 @@ pub async fn create_recording_rule(
         &mut body.virtual_id,
         &mut body.input_name,
         XtreamCluster::Live,
+        None,
     )
     .await
     .is_none()

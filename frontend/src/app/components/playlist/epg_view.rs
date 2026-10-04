@@ -33,6 +33,12 @@ const TIME_BLOCK_MINS: i64 = 30;
 const DEFAULT_PIXELS_PER_MIN: f64 = 7.0; // 210px / 30min
 const MIN_PIXELS_PER_MIN: f64 = 2.0;
 const MAX_PIXELS_PER_MIN: f64 = 28.0;
+/// Offset of the record button's left edge from the programme's right edge:
+/// 4px box border, 2px gap, 18px button.
+const RECORD_BUTTON_RIGHT_INSET: i64 = 24;
+/// Smallest offset of the record button from the programme's left edge, so it
+/// never starts before the programme it records.
+const RECORD_BUTTON_LEFT_INSET: i64 = 4;
 const WHEEL_ZOOM_FACTOR_IN: f64 = 1.1;
 const WHEEL_ZOOM_FACTOR_OUT: f64 = 1.0 / WHEEL_ZOOM_FACTOR_IN;
 const ZOOM_EQUALITY_TOLERANCE: f64 = 0.01;
@@ -1089,27 +1095,35 @@ pub fn EpgView() -> Html {
                                                     })
                                                 };
 
+                                                // The record button sits beside the programme box rather than
+                                                // inside it: the box clips its content, which hid the button on
+                                                // every programme narrower than the button itself.
+                                                let record_button = if can_write_recordings && !is_past && is_hosted_epg {
+                                                    let button_left = (right - RECORD_BUTTON_RIGHT_INSET).max(left + RECORD_BUTTON_LEFT_INSET);
+                                                    html! {
+                                                        <div class="tp__epg__program-record" style={format!("left:{button_left}px")}>
+                                                            <IconButton
+                                                                name="program_record"
+                                                                icon="DVR"
+                                                                class="tp__epg__program-menu"
+                                                                onclick={program_record_click}
+                                                            />
+                                                        </div>
+                                                    }
+                                                } else {
+                                                    html! {}
+                                                };
+
                                                 html! {
+                                                <>
                                                 <div class={classes!("tp__epg__program", if is_active { "tp__epg__program-active" } else {""})} style={program_style.clone()} title={ p.title.as_ref().map(ToString::to_string).unwrap_or_default() }>
                                                     <div class="tp__epg__program-time">{ &pstart } {"-"} { &pend }</div>
                                                     <div class="tp__epg__program-title">
                                                         { p.title.as_ref().map(ToString::to_string).unwrap_or_default() }
                                                     </div>
-                                                    {
-                                                        if can_write_recordings && !is_past && is_hosted_epg {
-                                                            html! {
-                                                                <IconButton
-                                                                    name="program_record"
-                                                                    icon="DVR"
-                                                                    class="tp__epg__program-menu"
-                                                                    onclick={program_record_click}
-                                                                />
-                                                            }
-                                                        } else {
-                                                            html! {}
-                                                        }
-                                                    }
                                                 </div>
+                                                { record_button }
+                                                </>
                                                 }
                                             } else {
                                               html!{}

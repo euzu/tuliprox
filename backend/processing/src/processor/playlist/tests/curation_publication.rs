@@ -326,6 +326,35 @@ impl Publication {
         values
     }
 
+    async fn assert_regular_publication(&self, expected: &[PlaylistGroup]) {
+        if self.target.get_xtream_output().is_some() {
+            let rows = self.xtream_rows().await;
+            for item in expected.iter().flat_map(|group| &group.channels) {
+                assert!(rows.iter().any(|row| row.title == item.header.title && row.url == item.header.url));
+            }
+            assert!(rows.iter().all(|row| !row.group.starts_with("TMDB") && !row.group.starts_with("Trakt")));
+        }
+        assert!(std::fs::read_to_string(self.directory.path().join("published.m3u")).is_ok_and(|text| {
+            expected
+                .iter()
+                .flat_map(|group| &group.channels)
+                .filter(|item| item.header.item_type != PlaylistItemType::SeriesInfo)
+                .all(|item| text.contains(item.header.title.as_ref()) && text.contains(item.header.url.as_ref()))
+        }));
+        let strm = self.strm_contents();
+        assert!(!strm.is_empty());
+        let files = file_snapshot(self.directory.path());
+        let live_title = expected[0].channels[0].header.title.as_bytes();
+        assert!(
+            files.iter().any(|(path, contents)| {
+                path.to_string_lossy().contains("epg")
+                    && contents.windows(live_title.len()).any(|part| part == live_title)
+            }),
+            "new EPG programme must be published"
+        );
+        assert!(!self.cache_signature().await.is_empty());
+    }
+
     async fn identity_signature(&self) -> BTreeMap<String, (u32, u32)> {
         let cache = self.context.playlist_state.as_ref().unwrap().data.read().await;
         cache[&self.target.name]
@@ -464,7 +493,7 @@ async fn tmdb_https_empty_and_no_match_clear_published_vod_series_but_keep_live(
 }
 
 #[tokio::test]
-async fn either_https_failure_retains_every_published_file_id_cache_and_watch_in_full_and_curated() {
+async fn either_https_failure_continues_regular_publication_in_full_and_curated() {
     for policy in ["full", "curated"] {
         for (route, status, body) in [
             (MOVIES, 503, "{}"),
@@ -473,20 +502,30 @@ async fn either_https_failure_retains_every_published_file_id_cache_and_watch_in
         ] {
             let server = DiscoveryServer::start().await;
             let run = Publication::new(&server, &target(policy, true, true));
-            let initial = file_snapshot(run.directory.path());
             server.reply(route, status, body);
-            assert!(run.publish().await.is_err(), "first run must not publish a successful sibling");
-            assert_eq!(file_snapshot(run.directory.path()), initial);
-            assert!(run.cache_signature().await.is_empty());
+            assert!(run.publish().await.is_ok());
+            run.assert_regular_publication(&catalog()).await;
             server.reply(route, 200, if route == TRAKT { TRAKT_PAGE } else { MOVIE_PAGE });
-            run.publish().await.unwrap();
-            let files = file_snapshot(run.directory.path());
-            let cache = run.cache_signature().await;
-            assert!(!files.is_empty() && !cache.is_empty());
+            assert!(run.publish().await.is_ok());
             server.reply(route, status, body);
-            assert!(run.publish().await.is_err());
-            assert_eq!(file_snapshot(run.directory.path()), files);
-            assert_eq!(run.cache_signature().await, cache);
+            assert!(run.publish_catalog(item_limit::changed_catalog()).await.is_ok());
+            run.assert_regular_publication(&item_limit::changed_catalog()).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_tmdb_credentials_publish_playlists_and_epg_with_and_without_xtream() {
+    for policy in ["full", "curated"] {
+        for xtream in [false, true] {
+            let server = DiscoveryServer::start().await;
+            let mut run = Publication::new(&server, &target(policy, false, xtream));
+            if let Some(source) = run.target.curation.as_mut().and_then(|config| config.tmdb.as_mut()) {
+                source.api.access_token.clear();
+            }
+            assert!(run.publish().await.is_ok());
+            run.assert_regular_publication(&catalog()).await;
+            assert!(server.requests.lock().is_ok_and(|requests| requests.is_empty()));
         }
     }
 }

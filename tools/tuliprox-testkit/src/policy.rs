@@ -252,6 +252,9 @@ mod tests {
             users: HashMap::from([("alice".to_owned(), UserPolicy { max_connections: 2, soft_connections: 1 })]),
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpLatest]),
             recent_eviction_reentry_ttl_ms: None,
+            hls_session_ttl_secs: None,
+            provider_affinity_ttl_secs: None,
+            hls_wrap_media_playlist: None,
             grace: None,
             provider_max_connections: None,
             provider_pool: Vec::new(),
@@ -319,8 +322,8 @@ mod tests {
 
         let mut contract_with_pool = contract();
         contract_with_pool.provider_pool = vec![
-            ProviderPoolAccount { name: "alpha".to_owned(), max_connections: 2 },
-            ProviderPoolAccount { name: "beta".to_owned(), max_connections: 3 },
+            ProviderPoolAccount { name: "alpha".to_owned(), max_connections: 2, priority: None },
+            ProviderPoolAccount { name: "beta".to_owned(), max_connections: 3, priority: None },
         ];
 
         let mut config_matching = fixture();

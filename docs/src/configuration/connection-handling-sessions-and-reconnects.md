@@ -81,11 +81,17 @@ Important values in the reverse proxy block:
 
 - `hls_session_ttl_secs`
 - `catchup_session_ttl_secs`
+- `provider_affinity_ttl_secs`
 
 In plain language:
 
 - HLS gets a short recognition window
 - catchup usually gets a somewhat longer one
+- after either window, a playback that comes back still prefers the provider account that last delivered its media for
+  `provider_affinity_ttl_secs` (default `120`); this preference holds no connection slot
+- with `hls_wrap_media_playlist` (default `true`) and the shared HLS cache off, a proxied live HLS player refreshes a
+  sealed token URL instead of the entry URL, so its playback keeps the same session and provider account when its
+  client IP changes; a refresh after session expiry recreates the session from that token
 
 ## What the session TTL does not mean
 
@@ -252,6 +258,13 @@ Check:
 - `hls_session_ttl_secs`
 - `grace_period_millis`
 - `grace_period_hold_stream`
+
+### If HLS playback moves between provider accounts after a player pause
+
+Check:
+
+- `provider_affinity_ttl_secs` (it must exceed the player's longest request pause)
+- whether the preferred account is full, which sends the playback to the normal provider order
 
 ### If catchup users often fail during timeline jumps
 

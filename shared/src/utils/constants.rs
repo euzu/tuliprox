@@ -29,7 +29,6 @@ const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[
     "access-control-allow-credentials",
     "icy-metadata",
     "icy-metaint",
-    "referer",
     "last-modified",
     "cache-control",
     "etag",

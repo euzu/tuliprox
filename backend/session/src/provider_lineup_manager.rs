@@ -482,6 +482,7 @@ pub struct ProviderLineupManager {
     /// Which priority group last served each input, so a fallback is reported
     /// on transition rather than once per allocation.
     served_priority_group: DashMap<Arc<str>, usize>,
+    pub account_health_changed: tokio::sync::Notify,
 }
 
 #[derive(Debug)]
@@ -505,6 +506,7 @@ impl ProviderLineupManager {
             provider_connections,
             event_manager: Arc::clone(event_manager),
             served_priority_group: DashMap::new(),
+            account_health_changed: tokio::sync::Notify::new(),
         }
     }
 
@@ -527,8 +529,123 @@ impl ProviderLineupManager {
         }
     }
 
+    /// Records an observation and returns the merged entry queued for persistence,
+    /// or `None` when it is unknown or repeats the already persisted state.
+    pub fn observe_account(
+        &self,
+        mut observation: tuliprox_core::model::ProviderAccountObservation,
+    ) -> Option<tuliprox_core::model::ProviderAccountObservation> {
+        let snapshot = self.snapshot.load();
+        let identity_matches = Self::get_provider_config_by_name(&observation.name, &snapshot.providers)
+            .is_some_and(|(_, config)| config.account_identity() == observation.identity);
+        if !identity_matches {
+            return None;
+        }
+        let connection = self.provider_connections.get(&observation.name).map(|entry| Arc::clone(entry.value()))?;
+        let mut state = connection.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = state.health_status.as_ref().filter(|old| old.identity == observation.identity) {
+            observation.status = observation.status.or(previous.status);
+            observation.exp_date = observation.exp_date.or(previous.exp_date);
+        }
+        if state.pending_health.is_none()
+            && state.health_status.as_ref().is_some_and(|old| old.same_state(&observation))
+        {
+            return None;
+        }
+        if observation.is_blocked()
+            || observation.status.is_some()
+            || state.health_status.as_ref().is_none_or(|previous| previous.identity != observation.identity)
+        {
+            state.health_status = Some(observation.clone());
+        }
+        state.pending_health = Some(observation.clone());
+        drop(state);
+        self.account_health_changed.notify_one();
+        Some(observation)
+    }
+
+    pub fn pending_account_observations(&self) -> Vec<tuliprox_core::model::ProviderAccountObservation> {
+        self.provider_connections
+            .iter()
+            .filter_map(|entry| {
+                entry.value().read().unwrap_or_else(std::sync::PoisonError::into_inner).pending_health.clone()
+            })
+            .collect()
+    }
+
+    /// True while exactly this observation still awaits persistence; renewals and newer
+    /// observations replace or clear it.
+    pub fn is_observation_pending(&self, observation: &tuliprox_core::model::ProviderAccountObservation) -> bool {
+        self.provider_connections.get(&observation.name).map(|entry| Arc::clone(entry.value())).is_some_and(
+            |connection| {
+                connection
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pending_health
+                    .as_ref()
+                    .is_some_and(|pending| pending.same_state(observation))
+            },
+        )
+    }
+
+    pub fn acknowledge_account_observation(&self, observation: &tuliprox_core::model::ProviderAccountObservation) {
+        if let Some(connection) =
+            self.provider_connections.get(&observation.name).map(|entry| Arc::clone(entry.value()))
+        {
+            let mut state = connection.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.pending_health.as_ref().is_some_and(|current| current.same_state(observation)) {
+                state.pending_health = None;
+            }
+        }
+    }
+
+    /// Asks the expiry worker to check the account; it decides whether its throttle allows a request.
+    pub fn request_account_probe(&self, name: &Arc<str>) {
+        let Some(connection) = self.provider_connections.get(name).map(|entry| Arc::clone(entry.value())) else {
+            return;
+        };
+        let mut state = connection.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !std::mem::replace(&mut state.probe_requested, true) {
+            drop(state);
+            self.account_health_changed.notify_one();
+        }
+    }
+
+    pub fn is_account_probe_requested(&self, name: &Arc<str>) -> bool {
+        self.provider_connections.get(name).map(|entry| Arc::clone(entry.value())).is_some_and(|connection| {
+            connection.read().unwrap_or_else(std::sync::PoisonError::into_inner).probe_requested
+        })
+    }
+
+    pub fn clear_account_probe(&self, name: &Arc<str>) {
+        if let Some(connection) = self.provider_connections.get(name).map(|entry| Arc::clone(entry.value())) {
+            connection.write().unwrap_or_else(std::sync::PoisonError::into_inner).probe_requested = false;
+        }
+    }
+
+    pub fn forget_account_health(&self, name: &Arc<str>) {
+        if let Some(connection) = self.provider_connections.get(name).map(|entry| Arc::clone(entry.value())) {
+            let mut state = connection.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.health_status = None;
+            state.pending_health = None;
+            state.probe_requested = false;
+        }
+    }
+
+    fn has_pending_health(&self, name: &Arc<str>) -> bool {
+        self.provider_connections.get(name).map(|entry| Arc::clone(entry.value())).is_some_and(|connection| {
+            connection.read().unwrap_or_else(std::sync::PoisonError::into_inner).pending_health.is_some()
+        })
+    }
+
+    /// Changed credentials always reset health; a manual re-enable only when no observation awaits persistence.
+    fn should_forget_health(&self, name: &Arc<str>, reenabled: bool, credentials_changed: bool) -> bool {
+        credentials_changed || (reenabled && !self.has_pending_health(name))
+    }
+
     fn inputs_differ(a: &ConfigInput, b: &ConfigInput) -> bool {
-        if a.enabled != b.enabled
+        if a.account_disabled != b.account_disabled
+            || a.enabled != b.enabled
             || a.max_connections != b.max_connections
             || a.priority != b.priority
             || a.input_type != b.input_type
@@ -594,6 +711,34 @@ impl ProviderLineupManager {
 
         if !self.has_changed(&new_inputs) {
             return;
+        }
+
+        {
+            let previous = self.snapshot.load();
+            for input in &new_inputs {
+                let Some(old) = previous.inputs.iter().find(|old| old.name == input.name) else {
+                    continue;
+                };
+                let root_reenabled = old.account_disabled && !input.account_disabled;
+                if self.should_forget_health(
+                    &input.name,
+                    root_reenabled,
+                    old.account_identity() != input.account_identity(),
+                ) {
+                    self.forget_account_health(&input.name);
+                }
+                for alias in input.aliases.iter().flatten() {
+                    let Some(old_alias) = old.aliases.iter().flatten().find(|old_alias| old_alias.name == alias.name)
+                    else {
+                        continue;
+                    };
+                    let reenabled = alias.enabled && !old_alias.enabled;
+                    let credentials_changed = old_alias.account_identity() != alias.account_identity();
+                    if self.should_forget_health(&alias.name, reenabled, credentials_changed) {
+                        self.forget_account_health(&alias.name);
+                    }
+                }
+            }
         }
 
         let mut new_lineups: Vec<ProviderLineup> = Vec::with_capacity(new_inputs.len());
@@ -1048,6 +1193,7 @@ mod tests {
             password: None,
             persist: None,
             enabled: true,
+            account_disabled: false,
             sequential_group: None,
             input_type: InputType::Xtream, // You can use a default value here
             max_connections,
@@ -1085,6 +1231,120 @@ mod tests {
     }
 
     fn dummy_callback(_: &Arc<str>, _: usize) {}
+
+    #[test]
+    fn blocked_root_keeps_alias_capacity_available() {
+        let mut input = create_config_input(1, &"root".intern(), 0, 0);
+        input.account_disabled = true;
+        input.aliases = Some(vec![create_config_input_alias(2, "http://alias", 0, 1)]);
+        let events = Arc::new(EventManager::new());
+        let lineup = ProviderLineupManager::new(vec![Arc::new(input)], GracePeriodOptions::default(), &events);
+        let allocation = lineup.acquire_connection_with_grace_override(&"root".intern(), false);
+        assert_eq!(allocation.get_provider_id(), Some(2));
+        assert!(matches!(
+            lineup.acquire_exact_connection_with_grace_override(&"root".intern(), true),
+            ProviderAllocation::Exhausted
+        ));
+        allocation.release();
+    }
+
+    #[test]
+    fn observed_ban_skips_live_and_redirect_allocations() {
+        let input = create_config_input(1, &"root".intern(), 0, 0);
+        let identity = input.account_identity();
+        let events = Arc::new(EventManager::new());
+        let lineup = ProviderLineupManager::new(vec![Arc::new(input)], GracePeriodOptions::default(), &events);
+        lineup.observe_account(tuliprox_core::model::ProviderAccountObservation {
+            name: "root".intern(),
+            identity,
+            status: Some(shared::model::ProxyUserStatus::Banned),
+            exp_date: None,
+        });
+        assert!(matches!(
+            lineup.acquire_connection_with_grace_override(&"root".intern(), true),
+            ProviderAllocation::Exhausted
+        ));
+        let config =
+            ProviderLineupManager::get_provider_config_by_name(&"root".intern(), &lineup.snapshot.load().providers)
+                .map(|(_, config)| config.config());
+        assert!(config.is_some_and(|config| config.is_account_blocked()));
+        assert!(lineup.get_next_provider(&"root".intern()).is_none());
+    }
+
+    #[test]
+    fn account_health_preserves_bans_and_rejects_stale_responses() {
+        let mut input = create_config_input(1, &"root".intern(), 0, 0);
+        let identity = input.account_identity();
+        let events = Arc::new(EventManager::new());
+        let lineup = ProviderLineupManager::new(vec![Arc::new(input.clone())], GracePeriodOptions::default(), &events);
+        let banned = tuliprox_core::model::ProviderAccountObservation {
+            name: "root".intern(),
+            identity,
+            status: Some(shared::model::ProxyUserStatus::Banned),
+            exp_date: None,
+        };
+        lineup.observe_account(banned.clone());
+        lineup.observe_account(tuliprox_core::model::ProviderAccountObservation {
+            status: None,
+            exp_date: Some(i64::MAX),
+            ..banned.clone()
+        });
+        assert!(lineup.get_next_provider(&input.name).is_none());
+        lineup.acknowledge_account_observation(&banned);
+        assert_eq!(lineup.pending_account_observations().len(), 1);
+        assert!(lineup.pending_account_observations()[0].is_blocked());
+        lineup.request_account_probe(&input.name);
+        assert!(lineup.is_account_probe_requested(&input.name));
+        input.password = Some("renewed".to_string());
+        lineup.update_config(vec![Arc::new(input.clone())], &GracePeriodOptions::default());
+        lineup.observe_account(banned);
+        assert!(lineup.get_next_provider(&input.name).is_some());
+        assert!(lineup.pending_account_observations().is_empty());
+        assert!(!lineup.is_account_probe_requested(&input.name));
+    }
+
+    #[test]
+    fn repeated_persisted_observation_is_not_queued_again() {
+        let input = create_config_input(1, &"root".intern(), 0, 0);
+        let events = Arc::new(EventManager::new());
+        let lineup = ProviderLineupManager::new(vec![Arc::new(input.clone())], GracePeriodOptions::default(), &events);
+        let active = tuliprox_core::model::ProviderAccountObservation {
+            name: Arc::clone(&input.name),
+            identity: input.account_identity(),
+            status: Some(shared::model::ProxyUserStatus::Active),
+            exp_date: Some(i64::MAX),
+        };
+        let queued = lineup.observe_account(active.clone());
+        assert!(queued.is_some());
+        lineup.acknowledge_account_observation(&active);
+        assert!(lineup.observe_account(active.clone()).is_none());
+        assert!(lineup.pending_account_observations().is_empty());
+        let banned = tuliprox_core::model::ProviderAccountObservation {
+            status: Some(shared::model::ProxyUserStatus::Banned),
+            ..active
+        };
+        assert!(lineup.observe_account(banned).is_some_and(|queued| queued.is_blocked()));
+    }
+
+    #[test]
+    fn reload_does_not_forget_an_unpersisted_ban() {
+        let mut input = create_config_input(1, &"root".intern(), 0, 0);
+        input.account_disabled = true;
+        let events = Arc::new(EventManager::new());
+        let lineup = ProviderLineupManager::new(vec![Arc::new(input.clone())], GracePeriodOptions::default(), &events);
+        lineup.observe_account(tuliprox_core::model::ProviderAccountObservation {
+            name: Arc::clone(&input.name),
+            identity: input.account_identity(),
+            status: Some(shared::model::ProxyUserStatus::Banned),
+            exp_date: None,
+        });
+        input.account_disabled = false;
+        lineup.update_config(vec![Arc::new(input.clone())], &GracePeriodOptions::default());
+        assert!(lineup.get_next_provider(&input.name).is_none());
+        assert_eq!(lineup.pending_account_observations().len(), 1);
+        lineup.forget_account_health(&input.name);
+        assert!(lineup.get_next_provider(&input.name).is_some());
+    }
 
     // Test acquiring with an alias
     #[test]

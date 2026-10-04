@@ -1031,7 +1031,6 @@ fn compare_number(a: f64, b: f64) -> Ordering {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
 fn format_number(num: f64) -> String {
     let epsilon = 1e-3; // = 0.001
 
@@ -1169,7 +1168,6 @@ macro_rules! extract_evaluated_arg_value {
 }
 
 impl Expression {
-    #[allow(clippy::too_many_lines)]
     pub fn eval(&self, ctx: &mut MapperContext, accessor: &mut ValueAccessor) -> EvalResult {
         match self {
             Expression::NullValue => Undefined,

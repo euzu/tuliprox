@@ -413,7 +413,8 @@ pub(super) async fn evaluate_hls_canonical_owner_handoff(
     let now_ms = current_time_millis();
     let Some(lease) = context
         .app_state
-        .hls_proxy
+        .hls
+        .proxy
         .access_lease_response_snapshot(context.access_lease_id, context.proxy_session_id, now_ms)
         .await
     else {
@@ -444,7 +445,7 @@ pub(super) async fn evaluate_hls_canonical_owner_handoff(
     }
 
     let current_session =
-        context.app_state.hls_proxy.sessions().get_by_proxy_session_id(context.proxy_session_id).await;
+        context.app_state.hls.proxy.sessions().get_by_proxy_session_id(context.proxy_session_id).await;
     if let Some(current_session) = current_session.as_ref() {
         let options = hls_cached_manifest_options_for_requirement(
             Duration::ZERO,
@@ -507,7 +508,7 @@ pub(super) async fn join_hls_canonical_manifest_owner(
     registration: HlsCanonicalOwnerRegistrationKind,
 ) -> axum::response::Response {
     let started_at = tokio::time::Instant::now();
-    let coordinator = context.app_state.hls_proxy.availability_reevaluations();
+    let coordinator = context.app_state.hls.proxy.availability_reevaluations();
     let resolution = loop {
         let mut observer = coordinator.observe_owner(context.proxy_session_id);
         let pending = match evaluate_hls_canonical_owner_handoff(&context).await {
@@ -561,7 +562,7 @@ pub(super) async fn hls_direct_refresh_follow_up(
             warn!("HLS direct origin refresh state contended; scheduling current availability reevaluation");
         }
     }
-    let Some(owner_key) = app_state.hls_proxy.availability_reevaluation_owner_key(session, proxy_session_id).await
+    let Some(owner_key) = app_state.hls.proxy.availability_reevaluation_owner_key(session, proxy_session_id).await
     else {
         warn!("HLS direct origin refresh follow-up unavailable: reason=session_superseded");
         return Some(hls_canonical_retry_after_response());
@@ -607,7 +608,7 @@ pub(super) async fn trigger_hls_canonical_manifest_refresh(
             let _refresh_started = trigger_origin_refresh_sync(refresh_request).await;
             let now_ms = current_time_millis();
             let Some(lease) =
-                app_state.hls_proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
+                app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
             else {
                 return Some(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable));
             };
@@ -749,7 +750,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_target(app_state, target) {
         let origin_source = build_hls_origin_source(input, stream_identity.stream_ref());
         let proxy_session_id = build_proxy_session_id(&origin_source.session_key(), &app_state.get_encrypt_secret());
-        let reservation_ttl_secs = match app_state.hls_proxy.sessions().get_by_key(&origin_source.session_key()).await {
+        let reservation_ttl_secs = match app_state.hls.proxy.sessions().get_by_key(&origin_source.session_key()).await {
             Some(session) => hls_origin_account_reservation_ttl_secs_for_session(&session).await,
             None => hls_origin_account_reservation_ttl_secs_fallback(),
         };
@@ -794,7 +795,7 @@ pub(super) async fn mark_hls_provisioning_handoff_discontinuity(
         return false;
     }
     let origin_source = build_hls_origin_source(input, stream_identity.stream_ref());
-    let Some(session) = app_state.hls_proxy.sessions().get_by_key(&origin_source.session_key()).await else {
+    let Some(session) = app_state.hls.proxy.sessions().get_by_key(&origin_source.session_key()).await else {
         return false;
     };
     mark_hls_provisioning_handoff_discontinuity_once_for_session(
@@ -817,7 +818,7 @@ pub(super) async fn mark_hls_provisioning_handoff_discontinuity_once_for_session
     now_ms: u64,
 ) -> bool {
     let proxy_session_id = session.read().await.proxy_session_id.clone();
-    if !app_state.hls_provisioning.mark_handoff_once(
+    if !app_state.hls.provisioning.mark_handoff_once(
         &input.name,
         virtual_id,
         Some(&proxy_session_id),
@@ -855,8 +856,8 @@ pub(super) fn clear_hls_provisioning_handoff_consumer(
     virtual_id: u32,
     now_ms: u64,
 ) {
-    if !app_state.hls_provisioning.take_ready_slot_for_consumer(&input.name, virtual_id, now_ms) {
-        app_state.hls_provisioning.clear_consumer(&input.name, virtual_id);
+    if !app_state.hls.provisioning.take_ready_slot_for_consumer(&input.name, virtual_id, now_ms) {
+        app_state.hls.provisioning.clear_consumer(&input.name, virtual_id);
     }
 }
 
@@ -868,7 +869,7 @@ pub(super) async fn maybe_mark_hls_provisioning_handoff_for_canonical_manifest(
     access_lease_id: &HlsAccessLeaseId,
     now_ms: u64,
 ) -> Option<u64> {
-    if !app_state.hls_provisioning.has_consumer(&input.name, virtual_id, now_ms) {
+    if !app_state.hls.provisioning.has_consumer(&input.name, virtual_id, now_ms) {
         return None;
     }
     let previous_manifest_rendered_at_ms = latest_shared_hls_manifest_rendered_at_ms(session).await;
@@ -944,9 +945,9 @@ pub(super) async fn hls_panel_provisioning_poll_response(
 ) -> axum::response::Response {
     let virtual_id = stream_identity.virtual_id();
     let now_ms = current_time_millis();
-    app_state.hls_provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
+    app_state.hls.provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
 
-    let existing_status = app_state.hls_provisioning.consumer_status(&input.name, virtual_id, now_ms);
+    let existing_status = app_state.hls.provisioning.consumer_status(&input.name, virtual_id, now_ms);
 
     if try_reserve_hls_virtual_entry_origin_account_for_redirect(
         app_state,
@@ -1111,7 +1112,8 @@ pub(super) async fn commit_shared_hls_provisioning_segments(
         let video = provisioning_segments.get(plan.physical_index)?;
         let duration_ms = video.duration_ms().unwrap_or(HLS_PROVISIONING_SEGMENT_DURATION_MS);
         let metadata = match app_state
-            .hls_proxy
+            .hls
+            .proxy
             .segment_cache()
             .write_bytes_and_commit(&plan.cache_key, video.as_bytes())
             .await
@@ -1276,10 +1278,10 @@ pub(super) async fn hls_shared_provisioning_or_provider_exhausted_response(
     let now_ms = current_time_millis();
     let provisioning_enabled = can_provision_on_exhausted(app_state.as_ref(), input);
     if provisioning_enabled {
-        app_state.hls_provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
+        app_state.hls.provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
         start_hls_panel_provisioning_once(app_state, input);
         if let Some(HlsProvisioningStatus::ProviderExhausted) =
-            app_state.hls_provisioning.consumer_status(&input.name, virtual_id, now_ms)
+            app_state.hls.provisioning.consumer_status(&input.name, virtual_id, now_ms)
         {
             return hls_runtime_or_standalone_custom_tail_response(
                 app_state,
@@ -1435,7 +1437,7 @@ pub(super) async fn prepare_hls_canonical_manifest_origin_runtime(
             Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
                 reason: HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted,
             }) => {
-                let strip = app_state.hls_proxy.strip();
+                let strip = app_state.hls.proxy.strip();
                 match hls_provider_connections_exhausted_manifest_resolution(
                     app_state,
                     session,
@@ -1513,7 +1515,8 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
     let now_ms = current_time_millis();
     let rewrite_secret = app_state.get_encrypt_secret();
     let (session, session_outcome) = app_state
-        .hls_proxy
+        .hls
+        .proxy
         .get_or_create_session_with_source_and_outcome(
             session_key,
             origin.origin_source.clone(),
@@ -1524,7 +1527,8 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
     if access_lease_state == HlsAccessLeaseState::Activated {
         let timing = hls_access_lease_timing_for_session(app_state, &session).await;
         match app_state
-            .hls_proxy
+            .hls
+            .proxy
             .touch_manifest_access_lease(
                 access_lease_id,
                 path_proxy_session_id,
@@ -1555,7 +1559,8 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
         }
     }
     app_state
-        .hls_proxy
+        .hls
+        .proxy
         .sync_session_access_lease_count_and_detach_if_needed(
             &app_state.active_users,
             &app_state.active_provider,
@@ -1681,20 +1686,20 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
         origin_entry,
         headers,
         origin_provider_session_headers,
-        client: app_state.http_client.load().as_ref().clone(),
-        no_redirect_client: app_state.http_client_no_redirect.load().as_ref().clone(),
+        client: app_state.http_clients.default.load().as_ref().clone(),
+        no_redirect_client: app_state.http_clients.no_redirect.load().as_ref().clone(),
         use_manual_redirects: app_state.should_use_manual_redirects(),
-        segment_cache: Arc::clone(app_state.hls_proxy.segment_cache()),
-        hls_proxy: Arc::clone(&app_state.hls_proxy),
-        segment_repair: Arc::clone(app_state.hls_proxy.segment_repair()),
-        segment_worker_pool: Arc::clone(app_state.hls_proxy.segment_worker_pool()),
-        map_worker_pool: Arc::clone(app_state.hls_proxy.map_worker_pool()),
-        origin_manifest_timeout_ms: app_state.hls_proxy.origin_manifest_timeout_ms(),
-        manifest_recovery_burst: app_state.hls_proxy.manifest_recovery_burst(),
-        strip: app_state.hls_proxy.strip().clone(),
+        segment_cache: Arc::clone(app_state.hls.proxy.segment_cache()),
+        hls_proxy: Arc::clone(&app_state.hls.proxy),
+        segment_repair: Arc::clone(app_state.hls.proxy.segment_repair()),
+        segment_worker_pool: Arc::clone(app_state.hls.proxy.segment_worker_pool()),
+        map_worker_pool: Arc::clone(app_state.hls.proxy.map_worker_pool()),
+        origin_manifest_timeout_ms: app_state.hls.proxy.origin_manifest_timeout_ms(),
+        manifest_recovery_burst: app_state.hls.proxy.manifest_recovery_burst(),
+        strip: app_state.hls.proxy.strip().clone(),
         retry_policy: RetryPolicy::default(),
         reverse_proxy_rewrite_secret: rewrite_secret.to_vec(),
-        transient_resource_ttl_ms: app_state.hls_proxy.transient_resource_ttl_ms(),
+        transient_resource_ttl_ms: app_state.hls.proxy.transient_resource_ttl_ms(),
         manifest_commit_requirement,
         fresh_manifest_requirement_generation: None,
         acceptance_directive,
@@ -1721,7 +1726,8 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
         )
         .await;
         let owner_wait_lease = app_state
-            .hls_proxy
+            .hls
+            .proxy
             .access_lease_response_snapshot(access_lease_id, path_proxy_session_id, current_time_millis())
             .await;
         let expected_lease_issued_at_ms = owner_wait_lease.as_ref().map(|lease| lease.issued_at_ms);
@@ -1736,7 +1742,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
             register_hls_availability_reevaluation(hls_ctx, Arc::clone(&session), owner_key, refresh_request);
         return Some(match hls_canonical_owner_registration(registration) {
             HlsCanonicalOwnerRegistration::Join(registration) => {
-                let strip = app_state.hls_proxy.strip();
+                let strip = app_state.hls.proxy.strip();
                 join_hls_canonical_manifest_owner(
                     HlsCanonicalOwnerHandoffContext {
                         app_state,
@@ -1782,7 +1788,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
         {
             return Some(response);
         }
-        let strip = app_state.hls_proxy.strip();
+        let strip = app_state.hls.proxy.strip();
         if let Some(response) = try_hls_cached_manifest_response(
             app_state,
             &session,
@@ -1823,7 +1829,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
             {
                 return Some(response);
             }
-            let strip = app_state.hls_proxy.strip();
+            let strip = app_state.hls.proxy.strip();
             if let Some(response) = try_hls_cached_manifest_response(
                 app_state,
                 &session,
@@ -1853,7 +1859,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
                 if refresh_ordering == HlsManifestRefreshOrdering::AwaitBeforeTerminalEvaluation
                     && response.status() == StatusCode::SERVICE_UNAVAILABLE
                 {
-                    let strip = app_state.hls_proxy.strip();
+                    let strip = app_state.hls.proxy.strip();
                     if let Some(live_response) = try_hls_cached_manifest_response(
                         app_state,
                         &session,
@@ -1881,7 +1887,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
                 now_ms,
             )
             .await;
-            let strip = app_state.hls_proxy.strip();
+            let strip = app_state.hls.proxy.strip();
             if let Some(response) = try_hls_cached_manifest_response(
                 app_state,
                 &session,
@@ -1903,7 +1909,7 @@ pub(super) async fn try_hls_cache_canonical_manifest_response(
 }
 
 pub(super) fn hls_initial_manifest_decision_wait_timeout(app_state: &Arc<AppState>) -> Duration {
-    Duration::from_secs(app_state.hls_proxy.initial_manifest_wait_timeout_secs())
+    Duration::from_secs(app_state.hls.proxy.initial_manifest_wait_timeout_secs())
 }
 
 pub(super) async fn hls_manifest_wait_timeout_for_requirement(
@@ -1935,7 +1941,8 @@ pub(super) async fn touch_initial_manifest_access_lease_window(
     let wait_timeout_ms = duration_to_millis_saturating(wait_timeout);
     let deadline_ms = now_ms.saturating_add(wait_timeout_ms.max(hls_pending_bootstrap_window_ms(app_state)));
     let touch = app_state
-        .hls_proxy
+        .hls
+        .proxy
         .touch_manifest_access_lease(
             access_lease_id,
             proxy_session_id,
@@ -2110,7 +2117,7 @@ pub(super) fn spawn_hls_runtime_bandwidth_persistence(
         (bitrate_bps, session_guard.proxy_session_id.clone(), session_guard.origin_source.stream_ref.clone())
     };
     let app_config = Arc::clone(&app_state.app_config);
-    let hls_proxy = Arc::clone(&app_state.hls_proxy);
+    let hls_proxy = Arc::clone(&app_state.hls.proxy);
     let session = Arc::clone(session);
 
     Some(tokio::spawn(async move {
@@ -2181,12 +2188,12 @@ pub(super) fn observe_hls_lease_manifest_snapshot_derivation(
     match derivation {
         Ok(snapshot) => {
             if let Some(snapshot) = snapshot.as_ref() {
-                app_state.hls_proxy.metrics().record_lease_snapshot_segments(snapshot.visible_segments.len());
+                app_state.hls.proxy.metrics().record_lease_snapshot_segments(snapshot.visible_segments.len());
             }
             Ok(snapshot)
         }
         Err(violation) => {
-            app_state.hls_proxy.metrics().record_manifest_limit_rejection();
+            app_state.hls.proxy.metrics().record_manifest_limit_rejection();
             warn!(
                 "HLS lease manifest snapshot rejected: proxy_session={} lease={} reason=manifest-representation-limit kind={} actual={} limit={}",
                 safe_proxy_session_id(proxy_session_id),
@@ -2215,7 +2222,8 @@ pub(super) async fn try_hls_cached_manifest_response(
     let started_at_ms = current_time_millis();
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let Some(publication_guard) = app_state
-        .hls_proxy
+        .hls
+        .proxy
         .prepare_access_lease_manifest_publication(access_lease_id, &proxy_session_id, started_at_ms)
         .await
     else {
@@ -2320,7 +2328,8 @@ pub(super) async fn try_hls_cached_manifest_response(
                 let startup_snapshot = snapshot.clone();
                 let admission_at_ms = current_time_millis();
                 let outcome = app_state
-                    .hls_proxy
+                    .hls
+                    .proxy
                     .commit_access_lease_manifest_publication_with_resources(
                         access_lease_id,
                         &proxy_session_id,
@@ -2333,7 +2342,7 @@ pub(super) async fn try_hls_cached_manifest_response(
                 if let Some(snapshot_generation) = outcome.snapshot_generation() {
                     let published_at_ms = current_time_millis();
                     let first_startup_publication =
-                        app_state.hls_proxy.startup_observability().record_manifest_publication(
+                        app_state.hls.proxy.startup_observability().record_manifest_publication(
                             access_lease_id,
                             snapshot_generation,
                             admission_at_ms,
@@ -2341,7 +2350,7 @@ pub(super) async fn try_hls_cached_manifest_response(
                             Arc::from(startup_snapshot.visible_proxy_seqs().collect::<Vec<_>>()),
                         );
                     if first_startup_publication && hls_access_manifest_uses_startup_view(access_lease_state) {
-                        app_state.hls_proxy.spawn_access_lease_repair_prewarm(
+                        app_state.hls.proxy.spawn_access_lease_repair_prewarm(
                             Arc::clone(session),
                             access_lease_id.clone(),
                             startup_snapshot,
@@ -2393,7 +2402,7 @@ pub(super) async fn mark_hls_authorized_manifest_access(
     now_ms: u64,
 ) {
     session.write().await.mark_authorized_manifest_access(now_ms);
-    app_state.hls_proxy.schedule_session_idle_for_handle(session).await;
+    app_state.hls.proxy.schedule_session_idle_for_handle(session).await;
 }
 
 pub(super) async fn mark_hls_authorized_media_access(
@@ -2402,7 +2411,7 @@ pub(super) async fn mark_hls_authorized_media_access(
     now_ms: u64,
 ) {
     session.write().await.mark_authorized_media_access(now_ms);
-    app_state.hls_proxy.schedule_session_idle_for_handle(session).await;
+    app_state.hls.proxy.schedule_session_idle_for_handle(session).await;
 }
 
 pub(super) fn hls_cache_configured(app_state: &Arc<AppState>) -> bool {
@@ -2533,7 +2542,7 @@ pub(super) async fn hls_proxy_manifest(
     let access_lease_id = HlsAccessLeaseId(params.hls_access_lease_id);
     let now_ms = current_time_millis();
     let access_lease_snapshot =
-        app_state.hls_proxy.access_lease_response_snapshot(&access_lease_id, &proxy_session_id, now_ms).await;
+        app_state.hls.proxy.access_lease_response_snapshot(&access_lease_id, &proxy_session_id, now_ms).await;
     if let Some(lease) = access_lease_snapshot.as_ref() {
         let standalone_policy_response_required = lease.playback_mode == HlsLeasePlaybackMode::Ended
             && lease
@@ -2546,10 +2555,11 @@ pub(super) async fn hls_proxy_manifest(
             return response;
         }
     }
-    let session = app_state.hls_proxy.sessions().get_by_proxy_session_id(&proxy_session_id).await;
+    let session = app_state.hls.proxy.sessions().get_by_proxy_session_id(&proxy_session_id).await;
     if let Some(session) = session.as_ref() {
         app_state
-            .hls_proxy
+            .hls
+            .proxy
             .sync_session_access_lease_count_and_detach_if_needed(
                 &app_state.active_users,
                 &app_state.active_provider,

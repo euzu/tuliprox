@@ -234,7 +234,12 @@ serve: ## Run tuliprox server with settings folder: make serve <settings_folder>
 		exit 1; \
 	fi
 	@echo "==> Starting tuliprox server with TULIPROX_HOME=$(SETTINGS_FOLDER)"
-	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --release --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
+	TULIPROX_HOME="$(SETTINGS_FOLDER)" $(CARGO) run --manifest-path $(PROJECT_DIR)/Cargo.toml --package tuliprox --bin tuliprox -- -s
+
+.PHONY: serve-fe
+serve-fe: ## Run frontend dev server with Trunk: make serve-fe
+	@echo "==> Starting frontend dev server (trunk serve)"
+	@cd $(PROJECT_DIR)/frontend && $(TRUNK) serve --address 127.0.0.1
 
 run-be: serve ## Alias for serve
 

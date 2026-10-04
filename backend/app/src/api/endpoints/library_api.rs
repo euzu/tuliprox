@@ -19,7 +19,7 @@ async fn scan_library(
 ) -> axum::response::Response {
     debug!("Library scan requested (force_rescan: {})", request.force_rescan);
 
-    let Some(permit) = app_state.update_guard.try_library() else {
+    let Some(permit) = app_state.playlist_updates.update_guard.try_library() else {
         warn!("Library update already in progress; update skipped.");
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -42,7 +42,7 @@ async fn scan_library(
             }
         }
     };
-    let client = app_state.http_client.load_full().as_ref().clone();
+    let client = app_state.http_clients.default.load_full().as_ref().clone();
     let event_manager = Arc::clone(&app_state.event_manager);
     spawn_library_scan(
         event_manager,
@@ -61,7 +61,7 @@ async fn get_library_status(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
     let config_snapshot = app_state.app_config.config.load();
-    match read_library_status(&config_snapshot, app_state.http_client.load_full().as_ref().clone()).await {
+    match read_library_status(&config_snapshot, app_state.http_clients.default.load_full().as_ref().clone()).await {
         Ok(status) => axum::Json(status).into_response(),
         Err(err) => {
             log::error!("Failed to read Library catalog status: {err}");

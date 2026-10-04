@@ -8,7 +8,7 @@ use crate::{
     auth::Fingerprint,
     model::{
         AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigProvider, ConfigTarget, GracePeriodOptions,
-        MediaToolCapabilities, NetworkAccess, ProcessTargets, ProxyUserCredentials, SourcesConfig, StreamHistoryConfig,
+        MediaToolCapabilities, NetworkAccess, ProxyUserCredentials, SourcesConfig, StreamHistoryConfig,
     },
     repository::GeoIp,
     utils::FileLockManager,
@@ -37,7 +37,7 @@ use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::{mpsc, RwLock},
+    sync::RwLock,
 };
 use tuliprox_core::utils::response_compression::should_compress_response;
 use tuliprox_session::{
@@ -810,6 +810,148 @@ fn get_stream_alternative_url_does_not_passthrough_arbitrary_open_external_url_f
 }
 
 #[test]
+fn xtream_vod_provider_url_requires_stored_input_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let config = create_test_dual_provider_app_config();
+    let input = config.sources.load().inputs.first().cloned().ok_or("missing input")?;
+    let provider = RuntimeProviderConfig::new(
+        &input,
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(|_, _| {}),
+    );
+    let stream_url = "http://cdn.example/r2/movie.mp4";
+    let mut channel = create_test_live_channel(stream_url);
+    channel.item_type = PlaylistItemType::Video;
+    channel.cluster = XtreamCluster::Video;
+    channel.provider_id = 100;
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), Some(stream_url.to_string()));
+    assert_eq!(
+        resolve_xtream_vod_provider_url("http://unrelated.example/movie.mp4", &input, &provider, &channel),
+        None
+    );
+    channel.input_name = "other-input".intern();
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), None);
+    channel.input_name = Arc::clone(&input.name);
+    channel.item_type = PlaylistItemType::Live;
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), None);
+    channel.item_type = PlaylistItemType::Video;
+    channel.provider_id = 0;
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &provider, &channel), None);
+    channel.provider_id = 100;
+    channel.url = "file:///internal/movie.mp4".intern();
+    assert_eq!(resolve_xtream_vod_provider_url(&channel.url, &input, &provider, &channel), None);
+    let unrelated = test_runtime_provider("http://unrelated.example", "other-user", "other-pass");
+    channel.url = stream_url.intern();
+    assert_eq!(resolve_xtream_vod_provider_url(stream_url, &input, &unrelated, &channel), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn xtream_vod_m3u_reverse_proxies_external_sources_and_alias_redirects_without_leaking_urls(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for use_alias in [false, true] {
+        for source_path in ["/r2/movie.mp4", "/stream/account-bound-token"] {
+            let (cdn_addr, cdn_task) = spawn_legacy_hls_test_origin(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\nContent-Range: bytes 4-7/12\r\nAccept-Ranges: bytes\r\nReferer: http://private-provider.example/user/pass\r\nContent-Location: http://private-cdn.example/movie.mp4\r\nLocation: http://private-cdn.example/movie.mp4\r\nLink: <http://private-cdn.example/movie.mp4>\r\nConnection: close\r\n\r\n".to_string(),
+                b"DATA".to_vec(),
+            ).await;
+            let cdn_url = format!("http://{cdn_addr}/internal/media.mp4?token=private-cdn-token");
+            let (redirect_addr, redirect_task) = spawn_legacy_hls_test_origin(
+                format!("HTTP/1.1 302 Found\r\nLocation: {cdn_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                Vec::new(),
+            )
+            .await;
+            let config = create_test_dual_provider_app_config();
+            let mut input = (**config.sources.load().inputs.first().ok_or("missing input")?).clone();
+            let alias = input.aliases.as_mut().and_then(|aliases| aliases.first_mut()).ok_or("missing alias")?;
+            alias.url = format!("http://{redirect_addr}");
+            let input = Arc::new(input);
+            config
+                .sources
+                .store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+            let app_state = create_test_app_state_for_config(Arc::new(config));
+            let busy_addr = SocketAddr::from(([127, 0, 0, 1], 55401));
+            let busy = if use_alias {
+                app_state.active_provider.acquire_exact_connection_with_grace(
+                    &input.name,
+                    &busy_addr,
+                    false,
+                    0,
+                    crate::api::model::ConnectionKind::Normal,
+                )
+            } else {
+                None
+            };
+            assert!(!use_alias || busy.is_some());
+            let source_url = format!("http://{redirect_addr}{source_path}");
+            let item = shared::model::M3uPlaylistItem::from(&PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: "900".intern(),
+                    input_stream_id: "100".intern(),
+                    virtual_id: VirtualId::new(100),
+                    input_name: Arc::clone(&input.name),
+                    url: source_url.intern(),
+                    item_type: PlaylistItemType::Video,
+                    xtream_cluster: XtreamCluster::Video,
+                    additional_properties: Some(shared::model::StreamProperties::Video(Box::new(
+                        shared::model::VideoStreamProperties {
+                            container_extension: "mp4".intern(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                },
+            });
+            let mut target = create_test_shared_target();
+            target.options = None;
+            target.output = vec![tuliprox_core::model::TargetOutput::M3u(tuliprox_core::model::M3uTargetOutput::from(
+                &shared::model::M3uTargetOutputDto::default(),
+            ))];
+            let mut user = load_test_user("vod-reverse-viewer");
+            user.proxy = ProxyType::Reverse(None);
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RANGE, HeaderValue::from_static("bytes=4-7"));
+            let response = crate::api::endpoints::m3u_api::m3u_api_stream_loaded(
+                Arc::new(user),
+                Arc::new(target),
+                &create_test_fingerprint(SocketAddr::from(([127, 0, 0, 1], 55402))),
+                &headers,
+                &app_state,
+                item,
+                Arc::clone(&input),
+                Some("mp4"),
+                None,
+                None,
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(response.headers().get(header::CONTENT_RANGE), Some(&HeaderValue::from_static("bytes 4-7/12")));
+            for name in ["location", "content-location", "referer", "link"] {
+                assert!(!response.headers().contains_key(name));
+            }
+            for value in response.headers().values() {
+                let value = value.to_str()?;
+                assert!(!value.contains(&redirect_addr.to_string()));
+                assert!(!value.contains(&cdn_addr.to_string()));
+                assert!(!value.contains("private-cdn-token"));
+                assert!(!value.contains("user2/pass2"));
+            }
+            let body = response.into_body().collect().await?.to_bytes();
+            assert_eq!(body.as_ref(), b"DATA");
+            let redirect_request = tokio::time::timeout(Duration::from_secs(5), redirect_task).await??;
+            let cdn_request = tokio::time::timeout(Duration::from_secs(5), cdn_task).await??;
+            let expected_path = if use_alias { "/movie/user2/pass2/100.mp4" } else { source_path };
+            assert!(redirect_request.starts_with(&format!("GET {expected_path} ")));
+            assert!(cdn_request.starts_with("GET /internal/media.mp4?token=private-cdn-token "));
+            assert!(redirect_request.to_ascii_lowercase().contains("range: bytes=4-7"));
+            assert!(cdn_request.to_ascii_lowercase().contains("range: bytes=4-7"));
+            app_state.active_provider.release_connection(&busy_addr);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
     for name in [
         "connection",
@@ -1095,6 +1237,7 @@ async fn forced_legacy_hls_test_response(
         provider: Arc::clone(&input.name),
         stream_url: origin_url.as_str().intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1105,6 +1248,7 @@ async fn forced_legacy_hls_test_response(
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
     let mut stream_channel = create_test_local_channel(&origin_url);
     stream_channel.provider_id = u32::from(input.id);
@@ -1244,6 +1388,7 @@ async fn forced_reopen_stays_on_pinned_provider_account() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_a}/live/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1254,6 +1399,7 @@ async fn forced_reopen_stays_on_pinned_provider_account() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
     let mut stream_channel = create_test_live_channel(&format!("http://{origin_a}/live/1.ts"));
     stream_channel.provider_id = 1;
@@ -1349,20 +1495,17 @@ async fn forced_series_reopen_uses_free_pool_account_and_updates_session_pin() {
     let session = UserSession {
         token: "series-pool-token".to_string(),
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        transition_version: 1,
         virtual_id: 42,
         provider: Arc::clone(&input.name),
         stream_url: stream_url.clone().intern(),
-        provider_session_headers: HashMap::new(),
-        user_agent_stream_index: None,
         addr: client_addr,
-        socket_bound: false,
         active_addrs: vec![client_addr],
         ts: 1,
         started_at: 1,
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
     let mut stream_channel = create_test_live_channel(&stream_url);
     stream_channel.virtual_id = session.virtual_id;
@@ -1408,6 +1551,87 @@ async fn forced_series_reopen_uses_free_pool_account_and_updates_session_pin() {
 }
 
 #[tokio::test]
+async fn forced_reopen_sends_provider_cookies_only_to_the_origin_that_set_them() {
+    for (cookie_from_stream_origin, expect_cookie) in [(true, true), (false, false)] {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: 4\r\nConnection: close\r\n\r\n";
+        let (origin, task) = spawn_legacy_hls_test_origin(head.to_string(), b"live".to_vec()).await;
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            url: format!("http://{origin}"),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            enabled: true,
+            max_connections: 1,
+            ..ConfigInput::default()
+        });
+        let app_config = Arc::new(create_test_provider_app_config());
+        app_config
+            .sources
+            .store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
+        let app_state = create_test_app_state_for_config(app_config);
+
+        let stream_url = format!("http://{origin}/live/1.ts");
+        let cookie_source =
+            if cookie_from_stream_origin { stream_url.clone() } else { "http://cdn.example/live/1.ts".to_string() };
+        let mut cookies = tuliprox_session::ProviderSessionCookieStore::default();
+        cookies.update(
+            &Url::parse(&cookie_source).expect("cookie source url"),
+            &tuliprox_session::ProviderSessionHeaders {
+                headers: HashMap::new(),
+                cookies: vec!["sid=scoped; Path=/".to_string()],
+            },
+        );
+        let client_addr = SocketAddr::from(([127, 0, 0, 1], 55_410));
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        let session = UserSession {
+            token: "cookie-scope-token".to_string(),
+            virtual_id: 41,
+            provider: Arc::clone(&input.name),
+            stream_url: stream_url.as_str().intern(),
+            provider_session_cookies: Arc::new(cookies),
+            media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            addr: client_addr,
+            active_addrs: vec![client_addr],
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            lifecycle: crate::api::model::PlaybackLifecycle::Active,
+            ..Default::default()
+        };
+        let mut stream_channel = create_test_live_channel(&stream_url);
+        stream_channel.provider_id = 1;
+        stream_channel.input_name = Arc::clone(&input.name);
+
+        let response = force_provider_stream_response(
+            &create_test_fingerprint(client_addr),
+            &app_state,
+            &session,
+            stream_channel,
+            ForceStreamRequestContext {
+                req_headers: &HeaderMap::new(),
+                input: &input,
+                user: &user,
+                session_reservation_ttl_secs: 0,
+                content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+            },
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response.into_body().collect().await.expect("stream body"));
+
+        let request = task.await.expect("origin task completes").to_ascii_lowercase();
+        assert_eq!(
+            request.contains("cookie: sid=scoped"),
+            expect_cookie,
+            "cookie_from_stream_origin={cookie_from_stream_origin}: {request}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn overlapping_vod_range_requests_return_correct_account_bytes() {
     const VOD_BODY: &[u8] = b"0123456789abcdefghij";
 
@@ -1441,6 +1665,7 @@ async fn overlapping_vod_range_requests_return_correct_account_bytes() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/movie/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1451,6 +1676,7 @@ async fn overlapping_vod_range_requests_return_correct_account_bytes() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -1560,6 +1786,7 @@ async fn parallel_series_range_requests_keep_both_claims_active() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/series/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -1570,6 +1797,7 @@ async fn parallel_series_range_requests_keep_both_claims_active() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -1911,6 +2139,7 @@ fn load_test_session(input: &ConfigInput, origin_addr: SocketAddr, token: &str, 
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr,
@@ -1921,6 +2150,7 @@ fn load_test_session(input: &ConfigInput, origin_addr: SocketAddr, token: &str, 
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     }
 }
 
@@ -2197,6 +2427,7 @@ async fn direct_ts_eof_before_first_byte_releases_slot_without_idle_lease() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2207,6 +2438,7 @@ async fn direct_ts_eof_before_first_byte_releases_slot_without_idle_lease() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let channel = load_test_channel(&input, origin_addr);
@@ -2287,6 +2519,7 @@ async fn direct_ts_abort_while_waiting_for_first_byte_releases_exact_request() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/live/42.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2297,6 +2530,7 @@ async fn direct_ts_abort_while_waiting_for_first_byte_releases_exact_request() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let channel = load_test_channel(&input, origin_addr);
@@ -2653,6 +2887,7 @@ async fn parallel_vod_abort_preserves_sibling_claim_and_provider_stickiness() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/movie/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2663,6 +2898,7 @@ async fn parallel_vod_abort_preserves_sibling_claim_and_provider_stickiness() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -2813,6 +3049,7 @@ async fn parallel_series_abort_then_seek_reuses_account_without_stale_claim() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_addr}/series/1.ts").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -2823,6 +3060,7 @@ async fn parallel_series_abort_then_seek_reuses_account_without_stale_claim() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_channel = || {
@@ -3431,6 +3669,7 @@ async fn catchup_abort_seek_and_window_change_preserve_correct_affinity() {
         provider: Arc::clone(&input.name),
         stream_url: format!("http://{origin_a}/timeshift/1.ts?window={window}").intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         user_agent_stream_index: None,
         addr: client_addr,
@@ -3441,6 +3680,7 @@ async fn catchup_abort_seek_and_window_change_preserve_correct_affinity() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     let make_catchup_channel = |window: &str| {
@@ -3971,7 +4211,9 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             session_owner: Some("vod-session"),
             playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: true,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
     assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
@@ -3997,7 +4239,9 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: true,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
     let (ProviderStreamState::Available(Some(fallback_provider), fallback_url)
@@ -4047,7 +4291,9 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
             session_owner: Some("vod-session"),
             playback_kind: crate::model::PlaybackKind::Vod,
             accept_requested_stream_url: true,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4106,7 +4352,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
     let channel = create_test_live_channel(stream_url);
     let details = create_stream_response_details(
         &app_state,
-        &get_stream_options(&app_state.app_config),
+        &get_stream_options(&app_state.app_config, StreamResponseMode::Stream),
         stream_url,
         &user.username,
         &create_test_fingerprint(reacquire_addr),
@@ -4127,6 +4373,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
         Some(session_token),
         Some(&initial_headers),
         true,
+        None,
         None,
         None,
         None,
@@ -4275,7 +4522,9 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4341,7 +4590,9 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4377,7 +4628,9 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4422,7 +4675,9 @@ async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4474,7 +4729,9 @@ async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fa
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4509,7 +4766,9 @@ async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
             session_owner: Some("live-session"),
             playback_kind: crate::model::PlaybackKind::LiveTs,
             accept_requested_stream_url: true,
+            capacity_wait_timeout: None,
         },
+        None,
     )
     .await;
 
@@ -4532,6 +4791,7 @@ fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session
         provider: Arc::<str>::from("provider"),
         stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
@@ -4541,6 +4801,7 @@ fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session
         started_at: 1,
         permission: UserConnectionPermission::Allowed,
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     assert!(should_allow_exhausted_shared_reconnect(true, Some(&session), 282, "http://provider/live/449924.ts"));
@@ -4727,48 +4988,29 @@ fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-    let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
     Arc::new(AppState {
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
             Arc::clone(&connection_manager),
         ),
-        forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-            enabled: false,
-            inputs: Vec::new(),
-            targets: Vec::new(),
-            target_names: Vec::new(),
-        })),
         app_config: app_cfg,
-        http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+        http_clients: Arc::default(),
         recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
-        hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
-        hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
-        stalker_resolve_coordinator: Arc::default(),
+        hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
+        stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,
         event_manager,
-        cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+        cancel_tokens: ArcSwap::from_pointee(tokens),
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
-        update_guard: crate::api::model::UpdateGuard::new(),
         metadata_manager,
-        identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-            std::path::PathBuf::new(),
-        )),
-        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-        token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-            std::path::PathBuf::new(),
-        )),
-        manual_update_sender,
+        auth: crate::api::model::AuthState::for_tests(),
+        playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
     })
 }
 
@@ -4801,8 +5043,8 @@ async fn resource_cache_is_used_only_by_matching_public_fetch_policy() {
     // The destination is public, so the hop is fetched through the public resource client; both resource
     // clients are mocked so the assertion below is about the cache, not about which client performed the
     // request.
-    app_state.resource_public_http_client_no_redirect.store(Arc::clone(&mock_client));
-    app_state.resource_http_client_no_redirect.store(mock_client);
+    app_state.http_clients.resource_public_no_redirect.store(Arc::clone(&mock_client));
+    app_state.http_clients.resource_no_redirect.store(mock_client);
 
     let public_response =
         resource_response(&app_state, ResourceFetchPolicy::Public, resource_url, &HeaderMap::new(), None)
@@ -4890,7 +5132,7 @@ async fn an_unresolved_resource_name_is_fetched_through_the_configured_proxy() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock proxy client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
 
     let response =
         resource_proxy_response(&app_state, "http://unresolved.invalid/logo.png", &HeaderMap::new(), None).await;
@@ -4943,7 +5185,7 @@ async fn no_redirect_resource_refuses_destinations_local_to_this_host() {
     }));
     let client = crate::api::model::create_resource_http_client_no_redirect(&app_state.app_config)
         .expect("resource HTTP client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
 
     for local_only in ["http://127.0.0.1/icon.png", "http://169.254.169.254/latest/meta-data/", "http://[::1]/icon.png"]
     {
@@ -4972,7 +5214,7 @@ async fn resource_redirect_hides_private_destination_and_upstream_location() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock upstream client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
 
     let private = resource_redirect_or_proxy(&app_state, "http://10.0.0.1/icon.png", &HeaderMap::new(), None).await;
     assert_eq!(private.status(), StatusCode::OK);
@@ -5029,7 +5271,7 @@ async fn proxied_m3u_logo_follows_private_redirect_without_forwarding_credential
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock resource client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
     let input = ConfigInput {
         url: "http://10.0.0.1/playlist.m3u".to_string(),
         headers: HashMap::from([("Authorization".to_string(), "Bearer secret".to_string())]),
@@ -5071,7 +5313,7 @@ async fn public_resource_is_fetched_through_the_configured_proxy() {
         .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).expect("test proxy"))
         .build()
         .expect("mock proxy client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
 
     let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
 
@@ -5099,7 +5341,7 @@ async fn proxied_resource_follows_a_redirect_into_the_public_network_through_the
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock private client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(private_client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(private_client));
 
     let response_head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\n";
     let (public_proxy_addr, public_proxy_task) =
@@ -5109,7 +5351,7 @@ async fn proxied_resource_follows_a_redirect_into_the_public_network_through_the
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock public client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(public_client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(public_client));
 
     let response = resource_proxy_response(&app_state, "http://10.0.0.1/logo.png", &HeaderMap::new(), None).await;
 
@@ -5159,7 +5401,7 @@ async fn public_resource_redirect_to_a_destination_local_to_this_host_is_refused
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock client");
-    app_state.resource_public_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
 
     let response = resource_proxy_response(&app_state, "http://8.8.8.8/logo.png", &HeaderMap::new(), None).await;
 
@@ -5185,7 +5427,7 @@ async fn no_redirect_resource_does_not_relay_upstream_error_details() {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("mock upstream client");
-    app_state.resource_http_client_no_redirect.store(Arc::new(client));
+    app_state.http_clients.resource_no_redirect.store(Arc::new(client));
 
     let response = resource_response(
         &app_state,
@@ -5320,6 +5562,7 @@ fn create_test_session(
             _ => "http://provider-1.example/live/42.ts",
         }),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: "127.0.0.1:55555".parse().unwrap_or_else(|_| unreachable!()),
@@ -5330,6 +5573,7 @@ fn create_test_session(
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle,
+        ..Default::default()
     }
 }
 
@@ -5492,6 +5736,8 @@ async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_ses
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5582,6 +5828,8 @@ async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_r
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5657,6 +5905,8 @@ async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_cou
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5735,6 +5985,8 @@ async fn activate_session_before_stream_open_pre_resolved_grace_period_materiali
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5831,6 +6083,8 @@ async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5887,6 +6141,8 @@ async fn resolve_playback_request_admission_prepare_only_returns_prepare_class()
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -5933,6 +6189,8 @@ async fn resolve_playback_request_admission_terminate_returns_terminate_class() 
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6012,6 +6270,8 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6121,6 +6381,8 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6247,6 +6509,8 @@ async fn effective_admission_strategies_use_legacy_grace_when_field_missing() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6273,6 +6537,8 @@ async fn effective_admission_strategies_respect_explicit_empty_list() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6298,6 +6564,8 @@ async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6404,6 +6672,8 @@ async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6576,6 +6846,8 @@ async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() 
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6677,6 +6949,8 @@ async fn evaluate_remaining_strategies_empty_slice_denies() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6731,6 +7005,8 @@ async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6792,6 +7068,8 @@ async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6895,6 +7173,8 @@ async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_contex
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -6959,6 +7239,8 @@ async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_contex
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7058,6 +7340,8 @@ async fn resolve_admission_with_strategies_falls_through_after_failed_grace_gran
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7259,6 +7543,8 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7441,6 +7727,8 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7570,6 +7858,8 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -7699,6 +7989,8 @@ async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -8074,7 +8366,7 @@ async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Res
     let channel = create_test_live_channel(&url);
     let details = create_stream_response_details(
         &app,
-        &get_stream_options(&app.app_config),
+        &get_stream_options(&app.app_config, StreamResponseMode::Stream),
         &url,
         "failing-user",
         &create_test_fingerprint(addr),
@@ -8095,6 +8387,7 @@ async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Res
         Some("failed-session"),
         None,
         false,
+        None,
         None,
         None,
         None,
@@ -8144,7 +8437,7 @@ async fn recording_provider_reservation_opens_without_second_slot() -> Result<()
     let channel = create_test_live_channel(&url);
     let details = create_stream_response_details(
         &app,
-        &get_stream_options(&app.app_config),
+        &get_stream_options(&app.app_config, StreamResponseMode::Stream),
         &url,
         "recording-user",
         &create_test_fingerprint(addr),
@@ -8165,6 +8458,7 @@ async fn recording_provider_reservation_opens_without_second_slot() -> Result<()
         Some("recording-session"),
         None,
         false,
+        None,
         None,
         None,
         Some(managed),
@@ -8340,7 +8634,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_name: Some("provider_1".intern()),
         request_url: None,
         session_headers: None,
-        provider_session_headers: HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         user_agent_stream_index: None,
         grace_period: GracePeriodOptions::default(),
         provider_grace_active: false,
@@ -8350,6 +8644,8 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
         custom_reason: None,
+        response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+        session_registration: None,
     };
     assert!(
         should_pin_provider_for_session(&no_video_details, &app_state, PlaylistItemType::Catchup),
@@ -8363,7 +8659,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         provider_name: Some("provider_1".intern()),
         request_url: None,
         session_headers: None,
-        provider_session_headers: HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         user_agent_stream_index: None,
         grace_period: GracePeriodOptions::default(),
         provider_grace_active: false,
@@ -8373,6 +8669,8 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
         content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
         custom_reason: None,
+        response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+        session_registration: None,
     };
     assert!(
         should_pin_provider_for_session(&provisioning_details, &app_state, PlaylistItemType::Catchup),
@@ -8393,7 +8691,7 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             provider_name: Some("provider_1".intern()),
             request_url: None,
             session_headers: None,
-            provider_session_headers: HashMap::new(),
+            provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
             user_agent_stream_index: None,
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
@@ -8403,6 +8701,8 @@ async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_vid
             content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
             custom_reason: None,
+            response_mode: tuliprox_session::stream_options::StreamResponseMode::default(),
+            session_registration: None,
         };
         assert!(
             !should_pin_provider_for_session(&failure_details, &app_state, PlaylistItemType::Catchup),
@@ -8843,6 +9143,8 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
         grace_period_hold_stream: true,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -9137,6 +9439,8 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
                 grace_period_hold_stream: true,
                 hls_session_ttl_secs: 10,
                 catchup_session_ttl_secs: 10,
+                provider_affinity_ttl_secs: 120,
+                hls_wrap_media_playlist: true,
                 throttle_str: None,
                 throttle_kbps: 0,
                 shared_burst_buffer_mb: 1,
@@ -9345,6 +9649,7 @@ fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
         provider: "provider-a".intern(),
         stream_url: "http://localhost/movie.mkv".intern(),
         provider_session_headers: HashMap::new(),
+        provider_session_headers_host: None,
         media_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         user_agent_stream_index: None,
         addr: seek,
@@ -9355,6 +9660,7 @@ fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
         permission: UserConnectionPermission::Allowed,
         connection_kind: Some(crate::api::model::ConnectionKind::Normal),
         lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
     };
 
     assert_eq!(session_reacquire_cleanup_addrs(&session, &seek), vec![primary, overlap]);
@@ -9384,7 +9690,7 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
 
     let mut details = create_stream_response_details(
         &app_state,
-        &get_stream_options(&app_state.app_config),
+        &get_stream_options(&app_state.app_config, StreamResponseMode::Stream),
         stream_url,
         "deferred-user",
         &fingerprint,
@@ -9406,6 +9712,7 @@ async fn intentional_deferred_open_retains_provider_grace_handle() {
         None,
         false,
         Some(true),
+        None,
         None,
         None,
     )
@@ -9889,7 +10196,7 @@ async fn test_channel_unavailable_fallback_does_not_register_body_owner_or_leak_
     let factory_response = tuliprox_session::ProviderStreamFactoryResponse {
         stream: channel_unavail_stream.unwrap(),
         info,
-        provider_session_headers: std::collections::HashMap::new(),
+        provider_session_headers: tuliprox_session::ProviderSessionHeaders::default(),
         has_upstream_owner: false,
     };
 
@@ -9938,7 +10245,7 @@ async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_l
 
     let url = url::Url::parse(&format!("http://{local_addr}/stream.ts")).unwrap();
     let req_headers = axum::http::HeaderMap::new();
-    let stream_options = get_stream_options(&app_state.app_config);
+    let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
     let mut options =
         crate::api::model::ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
             addr: client_addr,
@@ -9965,7 +10272,7 @@ async fn test_provider_open_cancelled_during_header_wait_releases_slot_without_l
     app_state.active_provider.mark_opening(handle.allocation_id);
 
     let ctx = app_state.provider_stream_ctx();
-    let client = app_state.http_client.load().as_ref().clone();
+    let client = app_state.http_clients.default.load().as_ref().clone();
 
     let open_task =
         tokio::spawn(async move { crate::api::model::create_provider_stream(&ctx, &client, options).await });
@@ -10016,6 +10323,8 @@ async fn test_eviction_strategy_falls_back_when_candidate_protected_by_reentry()
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -10217,6 +10526,8 @@ async fn test_mixed_suppressed_and_legitimate_eviction_reports_exhaustion() {
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -10387,6 +10698,8 @@ async fn test_reentry_suppression_does_not_emit_connection_denied() {
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,
@@ -10510,6 +10823,8 @@ async fn test_real_exhaustion_emits_connection_denied() {
         grace_period_hold_stream: false,
         hls_session_ttl_secs: 10,
         catchup_session_ttl_secs: 10,
+        provider_affinity_ttl_secs: 120,
+        hls_wrap_media_playlist: true,
         throttle_str: None,
         throttle_kbps: 0,
         shared_burst_buffer_mb: 1,

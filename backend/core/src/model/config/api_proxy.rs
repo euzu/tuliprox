@@ -130,11 +130,19 @@ pub struct ApiProxyConfig {
     pub use_user_db: bool,
     /// HTTP status code for auth failures. 0 means default (403).
     pub auth_error_status: u16,
+    pub templates: Option<Arc<[shared::model::PatternTemplate]>>,
 }
 
 macros::from_impl!(ApiProxyConfig);
 impl From<&ApiProxyConfigDto> for ApiProxyConfig {
-    fn from(dto: &ApiProxyConfigDto) -> Self {
+    fn from(dto: &ApiProxyConfigDto) -> Self { Self::from_dto_with_templates(dto, None) }
+}
+
+impl ApiProxyConfig {
+    pub fn from_dto_with_templates(
+        dto: &ApiProxyConfigDto,
+        templates: Option<Arc<[shared::model::PatternTemplate]>>,
+    ) -> Self {
         // Plans live in plans.yml now and are injected via `set_plans` after load.
         let plan_map: HashMap<String, Arc<UserPlan>> = HashMap::new();
         let user = dto
@@ -147,7 +155,7 @@ impl From<&ApiProxyConfigDto> for ApiProxyConfig {
                     .iter()
                     .map(|credentials| {
                         let mut user = ProxyUserCredentials::from(credentials);
-                        user.resolve_plan(&plan_map);
+                        user.resolve_plan_with_templates(&plan_map, templates.as_deref());
                         Arc::new(user)
                     })
                     .collect(),
@@ -156,6 +164,7 @@ impl From<&ApiProxyConfigDto> for ApiProxyConfig {
         Self {
             server: dto.server.iter().map(ApiProxyServerInfo::from).collect(),
             plans: Vec::new(),
+            templates,
             user,
             use_user_db: dto.use_user_db,
             auth_error_status: dto.auth_error_status,
@@ -175,6 +184,13 @@ impl From<&ApiProxyConfig> for ApiProxyConfigDto {
 }
 
 impl ApiProxyConfig {
+    pub fn set_templates(&mut self, templates: Option<Arc<[shared::model::PatternTemplate]>>) {
+        self.templates = templates;
+        let mut users = std::mem::take(&mut self.user);
+        self.resolve_target_users(&mut users);
+        self.user = users;
+    }
+
     pub fn plan_map(&self) -> HashMap<String, Arc<UserPlan>> {
         self.plans.iter().map(|plan| (plan.name.clone(), Arc::clone(plan))).collect()
     }
@@ -186,7 +202,7 @@ impl ApiProxyConfig {
         let plan_map = self.plan_map();
         for target_user in &mut self.user {
             for credentials in &mut target_user.credentials {
-                Arc::make_mut(credentials).resolve_plan(&plan_map);
+                Arc::make_mut(credentials).resolve_plan_with_templates(&plan_map, self.templates.as_deref());
             }
         }
     }
@@ -196,7 +212,7 @@ impl ApiProxyConfig {
         let plan_map = self.plan_map();
         for target_user in users {
             for credentials in &mut target_user.credentials {
-                Arc::make_mut(credentials).resolve_plan(&plan_map);
+                Arc::make_mut(credentials).resolve_plan_with_templates(&plan_map, self.templates.as_deref());
             }
         }
     }
@@ -233,5 +249,48 @@ impl ApiProxyConfig {
             debug!("Could not find any user credentials for: {username}");
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiProxyConfig;
+    use shared::model::{ApiProxyConfigDto, PatternTemplate, ProxyUserCredentialsDto, TargetUserDto, TemplateValue};
+    use std::sync::Arc;
+
+    #[test]
+    fn user_templates_survive_dto_reload_and_recompile_on_change() {
+        let raw = r#"Group = "!groups!""#;
+        let dto = ApiProxyConfigDto {
+            user: vec![TargetUserDto {
+                target: "test".to_owned(),
+                credentials: vec![ProxyUserCredentialsDto { filter: Some(raw.to_owned()), ..Default::default() }],
+            }],
+            ..Default::default()
+        };
+        let mut template = PatternTemplate {
+            name: "groups".to_owned(),
+            value: TemplateValue::Single("Sports".to_owned()),
+            placeholder: String::new(),
+        };
+        template.prepare();
+        let mut config = ApiProxyConfig::from_dto_with_templates(&dto, Some(Arc::from([template.clone()])));
+        assert!(!config.user[0].credentials[0].t_has_invalid_filter);
+        template.value = TemplateValue::Single("News".to_owned());
+        config.set_templates(Some(Arc::from([template])));
+        assert_eq!(
+            config.user[0].credentials[0].t_filter.as_ref().map(ToString::to_string).as_deref(),
+            Some(r#"Group = "News""#)
+        );
+        let saved = ApiProxyConfigDto::from(&config);
+        assert_eq!(saved.user[0].credentials[0].filter.as_deref(), Some(raw));
+        let reloaded = ApiProxyConfig::from_dto_with_templates(&saved, config.templates.clone());
+        let cloned = config.clone();
+        assert!(config.templates.as_ref().zip(cloned.templates.as_ref()).is_some_and(|(a, b)| Arc::ptr_eq(a, b)));
+        assert!(config.templates.as_ref().zip(reloaded.templates.as_ref()).is_some_and(|(a, b)| Arc::ptr_eq(a, b)));
+        assert_eq!(
+            reloaded.user[0].credentials[0].t_filter.as_ref().map(ToString::to_string).as_deref(),
+            Some(r#"Group = "News""#)
+        );
     }
 }

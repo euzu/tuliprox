@@ -699,6 +699,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "cookie"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+dependencies = [
+ "time",
+ "version_check",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1282,7 +1292,7 @@ checksum = "431a4c31778fde52b4400de34975f219eeca55cc829a9de157cd743a5b230ecb"
 
 [[package]]
 name = "frontend"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3782,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -4386,7 +4396,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "aes",
  "arc-swap",
@@ -4466,7 +4476,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-auth"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "axum",
@@ -4489,7 +4499,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-btree"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -4509,7 +4519,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-config-loader"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -4529,7 +4539,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-core"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "aes",
  "arc-swap",
@@ -4580,7 +4590,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-curation"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "indexmap",
  "log",
@@ -4597,7 +4607,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-dvr"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -4625,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-hls"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "async-compression",
@@ -4662,7 +4672,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-iptv"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4687,7 +4697,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-library"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "blake3",
  "bytes",
@@ -4714,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-media-server"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "bytes",
  "futures",
@@ -4733,7 +4743,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-messaging"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -4755,7 +4765,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-metadata"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -4778,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-mpegts"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "aes",
  "bytes",
@@ -4792,7 +4802,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-parser"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4812,7 +4822,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-processing"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -4851,7 +4861,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-repository"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -4888,12 +4898,13 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-session"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "arc-swap",
  "axum",
  "bytes",
  "chrono",
+ "cookie",
  "crc32fast",
  "dashmap",
  "futures",
@@ -4916,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-testkit"
-version = "3.3.126"
+version = "3.3.135"
 dependencies = [
  "axum",
  "base64 0.23.1",

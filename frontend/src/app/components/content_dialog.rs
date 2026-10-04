@@ -30,6 +30,8 @@ pub struct ContentDialogProps {
     pub on_confirm: Callback<DialogResult>,
     #[prop_or(true)]
     pub close_on_backdrop_click: bool,
+    #[prop_or(true)]
+    pub close_on_confirm: bool,
 }
 
 #[component]
@@ -40,8 +42,11 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
     let on_result = {
         let on_confirm = props.on_confirm.clone();
         let is_open = is_open.clone();
+        let close_on_confirm = props.close_on_confirm;
         move |result: DialogResult| {
-            is_open.set(false);
+            if close_on_confirm || result != DialogResult::Ok {
+                is_open.set(false);
+            }
             on_confirm.emit(result);
         }
     };

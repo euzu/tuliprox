@@ -172,6 +172,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
 
 async fn has_external_source_write(file_locks: &crate::utils::FileLockManager, paths: &HashSet<PathBuf>) -> bool {
     for path in paths {
+        let _guard = file_locks.read_lock(path).await;
         if !file_locks.is_internal_write_revision(path).await {
             return true;
         }
@@ -246,11 +247,11 @@ mod tests {
         tokio::fs::write(&internal, b"internal").await?;
         tokio::fs::write(&external, b"external").await?;
         let locks = FileLockManager::new();
-        locks.mark_internal_write_revision(&internal).await?;
+        locks.mark_internal_write_content(&internal, &tokio::fs::read(&internal).await?).await;
         let paths = HashSet::from([internal, external.clone()]);
 
         assert!(has_external_source_write(&locks, &paths).await);
-        locks.mark_internal_write_revision(&external).await?;
+        locks.mark_internal_write_content(&external, &tokio::fs::read(&external).await?).await;
         assert!(!has_external_source_write(&locks, &paths).await);
         Ok(())
     }

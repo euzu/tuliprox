@@ -36,7 +36,7 @@ async fn authenticate(app_state: &Arc<AppState>, token: &str) -> Result<Claims, 
     let claims = verify_claims(app_state, token)?;
     // Last, because it is the only check that touches shared state: a token
     // that fails any of the cheap checks above never reaches it.
-    if app_state.token_revocations.is_revoked(&claims).await {
+    if app_state.auth.token_revocations.is_revoked(&claims).await {
         return Err(AuthError::Revoked);
     }
     Ok(claims)

@@ -1,0 +1,66 @@
+name: Cleanup PR caches
+
+on:
+  pull_request_target:
+    types: [closed]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: cleanup-pr-caches
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete caches of closed pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # No checkout: this privileged workflow only uses GitHub API metadata.
+      - name: Delete PR caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          delete_caches() {
+            local ref="$1"
+            local ids id
+
+            echo "Deleting caches for $ref"
+            while true; do
+              ids=$(gh cache list --ref "$ref" --limit 100 --json id --jq '.[].id')
+              [ -n "$ids" ] || break
+
+              while IFS= read -r id; do
+                gh cache delete "$id"
+              done <<< "$ids"
+            done
+          }
+
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            delete_caches "refs/pull/$PR_NUMBER/merge"
+          else
+            # Fetch every page before deleting to keep pagination stable.
+            refs=$(gh api --paginate "repos/$GH_REPO/actions/caches?per_page=100" \
+              --jq '.actions_caches[].ref' | sort -u)
+
+            while IFS= read -r ref; do
+              if [[ "$ref" =~ ^refs/pull/([0-9]+)/merge$ ]]; then
+                number="${BASH_REMATCH[1]}"
+                state=$(gh api "repos/$GH_REPO/pulls/$number" --jq '.state')
+                if [ "$state" = "closed" ]; then
+                  delete_caches "$ref"
+                fi
+              fi
+            done <<< "$refs"
+          fi

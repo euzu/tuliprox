@@ -115,6 +115,15 @@ fn render_config(
         if let Some(ttl_ms) = policy.recent_eviction_reentry_ttl_ms {
             let _ = writeln!(config, "    recent_eviction_reentry_ttl_ms: {ttl_ms}");
         }
+        if let Some(ttl_secs) = policy.hls_session_ttl_secs {
+            let _ = writeln!(config, "    hls_session_ttl_secs: {ttl_secs}");
+        }
+        if let Some(ttl_secs) = policy.provider_affinity_ttl_secs {
+            let _ = writeln!(config, "    provider_affinity_ttl_secs: {ttl_secs}");
+        }
+        if let Some(wrap) = policy.hls_wrap_media_playlist {
+            let _ = writeln!(config, "    hls_wrap_media_playlist: {wrap}");
+        }
     }
     let _ = writeln!(
         config,
@@ -181,6 +190,9 @@ fn render_provider_pool(run_id: &str, origin_address: SocketAddr, policy: Option
             "  - name: testkit-origin\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={}\n    max_connections: {}\n",
             root.name, root.max_connections
         );
+        if let Some(priority) = root.priority {
+            let _ = writeln!(rendered, "    priority: {priority}");
+        }
         if !aliases.is_empty() {
             rendered.push_str("    aliases:\n");
             for alias in aliases {
@@ -191,6 +203,9 @@ fn render_provider_pool(run_id: &str, origin_address: SocketAddr, policy: Option
                     alias.name,
                     alias.max_connections
                 );
+                if let Some(priority) = alias.priority {
+                    let _ = writeln!(rendered, "        priority: {priority}");
+                }
             }
         }
         rendered
@@ -334,6 +349,16 @@ impl IsolatedFixture {
             .arg(run_id)
             .arg("--markers")
             .arg(markers);
+        let mut hls_markers = channels
+            .values()
+            .filter(|channel| channel.protocol == "hls")
+            .map(|channel| channel.origin_marker)
+            .collect::<Vec<_>>();
+        hls_markers.sort_unstable();
+        hls_markers.dedup();
+        if !hls_markers.is_empty() {
+            origin_cmd.arg("--hls-markers").arg(hls_markers.iter().map(u32::to_string).collect::<Vec<_>>().join(","));
+        }
         if let Some(origin_cfg) = origin_config {
             if let Some(limit) = origin_cfg.account_limit {
                 origin_cmd.arg("--account-limit").arg(limit.to_string());
@@ -544,6 +569,9 @@ mod tests {
             )]),
             admission_strategies: Some(vec![crate::oracle::AdmissionStrategy::EvictUserSameIpLatest]),
             recent_eviction_reentry_ttl_ms: None,
+            hls_session_ttl_secs: Some(2),
+            provider_affinity_ttl_secs: Some(6),
+            hls_wrap_media_playlist: Some(false),
             grace: None,
             provider_max_connections: None,
             provider_pool: Vec::new(),
@@ -571,6 +599,9 @@ mod tests {
         let api_proxy = std::fs::read_to_string(&fixture.api_proxy_file)?;
 
         assert!(config.contains(fixture.root.to_string_lossy().as_ref()));
+        assert!(config.contains("    hls_session_ttl_secs: 2\n"), "{config}");
+        assert!(config.contains("    provider_affinity_ttl_secs: 6\n"), "{config}");
+        assert!(config.contains("    hls_wrap_media_playlist: false\n"), "{config}");
         assert!(source.contains("fixture-run"));
         assert!(api_proxy.contains("fixture-user"));
         let expected_paths = [

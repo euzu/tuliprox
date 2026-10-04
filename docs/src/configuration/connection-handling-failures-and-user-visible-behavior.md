@@ -142,6 +142,7 @@ Check:
 
 - `hls_session_ttl_secs`
 - `catchup_session_ttl_secs`
+- `provider_affinity_ttl_secs`
 - grace configuration
 
 ### Scenario C: "Two users watched the same channel and then both dropped at once"

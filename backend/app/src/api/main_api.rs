@@ -22,9 +22,9 @@ use crate::{
             exec_qos_aggregation, load_playlists_into_memory_cache,
             recording_rule_scheduler::spawn_recording_rule_scheduler,
             recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
-            CancelTokens, ConnectionManager, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
-            ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, RecordingQueue,
-            SharedStreamManager, UpdateGuard,
+            AuthState, CancelTokens, ConnectionManager, EventManager, EventMessage, HdHomerunAppState, HlsState,
+            ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, PlaylistUpdateControl,
+            RecordingQueue, SharedStreamManager,
         },
         panel_api::{sync_panel_api_exp_dates, sync_panel_api_exp_dates_on_boot},
         serve::serve,
@@ -33,7 +33,7 @@ use crate::{
             exec_config_watch, exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync, spawn_ssdp_discover_task,
         },
     },
-    model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
+    model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, HttpClients, ProcessTargets, RateLimitConfig},
     processing::processor::{exec_processing, next_playlist_update_run_order, ProcessingRun},
     repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
@@ -128,12 +128,12 @@ fn spawn_metadata_trigger_update(
         return;
     }
 
-    let client = app_state.http_client.load().as_ref().clone();
+    let client = app_state.http_clients.default.load().as_ref().clone();
     let app_config = Arc::clone(&app_state.app_config);
     let event_manager = Arc::clone(&app_state.event_manager);
     let playlist_state = Arc::clone(&app_state.playlists);
     let disabled_headers = app_state.get_disabled_headers();
-    let update_guard = app_state.update_guard.clone();
+    let update_guard = app_state.playlist_updates.update_guard.clone();
     let app_state_clone = Arc::clone(app_state);
     let running_trigger_targets_clone = Arc::clone(running_trigger_targets);
     let pending_trigger_targets_clone = Arc::clone(pending_trigger_targets);
@@ -292,7 +292,7 @@ async fn ready(
 async fn bootstrap_identity_registry(
     config: &Config,
     app_config: &Arc<AppConfig>,
-) -> Result<Arc<IdentityRegistry>, TuliproxError> {
+) -> Result<IdentityRegistry, TuliproxError> {
     let path = std::path::PathBuf::from(&config.storage_dir).join("identity_registry.json");
 
     let web_users: Vec<String> = config
@@ -329,7 +329,7 @@ async fn bootstrap_identity_registry(
         }
         outcome => {
             info!("Identity registry: {outcome:?}");
-            Ok(Arc::new(registry))
+            Ok(registry)
         }
     }
 }
@@ -368,6 +368,7 @@ async fn create_shared_data(
     let cache = create_cache(&config);
     let event_manager = Arc::new(EventManager::with_capacity(config.event_channel_capacity as usize));
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
+    active_provider.bind_event_manager(&event_manager);
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     let rewrite_secret =
         config.reverse_proxy.as_ref().map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
@@ -402,31 +403,31 @@ async fn create_shared_data(
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-    let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
+    let cancel_tokens = ArcSwap::from_pointee(tokens);
 
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
     let identity_registry = bootstrap_identity_registry(&config, app_config).await?;
     let revocations_path = std::path::PathBuf::from(&config.storage_dir).join("token_revocations.json");
-    let token_revocations = Arc::new(TokenRevocations::load(revocations_path).await.map_err(|err| {
+    let token_revocations = TokenRevocations::load(revocations_path).await.map_err(|err| {
         // Reading a corrupt file as "nothing is revoked" would silently
         // reinstate every revoked session.
         TuliproxError::Server(format!("Cannot load token revocations: {err}"))
-    })?);
+    })?;
 
     let app_state = AppState {
-        forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
         app_config: Arc::clone(app_config),
-        http_client: Arc::new(ArcSwap::from_pointee(client)),
-        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
-        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
-        resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(resource_client_no_redirect)),
-        resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(resource_public_client_no_redirect)),
+        http_clients: Arc::new(HttpClients::new(
+            client,
+            client_no_redirect,
+            public_client_no_redirect,
+            resource_client_no_redirect,
+            resource_public_client_no_redirect,
+        )),
         recordings: Arc::new(recordings),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
-        hls_proxy,
-        hls_provisioning: Arc::new(HlsProvisioningState::new()),
-        stalker_resolve_coordinator: Arc::default(),
+        hls: HlsState::new(hls_proxy),
+        stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         active_users,
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
@@ -438,12 +439,9 @@ async fn create_shared_data(
         cancel_tokens,
         playlists: Arc::new(PlaylistStorageState::new()),
         geoip,
-        update_guard: UpdateGuard::new(),
         metadata_manager,
-        identity_registry,
-        login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-        token_revocations,
-        manual_update_sender,
+        auth: AuthState::new(identity_registry, token_revocations),
+        playlist_updates: PlaylistUpdateControl::new(Arc::clone(forced_targets), manual_update_sender),
     };
 
     load_persisted_recording_state(&app_state.recordings).await?;
@@ -457,7 +455,7 @@ async fn run_manual_update_worker(
     mut rx: mpsc::Receiver<ManualPlaylistUpdateRequest>,
 ) {
     while let Some(request) = rx.recv().await {
-        let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
+        let Some(permit) = app_state.playlist_updates.update_guard.acquire_playlist_lock().await else {
             app_state.event_manager.send_event(EventMessage::PlaylistUpdate(PlaylistUpdateSummary::for_run(
                 request.run_id,
                 next_playlist_update_run_order(),
@@ -482,7 +480,7 @@ async fn run_manual_update_worker(
                 }
             })
             .with_playlist_state(Arc::clone(&app_state.playlists))
-            .with_update_guard(app_state.update_guard.clone())
+            .with_update_guard(app_state.playlist_updates.update_guard.clone())
             .with_disabled_headers(app_state.get_disabled_headers())
             .with_provider_manager(Arc::clone(&app_state.active_provider))
             .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
@@ -542,7 +540,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
         let targets_clone = Arc::clone(targets);
         let playlist_state = Arc::clone(&app_state.playlists);
         let client = client.clone();
-        let update_guard = Some(app_state.update_guard.clone());
+        let update_guard = Some(app_state.playlist_updates.update_guard.clone());
         let disabled_headers = app_state.get_disabled_headers();
         let provider_manager = Arc::clone(&app_state.active_provider);
         let metadata_manager = Arc::clone(&app_state.metadata_manager);
@@ -705,7 +703,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Worker that processes manual playlist update requests one at a time.
     // The bounded channel ensures at most one pending request is queued.
     {
-        let worker_client = app_state.http_client.load().as_ref().clone();
+        let worker_client = app_state.http_clients.default.load().as_ref().clone();
         let worker_state = Arc::clone(&app_state);
         tokio::spawn(run_manual_update_worker(worker_client, worker_state, manual_update_rx));
     }
@@ -739,7 +737,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
 
     exec_system_usage(&app_state);
 
-    let client = shared_data.http_client.load();
+    let client = shared_data.http_clients.default.load();
 
     if !exec_update_on_boot(client.as_ref(), &app_state, &targets) {
         sync_panel_api_exp_dates_on_boot(&app_state).await;
@@ -832,7 +830,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             });
         tuliprox_messaging::outbox::spawn_notification_outbox(
             &app_state.app_config,
-            app_state.http_client.load().as_ref().clone(),
+            app_state.http_clients.default.load().as_ref().clone(),
             notification_cfg,
             &app_state.cancel_tokens.load().recordings,
             Arc::clone(&app_state.event_manager),
@@ -1108,11 +1106,10 @@ mod tests {
         use crate::{
             api::model::{
                 ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionKind, ConnectionManager,
-                EventManager, HlsProvisioningState, HlsProxyManager, ManualPlaylistUpdateRequest,
-                MetadataUpdateManager, PlaylistStorageState, ProviderHandle, RecordingQueue, SharedStreamManager,
-                UpdateGuard,
+                EventManager, HlsProxyManager, MetadataUpdateManager, PlaylistStorageState, ProviderHandle,
+                RecordingQueue, SharedStreamManager,
             },
-            model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
+            model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig},
             repository::GeoIp,
             utils::FileLockManager,
         };
@@ -1120,7 +1117,6 @@ mod tests {
         use axum::response::IntoResponse;
         use shared::{defaults::default_user_priority, model::provider_saturation::build_group_lookup};
         use std::{net::SocketAddr, sync::Arc};
-        use tokio::sync::mpsc;
         use tokio_util::sync::CancellationToken;
 
         fn test_input(name: &'static str, max_connections: u16, enabled: bool) -> Arc<ConfigInput> {
@@ -1197,47 +1193,28 @@ mod tests {
                 hls_cache: CancellationToken::new(),
             };
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-            let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
             Arc::new(AppState {
                 recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
                     Arc::clone(&active_provider),
                     Arc::clone(&connection_manager),
                 ),
-                forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
-                    enabled: false,
-                    inputs: Vec::new(),
-                    targets: Vec::new(),
-                    target_names: Vec::new(),
-                })),
                 app_config: app_cfg,
-                http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                resource_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-                resource_public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                http_clients: Arc::default(),
                 recordings: Arc::new(RecordingQueue::new()),
                 cache: Arc::new(ArcSwapOption::default()),
                 shared_stream_manager,
-                hls_proxy: Arc::new(HlsProxyManager::new()),
-                hls_provisioning: Arc::new(HlsProvisioningState::new()),
-                stalker_resolve_coordinator: Arc::default(),
+                hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),
+                stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
                 active_users,
                 active_provider,
                 connection_manager,
                 event_manager,
-                cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+                cancel_tokens: ArcSwap::from_pointee(tokens),
                 playlists: Arc::new(PlaylistStorageState::new()),
                 geoip,
-                update_guard: UpdateGuard::new(),
                 metadata_manager,
-                identity_registry: Arc::new(tuliprox_repository::identity_registry::IdentityRegistry::empty(
-                    std::path::PathBuf::new(),
-                )),
-                login_throttle: Arc::new(crate::auth::LoginThrottle::new()),
-                token_revocations: Arc::new(tuliprox_repository::token_revocations::TokenRevocations::empty(
-                    std::path::PathBuf::new(),
-                )),
-                manual_update_sender,
+                auth: crate::api::model::AuthState::for_tests(),
+                playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
             })
         }
 

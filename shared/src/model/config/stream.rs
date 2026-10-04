@@ -1,12 +1,14 @@
 use crate::{
     defaults::{
         default_as_true, default_catchup_session_ttl_secs, default_cleanup_queue_capacity, default_grace_period_millis,
-        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_recent_eviction_reentry_ttl_ms,
-        default_shared_burst_buffer_mb, default_shared_subscriber_idle_timeout_secs,
-        default_stream_buffer_max_bytes_mb, is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity,
-        is_default_grace_period_millis, is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs,
+        default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_provider_affinity_ttl_secs,
+        default_recent_eviction_reentry_ttl_ms, default_shared_burst_buffer_mb,
+        default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
+        is_default_catchup_session_ttl_secs, is_default_cleanup_queue_capacity, is_default_grace_period_millis,
+        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_provider_affinity_ttl_secs,
         is_default_recent_eviction_reentry_ttl_ms, is_default_shared_burst_buffer_mb,
         is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
+        MAX_PROVIDER_AFFINITY_TTL_SECS,
     },
     error::TuliproxError,
     utils::{is_blank_optional_string, parse_to_kbps},
@@ -103,6 +105,18 @@ pub struct StreamConfigDto {
     pub hls_session_ttl_secs: u64,
     #[serde(default = "default_catchup_session_ttl_secs", skip_serializing_if = "is_default_catchup_session_ttl_secs")]
     pub catchup_session_ttl_secs: u64,
+    /// Seconds a playback keeps preferring its provider after its last confirmed media,
+    /// on top of the reconnect window. Holds no capacity; `0` ties affinity to the lease.
+    #[serde(
+        default = "default_provider_affinity_ttl_secs",
+        skip_serializing_if = "is_default_provider_affinity_ttl_secs"
+    )]
+    pub provider_affinity_ttl_secs: u64,
+    /// If true (default), proxied live HLS entry requests whose upstream returns a media
+    /// playlist answer with a single-variant master playlist pointing at a sealed token URL,
+    /// so playlist refreshes keep their playback owner across client IP changes.
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub hls_wrap_media_playlist: bool,
     #[serde(default, skip)]
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
@@ -144,6 +158,8 @@ impl Default for StreamConfigDto {
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
+            provider_affinity_ttl_secs: default_provider_affinity_ttl_secs(),
+            hls_wrap_media_playlist: true,
             admission_strategies: None,
         }
     }
@@ -165,6 +181,8 @@ impl StreamConfigDto {
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
+            && self.provider_affinity_ttl_secs == default_provider_affinity_ttl_secs()
+            && self.hls_wrap_media_playlist
             && self.admission_strategies.is_none()
     }
 
@@ -204,6 +222,12 @@ impl StreamConfigDto {
 
         if self.cleanup_queue_capacity == 0 {
             return Err(TuliproxError::ConfigStream("`cleanup_queue_capacity` must be at least 1".to_string()));
+        }
+
+        if self.provider_affinity_ttl_secs > MAX_PROVIDER_AFFINITY_TTL_SECS {
+            return Err(TuliproxError::ConfigStream(format!(
+                "`provider_affinity_ttl_secs` must not exceed {MAX_PROVIDER_AFFINITY_TTL_SECS} seconds"
+            )));
         }
 
         if let Some(strategies) = &self.admission_strategies {
@@ -284,6 +308,44 @@ mod tests {
     #[test]
     fn test_empty_list_accepted() {
         let mut dto = StreamConfigDto { admission_strategies: Some(vec![]), ..StreamConfigDto::default() };
+        assert!(dto.prepare().is_ok());
+    }
+
+    #[test]
+    fn provider_affinity_ttl_defaults_and_round_trips() -> Result<(), serde_json::Error> {
+        let dto: StreamConfigDto = serde_json::from_str("{}")?;
+        assert_eq!(dto.provider_affinity_ttl_secs, 120);
+        assert!(dto.is_empty());
+        assert!(!serde_json::to_string(&dto)?.contains("provider_affinity_ttl_secs"));
+
+        let dto: StreamConfigDto = serde_json::from_str(r#"{"provider_affinity_ttl_secs":0}"#)?;
+        assert_eq!(dto.provider_affinity_ttl_secs, 0);
+        assert!(!dto.is_empty());
+        assert!(serde_json::to_string(&dto)?.contains("\"provider_affinity_ttl_secs\":0"));
+        Ok(())
+    }
+
+    #[test]
+    fn hls_wrap_media_playlist_defaults_to_true_and_disabling_is_not_empty() -> Result<(), serde_json::Error> {
+        let dto: StreamConfigDto = serde_json::from_str("{}")?;
+        assert!(dto.hls_wrap_media_playlist);
+        assert!(!serde_json::to_string(&dto)?.contains("hls_wrap_media_playlist"));
+
+        let dto: StreamConfigDto = serde_json::from_str(r#"{"hls_wrap_media_playlist":false}"#)?;
+        assert!(!dto.hls_wrap_media_playlist);
+        assert!(!dto.is_empty());
+        assert!(serde_json::to_string(&dto)?.contains("\"hls_wrap_media_playlist\":false"));
+        Ok(())
+    }
+
+    #[test]
+    fn provider_affinity_ttl_is_bounded() {
+        let mut dto = StreamConfigDto { provider_affinity_ttl_secs: u64::MAX, ..StreamConfigDto::default() };
+        assert!(dto.prepare().is_err());
+        let mut dto = StreamConfigDto {
+            provider_affinity_ttl_secs: MAX_PROVIDER_AFFINITY_TTL_SECS,
+            ..StreamConfigDto::default()
+        };
         assert!(dto.prepare().is_ok());
     }
 
