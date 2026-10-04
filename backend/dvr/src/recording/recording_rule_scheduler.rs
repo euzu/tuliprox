@@ -260,6 +260,7 @@ async fn materialize_due_rules<E: EventSink + Clone + 'static>(ctx: &RecordingCt
             },
             channel_id: candidate.channel_id,
             channel_name: candidate.channel_name,
+            group: None,
             provenance: RecordingProvenance {
                 rule_id: Some(candidate.rule_id),
                 occurrence_key: Some(candidate.occurrence_key),

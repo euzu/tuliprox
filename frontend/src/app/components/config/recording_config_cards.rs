@@ -22,8 +22,10 @@ generate_form_reducer!(
         Priority => priority: i8,
         ContainerFormat => container_format: RecordingContainerFormat,
         Directory => directory: Option<String>,
+        OrganizeIntoDirectories => organize_into_directories: bool,
         Timezone => timezone: Option<String>,
         FilenameTemplate => filename_template: Option<String>,
+        EpisodePattern => episode_pattern: Option<String>,
         DefaultPreRollSecs => default_pre_roll_secs: Option<u64>,
         MaxPreRollSecs => max_pre_roll_secs: u64,
         DefaultPostRollSecs => default_post_roll_secs: Option<u64>,
@@ -152,34 +154,36 @@ pub struct RecordingFieldDescriptor {
 
 pub const RECORDING_CARDS: [RecordingCardDescriptor; 5] = [
     RecordingCardDescriptor { id: "recording-general", label: "LABEL.RECORDING_GENERAL" },
-    RecordingCardDescriptor { id: "recording-padding", label: "LABEL.RECORDING_PADDING" },
     RecordingCardDescriptor { id: "recording-retention-disk", label: "LABEL.RECORDING_RETENTION_DISK" },
+    RecordingCardDescriptor { id: "recording-padding", label: "LABEL.RECORDING_PADDING" },
     RecordingCardDescriptor { id: "recording-quotas", label: "LABEL.RECORDING_QUOTAS" },
     RecordingCardDescriptor { id: "recording-notifications", label: "LABEL.RECORDING_NOTIFICATIONS" },
 ];
 
-pub const RECORDING_FIELDS: [RecordingFieldDescriptor; 25] = [
+pub const RECORDING_FIELDS: [RecordingFieldDescriptor; 27] = [
     RecordingFieldDescriptor { id: "enabled", label: "LABEL.RECORDING_ENABLED", card: 0 },
     RecordingFieldDescriptor { id: "priority", label: "LABEL.PRIORITY", card: 0 },
     RecordingFieldDescriptor { id: "container_format", label: "LABEL.CONTAINER", card: 0 },
     RecordingFieldDescriptor { id: "directory", label: "LABEL.DIRECTORY", card: 0 },
+    RecordingFieldDescriptor { id: "organize_into_directories", label: "LABEL.ORGANIZE_INTO_DIRECTORIES", card: 0 },
     RecordingFieldDescriptor { id: "timezone", label: "LABEL.TIMEZONE", card: 0 },
     RecordingFieldDescriptor { id: "filename_template", label: "LABEL.RECORDING_FILENAME_TEMPLATE", card: 0 },
-    RecordingFieldDescriptor { id: "default_pre_roll_secs", label: "LABEL.RECORDING_DEFAULT_PRE_ROLL_SECS", card: 1 },
-    RecordingFieldDescriptor { id: "max_pre_roll_secs", label: "LABEL.RECORDING_MAX_PRE_ROLL_SECS", card: 1 },
-    RecordingFieldDescriptor { id: "default_post_roll_secs", label: "LABEL.RECORDING_DEFAULT_POST_ROLL_SECS", card: 1 },
-    RecordingFieldDescriptor { id: "max_post_roll_secs", label: "LABEL.RECORDING_MAX_POST_ROLL_SECS", card: 1 },
-    RecordingFieldDescriptor { id: "keep_last_per_channel", label: "LABEL.RECORDING_KEEP_LAST_PER_CHANNEL", card: 2 },
-    RecordingFieldDescriptor { id: "delete_after_days", label: "LABEL.RECORDING_DELETE_AFTER_DAYS", card: 2 },
-    RecordingFieldDescriptor { id: "sweep_interval_secs", label: "LABEL.RECORDING_SWEEP_INTERVAL_SECS", card: 2 },
-    RecordingFieldDescriptor { id: "high_water_percent", label: "LABEL.RECORDING_HIGH_WATER_PERCENT", card: 2 },
-    RecordingFieldDescriptor { id: "low_water_percent", label: "LABEL.RECORDING_LOW_WATER_PERCENT", card: 2 },
-    RecordingFieldDescriptor { id: "cleanup_interval_secs", label: "LABEL.RECORDING_CLEANUP_INTERVAL_SECS", card: 2 },
-    RecordingFieldDescriptor { id: "safety_bytes", label: "LABEL.RECORDING_SAFETY_BYTES", card: 2 },
+    RecordingFieldDescriptor { id: "episode_pattern", label: "LABEL.EPISODE_PATTERN", card: 0 },
+    RecordingFieldDescriptor { id: "default_pre_roll_secs", label: "LABEL.RECORDING_DEFAULT_PRE_ROLL_SECS", card: 2 },
+    RecordingFieldDescriptor { id: "max_pre_roll_secs", label: "LABEL.RECORDING_MAX_PRE_ROLL_SECS", card: 2 },
+    RecordingFieldDescriptor { id: "default_post_roll_secs", label: "LABEL.RECORDING_DEFAULT_POST_ROLL_SECS", card: 2 },
+    RecordingFieldDescriptor { id: "max_post_roll_secs", label: "LABEL.RECORDING_MAX_POST_ROLL_SECS", card: 2 },
+    RecordingFieldDescriptor { id: "keep_last_per_channel", label: "LABEL.RECORDING_KEEP_LAST_PER_CHANNEL", card: 1 },
+    RecordingFieldDescriptor { id: "delete_after_days", label: "LABEL.RECORDING_DELETE_AFTER_DAYS", card: 1 },
+    RecordingFieldDescriptor { id: "sweep_interval_secs", label: "LABEL.RECORDING_SWEEP_INTERVAL_SECS", card: 1 },
+    RecordingFieldDescriptor { id: "high_water_percent", label: "LABEL.RECORDING_HIGH_WATER_PERCENT", card: 1 },
+    RecordingFieldDescriptor { id: "low_water_percent", label: "LABEL.RECORDING_LOW_WATER_PERCENT", card: 1 },
+    RecordingFieldDescriptor { id: "cleanup_interval_secs", label: "LABEL.RECORDING_CLEANUP_INTERVAL_SECS", card: 1 },
+    RecordingFieldDescriptor { id: "safety_bytes", label: "LABEL.RECORDING_SAFETY_BYTES", card: 1 },
     RecordingFieldDescriptor {
         id: "fallback_bytes_per_minute",
         label: "LABEL.RECORDING_FALLBACK_BYTES_PER_MINUTE",
-        card: 2,
+        card: 1,
     },
     RecordingFieldDescriptor { id: "default_private_bytes", label: "LABEL.RECORDING_DEFAULT_PRIVATE_BYTES", card: 3 },
     RecordingFieldDescriptor { id: "per_user_bytes", label: "LABEL.RECORDING_PER_USER_BYTES", card: 3 },
@@ -206,6 +210,12 @@ pub struct RecordingConfigCardsProps {
     pub edit_mode: bool,
     pub on_change: Callback<(bool, RecordingConfigDto)>,
     pub on_error: Callback<String>,
+    /// Rendered directly after the general card.
+    #[prop_or_default]
+    pub after_general: Html,
+    /// Rendered directly after the retention and disk card.
+    #[prop_or_default]
+    pub after_retention_disk: Html,
 }
 
 #[component]
@@ -304,6 +314,7 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
             "directory" => direct_state.form.directory.clone().unwrap_or_default(),
             "timezone" => direct_state.form.timezone.clone().unwrap_or_default(),
             "filename_template" => direct_state.form.filename_template.clone().unwrap_or_default(),
+            "episode_pattern" => direct_state.form.episode_pattern.clone().unwrap_or_default(),
             "default_pre_roll_secs" => {
                 direct_state.form.default_pre_roll_secs.map(|v| v.to_string()).unwrap_or_default()
             }
@@ -333,9 +344,9 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
             _ => String::new(),
         };
         let content = match field.id {
-            "enabled" => html! {
+            "enabled" | "organize_into_directories" => html! {
                 <div class="tp__form-field tp__form-field__bool">
-                    <ToggleSwitch value={direct_state.form.enabled} readonly={true} />
+                    <ToggleSwitch value={if field.id == "enabled" { direct_state.form.enabled } else { direct_state.form.organize_into_directories }} readonly={true} />
                     <FieldLabel label={label} field_id={field.id} />
                 </div>
             },
@@ -374,6 +385,10 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                 let state = direct_state.clone();
                 html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.enabled} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::Enabled(value)))} /><FieldLabel label={label} field_id={field.id} /></div> }
             }
+            "organize_into_directories" => {
+                let state = direct_state.clone();
+                html! { <div class="tp__form-field tp__form-field__bool"><ToggleSwitch value={state.form.organize_into_directories} readonly={false} on_change={Callback::from(move |value| state.dispatch(RecordingConfigFormAction::OrganizeIntoDirectories(value)))} /><FieldLabel label={label} field_id={field.id} /></div> }
+            }
             "priority" => {
                 let state = direct_state.clone();
                 html! { <crate::app::components::number_input::NumberInput name={field.id} label={Some(label)} value={Some(i64::from(state.form.priority))} min_i64={Some(i64::from(i8::MIN))} max_i64={Some(i64::from(i8::MAX))} on_change={Callback::from(move |value: Option<i64>| { if let Some(value) = value.and_then(|value| i8::try_from(value).ok()) { state.dispatch(RecordingConfigFormAction::Priority(value)); } })} /> }
@@ -399,16 +414,17 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
                 );
                 html! { <><FieldLabel label={label} field_id={field.id} /><Select name={field.id} options={options} on_select={Callback::from(move |(_, selection)| { if let DropDownSelection::Single(id) = selection { if let Some(container) = recording_container_from_id(&id) { state.dispatch(RecordingConfigFormAction::ContainerFormat(container)); } } })} /></> }
             }
-            "directory" | "timezone" | "filename_template" => {
+            "directory" | "timezone" | "filename_template" | "episode_pattern" => {
                 let state = direct_state.clone();
                 let value = match field.id {
                     "directory" => state.form.directory.clone(),
                     "timezone" => state.form.timezone.clone(),
+                    "episode_pattern" => state.form.episode_pattern.clone(),
                     _ => state.form.filename_template.clone(),
                 }
                 .unwrap_or_default();
                 let id = field.id;
-                html! { <Input name={id} label={Some(label)} value={value} hint_key={(id == "filename_template").then(|| "VIDEO_CONFIG.RECORDING_FILENAME_TEMPLATE".to_string())} on_change={Some(Callback::from(move |value: String| { let value = (!value.is_empty()).then_some(value); match id { "directory" => state.dispatch(RecordingConfigFormAction::Directory(value)), "timezone" => state.dispatch(RecordingConfigFormAction::Timezone(value)), _ => state.dispatch(RecordingConfigFormAction::FilenameTemplate(value)), } }))} /> }
+                html! { <Input name={id} label={Some(label)} value={value} hint_key={(id == "filename_template").then(|| "VIDEO_CONFIG.RECORDING_FILENAME_TEMPLATE".to_string())} on_change={Some(Callback::from(move |value: String| { let value = (!value.is_empty()).then_some(value); match id { "directory" => state.dispatch(RecordingConfigFormAction::Directory(value)), "timezone" => state.dispatch(RecordingConfigFormAction::Timezone(value)), "episode_pattern" => state.dispatch(RecordingConfigFormAction::EpisodePattern(value)), _ => state.dispatch(RecordingConfigFormAction::FilenameTemplate(value)), } }))} /> }
             }
             "default_pre_roll_secs" => {
                 let state = direct_state.clone();
@@ -672,12 +688,21 @@ pub fn RecordingConfigCards(props: &RecordingConfigCardsProps) -> Html {
     html! {
         <>
             { for RECORDING_CARDS.iter().enumerate().map(|(card_index, card)| html! {
-                <div id={card.id}>
-                    <Card class="tp__config-view__card">
-                        <h1>{translate.t(card.label)}</h1>
-                        { for RECORDING_FIELDS.iter().filter(|field| field.card == card_index).map(|field| if props.edit_mode { render_edit_field(field) } else { render_view_field(field) }) }
-                    </Card>
-                </div>
+                <>
+                    <div id={card.id}>
+                        <Card class="tp__config-view__card">
+                            <h1>{translate.t(card.label)}</h1>
+                            { for RECORDING_FIELDS.iter().filter(|field| field.card == card_index).map(|field| if props.edit_mode { render_edit_field(field) } else { render_view_field(field) }) }
+                        </Card>
+                    </div>
+                    {
+                        match card_index {
+                            0 => props.after_general.clone(),
+                            1 => props.after_retention_disk.clone(),
+                            _ => Html::default(),
+                        }
+                    }
+                </>
             }) }
         </>
     }
@@ -718,6 +743,8 @@ mod tests {
             directory: Some("recordings".to_string()),
             timezone: Some("Europe/Berlin".to_string()),
             filename_template: Some("{channel}-{start_time}".to_string()),
+            organize_into_directories: true,
+            episode_pattern: Some(".*(?P<episode>[Ss]\\d{1,2}.*?[Ee]\\d{1,2}).*".to_string()),
             default_pre_roll_secs: Some(7),
             max_pre_roll_secs: 11,
             default_post_roll_secs: Some(13),
@@ -873,8 +900,10 @@ mod tests {
             "priority",
             "container_format",
             "directory",
+            "organize_into_directories",
             "timezone",
             "filename_template",
+            "episode_pattern",
             "default_pre_roll_secs",
             "max_pre_roll_secs",
             "default_post_roll_secs",
@@ -903,8 +932,10 @@ mod tests {
 
     #[test]
     fn recording_ui_translation_keys_exist_in_every_locale() {
-        const KEYS: [&str; 31] = [
+        const KEYS: [&str; 33] = [
             "LABEL.RECORDING_GENERAL",
+            "LABEL.ORGANIZE_INTO_DIRECTORIES",
+            "LABEL.EPISODE_PATTERN",
             "LABEL.RECORDING_PADDING",
             "LABEL.RECORDING_RETENTION_DISK",
             "LABEL.RECORDING_QUOTAS",
@@ -1106,7 +1137,9 @@ mod browser_tests {
             .query_selector(&format!("#{} [data-recording-field=\"{}\"]", card.id, field.id))?
             .ok_or_else(|| wasm_bindgen::JsValue::from_str("recording field is not in its descriptor card"))?;
         match (edit_mode, field.id) {
-            (true, "enabled") => assert!(wrapper.query_selector("input[type=\"checkbox\"]")?.is_some()),
+            (true, "enabled" | "organize_into_directories") => {
+                assert!(wrapper.query_selector("input[type=\"checkbox\"]")?.is_some());
+            }
             (true, "container_format") => assert!(wrapper.query_selector(".tp__select")?.is_some()),
             (true, "per_user_bytes") => {
                 let entries = wrapper
@@ -1124,7 +1157,9 @@ mod browser_tests {
                     .value();
                 assert!(!value.is_empty());
             }
-            (false, "enabled") => assert!(wrapper.query_selector("input[type=\"checkbox\"]:disabled")?.is_some()),
+            (false, "enabled" | "organize_into_directories") => {
+                assert!(wrapper.query_selector("input[type=\"checkbox\"]:disabled")?.is_some());
+            }
             (false, "per_user_bytes") => {
                 let value = wrapper
                     .query_selector(".tp__keyvalue-editor")?

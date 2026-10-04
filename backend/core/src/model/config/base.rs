@@ -117,6 +117,26 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
 }
 
+/// Resolve a configured recording directory the way `Config::prepare` does:
+/// blank means the default directory under `home_path`, relative paths are
+/// joined onto `home_path`, absolute paths are kept.
+///
+/// Anything comparing a raw configured directory against the running one
+/// must resolve it first, or an untouched relative path reads as a change.
+pub fn resolve_recording_directory(directory: &str, home_path: &str) -> String {
+    let resolved = if directory.trim().is_empty() {
+        get_default_path_for_home(Path::new(home_path), DEFAULT_RECORDING_DIR)
+    } else {
+        let path = PathBuf::from(directory);
+        if path.is_relative() {
+            PathBuf::from(home_path).join(path)
+        } else {
+            return directory.to_string();
+        }
+    };
+    resolved.clean().to_string_lossy().to_string()
+}
+
 impl Config {
     pub fn recording(&self) -> Option<&RecordingConfig> {
         self.video.as_ref().and_then(|video| video.recording.as_ref())
@@ -184,15 +204,7 @@ impl Config {
         }
 
         if let Some(recording) = self.video.as_mut().and_then(|video| video.recording.as_mut()) {
-            let directory = PathBuf::from(&recording.directory);
-            if recording.directory.trim().is_empty() {
-                recording.directory = get_default_path_for_home(Path::new(home_path), DEFAULT_RECORDING_DIR)
-                    .clean()
-                    .to_string_lossy()
-                    .to_string();
-            } else if directory.is_relative() {
-                recording.directory = PathBuf::from(home_path).join(directory).clean().to_string_lossy().to_string();
-            }
+            recording.directory = resolve_recording_directory(&recording.directory, home_path);
         }
 
         Ok(())
@@ -361,9 +373,28 @@ impl From<&ConfigDto> for Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{resolve_recording_directory, Config};
     use shared::model::{ConfigDto, GeoIpUnavailablePolicy, RecordingConfigDto, VideoConfigDto};
     use tempfile::tempdir;
+
+    #[test]
+    fn untouched_recording_directory_resolves_to_the_prepared_one() {
+        // A save that does not touch the directory sends the raw configured
+        // value; it must equal what `prepare` put into the running config.
+        for raw in ["", "  ", "recordings", "./data/recordings", "/srv/recordings"] {
+            let dto = ConfigDto {
+                video: Some(VideoConfigDto {
+                    recording: Some(RecordingConfigDto { directory: Some(raw.to_string()), ..Default::default() }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let mut config = Config::from(&dto);
+            config.prepare("/home/tp/config", "/home/tp").expect("prepare");
+            let prepared = config.video.and_then(|video| video.recording).expect("recording").directory;
+            assert_eq!(resolve_recording_directory(raw, "/home/tp"), prepared, "raw directory {raw:?}");
+        }
+    }
 
     #[test]
     fn prepare_resolves_relative_web_root_from_home_path() {

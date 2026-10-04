@@ -356,6 +356,8 @@ mod tests {
             measured_bytes: measured,
             completed_at: None,
             notification_markers: Vec::new(),
+            group: None,
+            series_name: None,
             deleting_previous_state: None,
         }
     }

@@ -203,38 +203,31 @@ where
     Ok(Some(formatted))
 }
 
-/// Sanitize a single filename segment by replacing anything outside
-/// `A-Z a-z 0-9 . _ -` with `_`. The same shape is used by the legacy
-/// `RecordingTask::new` sanitizer, so rendered output stays consistent
-/// with the historical filename shape.
-fn sanitize_filename_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        let keep = matches!(ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-');
-        out.push(if keep { ch } else { '_' });
-    }
-    out
-}
+/// Sanitize a single filename segment with the shared filename allow-list:
+/// letters of every script are kept, whitespace becomes `_`, symbols and
+/// separators are dropped.
+fn sanitize_filename_segment(s: &str) -> String { crate::utils::sanitize_filename_chars(s, true) }
 
-/// Collapse runs of `_` and trim leading/trailing `_` and `.` from a
-/// rendered stem so empty fields do not produce dangling separators.
+/// Collapse runs of `_` / `.` into one separator and trim leading/trailing
+/// ones so empty fields do not produce dangling separators. A run that
+/// contains a `.` stays a `.`, so dots in titles and literal extensions
+/// (`{program_title}.ts`) survive.
 fn collapse_empty_components(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut last_was_sep = true; // suppress leading separators
+    let mut pending: Option<char> = None;
     for ch in s.chars() {
-        let is_sep = matches!(ch, '_' | '.');
-        if is_sep {
-            if !last_was_sep {
-                out.push('_');
+        if matches!(ch, '_' | '.') {
+            if pending != Some('.') {
+                pending = Some(ch);
             }
-            last_was_sep = true;
         } else {
+            if let Some(sep) = pending.take() {
+                if !out.is_empty() {
+                    out.push(sep);
+                }
+            }
             out.push(ch);
-            last_was_sep = false;
         }
-    }
-    while out.ends_with('_') || out.ends_with('.') {
-        out.pop();
     }
     out
 }
@@ -336,11 +329,26 @@ mod tests {
     }
 
     #[test]
-    fn rendering_replaces_non_ascii_with_underscore() {
+    fn rendering_drops_symbols() {
         let mut ctx = empty_ctx();
-        ctx.program_title = Some("Café — 90°".to_string());
+        ctx.program_title = Some("Café — 90° 🎬".to_string());
         let stem = render_recording_stem("{program_title}", &ctx, &utc()).expect("render");
-        assert!(stem.chars().all(|c| c.is_ascii() && (c.is_alphanumeric() || c == '_' || c == '.' || c == '-')));
+        assert_eq!(stem, "Café_90");
+    }
+
+    #[test]
+    fn rendering_keeps_letters_of_every_script() {
+        for (title, expected) in [
+            ("Tatort: Münster", "Tatort_Münster"),
+            ("Çalıkuşu", "Çalıkuşu"),
+            ("Новости дня", "Новости_дня"),
+            ("نشرة الأخبار", "نشرة_الأخبار"),
+        ] {
+            let mut ctx = empty_ctx();
+            ctx.program_title = Some(title.to_string());
+            let stem = render_recording_stem("{program_title}", &ctx, &utc()).expect("render");
+            assert_eq!(stem, expected);
+        }
     }
 
     #[test]
@@ -374,9 +382,8 @@ mod tests {
         let mut ctx = empty_ctx();
         ctx.owner_display = Some("alice@example.com".to_string());
         let stem = render_recording_stem("{owner}", &ctx, &utc()).expect("render");
-        // `@` and `.` are preserved (the sanitizer keeps `.` and `-`);
-        // `@` is replaced with `_`.
-        assert_eq!(stem, "alice_example_com");
+        // `@` and `.` are kept by the sanitizer.
+        assert_eq!(stem, "alice@example.com");
     }
 
     #[test]
@@ -391,16 +398,13 @@ mod tests {
 
     #[test]
     fn rendering_caps_at_utf8_boundary_for_multibyte_content() {
-        // The sanitizer turns multi-byte into `_` before the cap, so
-        // multi-byte boundary handling is exercised at the cap-function
-        // level. Render a stem with literal ASCII content that exceeds
-        // the cap and verify the cap truncates without exceeding the
-        // boundary.
+        // Two-byte letters survive the sanitizer, so the cap must cut on a
+        // character boundary.
         let mut ctx = empty_ctx();
-        ctx.program_title = Some("a".repeat(300));
+        ctx.program_title = Some("Ж".repeat(300));
         let stem = render_recording_stem("{program_title}", &ctx, &utc()).expect("render");
         assert!(stem.len() <= MAX_RECORDING_STEM_BYTES);
-        assert_eq!(stem.len(), MAX_RECORDING_STEM_BYTES);
+        assert!(stem.chars().all(|c| c == 'Ж'), "{stem}");
     }
 
     #[test]
@@ -418,7 +422,19 @@ mod tests {
         assert_eq!(collapse_empty_components("a__b___c"), "a_b_c");
         assert_eq!(collapse_empty_components("_leading"), "leading");
         assert_eq!(collapse_empty_components("trailing__"), "trailing");
-        assert_eq!(collapse_empty_components("a..b"), "a_b");
+        assert_eq!(collapse_empty_components("a..b"), "a.b");
+        assert_eq!(collapse_empty_components("Title_.ts"), "Title.ts");
+        assert_eq!(collapse_empty_components("Mr._Robot"), "Mr.Robot");
+        assert_eq!(collapse_empty_components(".hidden."), "hidden");
+    }
+
+    #[test]
+    fn rendering_keeps_dots_and_literal_extensions() {
+        let mut ctx = empty_ctx();
+        ctx.program_title = Some("Mr. Robot".to_string());
+        assert_eq!(render_recording_stem("{program_title}.ts", &ctx, &utc()).expect("render"), "Mr.Robot.ts");
+        ctx.program_title = Some("Doku 2.0".to_string());
+        assert_eq!(render_recording_stem("{program_title}", &ctx, &utc()).expect("render"), "Doku_2.0");
     }
 
     #[test]

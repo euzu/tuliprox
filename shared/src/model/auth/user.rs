@@ -1,5 +1,5 @@
 use super::{
-    super::identity_registry::UserId,
+    super::user_id::UserId,
     permission::PermissionSet,
     role::{role_names, Role, RoleSet},
 };
@@ -194,19 +194,5 @@ mod tests {
         };
         let json = serde_json::to_string(&claims).expect("serialize");
         assert!(!json.contains("subject_id"), "no subject_id key in: {json}");
-    }
-
-    #[test]
-    fn current_permission_schema_version_rejects_stale_tokens() {
-        // Removing `download.*` and then splitting `recording.write`
-        // renumbered the recording bits twice. Any token minted before those
-        // changes carries a lower schema version and must fail closed instead
-        // of having its old bits reinterpreted.
-        const {
-            assert!(
-                CURRENT_PERMISSION_SCHEMA_VERSION >= 4,
-                "schema must be bumped when permission bits are renumbered"
-            );
-        };
     }
 }

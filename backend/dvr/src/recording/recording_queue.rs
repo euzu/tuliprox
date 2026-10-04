@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub use shared::model::RecordingTaskState;
 use shared::{
     model::{Claims, QueueRevision, RecordingKind, RecordingMetadata, RecordingTaskDto, TaskPriorityDto, UserId},
-    utils::{deunicode_string, CONSTANTS, FILENAME_TRIM_PATTERNS},
+    utils::{sanitize_filename_chars, CONSTANTS, FILENAME_TRIM_PATTERNS},
 };
 use std::{
     collections::VecDeque,
@@ -47,6 +47,9 @@ fn poisoned_repository() -> std::io::Error {
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
 const RECORDING_INTERRUPTED_ERR: &str = "Recording was interrupted by a restart and cannot be resumed";
 static RECORDING_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// How many `_N` names are tried for a file already on disk before the
+/// request is refused as having no usable path.
+const MAX_COLLISION_PROBES: usize = 1000;
 
 /// Reason a persisted entry cannot be converted back to its in-memory form
 /// during the commit step. Surfaced to the caller so a corrupt persisted file
@@ -400,16 +403,18 @@ pub enum RecordingControl {
 
 /// What the organised layout groups this recording under.
 ///
-/// Live groups by channel, VOD by title, a series by its name and season.
-/// The series name falls back to the episode pattern applied to the filename
-/// stem, which is how the layout was derived before the metadata carried it.
+/// Every kind is filed under its playlist group. Without one, Live groups by
+/// channel and VOD by title. A series groups by its series name, which falls
+/// back to the programme title and then to the episode pattern applied to the
+/// filename stem, which is how the layout was derived before the metadata
+/// carried it.
 fn recording_grouping(
     kind: RecordingKind,
     recording: &RecordingMetadata,
     recording_cfg: &RecordingConfig,
     file_stem: &str,
 ) -> recording_path::RecordingGrouping {
-    match kind {
+    let grouping = match kind {
         RecordingKind::Live => recording_path::RecordingGrouping::live(
             recording.channel_name.clone().unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
         ),
@@ -417,10 +422,14 @@ fn recording_grouping(
             recording.program_title.clone().unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
         ),
         RecordingKind::Series => recording_path::RecordingGrouping::series(
-            recording.program_title.clone().unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
-            recording.epg.as_ref().and_then(|epg| epg.season),
+            recording
+                .series_name
+                .clone()
+                .or_else(|| recording.program_title.clone())
+                .unwrap_or_else(|| stem_group(recording_cfg, file_stem)),
         ),
-    }
+    };
+    grouping.in_group(recording.group.clone())
 }
 
 /// The pre-metadata grouping rule: strip the episode marker and any trailing
@@ -575,11 +584,7 @@ impl RecordingTask {
         recording: RecordingMetadata,
     ) -> Option<Self> {
         let url = reqwest::Url::parse(req_url).ok()?;
-        let tmp_filename = CONSTANTS
-            .re_filename
-            .replace_all(&deunicode_string(req_filename).replace(' ', "_"), "")
-            .replace("__", "_")
-            .replace("_-_", "-");
+        let tmp_filename = sanitize_filename_chars(req_filename, true).replace("__", "_").replace("_-_", "-");
         let filename_path = Path::new(&tmp_filename);
         let file_stem =
             filename_path.file_stem().and_then(OsStr::to_str).unwrap_or("").trim_matches(FILENAME_TRIM_PATTERNS);
@@ -597,12 +602,16 @@ impl RecordingTask {
         .ok()?;
         // A file already on disk under this name belongs to an earlier
         // recording; the repository reservation resolves logical collisions,
-        // this only avoids clobbering something already written.
-        for index in 1.. {
-            if !root.join(&relative).is_file() {
-                break;
+        // this only avoids clobbering something already written. Bounded: each
+        // probe is a filesystem call on the caller's thread.
+        let base = relative.clone();
+        let mut index = 0;
+        while root.join(&relative).is_file() {
+            index += 1;
+            if index > MAX_COLLISION_PROBES {
+                return None;
             }
-            relative = recording_path::with_collision_suffix(&relative, index);
+            relative = recording_path::with_collision_suffix(&base, index);
         }
         let file_path = recording_path::resolve_under_root(root, &relative).ok()?;
         let file_dir = file_path.parent().map(Path::to_path_buf)?;
@@ -696,21 +705,6 @@ impl RecordingTask {
             rule_id: meta.provenance.rule_id.clone(),
             occurrence_key: meta.provenance.occurrence_key.clone(),
             allowed_actions: recording_transition::allowed_actions(self.kind, self.state),
-        }
-    }
-
-    fn matches_existing_task(&self, other: &Self) -> bool {
-        if self.kind != other.kind {
-            return false;
-        }
-        match self.kind {
-            RecordingKind::Vod | RecordingKind::Series => self.url == other.url || self.file_path == other.file_path,
-            RecordingKind::Live => {
-                (self.url == other.url
-                    && self.scheduled_start() == other.scheduled_start()
-                    && self.scheduled_end() == other.scheduled_end())
-                    || self.file_path == other.file_path
-            }
         }
     }
 }
@@ -1231,28 +1225,6 @@ impl RecordingQueue {
         task
     }
 
-    /// An already-pending copy of the same work, if there is one.
-    ///
-    /// Terminal entries are deliberately excluded: after a failed or
-    /// cancelled attempt the caller must be able to ask again, and a
-    /// successful one may legitimately be re-requested. Only work that is
-    /// still active, queued or scheduled is a duplicate that a second
-    /// request would run twice.
-    pub async fn find_pending_duplicate(&self, candidate: &RecordingTask) -> Option<RecordingTask> {
-        if let Some(active) = self.active.read().await.as_ref() {
-            if active.matches_existing_task(candidate) {
-                return Some(active.clone());
-            }
-        }
-
-        if let Some(queued) = self.queue.lock().await.iter().find(|task| task.matches_existing_task(candidate)).cloned()
-        {
-            return Some(queued);
-        }
-
-        self.scheduled.read().await.iter().find(|task| task.matches_existing_task(candidate)).cloned()
-    }
-
     /// Pause the active task. Persists the new state through the
     /// transactional boundary. The runtime-only control signal is published
     /// after the commit while the mutation guard still preserves ordering.
@@ -1303,36 +1275,13 @@ impl RecordingQueue {
         Ok(true)
     }
 
-    /// Cancel the active task. Persists the new state through the
-    /// transactional boundary.
-    pub async fn cancel_active_matching(&self, uuid: &str) -> Result<bool, QueueMutationError> {
-        let _mutation = self.mutation_guard.lock().await;
-        let changed = mutate_optional_locked(self, |candidate| {
-            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
-                return Ok(None);
-            };
-            active.state = RecordingTaskState::Cancelled;
-            active.error = Some("Cancelled by user".to_string());
-            active.next_retry_at = None;
-            Ok(Some(true))
-        })
-        .await?
-        .unwrap_or(false);
-        if !changed {
-            return Ok(false);
-        }
-        *self.control_signal.write().await = RecordingControl::Cancel;
-        self.control_notify.notify_waiters();
-        Ok(true)
-    }
-
-    pub async fn cancel_active(&self) -> Result<bool, QueueMutationError> {
-        let Some(uuid) = self.active.read().await.as_ref().map(|active| active.uuid.clone()) else {
-            return Ok(false);
-        };
-        self.cancel_active_matching(&uuid).await
-    }
-
+    /// Cancel the active task `uuid`, if it is still the active one.
+    ///
+    /// A paused task holds no file handle or provider slot, so it is filed
+    /// as `Cancelled` right away. A running one is only marked `Cancelling`:
+    /// the worker still owns its file and slot and commits `Cancelled` once it
+    /// has released them. Returns whether the task was paused, or `None` when
+    /// `uuid` is not the active task.
     pub async fn cancel_requested(&self, uuid: &str) -> Result<Option<bool>, QueueMutationError> {
         let _mutation = self.mutation_guard.lock().await;
         let was_paused = mutate_optional_locked(self, |candidate| {
@@ -1376,17 +1325,30 @@ impl RecordingQueue {
         Ok(was_paused)
     }
 
+    /// Ask the worker to restart so it picks up a reloaded configuration.
+    ///
+    /// A restart never replaces a pending pause or cancel. The fallback below
+    /// runs later than the caller, and an unconditional write there could land
+    /// after a user's pause and turn it into a requeue.
     pub fn request_worker_restart(&self) {
+        fn request(control: &mut RecordingControl) -> bool {
+            if *control == RecordingControl::None {
+                *control = RecordingControl::Restart;
+            }
+            *control == RecordingControl::Restart
+        }
         if let Ok(mut control) = self.control_signal.try_write() {
-            *control = RecordingControl::Restart;
-            self.control_notify.notify_waiters();
+            if request(&mut control) {
+                self.control_notify.notify_waiters();
+            }
             return;
         }
         let control_signal = Arc::clone(&self.control_signal);
         let control_notify = Arc::clone(&self.control_notify);
         tokio::spawn(async move {
-            *control_signal.write().await = RecordingControl::Restart;
-            control_notify.notify_waiters();
+            if request(&mut *control_signal.write().await) {
+                control_notify.notify_waiters();
+            }
         });
     }
 
@@ -1503,7 +1465,11 @@ impl RecordingQueue {
 
         match result {
             Ok(Some(promoted)) => promoted,
-            Ok(None) | Err(_) => 0,
+            Ok(None) => 0,
+            Err(err) => {
+                error!("Promoting due scheduled recordings failed: {err}");
+                0
+            }
         }
     }
 
@@ -1596,15 +1562,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_marks_active_download_cancelled_without_finishing_immediately() {
+    async fn cancel_leaves_a_running_task_cancelling_until_the_worker_lets_go() {
         let queue = RecordingQueue::new();
         let active = task("id", RecordingKind::Vod, RecordingTaskState::Running);
 
         *queue.active.write().await = Some(active);
-        queue.cancel_active().await.expect("cancel active");
+        assert_eq!(queue.cancel_requested("id").await.expect("cancel active"), Some(false));
 
         let cancelled = queue.active.read().await.clone().expect("active download");
-        assert_eq!(cancelled.state, RecordingTaskState::Cancelled);
+        assert_eq!(cancelled.state, RecordingTaskState::Cancelling);
+        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel);
         assert!(!cancelled.finished);
         assert_eq!(cancelled.error.as_deref(), Some("Cancelled by user"));
         assert!(queue.finished.read().await.is_empty());
@@ -2189,6 +2156,32 @@ mod tests {
     }
 
     #[test]
+    fn a_name_taken_on_disk_is_numbered_from_the_original_stem() {
+        // The suffix was applied to the already-suffixed name, so the third
+        // copy became `film_1_2.mp4` instead of `film_2.mp4`.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("film.mp4"), b"").expect("first copy");
+        std::fs::write(dir.path().join("film_1.mp4"), b"").expect("second copy");
+        let cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+
+        let task = RecordingTask::new(
+            RecordingKind::Vod,
+            "https://example.com/film.mp4",
+            "film.mp4",
+            &cfg,
+            None,
+            0,
+            media_meta("web:alice"),
+        )
+        .expect("a free name");
+
+        assert_eq!(task.filename, "film_2.mp4");
+    }
+
+    #[test]
     fn download_new_omits_trailing_dot_when_filename_has_no_extension() {
         let cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
             directory: Some("/tmp".to_string()),
@@ -2208,6 +2201,48 @@ mod tests {
 
         assert_eq!(task.filename, "title_with_trailing_dot");
         assert!(!task.filename.ends_with('.'));
+    }
+
+    fn organized_task(kind: RecordingKind, filename: &str, recording: RecordingMetadata) -> RecordingTask {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = RecordingConfig::from(&shared::model::RecordingConfigDto {
+            directory: Some(dir.path().to_string_lossy().into_owned()),
+            organize_into_directories: true,
+            ..Default::default()
+        });
+        RecordingTask::new(kind, "https://example.com/item", filename, &cfg, None, 0, recording).expect("task")
+    }
+
+    #[test]
+    fn organized_live_recording_lands_in_its_group() {
+        let mut meta = live_meta("web:alice", 1_700_000_000, 1_800);
+        meta.channel_name = Some("SBS 6 HD".to_string());
+        meta.group = Some("NEDERLAND".to_string());
+        let task = organized_task(RecordingKind::Live, "news.ts", meta);
+        assert_eq!(task.recording.relative_path.as_deref(), Some("NEDERLAND/news.ts"));
+    }
+
+    #[test]
+    fn task_filename_keeps_extension_dots_and_letters_of_every_script() {
+        let mut meta = live_meta("web:alice", 1_700_000_000, 1_800);
+        meta.group = Some("Новости".to_string());
+        let task = organized_task(RecordingKind::Live, "Mr. Robot — Çalıkuşu 🎬.ts", meta);
+        assert_eq!(task.recording.relative_path.as_deref(), Some("Новости/Mr._Robot_Çalıkuşu.ts"));
+    }
+
+    #[test]
+    fn organized_series_episodes_share_the_series_folder_in_their_group() {
+        let episode = |title: &str| {
+            let mut meta = media_meta("web:alice");
+            meta.program_title = Some(title.to_string());
+            meta.series_name = Some("The Show".to_string());
+            meta.group = Some("Crime".to_string());
+            meta
+        };
+        let first = organized_task(RecordingKind::Series, "The Show S01E01.mkv", episode("Pilot"));
+        let second = organized_task(RecordingKind::Series, "The Show S02E05.mkv", episode("Finale"));
+        assert_eq!(first.recording.relative_path.as_deref(), Some("Crime/The Show/The_Show_S01E01.mkv"));
+        assert_eq!(second.recording.relative_path.as_deref(), Some("Crime/The Show/The_Show_S02E05.mkv"));
     }
 
     #[tokio::test]
@@ -2285,76 +2320,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_pending_duplicate_matches_active_queue_and_scheduled_downloads() {
-        let queue = RecordingQueue::new();
-        let candidate = task("candidate", RecordingKind::Vod, RecordingTaskState::Queued);
-
-        *queue.active.write().await = Some(RecordingTask { uuid: "active".to_string(), ..candidate.clone() });
-        assert_eq!(
-            queue.find_pending_duplicate(&candidate).await.map(|download| download.uuid),
-            Some("active".to_string())
-        );
-
-        *queue.active.write().await = None;
-        queue.queue.lock().await.push_back(RecordingTask { uuid: "queued".to_string(), ..candidate.clone() });
-        assert_eq!(
-            queue.find_pending_duplicate(&candidate).await.map(|download| download.uuid),
-            Some("queued".to_string())
-        );
-
-        queue.queue.lock().await.clear();
-        let scheduled = RecordingTask {
-            state: RecordingTaskState::Scheduled,
-            recording: live_meta("web:alice", 100, 60),
-            file_path: PathBuf::from("/tmp/recording.ts"),
-            filename: "recording.ts".to_string(),
-            ..task("scheduled", RecordingKind::Live, RecordingTaskState::Scheduled)
-        };
-        queue.scheduled.write().await.push(scheduled);
-        let recording_candidate = RecordingTask {
-            state: RecordingTaskState::Scheduled,
-            recording: live_meta("web:alice", 100, 60),
-            file_path: PathBuf::from("/tmp/recording.ts"),
-            filename: "recording.ts".to_string(),
-            ..task("recording-candidate", RecordingKind::Live, RecordingTaskState::Scheduled)
-        };
-        assert_eq!(
-            queue.find_pending_duplicate(&recording_candidate).await.map(|download| download.uuid),
-            Some("scheduled".to_string())
-        );
-
-        queue.scheduled.write().await.clear();
-        queue.finished.write().await.push(RecordingTask {
-            uuid: "finished".to_string(),
-            finished: true,
-            state: RecordingTaskState::Completed,
-            ..candidate.clone()
-        });
-        assert!(
-            queue.find_pending_duplicate(&candidate).await.is_none(),
-            "a finished recording must not block asking again"
-        );
-    }
-
-    #[tokio::test]
-    async fn find_duplicate_allows_distinct_recording_windows() {
-        let queue = RecordingQueue::new();
-        queue.scheduled.write().await.push(RecordingTask {
-            state: RecordingTaskState::Scheduled,
-            recording: live_meta("web:alice", 100, 60),
-            ..task("scheduled", RecordingKind::Live, RecordingTaskState::Scheduled)
-        });
-
-        let different_window = RecordingTask {
-            state: RecordingTaskState::Scheduled,
-            recording: live_meta("web:alice", 200, 60),
-            ..task("candidate", RecordingKind::Live, RecordingTaskState::Scheduled)
-        };
-
-        assert!(queue.find_pending_duplicate(&different_window).await.is_none());
-    }
-
-    #[tokio::test]
     async fn request_worker_restart_sets_restart_control_and_notifies_waiters() {
         let queue = RecordingQueue::new();
         let waiter_queue = Arc::clone(&queue.slot_waiters);
@@ -2374,6 +2339,26 @@ mod tests {
             RecordingWaitOutcome::Restarted
         );
         assert_eq!(*queue.control_signal.read().await, RecordingControl::Restart);
+    }
+
+    #[tokio::test]
+    async fn a_restart_never_replaces_a_pending_pause_or_cancel() {
+        // A configuration reload must not turn a user's pause into a requeue
+        // or swallow a cancel, whichever of the two writes lands first.
+        for pending in [RecordingControl::Pause, RecordingControl::Cancel] {
+            let queue = RecordingQueue::new();
+            *queue.control_signal.write().await = pending;
+            queue.request_worker_restart();
+            assert_eq!(*queue.control_signal.read().await, pending);
+
+            // The deferred path, taken while another writer holds the lock.
+            let held = queue.control_signal.write().await;
+            queue.request_worker_restart();
+            drop(held);
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            assert_eq!(*queue.control_signal.read().await, pending);
+        }
     }
 
     #[tokio::test]
@@ -2680,14 +2665,14 @@ mod tests {
         }
         assert_eq!(queue.revision.load(Ordering::SeqCst), 1);
         let api_queue = Arc::clone(&queue);
-        let newer_cancel = tokio::spawn(async move { api_queue.cancel_active_matching("task-b").await });
+        let newer_cancel = tokio::spawn(async move { api_queue.cancel_requested("task-b").await });
         tokio::task::yield_now().await;
         assert!(!newer_cancel.is_finished());
 
         drop(control_lock);
 
         assert!(worker_commit.await.expect("worker task").expect("worker commit").is_some());
-        assert!(newer_cancel.await.expect("cancel task").expect("cancel commit"));
+        assert_eq!(newer_cancel.await.expect("cancel task").expect("cancel commit"), Some(false));
         assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel);
     }
 

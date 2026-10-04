@@ -34,7 +34,7 @@ video:
     quota:
         default_private_bytes: 53687091200   # 50 GiB
         per_user_bytes:
-          "web:user-uuid-1": 107374182400    # 100 GiB
+          "web:alice": 107374182400          # 100 GiB, key is the user id (see section 9)
         shared_bytes: 536870912000           # 500 GiB
     notifications:
         outbox_buffer: 1024           # default 1024; in-memory queue depth
@@ -193,13 +193,16 @@ The layout carries **no owner or visibility component**. One physical file is sh
 user who requested it, so keying its directory on an owner would be wrong the moment a second
 user attaches, and would force the file to move on disk when the first detaches.
 
-With `organize_into_directories` enabled the layout groups by what the server resolved:
+With `organize_into_directories` enabled every recording is filed under the playlist group of
+the recorded item. All episodes of one series share a single folder inside their group:
 
 ```text
 <recording-root>/
-  <channel>/<file>                  # live
-  <title>/<file>                    # vod
-  <series>/Season NN/<file>         # series episode
+  <group>/<file>                    # live and vod
+  <group>/<series>/<file>           # series episode
+  <channel>/<file>                  # live without a group
+  <title>/<file>                    # vod without a group
+  <series>/<file>                   # series episode without a group
   <file>                            # unorganized, or no grouping resolved
 ```
 
@@ -211,6 +214,9 @@ any path that escapes the root (via `..`, symlinks, or absolute paths) is reject
 `recording_unsafe_path`.
 
 ## 3. Filename placeholders
+
+`filename_template` names live recordings. The container format supplies the extension
+(`.ts`, `.mkv` or `.mp4`). VOD and series transfers keep the provider title as their name.
 
 The supported placeholders:
 
@@ -224,8 +230,16 @@ The supported placeholders:
   `{owner}` placeholder is the only place the username-derived content may appear in the on-disk
   path.
 
-The final stem is capped at 240 UTF-8 bytes without splitting a code point. When the sanitized
-stem is empty, the runtime falls back to the recording task id.
+Values keep letters and digits of every script (`Münster`, `Çalıkuşu`, `Новости`, `الأخبار`)
+plus `+ = , . _ - @ # ( ) [ ]`; whitespace becomes `_` and everything else (emoji, symbols, path
+separators, control characters) is dropped. Group, channel, title and series directory names use
+the same rules but keep spaces. This is the same allow-list the STRM export uses. Separators
+next to an empty placeholder collapse, so `{channel}_{program_title}_{episode}` without episode
+numbers renders as `<channel>_<title>`. Dots are kept (`Mr. Robot` becomes `Mr.Robot`), and a
+template that already ends in the container extension (`{program_title}.ts`) is not given a second
+one. The final stem is capped at 240 UTF-8 bytes without
+splitting a code point. When the rendered stem is empty, the runtime falls back to the programme
+title.
 
 ## 4. Lifecycle and restart behavior
 
@@ -368,23 +382,21 @@ Orphan catalog entries (recordings whose target/input no longer matches a config
 visible only to administrators with `recording.read`. The path is never exposed; an opaque orphan
 id is generated per discovery.
 
-## 9. Identity-registry bootstrap
+## 9. User ids
 
-The identity registry is `web_user_ids.json` in the storage directory. The startup sequence is:
+A user id is derived from the configured username; nothing is stored for it:
 
-1. Pre-scan the recording repository for `RecordingOwner::User(_)` entries (without the
-   registry loaded).
-2. Load the existing registry (if any).
-3. Initialize the registry **only** when no persisted real owner exists. New `UserId`s are
-   generated for any username that lacks one.
-4. Fail closed on missing / corrupt registry when real owners exist. The server does not generate
-   replacement IDs in this case; the operator must restore the registry or run an explicit rename
-   migration.
-5. Sync current principals (insert a new `UserId` for any username that lacks one).
-6. Run the full queue load + normalization.
+- web users (`web_ui.auth`): `web:<username>`
+- proxy API users (`api_proxy`): `api:<username>`
+- the built-in administrator: `builtin:admin`
 
-The built-in administrator is the reserved subject id `builtin:admin` (constant). Operators do not
-create an entry for it.
+A web user and an API user with the same name are different principals. The username is used as
+configured, so a web user signing in with different letter case still gets the same id. The
+characters `%`, `/`, `\` and NUL are percent-encoded (`a/b` becomes `web:a%2Fb`).
+
+These ids own recordings and rules, key `quota.per_user_bytes`, and are the target of token
+revocation. Renaming a user in the configuration therefore starts a new principal: recordings and
+rules stay with the old name until it is renamed back.
 
 ## 10. Token refresh on permission schema bump
 
@@ -397,9 +409,8 @@ constant; pre-bump tokens become stale:
 - The frontend's `RecordingError::TokenRefreshRequired` and the generic auth refresh handler
   redirect the user back to the sign-in flow.
 
-Operators do **not** need to manually invalidate tokens on a schema bump. Existing user records in
-`web_user_ids.json` are preserved; only the `subject_id` mapping for current usernames is
-recomputed if missing.
+Operators do **not** need to manually invalidate tokens on a schema bump; the next sign-in issues a
+token with the current schema and the user's derived `subject_id`.
 
 ## 11. The removed `/file/record` route
 
@@ -605,8 +616,7 @@ Missing messaging configuration is a no-op; the adapter logs the dispatch decisi
    auth config, and messaging config.
 3. **Deploy** the version with additive normalization. No config changes are required for the
    existing flows to keep working.
-4. **Back up `web_user_ids.json`** after the first successful start. The bootstrap writes the
-   file automatically; the operator should preserve it across restarts.
+4. **Key per-user quotas by user id** (`web:<username>` / `api:<username>`, see section 9).
 5. **Grant `recording.read`, `recording.create`, `recording.manage` and `recording.delete`** explicitly to the user groups that need them.
    The `permissions: 65535` legacy config does **not** implicitly grant the new bits.
 6. **Refresh old tokens**. The schema bump forces a token refresh; pre-bump tokens get an

@@ -31,7 +31,7 @@ pub struct RecordingCatalogEntry {
     pub display_name: String,
     pub relative_path: String,
     /// Owner subject id. `None` for orphan/legacy entries.
-    pub owner_id: Option<crate::model::identity_registry::UserId>,
+    pub owner_id: Option<crate::model::user_id::UserId>,
     pub visibility: Option<crate::model::recording::RecordingVisibility>,
 }
 
@@ -94,7 +94,7 @@ impl RecordingCatalogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{identity_registry::UserId, recording::RecordingVisibility};
+    use crate::model::{recording::RecordingVisibility, user_id::UserId};
 
     #[test]
     fn dedup_key_uses_relative_path() {

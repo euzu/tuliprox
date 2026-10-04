@@ -10,8 +10,8 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
-    edit_field_number_f64, edit_field_number_u64, edit_field_number_u8, edit_field_text_option, generate_form_reducer,
+    config_field, config_field_child, edit_field_list, edit_field_number_f64, edit_field_number_u64,
+    edit_field_number_u8, generate_form_reducer,
     hooks::use_service_context,
     i18n::use_translation,
     use_default_form_reducer,
@@ -20,9 +20,6 @@ use shared::model::{RecordingConfigDto, VideoConfigDto};
 use std::collections::HashMap;
 use yew::prelude::*;
 
-const LABEL_ORGANIZE_INTO_DIRECTORIES: &str = "LABEL.ORGANIZE_INTO_DIRECTORIES";
-const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
-const LABEL_EPISODE_PATTERN: &str = "LABEL.EPISODE_PATTERN";
 const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_EXTENSIONS: &str = "LABEL.EXTENSIONS";
 const LABEL_ADD_EXTENSION: &str = "LABEL.ADD_EXTENSION";
@@ -39,9 +36,6 @@ generate_form_reducer!(
     state: RecordingConfigFormState { form: RecordingConfigDto },
     action_name: RecordingConfigFormAction,
     fields {
-        OrganizeIntoDirectories => organize_into_directories: bool,
-        Directory => directory: Option<String>,
-        EpisodePattern => episode_pattern: Option<String>,
         Headers => headers: HashMap<String, String>,
         ReserveSlotsForUsers => reserve_slots_for_users: u8,
         MaxBackgroundPerProvider => max_background_per_provider: u8,
@@ -110,7 +104,9 @@ pub fn RecordingConfigView() -> Html {
         Callback::from(move |(modified, recording)| {
             // The cards own several of this form's fields. Absorbing their
             // edit with `SetAll` would clear `modified` and the change
-            // would never reach the save button.
+            // would never reach the save button. Headers are owned by this
+            // view, so the cards' copy may be stale and must not win.
+            let recording = RecordingConfigDto { headers: state.form.headers.clone(), ..recording };
             state.dispatch(if modified {
                 RecordingConfigFormAction::SetAllEdited(recording)
             } else {
@@ -120,19 +116,18 @@ pub fn RecordingConfigView() -> Html {
     };
     let transfer_view = html! {
         <>
-            <Card>
+            <Card class="tp__config-view__card">
                 { config_field_child!(translate.t(LABEL_EXTENSIONS), "RECORDING_CONFIG.EXTENSIONS", {
                     html! { <div class="tp__config-view__tags">{ for video_state.form.extensions.iter().map(|extension| html! { <span>{extension}</span> }) }</div> }
                 }) }
-            </Card>
-            <Card class="tp__config-view__card">
-                { config_field_bool!(state.form, translate.t(LABEL_ORGANIZE_INTO_DIRECTORIES), organize_into_directories) }
-                { config_field_optional!(state.form, translate.t(LABEL_DIRECTORY), directory) }
-                { config_field_optional!(state.form, translate.t(LABEL_EPISODE_PATTERN), episode_pattern) }
                 { config_field_child!(translate.t(LABEL_HEADERS), "RECORDING_CONFIG.HEADERS", {
                     html! { <ul>{ for state.form.headers.iter().map(|(key, value)| html! { <li key={key.clone()}>{format!("- {key}: {value}")}</li> }) }</ul> }
                 }) }
             </Card>
+        </>
+    };
+    let queue_view = html! {
+        <>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_RECORDING_QUEUE)}</h1>
                 { config_field!(state.form, translate.t(LABEL_RESERVE_SLOTS_FOR_USERS), reserve_slots_for_users, "RECORDING_CONFIG.RESERVE_SLOTS_FOR_USERS") }
@@ -148,13 +143,14 @@ pub fn RecordingConfigView() -> Html {
 
     let transfer_edit = html! {
         <>
-            <Card>{ edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }</Card>
             <Card class="tp__config-view__card">
-                { edit_field_bool!(state, translate.t(LABEL_ORGANIZE_INTO_DIRECTORIES), organize_into_directories, RecordingConfigFormAction::OrganizeIntoDirectories) }
-                { edit_field_text_option!(state, translate.t(LABEL_DIRECTORY), directory, RecordingConfigFormAction::Directory) }
-                { edit_field_text_option!(state, translate.t(LABEL_EPISODE_PATTERN), episode_pattern, RecordingConfigFormAction::EpisodePattern) }
+                { edit_field_list!(video_state, translate.t(LABEL_EXTENSIONS), extensions, VideoConfigFormAction::Extensions, translate.t(LABEL_ADD_EXTENSION)) }
                 <KeyValueEditor label={Some(translate.t(LABEL_HEADERS))} entries={state.form.headers.clone()} readonly={false} on_change={handle_headers} />
             </Card>
+        </>
+    };
+    let queue_edit = html! {
+        <>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_RECORDING_QUEUE)}</h1>
                 { edit_field_number_u8!(state, translate.t(LABEL_RESERVE_SLOTS_FOR_USERS), reserve_slots_for_users, RecordingConfigFormAction::ReserveSlotsForUsers) }
@@ -168,17 +164,20 @@ pub fn RecordingConfigView() -> Html {
         </>
     };
 
+    let edit_mode = *config_view_ctx.edit_mode;
+
     html! {
         <div class="tp__recording-config-view tp__config-view-page">
             <div class="tp__config-view-page__title">{translate.t(LABEL_RECORDING_CONFIG)}</div>
             <div class="tp__recording-config-view__body tp__config-view-page__body">
-                { if *config_view_ctx.edit_mode { transfer_edit } else { transfer_view } }
                 <RecordingConfigCards
                     recording={state.form.clone()}
                     reload_generation={*reload_generation}
-                    edit_mode={*config_view_ctx.edit_mode}
+                    edit_mode={edit_mode}
                     on_change={handle_recording}
                     on_error={{ let toastr = services.toastr.clone(); Callback::from(move |message| toastr.error(message)) }}
+                    after_general={if edit_mode { queue_edit } else { queue_view }}
+                    after_retention_disk={if edit_mode { transfer_edit } else { transfer_view }}
                 />
             </div>
         </div>

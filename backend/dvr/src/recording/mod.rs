@@ -71,6 +71,8 @@ pub(crate) fn make_test_meta(
         measured_bytes: 0,
         completed_at: None,
         notification_markers: vec![],
+        group: None,
+        series_name: None,
         deleting_previous_state: None,
     }
 }

@@ -56,37 +56,55 @@ pub enum DeletionError {
     FinalizeFailed(#[source] QueueMutationError),
 }
 
-/// Locate a recording task in the candidate by uuid. Returns
-/// `(bucket, index)` where `bucket` is one of `"queue"`, `"scheduled"`,
-/// `"active"`, `"finished"`. Returns `None` if the uuid is not in the
-/// candidate.
-fn locate(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<(&'static str, usize)> {
-    if let Some(idx) = candidate.queue.iter().position(|d| d.uuid == uuid) {
-        return Some(("queue", idx));
-    }
-    if let Some(idx) = candidate.scheduled.iter().position(|d| d.uuid == uuid) {
-        return Some(("scheduled", idx));
-    }
-    if candidate.active.as_ref().is_some_and(|d| d.uuid == uuid) {
-        return Some(("active", 0));
-    }
-    if let Some(idx) = candidate.finished.iter().position(|d| d.uuid == uuid) {
-        return Some(("finished", idx));
-    }
-    None
+/// Where a task sits in the candidate snapshot.
+#[derive(Clone, Copy, Debug)]
+enum Location {
+    Queue(usize),
+    Scheduled(usize),
+    Active,
+    Finished(usize),
 }
 
-/// Read the recording metadata from a candidate. Returns `None` if the
-/// uuid is not a recording or has no metadata.
-fn read_meta(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<RecordingMetadata> {
-    candidate
-        .queue
-        .iter()
-        .chain(candidate.scheduled.iter())
-        .chain(candidate.active.iter())
-        .chain(candidate.finished.iter())
-        .find(|task| task.uuid == uuid)
-        .map(|task| task.recording.clone())
+/// Locate a recording task in the candidate by uuid.
+fn locate(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<Location> {
+    let matches = |task: &PersistedRecordingTask| task.uuid == uuid;
+    if let Some(idx) = candidate.queue.iter().position(matches) {
+        return Some(Location::Queue(idx));
+    }
+    if let Some(idx) = candidate.scheduled.iter().position(matches) {
+        return Some(Location::Scheduled(idx));
+    }
+    if candidate.active.as_ref().is_some_and(matches) {
+        return Some(Location::Active);
+    }
+    candidate.finished.iter().position(matches).map(Location::Finished)
+}
+
+fn task_at(candidate: &PersistedRecordingQueue, location: Location) -> Option<&PersistedRecordingTask> {
+    match location {
+        Location::Queue(idx) => candidate.queue.get(idx),
+        Location::Scheduled(idx) => candidate.scheduled.get(idx),
+        Location::Active => candidate.active.as_ref(),
+        Location::Finished(idx) => candidate.finished.get(idx),
+    }
+}
+
+fn task_at_mut(candidate: &mut PersistedRecordingQueue, location: Location) -> Option<&mut PersistedRecordingTask> {
+    match location {
+        Location::Queue(idx) => candidate.queue.get_mut(idx),
+        Location::Scheduled(idx) => candidate.scheduled.get_mut(idx),
+        Location::Active => candidate.active.as_mut(),
+        Location::Finished(idx) => candidate.finished.get_mut(idx),
+    }
+}
+
+fn remove_at(candidate: &mut PersistedRecordingQueue, location: Location) -> Option<PersistedRecordingTask> {
+    match location {
+        Location::Queue(idx) => (idx < candidate.queue.len()).then(|| candidate.queue.remove(idx)),
+        Location::Scheduled(idx) => (idx < candidate.scheduled.len()).then(|| candidate.scheduled.remove(idx)),
+        Location::Active => candidate.active.take(),
+        Location::Finished(idx) => (idx < candidate.finished.len()).then(|| candidate.finished.remove(idx)),
+    }
 }
 
 /// Derive the prior terminal state from a recording's current state.
@@ -148,28 +166,11 @@ where
     F: FnOnce(&RecordingMetadata) -> bool,
 {
     crate::recording::recording_queue::mutate(queue, |candidate| {
-        let Some(meta) = read_meta(candidate, uuid) else {
-            return Err(QueueMutationError::UnknownRecording);
-        };
-        if !permit(&meta) {
+        let location = locate(candidate, uuid).ok_or(QueueMutationError::UnknownRecording)?;
+        let task = task_at(candidate, location).ok_or(QueueMutationError::UnknownRecording)?;
+        if !permit(&task.recording) {
             return Err(QueueMutationError::Forbidden);
         }
-        let Some((bucket, idx)) = locate(candidate, uuid) else {
-            return Err(QueueMutationError::UnknownRecording);
-        };
-        // Resolve the current persisted file to read its terminal state.
-        let task = match bucket {
-            "queue" => &candidate.queue[idx],
-            "scheduled" => &candidate.scheduled[idx],
-            "active" => {
-                let Some(active) = candidate.active.as_ref() else {
-                    return Err(QueueMutationError::UnknownRecording);
-                };
-                active
-            }
-            "finished" => &candidate.finished[idx],
-            _ => return Err(QueueMutationError::UnknownRecording),
-        };
         let Some(prior) = prior_terminal_state_runtime(task) else {
             return Err(QueueMutationError::NotInTerminalState);
         };
@@ -186,10 +187,9 @@ where
             previous_state: prior,
             still_referenced: crate::recording::recording_queue::media_is_still_referenced(candidate, uuid),
         };
-        let mut new_meta = meta;
-        new_meta.deleting_previous_state = Some(prior);
-        apply_meta(candidate, bucket, idx, new_meta);
-        set_task_state(candidate, bucket, idx, RecordingTaskState::Cancelled);
+        let task = task_at_mut(candidate, location).ok_or(QueueMutationError::UnknownRecording)?;
+        task.recording.deleting_previous_state = Some(prior);
+        task.state = RecordingTaskState::Cancelled;
         Ok(target)
     })
     .await
@@ -223,82 +223,15 @@ fn prior_terminal_state_runtime(download: &PersistedRecordingTask) -> Option<Del
     }
 }
 
-fn apply_meta(candidate: &mut PersistedRecordingQueue, bucket: &'static str, idx: usize, meta: RecordingMetadata) {
-    match bucket {
-        "queue" => {
-            if let Some(d) = candidate.queue.get_mut(idx) {
-                d.recording = meta;
-            }
-        }
-        "scheduled" => {
-            if let Some(d) = candidate.scheduled.get_mut(idx) {
-                d.recording = meta;
-            }
-        }
-        "active" => {
-            if let Some(d) = candidate.active.as_mut() {
-                d.recording = meta;
-            }
-        }
-        "finished" => {
-            if let Some(d) = candidate.finished.get_mut(idx) {
-                d.recording = meta;
-            }
-        }
-        _ => unreachable!(),
-    }
-}
-
-/// Set the persisted `state` on a task in the given bucket. Companion to
-/// `apply_meta` — the deletion transition needs both the recording
-/// metadata flag (`deleting_previous_state`) and the canonical task
-/// state (`Cancelled`) to land atomically.
-fn set_task_state(
-    candidate: &mut PersistedRecordingQueue,
-    bucket: &'static str,
-    idx: usize,
-    state: RecordingTaskState,
-) {
-    match bucket {
-        "queue" => {
-            if let Some(d) = candidate.queue.get_mut(idx) {
-                d.state = state;
-            }
-        }
-        "scheduled" => {
-            if let Some(d) = candidate.scheduled.get_mut(idx) {
-                d.state = state;
-            }
-        }
-        "active" => {
-            if let Some(d) = candidate.active.as_mut() {
-                d.state = state;
-            }
-        }
-        "finished" => {
-            if let Some(d) = candidate.finished.get_mut(idx) {
-                d.state = state;
-            }
-        }
-        _ => unreachable!(),
-    }
-}
-
 /// Roll back a `begin_deletion` transition after `execute_deletion`
 /// fails to remove the file. Restores the persisted task state from
 /// `deleting_previous_state` and clears the flag so the recording
 /// reverts to its pre-deletion state. Best-effort: missing or already
 /// finalized tasks are silently left alone.
 pub fn rollback_deletion(candidate: &mut PersistedRecordingQueue, uuid: &str) {
-    let Some((bucket, idx)) = locate(candidate, uuid) else { return };
-    let task = match bucket {
-        "queue" => candidate.queue.get_mut(idx),
-        "scheduled" => candidate.scheduled.get_mut(idx),
-        "active" => candidate.active.as_mut(),
-        "finished" => candidate.finished.get_mut(idx),
-        _ => None,
+    let Some(task) = locate(candidate, uuid).and_then(|location| task_at_mut(candidate, location)) else {
+        return;
     };
-    let Some(task) = task else { return };
     let prior = task.recording.deleting_previous_state.take();
     task.state = match prior {
         Some(DeletionPreviousState::Completed) => RecordingTaskState::Completed,
@@ -379,28 +312,8 @@ pub async fn execute_deletion(
 /// boundary. Called after the file is gone (or was already missing).
 pub async fn finalize_deletion(queue: &RecordingQueue, uuid: &str) -> Result<(), DeletionError> {
     crate::recording::recording_queue::mutate(queue, |candidate| {
-        if let Some((bucket, idx)) = locate(candidate, uuid) {
-            match bucket {
-                "queue" => {
-                    if idx < candidate.queue.len() {
-                        candidate.queue.remove(idx);
-                    }
-                }
-                "scheduled" => {
-                    if idx < candidate.scheduled.len() {
-                        candidate.scheduled.remove(idx);
-                    }
-                }
-                "active" => {
-                    candidate.active = None;
-                }
-                "finished" => {
-                    if idx < candidate.finished.len() {
-                        candidate.finished.remove(idx);
-                    }
-                }
-                _ => unreachable!(),
-            }
+        if let Some(location) = locate(candidate, uuid) {
+            let _ = remove_at(candidate, location);
             return Ok(());
         }
         Err(QueueMutationError::UnknownRecording)
@@ -464,15 +377,8 @@ pub async fn recovery_action_for(
 /// Apply the recovery action to a candidate. Called by the startup
 /// loop after the decision has been computed.
 pub fn apply_recovery_to_candidate(candidate: &mut PersistedRecordingQueue, uuid: &str, action: RecoveryAction) {
-    if let Some((bucket, idx)) = locate(candidate, uuid) {
-        let d = match bucket {
-            "queue" => candidate.queue.get_mut(idx),
-            "scheduled" => candidate.scheduled.get_mut(idx),
-            "active" => candidate.active.as_mut(),
-            "finished" => candidate.finished.get_mut(idx),
-            _ => None,
-        };
-        if let Some(d) = d {
+    if let Some(location) = locate(candidate, uuid) {
+        if let Some(d) = task_at_mut(candidate, location) {
             match action {
                 RecoveryAction::FinishDeletion => {
                     // The caller is expected to remove the task entirely

@@ -174,6 +174,14 @@ mod tests {
             ("recording.manage", 1 << 16),
             ("recording.delete", 1 << 17),
         ];
+        // The table is the layout of this schema version. Changing a bit means
+        // editing the table, and the version beside it has to move with it so
+        // tokens minted under the old layout fail closed.
+        assert_eq!(
+            crate::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+            4,
+            "the bit table changed: bump CURRENT_PERMISSION_SCHEMA_VERSION and this expected value together"
+        );
         assert_eq!(PermissionSet::VARIANT_COUNT, expected.len());
         for (name, bit) in expected {
             let permission = permission_from_name(name).expect("permission name is missing");

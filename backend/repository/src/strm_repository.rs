@@ -8,8 +8,8 @@ use shared::{
     model::{MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType},
     utils::{
         arc_str_option_serde, arc_str_serde, clean_playlist_title, hash_bytes, hash_string_as_hex,
-        is_blank_optional_arc_str, sanitize_sensitive_info, truncate_string, ExportStyleConfig, CONSTANTS,
-        PROVIDER_SCHEME_PREFIX,
+        is_blank_optional_arc_str, sanitize_filename_chars, sanitize_sensitive_info, truncate_string,
+        ExportStyleConfig, CONSTANTS, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{
@@ -33,49 +33,12 @@ use tuliprox_core::{
     },
 };
 
-/// Sanitizes a string to be safe for use as a file or directory name by
-/// following a strict "allow-list" approach and discarding invalid characters.
+/// Sanitizes a string for use as a file or directory name, falling back to a
+/// placeholder when nothing survives.
 fn sanitize_for_filename(text: &str, underscore_whitespace: bool) -> String {
-    // A default placeholder for filenames that become empty after sanitization.
-    const EMPTY_FILENAME_REPLACEMENT: &str = "unnamed";
-
-    // 1. Trim leading/trailing whitespace.
-    let trimmed = text.trim();
-
-    // 2. Build the sanitized string by filtering and mapping characters.
-    let mut sanitized: String = trimmed
-        .chars()
-        .filter_map(|c| {
-            // Decide which characters to keep or transform.
-            if c.is_alphanumeric() {
-                Some(c)
-            } else if "+=,._-@#()[]".contains(c) {
-                // <-- Allow list of safe punctuation, added [ and ] for quality tags.
-                Some(c)
-            } else if c.is_whitespace() {
-                if underscore_whitespace {
-                    Some('_')
-                } else {
-                    Some(' ')
-                }
-            } else {
-                // Discard all other characters.
-                None
-            }
-        })
-        .collect();
-
-    // 3. Remove any leading periods to prevent creating hidden files/directories.
-    while sanitized.starts_with('.') {
-        sanitized.remove(0);
-    }
-
-    // 4. Remove empty parentheses
-    sanitized = CONSTANTS.export_style_config.paaren.replace_all(sanitized.as_str(), "").trim().to_string();
-
-    // 5. Final check: If sanitization resulted in an empty string, return a default.
+    let sanitized = sanitize_filename_chars(text, underscore_whitespace);
     if sanitized.is_empty() {
-        EMPTY_FILENAME_REPLACEMENT.to_string()
+        "unnamed".to_string()
     } else {
         sanitized
     }

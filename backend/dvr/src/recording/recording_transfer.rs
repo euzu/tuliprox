@@ -17,8 +17,8 @@ use crate::{
         recording_notification::LifecycleEvent,
         recording_notification_adapter::{build_marker, decide, message_for, DispatchDecision},
         recording_queue::{
-            mutate_optional, PersistedRecordingTask, QueueMutationError, RecordingControl, RecordingQueue,
-            RecordingTask, RecordingTaskState, RecordingWaitOutcome,
+            mutate_optional, PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingControl,
+            RecordingQueue, RecordingTask, RecordingTaskState, RecordingWaitOutcome,
         },
         recording_sidecar,
         recording_url::build_stable_recording_url,
@@ -32,12 +32,12 @@ use shared::{
     model::{EventMessage, EventSink, RecordingKind, RecordingMetadata},
     utils::bytes_to_megabytes,
 };
-use std::{collections::HashMap, ops::Deref, path::Path, pin::Pin, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncWrite, AsyncWriteExt},
     sync::{Notify, RwLock},
-    time::{self, Duration, Instant, Sleep},
+    time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::{
@@ -98,7 +98,7 @@ fn recording_execution_download(
 }
 
 fn classify_download_open_error(url: &reqwest::Url, err: &reqwest::Error) -> DownloadExecutionResult {
-    if is_retryable_download_error(err) {
+    if is_retryable_error(err) {
         DownloadExecutionResult::Retryable(format!("Error while opening url: {url} {err}"))
     } else {
         DownloadExecutionResult::Failed(format!("Error while opening url: {url} {err}"))
@@ -135,10 +135,6 @@ fn compute_download_retry_backoff_secs(attempts: u8, download_cfg: &RecordingCon
     let base_secs = clamped_secs.round() as u64;
     apply_download_retry_jitter(base_secs, download_cfg.retry_backoff_jitter_percent)
 }
-
-fn is_retryable_download_status(status: reqwest::StatusCode) -> bool { is_retryable_status(status) }
-
-fn is_retryable_download_error(err: &reqwest::Error) -> bool { is_retryable_error(err) }
 
 fn background_download_should_wait(
     priority: i8,
@@ -276,7 +272,6 @@ async fn send_download_request(
     offset: u64,
     control_signal: &RwLock<RecordingControl>,
     control_notify: &Notify,
-    provider_cancel_token: Option<&CancellationToken>,
 ) -> Result<reqwest::Response, DownloadExecutionResult> {
     if let Some(result) = handle_download_control_without_writer(current_download_control(control_signal)) {
         return Err(result);
@@ -294,27 +289,14 @@ async fn send_download_request(
     let send = request.send();
     tokio::pin!(send);
     loop {
-        if let Some(cancel_token) = provider_cancel_token {
-            tokio::select! {
-                biased;
-                () = cancel_token.cancelled() => return Err(DownloadExecutionResult::Preempted),
-                () = control_notify.notified() => {
-                    if let Some(result) = handle_download_control_without_writer(*control_signal.read().await) {
-                        return Err(result);
-                    }
+        tokio::select! {
+            biased;
+            () = control_notify.notified() => {
+                if let Some(result) = handle_download_control_without_writer(*control_signal.read().await) {
+                    return Err(result);
                 }
-                response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
             }
-        } else {
-            tokio::select! {
-                biased;
-                () = control_notify.notified() => {
-                    if let Some(result) = handle_download_control_without_writer(*control_signal.read().await) {
-                        return Err(result);
-                    }
-                }
-                response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
-            }
+            response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
         }
     }
 }
@@ -337,6 +319,29 @@ async fn wait_for_provider_slot(
     match deadline {
         Some(deadline) => time::timeout_at(deadline, waiting).await.ok(),
         None => Some(waiting.await),
+    }
+}
+
+/// What a control signal observed while acquiring a slot means; `None` keeps
+/// trying.
+fn acquire_result_for_control(control: RecordingControl) -> Option<ProviderAcquireResult> {
+    match control {
+        RecordingControl::Cancel => Some(ProviderAcquireResult::Cancelled),
+        RecordingControl::Pause => Some(ProviderAcquireResult::Paused),
+        RecordingControl::Restart => Some(ProviderAcquireResult::Preempted),
+        RecordingControl::None => None,
+    }
+}
+
+/// What the end of a provider-slot wait means; `None` (signalled) tries to
+/// acquire again. A wait without an outcome ran into the live window's end.
+fn acquire_result_after_wait(outcome: Option<RecordingWaitOutcome>) -> Option<ProviderAcquireResult> {
+    match outcome {
+        None => Some(ProviderAcquireResult::WindowClosed),
+        Some(RecordingWaitOutcome::Signalled) => None,
+        Some(RecordingWaitOutcome::Paused) => Some(ProviderAcquireResult::Paused),
+        Some(RecordingWaitOutcome::Cancelled) => Some(ProviderAcquireResult::Cancelled),
+        Some(RecordingWaitOutcome::Restarted) => Some(ProviderAcquireResult::Preempted),
     }
 }
 
@@ -393,22 +398,13 @@ async fn download_file<E: EventSink>(
     client: &reqwest::Client,
     control_signal: Arc<RwLock<RecordingControl>>,
     control_notify: Arc<Notify>,
-    provider_cancel_token: Option<CancellationToken>,
     event_manager: Option<&E>,
 ) -> DownloadExecutionResult {
     let worker_uuid = file_download.uuid.as_str();
     let url = file_download.url.clone();
     let file_path = http_transfer_path(&file_download);
     let existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
-    let response_result = send_download_request(
-        client,
-        &url,
-        existing_size,
-        &control_signal,
-        &control_notify,
-        provider_cancel_token.as_ref(),
-    )
-    .await;
+    let response_result = send_download_request(client, &url, existing_size, &control_signal, &control_notify).await;
 
     match response_result {
         Ok(response) => {
@@ -447,7 +443,7 @@ async fn download_file<E: EventSink>(
             }
             let status = response.status();
             if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
-                if is_retryable_download_status(status) {
+                if is_retryable_status(status) {
                     return DownloadExecutionResult::Retryable(format!(
                         "Download request failed for {url} with transient HTTP {status}"
                     ));
@@ -502,127 +498,30 @@ async fn download_file<E: EventSink>(
                                 let mut control_poll = time::interval(DOWNLOAD_CONTROL_POLL_INTERVAL);
                                 control_poll.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
                                 control_poll.tick().await;
-                                let deadline_at = recording_deadline_instant(&file_download);
-                                let mut deadline_sleep = deadline_at
-                                    .map(|deadline| Box::pin(time::sleep_until(deadline)) as Pin<Box<Sleep>>);
-
                                 loop {
-                                    if deadline_at.is_some_and(|deadline| Instant::now() >= deadline) {
-                                        if let Err(err) = buf_writer.flush().await {
-                                            return DownloadExecutionResult::Failed(err.to_string());
+                                    let next_item = tokio::select! {
+                                        biased;
+                                        () = control_notify.notified() => {
+                                            if let Some(result) =
+                                                handle_download_control(*control_signal.read().await, &mut buf_writer)
+                                                    .await
+                                            {
+                                                return result;
+                                            }
+                                            continue;
                                         }
-                                        if let Err(err) = buf_writer.shutdown().await {
-                                            return DownloadExecutionResult::Failed(err.to_string());
+                                        _ = control_poll.tick() => {
+                                            if let Some(result) = handle_download_control(
+                                                current_download_control(&control_signal),
+                                                &mut buf_writer,
+                                            )
+                                            .await
+                                            {
+                                                return result;
+                                            }
+                                            continue;
                                         }
-                                        return DownloadExecutionResult::Completed;
-                                    }
-
-                                    let next_item = if let (Some(cancel_token), Some(deadline_sleep)) =
-                                        (provider_cancel_token.as_ref(), deadline_sleep.as_mut())
-                                    {
-                                        tokio::select! {
-                                            biased;
-                                            () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
-                                            () = control_notify.notified() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    *control_signal.read().await,
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            _ = control_poll.tick() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    current_download_control(&control_signal),
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            () = deadline_sleep.as_mut() => return DownloadExecutionResult::Completed,
-                                            next_item = stream.try_next() => next_item.map_err(to_io_error),
-                                        }
-                                    } else if let Some(cancel_token) = provider_cancel_token.as_ref() {
-                                        tokio::select! {
-                                            biased;
-                                            () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
-                                            () = control_notify.notified() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    *control_signal.read().await,
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            _ = control_poll.tick() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    current_download_control(&control_signal),
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            next_item = stream.try_next() => next_item.map_err(to_io_error),
-                                        }
-                                    } else if let Some(deadline_sleep) = deadline_sleep.as_mut() {
-                                        tokio::select! {
-                                            biased;
-                                            () = control_notify.notified() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    *control_signal.read().await,
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            _ = control_poll.tick() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    current_download_control(&control_signal),
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            () = deadline_sleep.as_mut() => return DownloadExecutionResult::Completed,
-                                            next_item = stream.try_next() => next_item.map_err(to_io_error),
-                                        }
-                                    } else {
-                                        tokio::select! {
-                                            biased;
-                                            () = control_notify.notified() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    *control_signal.read().await,
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            _ = control_poll.tick() => {
-                                                if let Some(result) = handle_download_control(
-                                                    &active,
-                                                    current_download_control(&control_signal),
-                                                    &mut buf_writer,
-                                                ).await {
-                                                    return result;
-                                                }
-                                                continue;
-                                            }
-                                            next_item = stream.try_next() => next_item.map_err(to_io_error),
-                                        }
+                                        next_item = stream.try_next() => next_item.map_err(to_io_error),
                                     };
 
                                     match next_item {
@@ -771,44 +670,21 @@ fn current_download_control(control_signal: &RwLock<RecordingControl>) -> Record
 
 fn should_exit_worker_after_preempt(control: RecordingControl) -> bool { control == RecordingControl::Restart }
 
-async fn handle_download_control<W>(
-    _active: &Arc<RwLock<Option<RecordingTask>>>,
-    control: RecordingControl,
-    buf_writer: &mut W,
-) -> Option<DownloadExecutionResult>
+/// Close the writer for a pause, cancel or restart, so everything received
+/// so far is on disk before the worker reports the outcome.
+async fn handle_download_control<W>(control: RecordingControl, buf_writer: &mut W) -> Option<DownloadExecutionResult>
 where
     W: AsyncWrite + Unpin,
 {
-    match control {
-        RecordingControl::Pause => {
-            if let Err(err) = buf_writer.flush().await {
-                return Some(DownloadExecutionResult::Failed(err.to_string()));
-            }
-            if let Err(err) = buf_writer.shutdown().await {
-                return Some(DownloadExecutionResult::Failed(err.to_string()));
-            }
-            Some(DownloadExecutionResult::Paused)
-        }
-        RecordingControl::Cancel => {
-            if let Err(err) = buf_writer.flush().await {
-                return Some(DownloadExecutionResult::Failed(err.to_string()));
-            }
-            if let Err(err) = buf_writer.shutdown().await {
-                return Some(DownloadExecutionResult::Failed(err.to_string()));
-            }
-            Some(DownloadExecutionResult::Cancelled)
-        }
-        RecordingControl::Restart => {
-            if let Err(err) = buf_writer.flush().await {
-                return Some(DownloadExecutionResult::Failed(err.to_string()));
-            }
-            if let Err(err) = buf_writer.shutdown().await {
-                return Some(DownloadExecutionResult::Failed(err.to_string()));
-            }
-            Some(DownloadExecutionResult::Preempted)
-        }
-        RecordingControl::None => None,
+    let outcome = handle_download_control_without_writer(control)?;
+    let closed = async {
+        buf_writer.flush().await?;
+        buf_writer.shutdown().await
+    };
+    if let Err(err) = closed.await {
+        return Some(DownloadExecutionResult::Failed(err.to_string()));
     }
+    Some(outcome)
 }
 
 fn handle_download_control_without_writer(control: RecordingControl) -> Option<DownloadExecutionResult> {
@@ -960,19 +836,21 @@ fn spawn_recording_notification_after_persist(
     });
 }
 
+/// Take the active task out of the candidate, but only when it is still the
+/// one this worker is executing.
+fn take_active(candidate: &mut PersistedRecordingQueue, uuid: &str) -> Option<PersistedRecordingTask> {
+    candidate.active.take_if(|active| active.uuid == uuid)
+}
+
 async fn requeue_active_download_for_retry(
     download_queue: &RecordingQueue,
     uuid: &str,
     promote: bool,
 ) -> Result<bool, QueueMutationError> {
     Ok(mutate_optional(download_queue, |candidate| {
-        let Some(mut download) = candidate.active.take() else {
+        let Some(mut download) = take_active(candidate, uuid) else {
             return Ok(None);
         };
-        if download.uuid != uuid {
-            candidate.active = Some(download);
-            return Ok(None);
-        }
         download.finished = false;
         download.paused = false;
         download.error = None;
@@ -993,15 +871,12 @@ async fn requeue_active_download_for_capacity_wait(
     uuid: &str,
     reason: &str,
     promote: bool,
+    consumed_control: Option<RecordingControl>,
 ) -> Result<bool, QueueMutationError> {
-    let mutation = |candidate: &mut crate::recording::recording_queue::PersistedRecordingQueue| {
-        let Some(mut download) = candidate.active.take() else {
+    let mutation = |candidate: &mut PersistedRecordingQueue| {
+        let Some(mut download) = take_active(candidate, uuid) else {
             return Ok(None);
         };
-        if download.uuid != uuid {
-            candidate.active = Some(download);
-            return Ok(None);
-        }
         download.finished = false;
         download.paused = false;
         download.error = Some(reason.to_string());
@@ -1013,7 +888,7 @@ async fn requeue_active_download_for_capacity_wait(
         }
         Ok(Some(true))
     };
-    let result = if let Some(control) = Option::<RecordingControl>::None {
+    let result = if let Some(control) = consumed_control {
         download_queue.mutate_optional_and_clear_control(control, mutation).await?
     } else {
         mutate_optional(download_queue, mutation).await?
@@ -1056,13 +931,9 @@ async fn fail_active_download(
     reason: &str,
 ) -> Result<bool, QueueMutationError> {
     Ok(mutate_optional(download_queue, |candidate| {
-        let Some(mut failed) = candidate.active.take() else {
+        let Some(mut failed) = take_active(candidate, uuid) else {
             return Ok(None);
         };
-        if failed.uuid != uuid {
-            candidate.active = Some(failed);
-            return Ok(None);
-        }
         failed.finished = true;
         failed.paused = false;
         failed.next_retry_at = None;
@@ -1098,13 +969,9 @@ where
     F: FnOnce(&mut PersistedRecordingTask) -> RecordingNotificationPlan,
 {
     mutate_optional(download_queue, |candidate| {
-        let Some(mut active) = candidate.active.take() else {
+        let Some(mut active) = take_active(candidate, uuid) else {
             return Ok(None);
         };
-        if active.uuid != uuid {
-            candidate.active = Some(active);
-            return Ok(None);
-        }
         let notification = finish(&mut active);
         candidate.finished.push(active);
         crate::recording::recording_queue::promote_from_queue(candidate);
@@ -1116,13 +983,9 @@ where
 async fn cancel_active_and_promote(download_queue: &RecordingQueue, uuid: &str) -> Result<bool, QueueMutationError> {
     Ok(download_queue
         .mutate_optional_and_clear_control(RecordingControl::Cancel, |candidate| {
-            let Some(mut active) = candidate.active.take() else {
+            let Some(mut active) = take_active(candidate, uuid) else {
                 return Ok(None);
             };
-            if active.uuid != uuid {
-                candidate.active = Some(active);
-                return Ok(None);
-            }
             active.finished = true;
             active.paused = false;
             active.next_retry_at = None;
@@ -1311,24 +1174,23 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
             }
             tokio::spawn(async move {
                 'worker: loop {
-                    if dq.active.read().await.deref().is_some() {
-                        if let Some(download) = dq.active.read().await.as_ref() {
-                            if download.paused {
-                                break;
-                            }
-                        }
-                        let Some(worker_uuid) = dq.active.read().await.as_ref().map(|download| download.uuid.clone())
-                        else {
+                    // One read: the uuid, pause flag and live window must describe
+                    // the same task.
+                    let active_head =
+                        dq.active.read().await.as_ref().map(|download| {
+                            (download.uuid.clone(), download.paused, recording_deadline_instant(download))
+                        });
+                    if let Some((worker_uuid, paused, window_deadline)) = active_head {
+                        if paused {
                             break;
-                        };
+                        }
 
                         // Acquire a provider connection slot for this download.
                         // If the provider is at capacity, wait in the priority queue until signalled.
                         // Never proceeds without a slot when input_name is set — account bans otherwise.
                         let provider_acquire_result = {
                             let (input_name, priority) = dq.active_scheduling_priority().await.unwrap_or((None, 0i8));
-                            // Only live work has one; a transfer waits as long as it takes.
-                            let window_deadline = dq.active.read().await.as_ref().and_then(recording_deadline_instant);
+                            // Only live work has a window deadline; a transfer waits as long as it takes.
                             if let Some(input_name) = input_name {
                                 loop {
                                     let capacities = capacity.capacities_for_input(&input_name).await;
@@ -1337,55 +1199,14 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                     // background limit expects it to take effect.
                                     let live_config = app_config.config.load();
                                     let capacity_cfg = live_config.recording().unwrap_or(&download_cfg);
-                                    if background_download_should_wait(priority, &capacities, capacity_cfg) {
-                                        if let Err(err) = broadcast_worker_mutation(
-                                            &event_manager,
-                                            set_active_download_state(
-                                                &dq,
-                                                &worker_uuid,
-                                                RecordingTaskState::WaitingForCapacity,
-                                                None,
-                                                false,
-                                            )
-                                            .await,
-                                            "waiting-for-capacity state",
-                                        ) {
-                                            error!("Download worker commit failed: {err}");
-                                            break 'worker;
+                                    if !background_download_should_wait(priority, &capacities, capacity_cfg) {
+                                        if let Some(handle) = capacity.acquire(&input_name, priority).await {
+                                            break ProviderAcquireResult::Acquired(Some(handle));
                                         }
-                                        match wait_for_provider_slot(
-                                            &dq,
-                                            &input_name,
-                                            priority,
-                                            control_signal.as_ref(),
-                                            control_notify.as_ref(),
-                                            window_deadline,
-                                        )
-                                        .await
+                                        if let Some(stopped) = acquire_result_for_control(*control_signal.read().await)
                                         {
-                                            None => break ProviderAcquireResult::WindowClosed,
-                                            Some(RecordingWaitOutcome::Signalled) => {}
-                                            Some(RecordingWaitOutcome::Paused) => break ProviderAcquireResult::Paused,
-                                            Some(RecordingWaitOutcome::Cancelled) => {
-                                                break ProviderAcquireResult::Cancelled
-                                            }
-                                            Some(RecordingWaitOutcome::Restarted) => {
-                                                break ProviderAcquireResult::Preempted
-                                            }
+                                            break stopped;
                                         }
-                                        continue;
-                                    }
-                                    if let Some(handle) = capacity.acquire(&input_name, priority).await {
-                                        break ProviderAcquireResult::Acquired(Some(handle));
-                                    }
-                                    if *control_signal.read().await == RecordingControl::Cancel {
-                                        break ProviderAcquireResult::Cancelled;
-                                    }
-                                    if *control_signal.read().await == RecordingControl::Pause {
-                                        break ProviderAcquireResult::Paused;
-                                    }
-                                    if *control_signal.read().await == RecordingControl::Restart {
-                                        break ProviderAcquireResult::Preempted;
                                     }
                                     if let Err(err) = broadcast_worker_mutation(
                                         &event_manager,
@@ -1403,7 +1224,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         break 'worker;
                                     }
                                     // Wait for highest-priority signal — no sleep, no polling.
-                                    match wait_for_provider_slot(
+                                    let waited = wait_for_provider_slot(
                                         &dq,
                                         &input_name,
                                         priority,
@@ -1411,17 +1232,9 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         control_notify.as_ref(),
                                         window_deadline,
                                     )
-                                    .await
-                                    {
-                                        None => break ProviderAcquireResult::WindowClosed,
-                                        Some(RecordingWaitOutcome::Signalled) => {}
-                                        Some(RecordingWaitOutcome::Paused) => break ProviderAcquireResult::Paused,
-                                        Some(RecordingWaitOutcome::Cancelled) => {
-                                            break ProviderAcquireResult::Cancelled
-                                        }
-                                        Some(RecordingWaitOutcome::Restarted) => {
-                                            break ProviderAcquireResult::Preempted
-                                        }
+                                    .await;
+                                    if let Some(stopped) = acquire_result_after_wait(waited) {
+                                        break stopped;
                                     }
                                 }
                             } else {
@@ -1489,6 +1302,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         &worker_uuid,
                                         "Reloading download service configuration",
                                         true,
+                                        Some(RecordingControl::Restart),
                                     )
                                     .await,
                                     "configuration-reload requeue",
@@ -1534,7 +1348,6 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         &client,
                                         Arc::clone(&control_signal),
                                         Arc::clone(&control_notify),
-                                        None,
                                         Some(&event_manager),
                                     )
                                     .await
@@ -1621,14 +1434,15 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                         match execution_result {
                             DownloadExecutionResult::Completed => {
                                 capacity.release(provider_handle).await;
-                                let measured_bytes = {
-                                    let active = dq.active.read().await;
-                                    match active.as_ref() {
-                                        Some(fd) => tokio::fs::metadata(&fd.file_path)
-                                            .await
-                                            .map_or(fd.size, |metadata| metadata.len()),
-                                        None => 0,
+                                // Path copied out first: the lock must not be held across
+                                // the filesystem call, or progress writers and commits stall.
+                                let finished_file =
+                                    dq.active.read().await.as_ref().map(|fd| (fd.file_path.clone(), fd.size));
+                                let measured_bytes = match finished_file {
+                                    Some((path, fallback)) => {
+                                        tokio::fs::metadata(&path).await.map_or(fallback, |metadata| metadata.len())
                                     }
+                                    None => 0,
                                 };
                                 // Beside the file, before the repository is told
                                 // it is complete: an operator finding an orphan
@@ -1712,7 +1526,14 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                 };
                                 if let Err(err) = broadcast_required_worker_mutation(
                                     &event_manager,
-                                    requeue_active_download_for_capacity_wait(&dq, &worker_uuid, reason, true).await,
+                                    requeue_active_download_for_capacity_wait(
+                                        &dq,
+                                        &worker_uuid,
+                                        reason,
+                                        true,
+                                        (control == RecordingControl::Restart).then_some(RecordingControl::Restart),
+                                    )
+                                    .await,
                                     "preempted requeue",
                                 ) {
                                     error!("Download worker commit failed: {err}");
@@ -1722,9 +1543,9 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                     break;
                                 }
                             }
-                            DownloadExecutionResult::Retryable(_err) => {
+                            DownloadExecutionResult::Retryable(err) => {
                                 capacity.release(provider_handle).await;
-                                warn!("Retrying active download after transient failure");
+                                warn!("Retrying active download after transient failure: {err}");
                                 let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg).await;
                                 let retry_delay_secs = match retry_commit {
                                     Ok(Some(RetryCommit::Waiting { delay_secs, attempts })) => {
@@ -1814,6 +1635,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                                 &worker_uuid,
                                                 "Reloading download service configuration",
                                                 true,
+                                                Some(RecordingControl::Restart),
                                             )
                                             .await,
                                             "configuration-reload retry requeue",
@@ -2028,9 +1850,11 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::{
-        continue_after_pause, download_file, ensure_recording_worker_running, finalize_http_transfer,
-        http_transfer_path, recording_deadline_instant, refresh_recording_progress, start_recording_scheduler,
-        wait_for_provider_slot, DownloadExecutionResult, DISK_GONE_BEFORE_START, LIVE_CAPACITY_WINDOW_CLOSED,
+        acquire_result_after_wait, acquire_result_for_control, continue_after_pause, download_file,
+        ensure_recording_worker_running, finalize_http_transfer, http_transfer_path, recording_deadline_instant,
+        refresh_recording_progress, requeue_active_download_for_capacity_wait, start_recording_scheduler,
+        wait_for_provider_slot, DownloadExecutionResult, ProviderAcquireResult, DISK_GONE_BEFORE_START,
+        DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
     };
     use crate::recording::{
         recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -2152,7 +1976,6 @@ mod tests {
                 Arc::new(RwLock::new(RecordingControl::None)),
                 Arc::new(Notify::new()),
                 None,
-                None,
             )
             .await;
             assert!(matches!(result, DownloadExecutionResult::Completed));
@@ -2204,7 +2027,6 @@ mod tests {
                 Arc::new(RwLock::new(RecordingControl::None)),
                 Arc::new(Notify::new()),
                 None,
-                None,
             )
             .await;
             assert!(
@@ -2234,6 +2056,68 @@ mod tests {
 
         refresh_recording_progress(&queue.active, "task", &partial, &events).await;
         assert_eq!(events.0.load(Ordering::Relaxed), 1, "unchanged bytes need no second event");
+    }
+
+    #[tokio::test]
+    async fn a_restart_requeue_consumes_the_restart_signal() {
+        // A restart that survives its own requeue makes every new worker
+        // preempt itself on start, spinning until the live window closes.
+        let queue = RecordingQueue::new();
+        *queue.active.write().await = Some(scheduled_task(RecordingKind::Live, 0, 60));
+        *queue.control_signal.write().await = RecordingControl::Restart;
+
+        let requeued = requeue_active_download_for_capacity_wait(
+            &queue,
+            "task",
+            "Reloading download service configuration",
+            false,
+            Some(RecordingControl::Restart),
+        )
+        .await
+        .expect("requeue");
+
+        assert!(requeued);
+        assert_eq!(*queue.control_signal.read().await, RecordingControl::None);
+    }
+
+    #[tokio::test]
+    async fn a_preemption_requeue_leaves_a_pending_control_untouched() {
+        let queue = RecordingQueue::new();
+        *queue.active.write().await = Some(scheduled_task(RecordingKind::Live, 0, 60));
+        *queue.control_signal.write().await = RecordingControl::Pause;
+
+        requeue_active_download_for_capacity_wait(&queue, "task", DOWNLOAD_PREEMPTED_REASON, false, None)
+            .await
+            .expect("requeue");
+
+        assert_eq!(*queue.control_signal.read().await, RecordingControl::Pause);
+    }
+
+    #[test]
+    fn a_slot_wait_maps_onto_the_acquisition_outcome() {
+        // A wait that ends without an outcome ran into the live window's end;
+        // being signalled means trying to acquire again.
+        assert!(matches!(acquire_result_after_wait(None), Some(ProviderAcquireResult::WindowClosed)));
+        assert!(acquire_result_after_wait(Some(RecordingWaitOutcome::Signalled)).is_none());
+        assert!(matches!(
+            acquire_result_after_wait(Some(RecordingWaitOutcome::Paused)),
+            Some(ProviderAcquireResult::Paused)
+        ));
+        assert!(matches!(
+            acquire_result_after_wait(Some(RecordingWaitOutcome::Cancelled)),
+            Some(ProviderAcquireResult::Cancelled)
+        ));
+        assert!(matches!(
+            acquire_result_after_wait(Some(RecordingWaitOutcome::Restarted)),
+            Some(ProviderAcquireResult::Preempted)
+        ));
+        assert!(acquire_result_for_control(RecordingControl::None).is_none());
+        assert!(matches!(acquire_result_for_control(RecordingControl::Cancel), Some(ProviderAcquireResult::Cancelled)));
+        assert!(matches!(acquire_result_for_control(RecordingControl::Pause), Some(ProviderAcquireResult::Paused)));
+        assert!(matches!(
+            acquire_result_for_control(RecordingControl::Restart),
+            Some(ProviderAcquireResult::Preempted)
+        ));
     }
 
     #[test]

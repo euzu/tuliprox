@@ -9,7 +9,6 @@ mod api_user_recovery;
 mod db_viewer;
 mod epg_repository;
 mod geoip;
-pub mod identity_registry;
 mod library_repository;
 mod live_stream_metadata_repository;
 mod m3u_playlist_iterator;

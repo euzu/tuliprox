@@ -11,7 +11,7 @@
 //! be wrong the moment a second user attaches, and would force the file to
 //! move when the first detaches.
 
-use shared::model::RecordingKind;
+use shared::{model::RecordingKind, utils::sanitize_filename_chars};
 use std::path::{Component, Path, PathBuf};
 
 /// Longest a single path component may be, in bytes.
@@ -54,13 +54,15 @@ impl std::error::Error for RecordingPathError {}
 /// supplied.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecordingGrouping {
-    /// Live: the channel the capture came from.
+    /// Playlist group the recorded item belongs to. Every kind is filed
+    /// under it when known.
+    pub group: Option<String>,
+    /// Live: the channel the capture came from. Used only without a group.
     pub channel: Option<String>,
-    /// VOD: the title.
+    /// VOD: the title. Used only without a group.
     pub title: Option<String>,
-    /// Series: the series name and season number.
+    /// Series: the series name shared by all its episodes.
     pub series: Option<String>,
-    pub season: Option<u32>,
 }
 
 impl RecordingGrouping {
@@ -68,30 +70,23 @@ impl RecordingGrouping {
 
     pub fn vod(title: impl Into<String>) -> Self { Self { title: Some(title.into()), ..Self::default() } }
 
-    pub fn series(series: impl Into<String>, season: Option<u32>) -> Self {
-        Self { series: Some(series.into()), season, ..Self::default() }
+    pub fn series(series: impl Into<String>) -> Self { Self { series: Some(series.into()), ..Self::default() } }
+
+    #[must_use]
+    pub fn in_group(mut self, group: Option<String>) -> Self {
+        self.group = group;
+        self
     }
 }
 
-/// Replaces anything that is not safe in a single path component.
+/// `Some(value)` when it holds more than whitespace.
+fn non_blank(value: Option<&String>) -> Option<&str> { value.map(String::as_str).filter(|v| !v.trim().is_empty()) }
+
+/// Reduces `raw` to one safe path component. Letters of every script survive;
+/// separators, control characters, emoji and other symbols are dropped (the
+/// same allow-list the STRM export uses).
 fn sanitize_component(raw: &str) -> String {
-    let replaced: String = raw
-        .chars()
-        .map(|c| {
-            // Separators, the NUL byte, control characters and the characters
-            // Windows forbids all collapse to `_`.
-            if c == '/'
-                || c == '\\'
-                || c == '\0'
-                || c.is_control()
-                || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')
-            {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect();
+    let replaced = sanitize_filename_chars(raw, false);
     // A leading dot would hide the file; a trailing dot or space is silently
     // stripped by Windows, which would make two distinct names collide.
     let trimmed = replaced.trim().trim_matches('.').trim();
@@ -143,9 +138,11 @@ fn sanitize_extension(extension: &str) -> String {
 /// Builds the relative path a recording is stored at, below the recording
 /// root. Pure: it touches no filesystem and depends on no principal.
 ///
-/// Organised layouts are `<channel>/<file>` for Live, `<title>/<file>` for
-/// VOD and `<series>/Season NN/<file>` for a series episode. Unorganised is
-/// the bare `<file>`.
+/// Organised layouts file every kind under its playlist group:
+/// `<group>/<file>` for Live and VOD, `<group>/<series>/<file>` for a series
+/// episode, so all episodes of one series share a folder. Without a group,
+/// Live falls back to `<channel>/<file>` and VOD to `<title>/<file>`.
+/// Unorganised is the bare `<file>`.
 pub fn build_relative_path(
     kind: RecordingKind,
     organize_into_directories: bool,
@@ -156,27 +153,13 @@ pub fn build_relative_path(
     if !organize_into_directories {
         return Ok(PathBuf::from(filename));
     }
-    let mut path = PathBuf::new();
-    match kind {
-        RecordingKind::Live => {
-            if let Some(channel) = grouping.channel.as_deref().filter(|c| !c.trim().is_empty()) {
-                path.push(sanitize_component(channel));
-            }
-        }
-        RecordingKind::Vod => {
-            if let Some(title) = grouping.title.as_deref().filter(|t| !t.trim().is_empty()) {
-                path.push(sanitize_component(title));
-            }
-        }
-        RecordingKind::Series => {
-            if let Some(series) = grouping.series.as_deref().filter(|s| !s.trim().is_empty()) {
-                path.push(sanitize_component(series));
-                if let Some(season) = grouping.season {
-                    path.push(format!("Season {season:02}"));
-                }
-            }
-        }
-    }
+    let group = non_blank(grouping.group.as_ref());
+    let directories = match kind {
+        RecordingKind::Live => [group.or_else(|| non_blank(grouping.channel.as_ref())), None],
+        RecordingKind::Vod => [group.or_else(|| non_blank(grouping.title.as_ref())), None],
+        RecordingKind::Series => [group, non_blank(grouping.series.as_ref())],
+    };
+    let mut path: PathBuf = directories.into_iter().flatten().map(sanitize_component).collect();
     path.push(filename);
     Ok(path)
 }
@@ -245,18 +228,40 @@ mod tests {
             (RecordingKind::Live, true, RecordingGrouping::live("BBC One"), "news.ts", "BBC One/news.ts"),
             (RecordingKind::Vod, true, RecordingGrouping::vod("The Film"), "the_film.mp4", "The Film/the_film.mp4"),
             (
-                RecordingKind::Series,
+                RecordingKind::Live,
                 true,
-                RecordingGrouping::series("The Show", Some(1)),
-                "s01e02.mkv",
-                "The Show/Season 01/s01e02.mkv",
+                RecordingGrouping::live("BBC One").in_group(Some("UK News".into())),
+                "news.ts",
+                "UK News/news.ts",
+            ),
+            (
+                RecordingKind::Vod,
+                true,
+                RecordingGrouping::vod("The Film").in_group(Some("Drama".into())),
+                "the_film.mp4",
+                "Drama/the_film.mp4",
             ),
             (
                 RecordingKind::Series,
                 true,
-                RecordingGrouping::series("The Show", Some(12)),
+                RecordingGrouping::series("The Show").in_group(Some("Crime".into())),
+                "s01e02.mkv",
+                "Crime/The Show/s01e02.mkv",
+            ),
+            (
+                RecordingKind::Series,
+                true,
+                RecordingGrouping::series("The Show").in_group(Some("Crime".into())),
                 "s12e02.mkv",
-                "The Show/Season 12/s12e02.mkv",
+                "Crime/The Show/s12e02.mkv",
+            ),
+            // A blank group counts as no group.
+            (
+                RecordingKind::Live,
+                true,
+                RecordingGrouping::live("BBC One").in_group(Some("  ".into())),
+                "news.ts",
+                "BBC One/news.ts",
             ),
             // Unorganised: the bare file, directly under the recording root.
             (RecordingKind::Live, false, RecordingGrouping::live("BBC One"), "news.ts", "news.ts"),
@@ -264,7 +269,7 @@ mod tests {
             // A missing grouping degrades to the flat layout rather than
             // inventing a directory name.
             (RecordingKind::Vod, true, RecordingGrouping::default(), "orphan.mp4", "orphan.mp4"),
-            (RecordingKind::Series, true, RecordingGrouping::series("The Show", None), "e1.mkv", "The Show/e1.mkv"),
+            (RecordingKind::Series, true, RecordingGrouping::series("The Show"), "e1.mkv", "The Show/e1.mkv"),
         ];
         for (kind, organize, grouping, filename, expected) in cases {
             assert_eq!(&built(*kind, *organize, grouping, filename), expected, "{kind} organize={organize}");
@@ -278,10 +283,10 @@ mod tests {
         for kind in [RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series] {
             for organize in [true, false] {
                 let grouping = RecordingGrouping {
+                    group: Some("Group".into()),
                     channel: Some("Chan".into()),
                     title: Some("Title".into()),
                     series: Some("Series".into()),
-                    season: Some(3),
                 };
                 let path = built(kind, organize, &grouping, "file.ts");
                 for forbidden in ["users/", "shared/", "private/"] {
@@ -295,13 +300,13 @@ mod tests {
     fn separators_and_traversal_cannot_escape_a_component() {
         let grouping = RecordingGrouping::vod("../../etc");
         let path = built(RecordingKind::Vod, true, &grouping, "passwd");
-        // Separators collapse first, then the leading dot is stripped so the
+        // Separators are dropped, then the leading dots are stripped so the
         // directory is not hidden. Either way it is one flat component.
-        assert_eq!(path, "_.._etc/passwd");
+        assert_eq!(path, "etc/passwd");
         assert!(is_contained_relative_path(Path::new(&path)));
 
         let nested = built(RecordingKind::Vod, true, &RecordingGrouping::vod("a/b"), "c/d.ts");
-        assert_eq!(nested, "a_b/d.ts", "a separator in a title must not create a directory");
+        assert_eq!(nested, "ab/d.ts", "a separator in a title must not create a directory");
     }
 
     #[test]
@@ -310,10 +315,29 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_and_control_characters_are_replaced() {
-        assert_eq!(sanitize_component("a:b*c?d\"e<f>g|h"), "a_b_c_d_e_f_g_h");
-        assert_eq!(sanitize_component("tab\there"), "tab_here");
-        assert_eq!(sanitize_component("nul\0byte"), "nul_byte");
+    fn unsafe_and_control_characters_are_dropped() {
+        assert_eq!(sanitize_component("a:b*c?d\"e<f>g|h"), "abcdefgh");
+        assert_eq!(sanitize_component("tab\there"), "tab here");
+        assert_eq!(sanitize_component("nul\0byte"), "nulbyte");
+    }
+
+    #[test]
+    fn letters_of_every_script_are_kept() {
+        for name in ["Krimis Deutschland", "Çağrı Şükür", "Новости", "الأخبار", "Ειδήσεις", "Café Größe"]
+        {
+            assert_eq!(sanitize_component(name), name);
+        }
+        assert_eq!(sanitize_component("Krimi 🎬"), "Krimi");
+        assert_eq!(sanitize_component("🎬"), "untitled");
+        assert_eq!(
+            built(
+                RecordingKind::Series,
+                true,
+                &RecordingGrouping::series("Тайны следствия").in_group(Some("Сериалы".into())),
+                "s01e02.mkv",
+            ),
+            "Сериалы/Тайны следствия/s01e02.mkv"
+        );
     }
 
     #[test]
@@ -334,13 +358,13 @@ mod tests {
 
     #[test]
     fn a_component_is_capped_on_a_character_boundary() {
-        // Four-byte characters: a naive byte truncation would split one and
+        // Three-byte characters: a naive byte truncation would split one and
         // produce invalid UTF-8.
-        let long = "🎬".repeat(200);
+        let long = "ニ".repeat(200);
         let capped = sanitize_component(&long);
         assert!(capped.len() <= MAX_COMPONENT_BYTES, "{} bytes", capped.len());
-        assert!(capped.chars().all(|c| c == '🎬'));
-        assert_eq!(capped.len() % 4, 0, "a character was split");
+        assert!(capped.chars().all(|c| c == 'ニ'));
+        assert_eq!(capped.len() % 3, 0, "a character was split");
     }
 
     #[test]
@@ -398,7 +422,7 @@ mod tests {
         let relative = build_relative_path(
             RecordingKind::Series,
             true,
-            &RecordingGrouping::series("The Show", Some(2)),
+            &RecordingGrouping::series("The Show").in_group(Some("Crime".into())),
             "e03.mkv",
         )
         .expect("path builds");
@@ -406,7 +430,7 @@ mod tests {
         let written = root.join(&relative);
         let read_back = resolve_under_root(root, &relative).expect("resolves");
         assert_eq!(written, read_back);
-        assert_eq!(read_back, PathBuf::from("/recordings/The Show/Season 02/e03.mkv"));
+        assert_eq!(read_back, PathBuf::from("/recordings/Crime/The Show/e03.mkv"));
     }
 
     #[test]
@@ -417,10 +441,10 @@ mod tests {
         for kind in [RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series] {
             for group in nasty {
                 let grouping = RecordingGrouping {
+                    group: Some(group.into()),
                     channel: Some(group.into()),
                     title: Some(group.into()),
                     series: Some(group.into()),
-                    season: Some(1),
                 };
                 for filename in ["ok.ts", "../../escape.ts", "/abs.ts"] {
                     let Ok(path) = build_relative_path(kind, true, &grouping, filename) else { continue };

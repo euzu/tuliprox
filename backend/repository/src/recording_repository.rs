@@ -167,6 +167,14 @@ pub struct PersistedLibraryEntry {
     pub retry_attempts: u8,
     #[serde(default)]
     pub next_retry_at: Option<i64>,
+    /// This entry's own metadata: rule provenance, notification markers,
+    /// padding, title edits and a pending deletion are per link, not per file.
+    ///
+    /// `None` when it is identical to the materialization's copy, which is the
+    /// case for the entry that produces the file, so a file with a single
+    /// link stores its metadata once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<RecordingMetadata>,
 }
 
 /// Repository-level bookkeeping, stored under its own key.
@@ -304,7 +312,7 @@ impl RecoverySchema<RecordingDbKey, RecordingDbValue> for RecordingRecoverySchem
 }
 
 /// The stored records, indexed for joining and for the reference invariant.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct StoredRecords {
     queue_revision: u64,
     materializations: BTreeMap<String, PersistedMaterialization>,
@@ -346,6 +354,19 @@ impl StoredRecords {
         for (id, materialization) in &mut self.materializations {
             if let Some(priority) = strongest.get(id) {
                 materialization.priority = *priority;
+            }
+        }
+    }
+
+    /// Store an entry's metadata only where it differs from its file's copy.
+    fn drop_redundant_entry_media(&mut self) {
+        for entry in self.entries.values_mut() {
+            let redundant = self
+                .materializations
+                .get(&entry.materialization_id)
+                .is_some_and(|materialization| entry.media.as_ref() == Some(&materialization.media));
+            if redundant {
+                entry.media = None;
             }
         }
     }
@@ -398,6 +419,23 @@ pub fn materialization_id_for(task: &PersistedRecordingTask) -> String {
     format!("mat-{}", task.media_identity)
 }
 
+/// How strongly a task's view of the physical file can be trusted, lower is
+/// stronger.
+///
+/// Several entries can reference one file, but only one of them is the
+/// producer. The entry holding the active slot is writing it right now, and a
+/// completed one finished it; a queued or failed sibling only carries the
+/// state it was admitted with. Picking whichever entry came first in the
+/// record set let a waiting entry overwrite the running transfer's progress.
+fn producer_rank(task: &PersistedRecordingTask) -> u8 {
+    match (task.partition, task.state) {
+        (RecordingPartition::Active, _) => 0,
+        (_, RecordingTaskState::Completed) => 1,
+        (_, RecordingTaskState::Running | RecordingTaskState::Paused | RecordingTaskState::Cancelling) => 2,
+        _ => 3,
+    }
+}
+
 /// Split a task into the file it produces and the link that owns it.
 fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedLibraryEntry) {
     let materialization_id = materialization_id_for(task);
@@ -433,6 +471,7 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
         error: task.error.clone(),
         retry_attempts: task.retry_attempts,
         next_retry_at: task.next_retry_at,
+        media: Some(task.recording.clone()),
     };
     (materialization, entry)
 }
@@ -442,7 +481,14 @@ fn split(task: &PersistedRecordingTask) -> (PersistedMaterialization, PersistedL
 /// The link is authoritative for owner and visibility; the file is
 /// authoritative for everything physical.
 fn join(materialization: &PersistedMaterialization, entry: &PersistedLibraryEntry) -> PersistedRecordingTask {
-    let mut media = materialization.media.clone();
+    let mut media = entry.media.clone().unwrap_or_else(|| materialization.media.clone());
+    let file = &materialization.media;
+    media.relative_path.clone_from(&file.relative_path);
+    media.partial_relative_path.clone_from(&file.partial_relative_path);
+    media.resume_etag.clone_from(&file.resume_etag);
+    media.resume_last_modified.clone_from(&file.resume_last_modified);
+    media.measured_bytes = file.measured_bytes;
+    media.completed_at = file.completed_at;
     match &entry.principal {
         LibraryPrincipal::Shared => media.visibility = RecordingVisibility::Shared,
         LibraryPrincipal::User { id } => {
@@ -486,6 +532,10 @@ pub struct RecordingRepositorySnapshot {
 /// The recoverable recording store.
 pub struct RecordingRepository {
     journal: Journal,
+    /// What the database holds after the last successful write, so a commit
+    /// diffs against memory instead of scanning and decoding every record.
+    /// Dropped on any failed write; the next access reads it back from disk.
+    committed: Option<StoredRecords>,
 }
 
 impl RecordingRepository {
@@ -508,7 +558,7 @@ impl RecordingRepository {
         let paths =
             RecoveryPaths { database: storage_dir.join(DATABASE_FILE), directory: recovery_root.join(RECOVERY_DIR) };
         let (journal, report) = Journal::open(paths, RecordingRecoverySchema, RecoveryPolicy::default())?;
-        let mut repository = Self { journal };
+        let mut repository = Self { journal, committed: None };
         // A process that died with live keys would otherwise keep them until
         // the next create, and a server that never records again would keep
         // them forever.
@@ -520,7 +570,7 @@ impl RecordingRepository {
     ///
     /// Returns how many were removed, so a caller can log or assert on it.
     pub fn purge_expired_idempotency(&mut self, now: i64) -> io::Result<usize> {
-        let stored = self.read_records()?;
+        let mut stored = self.take_committed()?;
         let operations: Vec<_> = stored
             .idempotency
             .iter()
@@ -535,8 +585,29 @@ impl RecordingRepository {
         let removed = operations.len();
         if removed > 0 {
             let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
+            stored.idempotency.retain(|_, record| !record.is_expired_at(now));
         }
+        self.committed = Some(stored);
         Ok(removed)
+    }
+
+    /// The committed records, read from disk only when no write has cached
+    /// them yet.
+    fn committed(&mut self) -> io::Result<&StoredRecords> {
+        if self.committed.is_none() {
+            self.committed = Some(self.read_records()?);
+        }
+        self.committed.as_ref().ok_or_else(|| invalid("committed recording records are missing"))
+    }
+
+    /// Takes the cached records out for a write. Until the write succeeds and
+    /// puts the new state back, the cache stays empty, so a failed write can
+    /// never leave memory claiming something the database does not hold.
+    fn take_committed(&mut self) -> io::Result<StoredRecords> {
+        match self.committed.take() {
+            Some(stored) => Ok(stored),
+            None => self.read_records(),
+        }
     }
 
     /// Whether a request carrying this key has already been accepted.
@@ -551,7 +622,7 @@ impl RecordingRepository {
         request_fingerprint: &str,
         now: i64,
     ) -> io::Result<IdempotencyOutcome> {
-        let stored = self.read_records()?;
+        let stored = self.committed()?;
         let Some(record) = stored.idempotency.get(&(principal.to_owned(), key.to_owned())) else {
             return Ok(IdempotencyOutcome::Fresh);
         };
@@ -571,7 +642,7 @@ impl RecordingRepository {
     /// The caller still works in whole tasks. Splitting them is the
     /// repository's job precisely so the reference count has one owner.
     pub fn load(&mut self) -> io::Result<RecordingRepositorySnapshot> {
-        let stored = self.read_records()?;
+        let stored = self.committed()?;
         let mut snapshot = RecordingRepositorySnapshot { queue_revision: stored.queue_revision, tasks: Vec::new() };
         for entry in stored.entries.values() {
             let materialization = stored
@@ -647,20 +718,26 @@ impl RecordingRepository {
         now: i64,
     ) -> io::Result<()> {
         let mut incoming = StoredRecords::default();
+        let mut ranks: BTreeMap<String, u8> = BTreeMap::new();
         for task in tasks {
             let (materialization, entry) = split(task);
             if incoming.entries.insert(entry.id.clone(), entry).is_some() {
                 return Err(invalid("recording batch contains two tasks with the same uuid"));
             }
-            // Two requests for the same media converge on one file; the first
-            // one to arrive defines its physical state.
-            let _ = incoming.materializations.entry(materialization.id.clone()).or_insert(materialization);
+            // Two requests for the same media converge on one file; the
+            // entry producing it defines its physical state.
+            let rank = producer_rank(task);
+            if ranks.get(&materialization.id).is_none_or(|current| rank < *current) {
+                ranks.insert(materialization.id.clone(), rank);
+                incoming.materializations.insert(materialization.id.clone(), materialization);
+            }
         }
+        incoming.drop_redundant_entry_media();
         incoming.recount_references();
         incoming.recompute_effective_priorities();
         incoming.check_reference_invariant()?;
 
-        let existing = self.read_records()?;
+        let existing = self.take_committed()?;
         let mut operations = Vec::new();
         for id in existing.entries.keys() {
             if !incoming.entries.contains_key(id) {
@@ -690,19 +767,25 @@ impl RecordingRepository {
                 RecordingDbValue::LibraryEntry(Box::new(entry.clone())),
             ));
         }
+        let replaced = idempotency.as_ref().map(|record| (record.principal.clone(), record.key.clone()));
         for ((principal, key), record) in &existing.idempotency {
-            if record.is_expired_at(now) {
+            // A key reused after it expired is overwritten by the upsert below;
+            // deleting it in the same batch would touch the key twice.
+            if record.is_expired_at(now) && replaced.as_ref() != Some(&(principal.clone(), key.clone())) {
                 operations.push(RecoveryOperation::Delete(RecordingDbKey::Idempotency {
                     principal: principal.clone(),
                     token: key.clone(),
                 }));
             }
         }
+        incoming.idempotency = existing.idempotency;
+        incoming.idempotency.retain(|_, record| !record.is_expired_at(now));
         if let Some(record) = idempotency {
             operations.push(RecoveryOperation::Upsert(
                 RecordingDbKey::Idempotency { principal: record.principal.clone(), token: record.key.clone() },
-                RecordingDbValue::Idempotency(Box::new(record)),
+                RecordingDbValue::Idempotency(Box::new(record.clone())),
             ));
+            let _ = incoming.idempotency.insert((record.principal.clone(), record.key.clone()), record);
         }
         if existing.queue_revision != queue_revision || operations.is_empty() {
             operations.push(RecoveryOperation::Upsert(
@@ -712,6 +795,8 @@ impl RecordingRepository {
         }
 
         let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
+        incoming.queue_revision = queue_revision;
+        self.committed = Some(incoming);
         let _ = self.journal.checkpoint_if_needed()?;
         Ok(())
     }
@@ -719,7 +804,8 @@ impl RecordingRepository {
     /// Confirms the database and its recovery history agree, and that every
     /// stored task is filed under the uuid it carries.
     pub fn verify(&mut self) -> io::Result<RecoveryVerificationReport> {
-        let _ = self.load()?;
+        // Read from disk, not from the cache: this is the integrity check.
+        let _ = self.read_records()?;
         self.journal.verify()
     }
 
@@ -1135,6 +1221,80 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn each_entry_keeps_its_own_metadata_across_a_reload() -> io::Result<()> {
+        // Provenance, notification markers, padding, title edits and a pending
+        // deletion belong to the link. When the file's copy of the metadata was
+        // the only one stored, a reload handed every sibling the first entry's
+        // values: a rule lost its occurrence, and a deletion stamp jumped to an
+        // entry nobody was deleting.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        let mut alice = task_for("alice", "web:alice", "programme-42");
+        alice.recording.provenance.rule_id = Some("rule-a".to_owned());
+        alice.recording.provenance.occurrence_key = Some("occ-a".to_owned());
+        alice.recording.program_title = Some("Alice's title".to_owned());
+        alice.recording.post_roll_secs = 300;
+        alice.recording.deleting_previous_state = Some(shared::model::recording::DeletionPreviousState::Completed);
+        let mut bob = task_for("bob", "web:bob", "programme-42");
+        bob.recording.provenance.rule_id = Some("rule-b".to_owned());
+        bob.recording.provenance.occurrence_key = Some("occ-b".to_owned());
+        bob.recording.program_title = Some("Bob's title".to_owned());
+
+        repository.commit(1, &[alice.clone(), bob.clone()])?;
+        let loaded = repository.load()?.tasks;
+        let find = |uuid: &str| loaded.iter().find(|task| task.uuid == uuid).expect("entry").recording.clone();
+
+        let (alice_loaded, bob_loaded) = (find("alice"), find("bob"));
+        assert_eq!(alice_loaded.provenance, alice.recording.provenance);
+        assert_eq!(bob_loaded.provenance, bob.recording.provenance);
+        assert_eq!(alice_loaded.program_title, alice.recording.program_title);
+        assert_eq!(bob_loaded.program_title, bob.recording.program_title);
+        assert_eq!(alice_loaded.post_roll_secs, 300);
+        assert_eq!(bob_loaded.post_roll_secs, bob.recording.post_roll_secs);
+        assert!(alice_loaded.deleting_previous_state.is_some());
+        assert!(bob_loaded.deleting_previous_state.is_none(), "a deletion stamp must not move to a sibling");
+        Ok(())
+    }
+
+    #[test]
+    fn the_running_entry_defines_the_file_not_the_one_queued_behind_it() -> io::Result<()> {
+        // A queued sibling sits ahead of the active slot in the record set.
+        // Its file state is what it was admitted with; the running transfer's
+        // progress and resume validators are the truth.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        let mut queued = task_for("bob", "web:bob", "film-42");
+        queued.partition = RecordingPartition::Queued;
+        queued.state = RecordingTaskState::Queued;
+        queued.size = 0;
+        queued.file_path = PathBuf::from("/rec/film_1.mp4");
+        let mut running = task_for("alice", "web:alice", "film-42");
+        running.partition = RecordingPartition::Active;
+        running.state = RecordingTaskState::Running;
+        running.size = 4096;
+        running.file_path = PathBuf::from("/rec/film.mp4");
+        running.recording.resume_etag = Some("\"v1\"".to_owned());
+
+        repository.commit(1, &[queued, running])?;
+        for task in repository.load()?.tasks {
+            assert_eq!(task.file_path, PathBuf::from("/rec/film.mp4"), "{}", task.uuid);
+            assert_eq!(task.size, 4096, "{}", task.uuid);
+            assert_eq!(task.recording.resume_etag.as_deref(), Some("\"v1\""), "{}", task.uuid);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_single_link_stores_its_metadata_once() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(1, &[task_for("alice", "web:alice", "film-42")])?;
+        let stored = repository.read_records()?;
+        assert!(stored.entries.values().all(|entry| entry.media.is_none()));
+        Ok(())
+    }
+
     /// Two entries on one file, at the given priorities. Lower is stronger.
     fn shared_media_at(priorities: [(&str, i8); 2]) -> Vec<PersistedRecordingTask> {
         priorities
@@ -1250,6 +1410,44 @@ mod tests {
         {
             assert!(encoded.contains(field), "{field} is missing from {encoded}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn an_expired_key_can_be_accepted_again() -> io::Result<()> {
+        // The lookup reports an expired key as fresh, so the caller accepts
+        // the request and commits the same key again. Purging the old record
+        // in that batch as well touched the key twice and failed the write.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 0)), 0)?;
+
+        let later = IDEMPOTENCY_TTL_SECS + 10;
+        let mut renewed = idempotency_record("k1", "fp2", later);
+        renewed.recording_id = "b".to_string();
+        repository.commit_with_idempotency(2, &[task("a"), task("b")], Some(renewed), later)?;
+
+        assert_eq!(
+            repository.lookup_idempotency("web:alice", "k1", "fp2", later)?,
+            IdempotencyOutcome::Replay { recording_id: "b".to_string() }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_cached_state_matches_what_a_fresh_open_reads() -> io::Result<()> {
+        // Commits diff against the state cached by the previous write. If that
+        // cache ever drifted from the database, a later diff would skip a
+        // change it believed was already stored.
+        let fixture = Fixture::new()?;
+        let mut repository = fixture.open()?;
+        repository.commit(1, &[task_for("alice", "web:alice", "film-42"), task_for("bob", "web:bob", "film-42")])?;
+        repository.commit(2, &[task_for("bob", "web:bob", "film-42"), task("c")])?;
+        let cached = repository.load()?;
+        drop(repository);
+
+        let mut reopened = fixture.open()?;
+        assert_eq!(reopened.load()?, cached);
         Ok(())
     }
 

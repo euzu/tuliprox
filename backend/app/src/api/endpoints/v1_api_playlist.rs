@@ -211,21 +211,40 @@ pub(in crate::api) struct ResolvedRecordingSource {
     pub virtual_id: u32,
     pub input_name: String,
     pub title: String,
+    /// Playlist group the item belongs to; blank groups are `None`.
+    pub group: Option<String>,
+    /// Series name shared by all episodes. Episodes carry it as their
+    /// `name`, while `title` is the episode's own title.
+    pub series_name: Option<String>,
     pub extension: Option<String>,
     pub downloadable: bool,
 }
 
-fn recording_candidate(
+/// The playlist fields a recording needs, shared by Xtream and M3U items.
+struct RecordingCandidateFields<'a> {
     virtual_id: VirtualId,
-    input_name: &str,
-    title: &str,
-    url: &str,
+    input_name: &'a str,
+    name: &'a str,
+    title: &'a str,
+    group: &'a str,
+    url: &'a str,
     item_type: PlaylistItemType,
-) -> ResolvedRecordingSource {
+}
+
+fn non_blank(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn recording_candidate(fields: &RecordingCandidateFields<'_>) -> ResolvedRecordingSource {
+    let RecordingCandidateFields { virtual_id, input_name, name, title, group, url, item_type } = *fields;
+    let is_episode = matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries);
     ResolvedRecordingSource {
         virtual_id: virtual_id.get(),
         input_name: input_name.to_string(),
         title: title.to_string(),
+        group: non_blank(group),
+        series_name: if is_episode { non_blank(name) } else { None },
         extension: shared::utils::extract_extension_from_url(url).map(str::to_string),
         downloadable: item_type != PlaylistItemType::SeriesInfo,
     }
@@ -246,13 +265,15 @@ pub(in crate::api) async fn resolve_target_recording_source(
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if item.virtual_id == wanted {
-                    resolved = Some(recording_candidate(
-                        item.virtual_id,
-                        &item.input_name,
-                        &item.title,
-                        &item.url,
-                        item.item_type,
-                    ));
+                    resolved = Some(recording_candidate(&RecordingCandidateFields {
+                        virtual_id: item.virtual_id,
+                        input_name: &item.input_name,
+                        name: &item.name,
+                        title: &item.title,
+                        group: &item.group,
+                        url: &item.url,
+                        item_type: item.item_type,
+                    }));
                     break;
                 }
             }
@@ -263,13 +284,15 @@ pub(in crate::api) async fn resolve_target_recording_source(
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if item.virtual_id == wanted {
-                    resolved = Some(recording_candidate(
-                        item.virtual_id,
-                        &item.input_name,
-                        &item.title,
-                        &item.url,
-                        item.item_type,
-                    ));
+                    resolved = Some(recording_candidate(&RecordingCandidateFields {
+                        virtual_id: item.virtual_id,
+                        input_name: &item.input_name,
+                        name: &item.name,
+                        title: &item.title,
+                        group: &item.group,
+                        url: &item.url,
+                        item_type: item.item_type,
+                    }));
                     break;
                 }
             }
@@ -349,13 +372,15 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
-                    candidates.push(recording_candidate(
-                        item.virtual_id,
-                        &item.input_name,
-                        &item.title,
-                        &item.url,
-                        item.item_type,
-                    ));
+                    candidates.push(recording_candidate(&RecordingCandidateFields {
+                        virtual_id: item.virtual_id,
+                        input_name: &item.input_name,
+                        name: &item.name,
+                        title: &item.title,
+                        group: &item.group,
+                        url: &item.url,
+                        item_type: item.item_type,
+                    }));
                 }
             }
         } else if target.has_output(TargetType::M3u) {
@@ -366,13 +391,15 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
-                    candidates.push(recording_candidate(
-                        item.virtual_id,
-                        &item.input_name,
-                        &item.title,
-                        &item.url,
-                        item.item_type,
-                    ));
+                    candidates.push(recording_candidate(&RecordingCandidateFields {
+                        virtual_id: item.virtual_id,
+                        input_name: &item.input_name,
+                        name: &item.name,
+                        title: &item.title,
+                        group: &item.group,
+                        url: &item.url,
+                        item_type: item.item_type,
+                    }));
                 }
             }
         }
@@ -1473,6 +1500,8 @@ mod epg_channel_candidate_tests {
             virtual_id,
             input_name: "input".to_string(),
             title: title.to_string(),
+            group: None,
+            series_name: None,
             extension: None,
             downloadable: true,
         }
@@ -1501,6 +1530,29 @@ mod epg_channel_candidate_tests {
             Some(1)
         );
         assert_eq!(select_epg_channel_candidate(shared_epg_id_candidates(), None).map(|c| c.virtual_id), Some(1));
+    }
+
+    #[test]
+    fn episode_candidate_carries_series_name_and_group() {
+        use super::{recording_candidate, RecordingCandidateFields};
+        use shared::model::{PlaylistItemType, VirtualId};
+        let fields = |item_type, group| RecordingCandidateFields {
+            virtual_id: VirtualId::new(7),
+            input_name: "input",
+            name: "The Show",
+            title: "The Show S01E02 Pilot",
+            group,
+            url: "http://example.test/series/7.mkv",
+            item_type,
+        };
+        let episode = recording_candidate(&fields(PlaylistItemType::Series, "Crime"));
+        assert_eq!(episode.series_name.as_deref(), Some("The Show"));
+        assert_eq!(episode.group.as_deref(), Some("Crime"));
+        assert_eq!(episode.extension.as_deref().map(|ext| ext.trim_start_matches('.')), Some("mkv"));
+
+        let film = recording_candidate(&fields(PlaylistItemType::Video, "  "));
+        assert_eq!(film.series_name, None, "only episodes carry a series name");
+        assert_eq!(film.group, None, "a blank group is no group");
     }
 
     #[test]

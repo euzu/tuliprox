@@ -4,8 +4,8 @@
 //! runtime, and DTO layers all mirror it.
 
 use super::{
-    identity_registry::UserId,
     transfer::{TaskPriorityDto, TransferStatusDto},
+    user_id::UserId,
 };
 use std::fmt;
 
@@ -341,6 +341,11 @@ pub struct RecordingMetadata {
     pub channel_name: Option<String>,
     pub program_title: Option<String>,
     pub epg: Option<EpgEpisodeMetadata>,
+    /// Playlist group of the recorded item. Organised layouts file the
+    /// recording under it.
+    pub group: Option<String>,
+    /// Series name shared by every episode of a series. Series only.
+    pub series_name: Option<String>,
     #[serde(default)]
     pub provenance: RecordingProvenance,
     /// Final relative path below the recording root. `None` until the task
@@ -409,6 +414,8 @@ impl RecordingMetadata {
             measured_bytes: 0,
             completed_at: None,
             notification_markers: Vec::new(),
+            group: None,
+            series_name: None,
             deleting_previous_state: None,
         }
     }

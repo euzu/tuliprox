@@ -4,13 +4,12 @@ use crate::{
     api::{
         endpoints::recording_media_api::AuthClaims,
         model::{
-            mutate,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
-                CreateRecordingInput, EditRecordingPatch, IdempotencyRequest, RecordingService, RecordingSourceInput,
-                ServiceError,
+                CreateMediaRecordingInput, CreateRecordingInput, EditRecordingPatch, IdempotencyRequest,
+                RecordingService, RecordingSourceInput, ServiceError,
             },
-            AppState, RecordingQueue, RecordingTask,
+            AppState,
         },
     },
     repository::recording_rule_repository::RecordingRuleRepository,
@@ -24,12 +23,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use shared::model::{
-    recording::{
-        CreateRecordingRequest, RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource,
-        RecordingSourceRequest, RecordingVisibility,
-    },
+    recording::{CreateRecordingRequest, RecordingProvenance, RecordingSourceRequest},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
-    EventMessage, Permission, RecordingKind, UserId, XtreamCluster,
+    EventMessage, Permission, UserId, XtreamCluster,
 };
 use std::sync::Arc;
 
@@ -130,7 +126,7 @@ pub async fn create_recording_request(
         return service_error_response(&ServiceError::InvalidSource);
     };
     if source.cluster != XtreamCluster::Live {
-        return create_http_recording_task(&app_state, &claims, body, source, resolved_source).await;
+        return create_http_recording_task(&app_state, &claims, body, source, resolved_source, idempotency).await;
     }
     let (Some(program_start), Some(program_end)) = (body.program_start, body.program_end) else {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
@@ -151,6 +147,7 @@ pub async fn create_recording_request(
         visibility: body.visibility,
         channel_id: body.channel_id,
         channel_name: body.channel_name,
+        group: resolved_source.group,
         provenance: RecordingProvenance::default(),
         epg: body.epg,
     };
@@ -172,6 +169,7 @@ async fn create_http_recording_task(
     body: CreateRecordingRequest,
     source: RecordingSourceRequest,
     resolved: crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource,
+    idempotency: Option<IdempotencyRequest>,
 ) -> axum::response::Response {
     if body.program_start.is_some()
         || body.program_end.is_some()
@@ -180,88 +178,35 @@ async fn create_http_recording_task(
     {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
     }
-    if !claims.permissions.contains(Permission::RecordingManage) {
-        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
-    }
-    let Some(owner_id) = claims.subject_id.clone() else {
-        return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
-    };
-    if body.visibility == RecordingVisibility::Shared && !is_admin(claims) {
-        return error_response(StatusCode::FORBIDDEN, "recording_shared_requires_administrator");
-    }
-    let recording_kind = match source.cluster {
-        XtreamCluster::Video => RecordingKind::Vod,
-        XtreamCluster::Series => RecordingKind::Series,
-        XtreamCluster::Live => return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source"),
-    };
     if !resolved.downloadable {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_source");
     }
-    let Some(extension) = resolved.extension.as_deref().filter(|extension| !extension.is_empty()) else {
+    let Some(extension) = resolved.extension.filter(|extension| !extension.is_empty()) else {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_path");
     };
-    let Some(url) = tuliprox_dvr::recording::recording_url::build_stable_recording_url(
-        &app_state.app_config,
-        &source.target_id,
-        &source.input_name,
-        resolved.virtual_id,
-        source.cluster,
-        None,
-    ) else {
-        return error_response(StatusCode::BAD_REQUEST, "recording_invalid_source");
+    let input = CreateMediaRecordingInput {
+        source: RecordingSourceInput {
+            target_id: source.target_id,
+            virtual_id: source.virtual_id,
+            cluster: source.cluster,
+            input_name: source.input_name,
+        },
+        title: resolved.title,
+        extension,
+        visibility: body.visibility,
+        group: resolved.group,
+        series_name: resolved.series_name,
     };
-    let config = app_state.app_config.config.load();
-    let Some(recording_config) = config.recording() else {
-        return error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled");
-    };
-    let filename = format!("{}.{}", resolved.title, extension.trim_start_matches('.'));
-    let recording_source = RecordingSource::new(source.target_id, source.virtual_id, source.input_name.clone())
-        .with_cluster(source.cluster);
-    let metadata =
-        RecordingMetadata::new_media(RecordingOwner::User(owner_id), body.visibility, recording_source, resolved.title);
-    let Some(mut task) = RecordingTask::new(
-        recording_kind,
-        &url,
-        &filename,
-        recording_config,
-        Some(Arc::from(source.input_name.as_str())),
-        recording_config.priority,
-        metadata,
-    ) else {
-        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_path");
-    };
-    task.recording.relative_path = task
-        .file_path
-        .strip_prefix(&recording_config.directory)
-        .ok()
-        .and_then(|path| path.to_str())
-        .map(str::to_string);
-
-    let is_owner = true;
-    if let Some(existing) = app_state.recordings.find_pending_duplicate(&task).await {
-        return Json(existing.to_view(is_owner)).into_response();
+    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    match service.create_media_recording_idempotent(claims, &input, idempotency).await {
+        Ok(_) => {}
+        // The transfer already exists from the first attempt; nothing new to
+        // announce, and the caller gets the same answer it got then.
+        Err(ServiceError::IdempotentReplay { .. }) => return StatusCode::NO_CONTENT.into_response(),
+        Err(err) => return service_error_response(&err),
     }
-    if let Err(error) = mutate(&app_state.recordings, |candidate| {
-        candidate.queue.push(RecordingQueue::to_persisted(&task));
-        Ok(())
-    })
-    .await
-    {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.message());
-    }
-    if app_state.recordings.active.read().await.is_none()
-        && tuliprox_dvr::recording::recording_transfer::ensure_recording_worker_running(
-            &app_state.app_config,
-            recording_config,
-            &app_state.recordings,
-            &app_state.event_manager,
-            &app_state.recording_capacity,
-            std::path::Path::new(tuliprox_dvr::recording::recording_worker::FFMPEG_BINARY),
-        )
-        .await
-        .is_err()
-    {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_worker_failed");
+    if let Err(error) = start_recording_worker_if_needed(app_state).await {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, error);
     }
     let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
     StatusCode::NO_CONTENT.into_response()
@@ -1196,8 +1141,13 @@ pub use recording_enabled_layer;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::model::RecordingTask;
     use futures::future::BoxFuture;
     use serde_json::json;
+    use shared::model::{
+        recording::{RecordingMetadata, RecordingOwner, RecordingSource, RecordingVisibility},
+        RecordingKind,
+    };
     use std::time::Duration;
     use tokio::sync::Notify;
     use tuliprox_core::model::ProviderHandle;
@@ -1337,6 +1287,147 @@ mod tests {
         wait_until_worker_owns_runnable_task(&state).await;
     }
 
+    /// Recording enabled under `dir`, with target `1` fed by input `input-a`,
+    /// so the service can resolve a VOD request to its source.
+    fn media_request_state(dir: &std::path::Path) -> Arc<AppState> {
+        let mut recording = crate::model::RecordingConfig::from(&shared::model::RecordingConfigDto {
+            enabled: true,
+            ..Default::default()
+        });
+        recording.directory = dir.to_string_lossy().into_owned();
+        let mut state = crate::api::model::create_test_app_state(crate::model::Config {
+            video: Some(crate::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(recording),
+            }),
+            ..crate::model::Config::default()
+        });
+        let input = Arc::new(tuliprox_core::model::ConfigInput { id: 7, name: "input-a".into(), ..Default::default() });
+        let target = Arc::new(tuliprox_core::model::ConfigTarget {
+            id: 11,
+            enabled: true,
+            name: "1".to_string(),
+            options: None,
+            sort: None,
+            filter: tuliprox_core::model::StagedFilter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            curation: None,
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        state.app_config.sources.store(Arc::new(tuliprox_core::model::SourcesConfig {
+            inputs: vec![input],
+            sources: vec![tuliprox_core::model::ConfigSource { inputs: vec!["input-a".into()], targets: vec![target] }],
+            ..tuliprox_core::model::SourcesConfig::default()
+        }));
+        Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
+        state
+    }
+
+    fn vod_request(
+    ) -> (CreateRecordingRequest, RecordingSourceRequest, crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource)
+    {
+        let source = RecordingSourceRequest {
+            target_id: "1".to_string(),
+            virtual_id: "77".to_string(),
+            cluster: XtreamCluster::Video,
+            input_name: "input-a".to_string(),
+        };
+        let body = CreateRecordingRequest {
+            source: source.clone(),
+            program_title: "The Film".to_string(),
+            program_start: None,
+            program_end: None,
+            pre_roll_secs: None,
+            post_roll_secs: None,
+            visibility: RecordingVisibility::Private,
+            channel_id: None,
+            channel_name: None,
+            epg: None,
+        };
+        let resolved = crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource {
+            virtual_id: 77,
+            input_name: "input-a".to_string(),
+            title: "The Film".to_string(),
+            group: None,
+            series_name: None,
+            extension: Some("mp4".to_string()),
+            downloadable: true,
+        };
+        (body, source, resolved)
+    }
+
+    fn creator_claims(user: &str, permissions: shared::model::permission::PermissionSet) -> shared::model::Claims {
+        shared::model::Claims {
+            username: user.to_string(),
+            subject_id: Some(UserId::from(format!("web:{user}"))),
+            permissions,
+            ..edit_claims(None, false)
+        }
+    }
+
+    async fn post_vod(state: &Arc<AppState>, claims: &shared::model::Claims) -> axum::response::Response {
+        let (body, source, resolved) = vod_request();
+        create_http_recording_task(state, claims, body, source, resolved, None).await
+    }
+
+    async fn tasks_owned_by(state: &AppState, owner: &str) -> usize {
+        let (_, tasks) = state.recordings.committed_snapshot().await;
+        tasks.iter().filter(|task| task.owner_id() == &UserId::from(owner)).count()
+    }
+
+    #[tokio::test]
+    async fn a_vod_request_answers_no_content_and_queues_one_transfer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = media_request_state(dir.path());
+
+        let response = post_vod(&state, &creator_claims("alice", Permission::RecordingCreate.into())).await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(tasks_owned_by(&state, "web:alice").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_vod_request_needs_recording_create() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = media_request_state(dir.path());
+
+        let response = post_vod(&state, &creator_claims("alice", Permission::RecordingManage.into())).await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(tasks_owned_by(&state, "web:alice").await, 0);
+    }
+
+    #[tokio::test]
+    async fn another_users_vod_request_is_never_answered_with_the_first_users_entry() {
+        // The duplicate check used to match across owners and returned the
+        // first user's task, owner id included, to whoever asked next.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = media_request_state(dir.path());
+        let alice = creator_claims("alice", Permission::RecordingCreate.into());
+        let bob = creator_claims("bob", Permission::RecordingCreate.into());
+
+        assert_eq!(post_vod(&state, &alice).await.status(), StatusCode::NO_CONTENT);
+        let response = post_vod(&state, &bob).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert!(body.is_empty(), "a command carries no body, least of all another user's entry");
+        assert_eq!(tasks_owned_by(&state, "web:bob").await, 1);
+
+        let repeat = post_vod(&state, &alice).await;
+        assert_eq!(repeat.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(repeat.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(body.as_ref(), br#"{"error":"recording_duplicate"}"#);
+        assert_eq!(tasks_owned_by(&state, "web:alice").await, 1);
+    }
+
     #[tokio::test]
     async fn recording_availability_accepts_any_recording_permission() {
         let response = recording_availability(
@@ -1455,6 +1546,8 @@ mod tests {
             virtual_id: 42,
             input_name: "input-a".to_string(),
             title: "Example".to_string(),
+            group: None,
+            series_name: None,
             extension: Some("ts".to_string()),
             downloadable: true,
         };

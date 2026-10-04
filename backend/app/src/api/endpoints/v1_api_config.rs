@@ -355,7 +355,13 @@ async fn recording_reload_for(app_state: &Arc<AppState>, incoming: &ConfigDto) -
     let Some(incoming_recording) = incoming_recording else {
         return RecordingReloadOutcome::Unchanged;
     };
-    let incoming_recording = tuliprox_core::model::RecordingConfig::from(incoming_recording);
+    let mut incoming_recording = tuliprox_core::model::RecordingConfig::from(incoming_recording);
+    // The running config holds the prepared (home-resolved) directory, the
+    // incoming DTO the raw configured one; compare like with like.
+    incoming_recording.directory = tuliprox_core::model::resolve_recording_directory(
+        &incoming_recording.directory,
+        &app_state.app_config.paths.load().home_path,
+    );
     let existing = app_state.recordings.committed_snapshot().await.1.len();
     recording_reload_outcome(current_recording, &incoming_recording, existing)
 }

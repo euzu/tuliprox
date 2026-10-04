@@ -58,6 +58,9 @@ pub struct CreateRecordingInput {
     pub visibility: RecordingVisibility,
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
+    /// Playlist group of the channel, when the caller already resolved it.
+    /// `None` makes the service look it up for organised layouts.
+    pub group: Option<String>,
     pub provenance: RecordingProvenance,
     pub epg: Option<shared::model::recording::EpgEpisodeMetadata>,
 }
@@ -69,6 +72,33 @@ impl CreateRecordingInput {
             return Err(ServiceError::InvalidInterval);
         }
         Ok(())
+    }
+}
+
+/// Input for `RecordingService::create_media_recording_idempotent`: an
+/// immediate VOD or series transfer. Title, extension and grouping come from
+/// the playlist entry the caller already resolved.
+#[derive(Debug, Clone)]
+pub struct CreateMediaRecordingInput {
+    pub source: RecordingSourceInput,
+    pub title: String,
+    pub extension: String,
+    pub visibility: RecordingVisibility,
+    pub group: Option<String>,
+    pub series_name: Option<String>,
+}
+
+impl CreateMediaRecordingInput {
+    pub fn validate(&self) -> Result<RecordingKind, ServiceError> {
+        self.source.validate()?;
+        if self.extension.trim_start_matches('.').trim().is_empty() {
+            return Err(ServiceError::InvalidPath);
+        }
+        match self.source.cluster {
+            XtreamCluster::Video => Ok(RecordingKind::Vod),
+            XtreamCluster::Series => Ok(RecordingKind::Series),
+            XtreamCluster::Live => Err(ServiceError::InvalidSource),
+        }
     }
 }
 
@@ -313,13 +343,15 @@ impl RecordingService {
     /// the request-to-task translation, with no admission decisions in it.
     fn build_live_recording(
         owner_id: &UserId,
+        owner_display: &str,
         input: &CreateRecordingInput,
+        group: Option<String>,
         recording_cfg: &tuliprox_core::model::RecordingConfig,
         window: &EffectiveRecordingWindow,
         url: &str,
-        duration_secs: u64,
     ) -> Result<(RecordingTask, u64), ServiceError> {
-        let filename = render_filename_preview(input);
+        let duration_secs = window.remaining_duration_secs;
+        let filename = render_live_filename(input, recording_cfg, window, owner_display);
         let input_name: Option<Arc<str>> =
             (!input.source.input_name.trim().is_empty()).then(|| Arc::from(input.source.input_name.as_str()));
         let source = RecordingSource::new(
@@ -342,6 +374,7 @@ impl RecordingService {
         meta.channel_id.clone_from(&input.channel_id);
         meta.channel_name.clone_from(&input.channel_name);
         meta.program_title = Some(input.program_title.clone());
+        meta.group = group;
         meta.provenance = input.provenance.clone();
         meta.epg.clone_from(&input.epg);
         let (reserved_bytes, _) =
@@ -360,6 +393,28 @@ impl RecordingService {
         Ok((recording, reserved_bytes))
     }
 
+    /// Playlist group the live recording is filed under.
+    ///
+    /// Callers that did not resolve it (the rule scheduler) still get the
+    /// organised layout the operator asked for. Without organisation the
+    /// group is irrelevant, so the playlist is not read for it.
+    async fn live_group(
+        &self,
+        input: &CreateRecordingInput,
+        recording_cfg: &tuliprox_core::model::RecordingConfig,
+    ) -> Option<String> {
+        if input.group.is_some() || !recording_cfg.organize_into_directories {
+            return input.group.clone();
+        }
+        source_resolution::resolve_live_group(
+            &self.app_config,
+            &input.source.target_id,
+            &input.source.input_name,
+            &input.source.virtual_id,
+        )
+        .await
+    }
+
     /// `create_recording`, honouring an `Idempotency-Key`.
     ///
     /// A replay of an accepted request is answered from the stored record
@@ -374,26 +429,8 @@ impl RecordingService {
     ) -> Result<RecordingTaskView, ServiceError> {
         input.validate()?;
         let owner_id = Self::subject_id(claims)?;
-        // Before any work: a replay must not resolve sources, reserve a path
-        // or touch quota.
-        if let Some(request) = idempotency.as_ref() {
-            match self
-                .recordings
-                .lookup_idempotency(owner_id.0.as_str(), &request.key, &request.fingerprint)
-                .await
-                .map_err(|err| ServiceError::IoError(err.to_string()))?
-            {
-                IdempotencyOutcome::Fresh => {}
-                IdempotencyOutcome::Replay { recording_id } => {
-                    return Err(ServiceError::IdempotentReplay { recording_id })
-                }
-                IdempotencyOutcome::Conflict => return Err(ServiceError::IdempotencyConflict),
-            }
-        }
-        if !crate::recording::recording_supervisor::recording_enabled(&self.app_config) {
-            return Err(ServiceError::Disabled);
-        }
-        let config = self.app_config.config.load();
+        self.check_idempotency(&owner_id, idempotency.as_ref()).await?;
+        let config = self.enabled_config()?;
         let Some(recording_cfg) = config.recording() else {
             return Err(ServiceError::Disabled);
         };
@@ -415,28 +452,146 @@ impl RecordingService {
         // Shared creation requires admin.
         authorize_create_recording(claims, &owner_id, input.visibility)?;
 
+        // The layout is fixed when the task is built, so the group has to be
+        // known first.
+        let group = self.live_group(input, recording_cfg).await;
         let duration_secs = window.remaining_duration_secs;
         let (recording, reserved_bytes) =
-            Self::build_live_recording(&owner_id, input, recording_cfg, &window, &url, duration_secs)?;
-        let mut persisted = RecordingQueue::to_persisted(&recording);
-        let view_task = recording.clone();
+            Self::build_live_recording(&owner_id, &claims.username, input, group, recording_cfg, &window, &url)?;
+        self.admit(&recording, reserved_bytes, &owner_id, idempotency.as_ref(), recording_cfg).await?;
+
+        Ok(RecordingTaskView {
+            uuid: recording.uuid,
+            owner_id,
+            visibility: input.visibility,
+            filename_preview: recording.filename,
+            start_at: Some(window.execution_start),
+            duration_secs: Some(duration_secs),
+            state: RecordingTaskState::Scheduled,
+        })
+    }
+
+    /// Queue an immediate VOD or series transfer, honouring an
+    /// `Idempotency-Key`.
+    ///
+    /// Runs through the same admission as a live request: path reservation,
+    /// per-principal duplicate check, quota and disk. The size of a transfer
+    /// is unknown until the provider answers, so nothing is reserved up front;
+    /// the worker re-checks quota and disk before it opens the destination.
+    pub async fn create_media_recording_idempotent(
+        &self,
+        claims: &shared::model::Claims,
+        input: &CreateMediaRecordingInput,
+        idempotency: Option<IdempotencyRequest>,
+    ) -> Result<RecordingTaskView, ServiceError> {
+        let kind = input.validate()?;
+        let owner_id = Self::subject_id(claims)?;
+        self.check_idempotency(&owner_id, idempotency.as_ref()).await?;
+        let config = self.enabled_config()?;
+        let Some(recording_cfg) = config.recording() else {
+            return Err(ServiceError::Disabled);
+        };
+        let url = self.recording_url(&input.source).ok_or(ServiceError::InvalidSource)?;
+        authorize_create_recording(claims, &owner_id, input.visibility)?;
+
+        let source = RecordingSource::new(
+            input.source.target_id.clone(),
+            input.source.virtual_id.clone(),
+            input.source.input_name.clone(),
+        )
+        .with_cluster(input.source.cluster);
+        let mut meta = RecordingMetadata::new_media(
+            RecordingOwner::User(owner_id.clone()),
+            input.visibility,
+            source,
+            input.title.clone(),
+        );
+        meta.group.clone_from(&input.group);
+        meta.series_name.clone_from(&input.series_name);
+        let filename = format!("{}.{}", input.title, input.extension.trim_start_matches('.'));
+        let recording = RecordingTask::new(
+            kind,
+            &url,
+            &filename,
+            recording_cfg,
+            Some(Arc::from(input.source.input_name.as_str())),
+            recording_cfg.priority,
+            meta,
+        )
+        .ok_or(ServiceError::InvalidPath)?;
+        self.admit(&recording, 0, &owner_id, idempotency.as_ref(), recording_cfg).await?;
+
+        Ok(RecordingTaskView {
+            uuid: recording.uuid,
+            owner_id,
+            visibility: input.visibility,
+            filename_preview: recording.filename,
+            start_at: None,
+            duration_secs: None,
+            state: RecordingTaskState::Queued,
+        })
+    }
+
+    /// Answer a replayed or conflicting `Idempotency-Key` before any work:
+    /// a replay must not resolve sources, reserve a path or touch quota.
+    async fn check_idempotency(
+        &self,
+        owner_id: &UserId,
+        idempotency: Option<&IdempotencyRequest>,
+    ) -> Result<(), ServiceError> {
+        let Some(request) = idempotency else {
+            return Ok(());
+        };
+        match self
+            .recordings
+            .lookup_idempotency(owner_id.0.as_str(), &request.key, &request.fingerprint)
+            .await
+            .map_err(|err| ServiceError::IoError(err.to_string()))?
+        {
+            IdempotencyOutcome::Fresh => Ok(()),
+            IdempotencyOutcome::Replay { recording_id } => Err(ServiceError::IdempotentReplay { recording_id }),
+            IdempotencyOutcome::Conflict => Err(ServiceError::IdempotencyConflict),
+        }
+    }
+
+    fn enabled_config(&self) -> Result<Arc<tuliprox_core::model::Config>, ServiceError> {
+        if !crate::recording::recording_supervisor::recording_enabled(&self.app_config) {
+            return Err(ServiceError::Disabled);
+        }
+        Ok(self.app_config.config.load_full())
+    }
+
+    /// Admit a freshly built task into the queue: reserve its path, refuse a
+    /// duplicate from the same principal, then check quota and disk, all in
+    /// one mutation together with the idempotency record.
+    ///
+    /// Scheduled kinds land in `scheduled`, everything else in `queue`.
+    async fn admit(
+        &self,
+        recording: &RecordingTask,
+        reserved_bytes: u64,
+        owner_id: &UserId,
+        idempotency: Option<&IdempotencyRequest>,
+        recording_cfg: &tuliprox_core::model::RecordingConfig,
+    ) -> Result<(), ServiceError> {
+        let mut persisted = RecordingQueue::to_persisted(recording);
         let quota_limits = quota_limits_from_config(recording_cfg.quota.as_ref());
         // Measured before the mutation: it is a syscall, and the lock is
         // held for the whole closure. `None` means the root could not be
         // measured, and an unmeasurable disk is not grounds to refuse.
         let disk_safety_bytes = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
         let free_bytes = recording_disk::free_bytes_for(std::path::Path::new(&recording_cfg.directory));
-        let idempotency_record = idempotency.as_ref().map(|request| PersistedIdempotency {
+        let idempotency_record = idempotency.map(|request| PersistedIdempotency {
             principal: owner_id.0.clone(),
             key: request.key.clone(),
             request_fingerprint: request.fingerprint.clone(),
-            recording_id: view_task.uuid.clone(),
+            recording_id: recording.uuid.clone(),
             accepted_at: chrono::Utc::now().timestamp(),
         });
 
         let admit = |candidate: &mut PersistedRecordingQueue| -> Result<(), QueueMutationError> {
             reserve_recording_relative_path(candidate, &mut persisted)?;
-            if candidate_has_duplicate_recording(candidate, &view_task) {
+            if candidate_has_duplicate_recording(candidate, recording) {
                 return Err(QueueMutationError::Duplicate);
             }
             let pool = recording_quota::quota_pool_for_task(&persisted);
@@ -458,7 +613,11 @@ impl RecordingService {
                     return Err(QueueMutationError::DiskFull);
                 }
             }
-            candidate.scheduled.push(persisted.clone());
+            if recording.kind.is_scheduled() {
+                candidate.scheduled.push(persisted.clone());
+            } else {
+                candidate.queue.push(persisted.clone());
+            }
             Ok(())
         };
 
@@ -466,17 +625,7 @@ impl RecordingService {
             Some(record) => mutate_with_idempotency(&self.recordings, record, admit).await,
             None => mutate(&self.recordings, admit).await,
         }
-        .map_err(|e| map_queue_error(&e))?;
-
-        Ok(RecordingTaskView {
-            uuid: view_task.uuid,
-            owner_id,
-            visibility: input.visibility,
-            filename_preview: view_task.filename,
-            start_at: Some(window.execution_start),
-            duration_secs: Some(duration_secs),
-            state: RecordingTaskState::Scheduled,
-        })
+        .map_err(|e| map_queue_error(&e))
     }
 
     /// Edit an existing recording.
@@ -646,10 +795,10 @@ impl RecordingService {
             if !matches!(authorize(claims, &owner_id, RecordingAction::Cancel, &subject), RecordingDecision::Allow) {
                 return Err(ServiceError::Forbidden);
             }
-            // Cancel by uuid, never `cancel_active()`. Between the read
-            // above and this call ffmpeg can finish and the queue can
-            // promote a *different* recording into the active slot; the
-            // no-uuid variant would then kill that innocent recording.
+            // Cancel by uuid. Between the read above and this call ffmpeg
+            // can finish and the queue can promote a *different* recording
+            // into the active slot; cancelling whatever is active would then
+            // kill that innocent recording.
             match self.recordings.cancel_requested(uuid).await {
                 // The task is active (running, waiting, or paused). A paused
                 // one has already been moved to `finished`; a worker-owned one
@@ -1102,7 +1251,49 @@ fn is_windows_reserved_stem(value: &str) -> bool {
     WINDOWS_RESERVED_STEMS.iter().any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
-fn render_filename_preview(input: &CreateRecordingInput) -> String { sanitize_filename_component(&input.program_title) }
+/// Live recording filename: `recording.filename_template` rendered for this
+/// programme, plus the extension of the container the worker muxes into, so
+/// players and the media API can tell the format from the name.
+///
+/// The sanitized programme title stands in when the template is unset or
+/// cannot be rendered.
+fn render_live_filename(
+    input: &CreateRecordingInput,
+    recording_cfg: &tuliprox_core::model::RecordingConfig,
+    window: &EffectiveRecordingWindow,
+    owner_display: &str,
+) -> String {
+    let title_stem = sanitize_filename_component(&input.program_title);
+    let context = shared::utils::RecordingFilenameContext {
+        task_id: title_stem.clone(),
+        channel_id: input.channel_id.clone(),
+        channel_name: input.channel_name.clone(),
+        program_title: Some(input.program_title.clone()),
+        episode_season: input.epg.as_ref().and_then(|epg| epg.season),
+        episode_number: input.epg.as_ref().and_then(|epg| epg.episode),
+        owner_display: (!owner_display.trim().is_empty()).then(|| owner_display.to_string()),
+        program_start: Some(input.program_start),
+        program_end: Some(input.program_end),
+        scheduled_start: Some(window.scheduled_start),
+        scheduled_end: Some(window.scheduled_end),
+    };
+    let stem = Some(recording_cfg.filename_template.as_str())
+        .filter(|template| !template.trim().is_empty())
+        .and_then(|template| {
+            shared::utils::render_recording_stem(template, &context, &recording_cfg.timezone)
+                .map_err(|err| log::warn!("Recording filename template could not be rendered: {err}"))
+                .ok()
+        })
+        .unwrap_or(title_stem);
+    let extension = recording_cfg.container_format.file_extension();
+    // A template that already ends in the container extension must not double it.
+    let stem_path = Path::new(&stem);
+    let stem = match (stem_path.file_stem(), stem_path.extension()) {
+        (Some(base), Some(ext)) if ext.eq_ignore_ascii_case(extension) => base.to_string_lossy(),
+        _ => std::borrow::Cow::Borrowed(stem.as_str()),
+    };
+    format!("{stem}.{extension}")
+}
 
 fn authorize_create_recording(
     claims: &shared::model::Claims,
@@ -1208,9 +1399,6 @@ fn reserve_recording_relative_path(
     candidate: &PersistedRecordingQueue,
     task: &mut PersistedRecordingTask,
 ) -> Result<(), QueueMutationError> {
-    // Borrowed set, built once. The old code walked a `Vec<String>` of
-    // cloned filenames once per `_N` candidate, so reserving the
-    // (N+1)-th recording of a title cost O(N^2) string comparisons.
     // Borrowed set, built once. The old code walked a `Vec<String>` of
     // cloned filenames once per `_N` candidate, so reserving the
     // (N+1)-th recording of a title cost O(N^2) string comparisons.
@@ -1612,6 +1800,7 @@ mod tests {
             visibility: RecordingVisibility::Private,
             channel_id: None,
             channel_name: None,
+            group: None,
             provenance: RecordingProvenance::default(),
             epg: None,
         }
@@ -2373,6 +2562,86 @@ mod tests {
         assert_eq!(map_edit_validation_error(&EditError::ProvenanceCleared), ServiceError::ProvenanceImmutable);
     }
 
+    fn filename_config(template: &str, container_format: RecordingContainerFormat) -> RecordingConfig {
+        let mut cfg = RecordingConfig::from(&shared::model::RecordingConfigDto::default());
+        cfg.filename_template = template.to_string();
+        cfg.container_format = container_format;
+        cfg.timezone = "Europe/Berlin".parse().expect("timezone parses");
+        cfg
+    }
+
+    fn filename_window(input: &CreateRecordingInput) -> EffectiveRecordingWindow {
+        EffectiveRecordingWindow {
+            scheduled_start: input.program_start,
+            scheduled_end: input.program_end,
+            execution_start: input.program_start,
+            remaining_duration_secs: 0,
+        }
+    }
+
+    fn filename_input() -> CreateRecordingInput {
+        let mut input = create_input();
+        input.program_title = "Hart van Nederland".to_string();
+        input.channel_name = Some("┃NLZIET┃ SBS 6 HD".to_string());
+        // 2023-11-14 22:13:20 UTC = 23:13 in Berlin.
+        input.program_start = 1_700_000_000;
+        input.program_end = 1_700_001_800;
+        input
+    }
+
+    #[test]
+    fn live_filename_renders_the_configured_template() {
+        let input = filename_input();
+        let cfg = filename_config("{channel}_{program_title}_{start_time}", RecordingContainerFormat::Mpegts);
+        assert_eq!(
+            render_live_filename(&input, &cfg, &filename_window(&input), "alice"),
+            "NLZIET_SBS_6_HD_Hart_van_Nederland_2023-11-14_23-13.ts"
+        );
+    }
+
+    #[test]
+    fn live_filename_collapses_empty_placeholders() {
+        let mut input = filename_input();
+        input.channel_name = None;
+        let cfg = filename_config("{channel}_{program_title}_{episode}", RecordingContainerFormat::Matroska);
+        assert_eq!(render_live_filename(&input, &cfg, &filename_window(&input), "alice"), "Hart_van_Nederland.mkv");
+    }
+
+    #[test]
+    fn live_filename_renders_episode_and_owner() {
+        let mut input = filename_input();
+        input.epg = Some(shared::model::EpgEpisodeMetadata {
+            programme_id: None,
+            series_id: None,
+            episode_id: None,
+            season: Some(3),
+            episode: Some(9),
+            airing: shared::model::AiringStatus::default(),
+        });
+        let cfg = filename_config("{owner}-{program_title}-{episode}", RecordingContainerFormat::Mp4);
+        assert_eq!(
+            render_live_filename(&input, &cfg, &filename_window(&input), "alice"),
+            "alice-Hart_van_Nederland-S03E09.mp4"
+        );
+    }
+
+    #[test]
+    fn live_filename_keeps_dots_and_does_not_double_the_extension() {
+        let mut input = filename_input();
+        input.program_title = "Mr. Robot".to_string();
+        let cfg = filename_config("{program_title}.ts", RecordingContainerFormat::Mpegts);
+        assert_eq!(render_live_filename(&input, &cfg, &filename_window(&input), "alice"), "Mr.Robot.ts");
+        let cfg = filename_config("{program_title}", RecordingContainerFormat::Matroska);
+        assert_eq!(render_live_filename(&input, &cfg, &filename_window(&input), "alice"), "Mr.Robot.mkv");
+    }
+
+    #[test]
+    fn live_filename_without_template_uses_the_title() {
+        let input = filename_input();
+        let cfg = filename_config("", RecordingContainerFormat::Mpegts);
+        assert_eq!(render_live_filename(&input, &cfg, &filename_window(&input), "alice"), "Hart van Nederland.ts");
+    }
+
     #[test]
     fn sanitize_filename_strips_separators_and_reserved_characters() {
         assert_eq!(sanitize_filename_component("a/b\\c:d*e?f\"g<h>i|j"), "a_b_c_d_e_f_g_h_i_j");
@@ -2587,6 +2856,7 @@ mod tests {
             visibility: RecordingVisibility::Private,
             channel_id: None,
             channel_name: None,
+            group: None,
             provenance: RecordingProvenance::default(),
             epg: None,
         };
@@ -2665,6 +2935,88 @@ mod tests {
         }
     }
 
+    fn claims_for(user: &str, permissions: shared::model::permission::PermissionSet) -> shared::model::Claims {
+        shared::model::Claims {
+            username: user.to_string(),
+            subject_id: Some(UserId::from(format!("web:{user}"))),
+            permissions,
+            ..creating_claims()
+        }
+    }
+
+    fn media_input() -> CreateMediaRecordingInput {
+        CreateMediaRecordingInput {
+            source: RecordingSourceInput {
+                target_id: "1".to_string(),
+                virtual_id: "77".to_string(),
+                cluster: XtreamCluster::Video,
+                input_name: "input-a".to_string(),
+            },
+            title: "The Film".to_string(),
+            extension: "mp4".to_string(),
+            visibility: RecordingVisibility::Private,
+            group: None,
+            series_name: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_media_request_needs_the_create_permission_not_manage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(dir.path(), &queue, None);
+
+        let manage_only = claims_for("alice", Permission::RecordingManage.into());
+        let refused = service.create_media_recording_idempotent(&manage_only, &media_input(), None).await;
+        assert!(matches!(refused, Err(ServiceError::Forbidden)), "got {refused:?}");
+        assert!(queue.queue.lock().await.is_empty());
+
+        let create_only = claims_for("alice", Permission::RecordingCreate.into());
+        let admitted = service.create_media_recording_idempotent(&create_only, &media_input(), None).await;
+        assert!(admitted.is_ok(), "got {admitted:?}");
+        let queued = queue.queue.lock().await;
+        assert_eq!(queued.len(), 1, "a transfer is queued, not scheduled");
+        assert_eq!(queued[0].kind, RecordingKind::Vod);
+    }
+
+    #[tokio::test]
+    async fn a_second_user_gets_an_own_entry_and_a_repeat_is_a_duplicate() {
+        // Another user asking for the same film must neither be handed the
+        // first user's entry nor be refused; the same user asking twice is
+        // a duplicate.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(dir.path(), &queue, None);
+        let alice = claims_for("alice", Permission::RecordingCreate.into());
+        let bob = claims_for("bob", Permission::RecordingCreate.into());
+
+        let first = service.create_media_recording_idempotent(&alice, &media_input(), None).await.expect("alice");
+        let second = service.create_media_recording_idempotent(&bob, &media_input(), None).await.expect("bob");
+        assert_ne!(first.uuid, second.uuid);
+        assert_eq!(second.owner_id, UserId::from("web:bob"));
+
+        let repeat = service.create_media_recording_idempotent(&alice, &media_input(), None).await;
+        assert!(matches!(repeat, Err(ServiceError::Duplicate)), "got {repeat:?}");
+        assert_eq!(queue.queue.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_replayed_media_request_is_answered_without_queueing_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(dir.path(), &queue, None);
+        let alice = claims_for("alice", Permission::RecordingCreate.into());
+        let request = IdempotencyRequest { key: "k1".to_string(), fingerprint: "f1".to_string() };
+
+        let first = service
+            .create_media_recording_idempotent(&alice, &media_input(), Some(request.clone()))
+            .await
+            .expect("first request");
+        let replay = service.create_media_recording_idempotent(&alice, &media_input(), Some(request)).await;
+        assert_eq!(replay.err(), Some(ServiceError::IdempotentReplay { recording_id: first.uuid }));
+        assert_eq!(queue.queue.lock().await.len(), 1);
+    }
+
     fn disk_test_input() -> CreateRecordingInput {
         let now = chrono::Utc::now().timestamp();
         CreateRecordingInput {
@@ -2682,6 +3034,7 @@ mod tests {
             visibility: RecordingVisibility::Private,
             channel_id: None,
             channel_name: None,
+            group: None,
             provenance: RecordingProvenance::default(),
             epg: None,
         }

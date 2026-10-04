@@ -609,7 +609,7 @@ delivered message.
 * Each channel has a 30 second request timeout, and channels are attempted
   concurrently, so one unresponsive host cannot stall the others.
 
-Tuning lives under `video.download.recording.notifications`
+Tuning lives under `video.recording.notifications`
 (`outbox_buffer`, `max_attempts`, `backoff_initial_secs`,
 `backoff_max_secs`).
 
@@ -897,7 +897,8 @@ video:
   * `directory`: Where recordings are saved.
   * `headers` (optional): Custom HTTP headers used for the download request. This is useful for bypassing basic
     user-agent filters or setting specific media types.
-  * `organize_into_directories`: If true, Tuliprox automatically creates neat subfolders for series.
+  * `organize_into_directories`: If true, recordings are filed under the playlist group of the recorded item
+    (`<group>/<file>`); series episodes share one folder per series inside their group (`<group>/<series>/<file>`).
   * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group
     `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`)
     from the filename, ensuring all episodes of a show land in the same base-show folder.

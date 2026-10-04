@@ -141,10 +141,9 @@ pub fn build_recording_args(
         "0".to_string(),
         "-t".to_string(),
         effective_duration_secs.to_string(),
-        // Recording filenames may have no extension (sanitized title-only
-        // names from `render_filename_preview`), so we force the output
-        // muxer explicitly to avoid ffmpeg failing format detection with
-        // `Invalid argument` on paths like `foo.partial`. Which muxer is
+        // ffmpeg writes to `<name>.partial`, whose extension says nothing
+        // about the format, so we force the output muxer explicitly to
+        // avoid ffmpeg failing format detection with `Invalid argument`. Which muxer is
         // an operator choice: MPEG-TS survives truncation, but an
         // H.265/AAC source may need Matroska or MP4.
         "-f".to_string(),

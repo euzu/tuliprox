@@ -299,7 +299,7 @@ async fn serve_range(
         (header::ACCEPT_RANGES, "bytes".to_string()),
     ];
     if attachment {
-        base_headers.push((header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")));
+        base_headers.push((header::CONTENT_DISPOSITION, attachment_disposition(filename)));
     }
     if let Some(rh) = range_header {
         let Some(spec) = parse_range(rh, total) else {
@@ -348,6 +348,20 @@ async fn serve_range(
         hdrs.push((header::CONTENT_LENGTH, total.to_string()));
         build_response(StatusCode::OK, hdrs, Body::from_stream(stream))
     }
+}
+
+/// `attachment` disposition for a filename that may contain letters of any
+/// script (RFC 6266): an ASCII-only `filename` for legacy clients plus the
+/// exact UTF-8 name in `filename*`.
+fn attachment_disposition(filename: &str) -> String {
+    if filename.is_ascii() {
+        return format!("attachment; filename=\"{filename}\"");
+    }
+    let fallback: String = filename.chars().map(|c| if c.is_ascii() { c } else { '_' }).collect();
+    format!(
+        "attachment; filename=\"{fallback}\"; filename*=UTF-8''{}",
+        shared::utils::percent_encode_unreserved(filename)
+    )
 }
 
 fn build_response(status: StatusCode, headers: Vec<(header::HeaderName, String)>, body: Body) -> Response {
@@ -489,6 +503,15 @@ mod tests {
                 Some("required")
             );
         }
+    }
+
+    #[test]
+    fn attachment_disposition_encodes_non_ascii_names() {
+        assert_eq!(attachment_disposition("news.ts"), "attachment; filename=\"news.ts\"");
+        assert_eq!(
+            attachment_disposition("Новости.ts"),
+            "attachment; filename=\"_______.ts\"; filename*=UTF-8''%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8.ts"
+        );
     }
 
     #[test]

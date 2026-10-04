@@ -100,7 +100,7 @@ video:
       default_private_bytes: 53687091200
       shared_bytes: 536870912000
       per_user_bytes:
-        "web:user-uuid-1": 107374182400
+        "web:alice": 107374182400
     notifications:
       outbox_buffer: 1024
       max_attempts: 6
