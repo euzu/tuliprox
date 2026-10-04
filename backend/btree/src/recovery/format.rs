@@ -137,18 +137,22 @@ pub(crate) fn hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-pub(crate) fn unhex(text: &str) -> io::Result<[u8; 32]> {
-    if text.len() != 64 {
-        return Err(invalid_data("recovery hash must be 64 hex characters"));
+pub(crate) fn unhex(text: &str) -> io::Result<[u8; 32]> { unhex_array(text) }
+
+/// Decode exactly `N` bytes of lowercase or uppercase hex. Anything else,
+/// including a short or long input, is corrupt data rather than zero bytes.
+pub(crate) fn unhex_array<const N: usize>(text: &str) -> io::Result<[u8; N]> {
+    if text.len() != N.saturating_mul(2) {
+        return Err(invalid_data(format!("recovery hex value must be {} characters", N.saturating_mul(2))));
     }
     let bytes = text.as_bytes();
-    let mut out = [0u8; 32];
+    let mut out = [0u8; N];
     for (index, slot) in out.iter_mut().enumerate() {
-        let start = index.checked_mul(2).ok_or_else(|| invalid_data("recovery hash offset overflow"))?;
-        let end = start.checked_add(2).ok_or_else(|| invalid_data("recovery hash offset overflow"))?;
-        let pair = bytes.get(start..end).ok_or_else(|| invalid_data("truncated recovery hash"))?;
-        let pair = std::str::from_utf8(pair).map_err(|_| invalid_data("recovery hash is not ascii"))?;
-        *slot = u8::from_str_radix(pair, 16).map_err(|_| invalid_data("recovery hash is not hexadecimal"))?;
+        let start = index.checked_mul(2).ok_or_else(|| invalid_data("recovery hex offset overflow"))?;
+        let end = start.checked_add(2).ok_or_else(|| invalid_data("recovery hex offset overflow"))?;
+        let pair = bytes.get(start..end).ok_or_else(|| invalid_data("truncated recovery hex value"))?;
+        let pair = std::str::from_utf8(pair).map_err(|_| invalid_data("recovery hex value is not ascii"))?;
+        *slot = u8::from_str_radix(pair, 16).map_err(|_| invalid_data("recovery hex value is not hexadecimal"))?;
     }
     Ok(out)
 }
@@ -275,4 +279,17 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> io::Result<R
         }
     }
     Ok(ReadOutcome::Full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unhex_array;
+
+    #[test]
+    fn hex_that_is_not_exactly_the_right_bytes_is_refused() {
+        assert_eq!(unhex_array::<2>("0aff").expect("valid"), [0x0a, 0xff]);
+        for corrupt in ["0af", "0aff00", "0agg", "", "0a\u{e9}"] {
+            assert!(unhex_array::<2>(corrupt).is_err(), "{corrupt:?} must not decode to zero bytes");
+        }
+    }
 }

@@ -1,10 +1,7 @@
 //! Crash-recoverable persistence for the DVR recording queue.
 //!
-//! The queue used to be a single JSON document rewritten in full on every
-//! mutation. That could not survive a torn write, and a change to the record
-//! shape had no upgrade path other than refusing to load. This module stores
-//! one record per task in a B+Tree, and routes every write through
-//! [`BPlusTreeRecoveryJournal`] so the database can be rebuilt from a
+//! Each task is stored as its own record in a B+Tree, and every write goes
+//! through [`BPlusTreeRecoveryJournal`] so the database can be rebuilt from a
 //! field-named history whose schema version is migrated forward on restore.
 //!
 //! The repository owns the persisted record shape. It deliberately knows
@@ -797,7 +794,12 @@ impl RecordingRepository {
         let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
         incoming.queue_revision = queue_revision;
         self.committed = Some(incoming);
-        let _ = self.journal.checkpoint_if_needed()?;
+        // The batch is durable from here on. A failed checkpoint is
+        // maintenance, not a failed write: reporting it as one would make the
+        // queue discard a commit the database already holds.
+        if let Err(error) = self.journal.checkpoint_if_needed() {
+            log::error!("Recording repository checkpoint failed after a committed write: {error}");
+        }
         Ok(())
     }
 
@@ -889,6 +891,39 @@ mod tests {
         fn open(&self) -> io::Result<RecordingRepository> {
             RecordingRepository::open(&self.storage, &self.recovery).map(|(repository, _)| repository)
         }
+    }
+
+    /// Age the first generation's manifest so the next commit wants a
+    /// checkpoint, and block the directory that checkpoint would be written
+    /// to, so it fails after the commit itself succeeded.
+    fn force_a_failing_checkpoint(recovery_dir: &std::path::Path) {
+        let manifest = recovery_dir.join("gen-00000000000000000001/manifest.bin");
+        let bytes = std::fs::read(&manifest).expect("manifest");
+        let mut payload: serde_json::Value = serde_json::from_slice(&bytes[40..]).expect("manifest payload");
+        payload["created_at_unix"] = serde_json::json!(0);
+        let payload = serde_json::to_vec(&payload).expect("encode");
+        let mut framed = b"TRJ1".to_vec();
+        framed.extend_from_slice(&u32::try_from(payload.len()).expect("length").to_le_bytes());
+        framed.extend_from_slice(blake3::hash(&payload).as_bytes());
+        framed.extend_from_slice(&payload);
+        std::fs::write(&manifest, framed).expect("rewrite manifest");
+        std::fs::write(recovery_dir.join("gen-00000000000000000002"), b"blocks the next generation").expect("block");
+    }
+
+    #[test]
+    fn a_failed_checkpoint_does_not_fail_the_commit_before_it() -> io::Result<()> {
+        // The batch is durable before the checkpoint runs, so a checkpoint
+        // error must not turn the commit into a reported failure.
+        let fixture = Fixture::new()?;
+        drop(fixture.open()?);
+        force_a_failing_checkpoint(&fixture.recovery.join(super::RECOVERY_DIR));
+        let mut repository = fixture.open()?;
+
+        repository.commit(1, &[task_for("alice", "web:alice", "film-42")])?;
+        assert_eq!(repository.load()?.tasks.len(), 1);
+        drop(repository);
+        assert_eq!(fixture.open()?.load()?.tasks.len(), 1, "and it survives a restart");
+        Ok(())
     }
 
     #[test]
@@ -1224,10 +1259,9 @@ mod tests {
     #[test]
     fn each_entry_keeps_its_own_metadata_across_a_reload() -> io::Result<()> {
         // Provenance, notification markers, padding, title edits and a pending
-        // deletion belong to the link. When the file's copy of the metadata was
-        // the only one stored, a reload handed every sibling the first entry's
-        // values: a rule lost its occurrence, and a deletion stamp jumped to an
-        // entry nobody was deleting.
+        // deletion belong to the link, not to the file. A reload must give each
+        // sibling its own values: a rule keeps its occurrence, and a deletion
+        // stamp stays on the entry being deleted.
         let fixture = Fixture::new()?;
         let mut repository = fixture.open()?;
         let mut alice = task_for("alice", "web:alice", "programme-42");
@@ -1416,8 +1450,8 @@ mod tests {
     #[test]
     fn an_expired_key_can_be_accepted_again() -> io::Result<()> {
         // The lookup reports an expired key as fresh, so the caller accepts
-        // the request and commits the same key again. Purging the old record
-        // in that batch as well touched the key twice and failed the write.
+        // the request and commits the same key again. The batch overwrites the
+        // old record instead of also purging it, which would touch the key twice.
         let fixture = Fixture::new()?;
         let mut repository = fixture.open()?;
         repository.commit_with_idempotency(1, &[task("a")], Some(idempotency_record("k1", "fp", 0)), 0)?;

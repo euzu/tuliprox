@@ -11,13 +11,11 @@ pub const TOKEN_NO_AUTH: &str = "authorized";
 /// `Permission` enum or the permission bit layout changes. Tokens
 /// issued before a bump fail closed at the validator with a stable
 /// "token refresh required" response so clients re-authenticate
-/// before the new permission bits can leak through.
+/// before the new permission bits can leak through: an old token's bits
+/// would otherwise be read against the new layout.
 ///
-/// Bumped to `3` for the `download.read/write -> recording.read/write`
-/// migration, and to `4` when `recording.write` was split into
-/// `recording.create`, `recording.manage` and `recording.delete`. Both
-/// changes renumbered the bits above them, so tokens issued before a bump
-/// must fail closed rather than have their old bits reinterpreted.
+/// The layout this version stands for is pinned in the permission bit table
+/// test, next to the expected value of this constant.
 pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

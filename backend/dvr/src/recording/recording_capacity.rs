@@ -127,8 +127,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_provider_offers_no_room_and_grants_nothing() {
-        // This is what makes a worker wait, and until now it could only be
-        // produced by a real provider actually being full.
+        // This is what makes a worker wait, without needing a real provider
+        // that is actually full.
         let capacity = StubCapacity::full();
         let input: Arc<str> = Arc::from("provider");
 

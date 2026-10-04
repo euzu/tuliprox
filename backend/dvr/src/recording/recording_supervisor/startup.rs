@@ -57,17 +57,19 @@ pub async fn run_startup_reconciliation<E: EventSink + Clone + 'static>(ctx: &Re
     }
 }
 
-/// Whether an entry other than `subject` still holds the same file.
-///
-/// Mirrors the rule the deletion path uses: entries already mid-deletion do not
-/// count, so a crash between two deletions cannot leave the file with nothing
-/// pointing at it.
+/// Whether an entry other than `subject` still holds the same file, by the
+/// rule the deletion path applies.
 fn media_is_still_referenced(all_tasks: &[RecordingTask], subject: &RecordingTask) -> bool {
-    let key = |task: &RecordingTask| recording_identity_key(&task.recording, task.url.as_str());
-    let subject_key = key(subject);
-    all_tasks.iter().any(|other| {
-        other.uuid != subject.uuid && other.recording.deleting_previous_state.is_none() && key(other) == subject_key
-    })
+    let identities: Vec<String> =
+        all_tasks.iter().map(|task| recording_identity_key(&task.recording, task.url.as_str())).collect();
+    let subject_identity = recording_identity_key(&subject.recording, subject.url.as_str());
+    crate::recording::recording_queue::media_held_by_another(
+        all_tasks.iter().zip(&identities).map(|(task, identity)| {
+            (task.uuid.as_str(), identity.as_str(), task.recording.deleting_previous_state.is_some())
+        }),
+        &subject.uuid,
+        &subject_identity,
+    )
 }
 
 /// Tell the operator about recordings on disk the repository does not know.

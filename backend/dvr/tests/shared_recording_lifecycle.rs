@@ -223,7 +223,7 @@ async fn seed_sharing(queue: &RecordingQueue, file: &Path, users: &[&str], activ
 
 #[tokio::test]
 async fn cancelling_one_user_leaves_the_other_holding_the_file_across_a_restart() {
-    // Task 11: A leaves, B keeps the recording. Cancelling the running entry
+    // A leaves, B keeps the recording. Cancelling the running entry
     // does not finish it -- the worker still owns the file -- so the entry sits
     // in `Cancelling` until something acknowledges. Here that is a restart,
     // which is also the only acknowledgement available after a crash.
@@ -316,8 +316,8 @@ async fn cancelling_the_last_entry_leaves_nothing_referencing_the_file() {
 async fn a_cancelled_recording_stops_holding_the_space_it_reserved() {
     // A reservation is a claim on disk for bytes still to be written. Once the
     // recording is over, nothing more will be written, so keeping the claim
-    // charges the user for space no recording occupies -- and the worker paths
-    // used to keep it while only the user-initiated cancel released it.
+    // charges the user for space no recording occupies, whichever path ended
+    // the recording.
     let dir = TempDir::new().expect("tempdir");
     let storage = dir.path().join("state");
     std::fs::create_dir_all(&storage).expect("storage dir");

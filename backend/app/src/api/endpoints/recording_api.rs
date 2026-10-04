@@ -1407,8 +1407,8 @@ mod tests {
 
     #[tokio::test]
     async fn another_users_vod_request_is_never_answered_with_the_first_users_entry() {
-        // The duplicate check used to match across owners and returned the
-        // first user's task, owner id included, to whoever asked next.
+        // The duplicate check is per owner: another user's request for the
+        // same film is a new entry, and nobody is handed someone else's.
         let dir = tempfile::tempdir().expect("tempdir");
         let state = media_request_state(dir.path());
         let alice = creator_claims("alice", Permission::RecordingCreate.into());

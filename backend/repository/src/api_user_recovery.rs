@@ -13,9 +13,8 @@
 //! 21 combinations. Neither axis can be inferred from the other.
 //!
 //! The `StoredApiUserV1`..`StoredApiUserV7` types are the historical layouts,
-//! moved here from `startup_migration` rather than copied: two definitions of
-//! the same legacy record would drift, and a drifted legacy decoder silently
-//! loses user data. **Field order is load-bearing** — these are decoded
+//! defined only here: two definitions of the same legacy record would drift,
+//! and a drifted legacy decoder silently loses user data. **Field order is load-bearing** — these are decoded
 //! positionally from `MessagePack`, so reordering a field reinterprets every
 //! stored record.
 //!
@@ -568,7 +567,11 @@ impl ApiUserRepository {
             operations.push(RecoveryOperation::Upsert(name, user));
         }
         let _ = self.journal.apply_batch(RecoveryBatch::new(operations))?;
-        let _ = self.journal.checkpoint_if_needed()?;
+        // The batch is durable from here on; a failed checkpoint is
+        // maintenance and must not report the committed write as failed.
+        if let Err(error) = self.journal.checkpoint_if_needed() {
+            log::error!("API user recovery checkpoint failed after a committed write: {error}");
+        }
         Ok(())
     }
 
@@ -785,8 +788,8 @@ mod matrix {
     /// Writes the database the way the code at `container_version` would have.
     ///
     /// Container 1 is produced by writing a v2 file and patching the version
-    /// field, which is how the rest of this crate fabricates v1 fixtures: the
-    /// v1 writer no longer exists.
+    /// field, which is how the rest of this crate fabricates v1 fixtures: there
+    /// is no v1 writer.
     fn write_container<V>(path: &Path, container_version: u16, value: V) -> io::Result<()>
     where
         V: Serialize + for<'de> serde::Deserialize<'de> + Clone,

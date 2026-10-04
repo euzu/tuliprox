@@ -772,7 +772,7 @@ mod tests {
     fn visibility_to_wire_stable_strings() {
         assert_eq!(visibility_to_wire(false), RecordingVisibility::Private);
         assert_eq!(visibility_to_wire(true), RecordingVisibility::Shared);
-        // The wire form is the server's enum, so a typo can no longer reach it.
+        // The wire form is the server's enum, so a typo cannot reach it.
         assert_eq!(serde_json::to_string(&visibility_to_wire(true)).expect("serialize"), "\"shared\"");
     }
 

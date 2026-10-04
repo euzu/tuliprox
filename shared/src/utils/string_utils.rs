@@ -164,8 +164,8 @@ pub fn percent_encode_unreserved(value: &str) -> String {
 ///
 /// The text is NFC-normalized first, and combining marks (viramas, tone
 /// marks, accents a decomposed source did not compose) are kept when they
-/// follow a kept letter. Dropping them garbled whole scripts; keeping them
-/// after a dropped emoji would leave an invisible character behind.
+/// follow a kept letter: several scripts are unreadable without them. After a
+/// dropped emoji they would be an invisible leftover, so they go with it.
 pub fn sanitize_filename_chars(text: &str, underscore_whitespace: bool) -> String {
     use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
     let whitespace = if underscore_whitespace { '_' } else { ' ' };

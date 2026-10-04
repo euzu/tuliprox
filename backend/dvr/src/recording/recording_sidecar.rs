@@ -52,7 +52,7 @@ pub fn is_sidecar(path: &Path) -> bool {
 /// Write the sidecar beside its recording, replacing any earlier one.
 ///
 /// Staged and renamed so a crash mid-write cannot leave a half-parsed file
-/// where a valid one used to be. Rewriting an existing sidecar is normal: a
+/// where a valid one was. Rewriting an existing sidecar is normal: a
 /// finalization that runs twice must not fail the second time.
 pub async fn write_sidecar(recording: &Path, sidecar: &RecordingSidecar) -> io::Result<PathBuf> {
     let target = sidecar_path(recording);

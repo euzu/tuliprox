@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn private_retention_never_reaches_the_shared_library() {
-        // Step 1: a user's own budget must not evict the shared copy, and the
+        // A user's own budget must not evict the shared copy, and the
         // shared budget must not evict anyone's private one. They are separate
         // pools that happen to name the same channel.
         let config = RetentionConfig { keep_last_per_channel: Some(1), delete_after_days: None };

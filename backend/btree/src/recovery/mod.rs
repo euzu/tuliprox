@@ -360,7 +360,7 @@ where
         self.generation = 1;
         self.publish_checkpoint(std::iter::empty(), revision, 0)?;
         let mut tree = BPlusTree::<K, V>::new();
-        tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)));
+        tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)?));
         let _ = tree.store(&self.paths.database)?;
         self.current_revision = revision;
         self.database_revision = revision;
@@ -385,7 +385,7 @@ where
         for (key, value) in entries {
             tree.insert(key, value);
         }
-        tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)));
+        tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)?));
         let _ = tree.store(&self.paths.database)?;
         self.current_revision = revision;
         self.database_revision = revision;
@@ -393,13 +393,13 @@ where
         Ok(revision)
     }
 
-    fn identity(&self, applied_revision: u64) -> RecoveryIdentity {
-        RecoveryIdentity {
-            database_id: unhex16(&self.database_id),
+    fn identity(&self, applied_revision: u64) -> io::Result<RecoveryIdentity> {
+        Ok(RecoveryIdentity {
+            database_id: format::unhex_array(&self.database_id)?,
             schema_fingerprint: schema_fingerprint(S::NAME),
             schema_version: S::CURRENT_VERSION,
             applied_revision,
-        }
+        })
     }
 
     fn fail(&mut self, class: RecoveryErrorClass) {
@@ -525,7 +525,7 @@ where
             return Err(io::Error::other("injected fault: before journal sync"));
         }
 
-        if let Err(error) = self.sync_and_verify_journal() {
+        if let Err(error) = self.sync_and_verify_journal(frame.len()) {
             self.fail(RecoveryErrorClass::UncertainWrite);
             return Err(error);
         }
@@ -538,20 +538,24 @@ where
         Ok(())
     }
 
-    fn sync_and_verify_journal(&mut self) -> io::Result<()> {
+    /// Make the frame just appended durable and confirm all of it is on disk.
+    /// `journal_bytes` still counts only the frames before it.
+    fn sync_and_verify_journal(&mut self, frame_len: usize) -> io::Result<()> {
         let file = self.journal.as_mut().ok_or_else(|| invalid_data("recovery journal handle is missing"))?;
         file.sync_all()?;
         let metadata = fs::metadata(&self.journal_path)?;
-        let expected = self.journal_bytes;
+        let frame_len = u64::try_from(frame_len).map_err(|_| invalid_data("frame length exceeds u64"))?;
+        let expected =
+            self.journal_bytes.checked_add(frame_len).ok_or_else(|| invalid_data("journal size overflow"))?;
         if metadata.len() < expected {
-            return Err(invalid_data("recovery journal shrank after sync"));
+            return Err(invalid_data("recovery journal is shorter than its frames after sync"));
         }
         Ok(())
     }
 
     fn apply_to_database(&mut self, operations: Vec<RecoveryOperation<K, V>>, revision: u64) -> io::Result<()> {
         self.check_fault(RecoveryFaultPointCheck::DuringDatabaseBatch)?;
-        let identity = self.identity(revision);
+        let identity = self.identity(revision)?;
         let updater = self.updater()?;
         updater.set_flush_policy(FlushPolicy::Batch);
         let mut result = Ok(());
@@ -799,7 +803,7 @@ where
 
         let build = (|| -> io::Result<()> {
             let mut tree = BPlusTree::<K, V>::new();
-            tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)));
+            tree.set_metadata(BPlusTreeMetadata::Recovery(self.identity(revision)?));
             for (key, value) in state {
                 tree.insert(key, value);
             }
@@ -982,15 +986,3 @@ fn detect_placement(paths: &RecoveryPaths) -> RecoveryStoragePlacement {
 fn new_database_id() -> String { hex16(*uuid::Uuid::new_v4().as_bytes()) }
 
 fn hex16(bytes: [u8; 16]) -> String { format::hex_bytes(&bytes) }
-
-fn unhex16(text: &str) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    let bytes = text.as_bytes();
-    for (index, slot) in out.iter_mut().enumerate() {
-        let start = index.saturating_mul(2);
-        let Some(pair) = bytes.get(start..start.saturating_add(2)) else { break };
-        let Ok(pair) = std::str::from_utf8(pair) else { break };
-        *slot = u8::from_str_radix(pair, 16).unwrap_or(0);
-    }
-    out
-}

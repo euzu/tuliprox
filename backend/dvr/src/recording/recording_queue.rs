@@ -88,6 +88,12 @@ pub enum QueueMutationError {
     NotInTerminalState,
     DiskFull,
     MutationSkipped,
+    /// The idempotency key was accepted before, for the same request.
+    IdempotentReplay {
+        recording_id: String,
+    },
+    /// The idempotency key was accepted before, for a different request.
+    IdempotencyConflict,
     /// Escape hatch for dynamically-formatted validation messages
     /// that have no stable wire code. Prefer the typed variants.
     Other(String),
@@ -116,6 +122,8 @@ impl QueueMutationError {
             Self::NotInTerminalState => "recording not in terminal state",
             Self::DiskFull => "disk full",
             Self::MutationSkipped => "mutation unexpectedly skipped",
+            Self::IdempotentReplay { .. } => "recording idempotent replay",
+            Self::IdempotencyConflict => "recording idempotency conflict",
             Self::Other(_) => "queue mutation failed",
             Self::Io(_) => "queue mutation persistence failed",
         }
@@ -197,10 +205,62 @@ where
     F: FnOnce(&mut PersistedRecordingQueue) -> Result<R, QueueMutationError>,
 {
     let _mutation = this.mutation_guard.lock().await;
+    // Checked again under the guard: the caller's lookup ran without it, so
+    // another request with the same key may have committed in between.
+    let outcome = this
+        .lookup_idempotency(&idempotency.principal, &idempotency.key, &idempotency.request_fingerprint)
+        .await
+        .map_err(QueueMutationError::from_io)?;
+    match outcome {
+        IdempotencyOutcome::Fresh => {}
+        IdempotencyOutcome::Replay { recording_id } => {
+            return Err(QueueMutationError::IdempotentReplay { recording_id });
+        }
+        IdempotencyOutcome::Conflict => return Err(QueueMutationError::IdempotencyConflict),
+    }
     match mutate_optional_locked_with(this, Some(idempotency), |candidate| op(candidate).map(Some)).await? {
         Some(result) => Ok(result),
         None => Err(QueueMutationError::MutationSkipped),
     }
+}
+
+/// [`mutate`], then `after` with its result, before the mutation guard is
+/// released.
+///
+/// For filesystem work that must not race the next mutation: once the guard
+/// is released a new admission or a worker start can claim the path the
+/// committed state just gave up.
+pub async fn mutate_then<F, R, A, Fut>(this: &RecordingQueue, op: F, after: A) -> Result<R, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedRecordingQueue) -> Result<R, QueueMutationError>,
+    A: FnOnce(&R) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _mutation = this.mutation_guard.lock().await;
+    let result = mutate_optional_locked(this, |candidate| op(candidate).map(Some))
+        .await?
+        .ok_or(QueueMutationError::MutationSkipped)?;
+    after(&result).await;
+    Ok(result)
+}
+
+/// `prepare`, then [`mutate`] with its result, under one mutation guard.
+///
+/// For filesystem work that has to happen before a mutation commits, without
+/// blocking a runtime thread inside the mutation closure and without another
+/// mutation slipping in between. `prepare` reads the committed in-memory
+/// state, which cannot change while the guard is held.
+pub async fn mutate_prepared<P, Fut, T, F, R>(this: &RecordingQueue, prepare: P, op: F) -> Result<R, QueueMutationError>
+where
+    P: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, QueueMutationError>>,
+    F: FnOnce(&mut PersistedRecordingQueue, T) -> Result<R, QueueMutationError>,
+{
+    let _mutation = this.mutation_guard.lock().await;
+    let prepared = prepare().await?;
+    mutate_optional_locked(this, |candidate| op(candidate, prepared).map(Some))
+        .await?
+        .ok_or(QueueMutationError::MutationSkipped)
 }
 
 pub async fn mutate_optional<F, R>(this: &RecordingQueue, op: F) -> Result<Option<R>, QueueMutationError>
@@ -493,9 +553,28 @@ pub fn media_is_still_referenced(candidate: &PersistedRecordingQueue, uuid: &str
     let Some(subject) = all_tasks(candidate).find(|task| task.uuid == uuid) else {
         return false;
     };
-    all_tasks(candidate).any(|other| {
-        other.uuid != uuid && other.recording.deleting_previous_state.is_none() && same_media(other, subject)
-    })
+    media_held_by_another(
+        all_tasks(candidate).map(|task| {
+            (task.uuid.as_str(), task.media_identity.as_str(), task.recording.deleting_previous_state.is_some())
+        }),
+        uuid,
+        &subject.media_identity,
+    )
+}
+
+/// The reference rule itself, over `(uuid, media identity, being deleted)`
+/// entries, so the persisted queue and an in-memory snapshot apply the same
+/// one. An entry being deleted holds nothing, and an empty identity matches
+/// nothing.
+pub fn media_held_by_another<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+    uuid: &str,
+    media: &str,
+) -> bool {
+    !media.is_empty()
+        && entries
+            .into_iter()
+            .any(|(other_uuid, other_media, deleting)| other_uuid != uuid && !deleting && other_media == media)
 }
 
 pub fn promotion_decision(candidate: &PersistedRecordingQueue, task: &PersistedRecordingTask) -> PromotionDecision {
@@ -1039,6 +1118,10 @@ impl RecordingQueue {
     }
 
     pub async fn persist_to_disk(&self) -> std::io::Result<()> {
+        // `snapshot_current` takes the partition locks in mutation order; the
+        // guard is what keeps that order from meeting a reader that takes them
+        // differently.
+        let _mutation = self.mutation_guard.lock().await;
         let revision = self.revision.load(Ordering::SeqCst);
         let records = self.snapshot_current(QueueRevision(revision)).await.to_records();
         let result = self.commit_records(revision, records, None).await;
@@ -1328,8 +1411,8 @@ impl RecordingQueue {
     /// Ask the worker to restart so it picks up a reloaded configuration.
     ///
     /// A restart never replaces a pending pause or cancel. The fallback below
-    /// runs later than the caller, and an unconditional write there could land
-    /// after a user's pause and turn it into a requeue.
+    /// runs later than the caller, so it may land after a user's pause; it
+    /// must not turn that pause into a requeue.
     pub fn request_worker_restart(&self) {
         fn request(control: &mut RecordingControl) -> bool {
             if *control == RecordingControl::None {
@@ -2157,8 +2240,8 @@ mod tests {
 
     #[test]
     fn a_name_taken_on_disk_is_numbered_from_the_original_stem() {
-        // The suffix was applied to the already-suffixed name, so the third
-        // copy became `film_1_2.mp4` instead of `film_2.mp4`.
+        // Collision suffixes number the original stem: the third copy is
+        // `film_2.mp4`, not `film_1_2.mp4`.
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::fs::write(dir.path().join("film.mp4"), b"").expect("first copy");
         std::fs::write(dir.path().join("film_1.mp4"), b"").expect("second copy");
@@ -2339,6 +2422,105 @@ mod tests {
             RecordingWaitOutcome::Restarted
         );
         assert_eq!(*queue.control_signal.read().await, RecordingControl::Restart);
+    }
+
+    /// Age the first recovery generation so the next commit wants a
+    /// checkpoint, and block the directory that checkpoint would be written
+    /// to: the checkpoint fails after the commit itself succeeded.
+    fn force_a_failing_checkpoint(dir: &Path) {
+        let recovery = dir.join("recordings_library_recovery");
+        let manifest = recovery.join("gen-00000000000000000001/manifest.bin");
+        let bytes = std::fs::read(&manifest).expect("manifest");
+        let mut payload: serde_json::Value = serde_json::from_slice(&bytes[40..]).expect("manifest payload");
+        payload["created_at_unix"] = serde_json::json!(0);
+        let payload = serde_json::to_vec(&payload).expect("encode");
+        let mut framed = b"TRJ1".to_vec();
+        framed.extend_from_slice(&u32::try_from(payload.len()).expect("length").to_le_bytes());
+        framed.extend_from_slice(blake3::hash(&payload).as_bytes());
+        framed.extend_from_slice(&payload);
+        std::fs::write(&manifest, framed).expect("rewrite manifest");
+        std::fs::write(recovery.join("gen-00000000000000000002"), b"blocks the next generation").expect("block");
+    }
+
+    #[tokio::test]
+    async fn a_commit_whose_checkpoint_fails_is_kept_in_memory_and_on_disk() {
+        // The checkpoint runs after the batch is durable. The queue keeps the
+        // committed record, and the next commit does not delete it again.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        drop(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        force_a_failing_checkpoint(dir.path());
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("reopen repository");
+
+        let committed = RecordingQueue::to_persisted(&task("kept", RecordingKind::Vod, RecordingTaskState::Completed));
+        mutate(&queue, move |candidate| {
+            candidate.finished.push(committed.clone());
+            Ok(())
+        })
+        .await
+        .expect("the commit succeeds although its checkpoint does not");
+        assert_eq!(queue.finished.read().await.len(), 1);
+
+        // A second commit diffs against that state rather than deleting it.
+        let another = RecordingQueue::to_persisted(&task("next", RecordingKind::Vod, RecordingTaskState::Completed));
+        mutate(&queue, move |candidate| {
+            candidate.finished.push(another.clone());
+            Ok(())
+        })
+        .await
+        .expect("second commit");
+        drop(queue);
+
+        let reopened = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("reopen repository");
+        reopened.load_from_disk().await.expect("load");
+        let mut uuids: Vec<String> = reopened.finished.read().await.iter().map(|task| task.uuid.clone()).collect();
+        uuids.sort();
+        assert_eq!(uuids, ["kept", "next"]);
+    }
+
+    #[tokio::test]
+    async fn a_second_request_on_an_accepted_key_is_refused_and_leaves_the_key_alone() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository");
+        let record = |fingerprint: &str, recording_id: &str| PersistedIdempotency {
+            principal: "web:alice".to_string(),
+            key: "same-key".to_string(),
+            request_fingerprint: fingerprint.to_string(),
+            recording_id: recording_id.to_string(),
+            accepted_at: Utc::now().timestamp(),
+        };
+
+        let first = RecordingQueue::to_persisted(&task("first", RecordingKind::Vod, RecordingTaskState::Queued));
+        mutate_with_idempotency(&queue, record("first-body", "first"), move |candidate| {
+            candidate.queue.push(first.clone());
+            Ok(())
+        })
+        .await
+        .expect("first request");
+
+        let second = RecordingQueue::to_persisted(&task("second", RecordingKind::Vod, RecordingTaskState::Queued));
+        let refused = mutate_with_idempotency(&queue, record("different-body", "second"), move |candidate| {
+            candidate.queue.push(second.clone());
+            Ok(())
+        })
+        .await;
+        assert!(matches!(refused, Err(QueueMutationError::IdempotencyConflict)), "got {refused:?}");
+        assert_eq!(queue.queue.lock().await.len(), 1, "the second request admitted nothing");
+        assert_eq!(
+            queue.lookup_idempotency("web:alice", "same-key", "first-body").await.expect("lookup"),
+            IdempotencyOutcome::Replay { recording_id: "first".to_string() },
+            "the accepted key still answers for the first request"
+        );
+
+        let replay = RecordingQueue::to_persisted(&task("again", RecordingKind::Vod, RecordingTaskState::Queued));
+        let replayed = mutate_with_idempotency(&queue, record("first-body", "again"), move |candidate| {
+            candidate.queue.push(replay.clone());
+            Ok(())
+        })
+        .await;
+        assert!(
+            matches!(&replayed, Err(QueueMutationError::IdempotentReplay { recording_id }) if recording_id == "first"),
+            "got {replayed:?}"
+        );
     }
 
     #[tokio::test]

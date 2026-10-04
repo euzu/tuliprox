@@ -5,8 +5,9 @@ use crate::{
     recording::{
         recording_disk, recording_path,
         recording_queue::{
-            mutate, mutate_with_idempotency, IdempotencyOutcome, PersistedIdempotency, PersistedRecordingQueue,
-            PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask, RecordingTaskState,
+            mutate, mutate_prepared, mutate_then, mutate_with_idempotency, IdempotencyOutcome, PersistedIdempotency,
+            PersistedRecordingQueue, PersistedRecordingTask, QueueMutationError, RecordingQueue, RecordingTask,
+            RecordingTaskState,
         },
     },
     recording_deletion::{
@@ -594,10 +595,16 @@ impl RecordingService {
             if candidate_has_duplicate_recording(candidate, recording) {
                 return Err(QueueMutationError::Duplicate);
             }
+            // Media another entry finished, or is fetching with a known size,
+            // is charged at that size now: attaching copies the whole file
+            // into this entry's charge, so admitting it at zero would let it
+            // past the quota.
+            let charge = reserved_bytes.max(known_media_size(candidate, &persisted));
+            persisted.recording.reserved_bytes = charge;
             let pool = recording_quota::quota_pool_for_task(&persisted);
             let used = used_bytes_for_pool(candidate, &pool);
             if matches!(
-                recording_quota::would_exceed(&pool, used, reserved_bytes, &quota_limits),
+                recording_quota::would_exceed(&pool, used, charge, &quota_limits),
                 AdmissionOutcome::OverLimit { .. }
             ) {
                 return Err(QueueMutationError::QuotaExceeded);
@@ -687,15 +694,8 @@ impl RecordingService {
                     EditError::ProvenanceCleared => QueueMutationError::Forbidden,
                 })?;
                 let channel_changed_now = recording_edit::channel_changed(
-                    &recording_edit::EditPatch {
-                        program_start: patch.program_start,
-                        program_end: patch.program_end,
-                        pre_roll_secs: patch.pre_roll_secs,
-                        post_roll_secs: patch.post_roll_secs,
-                        program_title: patch.program_title.clone(),
-                        channel_id: patch.channel_id.clone(),
-                        channel_name: patch.channel_name.clone(),
-                    },
+                    patch.channel_id.as_deref(),
+                    patch.channel_name.as_deref(),
                     meta_snapshot.channel_id.as_deref(),
                     meta_snapshot.channel_name.as_deref(),
                 );
@@ -707,31 +707,57 @@ impl RecordingService {
                     current_start: meta_snapshot.program_start,
                     current_end: meta_snapshot.program_end,
                     current_reserved: meta_snapshot.reserved_bytes,
+                    is_live: task.kind == RecordingKind::Live,
+                    shares_media: crate::recording::recording_queue::media_is_still_referenced(candidate, uuid),
                 }
             };
-            // Immutable borrow is out of scope. Compute the new
-            // interval and the post-edit reservation, then check the
-            // quota against the pool total — no `RecordingMetadata`
-            // clone is required because the snapshot carries only
-            // primitives.
-            let start = patch.program_start.or(snapshot.current_start).ok_or(QueueMutationError::InvalidInterval)?;
-            let end = patch.program_end.or(snapshot.current_end).ok_or(QueueMutationError::InvalidInterval)?;
-            if start >= end {
+            // A programme window and its padding exist for live captures
+            // only; the create path refuses them for VOD and series too.
+            let edits_window = patch.program_start.is_some()
+                || patch.program_end.is_some()
+                || patch.pre_roll_secs.is_some()
+                || patch.post_roll_secs.is_some();
+            if !snapshot.is_live && edits_window {
                 return Err(QueueMutationError::InvalidInterval);
             }
-            let duration_secs = end
-                .checked_sub(start)
-                .and_then(|duration| u64::try_from(duration).ok())
-                .ok_or(QueueMutationError::InvalidInterval)?;
-            let (new_reserved, _) = recording_quota::estimate_reservation(duration_secs, 0, fallback_bytes_per_minute);
-            let pool_used = used_bytes_for_pool(candidate, &snapshot.pool);
-            let pool_used_minus_this = pool_used.saturating_sub(snapshot.current_reserved);
-            if matches!(
-                recording_quota::would_exceed(&snapshot.pool, pool_used_minus_this, new_reserved, &quota_limits),
-                AdmissionOutcome::OverLimit { .. }
-            ) {
-                return Err(QueueMutationError::QuotaExceeded);
-            }
+            // A changed window is derived the way the create path derives
+            // it: padded, and reserved for what is left of it. An edit that
+            // leaves the window alone leaves its schedule and reservation
+            // alone too.
+            let window = if edits_window {
+                let start =
+                    patch.program_start.or(snapshot.current_start).ok_or(QueueMutationError::InvalidInterval)?;
+                let end = patch.program_end.or(snapshot.current_end).ok_or(QueueMutationError::InvalidInterval)?;
+                // Same rule as a new request: the interval itself must be
+                // representable, not only its padded ends.
+                if end.checked_sub(start).is_none_or(|duration| duration <= 0) {
+                    return Err(QueueMutationError::InvalidInterval);
+                }
+                let window = effective_recording_window(
+                    start,
+                    end,
+                    snapshot.merged_pre,
+                    snapshot.merged_post,
+                    chrono::Utc::now().timestamp(),
+                )
+                .map_err(|error| match error {
+                    ServiceError::PaddingLimitExceeded => QueueMutationError::PaddingLimitExceeded,
+                    _ => QueueMutationError::InvalidInterval,
+                })?;
+                let (reserved, _) =
+                    recording_quota::estimate_reservation(window.remaining_duration_secs, 0, fallback_bytes_per_minute);
+                let pool_used = used_bytes_for_pool(candidate, &snapshot.pool);
+                let pool_used_minus_this = pool_used.saturating_sub(snapshot.current_reserved);
+                if matches!(
+                    recording_quota::would_exceed(&snapshot.pool, pool_used_minus_this, reserved, &quota_limits),
+                    AdmissionOutcome::OverLimit { .. }
+                ) {
+                    return Err(QueueMutationError::QuotaExceeded);
+                }
+                Some((start, end, window, reserved))
+            } else {
+                None
+            };
 
             // All immutable borrows are out of scope. Re-acquire the
             // same task via the remembered location (O(1)) for the
@@ -751,24 +777,46 @@ impl RecordingService {
             if let Some(channel_name) = patch.channel_name {
                 meta.channel_name = Some(channel_name);
             }
-            meta.pre_roll_secs = snapshot.merged_pre;
-            meta.post_roll_secs = snapshot.merged_post;
-            meta.program_start = Some(start);
-            meta.program_end = Some(end);
-            meta.scheduled_start = Some(start);
-            meta.scheduled_end = Some(end);
-            meta.reserved_bytes = new_reserved;
+            if let Some((start, end, window, reserved)) = window {
+                meta.pre_roll_secs = snapshot.merged_pre;
+                meta.post_roll_secs = snapshot.merged_post;
+                meta.program_start = Some(start);
+                meta.program_end = Some(end);
+                meta.scheduled_start = Some(window.scheduled_start);
+                meta.scheduled_end = Some(window.scheduled_end);
+                meta.reserved_bytes = reserved;
+            }
             if snapshot.channel_changed_now {
                 meta.epg = None;
             }
 
+            // The window is part of what makes two requests the same media.
+            // An edit that changes it leaves the media this entry shared,
+            // so it must not keep the shared file's path either: two
+            // captures would write one file, and deleting either would
+            // take the other's.
+            let identity = recording_identity_key(&task.recording, &task.url);
+            let leaves_shared_media = identity != task.media_identity && snapshot.shares_media;
+            task.media_identity = identity;
+            if leaves_shared_media {
+                let mut detached = task.clone();
+                reserve_recording_relative_path(candidate, &mut detached)?;
+                let Some(task) = recording_mut_at(candidate, location) else {
+                    return Err(QueueMutationError::UnknownRecording);
+                };
+                *task = detached;
+            }
+
+            let Some(task) = recording_mut_at(candidate, location) else {
+                return Err(QueueMutationError::UnknownRecording);
+            };
             out = Some(RecordingTaskView {
                 uuid: task.uuid.clone(),
                 owner_id: owner_id.clone(),
-                visibility: meta.visibility,
+                visibility: task.recording.visibility,
                 filename_preview: task.filename.clone(),
-                start_at: meta.scheduled_start,
-                duration_secs: Some(duration_secs),
+                start_at: task.recording.scheduled_start,
+                duration_secs: window.map(|(_, _, window, _)| window.remaining_duration_secs),
                 state: task.state,
             });
             Ok(())
@@ -887,24 +935,52 @@ impl RecordingService {
         uuid: &str,
     ) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        mutate(&self.recordings, |candidate| {
-            authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Delete)?;
-            // The active slot is owned by the worker. Removing a task from
-            // it here would leave the worker writing to a file no entry
-            // names, so refuse instead of silently doing nothing (the retain
-            // below cannot reach the active slot).
-            if candidate.active.as_ref().is_some_and(|active| active.uuid == uuid) {
-                return Err(QueueMutationError::StateNotEditable);
-            }
-            let original = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
-            candidate.queue.retain(|task| task.uuid != uuid);
-            candidate.scheduled.retain(|task| task.uuid != uuid);
-            candidate.finished.retain(|task| task.uuid != uuid);
-            let current = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
-            Ok(current != original)
-        })
+        let (removed, _) = mutate_then(
+            &self.recordings,
+            |candidate| {
+                authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Delete)?;
+                // The active slot is owned by the worker. Removing a task from
+                // it here would leave the worker writing to a file no entry
+                // names, so refuse instead of silently doing nothing (the retain
+                // below cannot reach the active slot).
+                if candidate.active.as_ref().is_some_and(|active| active.uuid == uuid) {
+                    return Err(QueueMutationError::StateNotEditable);
+                }
+                // Removing an entry keeps a finished recording on disk; that is
+                // what separates it from deleting the file. A partial is
+                // different: with no entry and no worker left on its media, it
+                // is never resumed. A worker on the same media holds the active
+                // slot, so it counts as a reference here.
+                let orphaned_partial = candidate_tasks(candidate)
+                    .find(|task| task.uuid == uuid)
+                    .filter(|_| !crate::recording::recording_queue::media_is_still_referenced(candidate, uuid))
+                    .map(|task| task.file_path.clone());
+                let original = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
+                candidate.queue.retain(|task| task.uuid != uuid);
+                candidate.scheduled.retain(|task| task.uuid != uuid);
+                candidate.finished.retain(|task| task.uuid != uuid);
+                let current = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
+                let removed = current != original;
+                Ok((removed, orphaned_partial.filter(|_| removed)))
+            },
+            // Still under the guard that decided the partial is orphaned: a
+            // request admitted after it may reuse the path, and must find it
+            // either still claimed or already empty, never emptied under it.
+            |(_, orphaned_partial)| {
+                let orphaned_partial = orphaned_partial.clone();
+                async move {
+                    let Some(file_path) = orphaned_partial else {
+                        return;
+                    };
+                    if let Err(err) = crate::recording_deletion::remove_orphaned_partial(&file_path).await {
+                        log::warn!("Removed a recording, but could not remove its leftover partial: {err}");
+                    }
+                }
+            },
+        )
         .await
-        .map_err(|e| map_queue_error(&e))
+        .map_err(|e| map_queue_error(&e))?;
+        Ok(removed)
     }
 
     /// Requeue a finished VOD/Series transfer. Live is rejected by the
@@ -926,47 +1002,71 @@ impl RecordingService {
         restart_from_beginning: bool,
     ) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        mutate(&self.recordings, |candidate| {
-            authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Edit)?;
-            let Some(pos) = candidate.finished.iter().position(|task| task.uuid == uuid) else {
-                return Ok(false);
-            };
-            if !candidate.finished[pos].kind.is_resumable() {
-                return Err(QueueMutationError::StateNotEditable);
-            }
-            let range_unsupported =
-                candidate.finished[pos].error.as_deref() == Some(super::recording_transfer::RANGE_UNSUPPORTED_ERROR);
-            if range_unsupported && !restart_from_beginning {
-                return Err(QueueMutationError::StateNotEditable);
-            }
-            if restart_from_beginning {
-                let failed = &candidate.finished[pos];
-                if !range_unsupported {
+        let recordings = &self.recordings;
+        let requester = &owner_id;
+        mutate_prepared(
+            recordings,
+            // A restart discards the partial before the task is queued
+            // again, so a worker can never resume from bytes the provider
+            // cannot continue. It runs once the request is known to be
+            // allowed, and before the mutation, under the same guard.
+            || async move {
+                if !restart_from_beginning {
+                    return Ok(());
+                }
+                let partial = {
+                    let finished = recordings.finished.read().await;
+                    let Some(task) = finished.iter().find(|task| task.uuid == uuid) else {
+                        return Ok(());
+                    };
+                    let subject = RecordingSubject::new(Some(&task.recording), TerminalState::Active, true);
+                    if !matches!(
+                        authorize(claims, requester, RecordingAction::Edit, &subject),
+                        RecordingDecision::Allow
+                    ) {
+                        return Err(QueueMutationError::Forbidden);
+                    }
+                    if task.error.as_deref() != Some(super::recording_transfer::RANGE_UNSUPPORTED_ERROR) {
+                        return Err(QueueMutationError::StateNotEditable);
+                    }
+                    crate::recording::recording_worker::recording_partial_path(&task.file_path)
+                };
+                match tokio::fs::remove_file(&partial).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(QueueMutationError::from_io(error)),
+                }
+            },
+            |candidate, ()| {
+                authorize_task_in_candidate(candidate, uuid, claims, &owner_id, RecordingAction::Edit)?;
+                let Some(pos) = candidate.finished.iter().position(|task| task.uuid == uuid) else {
+                    return Ok(false);
+                };
+                if !candidate.finished[pos].kind.is_resumable() {
                     return Err(QueueMutationError::StateNotEditable);
                 }
-                let partial = crate::recording::recording_worker::recording_partial_path(&failed.file_path);
-                match std::fs::remove_file(partial) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(QueueMutationError::from_io(error)),
+                let range_unsupported = candidate.finished[pos].error.as_deref()
+                    == Some(super::recording_transfer::RANGE_UNSUPPORTED_ERROR);
+                if range_unsupported != restart_from_beginning {
+                    return Err(QueueMutationError::StateNotEditable);
                 }
-            }
-            let mut task = candidate.finished.remove(pos);
-            task.finished = false;
-            task.size = 0;
-            if restart_from_beginning {
-                task.total_size = None;
-                task.recording.resume_etag = None;
-                task.recording.resume_last_modified = None;
-            }
-            task.paused = false;
-            task.error = None;
-            task.state = RecordingTaskState::Queued;
-            task.retry_attempts = 0;
-            task.next_retry_at = None;
-            candidate.queue.push(task);
-            Ok(true)
-        })
+                let mut task = candidate.finished.remove(pos);
+                task.finished = false;
+                task.size = 0;
+                if restart_from_beginning {
+                    task.total_size = None;
+                    task.recording.resume_etag = None;
+                    task.recording.resume_last_modified = None;
+                }
+                task.paused = false;
+                task.error = None;
+                task.state = RecordingTaskState::Queued;
+                task.retry_attempts = 0;
+                task.next_retry_at = None;
+                candidate.queue.push(task);
+                Ok(true)
+            },
+        )
         .await
         .map_err(|e| map_queue_error(&e))
     }
@@ -1331,6 +1431,10 @@ fn map_queue_error(err: &QueueMutationError) -> ServiceError {
         QueueMutationError::Duplicate => ServiceError::Duplicate,
         QueueMutationError::InvalidPath => ServiceError::InvalidPath,
         QueueMutationError::DiskFull => ServiceError::DiskFull,
+        QueueMutationError::IdempotentReplay { recording_id } => {
+            ServiceError::IdempotentReplay { recording_id: recording_id.clone() }
+        }
+        QueueMutationError::IdempotencyConflict => ServiceError::IdempotencyConflict,
         QueueMutationError::StateNotEditable
         | QueueMutationError::InvalidQuotaPool
         | QueueMutationError::NotInTerminalState
@@ -1427,6 +1531,26 @@ fn reserve_recording_relative_path(
     task.filename = filename;
     task.recording.relative_path = Some(relative.to_string_lossy().into_owned());
     Ok(())
+}
+
+/// The size of the media `task` refers to, as far as another entry already
+/// knows it: the measured size of a completed file, or the total a transfer
+/// learned from its provider. `0` when nobody knows yet.
+fn known_media_size(candidate: &PersistedRecordingQueue, task: &PersistedRecordingTask) -> u64 {
+    if task.media_identity.is_empty() {
+        return 0;
+    }
+    candidate_tasks(candidate)
+        .filter(|other| other.media_identity == task.media_identity)
+        .filter_map(|other| {
+            if other.state == RecordingTaskState::Completed {
+                Some(other.recording.measured_bytes.max(other.size))
+            } else {
+                other.total_size
+            }
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn collect_existing_relative_paths(candidate: &PersistedRecordingQueue) -> impl Iterator<Item = &str> + '_ {
@@ -1603,6 +1727,9 @@ struct EditSnapshot {
     current_start: Option<i64>,
     current_end: Option<i64>,
     current_reserved: u64,
+    is_live: bool,
+    /// Another entry holds the same media, and with it the same file path.
+    shares_media: bool,
 }
 /// Server-owned input for the conflict preview. The caller never
 /// supplies another recording's padded interval, capacity, or
@@ -2197,55 +2324,159 @@ mod tests {
         }
     }
 
+    fn deleting_claims() -> shared::model::Claims {
+        shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: Permission::RecordingDelete.into(),
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        }
+    }
+
+    /// A finished entry `uuid` of `owner` on the shared film, with its file in
+    /// `dir`. Both the final file and the partial are written, so a test sees
+    /// exactly which one a removal touched.
+    async fn finished_film(
+        queue: &RecordingQueue,
+        dir: &std::path::Path,
+        uuid: &str,
+        owner: &str,
+        state: RecordingTaskState,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let mut task = persisted_media(uuid, owner, RecordingVisibility::Private, "http://provider/film.mp4");
+        task.file_dir = dir.to_path_buf();
+        task.file_path = dir.join("recording.mp4");
+        task.state = state;
+        task.finished = true;
+        let final_path = task.file_path.clone();
+        let partial = crate::recording::recording_worker::recording_partial_path(&final_path);
+        std::fs::write(&final_path, b"recorded bytes").expect("write final file");
+        std::fs::write(&partial, b"partial bytes").expect("write partial");
+        let task = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task).expect("valid task"));
+        mutate(queue, move |candidate| {
+            candidate.finished.push(task.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed recording");
+        (final_path, partial)
+    }
+
     #[tokio::test]
-    async fn removing_a_terminal_entry_keeps_its_owned_file() {
-        for state in [RecordingTaskState::Completed, RecordingTaskState::Cancelled] {
+    async fn removing_a_completed_entry_keeps_its_file() {
+        // Remove takes the entry off the list; the recording stays on disk
+        // for whoever reads the directory. Deleting the file is its own action.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let (final_path, _) =
+            finished_film(&queue, dir.path(), "recording", "web:alice", RecordingTaskState::Completed).await;
+        let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+        assert!(service.remove_recording_task(&deleting_claims(), "recording").await.expect("remove"));
+        assert!(final_path.exists(), "the completed file was deleted while only removing the entry");
+        assert!(queue.finished.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_failed_or_cancelled_entry_removes_its_partial() {
+        for state in [RecordingTaskState::Failed, RecordingTaskState::Cancelled] {
             let dir = tempfile::tempdir().expect("tempdir");
             let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
-            let mut task =
-                persisted_media("recording", "web:alice", RecordingVisibility::Private, "http://provider/film.mp4");
-            task.file_dir = dir.path().to_path_buf();
-            task.file_path = dir.path().join("recording.mp4");
-            task.state = state;
-            task.finished = true;
-            let owned_path = if state == RecordingTaskState::Completed {
-                task.file_path.clone()
-            } else {
-                crate::recording::recording_worker::recording_partial_path(&task.file_path)
-            };
-            std::fs::write(&owned_path, b"recorded bytes").expect("write recorded file");
-            let task = RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task).expect("valid task"));
-            mutate(&queue, move |candidate| {
-                candidate.finished.push(task.clone());
-                Ok(())
-            })
-            .await
-            .expect("seed recording");
+            let (final_path, partial) = finished_film(&queue, dir.path(), "recording", "web:alice", state).await;
             let service = RecordingService::new(Arc::clone(&queue), test_app_config());
-            let claims = shared::model::Claims {
-                username: "alice".to_string(),
-                iss: "tuliprox".to_string(),
-                iat: 0,
-                exp: 0,
-                roles: shared::model::RoleSet::new(),
-                permissions: Permission::RecordingDelete.into(),
-                pwd_version: 0,
-                subject_id: Some(UserId::from("web:alice")),
-                permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
-            };
 
-            assert!(service.remove_recording_task(&claims, "recording").await.expect("remove recording"));
-            assert!(owned_path.exists(), "{state:?} file was deleted while only removing the entry");
-            assert!(queue.finished.read().await.is_empty());
+            assert!(service.remove_recording_task(&deleting_claims(), "recording").await.expect("remove"));
+            assert!(!partial.exists(), "{state:?}: a partial nothing will resume is not kept");
+            assert!(final_path.exists(), "{state:?}: a final file is never removed by Remove");
         }
+    }
+
+    #[test]
+    fn a_download_claiming_the_path_during_the_cleanup_keeps_its_partial() {
+        // The orphan check and the unlink happen under one mutation guard. A
+        // download admitted after the removal may take over the path, and
+        // must find its partial intact.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let queue = Arc::new(RecordingQueue::new());
+            let (final_path, partial) =
+                finished_film(&queue, dir.path(), "recording", "web:alice", RecordingTaskState::Failed).await;
+            std::fs::remove_file(&final_path).expect("only the partial exists");
+            let mut newcomer =
+                persisted_media("newcomer", "web:alice", RecordingVisibility::Private, "http://provider/film.mp4");
+            newcomer.file_path.clone_from(&final_path);
+            newcomer.state = RecordingTaskState::Running;
+
+            // Park the filesystem: the cleanup's unlink waits on the only
+            // blocking thread until released.
+            let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                parked_tx.send(()).expect("parked");
+                let _ = release_rx.recv();
+            });
+            parked_rx.recv().expect("blocking thread taken");
+
+            let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+            let removal =
+                tokio::spawn(async move { service.remove_recording_task(&deleting_claims(), "recording").await });
+            while !queue.finished.read().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+            // The newcomer is admitted and starts writing, as soon as it can.
+            let claim_queue = Arc::clone(&queue);
+            let claim_partial = partial.clone();
+            let claim = tokio::spawn(async move {
+                mutate(&claim_queue, move |candidate| {
+                    candidate.active = Some(newcomer.clone());
+                    Ok(())
+                })
+                .await
+                .expect("admit newcomer");
+                tokio::fs::write(&claim_partial, b"newcomer's bytes").await.expect("newcomer writes");
+            });
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            release_tx.send(()).expect("release");
+            blocker.await.expect("blocker");
+            assert!(removal.await.expect("join").expect("remove"));
+            claim.await.expect("claim");
+
+            assert_eq!(queue.active.read().await.as_ref().map(|task| task.uuid.clone()).as_deref(), Some("newcomer"));
+            assert!(partial.exists(), "the newcomer's partial must survive the cleanup of the old entry");
+        });
+    }
+
+    #[tokio::test]
+    async fn removing_an_entry_keeps_a_partial_another_entry_still_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let (_, partial) =
+            finished_film(&queue, dir.path(), "recording", "web:alice", RecordingTaskState::Cancelled).await;
+        let _ = finished_film(&queue, dir.path(), "bob-recording", "web:bob", RecordingTaskState::Failed).await;
+        let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+        assert!(service.remove_recording_task(&deleting_claims(), "recording").await.expect("remove"));
+        assert!(partial.exists(), "Bob's entry still points at this media");
+        assert_eq!(queue.finished.read().await.len(), 1);
     }
 
     #[tokio::test]
     async fn cancelling_an_active_recording_leaves_it_worker_owned_until_the_worker_finishes() {
-        // Regression: the request used to stamp `Cancelled` on the active
-        // task, so it appeared in the completed list while the worker was
-        // still writing. Removing it then found no entry in any inactive
-        // bucket, left the active slot alone, and reported success.
+        // A cancel request leaves the active task to its worker: it must not
+        // show as finished while the worker is still writing, and removing it
+        // in that state must be refused rather than reported as done.
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads.json");
         let downloads =
@@ -2339,7 +2570,8 @@ mod tests {
         let state_file = dir.path().join("downloads.json");
         let downloads =
             Arc::new(RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository"));
-        let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let mut task = RecordingQueue::from_persisted(persisted_rule_recording("recording", None, start))
             .expect("valid recording task");
         {
             let meta = &mut task.recording;
@@ -2424,14 +2656,145 @@ mod tests {
             subject_id: Some(UserId::from("web:alice")),
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
         };
-        let patch = EditRecordingPatch { program_end: Some(1_300), ..EditRecordingPatch::default() };
+        let patch = EditRecordingPatch { program_end: Some(start + 1_200), ..EditRecordingPatch::default() };
 
         let result = service.edit_recording(&claims, "recording", patch).await;
 
-        assert!(matches!(result, Err(ServiceError::QuotaExceeded)));
+        assert!(matches!(result, Err(ServiceError::QuotaExceeded)), "got {result:?}");
         assert_eq!(committed_records(&downloads).await, persisted_before);
         let scheduled = downloads.scheduled.read().await;
-        assert_eq!(scheduled[0].scheduled_start(), Some(100));
+        assert_eq!(scheduled[0].scheduled_start(), Some(start));
+    }
+
+    fn editing_claims() -> shared::model::Claims {
+        shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: shared::model::RoleSet::new(),
+            permissions: Permission::RecordingManage.into(),
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        }
+    }
+
+    /// A scheduled live recording an hour from now, for `owner`.
+    fn upcoming_live(uuid: &str, owner: &str, start: i64) -> PersistedRecordingTask {
+        let mut task = persisted_rule_recording(uuid, None, start);
+        task.recording.owner = RecordingOwner::User(UserId::from(owner));
+        task.file_path = std::path::PathBuf::from("/tmp/shared-programme.ts");
+        task.filename = "shared-programme.ts".to_string();
+        task.recording.relative_path = Some("shared-programme.ts".to_string());
+        RecordingQueue::to_persisted(&RecordingQueue::from_persisted(task).expect("valid task"))
+    }
+
+    async fn scheduled_queue(tasks: Vec<PersistedRecordingTask>) -> Arc<RecordingQueue> {
+        let queue = Arc::new(RecordingQueue::new());
+        mutate(&queue, move |candidate| {
+            candidate.scheduled.clone_from(&tasks);
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        queue
+    }
+
+    #[tokio::test]
+    async fn an_edited_window_keeps_its_padding() {
+        // An edited window is scheduled with its pre- and post-roll, like a
+        // new one.
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let queue = scheduled_queue(vec![upcoming_live("recording", "web:alice", start)]).await;
+        let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+        let patch = EditRecordingPatch {
+            program_end: Some(start + 1_800),
+            pre_roll_secs: Some(120),
+            post_roll_secs: Some(300),
+            ..EditRecordingPatch::default()
+        };
+        service.edit_recording(&editing_claims(), "recording", patch).await.expect("edit");
+
+        let scheduled = queue.scheduled.read().await;
+        let meta = &scheduled[0].recording;
+        assert_eq!(meta.program_start, Some(start));
+        assert_eq!(meta.scheduled_start, Some(start - 120));
+        assert_eq!(meta.scheduled_end, Some(start + 1_800 + 300));
+    }
+
+    #[tokio::test]
+    async fn a_vod_takes_no_window_but_can_still_be_retitled() {
+        let queue = scheduled_queue(Vec::new()).await;
+        let mut vod = persisted_media("film", "web:alice", RecordingVisibility::Private, "http://provider/film.mp4");
+        vod.state = RecordingTaskState::Queued;
+        mutate(&queue, move |candidate| {
+            candidate.queue.push(vod.clone());
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+        for patch in [
+            EditRecordingPatch { program_start: Some(1), program_end: Some(2), ..EditRecordingPatch::default() },
+            EditRecordingPatch { pre_roll_secs: Some(60), ..EditRecordingPatch::default() },
+        ] {
+            let refused = service.edit_recording(&editing_claims(), "film", patch).await;
+            assert!(matches!(refused, Err(ServiceError::InvalidInterval)), "got {refused:?}");
+        }
+        let retitled =
+            EditRecordingPatch { program_title: Some("Better title".into()), ..EditRecordingPatch::default() };
+        service.edit_recording(&editing_claims(), "film", retitled).await.expect("a title edit is fine");
+        let queued = queue.queue.lock().await;
+        assert_eq!(queued[0].recording.program_title.as_deref(), Some("Better title"));
+        assert_eq!(queued[0].recording.program_start, None, "and it stays a transfer without a window");
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_leaves_shared_media_moves_to_a_path_of_its_own() {
+        // Alice and Bob scheduled the same programme and hold one file path.
+        // Alice moving her window makes it different media; keeping the path
+        // would have two captures write one file and let deleting hers remove
+        // Bob's.
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let queue = scheduled_queue(vec![
+            upcoming_live("alice-entry", "web:alice", start),
+            upcoming_live("bob-entry", "web:bob", start),
+        ])
+        .await;
+        let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+        let patch = EditRecordingPatch { program_end: Some(start + 7_200), ..EditRecordingPatch::default() };
+        service.edit_recording(&editing_claims(), "alice-entry", patch).await.expect("edit");
+
+        let (_, tasks) = queue.committed_snapshot().await;
+        let task = |uuid: &str| tasks.iter().find(|task| task.uuid == uuid).cloned().expect("entry");
+        let (alice, bob) = (task("alice-entry"), task("bob-entry"));
+        assert_ne!(alice.file_path, bob.file_path, "the edited entry no longer writes Bob's file");
+        assert_eq!(bob.file_path, std::path::PathBuf::from("/tmp/shared-programme.ts"), "Bob's entry is untouched");
+        let identity = |task: &RecordingTask| recording_identity_key(&task.recording, task.url.as_str());
+        assert_ne!(identity(&alice), identity(&bob));
+    }
+
+    #[tokio::test]
+    async fn padding_alone_does_not_split_shared_media() {
+        // The programme window decides the media, its padding does not.
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let queue = scheduled_queue(vec![
+            upcoming_live("alice-entry", "web:alice", start),
+            upcoming_live("bob-entry", "web:bob", start),
+        ])
+        .await;
+        let service = RecordingService::new(Arc::clone(&queue), test_app_config());
+
+        let patch = EditRecordingPatch { post_roll_secs: Some(600), ..EditRecordingPatch::default() };
+        service.edit_recording(&editing_claims(), "alice-entry", patch).await.expect("edit");
+
+        let (_, tasks) = queue.committed_snapshot().await;
+        let paths: Vec<_> = tasks.iter().map(|task| task.file_path.clone()).collect();
+        assert_eq!(paths[0], paths[1], "still one file for one programme");
     }
 
     #[tokio::test]
@@ -3017,6 +3380,93 @@ mod tests {
         assert_eq!(queue.queue.lock().await.len(), 1);
     }
 
+    fn with_private_quota(service: &RecordingService, bytes: u64) {
+        let mut config = tuliprox_core::model::Config::clone(&service.app_config.config.load());
+        if let Some(recording) = config.video.as_mut().and_then(|video| video.recording.as_mut()) {
+            recording.quota = Some(tuliprox_core::model::RecordingQuotaConfig {
+                default_private_bytes: Some(bytes),
+                ..Default::default()
+            });
+        }
+        service.app_config.config.store(Arc::new(config));
+    }
+
+    /// Alice's request for the film, finished at `bytes`.
+    async fn completed_film(service: &RecordingService, queue: &RecordingQueue, bytes: u64) {
+        service
+            .create_media_recording_idempotent(&creating_claims(), &media_input(), None)
+            .await
+            .expect("alice's request");
+        mutate(queue, |candidate| {
+            let mut done = candidate.queue.remove(0);
+            done.state = RecordingTaskState::Completed;
+            done.finished = true;
+            done.size = bytes;
+            done.total_size = Some(bytes);
+            done.recording.measured_bytes = bytes;
+            candidate.finished.push(done);
+            Ok(())
+        })
+        .await
+        .expect("complete");
+    }
+
+    #[tokio::test]
+    async fn asking_for_a_finished_file_is_charged_its_size_at_admission() {
+        // Attaching copies the whole file into the new entry's charge, so a
+        // 16 byte quota must not let a 4096 byte file in.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = service_with_disk(dir.path(), &queue, None);
+        completed_film(&service, &queue, 4096).await;
+        with_private_quota(&service, 16);
+
+        let bob = claims_for("bob", Permission::RecordingCreate.into());
+        let refused = service.create_media_recording_idempotent(&bob, &media_input(), None).await;
+        assert!(matches!(refused, Err(ServiceError::QuotaExceeded)), "got {refused:?}");
+
+        with_private_quota(&service, 8192);
+        service.create_media_recording_idempotent(&bob, &media_input(), None).await.expect("fits now");
+        let queued = queue.queue.lock().await;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].recording.reserved_bytes, 4096, "reserved at the known size until it attaches");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_concurrent_requests_with_one_key_admit_only_one() {
+        // Both requests pass the first key lookup before either commits; the
+        // lookup under the mutation guard admits only one of them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+        let service = Arc::new(service_with_disk(dir.path(), &queue, None));
+        let held = queue.queue.lock().await;
+        let handles: Vec<_> = [("77", "body-a"), ("78", "body-b")]
+            .into_iter()
+            .map(|(virtual_id, fingerprint)| {
+                let service = Arc::clone(&service);
+                let mut input = media_input();
+                input.source.virtual_id = virtual_id.to_string();
+                let request = IdempotencyRequest { key: "same-key".to_string(), fingerprint: fingerprint.to_string() };
+                tokio::spawn(async move {
+                    service.create_media_recording_idempotent(&creating_claims(), &input, Some(request)).await
+                })
+            })
+            .collect();
+        // Both are past their first lookup and waiting to commit.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(held);
+
+        let mut admitted = 0;
+        for handle in handles {
+            match handle.await.expect("join") {
+                Ok(_) => admitted += 1,
+                Err(error) => assert_eq!(error, ServiceError::IdempotencyConflict),
+            }
+        }
+        assert_eq!(admitted, 1);
+        assert_eq!(queue.queue.lock().await.len(), 1);
+    }
+
     fn disk_test_input() -> CreateRecordingInput {
         let now = chrono::Utc::now().timestamp();
         CreateRecordingInput {
@@ -3043,11 +3493,9 @@ mod tests {
     #[tokio::test]
     async fn a_recording_with_no_room_on_disk_is_refused() {
         // Logical quota and physical space are different questions, and
-        // until now only the first was ever asked: `would_fit_on_disk` was
-        // implemented and tested but no caller ever ran it, so a server
-        // with a full disk accepted recordings until ffmpeg failed on
-        // ENOSPC. The safety margin drives headroom to zero here rather
-        // than actually filling a filesystem.
+        // admission asks both: a full disk refuses the recording up front
+        // instead of letting ffmpeg fail on ENOSPC. The safety margin drives
+        // headroom to zero here rather than actually filling a filesystem.
         let dir = tempfile::tempdir().expect("tempdir");
         let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
         let service = service_with_disk(

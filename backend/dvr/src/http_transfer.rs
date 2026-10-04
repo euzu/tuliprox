@@ -1,8 +1,5 @@
-//! Transport-neutral HTTP execution primitives.
-//!
-//! Moved out of the Axum endpoint layer so the recording subsystem can
-//! drive resumable VOD/Series transfers without the endpoint module
-//! having to expose them.
+//! Transport-neutral HTTP execution primitives for resumable VOD/Series
+//! transfers.
 //!
 //! Everything in this module is pure HTTP semantics: Range request
 //! construction, `Content-Range` parsing, retryability classification,
@@ -270,9 +267,9 @@ pub fn validate_resume_response(
     }
 
     if let Some(expected) = validator.expected_etag.as_ref() {
-        // A response that downgrades to a weak tag can no longer prove the
-        // bytes are unchanged, so it fails the comparison rather than passing
-        // it by absence.
+        // A response that downgrades to a weak tag cannot prove the bytes are
+        // unchanged, so it fails the comparison rather than passing it by
+        // absence.
         if let Some(got) = snapshot.etag.as_ref() {
             let got = strong_etag(got).unwrap_or(got.as_str());
             if got != expected {

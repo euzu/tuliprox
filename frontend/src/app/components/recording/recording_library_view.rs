@@ -192,8 +192,8 @@ fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 /// Which controls a task offers: what the server says it would accept,
 /// narrowed to what this viewer is permitted to ask for.
 ///
-/// The state rules are not restated here. They used to be, and they had
-/// drifted from the backend's.
+/// The state rules are not restated here: a second copy drifts from the
+/// backend's.
 fn action_availability(can_manage: bool, can_delete: bool, task: &RecordingTaskDto) -> RecordingActionAvailability {
     let allowed = task.allowed_actions;
     RecordingActionAvailability {

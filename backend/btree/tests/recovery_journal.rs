@@ -983,7 +983,7 @@ fn migration_older_database_is_upgraded_in_place() -> io::Result<()> {
     let (mut journal, opened) = JournalV2::open(harness.paths(), SchemaV2, RecoveryPolicy::default())?;
     assert_eq!(opened.action, RecoveryOpenAction::Rebuilt);
     assert_eq!(journal.query(&Key::new("alpha"))?, Some(V2 { name: "Alpha".into(), enabled: true }));
-    // The upgrade is durable: a second open no longer rebuilds.
+    // The upgrade is durable: a second open does not rebuild.
     drop(journal);
     let (_journal, reopened) = JournalV2::open(harness.paths(), SchemaV2, RecoveryPolicy::default())?;
     assert_eq!(reopened.action, RecoveryOpenAction::Opened);

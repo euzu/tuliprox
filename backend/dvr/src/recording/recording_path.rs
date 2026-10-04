@@ -1,10 +1,7 @@
 //! One owner-independent layout for recording files.
 //!
-//! Two independent path computations used to exist: `RecordingTask::new` wrote
-//! to `<root>[/<subdir>]/<filename>`, while the media endpoint resolved reads
-//! through `resolve_recording_dir`, which invented a `users/<owner>/` or
-//! `shared/` prefix that nothing ever wrote. Playback therefore looked for
-//! every recording at a path where it did not exist.
+//! Writing a recording and opening it for playback resolve the path through
+//! this module, so the two cannot disagree on where a file is.
 //!
 //! The layout is deliberately owner-independent. One physical file is shared
 //! by every user who requested it, so keying its directory on an owner would

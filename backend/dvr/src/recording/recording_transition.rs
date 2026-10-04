@@ -31,6 +31,16 @@ impl RecordingCommand {
             Self::Retry => "retry",
         }
     }
+
+    /// The past participle, for "cannot be ..." messages.
+    pub fn past_participle(self) -> &'static str {
+        match self {
+            Self::Pause => "paused",
+            Self::Resume => "resumed",
+            Self::Cancel => "cancelled",
+            Self::Retry => "retried",
+        }
+    }
 }
 
 /// Why a command was refused.
@@ -48,7 +58,7 @@ impl std::fmt::Display for TransitionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotSupportedForKind { kind, command } => {
-                write!(f, "a {kind} recording cannot be {}d", command.as_str())
+                write!(f, "a {kind} recording cannot be {}", command.past_participle())
             }
             Self::NotAllowedInState { state, command } => {
                 write!(f, "cannot {} a recording in state {}", command.as_str(), state.label())
@@ -174,6 +184,15 @@ mod tests {
     };
     use shared::model::{RecordingKind, RecordingTaskState};
 
+    #[test]
+    fn refusals_read_as_english() {
+        let message = |command| TransitionError::NotSupportedForKind { kind: RecordingKind::Live, command }.to_string();
+        assert!(message(RecordingCommand::Retry).ends_with("cannot be retried"));
+        assert!(message(RecordingCommand::Cancel).ends_with("cannot be cancelled"));
+        assert!(message(RecordingCommand::Pause).ends_with("cannot be paused"));
+        assert!(message(RecordingCommand::Resume).ends_with("cannot be resumed"));
+    }
+
     const ALL_KINDS: [RecordingKind; 3] = [RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series];
     const ALL_STATES: [RecordingTaskState; 10] = [
         RecordingTaskState::Queued,
@@ -292,10 +311,8 @@ mod tests {
 
     #[test]
     fn live_has_no_state_to_retry_from_and_no_state_to_wait_in() {
-        // The worker used to put a live capture into RetryWaiting after a
-        // transient failure, which is a state the graph says it cannot reach --
-        // and retrying records a later part of the programme as if it were the
-        // whole thing.
+        // A live capture never reaches RetryWaiting: retrying would record a
+        // later part of the programme as if it were the whole thing.
         assert!(!state_is_reachable(RecordingKind::Live, RecordingTaskState::RetryWaiting));
         for state in ALL_STATES {
             assert!(

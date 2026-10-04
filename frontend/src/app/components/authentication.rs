@@ -13,8 +13,12 @@ use yew::{prelude::*, suspense::use_future};
 use yew_hooks::{use_async_with_options, UseAsyncOptions};
 use yew_router::prelude::use_navigator;
 
-fn should_connect_websocket(success: bool, setup_mode: bool, can_read_system: bool) -> bool {
-    success && !setup_mode && can_read_system
+/// The socket carries server status for `system.read` and the recording
+/// snapshot for `recording.read`; the server checks each message on its own.
+/// The recording library is fed by the socket only, so a recording-only user
+/// needs it too.
+fn should_connect_websocket(success: bool, setup_mode: bool, can_read_system: bool, can_read_recordings: bool) -> bool {
+    success && !setup_mode && (can_read_system || can_read_recordings)
 }
 
 const SESSION_EXPIRY_SKEW_SECS: i64 = 30;
@@ -50,6 +54,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
                         success,
                         services_ctx.config.ui_config.setup_mode,
                         services_ctx.auth.has_permission(Permission::SystemRead),
+                        services_ctx.auth.has_permission(Permission::RecordingRead),
                     ) {
                         services_ctx.websocket.connect_ws_with_backoff();
                     }
@@ -125,11 +130,12 @@ mod tests {
     use super::{compute_session_expiry_delay_ms, should_connect_websocket, SESSION_EXPIRY_SKEW_SECS};
 
     #[test]
-    fn websocket_connects_only_for_authenticated_non_setup_users_with_system_read() {
-        assert!(should_connect_websocket(true, false, true));
-        assert!(!should_connect_websocket(false, false, true));
-        assert!(!should_connect_websocket(true, true, true));
-        assert!(!should_connect_websocket(true, false, false));
+    fn websocket_connects_for_authenticated_non_setup_users_with_system_or_recording_read() {
+        assert!(should_connect_websocket(true, false, true, false));
+        assert!(should_connect_websocket(true, false, false, true), "a recording-only user needs the snapshot");
+        assert!(!should_connect_websocket(false, false, true, true));
+        assert!(!should_connect_websocket(true, true, true, true));
+        assert!(!should_connect_websocket(true, false, false, false));
     }
 
     #[test]

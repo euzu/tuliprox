@@ -135,20 +135,18 @@ pub struct DeletionTarget {
 }
 
 impl DeletionTarget {
-    /// The file this deletion may unlink, or `None` when the entry is one
-    /// of several holding it. `Completed` recordings own their final file;
-    /// `Failed` / `Cancelled` ones never reached finalization, so they own
-    /// the `.partial`.
-    pub fn path_to_unlink(&self) -> Option<PathBuf> {
+    /// The files this deletion may unlink: none while another entry holds
+    /// the media, otherwise both the final file and its `.partial`.
+    ///
+    /// The entry's own state does not say which of the two exists: a cancelled
+    /// entry can share media whose transfer another entry finished. Whichever
+    /// of the two is on disk belongs to this media, and with no holder left
+    /// both go; a missing one is skipped.
+    pub fn paths_to_unlink(&self) -> Vec<PathBuf> {
         if self.still_referenced {
-            return None;
+            return Vec::new();
         }
-        Some(match self.previous_state {
-            DeletionPreviousState::Completed => self.file_path.clone(),
-            DeletionPreviousState::Failed | DeletionPreviousState::Cancelled => {
-                crate::recording_worker::recording_partial_path(&self.file_path)
-            }
-        })
+        vec![self.file_path.clone(), crate::recording_worker::recording_partial_path(&self.file_path)]
     }
 }
 
@@ -281,10 +279,22 @@ pub async fn file_path_for_deletion(download: &RecordingTask, _recording_root: O
 /// success. Returns the path that was unlinked, or `None` if no
 /// physical file was present.
 pub async fn execute_deletion_target(target: &DeletionTarget) -> Result<Option<PathBuf>, DeletionError> {
-    let Some(path) = target.path_to_unlink() else {
-        return Ok(None);
-    };
-    unlink_owned_file(&path).await
+    let mut first_unlinked = None;
+    for path in target.paths_to_unlink() {
+        if let Some(unlinked) = unlink_owned_file(&path).await? {
+            first_unlinked.get_or_insert(unlinked);
+        }
+    }
+    Ok(first_unlinked)
+}
+
+/// Unlink the `.partial` of `file_path`, leaving the final file alone.
+///
+/// For an entry that leaves the library without deleting its recording: a
+/// finished file stays for whoever reads the recording directory, but a
+/// partial nobody will ever resume is only taking space.
+pub async fn remove_orphaned_partial(file_path: &Path) -> Result<Option<PathBuf>, DeletionError> {
+    unlink_owned_file(&crate::recording_worker::recording_partial_path(file_path)).await
 }
 
 async fn unlink_owned_file(path: &Path) -> Result<Option<PathBuf>, DeletionError> {
@@ -696,7 +706,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let (queue, shared_file, target) = delete_one_of_two_entries_sharing(&dir).await;
         assert!(target.still_referenced, "Bob still holds this file");
-        assert_eq!(target.path_to_unlink(), None);
+        assert!(target.paths_to_unlink().is_empty());
         let unlinked = execute_deletion_target(&target).await.expect("execute");
         assert_eq!(unlinked, None, "nothing was unlinked");
         assert!(shared_file.exists(), "Bob's recording must survive Alice's deletion");
@@ -732,6 +742,41 @@ mod tests {
         execute_deletion_target(&first).await.expect("execute");
         execute_deletion_target(&second).await.expect("execute");
         assert!(!shared_file.exists(), "the file must not be left with nothing pointing at it");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_last_holder_takes_the_completed_file_with_it() {
+        // Alice cancelled, Bob finished the same media. Deleting Bob first, then
+        // Alice, must take the completed file too, although Alice's own state
+        // only ever produced a `.partial`.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open recording repository");
+        let shared_file = dir.path().join("programme.ts");
+        std::fs::write(&shared_file, b"complete").expect("write file");
+        for (uuid, owner, state) in [
+            ("alice-entry", "web:alice", RecordingTaskState::Cancelled),
+            ("bob-entry", "web:bob", RecordingTaskState::Completed),
+        ] {
+            let mut task = finished_with_state(uuid, state, None);
+            task.file_path.clone_from(&shared_file);
+            task.recording.owner = RecordingOwner::User(UserId::from(owner));
+            let persisted = RecordingQueue::to_persisted(&task);
+            mutate(&queue, |c| {
+                c.finished.push(persisted);
+                Ok(())
+            })
+            .await
+            .expect("seed");
+        }
+
+        for uuid in ["bob-entry", "alice-entry"] {
+            let target = begin_deletion(&queue, uuid).await.expect("begin");
+            execute_deletion_target(&target).await.expect("execute");
+            finalize_deletion(&queue, uuid).await.expect("finalize");
+        }
+
+        assert!(queue.finished.read().await.is_empty());
+        assert!(!shared_file.exists(), "no entry is left, so the file must not be");
     }
 
     #[tokio::test]
@@ -821,7 +866,7 @@ mod tests {
 
         let first = begin_deletion(&queue, "r").await.expect("first deletion begins");
         assert_eq!(first.previous_state, DeletionPreviousState::Completed);
-        assert_eq!(first.path_to_unlink(), Some(final_path.clone()), "the first owns the final file");
+        assert_eq!(first.paths_to_unlink().first(), Some(&final_path), "the first owns the final file");
 
         let second = begin_deletion(&queue, "r").await;
         assert!(
@@ -835,7 +880,7 @@ mod tests {
 
     #[tokio::test]
     async fn even_a_principal_allowed_to_delete_cannot_unlink_a_referenced_file() {
-        // Task 14: authorization decides whether an entry may be removed. It
+        // Authorization decides whether an entry may be removed. It
         // does not decide whether the bytes go -- that is the reference rule,
         // and it takes no principal at all. An admin or the retention
         // supervisor removing their entry must still leave another user's
@@ -860,7 +905,7 @@ mod tests {
         // The permit says yes, as it would for an administrator.
         let target = begin_deletion_authorized(&queue, "admin-entry", |_| true).await.expect("permitted");
         assert!(target.still_referenced);
-        assert_eq!(target.path_to_unlink(), None, "permission does not override a live reference");
+        assert!(target.paths_to_unlink().is_empty(), "permission does not override a live reference");
         execute_deletion_target(&target).await.expect("execute");
         assert!(shared_file.exists(), "Bob's recording survives an administrator removing their own entry");
     }

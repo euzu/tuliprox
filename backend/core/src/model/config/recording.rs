@@ -453,11 +453,7 @@ pub struct RecordingQuotaConfig {
 macros::from_impl!(RecordingConfig);
 impl From<&RecordingConfigDto> for RecordingConfig {
     fn from(dto: &RecordingConfigDto) -> Self {
-        let timezone = dto
-            .timezone
-            .as_deref()
-            .and_then(|s| s.parse::<Tz>().ok())
-            .unwrap_or_else(|| "UTC".parse::<Tz>().expect("UTC must parse"));
+        let timezone = dto.timezone.as_deref().and_then(|s| s.parse::<Tz>().ok()).unwrap_or(chrono_tz::UTC);
         Self {
             headers: dto.headers.clone(),
             organize_into_directories: dto.organize_into_directories,

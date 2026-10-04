@@ -140,3 +140,81 @@ pub fn i18n_provider(props: &I18nProviderProps) -> Html {
 
 #[hook]
 pub fn use_translation() -> YewI18n { use_context::<YewI18n>().expect("No I18n context provided") }
+
+#[cfg(test)]
+mod locale_file_tests {
+    use serde::de::{Deserializer, MapAccess, Visitor};
+    use std::{collections::BTreeSet, fmt};
+
+    const LOCALES: [(&str, &str); 4] = [
+        ("en", include_str!("../public/assets/i18n/en.json")),
+        ("ru", include_str!("../public/assets/i18n/ru.json")),
+        ("ar", include_str!("../public/assets/i18n/ar.json")),
+        ("es", include_str!("../public/assets/i18n/es.json")),
+    ];
+
+    /// The dotted key of every translated string, refusing a key that appears
+    /// twice in one object: JSON keeps only the last one, so the first is dead
+    /// text that looks translated.
+    struct Keys(BTreeSet<String>);
+
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct KeysVisitor;
+            impl<'de> Visitor<'de> for KeysVisitor {
+                type Value = Keys;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("a translation object") }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                    let mut keys = BTreeSet::new();
+                    let mut own = BTreeSet::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        if !own.insert(key.clone()) {
+                            return Err(serde::de::Error::custom(format!("duplicate key {key}")));
+                        }
+                        match map.next_value::<serde_json::Value>()? {
+                            serde_json::Value::Object(nested) => {
+                                let nested: Keys = serde_json::from_value(serde_json::Value::Object(nested))
+                                    .map_err(serde::de::Error::custom)?;
+                                keys.extend(nested.0.into_iter().map(|child| format!("{key}.{child}")));
+                            }
+                            _ => {
+                                keys.insert(key);
+                            }
+                        }
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            deserializer.deserialize_map(KeysVisitor)
+        }
+    }
+
+    #[test]
+    fn the_checked_locales_are_the_ones_the_ui_offers() {
+        let index: serde_json::Value =
+            serde_json::from_str(include_str!("../public/assets/i18n/index.json")).expect("index.json");
+        let mut offered: Vec<&str> = index["languages"]
+            .as_array()
+            .expect("languages")
+            .iter()
+            .filter_map(|language| language["code"].as_str())
+            .collect();
+        let mut checked: Vec<&str> = LOCALES.iter().map(|(code, _)| *code).collect();
+        offered.sort_unstable();
+        checked.sort_unstable();
+        assert_eq!(checked, offered, "add the new locale to LOCALES");
+    }
+
+    #[test]
+    fn every_locale_translates_exactly_the_english_keys_once() {
+        // A missing key shows the raw key in the UI.
+        let english = serde_json::from_str::<Keys>(LOCALES[0].1).expect("en.json").0;
+        for (code, text) in LOCALES {
+            let keys = serde_json::from_str::<Keys>(text).unwrap_or_else(|err| panic!("{code}.json: {err}")).0;
+            let missing: Vec<_> = english.difference(&keys).collect();
+            let extra: Vec<_> = keys.difference(&english).collect();
+            assert!(missing.is_empty(), "{code}.json is missing {missing:?}");
+            assert!(extra.is_empty(), "{code}.json has keys en.json does not: {extra:?}");
+        }
+    }
+}

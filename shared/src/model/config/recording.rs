@@ -40,9 +40,9 @@ const DEFAULT_RECORDING_NOTIFICATION_BACKOFF_INITIAL_SECS: u64 = 5;
 const DEFAULT_RECORDING_NOTIFICATION_BACKOFF_MAX_SECS: u64 = 900; // 15 minutes
 const MAX_FILENAME_TEMPLATE_BYTES: usize = 240;
 
-/// Container the recorder muxes into. Recordings used to be hard-coded
-/// to MPEG-TS regardless of the source codecs; operators recording
-/// H.265 or AAC-only channels want a container that can hold them.
+/// Container the recorder muxes into. MPEG-TS is the default; operators
+/// recording H.265 or AAC-only channels may want a container that suits them
+/// better.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingContainerFormat {

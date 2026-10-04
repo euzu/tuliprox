@@ -4611,6 +4611,7 @@ name = "tuliprox-dvr"
 version = "3.3.135"
 dependencies = [
  "arc-swap",
+ "blake3",
  "bytes",
  "chrono",
  "chrono-tz",

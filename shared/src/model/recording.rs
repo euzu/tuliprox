@@ -573,8 +573,8 @@ mod tests {
 
     #[test]
     fn create_request_rejects_an_unknown_visibility() {
-        // The visibility was previously a free-form string built by hand in
-        // the frontend, so a typo reached the server as a valid body.
+        // The visibility is the server's enum on the wire, so a typo in the
+        // frontend cannot reach the server as a valid body.
         let body = r#"{"source":{"target_id":"t","virtual_id":"42","cluster":"Video","input_name":"in"},
             "program_title":"Film","visibility":"pubic"}"#;
         assert!(serde_json::from_str::<CreateRecordingRequest>(body).is_err());

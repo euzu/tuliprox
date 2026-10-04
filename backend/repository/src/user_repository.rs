@@ -254,7 +254,10 @@ fn collect_target_users(user_tree: &BPlusTree<String, StoredProxyUserCredentials
 
 pub async fn load_api_user(cfg: &AppConfig) -> Result<Vec<TargetUser>, Error> {
     let path = get_api_user_db_path(cfg);
-    let lock = cfg.file_locks.read_lock(&path).await;
+    // A write lock although this only reads: opening the recovery journal can
+    // adopt a legacy database, repair `CURRENT` or write a checkpoint, and two
+    // concurrent opens must not do that at the same time.
+    let lock = cfg.file_locks.write_lock(&path).await;
     let cfg_for_open = cfg.clone();
     let result = task::spawn_blocking(move || -> Result<Vec<(String, StoredProxyUserCredentials)>, Error> {
         let mut repository = open_api_user_repository(&cfg_for_open)?;

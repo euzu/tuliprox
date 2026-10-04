@@ -34,5 +34,6 @@ url.workspace = true
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+blake3.workspace = true
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

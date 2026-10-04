@@ -355,10 +355,9 @@ fn http_transfer_path(task: &RecordingTask) -> std::path::PathBuf {
 
 /// Publish a completed transfer at its final path.
 ///
-/// Idempotent: linking is the only step that is not naturally repeatable, and a
-/// crash between the link and the partial's removal used to leave a recording
-/// whose bytes are complete on disk reported as failed, permanently -- a retry
-/// re-ran the same path and failed the same way.
+/// Idempotent: linking is the only step that is not naturally repeatable. A
+/// crash between the link and the partial's removal leaves the final file in
+/// place, and finalizing again accepts it instead of failing the recording.
 async fn finalize_http_transfer(final_path: &std::path::Path, transfer_path: &std::path::Path) -> std::io::Result<()> {
     if transfer_path == final_path {
         return Ok(());
@@ -399,6 +398,7 @@ async fn download_file<E: EventSink>(
     control_signal: Arc<RwLock<RecordingControl>>,
     control_notify: Arc<Notify>,
     event_manager: Option<&E>,
+    quota_gate: Option<QuotaGate<'_>>,
 ) -> DownloadExecutionResult {
     let worker_uuid = file_download.uuid.as_str();
     let url = file_download.url.clone();
@@ -473,6 +473,22 @@ async fn download_file<E: EventSink>(
                 .await;
             }
 
+            // The size is known from here on, or known to be unknown.
+            let byte_cap = match quota_gate {
+                Some(gate) => match gate.admit_size(worker_uuid, total_size, existing_size).await {
+                    Ok(admitted) => {
+                        if admitted.siblings_refused {
+                            if let Some(event_manager) = event_manager {
+                                publish_recording_change(event_manager);
+                            }
+                        }
+                        admitted.byte_cap
+                    }
+                    Err(reason) => return DownloadExecutionResult::Failed(reason),
+                },
+                None => None,
+            };
+
             match fs::create_dir_all(&file_download.file_dir).await {
                 Ok(()) => {
                     let mut open_options = tokio::fs::OpenOptions::new();
@@ -540,6 +556,15 @@ async fn download_file<E: EventSink>(
                                                         }
 
                                                         downloaded += chunk.len() as u64;
+                                                        if byte_cap.is_some_and(|cap| downloaded > cap) {
+                                                            // Unknown size, so the quota is enforced as
+                                                            // the bytes arrive.
+                                                            let _ = buf_writer.flush().await;
+                                                            let _ = buf_writer.shutdown().await;
+                                                            return DownloadExecutionResult::Failed(
+                                                                QUOTA_EXCEEDED_DURING_TRANSFER.to_string(),
+                                                            );
+                                                        }
                                                         if saw_first_chunk {
                                                             let now = Instant::now();
                                                             let should_log_progress = now
@@ -799,14 +824,11 @@ impl RecordingNotificationPlan {
 /// The marker is written inside the queue-mutation boundary, so it is
 /// durable before this runs; delivery must be durable too. The
 /// notification outbox owns that: it persists the entry, retries per
-/// channel with backoff, and dead-letters what it cannot deliver. This
-/// used to `tokio::spawn(send_message(..))` directly, which meant a
-/// transient Telegram/Discord/REST error silently dropped the
-/// notification and a crash before the spawned task ran lost it too.
+/// channel with backoff, and dead-letters what it cannot deliver.
 ///
-/// The direct send is kept as a fallback for the paths that run before
-/// the supervisor is installed (notably unit tests), so behaviour there
-/// is unchanged.
+/// A direct send is the fallback for paths that run before the supervisor
+/// installs the outbox (notably unit tests), and for an outbox that refuses
+/// the entry.
 fn spawn_recording_notification_after_persist(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -960,9 +982,16 @@ async fn promote_next_download(
     .await
 }
 
+/// Move the active task to `finished` and promote the next one.
+///
+/// With `waiting_quota`, the task finished a file other entries may be
+/// waiting to attach to. Its measured size is checked against each of their
+/// quotas before promotion attaches them: a transfer of unknown size cannot
+/// be checked when it starts, and attaching charges the whole file.
 async fn finish_active_and_promote<F>(
     download_queue: &RecordingQueue,
     uuid: &str,
+    waiting_quota: Option<&crate::recording::recording_quota::QuotaLimits>,
     finish: F,
 ) -> Result<Option<RecordingNotificationPlan>, QueueMutationError>
 where
@@ -973,7 +1002,12 @@ where
             return Ok(None);
         };
         let notification = finish(&mut active);
+        let media = active.media_identity.clone();
+        let measured = active.recording.measured_bytes;
         candidate.finished.push(active);
+        if let Some(limits) = waiting_quota {
+            let _ = charge_waiting_siblings(candidate, &media, measured, limits);
+        }
         crate::recording::recording_queue::promote_from_queue(candidate);
         Ok(Some(notification))
     })
@@ -1069,6 +1103,160 @@ fn preemption_reason_for(download: &RecordingTask) -> &'static str {
         RecordingKind::Vod | RecordingKind::Series => DOWNLOAD_PREEMPTED_REASON,
         RecordingKind::Live => RECORDING_PREEMPTED_REASON,
     }
+}
+
+pub(crate) const QUOTA_EXCEEDED_DURING_TRANSFER: &str =
+    "Quota exceeded: the recording is larger than the quota that is left";
+const SIBLING_QUOTA_EXCEEDED: &str = "Quota exceeded: the recording is larger than this entry's quota allows";
+
+/// What the size check at the start of a transfer decided.
+struct SizeAdmission {
+    /// Byte count the transfer may not exceed when its total is unknown.
+    byte_cap: Option<u64>,
+    /// Waiting entries for the same media were refused for their own quota.
+    siblings_refused: bool,
+}
+
+/// Quota and disk admission once a transfer knows how large it is.
+///
+/// A VOD or series request is admitted before its size is known, so it
+/// reserves nothing up front. The first response carries the size, and this
+/// is the first point where the charge can be checked: against the
+/// transfer's own pool, against every entry waiting to attach to the same
+/// file, and against the disk.
+struct QuotaGate<'a> {
+    queue: &'a RecordingQueue,
+    app_config: &'a AppConfig,
+}
+
+impl QuotaGate<'_> {
+    async fn admit_size(&self, uuid: &str, total: Option<u64>, on_disk: u64) -> Result<SizeAdmission, String> {
+        let config = self.app_config.config.load();
+        let Some(recording_cfg) = config.recording() else {
+            return Ok(SizeAdmission { byte_cap: None, siblings_refused: false });
+        };
+        let limits = crate::recording::recording_service::quota_limits_from_config(recording_cfg.quota.as_ref());
+        // Measured before the mutation: it is a syscall.
+        let free = crate::recording::recording_disk::free_bytes_for(Path::new(&recording_cfg.directory));
+        let safety = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
+
+        let decided = mutate_optional(self.queue, |candidate| {
+            let Some(subject) = candidate.active.as_ref().filter(|active| active.uuid == uuid) else {
+                return Ok(None);
+            };
+            let pool = crate::recording::recording_quota::quota_pool_for_task(subject);
+            let media = subject.media_identity.clone();
+            let used = used_by_others(candidate, uuid, &pool);
+            let Some(total) = total else {
+                let byte_cap = crate::recording::recording_quota::limit_for_pool(&pool, &limits)
+                    .map(|limit| limit.saturating_sub(used));
+                return Ok(Some(Ok(SizeAdmission { byte_cap, siblings_refused: false })));
+            };
+            if over_limit(&pool, used, total, &limits) {
+                return Ok(Some(Err(QUOTA_EXCEEDED_DURING_TRANSFER.to_string())));
+            }
+            if let Some(free) = free {
+                let running = crate::recording::recording_disk::active_disk_reservations(
+                    all_tasks(candidate).filter(|task| task.uuid != uuid),
+                );
+                if matches!(
+                    crate::recording::recording_disk::would_fit_on_disk(
+                        free,
+                        safety,
+                        running,
+                        total.saturating_sub(on_disk)
+                    ),
+                    crate::recording::recording_disk::DiskAdmission::Insufficient { .. }
+                ) {
+                    return Ok(Some(Err(DISK_GONE_BEFORE_START.to_string())));
+                }
+            }
+            if let Some(active) = candidate.active.as_mut() {
+                active.recording.reserved_bytes = active.recording.reserved_bytes.max(total);
+            }
+            let siblings_refused = charge_waiting_siblings(candidate, &media, total, &limits);
+            Ok(Some(Ok(SizeAdmission { byte_cap: None, siblings_refused })))
+        })
+        .await
+        .map_err(|err| format!("Could not record the transfer size: {err}"))?;
+        // The task left the active slot meanwhile; the worker finds out next.
+        decided.unwrap_or(Ok(SizeAdmission { byte_cap: None, siblings_refused: false }))
+    }
+}
+
+fn all_tasks(candidate: &PersistedRecordingQueue) -> impl Iterator<Item = &PersistedRecordingTask> {
+    candidate
+        .queue
+        .iter()
+        .chain(candidate.scheduled.iter())
+        .chain(candidate.active.iter())
+        .chain(candidate.finished.iter())
+}
+
+fn used_by_others(
+    candidate: &PersistedRecordingQueue,
+    uuid: &str,
+    pool: &crate::recording::recording_quota::QuotaPool,
+) -> u64 {
+    crate::recording::recording_quota::used_bytes_in_pool(all_tasks(candidate).filter(|task| task.uuid != uuid), pool)
+}
+
+fn over_limit(
+    pool: &crate::recording::recording_quota::QuotaPool,
+    used: u64,
+    charge: u64,
+    limits: &crate::recording::recording_quota::QuotaLimits,
+) -> bool {
+    matches!(
+        crate::recording::recording_quota::would_exceed(pool, used, charge, limits),
+        crate::recording::recording_quota::AdmissionOutcome::OverLimit { .. }
+    )
+}
+
+/// Charge every queued entry that will attach to this file with its size,
+/// and refuse the ones whose own quota cannot take it. Returns whether any
+/// entry was refused.
+///
+/// They were admitted while the size was unknown. Attaching later copies the
+/// whole file into their charge, so this is the last point where their quota
+/// can still say no.
+fn charge_waiting_siblings(
+    candidate: &mut PersistedRecordingQueue,
+    media: &str,
+    total: u64,
+    limits: &crate::recording::recording_quota::QuotaLimits,
+) -> bool {
+    if media.is_empty() {
+        return false;
+    }
+    let mut refused = Vec::new();
+    let waiting: Vec<String> =
+        candidate.queue.iter().filter(|task| task.media_identity == media).map(|task| task.uuid.clone()).collect();
+    for uuid in waiting {
+        let Some(sibling) = candidate.queue.iter().find(|task| task.uuid == uuid) else {
+            continue;
+        };
+        let pool = crate::recording::recording_quota::quota_pool_for_task(sibling);
+        let used = used_by_others(candidate, &uuid, &pool);
+        if over_limit(&pool, used, total, limits) {
+            refused.push(uuid);
+        } else if let Some(sibling) = candidate.queue.iter_mut().find(|task| task.uuid == uuid) {
+            sibling.recording.reserved_bytes = sibling.recording.reserved_bytes.max(total);
+        }
+    }
+    for uuid in &refused {
+        if let Some(index) = candidate.queue.iter().position(|task| &task.uuid == uuid) {
+            let mut failed = candidate.queue.remove(index);
+            failed.finished = true;
+            failed.paused = false;
+            failed.next_retry_at = None;
+            failed.state = RecordingTaskState::Failed;
+            failed.error = Some(SIBLING_QUOTA_EXCEEDED.to_string());
+            failed.recording.reserved_bytes = 0;
+            candidate.finished.push(failed);
+        }
+    }
+    !refused.is_empty()
 }
 
 pub(crate) const QUOTA_GONE_BEFORE_START: &str = "Quota was exhausted while this recording waited to start";
@@ -1349,6 +1537,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                         Arc::clone(&control_signal),
                                         Arc::clone(&control_notify),
                                         Some(&event_manager),
+                                        Some(QuotaGate { queue: &dq, app_config: &app_config }),
                                     )
                                     .await
                                 }
@@ -1420,11 +1609,11 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                         };
 
-                        // The internal HTTP stream now owns the same provider allocation.
-                        // Its normal EOF/client-close cleanup cancels the allocation token too,
-                        // so cancellation alone no longer means foreground preemption. The
-                        // manager records an explicit close reason before a real priority
-                        // eviction; only that outcome requeues the recording.
+                        // The internal HTTP stream owns the same provider allocation, and its
+                        // normal EOF/client-close cleanup cancels the allocation token too, so
+                        // cancellation alone does not mean foreground preemption. The manager
+                        // records an explicit close reason before a real priority eviction;
+                        // only that outcome requeues the recording.
                         if provider_handle.as_ref().is_some_and(|handle| {
                             handle.get_close_reason() == tuliprox_core::model::ProviderCloseReason::PriorityPreempted
                         }) {
@@ -1449,25 +1638,31 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                 // needs the record even if the commit is what
                                 // failed.
                                 write_completion_sidecar(&dq, &worker_uuid, measured_bytes).await;
-                                let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
-                                    fd.finished = true;
-                                    fd.paused = false;
-                                    fd.state = RecordingTaskState::Completed;
-                                    fd.size = measured_bytes;
-                                    fd.error = None;
-                                    fd.next_retry_at = None;
-                                    let meta = &mut fd.recording;
-                                    meta.measured_bytes = measured_bytes;
-                                    meta.reserved_bytes = 0;
-                                    meta.completed_at = Some(chrono::Utc::now().timestamp());
-                                    meta.partial_relative_path = None;
-                                    mark_recording_metadata_notification(
-                                        &mut fd.recording,
-                                        LifecycleEvent::Completed,
-                                        None,
+                                let completion_limits = app_config.config.load().recording().map(|recording| {
+                                    crate::recording::recording_service::quota_limits_from_config(
+                                        recording.quota.as_ref(),
                                     )
-                                })
-                                .await;
+                                });
+                                let committed =
+                                    finish_active_and_promote(&dq, &worker_uuid, completion_limits.as_ref(), |fd| {
+                                        fd.finished = true;
+                                        fd.paused = false;
+                                        fd.state = RecordingTaskState::Completed;
+                                        fd.size = measured_bytes;
+                                        fd.error = None;
+                                        fd.next_retry_at = None;
+                                        let meta = &mut fd.recording;
+                                        meta.measured_bytes = measured_bytes;
+                                        meta.reserved_bytes = 0;
+                                        meta.completed_at = Some(chrono::Utc::now().timestamp());
+                                        meta.partial_relative_path = None;
+                                        mark_recording_metadata_notification(
+                                            &mut fd.recording,
+                                            LifecycleEvent::Completed,
+                                            None,
+                                        )
+                                    })
+                                    .await;
                                 match committed {
                                     Ok(Some(notification)) => {
                                         spawn_recording_notification_after_persist(
@@ -1650,7 +1845,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             DownloadExecutionResult::Failed(err) => {
                                 capacity.release(provider_handle).await;
                                 warn!("Download failed permanently: {err}");
-                                let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
+                                let committed = finish_active_and_promote(&dq, &worker_uuid, None, |fd| {
                                     fd.finished = true;
                                     fd.paused = false;
                                     fd.next_retry_at = None;
@@ -1851,10 +2046,11 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
 mod tests {
     use super::{
         acquire_result_after_wait, acquire_result_for_control, continue_after_pause, download_file,
-        ensure_recording_worker_running, finalize_http_transfer, http_transfer_path, recording_deadline_instant,
-        refresh_recording_progress, requeue_active_download_for_capacity_wait, start_recording_scheduler,
-        wait_for_provider_slot, DownloadExecutionResult, ProviderAcquireResult, DISK_GONE_BEFORE_START,
-        DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
+        ensure_recording_worker_running, finalize_http_transfer, finish_active_and_promote, http_transfer_path,
+        recording_deadline_instant, refresh_recording_progress, requeue_active_download_for_capacity_wait,
+        start_recording_scheduler, wait_for_provider_slot, DownloadExecutionResult, ProviderAcquireResult, QuotaGate,
+        RecordingNotificationPlan, DISK_GONE_BEFORE_START, DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
+        QUOTA_EXCEEDED_DURING_TRANSFER,
     };
     use crate::recording::{
         recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -1976,6 +2172,7 @@ mod tests {
                 Arc::new(RwLock::new(RecordingControl::None)),
                 Arc::new(Notify::new()),
                 None,
+                None,
             )
             .await;
             assert!(matches!(result, DownloadExecutionResult::Completed));
@@ -2026,6 +2223,7 @@ mod tests {
                 &reqwest::Client::new(),
                 Arc::new(RwLock::new(RecordingControl::None)),
                 Arc::new(Notify::new()),
+                None,
                 None,
             )
             .await;
@@ -2091,6 +2289,198 @@ mod tests {
             .expect("requeue");
 
         assert_eq!(*queue.control_signal.read().await, RecordingControl::Pause);
+    }
+
+    /// One VOD on one media for `owner`, in the given partition and state.
+    fn vod_entry(uuid: &str, owner: &str, state: RecordingTaskState) -> PersistedRecordingTask {
+        let mut task = scheduled_task(RecordingKind::Vod, 0, 0);
+        task.uuid = uuid.to_string();
+        task.state = state;
+        task.recording = RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from(owner)),
+            RecordingVisibility::Private,
+            RecordingSource::new("t1", "v1", "in1"),
+            "Film".to_string(),
+        );
+        let mut persisted = RecordingQueue::to_persisted(&task);
+        persisted.media_identity = "film".to_string();
+        persisted
+    }
+
+    /// Recording enabled under `dir` with a private quota of `quota` bytes.
+    fn app_config_with_quota(dir: &Path, quota: u64) -> tuliprox_core::model::AppConfig {
+        let app_config = bare_app_config();
+        let mut rec_cfg =
+            RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() });
+        rec_cfg.directory = dir.to_string_lossy().into_owned();
+        rec_cfg.quota = Some(tuliprox_core::model::RecordingQuotaConfig {
+            default_private_bytes: Some(quota),
+            ..Default::default()
+        });
+        app_config.config.store(Arc::new(tuliprox_core::model::Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: Vec::new(),
+                web_search: None,
+                recording: Some(rec_cfg),
+            }),
+            ..tuliprox_core::model::Config::default()
+        }));
+        app_config
+    }
+
+    async fn queue_with(
+        dir: &TempDir,
+        active: PersistedRecordingTask,
+        queued: Vec<PersistedRecordingTask>,
+    ) -> RecordingQueue {
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository");
+        crate::recording::recording_queue::mutate(&queue, move |candidate| {
+            candidate.active = Some(active.clone());
+            candidate.queue.clone_from(&queued);
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        queue
+    }
+
+    #[tokio::test]
+    async fn a_transfer_larger_than_the_quota_left_is_refused_once_its_size_is_known() {
+        // Admitted at zero because the size was unknown; the first response
+        // says 4096 bytes against a 16 byte quota.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = queue_with(&dir, vod_entry("alice", "web:alice", RecordingTaskState::Running), Vec::new()).await;
+        let app_config = app_config_with_quota(dir.path(), 16);
+        let gate = QuotaGate { queue: &queue, app_config: &app_config };
+
+        let refused = gate.admit_size("alice", Some(4096), 0).await.err();
+        assert_eq!(refused.as_deref(), Some(QUOTA_EXCEEDED_DURING_TRANSFER));
+
+        let admitted = gate.admit_size("alice", Some(16), 0).await.expect("fits");
+        assert_eq!(admitted.byte_cap, None);
+        let reserved = queue.active.read().await.as_ref().map(|active| active.recording.reserved_bytes);
+        assert_eq!(reserved, Some(16), "the known size is now reserved");
+    }
+
+    #[tokio::test]
+    async fn a_download_over_the_quota_stops_before_writing_its_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let (url, server) = serve_range_fixture(true);
+        let mut task = scheduled_task(RecordingKind::Vod, chrono::Utc::now().timestamp(), 900);
+        task.file_dir = dir.path().to_path_buf();
+        task.file_path = dir.path().join("film.mp4");
+        task.url = url;
+        task.recording = RecordingMetadata::new_media(
+            RecordingOwner::User(UserId::from("web:alice")),
+            RecordingVisibility::Private,
+            RecordingSource::new("t1", "v1", "in1"),
+            "Film".to_string(),
+        );
+        let queue = queue_with(&dir, RecordingQueue::to_persisted(&task), Vec::new()).await;
+        let app_config = app_config_with_quota(dir.path(), 4);
+
+        let result = download_file::<NoopSink>(
+            Arc::clone(&queue.active),
+            task.clone(),
+            &reqwest::Client::new(),
+            Arc::new(RwLock::new(RecordingControl::None)),
+            Arc::new(Notify::new()),
+            None,
+            Some(QuotaGate { queue: &queue, app_config: &app_config }),
+        )
+        .await;
+        let _ = server.join();
+
+        assert!(
+            matches!(&result, DownloadExecutionResult::Failed(reason) if reason == QUOTA_EXCEEDED_DURING_TRANSFER),
+            "a 10 byte file against a 4 byte quota"
+        );
+        assert!(!task.file_path.exists(), "nothing was published");
+    }
+
+    #[tokio::test]
+    async fn a_file_of_unknown_size_is_checked_against_waiting_quotas_when_it_completes() {
+        // Without a Content-Length nothing can be charged when the transfer
+        // starts. Alice has room; Bob, waiting to attach, has 16 bytes. The
+        // finished size is the first moment his quota can be asked.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = queue_with(
+            &dir,
+            vod_entry("alice", "web:alice", RecordingTaskState::Running),
+            vec![vod_entry("bob", "web:bob", RecordingTaskState::Queued)],
+        )
+        .await;
+        let app_config = app_config_with_quota(dir.path(), 1 << 20);
+        let gate = QuotaGate { queue: &queue, app_config: &app_config };
+        let started = gate.admit_size("alice", None, 0).await.expect("alice starts");
+        assert!(!started.siblings_refused, "nothing is known about the size yet");
+
+        let limits = crate::recording::recording_quota::QuotaLimits {
+            default_private_bytes: Some(16),
+            per_user_bytes: [(UserId::from("web:alice"), 1 << 20)].into_iter().collect(),
+            shared_bytes: None,
+        };
+        finish_active_and_promote(&queue, "alice", Some(&limits), |done| {
+            done.finished = true;
+            done.state = RecordingTaskState::Completed;
+            done.size = 4096;
+            done.recording.measured_bytes = 4096;
+            done.recording.reserved_bytes = 0;
+            RecordingNotificationPlan::empty()
+        })
+        .await
+        .expect("commit");
+
+        let finished = queue.finished.read().await.clone();
+        let state_of = |uuid: &str| finished.iter().find(|task| task.uuid == uuid).map(|task| task.state);
+        assert_eq!(state_of("alice"), Some(RecordingTaskState::Completed));
+        assert_eq!(state_of("bob"), Some(RecordingTaskState::Failed), "not attached past his quota");
+        assert!(queue.queue.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_transfer_of_unknown_size_is_capped_at_the_quota_left() {
+        let dir = TempDir::new().expect("tempdir");
+        let queue = queue_with(&dir, vod_entry("alice", "web:alice", RecordingTaskState::Running), Vec::new()).await;
+        let app_config = app_config_with_quota(dir.path(), 1000);
+        let gate = QuotaGate { queue: &queue, app_config: &app_config };
+
+        let admitted = gate.admit_size("alice", None, 0).await.expect("admitted");
+        assert_eq!(admitted.byte_cap, Some(1000));
+    }
+
+    #[tokio::test]
+    async fn an_entry_waiting_to_attach_is_refused_for_its_own_quota() {
+        // Bob queued behind Alice's transfer while its size was unknown.
+        // Attaching later would charge him the whole file, so his quota has
+        // to be asked now.
+        let dir = TempDir::new().expect("tempdir");
+        let queue = queue_with(
+            &dir,
+            vod_entry("alice", "web:alice", RecordingTaskState::Running),
+            vec![vod_entry("bob", "web:bob", RecordingTaskState::Queued)],
+        )
+        .await;
+        let app_config = app_config_with_quota(dir.path(), 4096);
+        // Bob already holds something else that leaves him less than the file.
+        crate::recording::recording_queue::mutate(&queue, |candidate| {
+            let mut other = vod_entry("bob-other", "web:bob", RecordingTaskState::Completed);
+            other.media_identity = "other".to_string();
+            other.recording.measured_bytes = 1000;
+            other.finished = true;
+            candidate.finished.push(other);
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        let gate = QuotaGate { queue: &queue, app_config: &app_config };
+
+        let admitted = gate.admit_size("alice", Some(4096), 0).await.expect("alice fits");
+        assert!(admitted.siblings_refused);
+        assert!(queue.queue.lock().await.is_empty(), "bob no longer waits");
+        let bob = queue.finished.read().await.iter().find(|task| task.uuid == "bob").cloned().expect("bob is filed");
+        assert_eq!(bob.state, RecordingTaskState::Failed);
+        assert_eq!(bob.recording.reserved_bytes, 0);
     }
 
     #[test]

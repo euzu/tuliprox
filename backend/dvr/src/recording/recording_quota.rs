@@ -579,8 +579,8 @@ mod tests {
 
     #[test]
     fn a_terminal_recording_reports_no_reservation() {
-        // A failed transfer used to keep whatever it had reserved, so the user
-        // was shown space held by a recording that no longer exists.
+        // A failed transfer releases its reservation: nothing more will be
+        // written, so the user is not charged for space no recording holds.
         let subject = UserId::from("web:alice");
         let mut failed = task(RecordingOwner::User(subject.clone()), RecordingTaskState::Failed, 5_000, 0);
         failed.recording.reserved_bytes = 5_000;
