@@ -253,11 +253,29 @@ pub fn read_config_file_with_options(config_file: &str, opts: ReadConfigOptions)
                     }
                     Ok(config)
                 }
-                Err(err) => Err(TuliproxError::Config(format!("Can't read the config file: {config_file}: {err}"))),
+                Err(err) => Err(TuliproxError::Config(match renamed_config_block(config_file) {
+                    Some(hint) => format!("Can't read the config file: {config_file}: {hint}"),
+                    None => format!("Can't read the config file: {config_file}: {err}"),
+                })),
             }
         }
         Err(err) => Err(TuliproxError::Config(format!("Can't read the config file: {config_file}: {err}"))),
     }
+}
+
+/// A config block that was renamed, explained in terms of what to change.
+///
+/// Unknown fields are rejected, so a configuration written for an older
+/// release fails with a generic "unknown field" message. For a renamed block
+/// that message names neither the new name nor what moved.
+fn renamed_config_block(config_file: &str) -> Option<&'static str> {
+    let file = open_file(&std::path::PathBuf::from(config_file)).ok()?;
+    let raw: serde_json::Value = serde_saphyr::from_reader(config_file_reader(file, false)).ok()?;
+    raw.get("video").and_then(|video| video.get("download")).map(|_| {
+        "`video.download` is now `video.recording`: rename the block, move the keys of its nested `recording` \
+         block up into it, and replace `download_priority` / `recording_priority` with `priority` (see the \
+         CHANGELOG)"
+    })
 }
 
 pub fn read_config_file(
@@ -1361,7 +1379,7 @@ pub async fn migrate_api_user(api_proxy: &mut ApiProxyConfig, cfg: &AppConfig, e
 #[cfg(test)]
 mod tests {
     use super::{
-        get_batch_aliases, prepare_sources_batch, sanitize_sources_for_persist, write_config_file,
+        get_batch_aliases, prepare_sources_batch, read_config_file, sanitize_sources_for_persist, write_config_file,
         write_config_text_file,
     };
     use shared::{
@@ -1370,6 +1388,19 @@ mod tests {
     };
     use tempfile::tempdir;
     use tuliprox_core::utils::resolve_env_var;
+
+    #[test]
+    fn a_config_with_the_old_download_block_says_what_to_rename() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "video:\n  download:\n    directory: /data/downloads\n").expect("write config");
+
+        let error = read_config_file(path.to_str().expect("utf-8 path"), false, false)
+            .expect_err("the old block is refused")
+            .to_string();
+
+        assert!(error.contains("`video.download` is now `video.recording`"), "{error}");
+    }
 
     #[tokio::test]
     async fn api_proxy_template_failure_propagates_and_preserves_active_config(

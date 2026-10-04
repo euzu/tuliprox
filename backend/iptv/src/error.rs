@@ -98,6 +98,7 @@ impl ProviderErrorKind {
             | ErrorKind::ConfigSource
             | ErrorKind::ConfigStream
             | ErrorKind::ConfigStreamHistory
+            | ErrorKind::ConfigRecording
             | ErrorKind::ConfigVideoDownload
             | ErrorKind::ConfigTarget
             | ErrorKind::ConfigWebUi

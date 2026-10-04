@@ -1,7 +1,10 @@
 use crate::{
-    app::components::{
-        Country, DateInput, DropDownOption, PagedTable, RevealContent, Search, TabItem, TabSet, Table, TableDefinition,
-        TextButton, PAGE_SIZES, TP_PAGE_SIZE_KEY,
+    app::{
+        components::{
+            Country, DateInput, DropDownOption, PagedTable, RevealContent, Search, TabItem, TabSet, Table,
+            TableDefinition, TextButton, PAGE_SIZES, TP_PAGE_SIZE_KEY,
+        },
+        context::ConfigContext,
     },
     hooks::use_service_context,
     i18n::use_translation,
@@ -202,9 +205,29 @@ fn stream_history_table_items(
     response.map_or_else(Vec::new, |r| r.items.iter().cloned().map(Rc::new).collect())
 }
 
+pub const fn should_fetch_stream_history(active: bool, stream_history_enabled: bool, has_loaded: bool) -> bool {
+    active && stream_history_enabled && !has_loaded
+}
+
+pub const fn should_fetch_qos_snapshots(stream_history_enabled: bool, qos_aggregation_enabled: bool) -> bool {
+    stream_history_enabled && qos_aggregation_enabled
+}
+
+#[derive(Properties, Clone, PartialEq, Debug)]
+pub struct StreamHistoryViewProps {
+    #[prop_or(true)]
+    pub active: bool,
+}
+
 #[component]
-pub fn StreamHistoryView() -> Html {
+pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
     let services = use_service_context();
+    let config_ctx = use_context::<ConfigContext>();
+    let (stream_history_enabled, qos_aggregation_enabled) = config_ctx
+        .as_ref()
+        .and_then(|ctx| ctx.config.as_ref())
+        .map_or((false, false), |cfg| (cfg.is_stream_history_enabled(), cfg.is_qos_aggregation_enabled()));
+
     let translate = use_translation();
     let from_date = use_state(|| Some(today_start_ts()));
     let to_date = use_state(|| Some(today_start_ts()));
@@ -222,6 +245,7 @@ pub fn StreamHistoryView() -> Html {
     let search_filter = use_state(|| SearchRequest::Clear);
     let loading = use_state(|| false);
     let request_id = use_mut_ref(|| 0u64);
+    let has_loaded = use_mut_ref(|| false);
     let search_options: Rc<Vec<DropDownOption>> = {
         let translate = translate.clone();
         use_memo(translate, move |translate| {
@@ -269,6 +293,9 @@ pub fn StreamHistoryView() -> Html {
         let loading = loading.clone();
         let request_id = request_id.clone();
         Rc::new(move |requested_page: u32, requested_page_size: u16, request: SearchRequest| {
+            if !stream_history_enabled {
+                return;
+            }
             let services = services.clone();
             let paged_response = paged_response.clone();
             let loading = loading.clone();
@@ -320,6 +347,9 @@ pub fn StreamHistoryView() -> Html {
         let page_size = page_size.clone();
         let search_filter = search_filter.clone();
         Callback::from(move |_: String| {
+            if !stream_history_enabled {
+                return;
+            }
             let services = services.clone();
             let paged_response = paged_response.clone();
             let summaries = summaries.clone();
@@ -339,7 +369,15 @@ pub fn StreamHistoryView() -> Html {
             let (search_text, search_mode, search_fields) = search_request_parts(&active_search);
             page.set(1);
             loading.set(true);
+            let query_qos = should_fetch_qos_snapshots(stream_history_enabled, qos_aggregation_enabled);
             spawn_local(async move {
+                let qos_future = async {
+                    if query_qos {
+                        services.stream_history.get_qos_snapshots().await
+                    } else {
+                        Ok(Some(Vec::new()))
+                    }
+                };
                 let (history_result, summary_result, qos_result) = join!(
                     services.stream_history.get_history_page(StreamHistoryPageRequestDto {
                         from: from_str.clone(),
@@ -351,7 +389,7 @@ pub fn StreamHistoryView() -> Html {
                         search_fields,
                     }),
                     services.stream_history.get_summary(from_str.as_deref(), to_str.as_deref()),
-                    services.stream_history.get_qos_snapshots()
+                    qos_future
                 );
                 if is_latest_request(*request_id.borrow(), next_request_id) {
                     match history_result {
@@ -375,11 +413,16 @@ pub fn StreamHistoryView() -> Html {
         })
     };
 
-    // Load on mount with default date range (today)
+    // Lazy load on first activation when enabled
     {
         let handle_load = handle_load.clone();
-        use_effect_with((), move |()| {
-            handle_load.emit(String::new());
+        let has_loaded = has_loaded.clone();
+        let active = props.active;
+        use_effect_with((active, stream_history_enabled), move |(active, enabled)| {
+            if should_fetch_stream_history(*active, *enabled, *has_loaded.borrow()) {
+                *has_loaded.borrow_mut() = true;
+                handle_load.emit(String::new());
+            }
             || ()
         });
     }
@@ -439,6 +482,9 @@ pub fn StreamHistoryView() -> Html {
         let services = services.clone();
         let selected_qos_snapshot = selected_qos_snapshot.clone();
         Callback::from(move |stream_identity_key: String| {
+            if !should_fetch_qos_snapshots(stream_history_enabled, qos_aggregation_enabled) {
+                return;
+            }
             let services = services.clone();
             let selected_qos_snapshot = selected_qos_snapshot.clone();
             spawn_local(async move {
@@ -748,6 +794,21 @@ pub fn StreamHistoryView() -> Html {
         },
     ]);
 
+    if !stream_history_enabled {
+        return html! {
+            <div class="tp__stream-history">
+                <div class="tp__stream-history__header">
+                    <h1>{translate.t("LABEL.STREAM_HISTORY")}</h1>
+                </div>
+                <div class="tp__stream-history__body">
+                    <div class="tp__empty-state">
+                        <p>{translate.t("LABEL.STREAM_HISTORY_DISABLED_HINT")}</p>
+                    </div>
+                </div>
+            </div>
+        };
+    }
+
     html! {
         <div class="tp__stream-history">
             <div class="tp__stream-history__header">
@@ -968,5 +1029,28 @@ mod tests {
     #[test]
     fn stream_history_tabs_are_ordered_for_query_first_workflow() {
         assert_eq!(stream_history_tab_ids(), ["stream-history", "qos-snapshot", "summary"]);
+    }
+
+    #[test]
+    fn should_fetch_stream_history_checks_active_enabled_and_loaded() {
+        assert!(super::should_fetch_stream_history(true, true, false));
+        assert!(!super::should_fetch_stream_history(false, true, false));
+        assert!(!super::should_fetch_stream_history(true, false, false));
+        assert!(!super::should_fetch_stream_history(true, true, true));
+        assert!(!super::should_fetch_stream_history(false, false, false));
+    }
+
+    #[test]
+    fn should_fetch_qos_snapshots_requires_both_stream_history_and_qos() {
+        assert!(super::should_fetch_qos_snapshots(true, true));
+        assert!(!super::should_fetch_qos_snapshots(true, false));
+        assert!(!super::should_fetch_qos_snapshots(false, true));
+        assert!(!super::should_fetch_qos_snapshots(false, false));
+    }
+
+    #[test]
+    fn stream_history_view_props_tracks_active() {
+        let props = super::StreamHistoryViewProps { active: false };
+        assert!(!props.active);
     }
 }

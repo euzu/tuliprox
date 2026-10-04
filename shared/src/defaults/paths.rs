@@ -15,7 +15,7 @@ pub const DEFAULT_BACKUP_DIR: &str = "backup";
 pub const DEFAULT_CACHE_DIR: &str = "cache";
 pub const DEFAULT_STORAGE_TEMP_DIR: &str = "tmp";
 pub const DEFAULT_USER_CONFIG_DIR: &str = "user_config";
-pub const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
+pub const DEFAULT_RECORDING_DIR: &str = "recordings";
 pub const DEFAULT_STORAGE_DIR: &str = "data"; // TODO rename to storage and use data for config, storage, ...
 pub const DEFAULT_CUSTOM_STREAM_RESPONSE_PATH: &str = "resources";
 
@@ -39,10 +39,10 @@ pub fn is_default_dir_path(value: &str, default_dir: &str) -> bool {
     normalized == default_dir
 }
 
-pub fn is_blank_or_default_download_dir(path: &Option<String>) -> bool {
-    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_DOWNLOAD_DIR))
+pub fn is_blank_or_default_recording_dir(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_dir_path(value, DEFAULT_RECORDING_DIR))
 }
-pub fn default_download_dir() -> Option<String> { Some(DEFAULT_DOWNLOAD_DIR.to_string()) }
+pub fn default_recording_dir() -> Option<String> { Some(DEFAULT_RECORDING_DIR.to_string()) }
 
 pub fn default_main_storage_dir() -> Option<String> { Some(DEFAULT_STORAGE_DIR.to_string()) }
 pub fn default_main_backup_dir() -> Option<String> { Some(DEFAULT_BACKUP_DIR.to_string()) }

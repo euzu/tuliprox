@@ -740,6 +740,18 @@ impl HlsProxyManager {
 
     pub fn terminal_commit_now_ms(&self) -> u64 { self.terminal_commit_clock.now_ms() }
 
+    /// The clock every time-dependent HLS scheduler reads.
+    ///
+    /// One clock, so a test that controls time controls all of it rather than
+    /// some schedulers following the wall clock and others the test clock.
+    pub(crate) fn now_ms(&self) -> u64 { self.terminal_commit_clock.now_ms() }
+
+    /// Anchor the scheduling clock to tokio's, for `start_paused` tests.
+    #[cfg(test)]
+    pub(crate) fn follow_tokio_clock_for_test(&self, base_ms: u64) {
+        self.terminal_commit_clock.follow_tokio_clock(base_ms);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_prepared_terminal_bundle(
         &self,

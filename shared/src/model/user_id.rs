@@ -1,7 +1,8 @@
-//! Identity registry types for stable subject identities.
+//! Stable subject identities.
 //!
-//! [`UserId`] provides the stable identity used by recording metadata, scope
-//! strings, and per-user quota configuration.
+//! The [`UserId`] newtype is used by token claims, token revocations,
+//! recording metadata and the per-user quota config map. It is derived from
+//! the configured username, so it needs no stored mapping.
 
 use std::fmt;
 
@@ -15,10 +16,10 @@ impl fmt::Display for InvalidUserId {
 
 impl std::error::Error for InvalidUserId {}
 
-/// Stable subject identifier (UUID v4 hex). Used for web users, API users,
-/// and the reserved built-in admin subject. Namespaces are string prefixes on
-/// the wrapped `String` (`web:<uuid>`, `api:<uuid>`, `builtin:admin`) to keep
-/// the representation copy-free in the public DTO layer.
+/// Subject identifier for web users, API users and the reserved built-in
+/// admin. Namespaces are string prefixes on the wrapped `String`
+/// (`web:<username>`, `api:<username>`, `builtin:admin`): a web user and an API
+/// user may share a username and are still different principals.
 ///
 /// Deserialization validates the input via `UserId::validate` so arbitrary,
 /// path-like, or reserved strings cannot enter authorization or directory
@@ -37,6 +38,32 @@ impl UserId {
     pub fn builtin_admin() -> Self { Self(Self::BUILTIN_ADMIN_NAMESPACE.to_string()) }
 
     pub fn is_builtin_admin(&self) -> bool { self.0 == Self::BUILTIN_ADMIN_NAMESPACE }
+
+    /// The subject of a configured web user. Pass the username as configured,
+    /// not as typed at login: sign-in matches web users case-insensitively.
+    pub fn web(username: &str) -> Self { Self::namespaced(Self::WEB_NAMESPACE, username) }
+
+    /// The subject of a proxy API user.
+    pub fn api(username: &str) -> Self { Self::namespaced(Self::API_NAMESPACE, username) }
+
+    /// `namespace` followed by the trimmed username, with the few characters
+    /// [`UserId::validate`] refuses percent-encoded. `%` is encoded too, so two
+    /// different usernames can never produce the same id.
+    fn namespaced(namespace: &str, username: &str) -> Self {
+        let username = username.trim();
+        let mut id = String::with_capacity(namespace.len() + username.len());
+        id.push_str(namespace);
+        for ch in username.chars() {
+            match ch {
+                '%' => id.push_str("%25"),
+                '/' => id.push_str("%2F"),
+                '\\' => id.push_str("%5C"),
+                '\0' => id.push_str("%00"),
+                other => id.push(other),
+            }
+        }
+        Self(id)
+    }
 
     pub fn is_web(&self) -> bool { self.0.starts_with(Self::WEB_NAMESPACE) }
 
@@ -111,6 +138,23 @@ mod tests {
     fn builtin_admin_subject_id_is_stable() {
         assert_eq!(UserId::builtin_admin().0, "builtin:admin");
         assert!(UserId::builtin_admin().is_builtin_admin());
+    }
+
+    #[test]
+    fn a_subject_is_the_namespaced_username() {
+        assert_eq!(UserId::web("alice"), UserId::from("web:alice"));
+        assert_eq!(UserId::api(" alice "), UserId::from("api:alice"));
+        assert_ne!(UserId::web("alice"), UserId::api("alice"), "same name, different principals");
+    }
+
+    #[test]
+    fn a_derived_subject_always_validates_and_stays_unambiguous() {
+        for name in ["a/b", "a\\b", "a\0b", "50%", "..", "."] {
+            let id = UserId::web(name);
+            assert!(UserId::validate(&id.0).is_ok(), "{name:?} -> {id}");
+        }
+        assert_eq!(UserId::web("a/b").0, "web:a%2Fb");
+        assert_ne!(UserId::web("a/b"), UserId::web("a%2Fb"), "an encoded name is not the same user");
     }
 
     #[test]

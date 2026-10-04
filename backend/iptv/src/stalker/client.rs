@@ -24,7 +24,6 @@ use reqwest::{
 };
 use serde::Deserialize;
 use std::{
-    fmt::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -724,32 +723,15 @@ fn identity_cookie_pairs(config: &StalkerInputConfig) -> Vec<(String, String)> {
         return pairs;
     };
     if let Some(mac) = device.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        pairs.push(("mac".to_string(), percent_encode_cookie_value(mac)));
+        pairs.push(("mac".to_string(), shared::utils::percent_encode_unreserved(mac)));
     }
     if let Some(locale) = device.locale.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        pairs.push(("stb_lang".to_string(), percent_encode_cookie_value(locale)));
+        pairs.push(("stb_lang".to_string(), shared::utils::percent_encode_unreserved(locale)));
     }
     if let Some(timezone) = device.timezone.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        pairs.push(("timezone".to_string(), percent_encode_cookie_value(timezone)));
+        pairs.push(("timezone".to_string(), shared::utils::percent_encode_unreserved(timezone)));
     }
     pairs
-}
-
-/// Percent-encode a cookie value, keeping only RFC 3986 unreserved characters. This is
-/// what real MAG firmware does for the `mac`/`timezone` cookies (e.g. `:` → `%3A`,
-/// `/` → `%2F`).
-fn percent_encode_cookie_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(char::from(byte)),
-            other => {
-                out.push('%');
-                let _ = write!(out, "{other:02X}");
-            }
-        }
-    }
-    out
 }
 
 fn persist_stalker_debug_body(portal_url: &str, action: &'static str, body: &Bytes) {
@@ -1404,13 +1386,6 @@ mod tests {
     }
 
     #[test]
-    fn percent_encode_cookie_value_escapes_mac_colons() {
-        assert_eq!(percent_encode_cookie_value("00:1A:79:DE:AD:BE"), "00%3A1A%3A79%3ADE%3AAD%3ABE");
-        assert_eq!(percent_encode_cookie_value("Europe/Berlin"), "Europe%2FBerlin");
-        assert_eq!(percent_encode_cookie_value("en_US.utf8"), "en_US.utf8");
-    }
-
-    #[test]
     fn identity_cookie_pairs_includes_mac_lang_and_timezone() {
         let config = StalkerInputConfig {
             device: Some(tuliprox_core::model::StalkerDeviceProfile {
@@ -1431,6 +1406,6 @@ mod tests {
     #[test]
     fn identity_cookie_pairs_empty_without_device() {
         let config = StalkerInputConfig::default();
-        assert!(identity_cookie_pairs(&config).is_empty());
+        assert_eq!(identity_cookie_pairs(&config), [] as [(std::string::String, std::string::String); 0]);
     }
 }

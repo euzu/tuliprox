@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{net::SocketAddr, sync::Arc};
 
+/// Identifies an internal recording stream in the live stream display.
+pub const RECORDING_STREAM_USER_AGENT: &str = "Tuliprox recording worker";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StreamTechnicalInfo {
     #[serde(default, skip_serializing_if = "String::is_empty")]

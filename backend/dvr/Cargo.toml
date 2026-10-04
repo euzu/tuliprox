@@ -16,7 +16,10 @@ tuliprox-messaging = { workspace = true }
 tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
+fastrand.workspace = true
 chrono-tz = "0.10.4"
+bytes.workspace = true
+futures.workspace = true
 libc = "0.2"
 log.workspace = true
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
@@ -31,5 +34,6 @@ url.workspace = true
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+blake3.workspace = true
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

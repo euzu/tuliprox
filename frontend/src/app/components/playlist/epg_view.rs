@@ -33,6 +33,12 @@ const TIME_BLOCK_MINS: i64 = 30;
 const DEFAULT_PIXELS_PER_MIN: f64 = 7.0; // 210px / 30min
 const MIN_PIXELS_PER_MIN: f64 = 2.0;
 const MAX_PIXELS_PER_MIN: f64 = 28.0;
+/// Offset of the record button's left edge from the programme's right edge:
+/// 4px box border, 2px gap, 18px button.
+const RECORD_BUTTON_RIGHT_INSET: i64 = 24;
+/// Smallest offset of the record button from the programme's left edge, so it
+/// never starts before the programme it records.
+const RECORD_BUTTON_LEFT_INSET: i64 = 4;
 const WHEEL_ZOOM_FACTOR_IN: f64 = 1.1;
 const WHEEL_ZOOM_FACTOR_OUT: f64 = 1.0 / WHEEL_ZOOM_FACTOR_IN;
 const ZOOM_EQUALITY_TOLERANCE: f64 = 0.01;
@@ -143,6 +149,11 @@ fn register_mouse_pan(
     (Some(move_handle), Some(up_handle))
 }
 
+/// Yew may defer the effect that registers the window `mouseup` listener past
+/// the actual `mouseup`, so a move without the primary button held means the
+/// release was missed and the pan has to end here.
+fn is_primary_button_held(e: &MouseEvent) -> bool { e.buttons() & 1 != 0 }
+
 fn unregister_mouse_pan(move_handle: MouseMoveHandle, up_handle: MouseUpHandle) {
     if let Some(win) = window() {
         if let Some(mouse_move) = move_handle.borrow_mut().take() {
@@ -236,14 +247,13 @@ pub fn EpgView() -> Html {
     let is_program_panning = use_state(|| false);
     let is_timeline_panning = use_state(|| false);
     let selected_epg_source = use_state(|| None::<PlaylistEpgRequest>);
-    let can_write_recordings = services.auth.has_permission(Permission::RecordingWrite);
+    let can_write_recordings = services.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = services.auth.is_admin();
     let recording_padding = {
         let rec = config_ctx
             .config
             .as_ref()
             .and_then(|cfg| cfg.config.video.as_ref())
-            .and_then(|video| video.download.as_ref())
             .and_then(|video| video.recording.as_ref());
         Rc::new(PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
@@ -647,10 +657,16 @@ pub fn EpgView() -> Html {
             let container_ref_m = container_ref.clone();
             let timeline_pan_state_m = timeline_pan_state.clone();
             let timeline_pan_state_u = timeline_pan_state.clone();
+            let is_timeline_panning_m = is_timeline_panning_handle.clone();
             let is_timeline_panning_u = is_timeline_panning_handle.clone();
             let (move_handle, up_handle) = register_mouse_pan(
                 *is_timeline_panning,
                 Box::new(move |e: MouseEvent| {
+                    if !is_primary_button_held(&e) {
+                        *timeline_pan_state_m.borrow_mut() = None;
+                        is_timeline_panning_m.set(false);
+                        return;
+                    }
                     let Some(pan_state) = *timeline_pan_state_m.borrow() else { return };
                     let Some(container) = container_ref_m.cast::<HtmlElement>() else { return };
                     e.prevent_default();
@@ -704,10 +720,16 @@ pub fn EpgView() -> Html {
             let container_ref_m = container_ref.clone();
             let program_pan_state_m = program_pan_state.clone();
             let program_pan_state_u = program_pan_state.clone();
+            let is_program_panning_m = is_program_panning_handle.clone();
             let is_program_panning_u = is_program_panning_handle.clone();
             let (move_handle, up_handle) = register_mouse_pan(
                 *is_program_panning,
                 Box::new(move |e: MouseEvent| {
+                    if !is_primary_button_held(&e) {
+                        *program_pan_state_m.borrow_mut() = None;
+                        is_program_panning_m.set(false);
+                        return;
+                    }
                     let Some(pan_state) = *program_pan_state_m.borrow() else { return };
                     let Some(container) = container_ref_m.cast::<HtmlElement>() else { return };
                     e.prevent_default();
@@ -928,7 +950,7 @@ pub fn EpgView() -> Html {
                 let body = html! {
                     <RecordingForm
                         prefill={prefill}
-                        has_recording_write={can_write_recordings}
+                        has_recording_manage={can_write_recordings}
                         is_admin_role={is_admin_role}
                         on_submit={on_submit}
                         on_cancel={Callback::from(|()| {})}
@@ -958,7 +980,7 @@ pub fn EpgView() -> Html {
                     return;
                 };
                 match RecordingService::new().create_task(request).await {
-                    Ok(_) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
+                    Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
                     Err(err) => services.toastr.error(err.to_string()),
                 }
             });
@@ -1090,27 +1112,36 @@ pub fn EpgView() -> Html {
                                                     })
                                                 };
 
+                                                // The record button sits beside the programme box rather than
+                                                // inside it: the box clips its content, which hid the button on
+                                                // every programme narrower than the button itself.
+                                                let record_button = if can_write_recordings && !is_past && is_hosted_epg {
+                                                    let button_left = (right - RECORD_BUTTON_RIGHT_INSET).max(left + RECORD_BUTTON_LEFT_INSET);
+                                                    html! {
+                                                        <div class="tp__epg__program-record" style={format!("left:{button_left}px")}
+                                                            onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                                                            <IconButton
+                                                                name="program_record"
+                                                                icon="DVR"
+                                                                class="tp__epg__program-menu"
+                                                                onclick={program_record_click}
+                                                            />
+                                                        </div>
+                                                    }
+                                                } else {
+                                                    html! {}
+                                                };
+
                                                 html! {
+                                                <>
                                                 <div class={classes!("tp__epg__program", if is_active { "tp__epg__program-active" } else {""})} style={program_style.clone()} title={ p.title.as_ref().map(ToString::to_string).unwrap_or_default() }>
                                                     <div class="tp__epg__program-time">{ &pstart } {"-"} { &pend }</div>
                                                     <div class="tp__epg__program-title">
                                                         { p.title.as_ref().map(ToString::to_string).unwrap_or_default() }
                                                     </div>
-                                                    {
-                                                        if can_write_recordings && !is_past && is_hosted_epg {
-                                                            html! {
-                                                                <IconButton
-                                                                    name="program_record"
-                                                                    icon="DVR"
-                                                                    class="tp__epg__program-menu"
-                                                                    onclick={program_record_click}
-                                                                />
-                                                            }
-                                                        } else {
-                                                            html! {}
-                                                        }
-                                                    }
                                                 </div>
+                                                { record_button }
+                                                </>
                                                 }
                                             } else {
                                               html!{}

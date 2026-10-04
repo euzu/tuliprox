@@ -279,8 +279,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // which is the single place that decision is made.
         EventMessage::PlaylistUpdateProgress(_)
         | EventMessage::SystemInfoUpdate(_)
-        | EventMessage::DownloadsUpdate(_)
-        | EventMessage::DownloadsDeltaUpdate(_) => None,
+        | EventMessage::RecordingProgress => None,
     }
 }
 
@@ -501,10 +500,10 @@ mod tests {
     use shared::model::{
         notification::{registry, Severity},
         ActiveUserConnectionChange, AuthAuditEvent, AuthAuditOutcome, ConfigReloadFailure, ConfigType,
-        ConnectionDenied, DiskAlert, DiskAlertLevel, DownloadsResponse, EventKind, LibraryScanProgressEvent,
-        LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
-        PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary,
-        ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
+        ConnectionDenied, DiskAlert, DiskAlertLevel, EventKind, LibraryScanProgressEvent, LibraryScanSummary,
+        LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, PlaylistGroupsChanged,
+        PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
+        ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
         ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
         StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
         WatchDisabled, WatchDisabledReason, WatchUnmatched,
@@ -556,7 +555,6 @@ mod tests {
     /// and it has to stay one list for that assert to mean anything.
     #[allow(clippy::too_many_lines)]
     fn sample_of_every_kind() -> Vec<(EventMessage, EventKind)> {
-        let empty_downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
             EventMessage::ServerError("x".to_string()),
             EventMessage::ServerLifecycle(ServerLifecycleEvent::started("1".into(), "h:1".into())),
@@ -591,9 +589,8 @@ mod tests {
                     result: None,
                 },
             }),
-            EventMessage::DownloadsUpdate(Arc::new(empty_downloads)),
-            EventMessage::DownloadsDeltaUpdate(shared::model::TransfersDelta::ActiveCleared),
             EventMessage::RecordingChanged,
+            EventMessage::RecordingProgress,
             EventMessage::RecordingRulesChanged,
             EventMessage::InputMetadataUpdatesStarted("a".into()),
             EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new("a".into(), 1, false, None)),
@@ -673,11 +670,11 @@ mod tests {
 
     #[test]
     fn high_frequency_variants_are_not_notifiable() {
-        // Progress ticks and download deltas fire many times per operation;
-        // their terminal counterparts are what reaches a channel. Guarded by
-        // the exhaustive match in `to_notification`, so a new variant is a
-        // compile error rather than a silent firehose.
-        assert!(to_notification(&EventMessage::DownloadsDeltaUpdate(shared::model::TransfersDelta::ActiveCleared))
+        // Progress ticks fire many times per operation; their terminal
+        // counterparts are what reaches a channel. Guarded by the exhaustive
+        // match in `to_notification`, so a new variant is a compile error
+        // rather than a silent firehose.
+        assert!(to_notification(&EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent::global("", "")))
             .is_none());
     }
 

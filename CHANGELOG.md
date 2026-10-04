@@ -4,6 +4,40 @@
 
 ## ⚠️ Breaking Changes
 
+- **`video.download` is now `video.recording`, and VOD/series downloads are recordings.** Live
+  captures and VOD/series transfers share one queue and one configuration block. A configuration
+  that still contains `video.download` is rejected while loading. To migrate:
+  - rename `video.download` to `video.recording`;
+  - move the keys of the former nested `video.download.recording` block (`enabled`,
+    `container_format`, `timezone`, `filename_template`, padding, `retention`, `disk`, `quota`,
+    `notifications`, `fallback_bytes_per_minute`) up into `video.recording`;
+  - replace `download_priority` and `recording_priority` with the single `priority`;
+  - keep one `directory`; the former download directory and recording directory are no longer
+    separate.
+
+  The `/api/v1/file/download*` and `/api/v1/file/record` routes are removed; recordings are created
+  and controlled through `/api/v1/recording/*`. The permissions `download.read` and
+  `download.write` are removed and decode to nothing, so a groups file that still lists them loses
+  them; grant `recording.read` / `recording.create` / `recording.manage` / `recording.delete`
+  instead.
+
+- **The DVR recording queue is now a recoverable B+Tree, and does not migrate.** The queue moved
+  from `storage_dir/recordings_state.json` to `storage_dir/recordings.db`, with a
+  schema-versioned recovery history under `backup_dir/recordings_recovery/`. An existing
+  `recordings_state.json` is ignored: the queue starts empty on upgrade. The queue also fails
+  closed now — a database that is ahead of every surviving recovery generation refuses to start
+  rather than silently adopting a queue it cannot account for.
+
+- **`recording.write` is split into `recording.create`, `recording.manage` and
+  `recording.delete`.** The removed name decodes to nothing, so a groups file that still lists
+  it loses the permission rather than gaining one of the replacements. The permission schema
+  version is bumped, so tokens issued before the split fail closed and clients must
+  re-authenticate.
+
+- **Recording files are stored owner-independently.** The layout is `<recording-root>/<rel>`
+  with no `users/<owner-id>/` or `shared/` component. Recordings written by an earlier build are
+  not found at the new location and must be moved, or re-recorded.
+
 - **The per-input resource policy is gone again.** `resource_policy` (with `allowed_hosts` / `allowed_networks`) is no
   longer a valid input field, so configurations written for that feature are rejected while loading, and resource links
   minted by it are no longer accepted. Resource destinations are classified instead of configured: a destination on a
@@ -1277,11 +1311,12 @@
 - **Auth: an access token minted for one purpose was valid everywhere.** Internal access tokens signed only a timestamp
   and a TTL, so any valid token verified at every place a token was accepted. The capability scope is now mixed into the
   keyed hash and is a compile-time constant on both sides, never caller-supplied. The token string format is unchanged.
-- **Auth: renaming a user orphaned their recordings.** The JWT subject was synthesised from the display name
-  (`web:{username}` / `api:{username}`), so a rename reassigned every recording the old subject owned to a principal
-  that does not exist. Subjects now come from the identity registry, which was already built with persistence,
-  bootstrap and a rename that preserves the id, and was simply never wired into the server. A corrupt registry refuses
-  to start rather than inventing replacement ids.
+- **Auth: a user's subject id is derived from the configured username.** The id in tokens, recordings, rules,
+  per-user quotas and token revocations is `web:<username>` for web users and `api:<username>` for proxy API users,
+  taken from the configured name rather than as typed at sign-in. The identity registry
+  (`identity_registry.json`) that mapped usernames to random ids is removed: nothing called its rename, so it only
+  added a file that had to survive every restart. An existing `identity_registry.json` is ignored and can be deleted.
+  Renaming a user in the configuration starts a new principal.
 - **Auth: passwords typed at the terminal were left in memory.** The interactive password generator left two plaintext
   `String`s sitting after it returned; they are now wiped, the same discipline already applied to a password arriving
   over HTTP. A dead duplicate of the credential type that was never declared in its crate root has been removed.

@@ -46,12 +46,7 @@ pub fn create_jwt_admin(
     create_jwt(web_auth_config, username, RoleSet::ADMIN, PERM_ALL, pwd_version, Some(UserId::builtin_admin()))
 }
 
-/// `subject_id` comes from the identity registry.
-///
-/// It used to be `format!("api:{username}")`, which made the subject a
-/// function of the display name: renaming a user reassigned every recording
-/// they owned to a principal that did not exist, and two deployments that
-/// happened to share a username shared an identity.
+/// `subject_id` is [`UserId::api`] of the configured username.
 pub fn create_jwt_api_user(
     web_auth_config: &WebAuthConfig,
     username: &str,
@@ -60,8 +55,7 @@ pub fn create_jwt_api_user(
     create_jwt(web_auth_config, username, RoleSet::API_USER, PermissionSet::new(), 0, Some(subject_id))
 }
 
-/// `subject_id` comes from the identity registry. See
-/// [`create_jwt_api_user`] for why it is no longer derived from the username.
+/// `subject_id` is [`UserId::web`] of the configured username.
 pub fn create_jwt_web_user(
     web_auth_config: &WebAuthConfig,
     username: &str,
@@ -251,7 +245,7 @@ mod tests {
         assert!(data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::ConfigRead));
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
-        assert!(data.claims.permissions.contains(Permission::RecordingWrite));
+        assert!(data.claims.permissions.contains(Permission::RecordingManage));
         assert_eq!(data.claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
     }
 
@@ -271,7 +265,7 @@ mod tests {
         assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice-uuid")));
         assert!(!data.claims.is_admin());
         assert!(data.claims.permissions.contains(Permission::RecordingRead));
-        assert!(!data.claims.permissions.contains(Permission::RecordingWrite));
+        assert!(!data.claims.permissions.contains(Permission::RecordingManage));
     }
 
     #[test]

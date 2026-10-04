@@ -1,8 +1,8 @@
 use crate::{
     model::{
         macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, MessagingConfig,
-        MetadataUpdateConfig, ProxyConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, ScheduleConfig,
-        VideoConfig, WebUiConfig,
+        MetadataUpdateConfig, ProxyConfig, RecordingConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig,
+        ScheduleConfig, VideoConfig, WebUiConfig,
     },
     utils,
     utils::get_default_path_for_home,
@@ -12,7 +12,7 @@ use path_clean::PathClean;
 use shared::{
     defaults::{
         default_grace_period_millis, default_grace_period_timeout_secs, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR,
-        DEFAULT_DOWNLOAD_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR,
+        DEFAULT_RECORDING_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR,
     },
     error::TuliproxError,
     model::{ConfigDto, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview},
@@ -29,7 +29,7 @@ fn create_directories(cfg: &Config, temp_path: &Path) {
         Some(cfg.storage_dir.clone()),
         cfg.backup_dir.clone(),
         cfg.user_config_dir.clone(),
-        cfg.video.as_ref().and_then(|v| v.download.as_ref()).map(|d| d.directory.clone()),
+        cfg.video.as_ref().and_then(|video| video.recording.as_ref()).map(|recording| recording.directory.clone()),
         cfg.reverse_proxy
             .as_ref()
             .and_then(|r| r.cache.as_ref().and_then(|c| if c.enabled { Some(c.directory.clone()) } else { None })),
@@ -117,7 +117,31 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
 }
 
+/// Resolve a configured recording directory the way `Config::prepare` does:
+/// blank means the default directory under `home_path`, relative paths are
+/// joined onto `home_path`, absolute paths are kept.
+///
+/// Anything comparing a raw configured directory against the running one
+/// must resolve it first, or an untouched relative path reads as a change.
+pub fn resolve_recording_directory(directory: &str, home_path: &str) -> String {
+    let resolved = if directory.trim().is_empty() {
+        get_default_path_for_home(Path::new(home_path), DEFAULT_RECORDING_DIR)
+    } else {
+        let path = PathBuf::from(directory);
+        if path.is_relative() {
+            PathBuf::from(home_path).join(path)
+        } else {
+            return directory.to_string();
+        }
+    };
+    resolved.clean().to_string_lossy().to_string()
+}
+
 impl Config {
+    pub fn recording(&self) -> Option<&RecordingConfig> {
+        self.video.as_ref().and_then(|video| video.recording.as_ref())
+    }
+
     fn lexical_normalize(path: &Path) -> PathBuf { path.components().collect::<PathBuf>() }
 
     fn normalize_storage_path(
@@ -179,20 +203,8 @@ impl Config {
             messaging.prepare(config_path);
         }
 
-        if let Some(video) = self.video.as_mut() {
-            video.prepare();
-            if let Some(download) = video.download.as_mut() {
-                let download_path = PathBuf::from(&download.directory);
-                if download.directory.trim().is_empty() {
-                    download.directory = get_default_path_for_home(Path::new(home_path), DEFAULT_DOWNLOAD_DIR)
-                        .clean()
-                        .to_string_lossy()
-                        .to_string();
-                } else if download_path.is_relative() {
-                    download.directory =
-                        PathBuf::from(home_path).join(download_path).clean().to_string_lossy().to_string();
-                }
-            }
+        if let Some(recording) = self.video.as_mut().and_then(|video| video.recording.as_mut()) {
+            recording.directory = resolve_recording_directory(&recording.directory, home_path);
         }
 
         Ok(())
@@ -361,9 +373,28 @@ impl From<&ConfigDto> for Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
-    use shared::model::{ConfigDto, GeoIpUnavailablePolicy};
+    use super::{resolve_recording_directory, Config};
+    use shared::model::{ConfigDto, GeoIpUnavailablePolicy, RecordingConfigDto, VideoConfigDto};
     use tempfile::tempdir;
+
+    #[test]
+    fn untouched_recording_directory_resolves_to_the_prepared_one() {
+        // A save that does not touch the directory sends the raw configured
+        // value; it must equal what `prepare` put into the running config.
+        for raw in ["", "  ", "recordings", "./data/recordings", "/srv/recordings"] {
+            let dto = ConfigDto {
+                video: Some(VideoConfigDto {
+                    recording: Some(RecordingConfigDto { directory: Some(raw.to_string()), ..Default::default() }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let mut config = Config::from(&dto);
+            config.prepare("/home/tp/config", "/home/tp").expect("prepare");
+            let prepared = config.video.and_then(|video| video.recording).expect("recording").directory;
+            assert_eq!(resolve_recording_directory(raw, "/home/tp"), prepared, "raw directory {raw:?}");
+        }
+    }
 
     #[test]
     fn prepare_resolves_relative_web_root_from_home_path() {
@@ -465,7 +496,7 @@ mod tests {
                 geoip: Some(shared::model::GeoIpConfigDto {
                     enabled: true,
                     url: "https://example.com/db.csv".to_string(),
-                    unavailable_policy: shared::model::GeoIpUnavailablePolicy::Allow,
+                    unavailable_policy: GeoIpUnavailablePolicy::Allow,
                 }),
                 ..Default::default()
             }),
@@ -473,5 +504,28 @@ mod tests {
         };
         let config = Config::from(&dto);
         assert_eq!(config.get_geoip_unavailable_policy(), GeoIpUnavailablePolicy::Allow);
+    }
+
+    #[test]
+    fn recording_runtime_config_from_video_dto() {
+        let dto = ConfigDto {
+            video: Some(VideoConfigDto {
+                extensions: vec![".mp4".to_string()],
+                web_search: Some("https://example.test/search".to_string()),
+                recording: Some(RecordingConfigDto {
+                    enabled: true,
+                    directory: Some("/srv/recordings".to_string()),
+                    ..RecordingConfigDto::default()
+                }),
+            }),
+            ..ConfigDto::default()
+        };
+        let config = Config::from(&dto);
+        let video = config.video.as_ref().expect("runtime config must expose video");
+        let recording = video.recording.as_ref().expect("runtime config must expose recording");
+        assert!(recording.enabled, "recording.enabled must round-trip from DTO");
+        assert_eq!(recording.directory, "/srv/recordings");
+        assert_eq!(video.extensions, [".mp4"]);
+        assert_eq!(video.web_search.as_deref(), Some("https://example.test/search"));
     }
 }

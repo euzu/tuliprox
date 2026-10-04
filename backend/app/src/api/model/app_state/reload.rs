@@ -5,7 +5,6 @@ use super::{
 };
 use crate::{
     api::{
-        endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::{load_target_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler},
         tasks::{exec_config_watch, exec_scheduler},
     },
@@ -17,6 +16,7 @@ use log::error;
 use shared::{error::TuliproxError, model::WebAuthConfigDto};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 
 macro_rules! cancel_service {
@@ -98,7 +98,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         return;
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        app_state.downloads.request_worker_restart();
+        app_state.recordings.request_worker_restart();
     }
     let cancel_tokens = app_state.cancel_tokens.load();
 
@@ -114,7 +114,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         cancel_tokens.metadata.clone()
     };
     let qos_aggregation = cancel_service!(qos_aggregation, UpdateChangesFlags::QosAggregation, changes, cancel_tokens);
-    let downloads = cancel_service!(downloads, UpdateChangesFlags::Downloads, changes, cancel_tokens);
+    let recordings = cancel_service!(recordings, UpdateChangesFlags::Downloads, changes, cancel_tokens);
 
     let tokens = CancelTokens {
         scheduler,
@@ -123,7 +123,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         provider_dns,
         metadata,
         qos_aggregation,
-        downloads,
+        recordings,
         hls_cache: cancel_tokens.hls_cache.clone(),
     };
 
@@ -169,20 +169,20 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         });
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
-        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().downloads);
+        spawn_recording_services(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
+        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().recordings);
         let config = app_state.app_config.config.load();
-        if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()).cloned() {
+        if let Some(download_cfg) = config.recording().cloned() {
             let app_state = Arc::clone(app_state);
             tokio::spawn(async move {
                 for _ in 0..50 {
-                    if !*app_state.downloads.worker_running.read().await {
+                    if !*app_state.recordings.worker_running.read().await {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), &download_cfg).await {
-                    error!("Failed to resume downloads after hot reload: {err}");
+                if let Err(err) = resume_recording_worker_if_needed(&app_state.recording_ctx(), &download_cfg).await {
+                    error!("Failed to resume recordings after hot reload: {err}");
                 }
             });
         }

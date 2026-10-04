@@ -4249,6 +4249,10 @@ fn test_app_state_with_hls_proxy_and_inputs(
     let metadata_manager = Arc::new(MetadataUpdateManager::new(cancel_tokens.metadata.clone()));
 
     Arc::new(AppState {
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         app_config,
         http_clients: Arc::new(tuliprox_core::model::HttpClients::new(
             reqwest::Client::new(),
@@ -4260,7 +4264,7 @@ fn test_app_state_with_hls_proxy_and_inputs(
             reqwest::Client::new(),
             reqwest::Client::new(),
         )),
-        downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+        recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(hls_proxy),

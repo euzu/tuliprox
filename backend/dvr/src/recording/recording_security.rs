@@ -173,12 +173,7 @@ pub fn authorize_read(
     if matches!(meta.visibility, RecordingVisibility::Shared) {
         return true;
     }
-    if let RecordingOwner::User(owner_id) = &meta.owner {
-        return owner_id == principal_id;
-    }
-    // LegacyAdmin: only administrators can read (the admin check
-    // above already handled that path).
-    false
+    meta.owner.user_id() == principal_id
 }
 
 #[cfg(test)]
@@ -294,9 +289,9 @@ mod tests {
     }
 
     #[test]
-    fn authorize_read_legacy_admin_only_for_administrator() {
-        let meta = make_meta(RecordingVisibility::Private, RecordingOwner::LegacyAdmin);
+    fn authorize_read_private_recording_only_for_its_owner() {
+        let meta = make_meta(RecordingVisibility::Private, RecordingOwner::User(user("web:bob")));
         assert!(!authorize_read(&meta, &user("web:alice"), true, false));
-        assert!(authorize_read(&meta, &user("builtin:admin"), true, true));
+        assert!(authorize_read(&meta, &user("web:bob"), true, false));
     }
 }

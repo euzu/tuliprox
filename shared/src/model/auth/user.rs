@@ -1,5 +1,5 @@
 use super::{
-    super::identity_registry::UserId,
+    super::user_id::UserId,
     permission::PermissionSet,
     role::{role_names, Role, RoleSet},
 };
@@ -11,8 +11,12 @@ pub const TOKEN_NO_AUTH: &str = "authorized";
 /// `Permission` enum or the permission bit layout changes. Tokens
 /// issued before a bump fail closed at the validator with a stable
 /// "token refresh required" response so clients re-authenticate
-/// before the new permission bits can leak through.
-pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 1;
+/// before the new permission bits can leak through: an old token's bits
+/// would otherwise be read against the new layout.
+///
+/// The layout this version stands for is pinned in the permission bit table
+/// test, next to the expected value of this constant.
+pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {

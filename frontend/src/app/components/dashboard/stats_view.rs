@@ -1,3 +1,4 @@
+use super::stream_display::is_background_transfer_stream;
 use crate::{
     app::components::{
         use_metrics_history, Card, CollapsePanel, LogConsole, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
@@ -221,16 +222,17 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         let (stream_count, stream_footer) = status_ctx.status.as_ref().map_or_else(
             || (loading_label.clone(), String::new()),
             |status| {
-                let (live, video, series) = status.active_user_streams.iter().fold(
-                    (0_usize, 0_usize, 0_usize),
-                    |(l, v, s), stream| match stream.channel.cluster {
+                let (live, video, series) = status
+                    .active_user_streams
+                    .iter()
+                    .filter(|stream| !is_background_transfer_stream(stream))
+                    .fold((0_usize, 0_usize, 0_usize), |(l, v, s), stream| match stream.channel.cluster {
                         XtreamCluster::Live => (l + 1, v, s),
                         XtreamCluster::Video => (l, v + 1, s),
                         XtreamCluster::Series => (l, v, s + 1),
-                    },
-                );
+                    });
                 (
-                    status.active_user_streams.len().to_string(),
+                    (live + video + series).to_string(),
                     format!(
                         "{} {live} \u{b7} {} {video} \u{b7} {} {series}",
                         translate.t("LABEL.LIVE"),

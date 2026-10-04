@@ -510,9 +510,9 @@ mod tests {
         api::model::{
             build_hls_standalone_custom_plan, hls_custom_video_manifest_response_for_access_lease,
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CustomVideoStreamType,
-            DownloadQueue, EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProxyManager,
+            EventManager, HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsProxyManager,
             HlsRuntimeCustomTailReason, HlsStandaloneCustomAccess, MetadataUpdateManager, PlaylistStorageState,
-            ProxySessionId, SharedStreamManager, TransportStreamBuffer,
+            ProxySessionId, RecordingQueue, SharedStreamManager, TransportStreamBuffer,
         },
         model::{
             ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget,
@@ -708,15 +708,19 @@ mod tests {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
-            downloads: CancellationToken::new(),
+            recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             app_config: app_cfg,
             http_clients: Arc::default(),
-            downloads: Arc::new(DownloadQueue::new()),
+            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),

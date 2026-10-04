@@ -11,6 +11,7 @@
 
 pub(crate) mod codec;
 mod common;
+pub mod recovery;
 pub(crate) mod sorted_index;
 #[cfg(test)]
 mod stress;
@@ -31,6 +32,17 @@ pub use common::BPlusTreeError;
 // clean up databases need both, and they must agree with the engine or a
 // staging database can end up sharing a lock domain with a published one.
 pub use common::{ensure_distinct_sidecar_lock_domains, get_file_path_for_db_index, sidecar_lock_path};
+#[cfg(any(test, feature = "test-support"))]
+pub use recovery::RecoveryFaultPoint;
+// --- Recoverable persistence ----------------------------------------------
+// A second, schema-versioned history beside the write-ahead log. The engine
+// stores its bookkeeping in the database header and knows nothing about what a
+// record means; the application supplies that through `RecoverySchema`.
+pub use recovery::{
+    BPlusTreeRecoveryJournal, CheckpointOutcome, RecoveryBatch, RecoveryCommitReport, RecoveryErrorClass,
+    RecoveryHealth, RecoveryOpenAction, RecoveryOpenReport, RecoveryOperation, RecoveryPaths, RecoveryPolicy,
+    RecoveryRepositoryState, RecoverySchema, RecoveryStoragePlacement, RecoveryVerificationReport,
+};
 // --- Sorted-index sidecar --------------------------------------------------
 /// Iterates a database in sorted-index order, falling back to the caller's own
 /// handling when the sidecar is unusable.
@@ -44,7 +56,8 @@ pub use v3::migration as typed_migration;
 pub use v3::{publish_staged_database, BPlusTreeStagingArtifacts};
 pub use v3::{
     BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeMetadata, BPlusTreeQuery,
-    BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy, MAGIC, STORAGE_VERSION,
+    BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy, RecoveryIdentity, MAGIC,
+    STORAGE_VERSION,
 };
 
 // --- Test support ----------------------------------------------------------

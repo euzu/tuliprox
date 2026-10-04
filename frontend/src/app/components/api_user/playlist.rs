@@ -147,11 +147,11 @@ pub fn ApiUserPlaylist() -> Html {
                     }
                     (Err(e1), Err(e2)) => {
                         log::error!("Failed to load bouquet: {e1:?}, categories: {e2:?}");
-                        services.toastr.error(translate.t("MESSAGES.DOWNLOAD.USER_BOUQUET.FAIL"));
+                        services.toastr.error(translate.t("MESSAGES.USER_BOUQUET.FAIL"));
                     }
                     (Err(e), _) | (_, Err(e)) => {
                         log::error!("Failed to load user data: {e:?}");
-                        services.toastr.error(translate.t("MESSAGES.DOWNLOAD.USER_BOUQUET.FAIL"));
+                        services.toastr.error(translate.t("MESSAGES.USER_BOUQUET.FAIL"));
                     }
                 }
 

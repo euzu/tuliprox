@@ -167,7 +167,8 @@ async fn proxy_auth_lost_on_redirect_repro() {
     assert!(missing_auth > 0, "Expected missing proxy auth on redirect. missing_auth={missing_auth}, uris={uris:?}");
 }
 
-#[cfg(feature = "proxy-auth-regression")]
+/// The guard for the workaround: forwarding redirects by hand must carry the
+/// proxy credentials to every hop.
 #[tokio::test]
 async fn proxy_auth_survives_redirect_regression() {
     let (status, missing_auth, uris) = run_proxy_flow(true).await;

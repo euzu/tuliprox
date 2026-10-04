@@ -136,6 +136,68 @@ pub fn humanize_snake_case(s: &str) -> String {
 
 pub fn deunicode_string(s: &str) -> Cow<'_, str> { deunicode_with_tofu_cow(s, "[?]") }
 
+/// Percent-encodes every byte outside the RFC 3986 unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`), e.g. `:` -> `%3A`, `ü` -> `%C3%BC`. Suitable for
+/// cookie values and RFC 5987 `filename*` header parameters.
+pub fn percent_encode_unreserved(value: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(char::from(byte)),
+            other => {
+                let _ = write!(out, "%{other:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Filters text down to characters that are safe in a file or directory name.
+///
+/// Allow-list: letters and digits of every script (Latin with diacritics,
+/// Cyrillic, Arabic, Greek, CJK, Devanagari, Thai, ...) plus `+=,._-@#()[]`.
+/// Whitespace becomes `_` or a space; everything else (emoji, symbols, path
+/// separators, control characters, characters Windows forbids) is dropped.
+/// Leading dots and empty bracket pairs are removed. The result may be empty,
+/// so callers choose their own fallback name.
+///
+/// The text is NFC-normalized first, and combining marks (viramas, tone
+/// marks, accents a decomposed source did not compose) are kept when they
+/// follow a kept letter: several scripts are unreadable without them. After a
+/// dropped emoji they would be an invisible leftover, so they go with it.
+pub fn sanitize_filename_chars(text: &str, underscore_whitespace: bool) -> String {
+    use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+    let whitespace = if underscore_whitespace { '_' } else { ' ' };
+    let mut after_letter = false;
+    let sanitized: String = text
+        .trim()
+        .nfc()
+        .filter_map(|c| {
+            if c.is_alphanumeric() {
+                after_letter = true;
+                return Some(c);
+            }
+            if after_letter && is_combining_mark(c) && !is_variation_selector(c) {
+                return Some(c);
+            }
+            after_letter = false;
+            if "+=,._-@#()[]".contains(c) {
+                Some(c)
+            } else if c.is_whitespace() {
+                Some(whitespace)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_start_matches('.');
+    CONSTANTS.export_style_config.paaren.replace_all(sanitized, "").trim().to_string()
+}
+
+/// Variation selectors only pick a glyph style, typically for an emoji.
+fn is_variation_selector(c: char) -> bool { matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}') }
+
 pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
     if a.len() >= b.len() {
         a
@@ -236,7 +298,10 @@ macro_rules! concat_string {
 
 #[cfg(test)]
 mod test {
-    use super::{clean_playlist_title, generate_random_string, natural_cmp, quality_rank};
+    use super::{
+        clean_playlist_title, generate_random_string, natural_cmp, percent_encode_unreserved, quality_rank,
+        sanitize_filename_chars,
+    };
     use crate as shared; // allow path-based macro call in tests
     use crate::utils::Capitalize;
     use std::{cmp::Ordering, collections::HashSet};
@@ -299,5 +364,43 @@ mod test {
         assert_eq!(clean_playlist_title("(FR) Movie Title"), "Movie Title");
         assert_eq!(clean_playlist_title("[US] (FR) Movie Title"), "Movie Title");
         assert_eq!(clean_playlist_title("Movie Title"), "Movie Title");
+    }
+
+    #[test]
+    fn sanitize_filename_chars_keeps_letters_of_every_script() {
+        for name in ["Café Größe", "Çağrı Şükür", "Новости", "الأخبار", "Ειδήσεις", "ニュース"]
+        {
+            assert_eq!(sanitize_filename_chars(name, false), name);
+        }
+        assert_eq!(sanitize_filename_chars("Новости 24", true), "Новости_24");
+    }
+
+    #[test]
+    fn sanitize_filename_chars_keeps_combining_marks_of_a_kept_letter() {
+        // Virama and Thai tone marks are marks, not letters; dropping them
+        // turned conjuncts and tones into different words.
+        for name in ["समाचार", "क्षेत्र", "ข่าว", "Tiếng Việt"] {
+            assert_eq!(sanitize_filename_chars(name, false), name);
+        }
+        // A decomposed accent is composed, not lost.
+        assert_eq!(sanitize_filename_chars("Cafe\u{301}", false), "Café");
+        // A selector left behind by a dropped emoji does not survive.
+        assert_eq!(sanitize_filename_chars("News \u{2764}\u{FE0F}", false), "News");
+    }
+
+    #[test]
+    fn sanitize_filename_chars_drops_symbols_separators_and_controls() {
+        assert_eq!(sanitize_filename_chars("Krimi🎬: a/b\\c*?\"<>|\0", false), "Krimi abc");
+        assert_eq!(sanitize_filename_chars("../../etc", false), "etc");
+        assert_eq!(sanitize_filename_chars("Show () [HD]", false), "Show  [HD]");
+        assert_eq!(sanitize_filename_chars("🎬", false), "");
+    }
+
+    #[test]
+    fn percent_encode_unreserved_escapes_everything_else() {
+        assert_eq!(percent_encode_unreserved("00:1A:79:DE:AD:BE"), "00%3A1A%3A79%3ADE%3AAD%3ABE");
+        assert_eq!(percent_encode_unreserved("Europe/Berlin"), "Europe%2FBerlin");
+        assert_eq!(percent_encode_unreserved("en_US.utf8"), "en_US.utf8");
+        assert_eq!(percent_encode_unreserved("Grüße 1.ts"), "Gr%C3%BC%C3%9Fe%201.ts");
     }
 }

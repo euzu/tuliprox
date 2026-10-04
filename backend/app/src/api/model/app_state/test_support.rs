@@ -1,8 +1,8 @@
 use super::{AppState, AuthState, CancelTokens, HlsState, PlaylistUpdateControl};
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, ConnectionManager, DownloadQueue, EventManager, PlaylistStorageState,
-        SharedStreamManager,
+        ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, PlaylistStorageState,
+        RecordingQueue, SharedStreamManager,
     },
     model::{AppConfig, Config, SourcesConfig},
     repository::GeoIp,
@@ -66,12 +66,16 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
     Arc::new(AppState {
         app_config,
         http_clients: Arc::default(),
-        downloads: Arc::new(DownloadQueue::new()),
+        recordings: Arc::new(RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls: HlsState::new(Arc::new(HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         active_users,
+        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+            Arc::clone(&active_provider),
+            Arc::clone(&connection_manager),
+        ),
         active_provider,
         connection_manager,
         event_manager,

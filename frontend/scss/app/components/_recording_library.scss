@@ -1,4 +1,4 @@
-.tp__downloads-list {
+.tp__recording-list {
   &__header-toolbar {
     display: flex;
     flex-flow: row wrap;
@@ -9,9 +9,26 @@
   &__body {
     overflow: hidden;
   }
+
+  &__status {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: center;
+    gap: var(--gap-large);
+    padding: 0 var(--gap-small) var(--gap-small);
+    font-size: 0.85rem;
+    opacity: 0.8;
+  }
+
+  &__offline {
+    // Stale data stays on screen; this is the only thing saying so.
+    color: var(--warning-color, orange);
+    font-weight: 600;
+    opacity: 1;
+  }
 }
 
-.tp__downloads-table {
+.tp__recording-table {
   &__actions {
     display: flex;
     flex-flow: row wrap;
@@ -44,7 +61,7 @@
 }
 
 @media (max-width: 900px) {
-  .tp__downloads-list {
+  .tp__recording-list {
     &__header {
       align-items: flex-start;
       flex-flow: column;

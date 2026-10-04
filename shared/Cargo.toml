@@ -33,6 +33,7 @@ bytes.workspace = true
 lz4_flex.workspace = true
 brotli.workspace = true
 deunicode.workspace = true
+unicode-normalization.workspace = true
 serde-saphyr.workspace = true
 dashmap.workspace = true
 paste.workspace = true

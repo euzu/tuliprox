@@ -1,6 +1,6 @@
 use super::AppState;
 use crate::model::{Config, ConfigProvider, ConfigTarget, HdHomeRunConfig, ScheduleConfig, SourcesConfig};
-use shared::{create_bitset, model::VideoDownloadConfigDto, utils::small_vecs_equal_unordered};
+use shared::{create_bitset, model::RecordingConfigDto, utils::small_vecs_equal_unordered};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,11 +63,8 @@ macro_rules! change_detect {
     };
 }
 
-pub(super) fn video_download_changed(
-    a: &crate::model::VideoDownloadConfig,
-    b: &crate::model::VideoDownloadConfig,
-) -> bool {
-    VideoDownloadConfigDto::from(a) != VideoDownloadConfigDto::from(b)
+pub(super) fn recording_changed(a: &crate::model::RecordingConfig, b: &crate::model::RecordingConfig) -> bool {
+    RecordingConfigDto::from(a) != RecordingConfigDto::from(b)
 }
 
 impl AppState {
@@ -88,10 +85,10 @@ impl AppState {
         let geoip_enabled_old = old_config.is_geoip_enabled();
         let changed_storage_dir = old_config.storage_dir != config.storage_dir;
         let changed_qos_aggregation = qos_aggregation_changed(&old_config, config);
-        let changed_video_download = change_detect!(
-            video_download_changed,
-            old_config.video.as_ref().and_then(|video| video.download.as_ref()),
-            config.video.as_ref().and_then(|video| video.download.as_ref())
+        let changed_recording = change_detect!(
+            recording_changed,
+            old_config.video.as_ref().and_then(|video| video.recording.as_ref()),
+            config.video.as_ref().and_then(|video| video.recording.as_ref())
         );
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
@@ -104,7 +101,7 @@ impl AppState {
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
         changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
         changes.set_flag_if(changed_qos_aggregation || changed_storage_dir, UpdateChangesFlags::QosAggregation);
-        changes.set_flag_if(changed_video_download, UpdateChangesFlags::Downloads);
+        changes.set_flag_if(changed_recording, UpdateChangesFlags::Downloads);
         changes
     }
 

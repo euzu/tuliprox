@@ -37,7 +37,28 @@ const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[
 
 pub fn filter_response_header(key: &str) -> bool { SUPPORTED_RESPONSE_HEADERS.contains(&key) }
 
-pub fn filter_request_header(key: &str) -> bool { key != "host" && key != "connection" }
+/// Headers the transport owns, which configuration must never supply.
+///
+/// A configured `Range` or `If-Range` would collide with the offset a
+/// resumable transfer asks for, and the bytes that came back would be appended
+/// to a partial file they do not belong to. The framing headers are equally
+/// the transport's: a stale `Content-Length` desynchronises the body.
+const TRANSPORT_OWNED_HEADERS: &[&str] = &[
+    "host",
+    "connection",
+    "range",
+    "if-range",
+    "if-match",
+    "if-none-match",
+    "if-modified-since",
+    "if-unmodified-since",
+    "content-length",
+    "transfer-encoding",
+];
+
+pub fn filter_request_header(key: &str) -> bool {
+    !TRANSPORT_OWNED_HEADERS.iter().any(|owned| key.eq_ignore_ascii_case(owned))
+}
 
 /// Configuration for media export naming styles (Kodi, Plex, Emby, Jellyfin)
 pub struct ExportStyleConfig {
@@ -65,7 +86,6 @@ pub struct Constants {
     pub re_template_var: Regex,
     pub re_template_tag: Regex,
     pub re_template_attribute: Regex,
-    pub re_filename: Regex,
     pub re_remove_filename_ending: Regex,
     pub re_whitespace: Regex,
     pub re_hls_uri: Regex,
@@ -123,7 +143,6 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
         re_template_var: Regex::new("!(.*?)!").unwrap(),
         re_template_tag: Regex::new("<tag:(.*?)>").unwrap(),
         re_template_attribute: Regex::new("<(.*?)>").unwrap(),
-        re_filename: Regex::new(r"[^A-Za-z0-9_.-]").unwrap(),
         re_remove_filename_ending: Regex::new(r"[_.\s-]$").unwrap(),
         re_whitespace: Regex::new(r"\s+").unwrap(),
         re_hls_uri: Regex::new(r#"URI=["']([^"']+)["']"#).unwrap(),
@@ -170,3 +189,37 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
         re_html_tag: Regex::new(r"</?([a-zA-Z0-9]+)[^>]*>").unwrap()
     }
 });
+
+#[cfg(test)]
+mod transport_header_tests {
+    use super::filter_request_header;
+
+    #[test]
+    fn transport_owned_headers_are_never_taken_from_configuration() {
+        // A configured Range would collide with the offset a resumable
+        // transfer asks for, and the response would be appended to a partial
+        // it does not belong to.
+        for owned in [
+            "host",
+            "connection",
+            "range",
+            "if-range",
+            "if-match",
+            "if-none-match",
+            "if-modified-since",
+            "if-unmodified-since",
+            "content-length",
+            "transfer-encoding",
+        ] {
+            assert!(!filter_request_header(owned), "{owned} must be rejected");
+            assert!(!filter_request_header(&owned.to_uppercase()), "{owned} must be rejected case-insensitively");
+        }
+    }
+
+    #[test]
+    fn ordinary_provider_headers_are_still_accepted() {
+        for allowed in ["user-agent", "referer", "authorization", "cookie", "accept"] {
+            assert!(filter_request_header(allowed), "{allowed} must be accepted");
+        }
+    }
+}

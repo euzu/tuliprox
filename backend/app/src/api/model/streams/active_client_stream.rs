@@ -1632,8 +1632,9 @@ mod tests {
         api::model::{
             connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
             BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
-            DownloadQueue, EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
-            ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,
+            EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
+            ProviderContentRepresentationMode, ProviderHandle, RecordingQueue, SharedStreamManager, StreamDetails,
+            StreamError,
         },
         auth::Fingerprint,
         model::{
@@ -1749,9 +1750,13 @@ mod tests {
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             app_config: app_cfg,
             http_clients: Arc::default(),
-            downloads: Arc::new(DownloadQueue::new()),
+            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
@@ -1811,9 +1816,13 @@ mod tests {
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
         Arc::new(AppState {
+            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+            ),
             app_config: Arc::new(app_cfg),
             http_clients: Arc::default(),
-            downloads: Arc::new(DownloadQueue::new()),
+            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),

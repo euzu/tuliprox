@@ -1,4 +1,4 @@
-use super::BPlusTreeMetadata;
+use super::{BPlusTreeMetadata, RecoveryIdentity};
 use std::io;
 
 pub(crate) const PAGE_SIZE: usize = 4096;
@@ -17,6 +17,8 @@ pub const MAGIC: &[u8; 4] = b"BTRE";
 const DATABASE_CHECKSUM_OFFSET: usize = 72;
 const PAGE_CHECKSUM_OFFSET: usize = 24;
 const DATABASE_METADATA_OFFSET: usize = 76;
+// tag + database id + schema fingerprint + schema version + applied revision.
+const RECOVERY_METADATA_LEN_U32: u32 = 1 + 16 + 32 + 4 + 8;
 pub(crate) const PAGE_HEADER_LEN: usize = 32;
 pub(crate) const INTERNAL_PREAMBLE_LEN: usize = 8;
 pub(crate) const SLOT_LEN: usize = 4;
@@ -152,6 +154,19 @@ impl DatabaseHeader {
                 write_at(&mut page, DATABASE_METADATA_OFFSET, &[1])?;
                 write_at(&mut page, DATABASE_METADATA_OFFSET + 1, &value.to_le_bytes())?;
             }
+            BPlusTreeMetadata::Recovery(identity) => {
+                write_at(&mut page, 64, &RECOVERY_METADATA_LEN_U32.to_le_bytes())?;
+                let mut offset = DATABASE_METADATA_OFFSET;
+                write_at(&mut page, offset, &[2])?;
+                offset = checked_end(offset, 1)?;
+                write_at(&mut page, offset, &identity.database_id)?;
+                offset = checked_end(offset, 16)?;
+                write_at(&mut page, offset, &identity.schema_fingerprint)?;
+                offset = checked_end(offset, 32)?;
+                write_at(&mut page, offset, &identity.schema_version.to_le_bytes())?;
+                offset = checked_end(offset, 4)?;
+                write_at(&mut page, offset, &identity.applied_revision.to_le_bytes())?;
+            }
         }
         write_checksum(&mut page, DATABASE_CHECKSUM_OFFSET)?;
         Ok(page)
@@ -187,6 +202,26 @@ impl DatabaseHeader {
                     return Err(invalid_data("unknown metadata tag"));
                 }
                 BPlusTreeMetadata::TargetIdMapping(u32::from_le_bytes([value0, value1, value2, value3]))
+            }
+            RECOVERY_METADATA_LEN_U32 => {
+                let mut offset = DATABASE_METADATA_OFFSET;
+                if read_u8(page, offset)? != 2 {
+                    return Err(invalid_data("unknown metadata tag"));
+                }
+                offset = checked_end(offset, 1)?;
+                let database_id = bytes_at::<16>(page, offset)?;
+                offset = checked_end(offset, 16)?;
+                let schema_fingerprint = bytes_at::<32>(page, offset)?;
+                offset = checked_end(offset, 32)?;
+                let schema_version = read_u32(page, offset)?;
+                offset = checked_end(offset, 4)?;
+                let applied_revision = read_u64(page, offset)?;
+                BPlusTreeMetadata::Recovery(RecoveryIdentity {
+                    database_id,
+                    schema_fingerprint,
+                    schema_version,
+                    applied_revision,
+                })
             }
             _ => return Err(invalid_data("invalid metadata length")),
         };

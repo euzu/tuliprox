@@ -1,7 +1,7 @@
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, ConnectionManager, DownloadQueue, EventManager, PlaylistStorage,
-        PlaylistStorageState, SharedStreamManager, StalkerResolveCoordinator,
+        ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, PlaylistStorage,
+        PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
     },
     model::{AppConfig, GracePeriodOptions, HdHomeRunDeviceConfig, HttpClients, ReverseProxyDisabledHeaderConfig},
     repository::GeoIp,
@@ -40,7 +40,7 @@ pub use self::{
 pub struct AppState {
     pub app_config: Arc<AppConfig>,
     pub http_clients: Arc<HttpClients>,
-    pub downloads: Arc<DownloadQueue>,
+    pub recordings: Arc<RecordingQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls: HlsState,
@@ -48,6 +48,9 @@ pub struct AppState {
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
+    /// Provider capacity as the DVR sees it; the adapter that keeps provider
+    /// details out of the recording engine.
+    pub recording_capacity: Arc<dyn tuliprox_dvr::recording::recording_capacity::RecordingCapacityPort>,
     pub event_manager: Arc<EventManager>,
     pub cancel_tokens: ArcSwap<CancelTokens>,
     pub playlists: Arc<PlaylistStorageState>,

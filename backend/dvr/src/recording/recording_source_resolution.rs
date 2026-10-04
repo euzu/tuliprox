@@ -6,9 +6,11 @@
 //! position of calling into `endpoints`; it belongs here, and the endpoint now
 //! reads it from this module.
 
-use shared::model::XtreamCluster;
+use futures::StreamExt;
+use shared::model::{TargetType, VirtualId, XtreamCluster};
 use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, ConfigInput, ConfigTarget, SourcesConfig};
+use tuliprox_repository::{iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist};
 use url::Url;
 
 pub fn build_recording_source_descriptor(
@@ -53,4 +55,44 @@ pub fn resolve_recording_target(
 ) -> Option<Arc<ConfigTarget>> {
     resolve_recording_config(app_config.sources.load().as_ref(), target_name, input_name)
         .map(|resolved| resolved.target)
+}
+
+/// Playlist group of a live channel in the target playlist.
+///
+/// Reads the persisted target playlist, so it costs one pass over the live
+/// items. Only used when the caller has not resolved the group already.
+pub async fn resolve_live_group(
+    app_config: &AppConfig,
+    target_name: &str,
+    input_name: &str,
+    virtual_id: &str,
+) -> Option<String> {
+    let wanted = VirtualId::new(virtual_id.parse::<u32>().ok()?);
+    let target = resolve_recording_target(app_config, target_name, input_name)?;
+    if target.has_output(TargetType::Xtream) {
+        if let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await {
+            while let Some(entry) = items.next().await {
+                match entry {
+                    Ok(item) if item.virtual_id == wanted => return non_blank_group(&item.group),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if target.has_output(TargetType::M3u) {
+        if let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await {
+            while let Some(entry) = items.next().await {
+                match entry {
+                    Ok(item) if item.virtual_id == wanted => return non_blank_group(&item.group),
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+fn non_blank_group(group: &str) -> Option<String> {
+    let group = group.trim();
+    (!group.is_empty()).then(|| group.to_string())
 }

@@ -1412,6 +1412,18 @@ async fn acquire_stream_provider_handle(
     }
 }
 
+fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool {
+    matches!(
+        item_type,
+        PlaylistItemType::Video
+            | PlaylistItemType::LocalVideo
+            | PlaylistItemType::Series
+            | PlaylistItemType::SeriesInfo
+            | PlaylistItemType::LocalSeries
+            | PlaylistItemType::LocalSeriesInfo
+    )
+}
+
 pub(crate) fn resolve_redirect_location<'a>(
     input: Option<&ConfigInput>,
     stream_url: &'a str,
@@ -1456,6 +1468,7 @@ fn get_redirect_alternative_url(app_state: &Arc<AppState>, redirect_url: &Arc<st
 /// - and optional HTTP headers to include in the request.
 ///
 /// This logic helps abstract the decision-making behind provider selection and stream URL resolution.
+#[cfg(test)]
 async fn resolve_streaming_strategy(
     app_state: &Arc<AppState>,
     stream_url: &str,
@@ -1464,7 +1477,33 @@ async fn resolve_streaming_strategy(
     options: StreamingAcquireOptions<'_>,
     stream_channel: Option<&StreamChannel>,
 ) -> StreamingStrategy {
-    let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, &options).await;
+    resolve_streaming_strategy_with_provider_handle(
+        app_state,
+        stream_url,
+        fingerprint,
+        input,
+        options,
+        stream_channel,
+        None,
+    )
+    .await
+}
+
+async fn resolve_streaming_strategy_with_provider_handle(
+    app_state: &Arc<AppState>,
+    stream_url: &str,
+    fingerprint: &Fingerprint,
+    input: &ConfigInput,
+    options: StreamingAcquireOptions<'_>,
+    stream_channel: Option<&StreamChannel>,
+    preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
+) -> StreamingStrategy {
+    // Recording requests transfer the slot acquired by the worker into this
+    // provider-body owner. Normal playback allocates here as before.
+    let mut provider_connection_handle = match preacquired_provider_handle {
+        Some(handle) => Some(handle),
+        None => acquire_stream_provider_handle(app_state, input, fingerprint, &options).await,
+    };
 
     // panel_api provisioning/loading is handled later in the stream creation flow
 
@@ -1692,8 +1731,9 @@ async fn create_stream_response_details(
     grace_hold_override: Option<bool>,
     grace_resolution_context: Option<crate::api::model::GraceResolutionContext>,
     current_session: Option<CurrentSessionGuard<'_>>,
+    preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
 ) -> Result<StreamDetails, TuliproxError> {
-    let mut streaming_strategy = resolve_streaming_strategy(
+    let mut streaming_strategy = resolve_streaming_strategy_with_provider_handle(
         app_state,
         stream_url,
         fingerprint,
@@ -1711,6 +1751,7 @@ async fn create_stream_response_details(
                 .then_some(HLS_MEDIA_CAPACITY_WAIT),
         },
         Some(stream_channel),
+        preacquired_provider_handle,
     )
     .await;
     // A capacity wait can outlive the session snapshot: revalidate the account binding and
@@ -2457,7 +2498,8 @@ async fn force_stream_response(
         || app_state.active_provider.should_reuse_playback_provider(&user_session.token, &user_session.provider))
     .then_some(&user_session.provider);
     // Child URLs and their signed tokens belong to the account that fetched the playlist.
-    let allow_forced_provider_fallback = !hls_resource;
+    let allow_forced_provider_fallback =
+        !hls_resource && (!item_type.requires_provider_affinity() || allows_provider_pool_failover(item_type));
     // Never allow provider-side grace for forced seek/session reacquire.
     // Over-allocation here would break provider-side one-connection limits.
     let allow_provider_grace = false;
@@ -2499,6 +2541,7 @@ async fn force_stream_response(
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
         None,
         current_session,
+        None,
     );
     // The FORBIDDEN exits below leave the session reservation alone: they only fire once this
     // session identity is gone, and after an account switch the reservation belongs to the new
@@ -2555,6 +2598,9 @@ async fn force_stream_response(
     let deferred_grace_hold_stream = stream_details.has_deferred_provider_open();
 
     if stream_details.has_stream() || deferred_grace_hold_stream {
+        let selected_provider = stream_details.provider_name.clone();
+        let selected_request_url = stream_details.request_url.clone();
+        let selected_provider_headers = stream_details.provider_session_headers.clone();
         let metering = prepare_stream_metering(
             app_state,
             user_session.stream_url.as_ref(),
@@ -2648,6 +2694,37 @@ async fn force_stream_response(
             }
         };
 
+        if let Some(provider) = selected_provider.as_deref() {
+            let session_url = selected_request_url.as_deref().unwrap_or(user_session.stream_url.as_ref());
+            app_state
+                .active_users
+                .create_user_session(crate::api::model::CreateUserSessionParams {
+                    user: ctx.user,
+                    session_token: &user_session.token,
+                    virtual_id: user_session.virtual_id,
+                    provider,
+                    stream_url: session_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: user_session.connection_kind,
+                    socket_bound: user_session.socket_bound,
+                })
+                .await;
+            if !selected_provider_headers.is_empty() {
+                let cookie_origin =
+                    provider_response.as_ref().and_then(|(_, _, url, _)| url.as_ref()).map_or(session_url, Url::as_str);
+                app_state
+                    .active_users
+                    .update_session_provider_response_headers_from(
+                        &ctx.user.username,
+                        &user_session.token,
+                        &selected_provider_headers,
+                        cookie_origin,
+                    )
+                    .await;
+            }
+        }
+
         let (status_code, header_map) = get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
         let mut response = axum::response::Response::builder().status(status_code);
         for (key, value) in &header_map {
@@ -2689,9 +2766,49 @@ async fn force_stream_response(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stream_response(
+    fingerprint: &Fingerprint,
+    app_state: &Arc<AppState>,
+    session_token: &str,
+    request_class: Option<PlaybackRequestClass>,
+    stream_channel: StreamChannel,
+    stream_url: &str,
+    pinned_provider: Option<&Arc<str>>,
+    req_headers: &HeaderMap,
+    input: &Arc<ConfigInput>,
+    target: &Arc<ConfigTarget>,
+    user: &ProxyUserCredentials,
+    connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
+    allow_exhausted_shared_reconnect: bool,
+    grace_mode: Option<crate::api::model::GraceMode>,
+) -> axum::response::Response {
+    stream_response_with_provider_handle(
+        fingerprint,
+        app_state,
+        session_token,
+        request_class,
+        stream_channel,
+        stream_url,
+        pinned_provider,
+        req_headers,
+        input,
+        target,
+        user,
+        connection_permission,
+        connection_kind,
+        allow_exhausted_shared_reconnect,
+        grace_mode,
+        None,
+    )
+    .await
+    .into_response()
+}
+
 /// # Panics
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) async fn stream_response(
+pub(crate) async fn stream_response_with_provider_handle(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
     session_token: &str,
@@ -2707,6 +2824,7 @@ pub(crate) async fn stream_response(
     connection_kind: crate::api::model::ConnectionKind,
     allow_exhausted_shared_reconnect: bool,
     grace_mode: Option<crate::api::model::GraceMode>,
+    preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
 ) -> impl IntoResponse + Send {
     let _transition_guard = app_state.active_users.acquire_playback_transition(&user.username, session_token).await;
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
@@ -2853,7 +2971,7 @@ pub(crate) async fn stream_response(
         share_stream,
         connection_permission,
         pinned_provider,
-        pinned_provider.is_none(),
+        pinned_provider.is_none() || allows_provider_pool_failover(item_type),
         true,
         VirtualId::new(stream_channel.virtual_id),
         connection_priority_for_kind(user, connection_kind),
@@ -2865,6 +2983,7 @@ pub(crate) async fn stream_response(
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
         activation.grace_context.clone(),
         None,
+        preacquired_provider_handle,
     )
     .await
     {

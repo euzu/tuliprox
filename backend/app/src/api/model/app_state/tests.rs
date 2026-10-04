@@ -1,13 +1,12 @@
-use super::change_detection::{qos_aggregation_changed, schedules_changed, video_download_changed};
+use super::change_detection::{qos_aggregation_changed, recording_changed, schedules_changed};
 use crate::model::{
-    should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars, Config, ScheduleConfig,
-    VideoDownloadConfig,
+    should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars, Config, RecordingConfig,
+    ScheduleConfig,
 };
 use shared::model::{
     QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto, WebAuthConfigDto,
     WebUiConfigDto,
 };
-use std::{collections::HashMap, sync::Arc};
 
 fn config_with_web_auth(secret: &str) -> Config {
     let web_ui = WebUiConfigDto {
@@ -136,14 +135,9 @@ fn schedules_changed_treats_same_entries_as_unchanged() {
 }
 
 #[test]
-fn video_download_changed_detects_retry_policy_changes() {
-    let base = VideoDownloadConfig {
-        headers: HashMap::new(),
-        directory: "/tmp/downloads".to_string(),
-        organize_into_directories: false,
-        episode_pattern: None,
-        download_priority: 0,
-        recording_priority: 0,
+fn recording_changed_detects_retry_policy_changes() {
+    let base = RecordingConfig::from(&shared::model::RecordingConfigDto {
+        directory: Some("/tmp/downloads".to_string()),
         reserve_slots_for_users: 1,
         max_background_per_provider: 2,
         retry_backoff_initial_secs: 3,
@@ -151,22 +145,21 @@ fn video_download_changed_detects_retry_policy_changes() {
         retry_backoff_max_secs: 60,
         retry_backoff_jitter_percent: 5,
         retry_max_attempts: 5,
-        recording: None,
-    };
-    let changed = VideoDownloadConfig { retry_backoff_multiplier: 3.0, ..base.clone() };
+        ..Default::default()
+    });
+    let mut changed = base.clone();
+    changed.retry_backoff_multiplier = 3.0;
 
-    assert!(video_download_changed(&base, &changed));
+    assert!(recording_changed(&base, &changed));
 }
 
 #[test]
-fn video_download_changed_treats_equivalent_configs_as_unchanged() {
-    let base = VideoDownloadConfig {
-        headers: HashMap::new(),
-        directory: "/tmp/downloads".to_string(),
+fn recording_changed_treats_equivalent_configs_as_unchanged() {
+    let base = RecordingConfig::from(&shared::model::RecordingConfigDto {
+        directory: Some("/tmp/downloads".to_string()),
         organize_into_directories: true,
-        episode_pattern: Some(Arc::new(regex::Regex::new("S(?P<episode>\\d+)").unwrap())),
-        download_priority: -1,
-        recording_priority: 1,
+        episode_pattern: Some("S(?P<episode>\\d+)".to_string()),
+        priority: 1,
         reserve_slots_for_users: 2,
         max_background_per_provider: 3,
         retry_backoff_initial_secs: 3,
@@ -174,10 +167,10 @@ fn video_download_changed_treats_equivalent_configs_as_unchanged() {
         retry_backoff_max_secs: 60,
         retry_backoff_jitter_percent: 5,
         retry_max_attempts: 5,
-        recording: None,
-    };
+        ..Default::default()
+    });
 
-    assert!(!video_download_changed(&base, &base.clone()));
+    assert!(!recording_changed(&base, &base.clone()));
 }
 
 #[test]

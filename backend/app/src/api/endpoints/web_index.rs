@@ -17,7 +17,7 @@ use lol_html::{element, RewriteStrSettings};
 use rand::{rngs::OsRng, RngCore, TryRngCore};
 use serde_json::json;
 use shared::{
-    model::{AuthAuditEvent, EventMessage, EventSink, TokenResponse, UserCredential, TOKEN_NO_AUTH},
+    model::{AuthAuditEvent, EventMessage, EventSink, TokenResponse, UserCredential, UserId, TOKEN_NO_AUTH},
     utils::{concat_path_leading_slash, sanitize_sensitive_info, CONSTANTS},
 };
 use std::{
@@ -32,33 +32,6 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
 }
 
 fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
-
-/// The stable subject id for a web user, allocating one on first sight.
-///
-/// `register` is get-or-create, so a user bootstrap already synced keeps the
-/// id it has and one added since gets a fresh one. This used to be
-/// `format!("web:{username}")`, which made the subject a function of the
-/// display name: renaming a user reassigned everything the old subject owned.
-async fn web_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
-    match app_state.auth.identity_registry.register(username).await {
-        Ok(id) => Some(id),
-        Err(err) => {
-            error!("Cannot resolve a stable subject id for web user '{username}': {err}");
-            None
-        }
-    }
-}
-
-/// The stable subject id for a proxy API user, allocating one on first sight.
-async fn api_subject_id(app_state: &Arc<AppState>, username: &str) -> Option<shared::model::UserId> {
-    match app_state.auth.identity_registry.register_api_user(username).await {
-        Ok(id) => Some(id),
-        Err(err) => {
-            error!("Cannot resolve a stable subject id for API user '{username}': {err}");
-            None
-        }
-    }
-}
 
 /// Publish one authentication decision.
 ///
@@ -92,12 +65,7 @@ enum SignInAttempt {
 }
 
 /// Sign in against `web_ui.auth`.
-async fn web_user_sign_in(
-    app_state: &Arc<AppState>,
-    web_auth: &WebAuthConfig,
-    username: &str,
-    password: &str,
-) -> SignInAttempt {
+fn web_user_sign_in(web_auth: &WebAuthConfig, username: &str, password: &str) -> SignInAttempt {
     let Some(hash) = web_auth.get_user_password(username) else {
         return SignInAttempt::Rejected;
     };
@@ -120,16 +88,17 @@ async fn web_user_sign_in(
     let token_result = if is_admin {
         create_jwt_admin(web_auth, username, pwd_version)
     } else {
-        let Some(subject_id) = web_subject_id(app_state, username).await else {
-            return SignInAttempt::Refused(axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        };
+        // From the configured name, not the typed one: sign-in matches web
+        // users case-insensitively, and the subject must not depend on how
+        // the user happened to type it.
+        let subject_id = UserId::web(user_entry.map_or(username, |user| user.username.as_str()));
         create_jwt_web_user(web_auth, username, permissions, pwd_version, subject_id)
     };
     token_result.map_or(SignInAttempt::Rejected, SignInAttempt::Issued)
 }
 
 /// Sign in against the proxy API-user credentials.
-async fn api_user_sign_in(
+fn api_user_sign_in(
     app_state: &Arc<AppState>,
     web_auth: &WebAuthConfig,
     username: &str,
@@ -146,10 +115,8 @@ async fn api_user_sign_in(
         // this principal is still not allowed into the Web UI.
         return SignInAttempt::Refused(axum::http::StatusCode::FORBIDDEN.into_response());
     }
-    let Some(subject_id) = api_subject_id(app_state, username).await else {
-        return SignInAttempt::Refused(axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response());
-    };
-    create_jwt_api_user(web_auth, username, subject_id).map_or(SignInAttempt::Rejected, SignInAttempt::Issued)
+    create_jwt_api_user(web_auth, username, UserId::api(&credentials.username))
+        .map_or(SignInAttempt::Rejected, SignInAttempt::Issued)
 }
 
 async fn token(
@@ -188,9 +155,9 @@ async fn token(
         // the web branch has answered. It compares credentials and can
         // allocate a persisted subject id, neither of which a successful web
         // sign-in should trigger.
-        let mut attempt = web_user_sign_in(&app_state, web_auth, &username, &req.password).await;
+        let mut attempt = web_user_sign_in(web_auth, &username, &req.password);
         if matches!(attempt, SignInAttempt::Rejected) {
-            attempt = api_user_sign_in(&app_state, web_auth, &username, &req.password).await;
+            attempt = api_user_sign_in(&app_state, web_auth, &username, &req.password);
         }
         match attempt {
             SignInAttempt::Issued(token) => {
@@ -228,13 +195,15 @@ async fn revoke_user_tokens(
 ) -> impl axum::response::IntoResponse + Send {
     // Both namespaces: an operator names a principal, not a namespace, and a
     // username can exist in either.
-    let subjects: Vec<_> = [
-        app_state.auth.identity_registry.lookup_by_username(&username).await,
-        app_state.auth.identity_registry.lookup_api_by_username(&username).await,
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let web_user =
+        app_state.app_config.config.load().web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).and_then(|auth| {
+            auth.t_users
+                .as_ref()
+                .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(&username)))
+                .map(|user| UserId::web(&user.username))
+        });
+    let api_user = app_state.app_config.get_user_credentials(&username).map(|user| UserId::api(&user.username));
+    let subjects: Vec<_> = [web_user, api_user].into_iter().flatten().collect();
 
     if subjects.is_empty() {
         return axum::http::StatusCode::NOT_FOUND.into_response();
@@ -297,10 +266,7 @@ async fn token_refresh(
                     if !user.ui_enabled {
                         return axum::http::StatusCode::FORBIDDEN.into_response();
                     }
-                    let Some(subject_id) = api_subject_id(&app_state, username).await else {
-                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    };
-                    if let Ok(token) = create_jwt_api_user(web_auth, username, subject_id) {
+                    if let Ok(token) = create_jwt_api_user(web_auth, username, UserId::api(&user.username)) {
                         return axum::Json(TokenResponse { token, username: claims.username }).into_response();
                     }
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
@@ -330,10 +296,13 @@ async fn token_refresh(
                 let new_token = if is_admin {
                     create_jwt_admin(web_auth, username, current_pwd_version)
                 } else {
-                    let Some(subject_id) = web_subject_id(&app_state, username).await else {
-                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                    };
-                    create_jwt_web_user(web_auth, username, resolved_permissions, current_pwd_version, subject_id)
+                    create_jwt_web_user(
+                        web_auth,
+                        username,
+                        resolved_permissions,
+                        current_pwd_version,
+                        UserId::web(&user.username),
+                    )
                 };
                 if let Ok(token) = new_token {
                     return axum::Json(TokenResponse { token, username: user.username.clone() }).into_response();
@@ -613,6 +582,38 @@ mod tests {
     };
     use shared::utils::concat_path_leading_slash;
     use tower::ServiceExt;
+
+    fn auth_with_user(username: &str, password: &str) -> crate::model::WebAuthConfig {
+        crate::model::WebAuthConfig {
+            enabled: true,
+            issuer: "tuliprox".to_string(),
+            secret: "0123456789abcdef0123456789abcdef".to_string(),
+            token_ttl_mins: 60,
+            userfile: None,
+            groupfile: None,
+            t_users: Some(vec![crate::model::WebUiUser {
+                username: username.to_string(),
+                password_hash: crate::auth::hash(password.as_bytes()).expect("hash"),
+                groups: Vec::new(),
+            }]),
+            t_groups: Some(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_web_subject_comes_from_the_configured_name_not_the_typed_one() {
+        // Sign-in matches web users case-insensitively. Taking the typed name
+        // would give one user a different id for every spelling.
+        let auth = auth_with_user("Alice", "secret");
+        for typed in ["Alice", "alice", "ALICE"] {
+            let super::SignInAttempt::Issued(token) = super::web_user_sign_in(&auth, typed, "secret") else {
+                panic!("{typed} should sign in");
+            };
+            let claims =
+                crate::auth::verify_token(&token, auth.secret.as_bytes(), &auth.issuer).expect("valid token").claims;
+            assert_eq!(claims.subject_id, Some(shared::model::UserId::web("Alice")), "typed as {typed}");
+        }
+    }
 
     #[test]
     fn rejects_api_user_when_ui_is_disabled() {

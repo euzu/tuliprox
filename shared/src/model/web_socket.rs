@@ -1,7 +1,7 @@
 use crate::model::{
-    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
-    FileDownloadDto, LibraryScanProgressEvent, PermissionSet, PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent,
-    QueueRevision, StatusCheck, StreamMeterEntry, SystemInfo,
+    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanProgressEvent, PermissionSet,
+    PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent, QueueRevision, RecordingTaskDto, StatusCheck,
+    StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,6 @@ pub enum ProtocolMessage {
     Authorized,
     StreamMeterSubscribe,
     StreamMeterUnsubscribe,
-    DownloadsRequest,
     ServerError(String),
     StatusRequest(String),
     UserAction(UserCommand),
@@ -101,19 +100,18 @@ pub enum ProtocolMessage {
     SystemInfoResponse(SystemInfo),
     LibraryScanProgressResponse(LibraryScanProgressEvent),
     StreamMeterBatchResponse(Vec<StreamMeterEntry>),
-    DownloadsResponse(DownloadsResponse),
-    DownloadsDeltaResponse(DownloadsDelta),
-    // Recording-scoped snapshot + delta. The frontend requests a
-    // snapshot on connect (or after a revision gap) and receives
-    // filtered snapshots/deltas per session.
+    /// Owner-filtered recording snapshot. The frontend requests one on
+    /// connect and after a revision gap; the server publishes a full
+    /// filtered list on every change. There is deliberately no delta
+    /// message: a partial list must never be mistaken for a snapshot.
     RecordingSnapshotRequest,
     RecordingSnapshotResponse {
         revision: QueueRevision,
-        tasks: Vec<FileDownloadDto>,
-    },
-    RecordingDeltaResponse {
-        revision: QueueRevision,
-        tasks: Vec<FileDownloadDto>,
+        /// Whether the DVR can accept work at all. Carried here so a
+        /// client never has to poll a separate availability route.
+        available: bool,
+        quota: crate::model::RecordingQuotaSummaryDto,
+        tasks: Vec<RecordingTaskDto>,
     },
     /// Notification that the rule repository changed. The frontend
     /// re-fetches `/api/v1/recording/rules` on receipt. No payload

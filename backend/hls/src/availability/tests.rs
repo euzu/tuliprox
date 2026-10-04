@@ -1364,6 +1364,10 @@ async fn post_refresh_terminal_fixture_with_bundle_state(
         ctx.app_config.custom_stream_response.store(Some(runtime_custom_responses()));
     }
     let now_ms = ctx.hls_proxy.terminal_commit_now_ms();
+    // These tests drive time with `tokio::time::advance`. Anchor the scheduling
+    // clock to tokio's so the owner's deadlines move with it; otherwise it
+    // sleeps towards a wall-clock deadline the paused clock never reaches.
+    ctx.hls_proxy.follow_tokio_clock_for_test(now_ms);
     let (session, _) =
         ctx.hls_proxy.get_or_create_session_with_outcome(HlsSessionKey::new(1, name), b"secret", now_ms).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -2075,13 +2079,15 @@ async fn hard_failure_real_owner_commits_unavailable_before_exclusive_deadline()
 
     tokio::time::advance(Duration::from_millis(2_100)).await;
     assert_eq!(fixture.ctx.hls_proxy.availability_reevaluations().owner_count(), 1);
+    // Playback evidence is relative to the clock as it stands now, not to the
+    // fixture's base: the advance above really does move the scheduling clock.
     advance_post_refresh_fixture_playback(
         &fixture.ctx,
         &fixture.session,
         &fixture.proxy_session_id,
         &fixture.lease_id,
         7_000,
-        fixture.now_ms,
+        fixture.ctx.hls_proxy.now_ms(),
     )
     .await;
     wait_for_availability_owner_completion(&fixture).await;

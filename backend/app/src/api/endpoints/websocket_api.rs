@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
+        endpoints::v1_api::create_status_check,
         model::{AppState, EventMessage},
     },
     auth::{validate_token_claims, TokenVerifier},
@@ -123,11 +123,6 @@ fn websocket_claims(mem: &ProtocolHandlerMemory) -> Option<Claims> {
 #[inline]
 fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
     !auth_required || mem.permissions.contains(Permission::SystemRead)
-}
-
-#[inline]
-fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
-    !auth_required || mem.permissions.contains(Permission::DownloadRead)
 }
 
 /// Which permission an event needs is a fact about the event, not about the
@@ -260,13 +255,6 @@ async fn handle_protocol_message(
                     }
                 } else {
                     Some(ProtocolMessage::UserActionResponse(false))
-                }
-            }
-            Ok(ProtocolMessage::DownloadsRequest) => {
-                if websocket_requires_download_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
-                    Some(ProtocolMessage::DownloadsResponse(download_queue_snapshot(&app_state.downloads).await))
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
                 }
             }
             Ok(ProtocolMessage::RecordingSnapshotRequest) => {
@@ -409,9 +397,18 @@ async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> P
             code: RecordingViewDenial::TokenRefreshRequired.code().to_string(),
         };
     }
-    let (revision, tasks) =
-        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, claims).await;
-    ProtocolMessage::RecordingSnapshotResponse { revision, tasks }
+    let snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
+        &app_state.recordings,
+        claims,
+        &app_state.app_config,
+    )
+    .await;
+    ProtocolMessage::RecordingSnapshotResponse {
+        revision: snapshot.revision,
+        available: snapshot.available,
+        quota: snapshot.quota,
+        tasks: snapshot.tasks,
+    }
 }
 
 async fn send_recording_snapshot_event(
@@ -424,6 +421,36 @@ async fn send_recording_snapshot_event(
         send_event_response(socket, frame, "Recording snapshot event").await?;
     }
     Ok(())
+}
+
+/// The shortest gap between two progress-only recording snapshots on one
+/// session.
+const RECORDING_PROGRESS_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// When this session last sent a progress-only recording snapshot.
+///
+/// A running capture reports growth many times a second and each report
+/// costs a full per-session filtered snapshot. Throttling is safe because
+/// the snapshot is rebuilt from current state at send time, so a skipped
+/// progress event is superseded rather than lost. State transitions arrive
+/// as `RecordingChanged` and are never throttled.
+#[derive(Debug, Default)]
+struct RecordingProgressThrottle {
+    last_sent: Option<std::time::Instant>,
+}
+
+impl RecordingProgressThrottle {
+    fn should_send(&mut self, now: std::time::Instant) -> bool {
+        let due = self.last_sent.is_none_or(|last| now.duration_since(last) >= RECORDING_PROGRESS_MIN_GAP);
+        if due {
+            self.last_sent = Some(now);
+        }
+        due
+    }
+
+    /// A state change also resets the clock: the client has just been given
+    /// current bytes, so the next progress tick can wait its full second.
+    fn note_full_snapshot(&mut self, now: std::time::Instant) { self.last_sent = Some(now); }
 }
 
 /// The wire frame an event becomes, with the label used if sending it fails.
@@ -467,12 +494,6 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         EventMessage::LibraryScanProgress(progress) => {
             (ProtocolMessage::LibraryScanProgressResponse(progress), "Library scan progress event")
         }
-        EventMessage::DownloadsUpdate(downloads) => {
-            (ProtocolMessage::DownloadsResponse(unwrap_or_clone(downloads)), "Downloads event")
-        }
-        EventMessage::DownloadsDeltaUpdate(delta) => {
-            (ProtocolMessage::DownloadsDeltaResponse(delta), "Downloads delta event")
-        }
         // The rule repository is per-process and `list_recording_rules`
         // enforces the session filter server-side, so this is a bare nudge:
         // the frontend re-fetches.
@@ -487,6 +508,7 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // bus, and adding them to the wire would need a `ProtocolMessage`
         // variant and frontend handling that nothing asks for yet.
         EventMessage::RecordingChanged
+        | EventMessage::RecordingProgress
         | EventMessage::ServerLifecycle(_)
         | EventMessage::InputMetadataUpdatesCompleted(_)
         | EventMessage::InputMetadataUpdatesStarted(_)
@@ -524,6 +546,7 @@ async fn handle_event_message(
     socket: &mut WebSocket,
     event: EventMessage,
     handler: &ProtocolHandler,
+    progress_throttle: &mut RecordingProgressThrottle,
 ) -> Result<(), WebSocketApiError> {
     let ProtocolHandler::Default(mem) = handler else {
         return Ok(());
@@ -535,7 +558,18 @@ async fn handle_event_message(
     // Re-fetch the per-session filtered snapshot so the visibility contract
     // is enforced by `recording_ws` rather than by this socket.
     if matches!(event, EventMessage::RecordingChanged) {
+        progress_throttle.note_full_snapshot(std::time::Instant::now());
         return send_recording_snapshot_event(app_state, socket, mem).await;
+    }
+
+    // Progress-only snapshots are throttled; a skipped tick is
+    // superseded, never lost, because the snapshot is rebuilt from
+    // current state at send time. A state transition is never throttled.
+    if matches!(event, EventMessage::RecordingProgress) {
+        if progress_throttle.should_send(std::time::Instant::now()) {
+            return send_recording_snapshot_event(app_state, socket, mem).await;
+        }
+        return Ok(());
     }
 
     if let Some((message, context)) = to_protocol_message(event) {
@@ -560,6 +594,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
     let mut event_rx = app_state.event_manager.get_event_channel();
     let mut meter_event_rx = app_state.event_manager.get_meter_channel();
     let mut handler = ProtocolHandler::Version(PROTOCOL_VERSION);
+    let mut progress_throttle = RecordingProgressThrottle::default();
 
     loop {
         tokio::select! {
@@ -577,7 +612,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
             event_result = event_rx.recv() => {
                 match event_result {
                     Ok(event) => {
-                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler).await {
+                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler, &mut progress_throttle).await {
                             trace!("Failed to send ws event: {e}");
                             break;
                         }
@@ -662,17 +697,17 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 mod tests {
     use super::{
         main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth, to_protocol_message,
-        websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction,
+        websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction, RecordingProgressThrottle,
+        RECORDING_PROGRESS_MIN_GAP,
     };
     use crate::api::model::EventMessage;
     use shared::model::{
-        AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel, DownloadsDelta,
-        DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus,
-        MetadataUpdateFailure, MsgKind, Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent,
-        PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState, PlaylistUpdateSummary, ProtocolHandler,
-        ProtocolHandlerMemory, ProtocolMessage, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
-        ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet,
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, WatchChanges, WatchDisabled,
+        AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel,
+        LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
+        Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
+        PlaylistUpdateState, PlaylistUpdateSummary, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage,
+        ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
+        ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet, UserId, UserRole, WatchChanges, WatchDisabled,
         WatchDisabledReason, WatchUnmatched, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION,
         TOKEN_NO_AUTH,
     };
@@ -694,8 +729,9 @@ mod tests {
         // Reachable over the wire, just not through this pure function:
         // `RecordingChanged` needs a per-session snapshot re-fetch, and the
         // metadata events are internal.
-        const HANDLED_ELSEWHERE: [EventKind; 3] = [
+        const HANDLED_ELSEWHERE: [EventKind; 4] = [
             EventKind::RecordingChanged,
+            EventKind::RecordingProgress,
             EventKind::InputMetadataUpdatesCompleted,
             EventKind::InputMetadataUpdatesStarted,
         ];
@@ -806,7 +842,6 @@ mod tests {
             EventMessage::UserLifecycle(UserLifecycleEvent::new("u".into(), "t".into(), state))
         }
 
-        let downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
         let samples = vec![
             EventMessage::ServerError("x".to_string()),
             EventMessage::ServerLifecycle(ServerLifecycleEvent::started("1".into(), "h:1".into())),
@@ -841,9 +876,8 @@ mod tests {
                     result: None,
                 },
             }),
-            EventMessage::DownloadsUpdate(Arc::new(downloads)),
-            EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActiveCleared),
             EventMessage::RecordingChanged,
+            EventMessage::RecordingProgress,
             EventMessage::RecordingRulesChanged,
             EventMessage::InputMetadataUpdatesCompleted("a".into()),
             EventMessage::InputMetadataUpdatesStarted("a".into()),
@@ -1095,61 +1129,73 @@ mod tests {
     }
 
     #[test]
-    fn test_websocket_download_updates_allowed_for_download_read_user() {
+    fn test_websocket_recording_events_allowed_for_recording_read_user() {
         let mut mem =
-            ProtocolHandlerMemory { permissions: Permission::DownloadRead.into(), ..ProtocolHandlerMemory::default() };
+            ProtocolHandlerMemory { permissions: Permission::RecordingRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
-        assert!(websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::DownloadsUpdate(Arc::new(DownloadsResponse {
-                queue: Vec::new(),
-                finished: Vec::new(),
-                active: Vec::new(),
-            }))
-        ));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingChanged));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingProgress));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingRulesChanged));
     }
 
     #[test]
-    fn test_websocket_download_updates_denied_without_download_read() {
+    fn a_second_of_progress_reports_produces_one_snapshot() {
+        // A running capture reports growth many times a second and each
+        // report costs a full per-session filtered snapshot. Throttling is
+        // safe because the snapshot is rebuilt at send time, so a skipped
+        // report is superseded rather than lost.
+        let mut throttle = RecordingProgressThrottle::default();
+        let start = std::time::Instant::now();
+
+        let sent = (0..100)
+            .filter(|tick| {
+                // 100 reports spread across a single second.
+                throttle.should_send(start + std::time::Duration::from_millis(tick * 10))
+            })
+            .count();
+
+        assert_eq!(sent, 1, "a hundred progress reports in one second are worth one snapshot");
+    }
+
+    #[test]
+    fn progress_resumes_once_the_second_has_passed() {
+        // Throttling must not silence progress altogether.
+        let mut throttle = RecordingProgressThrottle::default();
+        let start = std::time::Instant::now();
+
+        assert!(throttle.should_send(start), "the first report is always worth sending");
+        assert!(!throttle.should_send(start + std::time::Duration::from_millis(999)));
+        assert!(throttle.should_send(start + RECORDING_PROGRESS_MIN_GAP));
+    }
+
+    #[test]
+    fn a_state_change_is_never_held_back_by_the_progress_timer() {
+        // Terminal states, command results and quota changes arrive as
+        // `RecordingChanged`; delaying one by up to a second would make a
+        // finished recording look like it was still running.
+        let mut throttle = RecordingProgressThrottle::default();
+        let start = std::time::Instant::now();
+        assert!(throttle.should_send(start), "consume the progress allowance");
+
+        // `RecordingChanged` does not consult the throttle at all; it only
+        // reports that a full snapshot just went out.
+        throttle.note_full_snapshot(start + std::time::Duration::from_millis(10));
+
+        assert!(
+            !throttle.should_send(start + std::time::Duration::from_millis(500)),
+            "and the next progress tick waits a full second from that snapshot"
+        );
+        assert!(throttle.should_send(start + std::time::Duration::from_millis(10) + RECORDING_PROGRESS_MIN_GAP));
+    }
+
+    #[test]
+    fn test_websocket_recording_events_denied_without_recording_read() {
         let mut mem =
             ProtocolHandlerMemory { permissions: Permission::SystemRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::DownloadsUpdate(Arc::new(DownloadsResponse {
-                queue: Vec::new(),
-                finished: Vec::new(),
-                active: Vec::new(),
-            }))
-        ));
-    }
-
-    #[test]
-    fn test_websocket_download_delta_updates_allowed_for_download_read_user() {
-        let mut mem =
-            ProtocolHandlerMemory { permissions: Permission::DownloadRead.into(), ..ProtocolHandlerMemory::default() };
-        mem.role = UserRole::User;
-
-        assert!(websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActivePatched(FileDownloadDto {
-                id: "id".to_string(),
-                title: "file.ts".to_string(),
-                kind: TaskKindDto::Download,
-                priority: TaskPriorityDto::Background,
-                status: TransferStatusDto::Running,
-                retry_attempts: 0,
-                downloaded_bytes: 1,
-                total_bytes: Some(2),
-                next_retry_at: None,
-                scheduled_start_at: None,
-                duration_secs: None,
-                error: None,
-                recording: None,
-            }))
-        ));
+        assert!(!websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingChanged));
     }
 
     fn recording_lifecycle(event: MsgKind) -> EventMessage {
