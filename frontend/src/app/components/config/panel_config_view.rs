@@ -8,7 +8,7 @@ use crate::{
             },
             input::Input,
             select::Select,
-            Card, Chip, DropDownOption, DropDownSelection, IconButton, ToggleSwitch,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, NoSubmitForm, ToggleSwitch,
         },
         context::ConfigContext,
     },
@@ -816,7 +816,9 @@ pub fn PanelConfigView() -> Html {
                         html! {
                             <>
                                 <Input name="panel_url" label={Some(translate.t(LABEL_URL))} value={url_val} on_change={Some(on_url)} placeholder={Some("https://panel.example.tld/api.php".to_string())}/>
-                                <Input name="panel_api_key" label={Some(translate.t(LABEL_API_KEY))} value={api_key_val.to_string()} hidden={true} on_change={Some(on_api_key)} placeholder={Some("...".to_string())}/>
+                                <NoSubmitForm>
+                                    <Input name="panel_api_key" label={Some(translate.t(LABEL_API_KEY))} value={api_key_val.to_string()} hidden={true} on_change={Some(on_api_key)} placeholder={Some("...".to_string())}/>
+                                </NoSubmitForm>
                                 <div class="tp__panel-api-config-view__section">
                                     <div class="tp__panel-api-config-view__section-header">
                                         <h2>{ translate.t(LABEL_PANEL_PROVISIONING) }</h2>

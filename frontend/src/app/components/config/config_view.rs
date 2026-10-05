@@ -15,7 +15,7 @@ use crate::{
                 RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView, WebUiConfigView,
             },
             input::Input,
-            validate_credentials, Card, TabItem, TabSet, TextButton,
+            validate_credentials, Card, NoSubmitForm, TabItem, TabSet, TextButton,
         },
         ConfigContext,
     },
@@ -528,6 +528,7 @@ pub fn ConfigView() -> Html {
             <Card>
                 { html_if!(setup_mode, {
                     <div class="tp__form-page__toolbar">
+                    <NoSubmitForm>
                         <Input
                             name="setup_username"
                             label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).clone())}
@@ -557,6 +558,7 @@ pub fn ConfigView() -> Html {
                                 Callback::from(move |value: String| setup_password_repeat.set(value))
                             })}
                         />
+                    </NoSubmitForm>
                     </div>
                 })}
                  <TabSet tabs={tabs.clone()} active_tab={Some((*active_tab).to_string())}

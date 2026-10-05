@@ -1,6 +1,6 @@
 use super::setup_helpers::{move_to_next_step, validate_credentials};
 use crate::{
-    app::components::{input::Input, Card, SetupContext, SetupStep, TextButton},
+    app::components::{input::Input, Card, NoSubmitForm, SetupContext, SetupStep, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -62,6 +62,7 @@ pub fn WelcomeStep() -> Html {
                         </span>
                     </div>
                     <div class="tp__config-view-page">
+                    <NoSubmitForm>
                         <Input
                             name="setup_username"
                             label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).clone())}
@@ -91,6 +92,7 @@ pub fn WelcomeStep() -> Html {
                                 Callback::from(move |value: String| setup_ctx.setup_password_repeat.set(value))
                             })}
                         />
+                    </NoSubmitForm>
                     </div>
                 </div>
                 <div class="tp__config-view__toolbar tp__form-page__toolbar">
