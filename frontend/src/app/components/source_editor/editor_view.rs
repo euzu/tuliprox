@@ -1763,7 +1763,10 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     }
                 }
 
-                if let Some(move_it) = compute_drag_move_params(&editor_state_ref.borrow(), mouse_x, mouse_y) {
+                // Bind first: an if-let scrutinee temporary would keep the borrow alive
+                // across move_blocks.emit, which needs borrow_mut.
+                let move_params = compute_drag_move_params(&editor_state_ref.borrow(), mouse_x, mouse_y);
+                if let Some(move_it) = move_params {
                     move_blocks.emit(move_it);
                     // Drag updates are applied directly to DOM for smoothness.
                     // Avoid full re-render on every mouse move while dragging blocks.
@@ -1891,7 +1894,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         let touch_x = client_x - rect.left() as f32;
                         let touch_y = client_y - rect.top() as f32;
 
-                        if let Some(move_it) = compute_drag_move_params(&editor_state_ref.borrow(), touch_x, touch_y) {
+                        let move_params = compute_drag_move_params(&editor_state_ref.borrow(), touch_x, touch_y);
+                        if let Some(move_it) = move_params {
                             move_blocks.emit(move_it);
                         } else {
                             force_update.set(*force_update + 1);
