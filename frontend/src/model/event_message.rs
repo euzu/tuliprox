@@ -21,7 +21,7 @@ pub enum EventMessage {
     WebSocketStatus(bool),
     SystemInfoUpdate(SystemInfo),
     LibraryScanProgress(LibraryScanProgressEvent),
-    StreamMeterBatch(Vec<StreamMeterEntry>),
+    StreamMeterBatch(Rc<[StreamMeterEntry]>),
     RecordingSnapshot {
         revision: u64,
         available: bool,

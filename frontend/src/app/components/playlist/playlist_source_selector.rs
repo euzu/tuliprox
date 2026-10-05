@@ -4,7 +4,7 @@ use crate::{
             collect_provider_buttons,
             input::Input,
             playlist::source_selector_common::{build_source_type_options, source_selection_callback, submit_on_enter},
-            Card, CollapsePanel, Panel, PlaylistContext, RadioButtonGroup, TextButton,
+            Card, CollapsePanel, NoSubmitForm, Panel, PlaylistContext, RadioButtonGroup, TextButton,
         },
         context::PlaylistExplorerContext,
     },
@@ -211,6 +211,7 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
             html! {
                 <div class="tp__playlist-source-selector__source-custom">
                   <div class="tp__playlist-source-selector__source-custom-body">
+                  <NoSubmitForm>
                   {
                     html_if!(matches!(*set_custom_provider, InputType::Xtream), {
                        <>
@@ -243,6 +244,7 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                     />
                     <TextButton name={"custom"} title={translate.t("LABEL.DOWNLOAD")} icon={"CloudDownload"}
                        onclick={handle_custom_source}/>
+                  </NoSubmitForm>
                   </div>
                 </div>
             }

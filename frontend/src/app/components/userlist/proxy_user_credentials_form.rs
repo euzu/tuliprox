@@ -6,8 +6,8 @@ use crate::{
             select::Select,
             selection_first_owned, selection_parse_first,
             userlist::{page::UserlistPage, proxy_type_input::ProxyTypeInput, ProxyTypeView},
-            ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, FilterInput, Tag, TextButton,
-            UserStatus,
+            ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, FilterInput, NoSubmitForm,
+            Tag, TextButton, UserStatus,
         },
         TargetUser,
     },
@@ -506,6 +506,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     options={proxy_user_status.clone()}
                 />
             }})}
+            <NoSubmitForm>
             { if *update {
                   config_field_custom!(translate.t("LABEL.USERNAME"), form_state.data().username.clone())
                 } else {
@@ -546,6 +547,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     </div>
                 }
             }
+            </NoSubmitForm>
             { edit_field_text_option!(form_state,  translate.t("LABEL.TOKEN"), token, UserFormAction::Token, true) }
             { config_field_child!(translate.t("LABEL.PROXY"), "PROXY_USER_CREDENTIALS.PROXY", {
                html! {

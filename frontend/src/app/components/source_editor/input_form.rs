@@ -1650,7 +1650,7 @@ mod browser_tests {
         let body = document.body().ok_or_else(|| wasm_bindgen::JsValue::from_str("test document has no body"))?;
         let root = document.create_element("div")?;
         body.append_child(&root)?;
-        Renderer::<M3uRefreshHarness>::with_root(root.clone()).render();
+        let handle = Renderer::<M3uRefreshHarness>::with_root(root.clone()).render();
         settle_render().await;
         assert_eq!(rendered_name(&root).as_deref(), Some("first"));
 
@@ -1663,6 +1663,9 @@ mod browser_tests {
         settle_render().await;
 
         assert_eq!(rendered_name(&root).as_deref(), Some("second"));
+        // Unmount so providers rendered outside the root do not leak into later browser tests.
+        handle.destroy();
+        settle_render().await;
         root.remove();
         Ok(())
     }

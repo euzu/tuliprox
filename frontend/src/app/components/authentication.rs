@@ -3,8 +3,9 @@ use crate::{
         components::{login::Login, LoadingScreen},
         AppRoute,
     },
-    hooks::use_service_context,
+    hooks::{use_service_context, Services},
     i18n::use_translation,
+    model::EventMessage,
 };
 use gloo_timers::callback::Timeout;
 use shared::model::permission::Permission;
@@ -19,6 +20,22 @@ use yew_router::prelude::use_navigator;
 /// needs it too.
 fn should_connect_websocket(success: bool, setup_mode: bool, can_read_system: bool, can_read_recordings: bool) -> bool {
     success && !setup_mode && (can_read_system || can_read_recordings)
+}
+
+/// Enables or disables the websocket for the current auth state.
+/// Idempotent, so it can run both from the auth signal and synchronously after
+/// a token refresh, before the authenticated children mount and send requests.
+fn sync_websocket_connection(services: &Services, success: bool) {
+    if should_connect_websocket(
+        success,
+        services.config.ui_config.setup_mode,
+        services.auth.has_permission(Permission::SystemRead),
+        services.auth.has_permission(Permission::RecordingRead),
+    ) {
+        services.websocket.connect_ws_with_backoff();
+    } else {
+        services.websocket.disconnect();
+    }
 }
 
 const SESSION_EXPIRY_SKEW_SECS: i64 = 30;
@@ -50,17 +67,29 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
                 .auth
                 .auth_subscribe(&mut |success| {
                     authenticated_state.set(success);
-                    if should_connect_websocket(
-                        success,
-                        services_ctx.config.ui_config.setup_mode,
-                        services_ctx.auth.has_permission(Permission::SystemRead),
-                        services_ctx.auth.has_permission(Permission::RecordingRead),
-                    ) {
-                        services_ctx.websocket.connect_ws_with_backoff();
-                    }
+                    sync_websocket_connection(&services_ctx, success);
                     future::ready(())
                 })
                 .await;
+        });
+    }
+
+    {
+        let services_ctx = services.clone();
+        use_effect_with((), move |()| {
+            let auth = services_ctx.auth.clone();
+            let websocket = services_ctx.websocket.clone();
+            let subid = services_ctx.event.subscribe(move |msg| {
+                if msg == EventMessage::Unauthorized {
+                    // auth_subscribe reacts asynchronously; close the socket now so no further messages are processed.
+                    websocket.disconnect();
+                    auth.logout();
+                }
+            });
+            move || {
+                services_ctx.event.unsubscribe(subid);
+                services_ctx.websocket.disconnect();
+            }
         });
     }
 
@@ -72,6 +101,9 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
             async move {
                 let result = services_ctx.auth.refresh().await;
                 let success = result.is_ok();
+                // The auth signal fires on a later poll; enable the socket before the children mount
+                // so their initial requests are queued instead of dropped.
+                sync_websocket_connection(&services_ctx, success);
                 authenticated_state.set(success);
                 loading_state.set(false);
                 result

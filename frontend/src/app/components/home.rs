@@ -211,7 +211,6 @@ pub fn Home() -> Html {
             let services_ctx_clone = services_ctx.clone();
             let translate_clone = translate_clone.clone();
             let subid = services_ctx.event.subscribe(move |msg| match msg {
-                EventMessage::Unauthorized => services_ctx_clone.auth.logout(),
                 EventMessage::ServerError(msg) => {
                     services_ctx_clone.toastr.error(msg);
                 }
