@@ -12,6 +12,7 @@ use crate::{
                 get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
                 rewrite_resource_url, STALKER_RESOURCE_SCHEME,
             },
+            epg_grid_api,
             extract_accept_header::ExtractAcceptHeader,
             m3u_api::m3u_api_stream_loaded,
             xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
@@ -1407,6 +1408,8 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
         .route("/playlist/update/status", axum::routing::get(playlist_update_status))
         .route("/playlist/epg", axum::routing::post(playlist_epg))
         .route("/playlist/epg/stream", axum::routing::post(stream_epg_api))
+        .route("/playlist/epg/groups", axum::routing::post(epg_grid_api::playlist_epg_groups))
+        .route("/playlist/epg/grid", axum::routing::post(epg_grid_api::playlist_epg_grid))
         .route("/playlist/live", axum::routing::post(playlist_content_live))
         .route("/playlist/vod", axum::routing::post(playlist_content_vod))
         .route("/playlist/series", axum::routing::post(playlist_content_series))
@@ -1447,6 +1450,8 @@ pub fn v1_api_playlist_register_with_permissions(
     let epg_routes = Router::new()
         .route("/epg", axum::routing::post(playlist_epg))
         .route("/epg/stream", axum::routing::post(stream_epg_api))
+        .route("/epg/groups", axum::routing::post(epg_grid_api::playlist_epg_groups))
+        .route("/epg/grid", axum::routing::post(epg_grid_api::playlist_epg_grid))
         .layer(permission_layer!(app_state, Permission::EpgRead));
 
     router.nest("/playlist", read_routes.merge(write_routes).merge(epg_routes))

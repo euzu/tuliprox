@@ -7,6 +7,7 @@ mod connection_denied;
 mod custom_video_stream_type;
 
 mod epg;
+mod epg_grid;
 mod epg_request;
 mod event;
 mod ids;
@@ -77,9 +78,9 @@ pub mod xtream_const;
 
 pub use self::{
     active_user_connection_change::*, auth::*, auth_audit::*, cluster_flags::*, config::*, connection_denied::*,
-    custom_video_stream_type::*, epg::*, epg_request::*, event::*, input_refresh_policy::*, input_update_action::*,
-    ip_check::*, item_field::*, library_request::*, log::*, mapping::*, media_properties::*, messaging::*,
-    metadata_update_failure::*, notification::*, notification_dead_letter::*, pagination::*, playlist::*,
+    custom_video_stream_type::*, epg::*, epg_grid::*, epg_request::*, event::*, input_refresh_policy::*,
+    input_update_action::*, ip_check::*, item_field::*, library_request::*, log::*, mapping::*, media_properties::*,
+    messaging::*, metadata_update_failure::*, notification::*, notification_dead_letter::*, pagination::*, playlist::*,
     playlist_categories::*, playlist_groups_changed::*, playlist_info_document::*, playlist_request::*,
     playlist_update_run::*, playlist_update_status::*, processing_order::*, progress::*, provider_fetch_failure::*,
     provider_pool::*, recording::*, recording_math::*, regex_cache::*, resource::*, scheduled_task_failure::*,

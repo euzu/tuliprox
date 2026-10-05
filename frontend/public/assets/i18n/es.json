@@ -1083,6 +1083,7 @@
     "EMPTY": "",
     "ENABLED": "Habilitado",
     "EPG": "Epg",
+    "EPG_GROUPS": "Grupos",
     "EDIT_EPG_SMART_MATCH": "Editar coincidencia inteligente de EPG",
     "EPG_LOGO_OVERRIDE": "Anular logotipo",
     "EPG_OUTPUT": "Salida EPG",
@@ -1946,7 +1947,11 @@
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Seleccione un EPG para ver su contenido.",
-      "SELECT_AN_EPG_HINT": "Elija una fuente EPG arriba para previsualizar su guía de programación."
+      "SELECT_AN_EPG_HINT": "Elija una fuente EPG arriba para previsualizar su guía de programación.",
+      "NO_GROUPS_WITH_EPG": "Ningún grupo de la lista de reproducción tiene canales con datos EPG.",
+      "UPDATE_TARGET_FOR_GROUPS": "Actualice el destino una vez para usar la vista por grupos.",
+      "GROUP_TRUNCATED": "Este grupo tiene más canales de los que se pueden mostrar; solo se listan los primeros 1000.",
+      "NO_SEARCH_MATCHES": "Ningún canal coincide con la búsqueda."
     },
     "RECORDING": {
       "INVALID_QUOTA": "Los valores de cuota deben ser números enteros no negativos de bytes.",

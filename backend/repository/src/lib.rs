@@ -7,6 +7,7 @@ mod target_id_mapping;
 mod alias_repository;
 mod api_user_recovery;
 mod db_viewer;
+mod epg_group_index;
 mod epg_repository;
 mod geoip;
 mod library_repository;
@@ -42,6 +43,7 @@ mod xtream_repository;
 
 pub use alias_repository::*;
 pub use db_viewer::*;
+pub use epg_group_index::*;
 pub use epg_repository::*;
 pub use geoip::*;
 pub use library_repository::*;

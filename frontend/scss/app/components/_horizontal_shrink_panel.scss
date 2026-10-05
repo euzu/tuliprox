@@ -1,0 +1,36 @@
+.tp__shrink-panel {
+  position: relative;
+  display: flex;
+  flex-flow: column;
+  flex-shrink: 0;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+
+  &__content {
+    flex: 1;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    // Leave room for the handle so it does not cover the content.
+    padding-right: 6px;
+  }
+
+  &__handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    touch-action: none;
+    background-color: var(--border-color);
+    opacity: 0.4;
+
+    &:hover,
+    &:focus-visible {
+      opacity: 1;
+      outline: none;
+    }
+  }
+}

@@ -1083,6 +1083,7 @@
     "EMPTY": "",
     "ENABLED": "Enabled",
     "EPG": "Epg",
+    "EPG_GROUPS": "Groups",
     "EDIT_EPG_SMART_MATCH": "Edit EPG Smart Match",
     "EPG_LOGO_OVERRIDE": "Logo Override",
     "EPG_OUTPUT": "EPG output",
@@ -1946,7 +1947,11 @@
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
-      "SELECT_AN_EPG_HINT": "Choose an EPG source above to preview its programme guide."
+      "SELECT_AN_EPG_HINT": "Choose an EPG source above to preview its programme guide.",
+      "NO_GROUPS_WITH_EPG": "No playlist group has channels with EPG data.",
+      "UPDATE_TARGET_FOR_GROUPS": "Update the target once to use the group view.",
+      "GROUP_TRUNCATED": "This group has more channels than can be shown; only the first 1000 are listed.",
+      "NO_SEARCH_MATCHES": "No channel matches the search."
     },
     "RECORDING": {
       "INVALID_QUOTA": "Quota values must be non-negative whole numbers of bytes.",
