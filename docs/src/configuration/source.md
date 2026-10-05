@@ -238,6 +238,11 @@ headers:
 > (`Lavf/…`) receives a combined MPEG-TS rendition that plays. If catch-up stops at the fMP4 initialization
 > object, set a non-VLC `User-Agent` for this input. Then check that live and VOD playback still work, because
 > some providers require a specific User-Agent.
+>
+> A per-channel `#EXTVLCOPT:http-user-agent` directive in the provider playlist overrides the input `User-Agent`
+> on catch-up HLS requests. If a channel sets this directive to a VLC User-Agent, the input header has no effect
+> for that channel. Change the directive to a non-VLC User-Agent as well, for example in a local copy of the
+> playlist.
 
 ---
 
