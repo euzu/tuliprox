@@ -45,40 +45,45 @@ pub const FLUSSONIC_LIVE_FILES: [&str; 7] =
 ///
 /// Account credentials are removed from the URL authority and query while all other URL
 /// components remain part of the identity. Query pairs are sorted so provider accounts may
-/// return the same channel parameters in a different order. Supported Flussonic live file
-/// names are lowercased, so `MONO.M3U8` and `mono.m3u8` share one identity.
+/// return the same channel parameters in a different order. The path stays exact, so
+/// case-sensitive provider paths remain distinct.
 pub fn m3u_stream_url_identity(stream_url: &str) -> Option<String> {
-    let mut url = Url::parse(stream_url).ok()?;
-    normalize_flussonic_live_file(&mut url);
-    account_independent_identity(url)
+    account_independent_identity(Url::parse(stream_url).ok()?)
 }
 
-/// Identity as written by indexes built before Flussonic live file names were normalized.
+/// Prefix of the case-folded Flussonic live file keys, disjoint from URL identities.
+const FLUSSONIC_LIVE_FILE_KEY_PREFIX: &str = "flussonic-live|";
+
+/// Additional index key of a Flussonic live file whose name is not the canonical lowercase one.
 ///
-/// Returns `None` when it equals [`m3u_stream_url_identity`], so lookups only add a
-/// fallback query where an older index could hold a different key.
-pub fn legacy_m3u_stream_url_identity(stream_url: &str) -> Option<String> {
-    let url = Url::parse(stream_url).ok()?;
-    let mut normalized = url.clone();
-    normalize_flussonic_live_file(&mut normalized);
-    if normalized == url {
-        return None;
-    }
-    account_independent_identity(url)
+/// Stored next to the exact identity, so a Flussonic archive sibling lookup probing
+/// `mono.m3u8` still finds an alias entry stored as `MONO.M3U8`. Exact lookups never use it.
+pub fn m3u_flussonic_live_file_index_key(stream_url: &str) -> Option<String> {
+    let (url, canonical) = flussonic_live_file_url(stream_url)?;
+    (!canonical).then(|| flussonic_live_file_key(url)).flatten()
 }
 
-fn normalize_flussonic_live_file(url: &mut Url) {
-    let Some(file) = url.path_segments().and_then(Iterator::last) else {
-        return;
-    };
-    let Some(live_file) = FLUSSONIC_LIVE_FILES.iter().find(|live_file| live_file.eq_ignore_ascii_case(file)) else {
-        return;
-    };
-    if *live_file != file {
-        if let Ok(mut segments) = url.path_segments_mut() {
-            segments.pop().push(live_file);
-        }
+/// Case-folded key a Flussonic archive sibling candidate is looked up under after its exact
+/// identity; see [`m3u_flussonic_live_file_index_key`].
+pub fn m3u_flussonic_live_file_lookup_key(stream_url: &str) -> Option<String> {
+    flussonic_live_file_key(flussonic_live_file_url(stream_url)?.0)
+}
+
+/// Parses a URL whose file name is a Flussonic live file in any case, returning it with the
+/// canonical lowercase name and whether the original name was already canonical.
+fn flussonic_live_file_url(stream_url: &str) -> Option<(Url, bool)> {
+    let mut url = Url::parse(stream_url).ok()?;
+    let file = url.path_segments()?.next_back()?;
+    let live_file = FLUSSONIC_LIVE_FILES.iter().find(|live_file| live_file.eq_ignore_ascii_case(file))?;
+    let canonical = *live_file == file;
+    if !canonical {
+        url.path_segments_mut().ok()?.pop().push(live_file);
     }
+    Some((url, canonical))
+}
+
+fn flussonic_live_file_key(url: Url) -> Option<String> {
+    account_independent_identity(url).map(|identity| format!("{FLUSSONIC_LIVE_FILE_KEY_PREFIX}{identity}"))
 }
 
 fn account_independent_identity(mut url: Url) -> Option<String> {
@@ -110,20 +115,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_lowercases_only_supported_flussonic_live_files() {
-        assert_eq!(
+    fn identity_keeps_path_case_and_flussonic_key_folds_only_live_files() {
+        assert_ne!(
             m3u_stream_url_identity("http://stream.example:4000/323/MONO.M3U8?token=a"),
             m3u_stream_url_identity("http://stream.example:4000/323/mono.m3u8?token=b")
         );
         assert_eq!(
-            m3u_stream_url_identity("http://stream.example:4000/323/Playlist.M3U8?token=a").as_deref(),
-            Some("http://stream.example:4000/323/Playlist.M3U8")
+            m3u_flussonic_live_file_index_key("http://stream.example:4000/323/MONO.M3U8?token=a").as_deref(),
+            Some("flussonic-live|http://stream.example:4000/323/mono.m3u8")
         );
         assert_eq!(
-            legacy_m3u_stream_url_identity("http://stream.example:4000/323/MONO.M3U8?token=a").as_deref(),
-            Some("http://stream.example:4000/323/MONO.M3U8")
+            m3u_flussonic_live_file_lookup_key("http://stream.example:4000/323/mono.m3u8?token=b"),
+            m3u_flussonic_live_file_index_key("http://stream.example:4000/323/MONO.M3U8?token=a")
         );
-        assert_eq!(legacy_m3u_stream_url_identity("http://stream.example:4000/323/mono.m3u8?token=a"), None);
+        // Canonical names need no extra index entry, other file names never get one.
+        assert_eq!(m3u_flussonic_live_file_index_key("http://stream.example:4000/323/mono.m3u8?token=a"), None);
+        assert_eq!(m3u_flussonic_live_file_index_key("http://stream.example:4000/323/Playlist.M3U8"), None);
+        assert_eq!(m3u_flussonic_live_file_lookup_key("http://stream.example:4000/323/Playlist.m3u8"), None);
     }
 
     #[test]

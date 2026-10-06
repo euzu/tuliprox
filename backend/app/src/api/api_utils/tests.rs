@@ -731,23 +731,31 @@ async fn select_provider_stream_url_prefers_archive_source_live_file() {
 }
 
 #[tokio::test]
-async fn select_provider_stream_url_matches_uppercase_alias_live_file() {
+async fn select_provider_stream_url_matches_uppercase_alias_live_file_for_archives_only() {
     let (_temp, app_config, input, alias) = independent_stream_token_alias_fixture_with(&[
         "http://stream.example:4000/323/MONO.M3U8?token=backup-stream-token",
+        "http://stream.example:4000/324/INDEX.m3u8?token=upper-token",
+        "http://stream.example:4000/324/index.m3u8?token=lower-token",
     ])
     .await;
 
-    for requested in [
-        "http://stream.example:4000/323/mono-1791225557-14400.m3u8?token=primary-stream-token",
-        "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
+    for (requested, expected) in [
+        // A Flussonic archive finds its live file in any case.
+        (
+            "http://stream.example:4000/323/mono-1791225557-14400.m3u8?token=primary-stream-token",
+            "http://stream.example:4000/323/mono-1791225557-14400.m3u8?token=backup-stream-token",
+        ),
+        // Exact lookups keep case-sensitive paths of other providers distinct.
+        (
+            "http://stream.example:4000/324/INDEX.m3u8?token=primary-stream-token",
+            "http://stream.example:4000/324/INDEX.m3u8?token=upper-token",
+        ),
+        (
+            "http://stream.example:4000/324/index.m3u8?token=primary-stream-token",
+            "http://stream.example:4000/324/index.m3u8?token=lower-token",
+        ),
     ] {
         let selected = select_provider_stream_url(requested, &input, &alias, false, &app_config).await;
-        let expected = if requested.contains("mono-") {
-            "http://stream.example:4000/323/mono-1791225557-14400.m3u8?token=backup-stream-token"
-        } else {
-            // A live hit returns the stored alias URL unchanged.
-            "http://stream.example:4000/323/MONO.M3U8?token=backup-stream-token"
-        };
         assert_eq!(selected.map(|(_, url)| url).as_deref(), Some(expected), "{requested}");
     }
 }
