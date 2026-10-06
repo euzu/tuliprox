@@ -7204,8 +7204,15 @@ async fn bounded_flussonic_request(
     Ok(router.oneshot(request).await?)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoundedArchiveOrigin {
+    Media,
+    Missing,
+    SingleVariantMaster,
+}
+
 async fn bounded_flussonic_origin(
-    missing: bool,
+    archive_origin: BoundedArchiveOrigin,
     requests: &Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Result<TestSegmentOrigin, Box<dyn std::error::Error>> {
     let recorded = Arc::clone(requests);
@@ -7230,20 +7237,34 @@ async fn bounded_flussonic_origin(
             return TestBinaryOriginResponse::new(StatusCode::OK, Arc::from(text.into_bytes()));
         }
         if resource.ends_with(".ts")
-            && (resource.starts_with("/channel/archive-") || resource.starts_with("/channel/live/"))
+            && ["/channel/archive-", "/channel/live/", "/channel/tracks-v1/archive-"]
+                .iter()
+                .any(|prefix| resource.starts_with(prefix))
         {
             return TestBinaryOriginResponse::new(StatusCode::OK, Arc::clone(&segment));
         }
+        let archive_file = resource
+            .strip_prefix("/channel/")
+            .and_then(|file| file.strip_suffix(".m3u8"))
+            .filter(|file| file.starts_with("archive-"));
+        if let (BoundedArchiveOrigin::SingleVariantMaster, Some(archive)) = (archive_origin, archive_file) {
+            let master = format!(
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=9150000,RESOLUTION=1920x1080\ntracks-v1/{archive}.ts.m3u8\n"
+            );
+            return TestBinaryOriginResponse::new(StatusCode::OK, Arc::from(master.into_bytes()));
+        }
         let media_directory = if resource == "/channel/mono.m3u8" {
             Some("live")
-        } else {
+        } else if archive_origin == BoundedArchiveOrigin::SingleVariantMaster {
             resource
-                .strip_prefix("/channel/")
-                .and_then(|file| file.strip_suffix(".m3u8"))
+                .strip_prefix("/channel/tracks-v1/")
+                .and_then(|file| file.strip_suffix(".ts.m3u8"))
                 .filter(|file| file.starts_with("archive-"))
+        } else {
+            archive_file
         };
         if let Some(directory) = media_directory {
-            if missing && directory != "live" {
+            if archive_origin == BoundedArchiveOrigin::Missing && directory != "live" {
                 return TestBinaryOriginResponse::new(StatusCode::NOT_FOUND, Arc::from(&b"unavailable"[..]));
             }
             let mut manifest = String::from_utf8_lossy(&regression_origin_manifest(123, 6)).into_owned();
@@ -7263,14 +7284,16 @@ async fn bounded_flussonic_origin(
     Ok(origin)
 }
 
-async fn bounded_flussonic_hls_fixture(missing: bool) -> Result<BoundedFlussonicFixture, Box<dyn std::error::Error>> {
+async fn bounded_flussonic_hls_fixture(
+    archive_origin: BoundedArchiveOrigin,
+) -> Result<BoundedFlussonicFixture, Box<dyn std::error::Error>> {
     use shared::model::{ConfigInputOptionsDto, FlussonicHlsCatchup, ProxyType};
     use tuliprox_core::model::ConfigInputOptions;
     use tuliprox_repository::{ensure_target_storage_path, m3u_write_playlist};
 
     let temp = tempfile::tempdir()?;
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let origin = bounded_flussonic_origin(missing, &requests).await?;
+    let origin = bounded_flussonic_origin(archive_origin, &requests).await?;
     let options: ConfigInputOptionsDto = serde_json::from_str(r#"{"flussonic_hls_catchup":"bounded_archive"}"#)?;
     assert_eq!(options.flussonic_hls_catchup, FlussonicHlsCatchup::BoundedArchive);
     let input = ConfigInput {
@@ -7353,7 +7376,7 @@ async fn bounded_flussonic_hls_entry(
 #[tokio::test]
 async fn bounded_flussonic_hls_preserves_master_child_segments_and_duration_identity(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = bounded_flussonic_hls_fixture(false).await?;
+    let fixture = bounded_flussonic_hls_fixture(BoundedArchiveOrigin::Media).await?;
     let mut identities = std::collections::HashSet::new();
     for (start, duration) in [(1_784_898_000, 3600), (1_784_898_000, 7200), (1_784_898_600, 3600)] {
         let entry = bounded_flussonic_hls_entry(&fixture, start, duration).await?;
@@ -7394,9 +7417,37 @@ async fn bounded_flussonic_hls_preserves_master_child_segments_and_duration_iden
 }
 
 #[tokio::test]
+async fn bounded_flussonic_hls_resolves_single_variant_archive_master() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = bounded_flussonic_hls_fixture(BoundedArchiveOrigin::SingleVariantMaster).await?;
+    let entry = bounded_flussonic_hls_entry(&fixture, 1_784_898_000, 3600).await?;
+    assert_eq!(entry.status(), StatusCode::OK);
+    let (_, uri) = single_variant_master_playlist(entry).await;
+    let media = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
+    assert_eq!(media.status(), StatusCode::OK);
+    let body = String::from_utf8(response_body(media).await.to_vec())?;
+    let segment_uri =
+        body.lines().find(|line| line.starts_with("/hls/") && path_has_extension(line, "ts")).ok_or("segment")?;
+    let segment = get_response(Arc::clone(&fixture.app_state), segment_uri, None).await;
+    assert_eq!(segment.status(), StatusCode::OK);
+    assert_ne!(response_body(segment).await, bytes::Bytes::new());
+    let reload = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
+    assert_eq!(reload.status(), StatusCode::OK);
+    let reload_body = String::from_utf8(response_body(reload).await.to_vec())?;
+    assert_eq!(manifest_media_sequence(&body), manifest_media_sequence(&reload_body));
+    let paths = fixture.requests.lock().map_err(|_| "request log")?;
+    assert!(paths.iter().any(|p| p == "/channel/archive-1784898000-3600.m3u8?token=a%2Fb"));
+    assert!(paths.iter().any(|p| p == "/channel/tracks-v1/archive-1784898000-3600.ts.m3u8?token=a%2Fb"));
+    assert!(paths
+        .iter()
+        .any(|p| p.starts_with("/channel/tracks-v1/archive-1784898000-3600/") && p.ends_with(".ts?token=a%2Fb")));
+    assert!(!paths.iter().any(|p| p.contains("timeshift_abs") || p.contains("mono.m3u8")));
+    Ok(())
+}
+
+#[tokio::test]
 async fn bounded_flussonic_hls_404_is_unavailable_without_live_or_timeshift_fallback(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let fixture = bounded_flussonic_hls_fixture(true).await?;
+    let fixture = bounded_flussonic_hls_fixture(BoundedArchiveOrigin::Missing).await?;
     let entry = bounded_flussonic_hls_entry(&fixture, 1_784_898_000, 3600).await?;
     assert_eq!(entry.status(), StatusCode::OK);
     let (_, uri) = single_variant_master_playlist(entry).await;

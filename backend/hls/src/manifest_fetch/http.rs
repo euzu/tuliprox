@@ -352,7 +352,7 @@ pub(super) fn request_failed_status_from_message(message: &str) -> Option<Status
     StatusCode::from_u16(status_code).ok()
 }
 
-fn same_origin(lhs: &Url, rhs: &Url) -> bool {
+pub(super) fn same_origin(lhs: &Url, rhs: &Url) -> bool {
     lhs.scheme().eq_ignore_ascii_case(rhs.scheme())
         && lhs.host_str() == rhs.host_str()
         && lhs.port_or_known_default() == rhs.port_or_known_default()
