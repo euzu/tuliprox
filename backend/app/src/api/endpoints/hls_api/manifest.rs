@@ -747,7 +747,7 @@ pub(super) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     let Some(connection_kind) = connection_admission.kind() else {
         return false;
     };
-    let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_target(app_state, target) {
+    let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_user(app_state, target, user) {
         let origin_source = build_hls_origin_source(input, stream_identity.stream_ref());
         let proxy_session_id = build_proxy_session_id(&origin_source.session_key(), &app_state.get_encrypt_secret());
         let reservation_ttl_secs = match app_state.hls.proxy.sessions().get_by_key(&origin_source.session_key()).await {
@@ -2421,6 +2421,15 @@ pub(super) fn hls_cache_configured(app_state: &Arc<AppState>) -> bool {
 
 pub(super) fn hls_cache_enabled_for_target(app_state: &Arc<AppState>, target: &ConfigTarget) -> bool {
     hls_cache_configured(app_state) && is_hls_stream_share_enabled(target)
+}
+
+pub(super) fn hls_cache_enabled_for_user(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    user: &ProxyUserCredentials,
+) -> bool {
+    // Recording headers can select different origin content from ordinary playback.
+    !user.is_recording_proxy_user() && hls_cache_enabled_for_target(app_state, target)
 }
 
 pub(super) struct HlsAccessManifestRequestContext {

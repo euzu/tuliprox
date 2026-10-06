@@ -22,7 +22,9 @@ use crate::{
         },
         recording_sidecar,
         recording_url::build_stable_recording_url,
-        recording_worker::{recording_partial_path, run_recording_with_binary, RecordingExecutionResult},
+        recording_worker::{
+            recording_partial_path, redact_url_tokens, run_recording_with_binary, RecordingExecutionResult,
+        },
     },
 };
 use futures::stream::TryStreamExt;
@@ -58,6 +60,7 @@ pub(crate) const RANGE_UNSUPPORTED_ERROR: &str = "range_unsupported";
 const RECORDING_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 type ProviderCapacities = Vec<(Arc<str>, usize, usize)>;
 
+#[derive(Debug)]
 enum DownloadExecutionResult {
     Completed,
     Paused,
@@ -268,6 +271,7 @@ fn capture_resume_validators(response: &reqwest::Response) -> (Option<String>, O
 
 async fn send_download_request(
     client: &reqwest::Client,
+    upstream_client: Option<&reqwest::Client>,
     url: &reqwest::Url,
     offset: u64,
     control_signal: &RwLock<RecordingControl>,
@@ -277,16 +281,46 @@ async fn send_download_request(
         return Err(result);
     }
 
-    // The resume offset refers to bytes stored on disk, so neither the
-    // provider nor the internal proxy may change the response encoding.
-    let mut request = client
-        .get(url.clone())
-        .header(reqwest::header::USER_AGENT, shared::model::RECORDING_STREAM_USER_AGENT)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity");
-    if offset > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-    }
-    let send = request.send();
+    let send = async {
+        let mut destination = url.clone();
+        for redirects in 0..=10 {
+            let hop_client =
+                if destination.origin() == url.origin() { client } else { upstream_client.unwrap_or(client) };
+            // Resume offsets refer to bytes on disk, so every hop must preserve encoding.
+            let mut request = hop_client
+                .get(destination.clone())
+                .header(reqwest::header::USER_AGENT, shared::model::RECORDING_STREAM_USER_AGENT)
+                .header(reqwest::header::ACCEPT_ENCODING, "identity");
+            if offset > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+            }
+            if destination.origin() != url.origin() {
+                // Override client defaults so listener credentials cannot reach
+                // a different origin through a manually followed redirect.
+                request = request.header(reqwest::header::AUTHORIZATION, "").header(reqwest::header::COOKIE, "");
+            }
+            let response = request.send().await.map_err(|error| classify_download_open_error(&destination, &error))?;
+            if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                return Ok(response);
+            }
+            let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+                return Ok(response);
+            };
+            let next = location
+                .to_str()
+                .ok()
+                .and_then(|value| response.url().join(value).ok())
+                .filter(|value| matches!(value.scheme(), "http" | "https"));
+            let Some(next) = next else {
+                return Err(DownloadExecutionResult::Failed("Invalid recording redirect location".to_string()));
+            };
+            if redirects == 10 {
+                return Err(DownloadExecutionResult::Failed("Recording redirect limit exceeded".to_string()));
+            }
+            destination = next;
+        }
+        Err(DownloadExecutionResult::Failed("Recording redirect limit exceeded".to_string()))
+    };
     tokio::pin!(send);
     loop {
         tokio::select! {
@@ -296,7 +330,7 @@ async fn send_download_request(
                     return Err(result);
                 }
             }
-            response = &mut send => return response.map_err(|error| classify_download_open_error(url, &error)),
+            response = &mut send => return response,
         }
     }
 }
@@ -390,11 +424,12 @@ async fn finalize_http_transfer(final_path: &std::path::Path, transfer_path: &st
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn download_file<E: EventSink>(
     active: Arc<RwLock<Option<RecordingTask>>>,
     file_download: RecordingTask,
     client: &reqwest::Client,
+    upstream_client: Option<&reqwest::Client>,
     control_signal: Arc<RwLock<RecordingControl>>,
     control_notify: Arc<Notify>,
     event_manager: Option<&E>,
@@ -404,7 +439,8 @@ async fn download_file<E: EventSink>(
     let url = file_download.url.clone();
     let file_path = http_transfer_path(&file_download);
     let existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
-    let response_result = send_download_request(client, &url, existing_size, &control_signal, &control_notify).await;
+    let response_result =
+        send_download_request(client, upstream_client, &url, existing_size, &control_signal, &control_notify).await;
 
     match response_result {
         Ok(response) => {
@@ -1044,6 +1080,7 @@ async fn prepare_active_retry(
     download_queue: &RecordingQueue,
     uuid: &str,
     download_cfg: &RecordingConfig,
+    cause: &str,
 ) -> Result<Option<RetryCommit>, QueueMutationError> {
     mutate_optional(download_queue, |candidate| {
         let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
@@ -1061,9 +1098,9 @@ async fn prepare_active_retry(
                 return Ok(None);
             };
             let error = if retryable_kind {
-                format!("Retry limit reached after {} attempts", download_cfg.retry_max_attempts)
+                format!("Retry limit reached after {} attempts: {cause}", download_cfg.retry_max_attempts)
             } else {
-                "Live recording failed and cannot be retried; its broadcast window has moved on".to_string()
+                format!("Live recording failed; restarting a live capture is not supported: {cause}")
             };
             failed.finished = true;
             failed.paused = false;
@@ -1086,7 +1123,7 @@ async fn prepare_active_retry(
         active.paused = false;
         active.finished = false;
         active.error = Some(format!(
-            "Retrying after transient failure in {delay_secs}s (attempt {attempts}/{})",
+            "Retrying after transient failure in {delay_secs}s (attempt {attempts}/{}): {cause}",
             download_cfg.retry_max_attempts
         ));
         Ok(Some(RetryCommit::Waiting { delay_secs, attempts }))
@@ -1356,7 +1393,18 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
         let recording_binary = recording_binary.to_path_buf();
         let app_config = Arc::new(cfg.clone());
 
-        if let Ok(client) = create_client(cfg).default_headers(headers).build() {
+        // The listener hop bypasses proxies; external redirect hops retain them.
+        // Notifications retain the proxy without the recording headers.
+        let clients = (
+            create_client(cfg)
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .default_headers(headers.clone())
+                .build(),
+            create_client(cfg).redirect(reqwest::redirect::Policy::none()).default_headers(headers).build(),
+            create_client(cfg).build(),
+        );
+        if let (Ok(transfer_client), Ok(upstream_transfer_client), Ok(client)) = clients {
             if let Some(active) = dq.active.read().await.as_ref() {
                 info!("Starting download worker for active download {} ({})", active.uuid, active.filename);
             }
@@ -1533,7 +1581,8 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                     download_file(
                                         Arc::clone(&dq.active),
                                         execution_download,
-                                        &client,
+                                        &transfer_client,
+                                        Some(&upstream_transfer_client),
                                         Arc::clone(&control_signal),
                                         Arc::clone(&control_notify),
                                         Some(&event_manager),
@@ -1740,8 +1789,9 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                             DownloadExecutionResult::Retryable(err) => {
                                 capacity.release(provider_handle).await;
-                                warn!("Retrying active download after transient failure: {err}");
-                                let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg).await;
+                                let err = redact_url_tokens(&err);
+                                warn!("Recording transfer encountered a transient failure: {err}");
+                                let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg, &err).await;
                                 let retry_delay_secs = match retry_commit {
                                     Ok(Some(RetryCommit::Waiting { delay_secs, attempts })) => {
                                         debug!("Download retry attempt {attempts} scheduled in {delay_secs}s");
@@ -1844,6 +1894,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                             DownloadExecutionResult::Failed(err) => {
                                 capacity.release(provider_handle).await;
+                                let err = redact_url_tokens(&err);
                                 warn!("Download failed permanently: {err}");
                                 let committed = finish_active_and_promote(&dq, &worker_uuid, None, |fd| {
                                     fd.finished = true;
@@ -2169,6 +2220,7 @@ mod tests {
                 active,
                 task.clone(),
                 &reqwest::Client::new(),
+                None,
                 Arc::new(RwLock::new(RecordingControl::None)),
                 Arc::new(Notify::new()),
                 None,
@@ -2221,6 +2273,7 @@ mod tests {
                 Arc::new(RwLock::new(Some(task.clone()))),
                 task.clone(),
                 &reqwest::Client::new(),
+                None,
                 Arc::new(RwLock::new(RecordingControl::None)),
                 Arc::new(Notify::new()),
                 None,
@@ -2383,6 +2436,7 @@ mod tests {
             Arc::clone(&queue.active),
             task.clone(),
             &reqwest::Client::new(),
+            None,
             Arc::new(RwLock::new(RecordingControl::None)),
             Arc::new(Notify::new()),
             None,
@@ -2718,23 +2772,13 @@ mod tests {
         }
     }
 
-    /// `bare_app_config`, plus the one server entry a recording needs to
-    /// resolve its own execution URL. Without it the worker fails before it
-    /// ever reaches the encoder.
-    fn app_config_with_server() -> tuliprox_core::model::AppConfig {
+    /// Configured local API listener with no public playback server.
+    fn app_config_with_listener() -> tuliprox_core::model::AppConfig {
         let app_config = bare_app_config();
-        app_config.api_proxy.store(Some(Arc::new(tuliprox_core::model::ApiProxyConfig {
-            server: vec![tuliprox_core::model::ApiProxyServerInfo {
-                name: "default".to_string(),
-                protocol: "http".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: Some("8901".to_string()),
-                timezone: "UTC".to_string(),
-                message: String::new(),
-                path: None,
-            }],
-            ..tuliprox_core::model::ApiProxyConfig::default()
-        })));
+        let mut config = (*app_config.config.load_full()).clone();
+        config.api.host = "127.0.0.1".to_string();
+        config.api.port = 8901;
+        app_config.config.store(Arc::new(config));
         app_config
     }
 
@@ -2764,6 +2808,103 @@ mod tests {
 
     fn spawn_count(log: &Path) -> usize {
         std::fs::read_to_string(log).map_or(0, |text| text.lines().filter(|line| !line.is_empty()).count())
+    }
+
+    #[tokio::test]
+    async fn live_timeout_keeps_the_transfer_cause_without_claiming_the_window_expired(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path())?);
+        let mut capture = scheduled_task(RecordingKind::Live, chrono::Utc::now().timestamp(), 300);
+        capture.recording.source.virtual_id = "42".to_string();
+        capture.file_dir = dir.path().to_path_buf();
+        capture.file_path = dir.path().join("capture.ts");
+        capture.state = RecordingTaskState::Queued;
+        capture.input_name = Some(Arc::from("provider"));
+        let persisted = RecordingQueue::to_persisted(&capture);
+        crate::recording::recording_queue::mutate(&queue, move |candidate| {
+            candidate.queue.push(persisted.clone());
+            Ok(())
+        })
+        .await?;
+        let script = counting_ffmpeg(dir.path(), &dir.path().join("spawns.log"));
+        std::fs::write(&script, "#!/bin/sh\necho 'Error opening input files: Operation timed out' >&2\nexit 1\n")?;
+        let stub = StubCapacity::with_room();
+        let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(&stub) as Arc<dyn RecordingCapacityPort>;
+        ensure_recording_worker_running(
+            &app_config_with_listener(),
+            &RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() }),
+            &queue,
+            &NoopSink,
+            &capacity,
+            &script,
+        )
+        .await?;
+        let settled = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(task) = queue.finished.read().await.first().cloned() {
+                    break task;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(settled.state, RecordingTaskState::Failed);
+        let error = settled.error.as_deref().ok_or("missing transfer cause")?;
+        assert!(error.contains("Error opening input files: Operation timed out"), "{error}");
+        assert!(!error.contains("window has moved on"), "{error}");
+        assert_eq!(settled.retry_attempts, 1);
+        assert_eq!(settled.recording.reserved_bytes, 0);
+        assert_eq!(stub.acquire_count(), 1);
+        assert_eq!(stub.release_count(), 1);
+        assert!(queue.active.read().await.is_none());
+        assert_eq!(queue.finished.read().await.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn media_retry_waiting_and_limit_keep_the_transfer_cause() -> Result<(), Box<dyn std::error::Error>> {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let queue = RecordingQueue::new();
+            let task = scheduled_task(kind, chrono::Utc::now().timestamp(), 300);
+            let persisted = RecordingQueue::to_persisted(&task);
+            crate::recording::recording_queue::mutate(&queue, move |candidate| {
+                candidate.active = Some(persisted.clone());
+                Ok(())
+            })
+            .await?;
+            let config = RecordingConfig::from(&shared::model::RecordingConfigDto {
+                retry_max_attempts: 1,
+                retry_backoff_initial_secs: 1,
+                retry_backoff_max_secs: 1,
+                retry_backoff_jitter_percent: 0,
+                ..Default::default()
+            });
+            let cause = "Error while opening stream: (http://user:password@upstream.example/live/1?token=secret) Operation timed out";
+            let public_cause = crate::recording::recording_worker::redact_url_tokens(cause);
+            assert_eq!(public_cause, "Error while opening stream: [stream URL] Operation timed out");
+            let retry = super::prepare_active_retry(&queue, "task", &config, &public_cause).await?;
+            assert!(matches!(retry, Some(super::RetryCommit::Waiting { delay_secs: 1, attempts: 1 })));
+            {
+                let active = queue.active.read().await;
+                let active = active.as_ref().ok_or("active transfer missing")?;
+                assert_eq!(active.state, RecordingTaskState::RetryWaiting);
+                assert!(active.error.as_deref().is_some_and(|error| error.contains(&public_cause)));
+                assert!(active.next_retry_at.is_some());
+            }
+            let retry = super::prepare_active_retry(&queue, "task", &config, &public_cause).await?;
+            assert!(matches!(retry, Some(super::RetryCommit::Failed(_))));
+            let finished = queue.finished.read().await;
+            let failed = finished.first().ok_or("terminal transfer missing")?;
+            assert_eq!(failed.state, RecordingTaskState::Failed);
+            assert_eq!(
+                failed.error.as_deref(),
+                Some(format!("Retry limit reached after 1 attempts: {public_cause}").as_str())
+            );
+            assert_eq!(failed.recording.reserved_bytes, 0);
+            assert!(failed.next_retry_at.is_none());
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -2903,7 +3044,7 @@ mod tests {
         let stub = StubCapacity::with_room();
         let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(&stub) as Arc<dyn RecordingCapacityPort>;
         ensure_recording_worker_running(
-            &app_config_with_server(),
+            &app_config_with_listener(),
             &RecordingConfig::from(&shared::model::RecordingConfigDto {
                 enabled: true,
                 ..shared::model::RecordingConfigDto::default()
@@ -2955,6 +3096,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_redirects_keep_the_proxy_and_resume_headers() -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_url = reqwest::Url::parse(&format!("http://{}/capture", listener.local_addr()?))?;
+        let local_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                if socket.read(&mut byte).await? == 0 {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://recording-origin.invalid/start\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            Ok::<_, std::io::Error>(String::from_utf8_lossy(&request).to_ascii_lowercase())
+        });
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_url = format!("http://{}", proxy.local_addr()?);
+        let proxy_task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: /finish\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nContent-Length: 6\r\nConnection: close\r\n\r\n456789",
+            ] {
+                let (mut socket, _) = proxy.accept().await?;
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    if socket.read(&mut byte).await? == 0 { break; }
+                    request.push(byte[0]);
+                }
+                socket.write_all(response.as_bytes()).await?;
+                requests.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+            }
+            Ok::<_, std::io::Error>(requests)
+        });
+        let config = app_config_with_listener();
+        let mut updated = (*config.config.load_full()).clone();
+        updated.proxy = Some(tuliprox_core::model::ProxyConfig { url: proxy_url, username: None, password: None });
+        config.config.store(Arc::new(updated));
+        let local = tuliprox_core::utils::request::create_client(&config)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let mut sensitive = reqwest::header::HeaderMap::new();
+        sensitive.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer listener-secret"),
+        );
+        sensitive.insert(reqwest::header::COOKIE, reqwest::header::HeaderValue::from_static("session=listener-secret"));
+        let upstream = tuliprox_core::utils::request::create_client(&config)
+            .redirect(reqwest::redirect::Policy::none())
+            .default_headers(sensitive)
+            .build()?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::send_download_request(
+                &local,
+                Some(&upstream),
+                &local_url,
+                4,
+                &RwLock::new(RecordingControl::None),
+                &Notify::new(),
+            ),
+        )
+        .await?
+        .map_err(|result| format!("request failed: {result:?}"))?;
+        assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.bytes().await?.as_ref(), b"456789");
+        let local_request = local_task.await??;
+        let upstream_requests = proxy_task.await??;
+        assert!(local_request.starts_with("get /capture "));
+        assert!(upstream_requests[0].starts_with("get http://recording-origin.invalid/start "));
+        assert!(upstream_requests[1].starts_with("get http://recording-origin.invalid/finish "));
+        assert!(upstream_requests.iter().all(|request| !request.contains("listener-secret")));
+        for request in std::iter::once(&local_request).chain(&upstream_requests) {
+            assert!(request.contains("range: bytes=4-"), "{request}");
+            assert!(request.contains("accept-encoding: identity"), "{request}");
+            assert!(request.contains(&shared::model::RECORDING_STREAM_USER_AGENT.to_ascii_lowercase()), "{request}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vod_and_series_transfers_reach_the_local_listener_past_a_configured_proxy() {
+        for kind in [RecordingKind::Vod, RecordingKind::Series] {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let (fixture_url, server) = serve_range_fixture(true);
+            let app_config = app_config_with_listener();
+            let mut config = (*app_config.config.load_full()).clone();
+            config.api.port = fixture_url.port().expect("fixture port");
+            // Nothing listens here: a transfer routed through the proxy fails.
+            config.proxy = Some(tuliprox_core::model::ProxyConfig {
+                url: "http://127.0.0.1:9".to_string(),
+                username: None,
+                password: None,
+            });
+            app_config.config.store(Arc::new(config));
+
+            let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+            let mut transfer = scheduled_task(kind, chrono::Utc::now().timestamp(), 300);
+            transfer.state = RecordingTaskState::Queued;
+            transfer.input_name = Some(Arc::from("provider"));
+            transfer.recording.source.virtual_id = "42".to_string();
+            transfer.file_dir = dir.path().to_path_buf();
+            transfer.file_path = dir.path().join("transfer.mp4");
+            let persisted = RecordingQueue::to_persisted(&transfer);
+            crate::recording::recording_queue::mutate(&queue, move |candidate| {
+                candidate.queue.push(persisted.clone());
+                Ok(())
+            })
+            .await
+            .expect("seed");
+
+            let capacity: Arc<dyn RecordingCapacityPort> = StubCapacity::with_room() as Arc<dyn RecordingCapacityPort>;
+            ensure_recording_worker_running(
+                &app_config,
+                &RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() }),
+                &queue,
+                &NoopSink,
+                &capacity,
+                Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
+            )
+            .await
+            .expect("worker started");
+
+            let settled = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(done) = queue.finished.read().await.first().cloned() {
+                        break done;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("transfer settled");
+            assert_eq!(settled.state, RecordingTaskState::Completed, "{kind:?}: {:?}", settled.error);
+            let request = server.join().expect("fixture server");
+            assert!(request.starts_with("GET /api/v1/playlist/recording/"), "{request}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_recording_whose_disk_filled_while_it_waited_never_opens_a_destination() {
         // Admission happened when the request was accepted; this recording
         // then waited. By the time it reaches the front of the queue the
@@ -2986,7 +3271,7 @@ mod tests {
 
         // The safety margin stands in for a disk that filled up: it drives
         // headroom to zero without needing a real full filesystem.
-        let app_config = app_config_with_server();
+        let app_config = app_config_with_listener();
         let mut rec_cfg =
             RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() });
         rec_cfg.directory = recordings_dir.to_string_lossy().into_owned();

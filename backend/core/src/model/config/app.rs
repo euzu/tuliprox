@@ -539,6 +539,9 @@ impl AppConfig {
     }
 
     pub fn get_user_server_info(&self, user: &ProxyUserCredentials) -> Option<ApiProxyServerInfo> {
+        if user.is_recording_proxy_user() {
+            return Some(self.config.load().api.local_server_info());
+        }
         let server_info_name = user.server.as_ref().map_or("default", |server_name| server_name.as_str());
         self.get_server_info(server_info_name)
     }

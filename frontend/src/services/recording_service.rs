@@ -93,6 +93,12 @@ pub struct PreviewSourceDto {
     pub target_name: String,
     pub virtual_id: String,
     pub input_name: String,
+    /// EPG identity for rows without a playlist id; the server resolves
+    /// the same channel the recording request will use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -814,6 +820,8 @@ mod tests {
                 target_name: "target-1".to_string(),
                 virtual_id: "42".to_string(),
                 input_name: "input-a".to_string(),
+                channel_id: None,
+                channel_name: None,
             },
             candidate: PreviewCandidateDto {
                 padded_start: 1_700_000_000,
@@ -835,6 +843,7 @@ mod tests {
         assert!(!json.contains("\"background_slots\""));
         assert!(!json.contains("\"provider_scope\""));
         assert!(json.contains("\"padded_start\":1700000000"));
+        assert!(!json.contains("\"channel_id\""));
     }
 
     #[test]

@@ -2220,6 +2220,12 @@ where
     let is_dash_request =
         (!is_hls_request && item_type == PlaylistItemType::LiveDash) || params.stream_ext == Some(DASH_EXT);
 
+    // Recording playback keeps provider headers and proxy handling on this listener.
+    // DASH redirects because relative MPD resource URLs are not rewritten.
+    if params.user.is_recording_proxy_user() && !is_dash_request {
+        return None;
+    }
+
     if params.target_type == TargetType::M3u {
         if redirect_request || is_dash_request {
             let redirect_url: Arc<str> = if is_hls_request {
@@ -3582,7 +3588,7 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
         .await;
     app_state.active_users.clear_unbound_session_addr(&user.username, &created_session_token, &fingerprint.addr).await;
 
-    if playlist_kind == HlsPlaylistKind::Media && hls_media_playlist_wrap_enabled(app_state, target) {
+    if playlist_kind == HlsPlaylistKind::Media && hls_media_playlist_wrap_enabled(app_state, target, user) {
         let master = wrap_media_playlist(
             HlsMediaPlaylistWrap {
                 app_state,
@@ -5234,6 +5240,57 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         t_filter: None,
         t_has_unresolved_plan: false,
         t_has_invalid_filter: false,
+    }
+}
+
+/// The user internal recording playback runs as. Its server resolves to the
+/// local API listener (`AppConfig::get_user_server_info`), and its HLS URLs
+/// carry this identity to every follow-up request.
+pub fn create_recording_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials {
+    use base64::Engine;
+    use sha2::Digest;
+    let mut user = create_api_proxy_user(app_state);
+    user.username = crate::model::RECORDING_PROXY_USERNAME.to_string();
+    let digest = sha2::Sha256::new()
+        .chain_update(b"tuliprox/internal-recording-user")
+        .chain_update(app_state.app_config.access_token_secret)
+        .finalize();
+    user.password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..]);
+    user.server = None;
+    user
+}
+
+/// Recording headers configure the upstream capture. They are layered under
+/// the input's own headers, which keep precedence, and above the worker's
+/// request headers. The worker's `User-Agent` stays on the local request so
+/// the stream remains identifiable as a recording.
+pub(crate) fn with_recording_headers(app_config: &AppConfig, input: Arc<ConfigInput>) -> Arc<ConfigInput> {
+    let config = app_config.config.load();
+    let Some(recording) = config.recording() else { return input };
+    let recording_headers = recording.origin_headers(&config);
+    if recording_headers.keys().all(|name| input.headers.keys().any(|key| key.eq_ignore_ascii_case(name.as_str()))) {
+        return input;
+    }
+    let mut merged = input.as_ref().clone();
+    for (name, value) in recording_headers {
+        let Ok(value) = value.to_str() else { continue };
+        if !merged.headers.keys().any(|key| key.eq_ignore_ascii_case(name.as_str())) {
+            merged.headers.insert(name.as_str().to_string(), value.to_string());
+        }
+    }
+    Arc::new(merged)
+}
+
+/// The input as seen by `user`: recording playback adds the recording headers.
+pub(crate) fn input_for_user(
+    app_config: &AppConfig,
+    user: &ProxyUserCredentials,
+    input: Arc<ConfigInput>,
+) -> Arc<ConfigInput> {
+    if user.is_recording_proxy_user() {
+        with_recording_headers(app_config, input)
+    } else {
+        input
     }
 }
 

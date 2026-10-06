@@ -15,11 +15,11 @@ use crate::{
     api::{
         api_utils::{
             connection_priority_for_kind, create_api_proxy_user, create_m3u_catchup_session_key,
-            create_playback_session_fingerprint, create_session_fingerprint, force_hls_resource_response,
-            get_headers_from_request, get_hls_session_ttl_secs, get_stream_alternative_url,
-            is_hls_stream_share_enabled, local_stream_response, record_connect_failed_attempt,
-            resolve_playback_request_admission, select_provider_stream_url, try_option_bad_request, try_unwrap_body,
-            ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
+            create_playback_session_fingerprint, create_recording_proxy_user, create_session_fingerprint,
+            force_hls_resource_response, get_headers_from_request, get_hls_session_ttl_secs,
+            get_stream_alternative_url, input_for_user, is_hls_stream_share_enabled, local_stream_response,
+            record_connect_failed_attempt, resolve_playback_request_admission, select_provider_stream_url,
+            try_option_bad_request, try_unwrap_body, ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
         },
         model::{
             hls_cache::initial_strip::{

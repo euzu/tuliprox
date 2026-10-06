@@ -34,8 +34,13 @@ pub(in crate::api) fn append_user_session_provider_headers(
 }
 
 /// True when an entry media playlist should be answered with a single-variant master.
-pub(in crate::api) fn hls_media_playlist_wrap_enabled(app_state: &Arc<AppState>, target: &ConfigTarget) -> bool {
-    app_state.app_config.config.load().get_hls_wrap_media_playlist() && !hls_cache_enabled_for_target(app_state, target)
+pub(in crate::api) fn hls_media_playlist_wrap_enabled(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    user: &ProxyUserCredentials,
+) -> bool {
+    app_state.app_config.config.load().get_hls_wrap_media_playlist()
+        && !hls_cache_enabled_for_user(app_state, target, user)
 }
 
 pub(in crate::api) struct HlsMediaPlaylistWrap<'a> {
@@ -206,7 +211,7 @@ pub(super) async fn recreate_hls_session_from_token(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if hls_cache_enabled_for_target(app_state, target)
+    if hls_cache_enabled_for_user(app_state, target, user)
         || !hls_session_hint_matches_requester(fingerprint, &user.username, virtual_id, hint)
     {
         return StatusCode::BAD_REQUEST.into_response();

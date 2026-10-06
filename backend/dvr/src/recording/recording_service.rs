@@ -2587,6 +2587,7 @@ mod tests {
         };
         let rec_cfg = RecordingConfig {
             headers: HashMap::new(),
+            t_origin_headers: tuliprox_core::model::RecordingOriginHeaders::default(),
             organize_into_directories: false,
             episode_pattern: None,
             priority: 0,

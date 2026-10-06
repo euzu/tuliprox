@@ -184,10 +184,10 @@ fn epg_channel_filter(search: &SearchRequest) -> Option<EpgChannelFilter> {
     }
 }
 
-/// Recording source id: the playlist channel when known, else the EPG channel id, which the
-/// backend resolves to a playlist channel.
+/// The playlist id when available. Full EPG rows leave it empty and carry
+/// their EPG identity in `channel_id` so numeric EPG ids remain unambiguous.
 fn pending_program_source_id(channel: &EpgGridChannel) -> String {
-    channel.virtual_id.map_or_else(|| channel.epg_id.to_string(), |virtual_id| virtual_id.to_string())
+    channel.virtual_id.map_or_else(String::new, |virtual_id| virtual_id.to_string())
 }
 
 fn recording_padding(config: Option<&AppConfigDto>) -> PaddingBounds {
@@ -1340,8 +1340,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_program_source_id_falls_back_to_epg_id() {
+    fn pending_program_source_id_does_not_treat_numeric_epg_id_as_playlist_id() {
         let full = EpgGridModel::from_epg_tv(&EpgTv::new(vec![EpgChannel::new("123".intern())]), |_| 0);
-        assert_eq!(pending_program_source_id(&full.channels[0]), "123");
+        assert!(pending_program_source_id(&full.channels[0]).is_empty());
     }
 }

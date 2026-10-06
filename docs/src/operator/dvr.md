@@ -7,6 +7,22 @@ consume.
 
 ## 1. Configuration reference
 
+Captures and transfers connect to Tuliprox's own HTTP API listener, using `api.host`
+and `api.port`. Wildcard bind addresses use loopback; an explicit hostname must resolve
+locally to that listener. `web_ui.player_server` and the public servers in `api-proxy.yml`
+select client playback URLs and do not override recording capture URLs. Recordings work
+without an `api-proxy.yml` server. The local hop bypasses HTTP proxies; external download
+redirects keep the configured proxy. Live captures preserve proxy exclusions and add the
+listener host to ffmpeg's `no_proxy`.
+
+Tuliprox applies `video.recording.headers` to proxied provider requests, including HLS
+playlists and segments. Input headers take precedence. Recording HLS sessions remain
+independent of shared live HLS playback so their origin headers cannot affect other viewers.
+
+DASH captures follow a provider redirect so relative MPD resource URLs still work. That
+external hop uses ffmpeg's proxy environment; Tuliprox cannot attach input or recording
+headers to requests after that redirect.
+
 All fields live under `video.recording` in the config file. Every field is optional;
 defaults match the recommended values.
 

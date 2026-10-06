@@ -200,7 +200,13 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
     }
 }
 
+/// Synthetic user for internal recording playback. Its HLS URLs carry this
+/// identity, so follow-up requests stay on the local listener.
+pub const RECORDING_PROXY_USERNAME: &str = "recording_user";
+
 impl ProxyUserCredentials {
+    pub fn is_recording_proxy_user(&self) -> bool { self.t_is_api_user && self.username == RECORDING_PROXY_USERNAME }
+
     /// Fill unset capability values from the referenced plan and compile the
     /// combined content filter. Idempotent; call after any load/conversion.
     pub fn resolve_plan(&mut self, plans: &HashMap<String, Arc<UserPlan>>) {

@@ -2379,7 +2379,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         stream_context.identity().upstream_user_agent(),
     );
 
-    if hls_cache_enabled_for_target(app_state, target) {
+    if hls_cache_enabled_for_user(app_state, target, user) {
         let Some(origin_source) = hls_origin_source.clone() else {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
@@ -2552,7 +2552,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             session_token_hint,
             archive_reference,
         );
-        let hls_session_owner = if hls_cache_enabled_for_target(app_state, target) {
+        let hls_session_owner = if hls_cache_enabled_for_user(app_state, target, user) {
             let session_key = HlsSessionKey::new(input.id, stream_context.stream_ref());
             let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
             Some(build_hls_origin_session_owner(&proxy_session_id))
@@ -2713,7 +2713,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             if let (HlsRequestStage::Entry, HlsPlaylistKind::Media, Some(session_token), Some(provider)) =
                 (stage, playlist_kind, session_token.as_deref(), selected_provider_name.as_ref())
             {
-                if hls_media_playlist_wrap_enabled(app_state, target) {
+                if hls_media_playlist_wrap_enabled(app_state, target, user) {
                     let master = wrap_media_playlist(
                         HlsMediaPlaylistWrap {
                             app_state,
@@ -2935,14 +2935,17 @@ pub(super) async fn hls_api_stream(
     axum::extract::Path(params): axum::extract::Path<HlsApiPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let api_proxy_user = create_api_proxy_user(&app_state);
-    let (user, target) = if params.username == api_proxy_user.username
-        && crate::auth::constant_time_eq(params.password.as_bytes(), api_proxy_user.password.as_bytes())
-    {
+    let internal_user = match params.username.as_str() {
+        crate::model::RECORDING_PROXY_USERNAME => Some(create_recording_proxy_user(&app_state)),
+        "api_user" => Some(create_api_proxy_user(&app_state)),
+        _ => None,
+    }
+    .filter(|internal| crate::auth::constant_time_eq(params.password.as_bytes(), internal.password.as_bytes()));
+    let (user, target) = if let Some(internal_user) = internal_user {
         let Some(target) = app_state.app_config.get_target_by_id(params.target_id) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
-        (Arc::new(api_proxy_user), target)
+        (Arc::new(internal_user), target)
     } else {
         let Some((user, target)) = app_state.app_config.get_target_for_user(&params.username, &params.password) else {
             // Credential failure is an auth error, not a malformed request
@@ -2970,6 +2973,7 @@ pub(super) async fn hls_api_stream(
         let Some(input) = app_state.app_config.get_input_by_id(params.input_id) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
+        let input = input_for_user(&app_state.app_config, &user, input);
         let Some(session) = app_state
             .active_users
             .find_latest_session_for_target_stream(
@@ -2984,7 +2988,7 @@ pub(super) async fn hls_api_stream(
             return StatusCode::NOT_FOUND.into_response();
         };
         if !legacy_hls_route_allowed_with_cache(
-            hls_cache_enabled_for_target(&app_state, &target),
+            hls_cache_enabled_for_user(&app_state, &target, &user),
             decoded_hls_token.session_token.as_deref(),
             Some(session.token.as_str()),
         ) {
@@ -3047,6 +3051,7 @@ pub(super) async fn hls_api_stream_resolved(
         true,
         format!("Can't find input {} for target {target_name}, stream_id {virtual_id}, hls", input_id)
     );
+    let input = input_for_user(&app_state.app_config, &user, input);
 
     if user.permission_denied(&app_state.app_config) {
         let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, "", None, None).await;
@@ -3076,7 +3081,7 @@ pub(super) async fn hls_api_stream_resolved(
     let mut user_session =
         app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
     if !legacy_hls_route_allowed_with_cache(
-        hls_cache_enabled_for_target(&app_state, &target),
+        hls_cache_enabled_for_user(&app_state, &target, &user),
         decoded_hls_token.session_token.as_deref(),
         user_session.as_ref().map(|session| session.token.as_str()),
     ) {

@@ -419,6 +419,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
         let conflict = conflict.clone();
         let conflict_pending = conflict_pending.clone();
         let source = prefill.source.clone();
+        let (channel_id, channel_name) = (prefill.channel_id.clone(), prefill.channel_name.clone());
         let pre = *pre_state;
         let post = *post_state;
         use_effect_with((scheduled_start, scheduled_end, pre, post), move |_| {
@@ -438,6 +439,8 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
                         target_name: source.target_id.clone(),
                         virtual_id: source.virtual_id.clone(),
                         input_name: source.input_name.clone(),
+                        channel_id: channel_id.clone(),
+                        channel_name: channel_name.clone(),
                     },
                     candidate: PreviewCandidateDto {
                         padded_start: scheduled_start,
