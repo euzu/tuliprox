@@ -121,10 +121,10 @@ pub fn parse_flussonic_archive_file(file: &str) -> Option<FlussonicArchiveKind> 
     None
 }
 
+pub use shared::utils::FLUSSONIC_LIVE_FILES;
+
 pub fn is_flussonic_live_file(file: &str) -> bool {
-    ["index.m3u8", "video.m3u8", "mono.m3u8", "mpegts", "index.ts", "video.ts", "mono.ts"]
-        .iter()
-        .any(|supported_file| file.trim().eq_ignore_ascii_case(supported_file))
+    FLUSSONIC_LIVE_FILES.iter().any(|supported_file| file.trim().eq_ignore_ascii_case(supported_file))
 }
 
 fn provider_playlist_stem(provider_url: &str) -> Option<&'static str> {

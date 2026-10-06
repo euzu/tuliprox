@@ -72,5 +72,22 @@ pub async fn refresh_from_live_hls_entrypoint_with_retries(
     .await
 }
 
+/// Runs one pinned recovery fetch the way the recovery chain issues it.
+#[cfg(test)]
+pub(crate) async fn fetch_hls_origin_manifest_recovery_once(
+    context: &HlsOriginManifestFetchContext,
+    binding: &crate::manifest_origin_binding::HlsManifestOriginBinding,
+) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
+    let log_context =
+        http::ManifestRecoveryAttemptLogContext { attempt_index: 0, attempts: 1, candidate_index: 0, candidates: 1 };
+    fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::recovery_direct_target(
+        context,
+        binding,
+        None,
+        log_context,
+    ))
+    .await
+}
+
 #[cfg(test)]
 mod tests;

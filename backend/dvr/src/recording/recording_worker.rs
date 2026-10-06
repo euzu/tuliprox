@@ -210,6 +210,31 @@ pub fn recording_start_missed_window(download: &RecordingTask, now_ts: i64) -> b
 /// passes this and nothing else.
 pub const FFMPEG_BINARY: &str = "ffmpeg";
 
+/// Spawn attempts after the first while the executable reports `ETXTBSY`.
+const BUSY_EXECUTABLE_SPAWN_RETRIES: u64 = 5;
+
+/// Spawns `command`, retrying briefly while its executable is busy.
+///
+/// `ETXTBSY` means a write descriptor to the executable is still open somewhere, typically
+/// inherited by a concurrently forked process that has not reached `exec` yet. The window is
+/// short, so a few delayed attempts succeed where the first one failed.
+async fn spawn_retrying_busy_executable(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(err)
+                if err.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < BUSY_EXECUTABLE_SPAWN_RETRIES =>
+            {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(10 * attempt)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 pub async fn run_recording_with_binary(
     ffmpeg_binary: &Path,
     download: &RecordingTask,
@@ -248,7 +273,7 @@ pub async fn run_recording_with_binary(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = match command.spawn() {
+    let mut child = match spawn_retrying_busy_executable(&mut command).await {
         Ok(child) => child,
         Err(err) => return RecordingExecutionResult::Failed(format!("Failed to spawn ffmpeg: {err}")),
     };
@@ -370,7 +395,8 @@ mod tests {
     use super::{
         build_recording_args, classify_ffmpeg_failure, recording_partial_path,
         recording_resume_or_retry_is_unsupported, recording_start_missed_window, recovery_decision_for,
-        remaining_recording_duration_secs, run_recording_with_binary, RecordingExecutionResult, RecoveryDecision,
+        remaining_recording_duration_secs, run_recording_with_binary, spawn_retrying_busy_executable,
+        RecordingExecutionResult, RecoveryDecision,
     };
     use crate::{
         recording::recording_queue::{RecordingControl, RecordingTask, RecordingTaskState},
@@ -728,6 +754,31 @@ mod tests {
         assert_eq!(result, RecordingExecutionResult::Retryable("Could not resolve host: upstream.example".to_string()));
         let _ = fs::remove_file(script);
         let _ = fs::remove_dir_all(&recording.file_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_retries_while_executable_is_open_for_writing() {
+        let script = fake_ffmpeg_script("busy", "#!/bin/sh\nexit 0\n");
+        // An open write descriptor makes `exec` fail with ETXTBSY until it is closed.
+        let writer = fs::OpenOptions::new().append(true).open(&script).expect("open fake ffmpeg for writing");
+        let mut command = tokio::process::Command::new(&script);
+        assert_eq!(command.spawn().map(|_| ()).map_err(|err| err.kind()), Err(std::io::ErrorKind::ExecutableFileBusy));
+
+        let release_writer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            drop(writer);
+        });
+        let status = spawn_retrying_busy_executable(&mut command)
+            .await
+            .expect("spawn after the writer closed")
+            .wait()
+            .await
+            .expect("fake ffmpeg exit");
+        release_writer.await.expect("release writer");
+
+        assert!(status.success());
+        let _ = fs::remove_dir_all(script.parent().expect("script dir"));
     }
 
     #[tokio::test]

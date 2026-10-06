@@ -19,7 +19,7 @@ use shared::{
         LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties,
         XtreamCluster,
     },
-    utils::{m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
+    utils::{m3u_flussonic_live_file_index_key, m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
     collections::HashMap,
@@ -415,13 +415,14 @@ pub async fn persist_input_m3u_playlist(
 
         let mut indexed_urls: HashMap<Arc<str>, Option<Arc<str>>> = HashMap::new();
         let mut index_url = |url: &Arc<str>| {
-            let Some(identity) = m3u_stream_url_identity(url) else { return };
-            if let Some(indexed_url) = indexed_urls.get_mut(identity.as_str()) {
-                if indexed_url.as_ref().is_some_and(|indexed| indexed.as_ref() != url.as_ref()) {
-                    *indexed_url = None;
+            for key in [m3u_stream_url_identity(url), m3u_flussonic_live_file_index_key(url)].into_iter().flatten() {
+                if let Some(indexed_url) = indexed_urls.get_mut(key.as_str()) {
+                    if indexed_url.as_ref().is_some_and(|indexed| indexed.as_ref() != url.as_ref()) {
+                        *indexed_url = None;
+                    }
+                } else {
+                    indexed_urls.insert(key.into(), Some(Arc::clone(url)));
                 }
-            } else {
-                indexed_urls.insert(identity.into(), Some(Arc::clone(url)));
             }
         };
         for item in &playlist_items {
@@ -466,6 +467,22 @@ pub async fn load_input_m3u_stream_url(
     requested_stream_url: &str,
 ) -> Result<Option<Arc<str>>, TuliproxError> {
     let Some(identity) = m3u_stream_url_identity(requested_stream_url) else { return Ok(None) };
+    load_first_input_m3u_stream_url_by_keys(app_config, input_name, vec![identity]).await
+}
+
+/// Resolves the first index key present in the input's M3U stream URL index.
+///
+/// All keys are queried against one opened index, so callers probing several sibling
+/// URLs pay a single lock and blocking task.
+pub async fn load_first_input_m3u_stream_url_by_keys(
+    app_config: &Arc<AppConfig>,
+    input_name: &Arc<str>,
+    keys: Vec<String>,
+) -> Result<Option<Arc<str>>, TuliproxError> {
+    let identities: Vec<Arc<str>> = keys.into_iter().map(Arc::from).collect();
+    if identities.is_empty() {
+        return Ok(None);
+    }
     let cfg = app_config.config.load();
     let storage_path = build_input_storage_path(input_name, &cfg.storage_dir);
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, input_name);
@@ -482,9 +499,18 @@ pub async fn load_input_m3u_stream_url(
         let mut query = BPlusTreeQuery::<Arc<str>, Arc<str>>::try_new(&index_path).map_err(|err| {
             TuliproxError::RepositoryM3u(format!("failed to open M3U stream URL index {}: {err}", index_path.display()))
         })?;
-        query.query(&identity.into()).map_err(|err| {
-            TuliproxError::RepositoryM3u(format!("failed to read M3U stream URL index {}: {err}", index_path.display()))
-        })
+        for identity in &identities {
+            let resolved = query.query(identity).map_err(|err| {
+                TuliproxError::RepositoryM3u(format!(
+                    "failed to read M3U stream URL index {}: {err}",
+                    index_path.display()
+                ))
+            })?;
+            if resolved.is_some() {
+                return Ok(resolved);
+            }
+        }
+        Ok(None)
     })
     .await
     .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to join M3U stream URL lookup task: {err}")))?
