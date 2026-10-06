@@ -37,13 +37,51 @@ pub fn is_account_query_key(key: &str) -> bool {
         || ends_with_ignore_ascii_case("_key")
 }
 
+/// Live playlist file names a Flussonic channel directory can expose next to its archive files.
+pub const FLUSSONIC_LIVE_FILES: [&str; 7] =
+    ["index.m3u8", "video.m3u8", "mono.m3u8", "mpegts", "index.ts", "video.ts", "mono.ts"];
+
 /// Builds the account-independent identity used to correlate equivalent M3U stream URLs.
 ///
 /// Account credentials are removed from the URL authority and query while all other URL
 /// components remain part of the identity. Query pairs are sorted so provider accounts may
-/// return the same channel parameters in a different order.
+/// return the same channel parameters in a different order. Supported Flussonic live file
+/// names are lowercased, so `MONO.M3U8` and `mono.m3u8` share one identity.
 pub fn m3u_stream_url_identity(stream_url: &str) -> Option<String> {
     let mut url = Url::parse(stream_url).ok()?;
+    normalize_flussonic_live_file(&mut url);
+    account_independent_identity(url)
+}
+
+/// Identity as written by indexes built before Flussonic live file names were normalized.
+///
+/// Returns `None` when it equals [`m3u_stream_url_identity`], so lookups only add a
+/// fallback query where an older index could hold a different key.
+pub fn legacy_m3u_stream_url_identity(stream_url: &str) -> Option<String> {
+    let url = Url::parse(stream_url).ok()?;
+    let mut normalized = url.clone();
+    normalize_flussonic_live_file(&mut normalized);
+    if normalized == url {
+        return None;
+    }
+    account_independent_identity(url)
+}
+
+fn normalize_flussonic_live_file(url: &mut Url) {
+    let Some(file) = url.path_segments().and_then(Iterator::last) else {
+        return;
+    };
+    let Some(live_file) = FLUSSONIC_LIVE_FILES.iter().find(|live_file| live_file.eq_ignore_ascii_case(file)) else {
+        return;
+    };
+    if *live_file != file {
+        if let Ok(mut segments) = url.path_segments_mut() {
+            segments.pop().push(live_file);
+        }
+    }
+}
+
+fn account_independent_identity(mut url: Url) -> Option<String> {
     if url.cannot_be_a_base() || url.host_str().is_none() {
         return None;
     }
@@ -70,6 +108,23 @@ pub fn m3u_stream_url_identity(stream_url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_lowercases_only_supported_flussonic_live_files() {
+        assert_eq!(
+            m3u_stream_url_identity("http://stream.example:4000/323/MONO.M3U8?token=a"),
+            m3u_stream_url_identity("http://stream.example:4000/323/mono.m3u8?token=b")
+        );
+        assert_eq!(
+            m3u_stream_url_identity("http://stream.example:4000/323/Playlist.M3U8?token=a").as_deref(),
+            Some("http://stream.example:4000/323/Playlist.M3U8")
+        );
+        assert_eq!(
+            legacy_m3u_stream_url_identity("http://stream.example:4000/323/MONO.M3U8?token=a").as_deref(),
+            Some("http://stream.example:4000/323/MONO.M3U8")
+        );
+        assert_eq!(legacy_m3u_stream_url_identity("http://stream.example:4000/323/mono.m3u8?token=a"), None);
+    }
 
     #[test]
     fn identity_ignores_account_tokens_but_preserves_channel_parameters() {

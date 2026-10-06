@@ -1152,7 +1152,18 @@ async fn resolve_m3u_alias_flussonic_archive_url(
     let requested = Url::parse(stream_url).ok()?;
     let archive_file = requested.path_segments()?.next_back()?;
     crate::iptv::m3u::parse_flussonic_archive_file(archive_file)?;
-    let siblings: Vec<String> = crate::iptv::m3u::FLUSSONIC_LIVE_FILES
+    // The live file the archive was derived from is probed first: same stem, then same transport.
+    let archive_lower = archive_file.to_ascii_lowercase();
+    let archive_is_hls = archive_lower.ends_with(HLS_EXT);
+    let archive_stem = archive_lower.split_once('-').map(|(stem, _)| stem);
+    let mut live_files = crate::iptv::m3u::FLUSSONIC_LIVE_FILES;
+    live_files.sort_by_key(|live_file| {
+        let same_stem =
+            archive_stem.is_some_and(|stem| live_file.split_once('.').is_some_and(|(name, _)| name == stem));
+        let same_transport = live_file.ends_with(HLS_EXT) == archive_is_hls;
+        (!same_stem, !same_transport)
+    });
+    let siblings: Vec<String> = live_files
         .iter()
         .filter_map(|live_file| {
             let mut sibling = requested.clone();

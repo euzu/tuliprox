@@ -121,9 +121,7 @@ pub fn parse_flussonic_archive_file(file: &str) -> Option<FlussonicArchiveKind> 
     None
 }
 
-/// Live playlist file names a Flussonic channel directory can expose next to its archive files.
-pub const FLUSSONIC_LIVE_FILES: [&str; 7] =
-    ["index.m3u8", "video.m3u8", "mono.m3u8", "mpegts", "index.ts", "video.ts", "mono.ts"];
+pub use shared::utils::FLUSSONIC_LIVE_FILES;
 
 pub fn is_flussonic_live_file(file: &str) -> bool {
     FLUSSONIC_LIVE_FILES.iter().any(|supported_file| file.trim().eq_ignore_ascii_case(supported_file))

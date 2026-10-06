@@ -19,7 +19,7 @@ use shared::{
         LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties,
         XtreamCluster,
     },
-    utils::{m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
+    utils::{legacy_m3u_stream_url_identity, m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
     collections::HashMap,
@@ -471,14 +471,19 @@ pub async fn load_input_m3u_stream_url(
 /// Resolves the first candidate URL present in the input's M3U stream URL index.
 ///
 /// All candidates are queried against one opened index, so callers probing several
-/// sibling URLs pay a single lock and blocking task.
+/// sibling URLs pay a single lock and blocking task. Each candidate also tries its legacy
+/// identity, so indexes written before live file name normalization keep matching.
 pub async fn load_first_input_m3u_stream_url<'a>(
     app_config: &Arc<AppConfig>,
     input_name: &Arc<str>,
     candidate_stream_urls: impl IntoIterator<Item = &'a str>,
 ) -> Result<Option<Arc<str>>, TuliproxError> {
-    let identities: Vec<Arc<str>> =
-        candidate_stream_urls.into_iter().filter_map(m3u_stream_url_identity).map(Arc::from).collect();
+    let identities: Vec<Arc<str>> = candidate_stream_urls
+        .into_iter()
+        .flat_map(|url| [m3u_stream_url_identity(url), legacy_m3u_stream_url_identity(url)])
+        .flatten()
+        .map(Arc::from)
+        .collect();
     if identities.is_empty() {
         return Ok(None);
     }

@@ -586,9 +586,16 @@ async fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alia
     );
 }
 
-/// Primary and backup M3U accounts whose stream tokens are independent of their playlist
-/// keys; only the backup alias playlist (with its own stream token) is persisted.
 async fn independent_stream_token_alias_fixture(
+) -> (tempfile::TempDir, Arc<AppConfig>, ConfigInput, Arc<RuntimeProviderConfig>) {
+    independent_stream_token_alias_fixture_with(&["http://stream.example:4000/323/mono.m3u8?token=backup-stream-token"])
+        .await
+}
+
+/// Primary and backup M3U accounts whose stream tokens are independent of their playlist
+/// keys; only the backup alias playlist with `alias_urls` is persisted.
+async fn independent_stream_token_alias_fixture_with(
+    alias_urls: &[&str],
 ) -> (tempfile::TempDir, Arc<AppConfig>, ConfigInput, Arc<RuntimeProviderConfig>) {
     use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
     use tuliprox_repository::{get_input_m3u_playlist_file_path, get_input_storage_path, persist_input_m3u_playlist};
@@ -625,16 +632,20 @@ async fn independent_stream_token_alias_fixture(
     let playlist = vec![PlaylistGroup {
         id: 1,
         title: "Live".intern(),
-        channels: vec![PlaylistItem {
-            header: PlaylistItemHeader {
-                id: "channel-323".intern(),
-                input_stream_id: "channel-323".intern(),
-                url: "http://stream.example:4000/323/mono.m3u8?token=backup-stream-token".intern(),
-                item_type: PlaylistItemType::Live,
-                xtream_cluster: XtreamCluster::Live,
-                ..PlaylistItemHeader::default()
-            },
-        }],
+        channels: alias_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: format!("channel-323-{index}").intern(),
+                    input_stream_id: format!("channel-323-{index}").intern(),
+                    url: (*url).intern(),
+                    item_type: PlaylistItemType::Live,
+                    xtream_cluster: XtreamCluster::Live,
+                    ..PlaylistItemHeader::default()
+                },
+            })
+            .collect(),
         xtream_cluster: XtreamCluster::Live,
     }];
     persist_input_m3u_playlist(&app_config, &playlist_path, &playlist).await.expect("alias playlist should persist");
@@ -685,6 +696,59 @@ async fn select_provider_stream_url_maps_flussonic_archive_to_alias_stream_token
             )),
             "{archive_file}"
         );
+    }
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_prefers_archive_source_live_file() {
+    let (_temp, app_config, input, alias) = independent_stream_token_alias_fixture_with(&[
+        "http://stream.example:4000/323/index.m3u8?token=index-token",
+        "http://stream.example:4000/323/mono.ts?token=mono-ts-token",
+        "http://stream.example:4000/323/mono.m3u8?token=mono-hls-token",
+    ])
+    .await;
+
+    for (archive_file, token) in [
+        ("mono-1791225557-14400.m3u8", "mono-hls-token"),
+        ("mono-1791225557-14400.ts", "mono-ts-token"),
+        ("index-1791225557-14400.m3u8", "index-token"),
+    ] {
+        let selected = select_provider_stream_url(
+            &format!("http://stream.example:4000/323/{archive_file}?token=primary-stream-token"),
+            &input,
+            &alias,
+            false,
+            &app_config,
+        )
+        .await;
+
+        assert_eq!(
+            selected.map(|(_, url)| url),
+            Some(format!("http://stream.example:4000/323/{archive_file}?token={token}")),
+            "{archive_file}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_matches_uppercase_alias_live_file() {
+    let (_temp, app_config, input, alias) = independent_stream_token_alias_fixture_with(&[
+        "http://stream.example:4000/323/MONO.M3U8?token=backup-stream-token",
+    ])
+    .await;
+
+    for requested in [
+        "http://stream.example:4000/323/mono-1791225557-14400.m3u8?token=primary-stream-token",
+        "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
+    ] {
+        let selected = select_provider_stream_url(requested, &input, &alias, false, &app_config).await;
+        let expected = if requested.contains("mono-") {
+            "http://stream.example:4000/323/mono-1791225557-14400.m3u8?token=backup-stream-token"
+        } else {
+            // A live hit returns the stored alias URL unchanged.
+            "http://stream.example:4000/323/MONO.M3U8?token=backup-stream-token"
+        };
+        assert_eq!(selected.map(|(_, url)| url).as_deref(), Some(expected), "{requested}");
     }
 }
 
