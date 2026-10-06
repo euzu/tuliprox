@@ -1,4 +1,5 @@
 use crate::{
+    build_epg_group_index, epg_group_index_remove, epg_group_index_store,
     error_macros::{cant_open_result, cant_query_result},
     m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree,
     BPlusTreeQuery,
@@ -7,7 +8,11 @@ use shared::{
     error::TuliproxError,
     model::{EpgChannel, EpgOutputOptions, PlaylistGroup},
 };
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 use tokio::task;
 use tuliprox_core::{
     model::{Config, ConfigTarget, Epg, TargetOutput},
@@ -38,6 +43,23 @@ fn epg_order_rank(source_ordinal: u32, traversal_ordinal: u32) -> u64 {
     (u64::from(ordinal) << u32::BITS) | u64::from(traversal_ordinal)
 }
 
+/// A channel is written to the target EPG db only when it has programmes.
+fn is_written_epg_channel(channel: &EpgChannel) -> bool { !channel.programmes.is_empty() }
+
+/// Canonical keys `epg_write_file` writes for `epg`, or `None` when it writes nothing.
+fn epg_written_keys(epg: &Epg, output_case: EpgIdOutputCase) -> Option<HashSet<Arc<str>>> {
+    if epg.children.is_empty() {
+        return None;
+    }
+    Some(
+        epg.children
+            .iter()
+            .filter(|channel| is_written_epg_channel(channel))
+            .map(|channel| canonicalize_output_epg_id(&channel.id, output_case))
+            .collect(),
+    )
+}
+
 pub fn epg_write_file<S: std::hash::BuildHasher>(
     target_name: &str,
     epg: &Epg,
@@ -53,7 +75,7 @@ pub fn epg_write_file<S: std::hash::BuildHasher>(
     let mut tree = BPlusTree::<Arc<str>, EpgChannel>::new();
     let output_case = EpgIdOutputCase::from_lowercase(epg_output.lowercase_ids);
     for channel in &epg.children {
-        if channel.programmes.is_empty() {
+        if !is_written_epg_channel(channel) {
             continue;
         }
 
@@ -149,29 +171,9 @@ pub async fn epg_write_for_target(
             target.options.as_ref().map_or_else(EpgOutputOptions::default, |options| options.epg_output.clone());
         let output_case = EpgIdOutputCase::from_lowercase(epg_output.lowercase_ids);
         let (rename_map, order_map) = build_epg_maps(playlist, output_case);
-        let rename_map = Arc::new(rename_map);
-        let order_map = Arc::new(order_map);
-        let epg_data = Arc::new(epg_data.clone());
-        match output {
+        let epg_path = match output {
             TargetOutput::Xtream(_) => match xtream_get_storage_path(cfg, &target.name) {
-                Some(path) => {
-                    let epg_path = xtream_get_epg_file_path_for_target(&path);
-                    debug_if_enabled!("writing xtream epg to {}", epg_path.display());
-                    let target_name = target.name.clone();
-                    let target_name_err = target_name.clone();
-                    let rename_map = Arc::clone(&rename_map);
-                    let order_map = Arc::clone(&order_map);
-                    let epg_data = Arc::clone(&epg_data);
-                    let epg_output = epg_output.clone();
-                    let epg_path = epg_path.clone();
-                    tokio::task::spawn_blocking(move || {
-                        epg_write_file(&target_name, &epg_data, &epg_path, &rename_map, Some(&order_map), &epg_output)
-                    })
-                    .await
-                    .map_err(|err| {
-                        TuliproxError::RepositoryEpg(format!("Failed to write epg for target {target_name_err}: {err}"))
-                    })??;
-                }
+                Some(path) => xtream_get_epg_file_path_for_target(&path),
                 None => {
                     return Err(TuliproxError::RepositoryEpg(format!(
                         "failed to write epg for target: {}, storage path not found",
@@ -179,26 +181,35 @@ pub async fn epg_write_for_target(
                     )))
                 }
             },
-            TargetOutput::M3u(_) => {
-                let path = m3u_get_epg_file_path_for_target(target_path);
-                debug_if_enabled!("writing m3u epg to {}", path.display());
-                let target_name = target.name.clone();
-                let target_name_err = target_name.clone();
-                let rename_map = Arc::clone(&rename_map);
-                let order_map = Arc::clone(&order_map);
-                let epg_data = Arc::clone(&epg_data);
-                let epg_output = epg_output.clone();
-                let path = path.clone();
-                tokio::task::spawn_blocking(move || {
-                    epg_write_file(&target_name, &epg_data, &path, &rename_map, Some(&order_map), &epg_output)
-                })
-                .await
-                .map_err(|err| {
-                    TuliproxError::RepositoryEpg(format!("Failed to write epg for target {target_name_err}: {err}"))
-                })??;
+            TargetOutput::M3u(_) => m3u_get_epg_file_path_for_target(target_path),
+            TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) => return Ok(()),
+        };
+        debug_if_enabled!("writing {} epg to {}", output.target_type(), epg_path.display());
+        // The group index is small and built from the borrowed playlist here, so the playlist is
+        // not cloned into the blocking task. It is only written together with the EPG db.
+        let group_index = playlist
+            .zip(epg_written_keys(epg_data, output_case))
+            .map(|(playlist, keys)| build_epg_group_index(playlist, &keys, output_case));
+        let target_name = target.name.clone();
+        let target_name_err = target_name.clone();
+        let epg_data = epg_data.clone();
+        tokio::task::spawn_blocking(move || {
+            // The old index goes before the EPG db is replaced and the new one is published after
+            // it, so a failure at any step leaves no index rather than one of another EPG db.
+            // Readers treat a missing index as "not built yet". An empty EPG keeps the old db.
+            if !epg_data.children.is_empty() {
+                epg_group_index_remove(&epg_path)?;
             }
-            TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) => {}
-        }
+            epg_write_file(&target_name, &epg_data, &epg_path, &rename_map, Some(&order_map), &epg_output)?;
+            if let Some(group_index) = group_index {
+                epg_group_index_store(group_index, &epg_path)?;
+            }
+            Ok::<_, TuliproxError>(())
+        })
+        .await
+        .map_err(|err| {
+            TuliproxError::RepositoryEpg(format!("Failed to write epg for target {target_name_err}: {err}"))
+        })??;
     }
     Ok(())
 }
@@ -314,6 +325,136 @@ mod tests {
         assert!(results[1].1.is_some());
         assert_eq!(results[2].0.as_ref(), "ch3");
         assert!(results[2].1.is_none());
+    }
+
+    fn epg_with_channels(ids: &[&str]) -> Epg {
+        Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: ids
+                .iter()
+                .map(|id| {
+                    Arc::new(EpgChannel {
+                        id: id.intern(),
+                        title: None,
+                        icon: None,
+                        programmes: vec![EpgProgramme::new(0, 60, id.intern())],
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    fn live_group(title: &str, channels: &[(u32, &str)]) -> PlaylistGroup {
+        PlaylistGroup {
+            id: 1,
+            title: title.intern(),
+            channels: channels
+                .iter()
+                .map(|(virtual_id, epg_id)| PlaylistItem {
+                    header: PlaylistItemHeader {
+                        virtual_id: shared::model::VirtualId::new(*virtual_id),
+                        name: format!("ch{virtual_id}").intern(),
+                        epg_channel_id: Some(epg_id.intern()),
+                        xtream_cluster: XtreamCluster::Live,
+                        ..PlaylistItemHeader::default()
+                    },
+                })
+                .collect(),
+            xtream_cluster: XtreamCluster::Live,
+        }
+    }
+
+    async fn write_target_epg(
+        tmp: &TempDir,
+        playlist: Option<&[PlaylistGroup]>,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let config = Config { storage_dir: tmp.path().to_string_lossy().into_owned(), ..Config::default() };
+        let target = target_with_m3u_and_xtream();
+        let target_path = crate::get_target_storage_path(&config, &target.name).expect("target storage path");
+        let m3u_path = m3u_get_epg_file_path_for_target(&target_path);
+        let xtream_storage = xtream_get_storage_path(&config, &target.name).expect("xtream storage path");
+        let xtream_path = xtream_get_epg_file_path_for_target(&xtream_storage);
+        std::fs::create_dir_all(m3u_path.parent().expect("m3u parent")).expect("create m3u storage");
+        std::fs::create_dir_all(xtream_path.parent().expect("xtream parent")).expect("create xtream storage");
+        let epg = epg_with_channels(&["a", "b"]);
+        for output in &target.output {
+            epg_write_for_target(&config, &target, &target_path, Some(&epg), output, playlist)
+                .await
+                .expect("write target EPG");
+        }
+        (m3u_path, xtream_path)
+    }
+
+    #[tokio::test]
+    async fn target_epg_write_creates_group_index_next_to_each_epg_db() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let playlist = vec![live_group("Sport", &[(7, "b"), (8, "missing")]), live_group("News", &[(3, "a")])];
+        let (m3u_path, xtream_path) = write_target_epg(&tmp, Some(&playlist)).await;
+
+        for epg_path in [&m3u_path, &xtream_path] {
+            let mut groups = BPlusTreeQuery::<u32, crate::EpgGroupEntry>::try_new(&crate::epg_groups_path(epg_path))
+                .expect("groups index written");
+            let names: Vec<_> = groups
+                .iter()
+                .map(|entry| entry.map(|(_, group)| (group.name.to_string(), group.channel_count)))
+                .collect::<std::io::Result<_>>()
+                .expect("groups readable");
+            assert_eq!(names, vec![("Sport".to_string(), 1), ("News".to_string(), 1)]);
+            assert!(crate::epg_group_channels_path(epg_path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn target_epg_write_without_playlist_writes_no_group_index() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let (m3u_path, xtream_path) = write_target_epg(&tmp, None).await;
+        for epg_path in [&m3u_path, &xtream_path] {
+            assert!(epg_path.exists());
+            assert!(!crate::epg_groups_path(epg_path).exists());
+            assert!(!crate::epg_group_channels_path(epg_path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn target_epg_rewrite_without_playlist_removes_stale_group_index() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let playlist = vec![live_group("News", &[(3, "a")])];
+        write_target_epg(&tmp, Some(&playlist)).await;
+        let (m3u_path, xtream_path) = write_target_epg(&tmp, None).await;
+        for epg_path in [&m3u_path, &xtream_path] {
+            assert!(epg_path.exists());
+            assert!(!crate::epg_groups_path(epg_path).exists());
+            assert!(!crate::epg_group_channels_path(epg_path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn target_epg_write_keeps_old_db_when_stale_group_index_cannot_be_removed() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let config = Config { storage_dir: tmp.path().to_string_lossy().into_owned(), ..Config::default() };
+        let target = target_with_m3u_and_xtream();
+        let target_path = crate::get_target_storage_path(&config, &target.name).expect("target storage path");
+        let epg_path = m3u_get_epg_file_path_for_target(&target_path);
+        // A directory cannot be removed as a file, so invalidating the old index fails.
+        std::fs::create_dir_all(crate::epg_groups_path(&epg_path)).expect("create blocking groups path");
+        let output = target.output.iter().find(|output| matches!(output, TargetOutput::M3u(_))).expect("m3u output");
+        let playlist = vec![live_group("News", &[(3, "a")])];
+
+        let result = epg_write_for_target(
+            &config,
+            &target,
+            &target_path,
+            Some(&epg_with_channels(&["a"])),
+            output,
+            Some(&playlist),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!epg_path.exists());
+        assert!(!crate::epg_group_channels_path(&epg_path).exists());
     }
 
     #[tokio::test]

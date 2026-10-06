@@ -7,10 +7,11 @@ use indexmap::IndexMap;
 use log::error;
 use shared::{
     model::{
-        EpgChannel, EpgTv, InputRefreshOverride, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest,
-        PlaylistUpdateRequestDto, PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, SeriesStreamProperties,
-        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, UiPlaylistCategories, UiPlaylistGroup,
-        UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
+        EpgChannel, EpgChannelFilter, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest, EpgTv,
+        InputRefreshOverride, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest, PlaylistUpdateRequestDto,
+        PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, SeriesStreamProperties, StreamEpgItemRequest,
+        StreamEpgRequest, StreamEpgResponse, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster,
+        XtreamSeriesInfoDoc,
     },
     utils::concat_path_leading_slash,
 };
@@ -27,6 +28,8 @@ pub struct PlaylistService {
     playlist_api_series_info_path: String,
     playlist_api_episode_info_path: String,
     stream_epg_path: String,
+    epg_groups_path: String,
+    epg_grid_path: String,
 }
 impl Default for PlaylistService {
     fn default() -> Self { Self::new() }
@@ -48,6 +51,8 @@ impl PlaylistService {
             playlist_api_series_info_path: api("series_info"),
             playlist_api_episode_info_path: api("series/episode"),
             stream_epg_path: api("epg/stream"),
+            epg_groups_path: api("epg/groups"),
+            epg_grid_path: api("epg/grid"),
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
@@ -173,6 +178,29 @@ impl PlaylistService {
                 None
             }
         }
+    }
+
+    /// Playlist groups of a target that have channels with EPG data, in playlist order.
+    /// `Ok(None)`: the target has no group index yet (it was not updated since the index exists).
+    /// With a `filter`, only groups with matching channels, counting the matches.
+    pub async fn get_epg_groups(
+        &self,
+        target_id: u16,
+        filter: Option<EpgChannelFilter>,
+    ) -> Result<Option<Vec<EpgGroupInfo>>, Error> {
+        request_post(&self.epg_groups_path, &EpgGroupsRequest { target_id, filter }, None, Some(Encoding::Cbor)).await
+    }
+
+    /// Channels of one playlist group with their programmes (time and title only).
+    /// `Ok(None)`: the server has no content for the group.
+    pub async fn get_epg_grid(
+        &self,
+        target_id: u16,
+        group: String,
+        filter: Option<EpgChannelFilter>,
+    ) -> Result<Option<Vec<EpgGridRow>>, Error> {
+        request_post(&self.epg_grid_path, &EpgGridRequest { target_id, group, filter }, None, Some(Encoding::Cbor))
+            .await
     }
 
     /// Fetches per-stream EPG data for the UI "now playing" / "up next" display.

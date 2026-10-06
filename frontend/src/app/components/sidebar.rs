@@ -3,7 +3,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
-    utils::{get_local_storage_item, html_if, set_local_storage_item},
+    utils::{get_local_storage_item, html_if, set_local_storage_item, MOBILE_BREAKPOINT_PX},
 };
 use shared::model::permission::Permission;
 use std::str::FromStr;
@@ -12,7 +12,6 @@ use web_sys::window;
 use yew::prelude::*;
 use yew_hooks::use_mount;
 
-const MOBILE_BREAKPOINT_PX: f64 = 780.0;
 const TP_SIDEBAR_COLLAPSED_KEY: &str = "tp-sidebar-collapsed";
 
 #[derive(Debug, Copy, Clone, PartialEq)]

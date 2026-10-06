@@ -31,7 +31,93 @@ $epg-border-size: 4px;
     }
   }
 
+  &__main {
+    display: flex;
+    flex-flow: row;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  &__group-panel {
+    height: 100%;
+    border-right: 1px solid var(--border-color);
+  }
+
+  &__groups {
+    display: flex;
+    flex-flow: column;
+    min-width: 0;
+
+    &--disabled {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+  }
+
+  &__groups-title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    box-sizing: border-box;
+    height: var(--epg-header-height);
+    line-height: var(--epg-header-height);
+    padding: 0 var(--padding-small);
+    background-color: var(--background-color);
+    color: var(--modest-text-color);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__group-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  &__group {
+    display: flex;
+    flex-flow: row;
+    align-items: center;
+    gap: var(--gap-small);
+    padding: var(--padding-small);
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    white-space: nowrap;
+
+    &:hover,
+    &:focus-visible {
+      background-color: var(--card-background-color);
+      outline: none;
+    }
+
+    &--active {
+      background-color: var(--epg-program-active-background-color);
+      color: var(--epg-program-active-color);
+    }
+  }
+
+  &__group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__group-count {
+    flex-shrink: 0;
+    color: var(--modest-text-color);
+    font-size: var(--font-size-sm);
+  }
+
+  .tp__shrink-panel--shrunk &__group-count {
+    display: none;
+  }
+
   &__body {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     flex-flow: row;
     overflow-x: auto;
@@ -41,6 +127,9 @@ $epg-border-size: 4px;
     -webkit-overflow-scrolling: touch;
     touch-action: pan-x pan-y;
     overscroll-behavior: contain;
+    // Scroll position is managed in code (virtualized rows and programmes, anchored zoom);
+    // browser scroll anchoring would move it when culled elements leave the DOM.
+    overflow-anchor: none;
     contain: layout style;
     will-change: scroll-position;
   }
@@ -113,16 +202,13 @@ $epg-border-size: 4px;
     min-width: 100%;
     height: fit-content;
     position: relative;
-
-    &-panning {
-      touch-action: none;
-    }
   }
 
   &__program-grid {
     position: relative;
     cursor: grab;
-    touch-action: none;
+    // Touch scrolling stays native (momentum); only mouse drag pans in code.
+    touch-action: pan-x pan-y;
 
     &-panning {
       cursor: grabbing;

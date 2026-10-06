@@ -234,7 +234,7 @@ pub fn rewrite_epg_channel_resource_url(
 /// Wraps an EPG icon into a proxy link, so the client never receives the destination itself.
 ///
 /// Empty and instance-relative paths are already served by this instance and stay untouched.
-fn rewrite_epg_resource_icon(
+pub(in crate::api) fn rewrite_epg_resource_icon(
     encrypt_secret: &[u8; 16],
     resource_url: &str,
     icon: Option<Arc<str>>,
