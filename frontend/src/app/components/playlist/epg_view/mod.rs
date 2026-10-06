@@ -316,6 +316,7 @@ pub fn EpgView() -> Html {
                 service_ctx.toastr.warning(translate.t("MESSAGES.EPG.GROUP_TRUNCATED"));
             }
             let service_ctx = service_ctx.clone();
+            let translate = translate.clone();
             let grid_model = grid_model.clone();
             let epg_request_seq = epg_request_seq.clone();
             let pending_recenter = pending_recenter.clone();
@@ -332,14 +333,21 @@ pub fn EpgView() -> Html {
                             &epg_request_seq.borrow(),
                             token,
                             rows,
-                            |rows| {
-                                *pending_recenter.borrow_mut() = rows.is_some();
-                                grid_model.set(rows.map(|rows| {
-                                    ModelRef(Rc::new(EpgGridModel::from_grid_rows(
-                                        &rows,
-                                        cached_offsets(local_offset_secs),
-                                    )))
-                                }));
+                            |rows| match rows {
+                                Ok(rows) => {
+                                    *pending_recenter.borrow_mut() = rows.is_some();
+                                    grid_model.set(rows.map(|rows| {
+                                        ModelRef(Rc::new(EpgGridModel::from_grid_rows(
+                                            &rows,
+                                            cached_offsets(local_offset_secs),
+                                        )))
+                                    }));
+                                }
+                                Err(err) => {
+                                    *pending_recenter.borrow_mut() = false;
+                                    grid_model.set(None);
+                                    service_ctx.toastr.error(format!("{}: {err}", translate.t("LABEL.EPG")));
+                                }
                             },
                             || service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Hide)),
                         );

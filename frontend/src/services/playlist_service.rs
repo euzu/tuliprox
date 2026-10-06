@@ -192,18 +192,15 @@ impl PlaylistService {
     }
 
     /// Channels of one playlist group with their programmes (time and title only).
+    /// `Ok(None)`: the server has no content for the group.
     pub async fn get_epg_grid(
         &self,
         target_id: u16,
         group: String,
         filter: Option<EpgChannelFilter>,
-    ) -> Option<Vec<EpgGridRow>> {
+    ) -> Result<Option<Vec<EpgGridRow>>, Error> {
         request_post(&self.epg_grid_path, &EpgGridRequest { target_id, group, filter }, None, Some(Encoding::Cbor))
             .await
-            .unwrap_or_else(|err| {
-                error!("{err}");
-                None
-            })
     }
 
     /// Fetches per-stream EPG data for the UI "now playing" / "up next" display.
