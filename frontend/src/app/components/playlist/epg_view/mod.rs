@@ -375,6 +375,8 @@ pub fn EpgView() -> Html {
             let group_index_missing = group_index_missing.clone();
             let last_group = last_group.clone();
             let load_grid = load_grid.clone();
+            // The listed groups belong to the previous request until the new list arrives.
+            groups_ready.set(false);
             service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Show));
             spawn_local(async move {
                 let result = service_ctx.playlist.get_epg_groups(target_id, filter.clone()).await;
@@ -408,7 +410,10 @@ pub fn EpgView() -> Html {
                             groups_ready.set(true);
                         }
                         Ok(None) => group_index_missing.set(true),
-                        Err(err) => service_ctx.toastr.error(format!("{}: {err}", translate.t("LABEL.EPG_GROUPS"))),
+                        Err(err) => {
+                            groups_ready.set(true);
+                            service_ctx.toastr.error(format!("{}: {err}", translate.t("LABEL.EPG_GROUPS")));
+                        }
                     },
                     || service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Hide)),
                 );

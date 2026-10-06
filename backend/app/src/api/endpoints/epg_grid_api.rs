@@ -24,7 +24,7 @@ use serde::Serialize;
 use shared::{
     model::{
         EpgChannel, EpgChannelFilter, EpgGridProgrammeDto, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest,
-        TargetType, MAX_EPG_GRID_ROWS, REGEX_CACHE,
+        TargetType, MAX_EPG_GRID_ROWS,
     },
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
 };
@@ -46,6 +46,9 @@ pub(in crate::api) fn to_grid_programmes(channel: EpgChannel) -> Vec<EpgGridProg
         .collect()
 }
 
+/// Compiled size limit of a grid search regular expression.
+const MAX_SEARCH_REGEX_SIZE: usize = 1 << 20;
+
 /// Channel name matcher of the grid search.
 pub(in crate::api) enum ChannelMatcher {
     All,
@@ -61,9 +64,11 @@ impl ChannelMatcher {
             None => Ok(Self::All),
             Some(EpgChannelFilter::Text(pattern)) if pattern.trim().is_empty() => Ok(Self::All),
             Some(EpgChannelFilter::Text(pattern)) => Ok(Self::Text(pattern.to_lowercase())),
-            Some(EpgChannelFilter::Regexp(pattern)) => REGEX_CACHE
-                .get_or_compile(pattern)
-                .map(Self::Regexp)
+            // Request patterns stay out of the shared regex cache, which only a reload sweeps.
+            Some(EpgChannelFilter::Regexp(pattern)) => regex::RegexBuilder::new(pattern)
+                .size_limit(MAX_SEARCH_REGEX_SIZE)
+                .build()
+                .map(|regex| Self::Regexp(Arc::new(regex)))
                 .map_err(|err| format!("Invalid search pattern: {err}")),
         }
     }
@@ -347,6 +352,11 @@ mod tests {
         assert!(matcher.matches("ZDF HD"));
         assert!(!matcher.matches("Das ZDF"));
         assert!(ChannelMatcher::new(Some(&EpgChannelFilter::Regexp("(".to_owned()))).is_err());
+    }
+
+    #[test]
+    fn channel_matcher_rejects_oversized_regexp() {
+        assert!(ChannelMatcher::new(Some(&EpgChannelFilter::Regexp("a{1000}{1000}".to_owned()))).is_err());
     }
 
     #[test]
