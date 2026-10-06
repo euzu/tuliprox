@@ -35,7 +35,7 @@ use crate::{
         parser::hls::{classify_hls_playlist, rewrite_hls, HlsPlaylistKind, RewriteHlsProps},
         processor::re_resolve_stalker_url,
     },
-    repository::load_input_m3u_stream_url,
+    repository::{load_first_input_m3u_stream_url, load_input_m3u_stream_url},
     utils::{
         async_file_reader, async_file_writer, classify_output_resource_url, classify_resource_hop,
         create_new_file_for_write, debug_if_enabled, get_file_extension, request,
@@ -1139,6 +1139,44 @@ fn stream_url_has_account_signature(stream_url: &str, user_info: &crate::model::
     false
 }
 
+/// Maps a Flussonic archive URL of another account onto the alias account.
+///
+/// The URL index only holds live URLs, so an archive URL derived from the main account's
+/// live URL never matches. The archive lives next to the channel's live file, so the alias
+/// URL of that sibling supplies the alias credentials and the archive file name is kept.
+async fn resolve_m3u_alias_flussonic_archive_url(
+    app_config: &Arc<AppConfig>,
+    provider_name: &Arc<str>,
+    stream_url: &str,
+) -> Option<String> {
+    let requested = Url::parse(stream_url).ok()?;
+    let archive_file = requested.path_segments()?.next_back()?;
+    crate::iptv::m3u::parse_flussonic_archive_file(archive_file)?;
+    let siblings: Vec<String> = crate::iptv::m3u::FLUSSONIC_LIVE_FILES
+        .iter()
+        .filter_map(|live_file| {
+            let mut sibling = requested.clone();
+            sibling.path_segments_mut().ok()?.pop().push(live_file);
+            Some(sibling.into())
+        })
+        .collect();
+    let alias_live_url =
+        match load_first_input_m3u_stream_url(app_config, provider_name, siblings.iter().map(String::as_str)).await {
+            Ok(url) => url?,
+            Err(err) => {
+                debug_if_enabled!(
+                    "Failed to resolve M3U archive sibling URL for provider {}: {}",
+                    sanitize_sensitive_info(provider_name),
+                    sanitize_sensitive_info(&err.to_string())
+                );
+                return None;
+            }
+        };
+    let mut alias_url = Url::parse(&alias_live_url).ok()?;
+    alias_url.path_segments_mut().ok()?.pop().push(archive_file);
+    Some(alias_url.into())
+}
+
 pub(crate) async fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,
@@ -1162,6 +1200,17 @@ pub(crate) async fn select_provider_stream_url(
                 return Some((provider_cfg.name.clone(), provider_stream_url.to_string()));
             }
             Ok(None) => {
+                if let Some(provider_stream_url) =
+                    resolve_m3u_alias_flussonic_archive_url(app_config, &provider_cfg.name, stream_url).await
+                {
+                    debug_if_enabled!(
+                        "M3U alias URL lookup: provider={} requested_url={} index_match=archive_sibling resolved_url={}",
+                        sanitize_sensitive_info(&provider_cfg.name),
+                        sanitize_sensitive_info(resolve_request_url_for_logging(input, stream_url).as_ref()),
+                        sanitize_sensitive_info(resolve_request_url_for_logging(input, &provider_stream_url).as_ref())
+                    );
+                    return Some((provider_cfg.name.clone(), provider_stream_url));
+                }
                 debug_if_enabled!(
                     "M3U alias URL lookup: provider={} requested_url={} index_match=false",
                     sanitize_sensitive_info(&provider_cfg.name),

@@ -465,7 +465,23 @@ pub async fn load_input_m3u_stream_url(
     input_name: &Arc<str>,
     requested_stream_url: &str,
 ) -> Result<Option<Arc<str>>, TuliproxError> {
-    let Some(identity) = m3u_stream_url_identity(requested_stream_url) else { return Ok(None) };
+    load_first_input_m3u_stream_url(app_config, input_name, std::iter::once(requested_stream_url)).await
+}
+
+/// Resolves the first candidate URL present in the input's M3U stream URL index.
+///
+/// All candidates are queried against one opened index, so callers probing several
+/// sibling URLs pay a single lock and blocking task.
+pub async fn load_first_input_m3u_stream_url<'a>(
+    app_config: &Arc<AppConfig>,
+    input_name: &Arc<str>,
+    candidate_stream_urls: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<Arc<str>>, TuliproxError> {
+    let identities: Vec<Arc<str>> =
+        candidate_stream_urls.into_iter().filter_map(m3u_stream_url_identity).map(Arc::from).collect();
+    if identities.is_empty() {
+        return Ok(None);
+    }
     let cfg = app_config.config.load();
     let storage_path = build_input_storage_path(input_name, &cfg.storage_dir);
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, input_name);
@@ -482,9 +498,18 @@ pub async fn load_input_m3u_stream_url(
         let mut query = BPlusTreeQuery::<Arc<str>, Arc<str>>::try_new(&index_path).map_err(|err| {
             TuliproxError::RepositoryM3u(format!("failed to open M3U stream URL index {}: {err}", index_path.display()))
         })?;
-        query.query(&identity.into()).map_err(|err| {
-            TuliproxError::RepositoryM3u(format!("failed to read M3U stream URL index {}: {err}", index_path.display()))
-        })
+        for identity in &identities {
+            let resolved = query.query(identity).map_err(|err| {
+                TuliproxError::RepositoryM3u(format!(
+                    "failed to read M3U stream URL index {}: {err}",
+                    index_path.display()
+                ))
+            })?;
+            if resolved.is_some() {
+                return Ok(resolved);
+            }
+        }
+        Ok(None)
     })
     .await
     .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to join M3U stream URL lookup task: {err}")))?

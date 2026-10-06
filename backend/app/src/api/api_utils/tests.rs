@@ -586,8 +586,10 @@ async fn select_provider_stream_url_rewrites_opaque_m3u_token_for_allocated_alia
     );
 }
 
-#[tokio::test]
-async fn select_provider_stream_url_uses_persisted_alias_url_for_independent_stream_token() {
+/// Primary and backup M3U accounts whose stream tokens are independent of their playlist
+/// keys; only the backup alias playlist (with its own stream token) is persisted.
+async fn independent_stream_token_alias_fixture(
+) -> (tempfile::TempDir, Arc<AppConfig>, ConfigInput, Arc<RuntimeProviderConfig>) {
     use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader};
     use tuliprox_repository::{get_input_m3u_playlist_file_path, get_input_storage_path, persist_input_m3u_playlist};
 
@@ -636,6 +638,12 @@ async fn select_provider_stream_url_uses_persisted_alias_url_for_independent_str
         xtream_cluster: XtreamCluster::Live,
     }];
     persist_input_m3u_playlist(&app_config, &playlist_path, &playlist).await.expect("alias playlist should persist");
+    (temp, app_config, input, alias)
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_uses_persisted_alias_url_for_independent_stream_token() {
+    let (_temp, app_config, input, alias) = independent_stream_token_alias_fixture().await;
 
     let selected = select_provider_stream_url(
         "http://stream.example:4000/323/mono.m3u8?token=primary-stream-token",
@@ -653,6 +661,41 @@ async fn select_provider_stream_url_uses_persisted_alias_url_for_independent_str
             "http://stream.example:4000/323/mono.m3u8?token=backup-stream-token".to_string(),
         ))
     );
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_maps_flussonic_archive_to_alias_stream_token() {
+    let (_temp, app_config, input, alias) = independent_stream_token_alias_fixture().await;
+
+    for archive_file in ["archive-1791225557-14400.m3u8", "mono-1791225557-14400.m3u8", "timeshift_abs-1791225557.ts"] {
+        let selected = select_provider_stream_url(
+            &format!("http://stream.example:4000/323/{archive_file}?token=primary-stream-token"),
+            &input,
+            &alias,
+            false,
+            &app_config,
+        )
+        .await;
+
+        assert_eq!(
+            selected,
+            Some((
+                "backup-account".intern(),
+                format!("http://stream.example:4000/323/{archive_file}?token=backup-stream-token"),
+            )),
+            "{archive_file}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_keeps_unindexed_non_archive_url() {
+    let (_temp, app_config, input, alias) = independent_stream_token_alias_fixture().await;
+    let segment = "http://stream.example:4000/323/tracks-v1a1/dvr-2026/10/05/18/26/seg.ts?token=backup-stream-token";
+
+    let selected = select_provider_stream_url(segment, &input, &alias, false, &app_config).await;
+
+    assert_eq!(selected, Some(("backup-account".intern(), segment.to_string())));
 }
 
 #[test]
