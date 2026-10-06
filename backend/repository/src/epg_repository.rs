@@ -194,12 +194,15 @@ pub async fn epg_write_for_target(
         let target_name_err = target_name.clone();
         let epg_data = epg_data.clone();
         tokio::task::spawn_blocking(move || {
+            // The old index goes before the EPG db is replaced and the new one is published after
+            // it, so a failure at any step leaves no index rather than one of another EPG db.
+            // Readers treat a missing index as "not built yet". An empty EPG keeps the old db.
+            if !epg_data.children.is_empty() {
+                epg_group_index_remove(&epg_path)?;
+            }
             epg_write_file(&target_name, &epg_data, &epg_path, &rename_map, Some(&order_map), &epg_output)?;
-            match group_index {
-                Some(group_index) => epg_group_index_store(group_index, &epg_path)?,
-                // Without a playlist the old index would describe the previous EPG db.
-                None if !epg_data.children.is_empty() => epg_group_index_remove(&epg_path)?,
-                None => {}
+            if let Some(group_index) = group_index {
+                epg_group_index_store(group_index, &epg_path)?;
             }
             Ok::<_, TuliproxError>(())
         })
@@ -425,6 +428,33 @@ mod tests {
             assert!(!crate::epg_groups_path(epg_path).exists());
             assert!(!crate::epg_group_channels_path(epg_path).exists());
         }
+    }
+
+    #[tokio::test]
+    async fn target_epg_write_keeps_old_db_when_stale_group_index_cannot_be_removed() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let config = Config { storage_dir: tmp.path().to_string_lossy().into_owned(), ..Config::default() };
+        let target = target_with_m3u_and_xtream();
+        let target_path = crate::get_target_storage_path(&config, &target.name).expect("target storage path");
+        let epg_path = m3u_get_epg_file_path_for_target(&target_path);
+        // A directory cannot be removed as a file, so invalidating the old index fails.
+        std::fs::create_dir_all(crate::epg_groups_path(&epg_path)).expect("create blocking groups path");
+        let output = target.output.iter().find(|output| matches!(output, TargetOutput::M3u(_))).expect("m3u output");
+        let playlist = vec![live_group("News", &[(3, "a")])];
+
+        let result = epg_write_for_target(
+            &config,
+            &target,
+            &target_path,
+            Some(&epg_with_channels(&["a"])),
+            output,
+            Some(&playlist),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!epg_path.exists());
+        assert!(!crate::epg_group_channels_path(&epg_path).exists());
     }
 
     #[tokio::test]
