@@ -113,6 +113,24 @@ pub fn epg_group_index_store(
     Ok(())
 }
 
+/// Removes the group index next to the EPG db at `epg_path`, so it cannot describe a rewritten
+/// EPG db it was not built for. Missing files are fine.
+pub fn epg_group_index_remove(epg_path: &Path) -> Result<(), TuliproxError> {
+    // Groups first: readers treat a missing groups file as "no index".
+    for path in [epg_groups_path(epg_path), epg_group_channels_path(epg_path)] {
+        match std::fs::remove_file(&path) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                return Err(TuliproxError::RepositoryEpg(format!(
+                    "Failed to remove epg group index {}: {err}",
+                    path.display()
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Builds and stores the group index next to the EPG db at `epg_path`.
 pub fn epg_group_index_write<S: std::hash::BuildHasher>(
     playlist: &[PlaylistGroup],

@@ -1,5 +1,5 @@
 use crate::{
-    build_epg_group_index, epg_group_index_store,
+    build_epg_group_index, epg_group_index_remove, epg_group_index_store,
     error_macros::{cant_open_result, cant_query_result},
     m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree,
     BPlusTreeQuery,
@@ -195,8 +195,11 @@ pub async fn epg_write_for_target(
         let epg_data = epg_data.clone();
         tokio::task::spawn_blocking(move || {
             epg_write_file(&target_name, &epg_data, &epg_path, &rename_map, Some(&order_map), &epg_output)?;
-            if let Some(group_index) = group_index {
-                epg_group_index_store(group_index, &epg_path)?;
+            match group_index {
+                Some(group_index) => epg_group_index_store(group_index, &epg_path)?,
+                // Without a playlist the old index would describe the previous EPG db.
+                None if !epg_data.children.is_empty() => epg_group_index_remove(&epg_path)?,
+                None => {}
             }
             Ok::<_, TuliproxError>(())
         })
@@ -403,6 +406,19 @@ mod tests {
     #[tokio::test]
     async fn target_epg_write_without_playlist_writes_no_group_index() {
         let tmp = TempDir::new().expect("temp dir created");
+        let (m3u_path, xtream_path) = write_target_epg(&tmp, None).await;
+        for epg_path in [&m3u_path, &xtream_path] {
+            assert!(epg_path.exists());
+            assert!(!crate::epg_groups_path(epg_path).exists());
+            assert!(!crate::epg_group_channels_path(epg_path).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn target_epg_rewrite_without_playlist_removes_stale_group_index() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let playlist = vec![live_group("News", &[(3, "a")])];
+        write_target_epg(&tmp, Some(&playlist)).await;
         let (m3u_path, xtream_path) = write_target_epg(&tmp, None).await;
         for epg_path in [&m3u_path, &xtream_path] {
             assert!(epg_path.exists());
