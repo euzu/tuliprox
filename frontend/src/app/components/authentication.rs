@@ -135,6 +135,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
                     let now_secs = js_sys::Date::now() / 1000.0;
                     let delay_ms = compute_session_expiry_delay_ms(exp, now_secs as i64, SESSION_EXPIRY_SKEW_SECS);
                     timeout = Some(Timeout::new(delay_ms, move || {
+                        services_ctx.websocket.disconnect();
                         services_ctx.auth.logout();
                         services_ctx.toastr.warning(translate.t("MESSAGES.SESSION.EXPIRED"));
                     }));
