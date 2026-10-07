@@ -695,6 +695,7 @@ async fn resolve_recording_source(
         let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
             &app_state.app_config,
             target_name,
+            input_name,
             epg_id,
             channel_name,
         )
@@ -1518,14 +1519,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn epg_recording_source_filters_input_before_title_hint() -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            let dir = tempfile::tempdir()?;
+            let state = live_request_state(dir.path(), output).await?;
+            for (input, title, expected) in [("input-a", "Channel 4K", "42"), ("input-b", "Channel HD", "43")] {
+                let mut virtual_id = String::new();
+                let mut input_name = input.to_string();
+                let resolved = resolve_recording_source(
+                    &state,
+                    "1",
+                    &mut virtual_id,
+                    &mut input_name,
+                    XtreamCluster::Live,
+                    Some("43"),
+                    Some(title),
+                )
+                .await;
+                assert!(resolved.is_some(), "{output:?}: {input}/{title}");
+                assert_eq!(virtual_id, expected);
+                assert_eq!(input_name, input);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn epg_recording_rules_resolve_both_playlist_and_explicit_epg_identity(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
-            for (id, expected) in [("43", "43"), ("", "42")] {
+            for (id, input, expected) in
+                [("43", "", "43"), ("", "", "42"), ("", "input-a", "42"), ("", "input-b", "43")]
+            {
                 let dir = tempfile::tempdir()?;
                 let state = live_request_state(dir.path(), output).await?;
                 let body = serde_json::from_value(json!({
-                    "target_id": "1", "virtual_id": id, "input_name": "", "channel_id": "43",
+                    "target_id": "1", "virtual_id": id, "input_name": input, "channel_id": "43",
                     "body": {"kind": "weekly_timeslot", "weekday": 3, "local_start_time": "20:00",
                              "duration_secs": 120, "timezone": "America/Toronto"}
                 }))?;
@@ -1550,7 +1579,9 @@ mod tests {
     async fn recording_requests_reject_conflicting_unknown_and_out_of_scope_sources(
     ) -> Result<(), Box<dyn std::error::Error>> {
         for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
-            for (id, input) in [("43", "input-a"), ("999", ""), ("44", ""), ("42", "unknown")] {
+            for (id, input) in
+                [("43", "input-a"), ("999", ""), ("44", ""), ("42", "unknown"), ("", "unknown"), ("", "foreign")]
+            {
                 let dir = tempfile::tempdir()?;
                 let state = live_request_state(dir.path(), output).await?;
                 let response = post_live(&state, id, input).await?;
@@ -1573,6 +1604,7 @@ mod tests {
             for (virtual_id, input_name, channel_id, expected) in [
                 ("", "", Some("43"), StatusCode::OK),
                 ("", "input-a", Some("43"), StatusCode::OK),
+                ("", "input-b", Some("43"), StatusCode::OK),
                 ("shared.epg", "input-a", None, StatusCode::OK),
                 ("", "", None, StatusCode::BAD_REQUEST),
                 ("", "input-a", None, StatusCode::BAD_REQUEST),

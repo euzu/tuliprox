@@ -378,6 +378,7 @@ fn select_epg_channel_candidate(
 pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
     app_config: &crate::model::AppConfig,
     target_name: &str,
+    input_name: &str,
     epg_channel_id: &str,
     channel_name: Option<&str>,
 ) -> Option<ResolvedRecordingSource> {
@@ -421,9 +422,11 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
             }
         }
     }
-    // Only streams from inputs configured for this target may be recorded, so
-    // an out-of-scope feed never wins the title hint over a valid one.
-    candidates.retain(|candidate| is_recording_input_in_target_scope(app_config, &target, &candidate.input_name));
+    // Apply input constraints before the title hint can select another feed.
+    candidates.retain(|candidate| {
+        (input_name.trim().is_empty() || candidate.input_name == input_name)
+            && is_recording_input_in_target_scope(app_config, &target, &candidate.input_name)
+    });
     select_epg_channel_candidate(candidates, channel_name)
 }
 
