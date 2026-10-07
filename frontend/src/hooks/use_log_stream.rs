@@ -99,7 +99,6 @@ impl LogStream {
             Ok(ws) => ws,
             Err(err) => {
                 error!("Failed to create log websocket: {err:?}");
-                self.schedule_reconnect();
                 return;
             }
         };
