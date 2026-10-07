@@ -683,26 +683,5 @@ pub(crate) fn prepare_recording_config(recording: &mut RecordingConfigDto) -> Re
         return Err(TuliproxError::ConfigRecording("recording.fallback_bytes_per_minute must be > 0".to_string()));
     }
 
-    // Nothing bounds recording disk use unless at least one of the three
-    // policies is set. Worth a warning, not an error: a dedicated
-    // filesystem is a legitimate reason to run without any of them.
-    let has_policy_retention = recording
-        .retention
-        .as_ref()
-        .is_some_and(|retention| retention.keep_last_per_channel.is_some() || retention.delete_after_days.is_some());
-    let has_watermarks = recording
-        .disk
-        .as_ref()
-        .is_some_and(|disk| disk.high_water_percent.is_some() && disk.low_water_percent.is_some());
-    let has_quota = recording.quota.as_ref().is_some_and(|quota| {
-        quota.default_private_bytes.is_some() || quota.shared_bytes.is_some() || !quota.per_user_bytes.is_empty()
-    });
-    if recording.enabled && !has_policy_retention && !has_watermarks && !has_quota {
-        log::warn!(
-            "recording is enabled with no retention, no disk watermarks, and no quota; \
-             recording disk usage is unbounded"
-        );
-    }
-
     Ok(())
 }
