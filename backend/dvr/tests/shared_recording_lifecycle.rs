@@ -210,7 +210,7 @@ async fn seed_sharing(queue: &RecordingQueue, file: &Path, users: &[&str], activ
         let is_active = *user == active_user;
         mutate(queue, move |candidate| {
             if is_active {
-                candidate.active = Some(entry.clone());
+                candidate.active = vec![entry.clone()];
             } else {
                 candidate.queue.push(entry.clone());
             }
@@ -240,8 +240,12 @@ async fn cancelling_one_user_leaves_the_other_holding_the_file_across_a_restart(
 
         let was_paused = queue.cancel_requested("alice-entry").await.expect("cancel");
         assert_eq!(was_paused, Some(false), "the active entry was cancelled");
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel, "the worker is signalled once");
-        let active = queue.active.read().await.clone().expect("still active");
+        assert_eq!(
+            *queue.worker("alice-entry").control_signal.read().await,
+            RecordingControl::Cancel,
+            "the worker is signalled once"
+        );
+        let active = queue.active.read().await.first().cloned().expect("still active");
         assert_eq!(active.state, RecordingTaskState::Cancelling, "the worker has not let go yet");
 
         // Removing it now would unlink the partial the worker is still writing.
@@ -329,7 +333,7 @@ async fn a_cancelled_recording_stops_holding_the_space_it_reserved() {
     running.finished = false;
     running.recording.reserved_bytes = 5_000;
     mutate(&queue, move |candidate| {
-        candidate.active = Some(running.clone());
+        candidate.active = vec![running.clone()];
         Ok(())
     })
     .await

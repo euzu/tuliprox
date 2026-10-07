@@ -164,22 +164,18 @@ fn capacities_have_free_slot(capacities: &[(Arc<str>, usize, usize)]) -> bool {
 }
 
 async fn active_download_snapshot_for_worker(
-    active: &RwLock<Option<RecordingTask>>,
+    active: &RwLock<Vec<RecordingTask>>,
     worker_uuid: &str,
 ) -> Option<RecordingTask> {
-    active.read().await.as_ref().filter(|task| task.uuid == worker_uuid).cloned()
+    active.read().await.iter().find(|task| task.uuid == worker_uuid).cloned()
 }
 
-async fn update_active_download_for_worker<F>(
-    active: &RwLock<Option<RecordingTask>>,
-    worker_uuid: &str,
-    update: F,
-) -> bool
+async fn update_active_download_for_worker<F>(active: &RwLock<Vec<RecordingTask>>, worker_uuid: &str, update: F) -> bool
 where
     F: FnOnce(&mut RecordingTask) -> bool,
 {
     let mut active = active.write().await;
-    let Some(task) = active.as_mut().filter(|task| task.uuid == worker_uuid) else {
+    let Some(task) = active.iter_mut().find(|task| task.uuid == worker_uuid) else {
         return false;
     };
     update(task)
@@ -225,7 +221,7 @@ fn broadcast_required_worker_mutation<E: EventSink>(
 }
 
 async fn refresh_recording_progress<E: EventSink>(
-    active: &RwLock<Option<RecordingTask>>,
+    active: &RwLock<Vec<RecordingTask>>,
     worker_uuid: &str,
     file_path: &std::path::Path,
     event_manager: &E,
@@ -283,6 +279,7 @@ async fn send_download_request(
 
     let send = async {
         let mut destination = url.clone();
+        let mut upstream_origin = None;
         for redirects in 0..=10 {
             let hop_client =
                 if destination.origin() == url.origin() { client } else { upstream_client.unwrap_or(client) };
@@ -295,9 +292,12 @@ async fn send_download_request(
                 request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
             }
             if destination.origin() != url.origin() {
-                // Override client defaults so listener credentials cannot reach
-                // a different origin through a manually followed redirect.
-                request = request.header(reqwest::header::AUTHORIZATION, "").header(reqwest::header::COOKIE, "");
+                let trusted_origin = upstream_origin.get_or_insert_with(|| destination.origin());
+                if upstream_client.is_none() || destination.origin() != *trusted_origin {
+                    // Listener credentials stay local; provider credentials stay
+                    // on the first upstream origin throughout the redirect chain.
+                    request = request.header(reqwest::header::AUTHORIZATION, "").header(reqwest::header::COOKIE, "");
+                }
             }
             let response = request.send().await.map_err(|error| classify_download_open_error(&destination, &error))?;
             if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
@@ -426,7 +426,7 @@ async fn finalize_http_transfer(final_path: &std::path::Path, transfer_path: &st
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn download_file<E: EventSink>(
-    active: Arc<RwLock<Option<RecordingTask>>>,
+    active: Arc<RwLock<Vec<RecordingTask>>>,
     file_download: RecordingTask,
     client: &reqwest::Client,
     upstream_client: Option<&reqwest::Client>,
@@ -779,7 +779,7 @@ async fn set_active_download_state(
     paused: bool,
 ) -> Result<bool, QueueMutationError> {
     Ok(mutate_optional(download_queue, |candidate| {
-        let Some(task) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+        let Some(task) = candidate.active.iter_mut().find(|active| active.uuid == uuid) else {
             return Ok(None);
         };
         if task.state == state && task.error == error && task.paused == paused && !task.finished {
@@ -796,17 +796,7 @@ async fn set_active_download_state(
 }
 
 async fn continue_after_pause(download_queue: &RecordingQueue, uuid: &str) -> bool {
-    let mut running = download_queue.worker_running.write().await;
-    let resumed = download_queue
-        .active
-        .read()
-        .await
-        .as_ref()
-        .is_some_and(|task| task.uuid == uuid && !task.paused && !task.finished);
-    if !resumed {
-        *running = false;
-    }
-    resumed
+    download_queue.active.read().await.iter().any(|task| task.uuid == uuid && !task.paused && !task.finished)
 }
 
 async fn commit_acquired_download(
@@ -814,7 +804,7 @@ async fn commit_acquired_download(
     uuid: &str,
 ) -> Result<Option<RecordingNotificationPlan>, QueueMutationError> {
     mutate_optional(download_queue, |candidate| {
-        let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+        let Some(active) = candidate.active.iter_mut().find(|active| active.uuid == uuid) else {
             return Ok(None);
         };
         active.state = RecordingTaskState::Running;
@@ -897,7 +887,7 @@ fn spawn_recording_notification_after_persist(
 /// Take the active task out of the candidate, but only when it is still the
 /// one this worker is executing.
 fn take_active(candidate: &mut PersistedRecordingQueue, uuid: &str) -> Option<PersistedRecordingTask> {
-    candidate.active.take_if(|active| active.uuid == uuid)
+    candidate.active.iter().position(|active| active.uuid == uuid).map(|index| candidate.active.remove(index))
 }
 
 async fn requeue_active_download_for_retry(
@@ -947,7 +937,7 @@ async fn requeue_active_download_for_capacity_wait(
         Ok(Some(true))
     };
     let result = if let Some(control) = consumed_control {
-        download_queue.mutate_optional_and_clear_control(control, mutation).await?
+        download_queue.mutate_optional_and_clear_control(uuid, control, mutation).await?
     } else {
         mutate_optional(download_queue, mutation).await?
     };
@@ -960,7 +950,7 @@ async fn requeue_active_download_for_capacity_wait(
 /// and refusing to complete a transfer because a descriptive file could not be
 /// written would trade a real recording for a diagnostic.
 async fn write_completion_sidecar(download_queue: &RecordingQueue, uuid: &str, measured_bytes: u64) {
-    let Some(task) = download_queue.active.read().await.as_ref().filter(|task| task.uuid == uuid).cloned() else {
+    let Some(task) = download_queue.active.read().await.iter().find(|task| task.uuid == uuid).cloned() else {
         return;
     };
     let Some(relative_path) = task.recording.relative_path.clone() else {
@@ -1006,19 +996,20 @@ async fn fail_active_download(
     .unwrap_or(false))
 }
 
-async fn promote_next_download(
-    download_queue: &RecordingQueue,
-) -> Result<Option<(String, String)>, QueueMutationError> {
-    mutate_optional(download_queue, |candidate| {
-        if candidate.active.is_some() || candidate.queue.is_empty() {
-            return Ok(None);
-        }
-        Ok(crate::recording::recording_queue::promote_from_queue(candidate))
+async fn promote_ready_downloads(download_queue: &RecordingQueue) -> Result<bool, QueueMutationError> {
+    if !download_queue.has_promotable_queued().await {
+        return Ok(false);
+    }
+    Ok(mutate_optional(download_queue, |candidate| {
+        let queued = candidate.queue.len();
+        while crate::recording::recording_queue::promote_from_queue(candidate).is_some() {}
+        Ok((candidate.queue.len() != queued).then_some(true))
     })
-    .await
+    .await?
+    .unwrap_or(false))
 }
 
-/// Move the active task to `finished` and promote the next one.
+/// Move this worker's task to `finished` and promote the next runnable entry.
 ///
 /// With `waiting_quota`, the task finished a file other entries may be
 /// waiting to attach to. Its measured size is checked against each of their
@@ -1033,26 +1024,27 @@ async fn finish_active_and_promote<F>(
 where
     F: FnOnce(&mut PersistedRecordingTask) -> RecordingNotificationPlan,
 {
-    mutate_optional(download_queue, |candidate| {
-        let Some(mut active) = take_active(candidate, uuid) else {
-            return Ok(None);
-        };
-        let notification = finish(&mut active);
-        let media = active.media_identity.clone();
-        let measured = active.recording.measured_bytes;
-        candidate.finished.push(active);
-        if let Some(limits) = waiting_quota {
-            let _ = charge_waiting_siblings(candidate, &media, measured, limits);
-        }
-        crate::recording::recording_queue::promote_from_queue(candidate);
-        Ok(Some(notification))
-    })
-    .await
+    download_queue
+        .mutate_optional_and_clear_control(uuid, RecordingControl::Cancel, |candidate| {
+            let Some(mut active) = take_active(candidate, uuid) else {
+                return Ok(None);
+            };
+            let notification = finish(&mut active);
+            let media = active.media_identity.clone();
+            let measured = active.recording.measured_bytes;
+            candidate.finished.push(active);
+            if let Some(limits) = waiting_quota {
+                let _ = charge_waiting_siblings(candidate, &media, measured, limits);
+            }
+            crate::recording::recording_queue::promote_from_queue(candidate);
+            Ok(Some(notification))
+        })
+        .await
 }
 
 async fn cancel_active_and_promote(download_queue: &RecordingQueue, uuid: &str) -> Result<bool, QueueMutationError> {
     Ok(download_queue
-        .mutate_optional_and_clear_control(RecordingControl::Cancel, |candidate| {
+        .mutate_optional_and_clear_control(uuid, RecordingControl::Cancel, |candidate| {
             let Some(mut active) = take_active(candidate, uuid) else {
                 return Ok(None);
             };
@@ -1083,7 +1075,7 @@ async fn prepare_active_retry(
     cause: &str,
 ) -> Result<Option<RetryCommit>, QueueMutationError> {
     mutate_optional(download_queue, |candidate| {
-        let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+        let Some(active) = candidate.active.iter_mut().find(|active| active.uuid == uuid) else {
             return Ok(None);
         };
         // A live broadcast cannot be retried: whatever played during the
@@ -1094,7 +1086,7 @@ async fn prepare_active_retry(
         active.retry_attempts = active.retry_attempts.saturating_add(1);
         let attempts = active.retry_attempts;
         if !retryable_kind || attempts > download_cfg.retry_max_attempts {
-            let Some(mut failed) = candidate.active.take() else {
+            let Some(mut failed) = take_active(candidate, uuid) else {
                 return Ok(None);
             };
             let error = if retryable_kind {
@@ -1178,7 +1170,7 @@ impl QuotaGate<'_> {
         let safety = recording_cfg.disk.as_ref().and_then(|disk| disk.safety_bytes).unwrap_or(0);
 
         let decided = mutate_optional(self.queue, |candidate| {
-            let Some(subject) = candidate.active.as_ref().filter(|active| active.uuid == uuid) else {
+            let Some(subject) = candidate.active.iter().find(|active| active.uuid == uuid) else {
                 return Ok(None);
             };
             let pool = crate::recording::recording_quota::quota_pool_for_task(subject);
@@ -1208,7 +1200,7 @@ impl QuotaGate<'_> {
                     return Ok(Some(Err(DISK_GONE_BEFORE_START.to_string())));
                 }
             }
-            if let Some(active) = candidate.active.as_mut() {
+            if let Some(active) = candidate.active.iter_mut().find(|task| task.uuid == uuid) {
                 active.recording.reserved_bytes = active.recording.reserved_bytes.max(total);
             }
             let siblings_refused = charge_waiting_siblings(candidate, &media, total, &limits);
@@ -1346,7 +1338,6 @@ async fn refused_before_start(
     None
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
     cfg: &AppConfig,
     download_cfg: &RecordingConfig,
@@ -1355,68 +1346,81 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
     capacity: &Arc<dyn RecordingCapacityPort>,
     recording_binary: &Path,
 ) -> Result<(), String> {
-    let mut worker_running = download_queue.worker_running.write().await;
-    if *worker_running {
-        debug!("Download worker already running");
+    if promote_ready_downloads(download_queue).await.map_err(|err| err.to_string())? {
+        publish_recording_change(event_manager);
+    }
+    let ready: Vec<_> = download_queue
+        .active
+        .read()
+        .await
+        .iter()
+        .filter(|task| !task.paused && !task.finished)
+        .map(|task| task.uuid.clone())
+        .collect();
+    for uuid in ready {
+        start_recording_worker(cfg, download_cfg, download_queue, event_manager, capacity, recording_binary, uuid)
+            .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn start_recording_worker<E: EventSink + Clone + 'static>(
+    cfg: &AppConfig,
+    download_cfg: &RecordingConfig,
+    download_queue: &Arc<RecordingQueue>,
+    event_manager: &E,
+    capacity: &Arc<dyn RecordingCapacityPort>,
+    recording_binary: &Path,
+    worker_uuid: String,
+) -> Result<(), String> {
+    let Some(worker) = download_queue.claim_worker(&worker_uuid).await else {
         return Ok(());
-    }
-    *worker_running = true;
-    drop(worker_running);
+    };
 
-    match promote_next_download(download_queue).await {
-        Ok(Some((uuid, filename))) => {
-            debug!("Promoting queued download {uuid} ({filename}) to active");
-            publish_recording_change(event_manager);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            *download_queue.worker_running.write().await = false;
-            return Err(err.to_string());
-        }
-    }
-
-    if download_queue.active.read().await.is_some() {
+    if download_queue.active.read().await.iter().any(|task| task.uuid == worker_uuid) {
         let config = cfg.config.load();
         let disabled_headers = cfg.get_disabled_headers();
-        let headers = request::get_request_headers(
+        let upstream_headers = request::get_request_headers(
             Some(&download_cfg.headers),
             None,
             disabled_headers.as_ref(),
             config.default_user_agent.as_deref(),
         );
         let dq = Arc::clone(download_queue);
-        let control_signal = Arc::clone(&dq.control_signal);
-        let control_notify = Arc::clone(&dq.control_notify);
+        let control_signal = Arc::clone(&worker.control_signal);
+        let control_notify = Arc::clone(&worker.control_notify);
         let event_manager = event_manager.clone();
         let capacity = Arc::clone(capacity);
         let download_cfg = download_cfg.clone();
         let recording_binary = recording_binary.to_path_buf();
         let app_config = Arc::new(cfg.clone());
 
-        // The listener hop bypasses proxies; external redirect hops retain them.
+        // The listener authenticates through its recording URL and bypasses proxies.
+        // Provider headers stay on the upstream client; proxied listener requests
+        // receive them through the recording input configuration.
         // Notifications retain the proxy without the recording headers.
         let clients = (
-            create_client(cfg)
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .default_headers(headers.clone())
-                .build(),
-            create_client(cfg).redirect(reqwest::redirect::Policy::none()).default_headers(headers).build(),
+            create_client(cfg).no_proxy().redirect(reqwest::redirect::Policy::none()).build(),
+            create_client(cfg).redirect(reqwest::redirect::Policy::none()).default_headers(upstream_headers).build(),
             create_client(cfg).build(),
         );
         if let (Ok(transfer_client), Ok(upstream_transfer_client), Ok(client)) = clients {
-            if let Some(active) = dq.active.read().await.as_ref() {
+            if let Some(active) = dq.active.read().await.iter().find(|task| task.uuid == worker_uuid) {
                 info!("Starting download worker for active download {} ({})", active.uuid, active.filename);
             }
             tokio::spawn(async move {
                 'worker: loop {
                     // One read: the uuid, pause flag and live window must describe
                     // the same task.
-                    let active_head =
-                        dq.active.read().await.as_ref().map(|download| {
-                            (download.uuid.clone(), download.paused, recording_deadline_instant(download))
-                        });
-                    if let Some((worker_uuid, paused, window_deadline)) = active_head {
+                    let active_head = dq
+                        .active
+                        .read()
+                        .await
+                        .iter()
+                        .find(|task| task.uuid == worker_uuid)
+                        .map(|download| (download.paused, recording_deadline_instant(download)));
+                    if let Some((paused, window_deadline)) = active_head {
                         if paused {
                             break;
                         }
@@ -1425,24 +1429,29 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                         // If the provider is at capacity, wait in the priority queue until signalled.
                         // Never proceeds without a slot when input_name is set — account bans otherwise.
                         let provider_acquire_result = {
-                            let (input_name, priority) = dq.active_scheduling_priority().await.unwrap_or((None, 0i8));
+                            let (input_name, priority) =
+                                dq.active_scheduling_priority(&worker_uuid).await.unwrap_or((None, 0i8));
                             // Only live work has a window deadline; a transfer waits as long as it takes.
                             if let Some(input_name) = input_name {
                                 loop {
-                                    let capacities = capacity.capacities_for_input(&input_name).await;
-                                    // Loaded per attempt, not captured at spawn: a worker can
-                                    // outlive several reloads, and an operator raising the
-                                    // background limit expects it to take effect.
-                                    let live_config = app_config.config.load();
-                                    let capacity_cfg = live_config.recording().unwrap_or(&download_cfg);
-                                    if !background_download_should_wait(priority, &capacities, capacity_cfg) {
-                                        if let Some(handle) = capacity.acquire(&input_name, priority).await {
-                                            break ProviderAcquireResult::Acquired(Some(handle));
+                                    if let Some(stopped) = acquire_result_for_control(*control_signal.read().await) {
+                                        break stopped;
+                                    }
+                                    let handle = {
+                                        // Keep the policy check and allocation together so
+                                        // concurrent recording starts respect background limits.
+                                        let _capacity = dq.capacity_guard.lock().await;
+                                        let capacities = capacity.capacities_for_input(&input_name).await;
+                                        let live_config = app_config.config.load();
+                                        let capacity_cfg = live_config.recording().unwrap_or(&download_cfg);
+                                        if background_download_should_wait(priority, &capacities, capacity_cfg) {
+                                            None
+                                        } else {
+                                            capacity.acquire(&input_name, priority).await
                                         }
-                                        if let Some(stopped) = acquire_result_for_control(*control_signal.read().await)
-                                        {
-                                            break stopped;
-                                        }
+                                    };
+                                    if let Some(handle) = handle {
+                                        break ProviderAcquireResult::Acquired(Some(handle));
                                     }
                                     if let Err(err) = broadcast_worker_mutation(
                                         &event_manager,
@@ -1674,8 +1683,13 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                 capacity.release(provider_handle).await;
                                 // Path copied out first: the lock must not be held across
                                 // the filesystem call, or progress writers and commits stall.
-                                let finished_file =
-                                    dq.active.read().await.as_ref().map(|fd| (fd.file_path.clone(), fd.size));
+                                let finished_file = dq
+                                    .active
+                                    .read()
+                                    .await
+                                    .iter()
+                                    .find(|task| task.uuid == worker_uuid)
+                                    .map(|fd| (fd.file_path.clone(), fd.size));
                                 let measured_bytes = match finished_file {
                                     Some((path, fallback)) => {
                                         tokio::fs::metadata(&path).await.map_or(fallback, |metadata| metadata.len())
@@ -1731,14 +1745,13 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                             DownloadExecutionResult::Paused => {
                                 capacity.release(provider_handle).await;
-                                // The pause command has already persisted the state. A resume
-                                // can arrive while this worker is closing the old stream. Hold
-                                // the worker flag until the state is checked so the resume
-                                // handler either restarts this worker or starts a new one.
+                                // A resume observed here continues this worker. A later resume
+                                // is picked up after release_worker clears the claim and wakes
+                                // the scheduler to start a new worker.
                                 if continue_after_pause(&dq, &worker_uuid).await {
                                     continue 'worker;
                                 }
-                                return;
+                                break 'worker;
                             }
                             DownloadExecutionResult::Cancelled => {
                                 capacity.release(provider_handle).await;
@@ -1765,7 +1778,10 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                     if control == RecordingControl::Restart {
                                         "Reloading download service configuration"
                                     } else {
-                                        active.as_ref().map_or(DOWNLOAD_PREEMPTED_REASON, preemption_reason_for)
+                                        active
+                                            .iter()
+                                            .find(|task| task.uuid == worker_uuid)
+                                            .map_or(DOWNLOAD_PREEMPTED_REASON, preemption_reason_for)
                                     }
                                 };
                                 if let Err(err) = broadcast_required_worker_mutation(
@@ -1806,7 +1822,7 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                                             true,
                                         );
                                         publish_recording_change(&event_manager);
-                                        if dq.active.read().await.is_some() {
+                                        if dq.active.read().await.iter().any(|task| task.uuid == worker_uuid) {
                                             continue;
                                         }
                                         break;
@@ -1929,35 +1945,17 @@ pub async fn ensure_recording_worker_running<E: EventSink + Clone + 'static>(
                             }
                         }
                     } else {
-                        // The active slot is empty. A submission can enqueue
-                        // work after this worker last checked but before it
-                        // stops, and that submission is already past its
-                        // `worker_running` check in
-                        // `ensure_recording_worker_running`. Decide under the
-                        // same flag lock, then re-check the queue while
-                        // holding it, so the two cannot both decline the work.
-                        let mut running = dq.worker_running.write().await;
-                        if dq.queue.lock().await.is_empty() {
-                            *running = false;
-                            return;
-                        }
-                        drop(running);
-                        // Nothing runnable right now means the next submission
-                        // starts a worker instead of this one spinning.
-                        if !matches!(promote_next_download(&dq).await, Ok(Some(_))) {
-                            *dq.worker_running.write().await = false;
-                            break;
-                        }
+                        break;
                     }
                 }
-                *dq.worker_running.write().await = false;
+                dq.release_worker(&worker_uuid).await;
             });
         } else {
-            *download_queue.worker_running.write().await = false;
+            *worker.running.write().await = false;
             return Err("Failed to build http client".to_string());
         }
     } else {
-        *download_queue.worker_running.write().await = false;
+        download_queue.release_worker(&worker_uuid).await;
     }
     Ok(())
 }
@@ -1978,6 +1976,7 @@ pub fn spawn_recording_services<E: EventSink + Clone + 'static>(
         ctx.events.clone(),
         Arc::clone(&ctx.recording_capacity),
         cancel_token.clone(),
+        Path::new(crate::recording::recording_worker::FFMPEG_BINARY).to_path_buf(),
     );
 }
 
@@ -1985,7 +1984,7 @@ pub async fn resume_recording_worker_if_needed<E: EventSink + Clone + 'static>(
     ctx: &RecordingCtx<E>,
     recording_cfg: &RecordingConfig,
 ) -> Result<(), String> {
-    if ctx.recordings.queue.lock().await.is_empty() && ctx.recordings.active.read().await.is_none() {
+    if ctx.recordings.queue.lock().await.is_empty() && ctx.recordings.active.read().await.is_empty() {
         return Ok(());
     }
 
@@ -2007,6 +2006,7 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
     event_manager: E,
     capacity: Arc<dyn RecordingCapacityPort>,
     cancel_token: CancellationToken,
+    recording_binary: std::path::PathBuf,
 ) {
     let capacity_notify = capacity.capacity_changed();
     let slot_waiters = Arc::clone(&recordings.slot_waiters);
@@ -2018,38 +2018,39 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
         loop {
             tokio::select! {
                 () = bridge_cancel_token.cancelled() => break,
-                () = capacity_notify.notified() => {}
+                () = capacity_notify.notified() => {},
+                () = slot_waiters.registration_changed.notified() => {}
             }
             let mut capacities_by_input: HashMap<Arc<str>, ProviderCapacities> = HashMap::new();
-            let mut ready_waiter = None;
-            // Reloaded on each capacity signal rather than captured at spawn.
             let live_config = bridge_app_config.config.load();
             let waiter_cfg = live_config.recording().unwrap_or(&bridge_recording_cfg);
-            let mut waiters = slot_waiters.snapshots().await;
+            let mut waiters = slot_waiters.snapshots();
             waiters.sort_by_key(|waiter| waiter.priority);
             for waiter in waiters {
                 let Some(input_name) = waiter.input_name.as_ref() else {
-                    ready_waiter = Some(waiter.id);
-                    break;
+                    let _ = slot_waiters.signal_waiter(waiter.id);
+                    continue;
                 };
-                let capacities = if let Some(capacities) = capacities_by_input.get(input_name) {
-                    capacities.clone()
-                } else {
-                    let capacities = bridge_capacity.capacities_for_input(input_name).await;
-                    capacities_by_input.insert(Arc::clone(input_name), capacities.clone());
-                    capacities
+                let capacities = match capacities_by_input.entry(Arc::clone(input_name)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(bridge_capacity.capacities_for_input(input_name).await)
+                    }
                 };
-                if !capacities_have_free_slot(&capacities) {
+                if !capacities_have_free_slot(capacities)
+                    || background_download_should_wait(waiter.priority, capacities, waiter_cfg)
+                {
                     continue;
                 }
-                if background_download_should_wait(waiter.priority, &capacities, waiter_cfg) {
-                    continue;
+                if slot_waiters.signal_waiter(waiter.id) {
+                    // Reserve a wake-up against this snapshot so one signal wakes
+                    // as many eligible recordings as there are free connections.
+                    if let Some((_, used, _)) =
+                        capacities.iter_mut().find(|(_, used, limit)| *limit == 0 || *used < *limit)
+                    {
+                        *used = used.saturating_add(1);
+                    }
                 }
-                ready_waiter = Some(waiter.id);
-                break;
-            }
-            if let Some(waiter_id) = ready_waiter {
-                let _ = slot_waiters.signal_waiter(waiter_id).await;
             }
         }
     });
@@ -2062,33 +2063,27 @@ fn start_recording_scheduler<E: EventSink + Clone + 'static>(
         loop {
             tokio::select! {
                 () = scheduler_cancel_token.cancelled() => break,
-                _ = interval.tick() => {}
+                _ = interval.tick() => {},
+                () = scheduler_recordings.queue_changed.notified() => {}
             }
             let promoted = scheduler_recordings.promote_due_scheduled_now().await;
             if promoted > 0 {
                 publish_recording_change(&event_manager);
             }
-            // A worker can exit while a resume or enqueue observes its old
-            // running flag. Heal runnable work even when no scheduled task is due.
-            let active_runnable =
-                scheduler_recordings.active.read().await.as_ref().map(|active| !active.paused && !active.finished);
-            let needs_worker = !*scheduler_recordings.worker_running.read().await
-                && match active_runnable {
-                    Some(runnable) => runnable,
-                    None => !scheduler_recordings.queue.lock().await.is_empty(),
-                };
-            if !needs_worker {
-                continue;
-            }
-            let _ = ensure_recording_worker_running(
+            // Commits and worker release wake the scheduler immediately. The
+            // interval also checks scheduled windows and retries failed starts.
+            if let Err(error) = ensure_recording_worker_running(
                 &app_config,
                 &recording_cfg,
                 &scheduler_recordings,
                 &event_manager,
                 &capacity,
-                Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
+                &recording_binary,
             )
-            .await;
+            .await
+            {
+                error!("Could not start recording workers: {error}");
+            }
         }
     });
 }
@@ -2215,7 +2210,7 @@ mod tests {
             task.total_size = Some(10);
             let partial = http_transfer_path(&task);
             tokio::fs::write(&partial, b"0123").await.expect("saved partial");
-            let active = Arc::new(RwLock::new(Some(task.clone())));
+            let active = Arc::new(RwLock::new(vec![task.clone()]));
             let result = download_file::<NoopSink>(
                 active,
                 task.clone(),
@@ -2240,20 +2235,22 @@ mod tests {
     async fn resume_during_pause_shutdown_keeps_a_worker_for_vod_and_series() {
         for kind in [RecordingKind::Vod, RecordingKind::Series] {
             let queue = RecordingQueue::new();
-            *queue.active.write().await = Some(scheduled_task(kind, 0, 900));
-            *queue.worker_running.write().await = true;
+            *queue.active.write().await = vec![scheduled_task(kind, 0, 900)];
+            *queue.worker("task").running.write().await = true;
 
             assert!(queue.pause_active("task").await.expect("pause"));
             assert!(queue.resume_active("task").await.expect("resume before old worker exits"));
             assert!(continue_after_pause(&queue, "task").await);
-            assert!(*queue.worker_running.read().await);
-            assert_eq!(queue.active.read().await.as_ref().map(|task| task.state), Some(RecordingTaskState::Running));
+            assert!(queue.workers_running().await);
+            assert_eq!(queue.active.read().await.first().map(|task| task.state), Some(RecordingTaskState::Running));
 
             assert!(queue.pause_active("task").await.expect("second pause"));
             assert!(!continue_after_pause(&queue, "task").await);
-            assert!(!*queue.worker_running.read().await);
+            assert!(queue.workers_running().await, "the claim lasts until worker exit");
+            queue.release_worker("task").await;
+            assert!(!queue.workers_running().await);
             assert!(queue.resume_active("task").await.expect("resume after old worker exits"));
-            assert!(!queue.active.read().await.as_ref().is_some_and(|task| task.paused));
+            assert!(!queue.active.read().await.first().is_some_and(|task| task.paused));
         }
     }
 
@@ -2270,7 +2267,7 @@ mod tests {
             let partial = http_transfer_path(&task);
             tokio::fs::write(&partial, b"0123").await.expect("saved partial");
             let result = download_file::<NoopSink>(
-                Arc::new(RwLock::new(Some(task.clone()))),
+                Arc::new(RwLock::new(vec![task.clone()])),
                 task.clone(),
                 &reqwest::Client::new(),
                 None,
@@ -2295,7 +2292,7 @@ mod tests {
         let partial = dir.path().join("capture.ts.partial");
         std::fs::write(&partial, b"growing capture").expect("write partial recording");
         let queue = RecordingQueue::new();
-        *queue.active.write().await = Some(scheduled_task(RecordingKind::Live, 0, 60));
+        *queue.active.write().await = vec![scheduled_task(RecordingKind::Live, 0, 60)];
         let events = ProgressSink::default();
 
         refresh_recording_progress(&queue.active, "task", &partial, &events).await;
@@ -2314,8 +2311,8 @@ mod tests {
         // A restart that survives its own requeue makes every new worker
         // preempt itself on start, spinning until the live window closes.
         let queue = RecordingQueue::new();
-        *queue.active.write().await = Some(scheduled_task(RecordingKind::Live, 0, 60));
-        *queue.control_signal.write().await = RecordingControl::Restart;
+        *queue.active.write().await = vec![scheduled_task(RecordingKind::Live, 0, 60)];
+        *queue.worker("task").control_signal.write().await = RecordingControl::Restart;
 
         let requeued = requeue_active_download_for_capacity_wait(
             &queue,
@@ -2328,20 +2325,20 @@ mod tests {
         .expect("requeue");
 
         assert!(requeued);
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::None);
+        assert_eq!(*queue.worker("task").control_signal.read().await, RecordingControl::None);
     }
 
     #[tokio::test]
     async fn a_preemption_requeue_leaves_a_pending_control_untouched() {
         let queue = RecordingQueue::new();
-        *queue.active.write().await = Some(scheduled_task(RecordingKind::Live, 0, 60));
-        *queue.control_signal.write().await = RecordingControl::Pause;
+        *queue.active.write().await = vec![scheduled_task(RecordingKind::Live, 0, 60)];
+        *queue.worker("task").control_signal.write().await = RecordingControl::Pause;
 
         requeue_active_download_for_capacity_wait(&queue, "task", DOWNLOAD_PREEMPTED_REASON, false, None)
             .await
             .expect("requeue");
 
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Pause);
+        assert_eq!(*queue.worker("task").control_signal.read().await, RecordingControl::Pause);
     }
 
     /// One VOD on one media for `owner`, in the given partition and state.
@@ -2358,6 +2355,43 @@ mod tests {
         let mut persisted = RecordingQueue::to_persisted(&task);
         persisted.media_identity = "film".to_string();
         persisted
+    }
+
+    #[tokio::test]
+    async fn starting_workers_commits_entries_attached_to_an_already_completed_file(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let queue = Arc::new(RecordingQueue::new());
+        let mut done = vod_entry("done", "alice", RecordingTaskState::Completed);
+        done.finished = true;
+        done.size = 123;
+        done.recording.measured_bytes = 123;
+        let waiting = vod_entry("waiting", "bob", RecordingTaskState::Queued);
+        crate::recording::recording_queue::mutate(&queue, |candidate| {
+            candidate.finished.push(done);
+            candidate.queue.push(waiting);
+            Ok(())
+        })
+        .await?;
+        let stub = StubCapacity::with_room();
+        let capacity: Arc<dyn RecordingCapacityPort> = stub.clone();
+        ensure_recording_worker_running(
+            &app_config_with_listener(),
+            &RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() }),
+            &queue,
+            &NoopSink,
+            &capacity,
+            Path::new("unused-encoder"),
+        )
+        .await?;
+        assert!(queue.queue.lock().await.is_empty());
+        assert!(queue.active.read().await.is_empty());
+        assert_eq!(queue.finished.read().await.len(), 2);
+        let finished = queue.finished.read().await;
+        let attached = finished.iter().find(|task| task.uuid == "waiting").ok_or("missing attached entry")?;
+        assert_eq!(attached.state, RecordingTaskState::Completed);
+        assert_eq!(attached.size, 123);
+        assert_eq!(stub.acquire_count(), 0);
+        Ok(())
     }
 
     /// Recording enabled under `dir` with a private quota of `quota` bytes.
@@ -2388,7 +2422,7 @@ mod tests {
     ) -> RecordingQueue {
         let queue = RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository");
         crate::recording::recording_queue::mutate(&queue, move |candidate| {
-            candidate.active = Some(active.clone());
+            candidate.active = vec![active.clone()];
             candidate.queue.clone_from(&queued);
             Ok(())
         })
@@ -2411,7 +2445,7 @@ mod tests {
 
         let admitted = gate.admit_size("alice", Some(16), 0).await.expect("fits");
         assert_eq!(admitted.byte_cap, None);
-        let reserved = queue.active.read().await.as_ref().map(|active| active.recording.reserved_bytes);
+        let reserved = queue.active.read().await.first().map(|active| active.recording.reserved_bytes);
         assert_eq!(reserved, Some(16), "the known size is now reserved");
     }
 
@@ -2619,6 +2653,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopping_live_capture_clears_cancel_before_starting_a_due_recording(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for terminal in [RecordingTaskState::Completed, RecordingTaskState::Failed] {
+            for has_next in [false, true] {
+                let dir = TempDir::new()?;
+                let queue = RecordingQueue::new_persistent(dir.path(), dir.path())?;
+                let now = chrono::Utc::now().timestamp();
+                let mut active = scheduled_task(RecordingKind::Live, now - 60, 900);
+                active.uuid = "immediate".to_string();
+                let mut scheduled = scheduled_task(RecordingKind::Live, now, 900);
+                scheduled.uuid = "scheduled".to_string();
+                scheduled.state = RecordingTaskState::Scheduled;
+                let active = RecordingQueue::to_persisted(&active);
+                let scheduled = RecordingQueue::to_persisted(&scheduled);
+                crate::recording::recording_queue::mutate(&queue, |candidate| {
+                    candidate.active = vec![active];
+                    if has_next {
+                        candidate.scheduled.push(scheduled);
+                    }
+                    Ok(())
+                })
+                .await?;
+                assert_eq!(queue.promote_due_scheduled(now).await, usize::from(has_next));
+                assert_eq!(queue.cancel_requested("immediate").await?, Some(false));
+                assert_eq!(*queue.worker("immediate").control_signal.read().await, RecordingControl::Cancel);
+
+                let committed = finish_active_and_promote(&queue, "immediate", None, |task| {
+                    task.state = terminal;
+                    task.finished = true;
+                    task.error =
+                        (terminal == RecordingTaskState::Failed).then(|| "Stopped recording has no data".to_string());
+                    task.recording.reserved_bytes = 0;
+                    RecordingNotificationPlan::empty()
+                })
+                .await?;
+                assert!(committed.is_some());
+                assert_eq!(*queue.worker("immediate").control_signal.read().await, RecordingControl::None);
+                assert_eq!(
+                    queue.active.read().await.first().map(|task| task.uuid.as_str()),
+                    has_next.then_some("scheduled")
+                );
+                let finished = queue.finished.read().await;
+                assert_eq!(finished.len(), 1);
+                assert_eq!(finished[0].state, terminal);
+                assert!(finished[0].to_view(true).is_terminal());
+                drop(finished);
+
+                let restored = RecordingQueue::new_persistent(dir.path(), dir.path())?;
+                restored.load_from_disk().await?;
+                assert_eq!(restored.finished.read().await[0].state, terminal);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn finalizing_publishes_the_staged_bytes_and_clears_the_partial() {
         let dir = TempDir::new().expect("tempdir");
         let partial = dir.path().join("film.mp4.partial");
@@ -2696,6 +2786,7 @@ mod tests {
             wait_for_provider_slot(&queue, &Arc::from("provider"), 0, &control, &notify, Some(window_ends)).await;
 
         assert!(outcome.is_none(), "the wait ends when the programme does");
+        assert!(queue.slot_waiters.snapshots().is_empty(), "expired waits must deregister");
         assert!(tokio::time::Instant::now() >= window_ends, "and only then");
     }
 
@@ -2711,9 +2802,9 @@ mod tests {
         let waiters = Arc::clone(&queue.slot_waiters);
         let freed = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_mins(60)).await;
-            let queued = waiters.snapshots().await;
+            let queued = waiters.snapshots();
             let waiter = queued.first().expect("someone is waiting an hour later");
-            waiters.signal_waiter(waiter.id).await
+            waiters.signal_waiter(waiter.id)
         });
 
         let outcome = wait_for_provider_slot(&queue, &Arc::from("provider"), 0, &control, &notify, None).await;
@@ -2810,6 +2901,395 @@ mod tests {
         std::fs::read_to_string(log).map_or(0, |text| text.lines().filter(|line| !line.is_empty()).count())
     }
 
+    #[cfg(unix)]
+    struct LimitedCapacity {
+        limit: usize,
+        in_use: AtomicUsize,
+        peak: AtomicUsize,
+        releases: AtomicUsize,
+        notify: Arc<Notify>,
+    }
+
+    #[cfg(unix)]
+    impl RecordingCapacityPort for LimitedCapacity {
+        fn capacities_for_input<'a>(
+            &'a self,
+            input: &'a Arc<str>,
+        ) -> futures::future::BoxFuture<'a, Vec<crate::recording::recording_capacity::ProviderCapacity>> {
+            Box::pin(async move {
+                let in_use = self.in_use.load(Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                vec![(input.clone(), in_use, self.limit)]
+            })
+        }
+
+        fn acquire<'a>(
+            &'a self,
+            _input: &'a Arc<str>,
+            _priority: i8,
+        ) -> futures::future::BoxFuture<'a, Option<tuliprox_core::model::ProviderHandle>> {
+            Box::pin(async move {
+                let previous = self
+                    .in_use
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                        (self.limit == 0 || used < self.limit).then_some(used + 1)
+                    })
+                    .ok()?;
+                self.peak.fetch_max(previous + 1, Ordering::SeqCst);
+                Some(tuliprox_core::model::ProviderHandle::new(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                    1,
+                    tuliprox_core::model::ProviderAllocation::Exhausted,
+                    Some(tokio_util::sync::CancellationToken::new()),
+                ))
+            })
+        }
+
+        fn release(&self, handle: Option<tuliprox_core::model::ProviderHandle>) -> futures::future::BoxFuture<'_, ()> {
+            Box::pin(async move {
+                if handle.is_some() {
+                    self.in_use.fetch_sub(1, Ordering::SeqCst);
+                    self.releases.fetch_add(1, Ordering::SeqCst);
+                    self.notify.notify_one();
+                }
+            })
+        }
+
+        fn capacity_changed(&self) -> Arc<Notify> { self.notify.clone() }
+    }
+
+    #[cfg(unix)]
+    struct ConcurrentLiveFixture {
+        dir: TempDir,
+        queue: Arc<RecordingQueue>,
+        script: PathBuf,
+        capacity: Arc<LimitedCapacity>,
+        app: Arc<tuliprox_core::model::AppConfig>,
+        config: RecordingConfig,
+        cancel: tokio_util::sync::CancellationToken,
+    }
+
+    #[cfg(unix)]
+    impl ConcurrentLiveFixture {
+        async fn new(count: u32, limit: usize) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::with_background_limit(count, limit, 0).await
+        }
+
+        async fn with_background_limit(
+            count: u32,
+            limit: usize,
+            background_limit: u8,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            let dir = TempDir::new()?;
+            let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path())?);
+            let script = counting_ffmpeg(dir.path(), &dir.path().join("spawns.log"));
+            std::fs::write(&script, "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf recorded > \"$output\"\ntouch \"$output.ready\"\nread -r control\nexit 0\n")?;
+            let now = chrono::Utc::now().timestamp();
+            let tasks = (0..count)
+                .map(|index| {
+                    let mut task = scheduled_task(RecordingKind::Live, now, 300);
+                    task.uuid = format!("live-{index}");
+                    task.state = RecordingTaskState::Queued;
+                    task.priority = 5;
+                    task.input_name = Some(Arc::from("provider"));
+                    task.recording.source.virtual_id = (42 + index).to_string();
+                    task.recording.source.input_name = "provider".to_string();
+                    task.file_dir = dir.path().to_path_buf();
+                    task.file_path = dir.path().join(format!("live-{index}.ts"));
+                    RecordingQueue::to_persisted(&task)
+                })
+                .collect::<Vec<_>>();
+            crate::recording::recording_queue::mutate(&queue, |candidate| {
+                candidate.queue.extend(tasks);
+                Ok(())
+            })
+            .await?;
+            let fixture = Self {
+                dir,
+                queue,
+                script,
+                capacity: Arc::new(LimitedCapacity {
+                    limit,
+                    in_use: AtomicUsize::new(0),
+                    peak: AtomicUsize::new(0),
+                    releases: AtomicUsize::new(0),
+                    notify: Arc::new(Notify::new()),
+                }),
+                app: Arc::new(app_config_with_listener()),
+                config: RecordingConfig::from(&shared::model::RecordingConfigDto {
+                    enabled: true,
+                    max_background_per_provider: background_limit,
+                    ..Default::default()
+                }),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            };
+            start_recording_scheduler(
+                fixture.app.clone(),
+                fixture.config.clone(),
+                &fixture.queue,
+                NoopSink,
+                fixture.capacity.clone(),
+                fixture.cancel.clone(),
+                fixture.script.clone(),
+            );
+            Ok(fixture)
+        }
+
+        async fn start(&self) -> Result<(), String> {
+            let capacity: Arc<dyn RecordingCapacityPort> = self.capacity.clone();
+            ensure_recording_worker_running(&self.app, &self.config, &self.queue, &NoopSink, &capacity, &self.script)
+                .await
+        }
+
+        async fn wait_for_running(&self, count: usize) -> Result<Vec<String>, tokio::time::error::Elapsed> {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let ready = self
+                        .queue
+                        .active
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|task| {
+                            task.state == RecordingTaskState::Running
+                                && self.dir.path().join(format!("{}.ts.partial.ready", task.uuid)).exists()
+                        })
+                        .map(|task| task.uuid.clone())
+                        .collect::<Vec<_>>();
+                    if ready.len() == count {
+                        break ready;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+        }
+
+        async fn stop_all(&self, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+            let active = self.queue.active.read().await.iter().map(|task| task.uuid.clone()).collect::<Vec<_>>();
+            for uuid in active {
+                self.queue.cancel_requested(&uuid).await?;
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.queue.finished.read().await.len() != count || self.queue.workers_running().await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            assert_eq!(self.capacity.in_use.load(Ordering::SeqCst), 0);
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ConcurrentLiveFixture {
+        fn drop(&mut self) { self.cancel.cancel(); }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_live_workers_fill_provider_capacity_and_stop_only_the_selected_recording(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for limit in [0, 4] {
+            let fixture = ConcurrentLiveFixture::new(4, limit).await?;
+            let (first, second) = tokio::join!(fixture.start(), fixture.start());
+            first?;
+            second?;
+            fixture.wait_for_running(4).await?;
+            assert_eq!(fixture.capacity.peak.load(Ordering::SeqCst), 4);
+            fixture.queue.cancel_requested("live-2").await?;
+            let remaining = fixture.wait_for_running(3).await?;
+            assert!(!remaining.iter().any(|uuid| uuid == "live-2"));
+            assert!(fixture
+                .queue
+                .active
+                .read()
+                .await
+                .iter()
+                .filter(|task| task.uuid != "live-2")
+                .all(|task| task.state == RecordingTaskState::Running));
+            fixture.stop_all(4).await?;
+            assert_eq!(
+                fixture.capacity.releases.load(Ordering::SeqCst),
+                4,
+                "one allocation per recording despite concurrent starts"
+            );
+            assert!(fixture.queue.finished.read().await.iter().all(|task| task.state == RecordingTaskState::Completed));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_workers_respect_capacity_and_start_waiting_recordings_when_a_slot_is_released(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ConcurrentLiveFixture::new(4, 2).await?;
+        fixture.start().await?;
+        let running = fixture.wait_for_running(2).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fixture.queue.slot_waiters.snapshots().len() != 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(fixture.capacity.in_use.load(Ordering::SeqCst), 2);
+        fixture.queue.cancel_requested(&running[0]).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let now_running = fixture.wait_for_running(2).await?;
+                if now_running.iter().any(|uuid| !running.contains(uuid)) {
+                    break Ok::<_, tokio::time::error::Elapsed>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert_eq!(fixture.capacity.peak.load(Ordering::SeqCst), 2);
+        assert!(fixture
+            .queue
+            .active
+            .read()
+            .await
+            .iter()
+            .any(|task| task.uuid == running[1] && task.state == RecordingTaskState::Running));
+        fixture.stop_all(4).await?;
+        assert!(fixture.queue.finished.read().await.iter().all(|task| task.to_view(true).is_terminal()));
+        assert!(fixture.queue.slot_waiters.snapshots().is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_starts_respect_the_configured_background_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ConcurrentLiveFixture::with_background_limit(3, 3, 1).await?;
+        fixture.start().await?;
+        let running = fixture.wait_for_running(1).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fixture.queue.slot_waiters.snapshots().len() != 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(fixture.capacity.peak.load(Ordering::SeqCst), 1);
+        fixture.queue.cancel_requested(&running[0]).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let now_running = fixture.wait_for_running(1).await?;
+                if now_running != running {
+                    break Ok::<_, tokio::time::error::Elapsed>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert_eq!(fixture.capacity.peak.load(Ordering::SeqCst), 1);
+        fixture.stop_all(3).await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduler_starts_a_due_live_capture_while_another_capture_is_running(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for has_data in [false, true] {
+            let dir = TempDir::new()?;
+            let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path())?);
+            let now = chrono::Utc::now().timestamp();
+            let mut immediate = scheduled_task(RecordingKind::Live, now - 60, 900);
+            immediate.uuid = "immediate".to_string();
+            immediate.state = RecordingTaskState::Queued;
+            immediate.input_name = Some(Arc::from("provider"));
+            immediate.recording.source.virtual_id = "42".to_string();
+            immediate.file_dir = dir.path().to_path_buf();
+            immediate.file_path = dir.path().join("immediate.ts");
+            let mut scheduled = immediate.clone();
+            scheduled.uuid = "scheduled".to_string();
+            scheduled.state = RecordingTaskState::Scheduled;
+            scheduled.file_path = dir.path().join("scheduled.ts");
+            scheduled.recording.program_start = Some(now);
+            scheduled.recording.scheduled_start = Some(now);
+            let immediate = RecordingQueue::to_persisted(&immediate);
+            let scheduled = RecordingQueue::to_persisted(&scheduled);
+            crate::recording::recording_queue::mutate(&queue, |candidate| {
+                candidate.queue.push(immediate);
+                candidate.scheduled.push(scheduled);
+                Ok(())
+            })
+            .await?;
+            let script = counting_ffmpeg(dir.path(), &dir.path().join("spawns.log"));
+            let write_initial = if has_data { "printf recorded > \"$output\"" } else { ":" };
+            std::fs::write(&script, format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\ncase \"$output\" in\n*immediate.ts.partial) {write_initial}; touch \"$output.ready\"; read -r control ;;\n*) printf recorded > \"$output\" ;;\nesac\nexit 0\n"
+            ))?;
+            let stub = StubCapacity::with_room();
+            let capacity: Arc<dyn RecordingCapacityPort> = stub.clone();
+            let config =
+                RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() });
+            ensure_recording_worker_running(
+                &app_config_with_listener(),
+                &config,
+                &queue,
+                &NoopSink,
+                &capacity,
+                &script,
+            )
+            .await?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !dir.path().join("immediate.ts.partial.ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            start_recording_scheduler(
+                Arc::new(app_config_with_listener()),
+                config.clone(),
+                &queue,
+                NoopSink,
+                capacity.clone(),
+                cancel.clone(),
+                script.clone(),
+            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !queue.finished.read().await.iter().any(|task| task.uuid == "scheduled") {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            assert!(queue
+                .active
+                .read()
+                .await
+                .iter()
+                .any(|task| task.uuid == "immediate" && task.state == RecordingTaskState::Running));
+            assert!(queue.finished.read().await.iter().all(|task| task.uuid != "immediate"));
+            queue.cancel_requested("immediate").await?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while queue.finished.read().await.len() != 2 || queue.workers_running().await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            cancel.cancel();
+            assert_eq!(stub.acquire_count(), 2);
+            let finished = queue.finished.read().await;
+            let stopped = finished.iter().find(|task| task.uuid == "immediate").ok_or("missing stopped task")?;
+            let next = finished.iter().find(|task| task.uuid == "scheduled").ok_or("missing scheduled task")?;
+            assert_eq!(
+                stopped.state,
+                if has_data { RecordingTaskState::Completed } else { RecordingTaskState::Failed }
+            );
+            assert_eq!(next.state, RecordingTaskState::Completed, "{:?}", next.error);
+            assert_eq!(tokio::fs::read(&next.file_path).await?, b"recorded");
+            assert!(stopped.to_view(true).is_terminal());
+            assert!(next.to_view(true).is_terminal());
+            assert!(queue.active.read().await.is_empty());
+            assert_eq!(*queue.worker("immediate").control_signal.read().await, RecordingControl::None);
+            assert_eq!(stub.release_count(), 2);
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn live_timeout_keeps_the_transfer_cause_without_claiming_the_window_expired(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2857,7 +3337,7 @@ mod tests {
         assert_eq!(settled.recording.reserved_bytes, 0);
         assert_eq!(stub.acquire_count(), 1);
         assert_eq!(stub.release_count(), 1);
-        assert!(queue.active.read().await.is_none());
+        assert!(queue.active.read().await.is_empty());
         assert_eq!(queue.finished.read().await.len(), 1);
         Ok(())
     }
@@ -2869,7 +3349,7 @@ mod tests {
             let task = scheduled_task(kind, chrono::Utc::now().timestamp(), 300);
             let persisted = RecordingQueue::to_persisted(&task);
             crate::recording::recording_queue::mutate(&queue, move |candidate| {
-                candidate.active = Some(persisted.clone());
+                candidate.active = vec![persisted.clone()];
                 Ok(())
             })
             .await?;
@@ -2887,7 +3367,7 @@ mod tests {
             assert!(matches!(retry, Some(super::RetryCommit::Waiting { delay_secs: 1, attempts: 1 })));
             {
                 let active = queue.active.read().await;
-                let active = active.as_ref().ok_or("active transfer missing")?;
+                let active = active.first().ok_or("active transfer missing")?;
                 assert_eq!(active.state, RecordingTaskState::RetryWaiting);
                 assert!(active.error.as_deref().is_some_and(|error| error.contains(&public_cause)));
                 assert!(active.next_retry_at.is_some());
@@ -2931,6 +3411,7 @@ mod tests {
             NoopSink,
             capacity,
             cancel.clone(),
+            Path::new(crate::recording::recording_worker::FFMPEG_BINARY).to_path_buf(),
         );
 
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -2939,7 +3420,7 @@ mod tests {
                     .active
                     .read()
                     .await
-                    .as_ref()
+                    .first()
                     .is_some_and(|task| task.state == RecordingTaskState::WaitingForCapacity)
                 {
                     break;
@@ -3071,7 +3552,7 @@ mod tests {
         let Ok(settled) = settled else {
             panic!(
                 "never settled: active={:?} queued={} spawns={} acquires={}",
-                queue.active.read().await.as_ref().map(|active| (
+                queue.active.read().await.first().map(|active| (
                     active.uuid.clone(),
                     active.state,
                     active.error.clone()
@@ -3095,23 +3576,29 @@ mod tests {
         assert_eq!(settled.recording.reserved_bytes, 0, "and it is not still holding disk");
     }
 
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> std::io::Result<String> {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut byte = [0; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            if socket.read(&mut byte).await? == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete request headers"));
+            }
+            request.push(byte[0]);
+        }
+        Ok(String::from_utf8_lossy(&request).to_ascii_lowercase())
+    }
+
     #[tokio::test]
     async fn recording_redirects_keep_the_proxy_and_resume_headers() -> Result<(), Box<dyn std::error::Error>> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let local_url = reqwest::Url::parse(&format!("http://{}/capture", listener.local_addr()?))?;
         let local_task = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await?;
-            let mut request = Vec::new();
-            let mut byte = [0; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                if socket.read(&mut byte).await? == 0 {
-                    break;
-                }
-                request.push(byte[0]);
-            }
+            let request = read_request(&mut socket).await?;
             socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://recording-origin.invalid/start\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
-            Ok::<_, std::io::Error>(String::from_utf8_lossy(&request).to_ascii_lowercase())
+            Ok::<_, std::io::Error>(request)
         });
         let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let proxy_url = format!("http://{}", proxy.local_addr()?);
@@ -3119,17 +3606,13 @@ mod tests {
             let mut requests = Vec::new();
             for response in [
                 "HTTP/1.1 307 Temporary Redirect\r\nLocation: /finish\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 302 Found\r\nLocation: http://recording-cdn.invalid/end\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nContent-Length: 6\r\nConnection: close\r\n\r\n456789",
             ] {
                 let (mut socket, _) = proxy.accept().await?;
-                let mut request = Vec::new();
-                let mut byte = [0; 1];
-                while !request.ends_with(b"\r\n\r\n") {
-                    if socket.read(&mut byte).await? == 0 { break; }
-                    request.push(byte[0]);
-                }
+                let request = read_request(&mut socket).await?;
                 socket.write_all(response.as_bytes()).await?;
-                requests.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+                requests.push(request);
             }
             Ok::<_, std::io::Error>(requests)
         });
@@ -3137,19 +3620,30 @@ mod tests {
         let mut updated = (*config.config.load_full()).clone();
         updated.proxy = Some(tuliprox_core::model::ProxyConfig { url: proxy_url, username: None, password: None });
         config.config.store(Arc::new(updated));
-        let local = tuliprox_core::utils::request::create_client(&config)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
         let mut sensitive = reqwest::header::HeaderMap::new();
         sensitive.insert(
             reqwest::header::AUTHORIZATION,
             reqwest::header::HeaderValue::from_static("Bearer listener-secret"),
         );
         sensitive.insert(reqwest::header::COOKIE, reqwest::header::HeaderValue::from_static("session=listener-secret"));
-        let upstream = tuliprox_core::utils::request::create_client(&config)
+        let local = tuliprox_core::utils::request::create_client(&config)
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .default_headers(sensitive)
+            .build()?;
+        let recording_headers = std::collections::HashMap::from([
+            ("Authorization".to_string(), "Bearer recording-secret".to_string()),
+            ("Cookie".to_string(), "session=recording-secret".to_string()),
+            ("X-Recording-Test".to_string(), "custom".to_string()),
+        ]);
+        let upstream = tuliprox_core::utils::request::create_client(&config)
+            .redirect(reqwest::redirect::Policy::none())
+            .default_headers(tuliprox_core::utils::request::get_request_headers(
+                Some(&recording_headers),
+                None,
+                None,
+                None,
+            ))
             .build()?;
         let response = tokio::time::timeout(
             Duration::from_secs(5),
@@ -3171,12 +3665,208 @@ mod tests {
         assert!(local_request.starts_with("get /capture "));
         assert!(upstream_requests[0].starts_with("get http://recording-origin.invalid/start "));
         assert!(upstream_requests[1].starts_with("get http://recording-origin.invalid/finish "));
-        assert!(upstream_requests.iter().all(|request| !request.contains("listener-secret")));
+        assert!(local_request.contains("authorization: bearer listener-secret"), "{local_request}");
+        assert!(local_request.contains("cookie: session=listener-secret"), "{local_request}");
+        assert!(!local_request.contains("recording-secret"), "{local_request}");
+        assert!(upstream_requests[2].starts_with("get http://recording-cdn.invalid/end "));
+        for (index, request) in upstream_requests.iter().enumerate() {
+            assert!(!request.contains("listener-secret"), "{request}");
+            if index < 2 {
+                assert!(request.contains("authorization: bearer recording-secret"), "{request}");
+                assert!(request.contains("cookie: session=recording-secret"), "{request}");
+            } else {
+                assert!(!request.contains("recording-secret"), "{request}");
+            }
+            assert!(request.contains("x-recording-test: custom"), "{request}");
+        }
         for request in std::iter::once(&local_request).chain(&upstream_requests) {
             assert!(request.contains("range: bytes=4-"), "{request}");
             assert!(request.contains("accept-encoding: identity"), "{request}");
             assert!(request.contains(&shared::model::RECORDING_STREAM_USER_AGENT.to_ascii_lowercase()), "{request}");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recording_redirects_without_upstream_client_strip_listener_credentials(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_url = reqwest::Url::parse(&format!("http://{}/capture", listener.local_addr()?))?;
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            upstream.local_addr()?
+        );
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (listener, response) in [
+                (listener, redirect),
+                (upstream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()),
+            ] {
+                let (mut socket, _) = listener.accept().await?;
+                let request = read_request(&mut socket).await?;
+                socket.write_all(response.as_bytes()).await?;
+                requests.push(request);
+            }
+            Ok::<_, std::io::Error>(requests)
+        });
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer listener-secret"),
+        );
+        headers.insert(reqwest::header::COOKIE, reqwest::header::HeaderValue::from_static("session=listener-secret"));
+        headers.insert("x-recording-test", reqwest::header::HeaderValue::from_static("custom"));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .default_headers(headers)
+            .build()?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::send_download_request(
+                &client,
+                None,
+                &local_url,
+                0,
+                &RwLock::new(RecordingControl::None),
+                &Notify::new(),
+            ),
+        )
+        .await?
+        .map_err(|result| format!("request failed: {result:?}"))?;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let requests = server.await??;
+        assert!(requests[0].contains("authorization: bearer listener-secret"), "{}", requests[0]);
+        assert!(requests[0].contains("cookie: session=listener-secret"), "{}", requests[0]);
+        assert!(!requests[1].contains("listener-secret"), "{}", requests[1]);
+        assert!(requests[1].contains("x-recording-test: custom"), "{}", requests[1]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn serial_transfers_start_the_next_worker_without_waiting_for_a_tick(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::AsyncWriteExt;
+        let dir = TempDir::new()?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let app = Arc::new(app_config_with_listener());
+        let mut config = (*app.config.load_full()).clone();
+        config.api.port = listener.local_addr()?.port();
+        app.config.store(Arc::new(config));
+        let queue = Arc::new(RecordingQueue::new());
+        for index in 0..2 {
+            let mut task = scheduled_task(RecordingKind::Vod, chrono::Utc::now().timestamp(), 300);
+            task.uuid = format!("transfer-{index}");
+            task.state = RecordingTaskState::Queued;
+            task.recording.source.virtual_id = (42 + index).to_string();
+            task.file_dir = dir.path().to_path_buf();
+            task.file_path = dir.path().join(format!("transfer-{index}.mp4"));
+            queue.queue.lock().await.push_back(task);
+        }
+        let (first_seen, first_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (second_seen, second_received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            for (seen, gate) in [(first_seen, Some(released)), (second_seen, None)] {
+                let (mut socket, _) = listener.accept().await?;
+                read_request(&mut socket).await?;
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n").await?;
+                let _ = seen.send(());
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                socket.write_all(b"0123456789").await?;
+            }
+            Ok::<_, std::io::Error>(())
+        });
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let capacity: Arc<dyn RecordingCapacityPort> = StubCapacity::with_room();
+        start_recording_scheduler(
+            app,
+            RecordingConfig::from(&shared::model::RecordingConfigDto { enabled: true, ..Default::default() }),
+            &queue,
+            NoopSink,
+            capacity,
+            cancellation.clone(),
+            PathBuf::from("unused"),
+        );
+        let result = async {
+            tokio::time::timeout(Duration::from_secs(5), first_received).await??;
+            assert_eq!(queue.active.read().await.len(), 1);
+            assert_eq!(queue.queue.lock().await.len(), 1);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            release.send(()).map_err(|()| "fixture stopped")?;
+            tokio::time::timeout(Duration::from_millis(500), second_received).await??;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while queue.finished.read().await.len() != 2 || queue.workers_running().await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            assert!(queue.finished.read().await.iter().all(|task| task.state == RecordingTaskState::Completed));
+            server.await??;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }
+        .await;
+        cancellation.cancel();
+        result
+    }
+
+    #[tokio::test]
+    async fn blocked_serial_queue_does_not_clone_partitions_on_each_commit() -> Result<(), Box<dyn std::error::Error>> {
+        let queue = RecordingQueue::new();
+        queue.active.write().await.push(scheduled_task(RecordingKind::Vod, 0, 300));
+        for index in 0..49 {
+            let mut task = scheduled_task(RecordingKind::Vod, 0, 300);
+            task.uuid = format!("waiting-{index}");
+            task.recording.source.virtual_id = index.to_string();
+            task.state = RecordingTaskState::Queued;
+            queue.queue.lock().await.push_back(task);
+        }
+        for index in 0..100 {
+            let mut done = scheduled_task(RecordingKind::Vod, 0, 300);
+            done.uuid = format!("completed-{index}");
+            done.recording.source.virtual_id = (100 + index).to_string();
+            done.state = RecordingTaskState::Completed;
+            queue.finished.write().await.push(done);
+        }
+        for size in 0..3 {
+            crate::recording::recording_queue::mutate(&queue, |candidate| {
+                candidate.active[0].size = size;
+                Ok(())
+            })
+            .await?;
+            // Promotion has no reason to read this partition; a full snapshot does.
+            let scheduled = queue.scheduled.write().await;
+            assert!(!tokio::time::timeout(Duration::from_millis(200), super::promote_ready_downloads(&queue)).await??);
+            drop(scheduled);
+        }
+        assert_eq!(queue.queue.lock().await.len(), 49);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_scheduler_does_not_snapshot_recording_history() -> Result<(), Box<dyn std::error::Error>> {
+        let queue = Arc::new(RecordingQueue::new());
+        let history = queue.finished.write().await;
+        let capacity: Arc<dyn RecordingCapacityPort> = StubCapacity::with_room();
+        let config = RecordingConfig::from(&shared::model::RecordingConfigDto::default());
+        tokio::time::timeout(Duration::from_millis(200), async {
+            queue.promote_due_scheduled_now().await;
+            ensure_recording_worker_running(
+                &app_config_with_listener(),
+                &config,
+                &queue,
+                &NoopSink,
+                &capacity,
+                Path::new("unused"),
+            )
+            .await
+        })
+        .await??;
+        drop(history);
         Ok(())
     }
 
@@ -3307,7 +3997,7 @@ mod tests {
         let Ok(settled) = settled else {
             panic!(
                 "never settled: active={:?} spawns={}",
-                queue.active.read().await.as_ref().map(|active| (active.state, active.error.clone())),
+                queue.active.read().await.first().map(|active| (active.state, active.error.clone())),
                 spawn_count(&log),
             );
         };

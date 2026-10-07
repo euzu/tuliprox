@@ -1266,8 +1266,8 @@ mod tests {
     async fn wait_until_worker_owns_runnable_task(state: &AppState) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let running = *state.recordings.worker_running.read().await;
-                let runnable = state.recordings.active.read().await.as_ref().is_some_and(|task| {
+                let running = state.recordings.workers_running().await;
+                let runnable = state.recordings.active.read().await.first().is_some_and(|task| {
                     matches!(
                         task.state,
                         shared::model::RecordingTaskState::Running
@@ -1288,7 +1288,7 @@ mod tests {
     async fn resume_command_restarts_the_worker_for_a_paused_vod() {
         let mut state = enabled_recording_state();
         Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
-        *state.recordings.active.write().await = Some(resumable_vod(shared::model::RecordingTaskState::Paused));
+        *state.recordings.active.write().await = vec![resumable_vod(shared::model::RecordingTaskState::Paused)];
 
         let response = resume_recording_task(
             axum::extract::Path("vod".to_string()),

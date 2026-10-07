@@ -24,7 +24,7 @@ use shared::{
     utils::{sanitize_filename_chars, CONSTANTS, FILENAME_TRIM_PATTERNS},
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::{
@@ -327,13 +327,13 @@ where
                 .map_err(|e| QueueMutationError::new(format!("persisted scheduled entry invalid: {e}")))?,
         );
     }
-    let active = match candidate_active {
-        Some(p) => Some(
-            RecordingQueue::from_persisted(p)
-                .map_err(|e| QueueMutationError::new(format!("persisted active entry invalid: {e}")))?,
-        ),
-        None => None,
-    };
+    let active = candidate_active
+        .into_iter()
+        .map(|task| {
+            RecordingQueue::from_persisted(task)
+                .map_err(|e| QueueMutationError::new(format!("persisted active entry invalid: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut finished: Vec<RecordingTask> = Vec::with_capacity(candidate_finished.len());
     for p in candidate_finished {
         finished.push(
@@ -355,7 +355,9 @@ where
     *scheduled_lock = scheduled;
     *active_lock = active;
     *finished_lock = finished;
+    this.prune_idle_workers(&queue_lock, &scheduled_lock, &active_lock);
     this.revision.store(next_revision, Ordering::SeqCst);
+    this.queue_changed.notify_one();
     Ok(Some(result))
 }
 
@@ -404,7 +406,7 @@ pub struct RecordingTask {
 pub struct PersistedRecordingQueue {
     pub queue: Vec<PersistedRecordingTask>,
     pub scheduled: Vec<PersistedRecordingTask>,
-    pub active: Option<PersistedRecordingTask>,
+    pub active: Vec<PersistedRecordingTask>,
     pub finished: Vec<PersistedRecordingTask>,
     /// Monotonic revision. Increments once per committed queue mutation.
     /// The in-memory `RecordingQueue` mirrors this counter via an `AtomicU64`.
@@ -416,13 +418,12 @@ impl PersistedRecordingQueue {
     /// Flatten the four partitions into the repository's record set, tagging
     /// each task with the partition it must be restored into.
     fn to_records(&self) -> Vec<PersistedRecordingTask> {
-        let mut records = Vec::with_capacity(
-            self.queue.len() + self.scheduled.len() + self.finished.len() + usize::from(self.active.is_some()),
-        );
+        let mut records =
+            Vec::with_capacity(self.queue.len() + self.scheduled.len() + self.finished.len() + self.active.len());
         let partitions: [(&[PersistedRecordingTask], RecordingPartition); 4] = [
             (&self.queue, RecordingPartition::Queued),
             (&self.scheduled, RecordingPartition::Scheduled),
-            (self.active.as_slice(), RecordingPartition::Active),
+            (&self.active, RecordingPartition::Active),
             (&self.finished, RecordingPartition::Finished),
         ];
         for (tasks, partition) in partitions {
@@ -442,10 +443,8 @@ impl PersistedRecordingQueue {
             match task.partition {
                 RecordingPartition::Scheduled => restored.scheduled.push(task),
                 RecordingPartition::Finished => restored.finished.push(task),
-                RecordingPartition::Active if restored.active.is_none() => restored.active = Some(task),
-                // Only one task can be active; a second one is a corrupt record
-                // set, and is requeued rather than silently dropped.
-                RecordingPartition::Queued | RecordingPartition::Active => restored.queue.push(task),
+                RecordingPartition::Active => restored.active.push(task),
+                RecordingPartition::Queued => restored.queue.push(task),
             }
         }
         restored
@@ -519,9 +518,7 @@ pub enum PromotionDecision {
     Execute,
     /// A completed entry at this index in `finished` already holds it.
     AttachTo(usize),
-    /// Another entry is producing it right now. Unreachable while there is a
-    /// single active slot, since promotion only runs once it is empty; kept so
-    /// the rule stays correct if that ever stops being true.
+    /// Another active entry is producing this media; wait for its file.
     Wait,
 }
 
@@ -578,7 +575,7 @@ pub fn media_held_by_another<'a>(
 }
 
 pub fn promotion_decision(candidate: &PersistedRecordingQueue, task: &PersistedRecordingTask) -> PromotionDecision {
-    if candidate.active.as_ref().is_some_and(|active| same_media(active, task)) {
+    if candidate.active.iter().any(|active| same_media(active, task)) {
         return PromotionDecision::Wait;
     }
     if let Some(index) =
@@ -589,10 +586,10 @@ pub fn promotion_decision(candidate: &PersistedRecordingQueue, task: &PersistedR
     PromotionDecision::Execute
 }
 
-/// Move the next runnable entry into the active slot, attaching any entry whose
+/// Add the next runnable entry to the active tasks, attaching any entry whose
 /// file another entry already produced.
 ///
-/// Every path that fills the active slot goes through here. Taking the head of
+/// Every path that activates a task goes through here. Taking the head of
 /// the queue directly would re-download a file that was just completed by the
 /// entry ahead of it.
 pub fn promote_from_queue(candidate: &mut PersistedRecordingQueue) -> Option<(String, String)> {
@@ -600,9 +597,16 @@ pub fn promote_from_queue(candidate: &mut PersistedRecordingQueue) -> Option<(St
     while index < candidate.queue.len() {
         match promotion_decision(candidate, &candidate.queue[index]) {
             PromotionDecision::Execute => {
+                // Bulk transfers stay serial; live captures can run alongside them.
+                if candidate.queue[index].kind != RecordingKind::Live
+                    && candidate.active.iter().any(|task| task.kind != RecordingKind::Live)
+                {
+                    index += 1;
+                    continue;
+                }
                 let next = candidate.queue.remove(index);
                 let promoted = (next.uuid.clone(), next.filename.clone());
-                candidate.active = Some(next);
+                candidate.active.push(next);
                 return Some(promoted);
             }
             PromotionDecision::AttachTo(completed) => {
@@ -798,7 +802,16 @@ struct RecordingWaiter {
     notify: Arc<Notify>,
 }
 
-type RecordingWaiters = Arc<Mutex<Vec<RecordingWaiter>>>;
+type RecordingWaiters = Arc<StdMutex<Vec<RecordingWaiter>>>;
+
+struct RecordingWaitRegistration {
+    waiters: RecordingWaiters,
+    id: u64,
+}
+
+impl Drop for RecordingWaitRegistration {
+    fn drop(&mut self) { lock_unpoisoned(&self.waiters).retain(|waiter| waiter.id != self.id); }
+}
 
 #[derive(Clone)]
 pub struct RecordingWaiterSnapshot {
@@ -818,6 +831,7 @@ pub enum RecordingWaitOutcome {
 pub struct RecordingSlotWaitQueue {
     waiters: RecordingWaiters,
     next_waiter_id: AtomicU64,
+    pub registration_changed: Notify,
 }
 
 impl Default for RecordingSlotWaitQueue {
@@ -825,9 +839,15 @@ impl Default for RecordingSlotWaitQueue {
 }
 
 impl RecordingSlotWaitQueue {
-    pub fn new() -> Self { Self { waiters: Arc::new(Mutex::new(Vec::new())), next_waiter_id: AtomicU64::new(1) } }
+    pub fn new() -> Self {
+        Self {
+            waiters: Arc::new(StdMutex::new(Vec::new())),
+            next_waiter_id: AtomicU64::new(1),
+            registration_changed: Notify::new(),
+        }
+    }
 
-    async fn remove_waiter(&self, waiter_id: u64) { self.waiters.lock().await.retain(|waiter| waiter.id != waiter_id); }
+    fn remove_waiter(&self, waiter_id: u64) { lock_unpoisoned(&self.waiters).retain(|waiter| waiter.id != waiter_id); }
 
     /// Register and block until this task is signalled or control flow requests pause/cancel.
     pub async fn wait(
@@ -839,25 +859,30 @@ impl RecordingSlotWaitQueue {
     ) -> RecordingWaitOutcome {
         let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
-        self.waiters.lock().await.push(RecordingWaiter {
+        lock_unpoisoned(&self.waiters).push(RecordingWaiter {
             id: waiter_id,
             input_name,
             priority,
             notify: Arc::clone(&notify),
         });
 
+        let _registration = RecordingWaitRegistration { waiters: Arc::clone(&self.waiters), id: waiter_id };
+        self.registration_changed.notify_one();
+
         if let Some(outcome) = self.control_outcome(waiter_id, control_signal).await {
             return outcome;
         }
 
         loop {
+            let controlled = control_notify.notified();
+            tokio::pin!(controlled);
+            controlled.as_mut().enable();
+            if let Some(outcome) = self.control_outcome(waiter_id, control_signal).await {
+                return outcome;
+            }
             tokio::select! {
                 () = notify.notified() => return RecordingWaitOutcome::Signalled,
-                () = control_notify.notified() => {
-                    if let Some(outcome) = self.control_outcome(waiter_id, control_signal).await {
-                        return outcome;
-                    }
-                }
+                () = &mut controlled => {}
             }
         }
     }
@@ -875,14 +900,12 @@ impl RecordingSlotWaitQueue {
             RecordingControl::Restart => RecordingWaitOutcome::Restarted,
             RecordingControl::None => return None,
         };
-        self.remove_waiter(waiter_id).await;
+        self.remove_waiter(waiter_id);
         Some(outcome)
     }
 
-    pub async fn snapshots(&self) -> Vec<RecordingWaiterSnapshot> {
-        self.waiters
-            .lock()
-            .await
+    pub fn snapshots(&self) -> Vec<RecordingWaiterSnapshot> {
+        lock_unpoisoned(&self.waiters)
             .iter()
             .map(|waiter| RecordingWaiterSnapshot {
                 id: waiter.id,
@@ -893,8 +916,8 @@ impl RecordingSlotWaitQueue {
     }
 
     /// Wake a specific waiter by id.
-    pub async fn signal_waiter(&self, waiter_id: u64) -> bool {
-        let mut waiters = self.waiters.lock().await;
+    pub fn signal_waiter(&self, waiter_id: u64) -> bool {
+        let mut waiters = lock_unpoisoned(&self.waiters);
         if let Some(idx) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
             let notify = Arc::clone(&waiters[idx].notify);
             waiters.remove(idx);
@@ -906,14 +929,35 @@ impl RecordingSlotWaitQueue {
     }
 }
 
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runtime state belonging to one recording. Control signals never cross task boundaries.
+///
+/// Queue mutations and worker release take `mutation_guard` first. The worker-map
+/// mutex is held only for lookup/removal, never across an await. The `running`
+/// lock is released before acquiring queue/active locks or entering a mutation.
+/// Control publication follows persisted mutations under `mutation_guard`.
+/// Idle-map pruning uses `try_read` under partition locks and retains contested
+/// entries for a later worker release.
+#[derive(Default)]
+pub struct RecordingWorkerState {
+    pub control_signal: Arc<RwLock<RecordingControl>>,
+    pub control_notify: Arc<Notify>,
+    pub running: Arc<RwLock<bool>>,
+}
+
 pub struct RecordingQueue {
     pub queue: Arc<Mutex<VecDeque<RecordingTask>>>,
     pub scheduled: Arc<RwLock<Vec<RecordingTask>>>,
-    pub active: Arc<RwLock<Option<RecordingTask>>>,
+    pub active: Arc<RwLock<Vec<RecordingTask>>>,
     pub finished: Arc<RwLock<Vec<RecordingTask>>>,
-    pub control_signal: Arc<RwLock<RecordingControl>>,
-    pub control_notify: Arc<Notify>,
-    pub worker_running: Arc<RwLock<bool>>,
+    workers: StdMutex<HashMap<String, Arc<RecordingWorkerState>>>,
+    // Inputs can share providers, so policy inspection and allocation use one
+    // guard. Transfer I/O runs outside it.
+    pub(crate) capacity_guard: Mutex<()>,
+    pub(crate) queue_changed: Notify,
     /// The recoverable store. `None` for an in-memory queue in tests.
     pub repository: Option<Arc<StdMutex<RecordingRepository>>>,
     /// Priority-aware waiter queue for provider connection slots.
@@ -929,8 +973,103 @@ impl Default for RecordingQueue {
 }
 
 impl RecordingQueue {
+    pub fn worker(&self, uuid: &str) -> Arc<RecordingWorkerState> {
+        let mut workers = lock_unpoisoned(&self.workers);
+        if let Some(worker) = workers.get(uuid) {
+            return Arc::clone(worker);
+        }
+        workers.entry(uuid.to_owned()).or_default().clone()
+    }
+
+    pub fn existing_worker(&self, uuid: &str) -> Option<Arc<RecordingWorkerState>> {
+        lock_unpoisoned(&self.workers).get(uuid).cloned()
+    }
+
+    fn prune_idle_workers(
+        &self,
+        queued: &VecDeque<RecordingTask>,
+        scheduled: &[RecordingTask],
+        active: &[RecordingTask],
+    ) {
+        lock_unpoisoned(&self.workers).retain(|uuid, worker| {
+            queued.iter().chain(scheduled).chain(active).any(|task| task.uuid == *uuid)
+                || !worker.running.try_read().is_ok_and(|running| !*running)
+        });
+    }
+
+    /// Check promotion eligibility without cloning persisted partitions.
+    pub(crate) async fn has_promotable_queued(&self) -> bool {
+        use crate::recording::recording_service::recording_identity;
+        let queued = self.queue.lock().await;
+        if queued.is_empty() {
+            return false;
+        }
+        let active = self.active.read().await;
+        let transfer_running = active.iter().any(|task| task.kind != RecordingKind::Live);
+        let active_media: HashSet<_> =
+            active.iter().map(|task| recording_identity(&task.recording, task.url.as_str())).collect();
+        let mut waiting_media = HashSet::new();
+        for task in queued.iter() {
+            let identity = recording_identity(&task.recording, task.url.as_str());
+            if active_media.contains(&identity) {
+                continue;
+            }
+            if task.kind == RecordingKind::Live || !transfer_running {
+                return true;
+            }
+            waiting_media.insert(identity);
+        }
+        if waiting_media.is_empty() {
+            return false;
+        }
+        self.finished.read().await.iter().any(|task| {
+            task.state == RecordingTaskState::Completed
+                && waiting_media.contains(&recording_identity(&task.recording, task.url.as_str()))
+        })
+    }
+
+    pub(crate) async fn claim_worker(&self, uuid: &str) -> Option<Arc<RecordingWorkerState>> {
+        let _mutation = self.mutation_guard.lock().await;
+        if !self.active.read().await.iter().any(|task| task.uuid == uuid && !task.paused && !task.finished) {
+            return None;
+        }
+        let worker = self.worker(uuid);
+        let mut running = worker.running.write().await;
+        if *running {
+            return None;
+        }
+        *running = true;
+        drop(running);
+        Some(worker)
+    }
+
+    pub async fn release_worker(&self, uuid: &str) {
+        let _mutation = self.mutation_guard.lock().await;
+        if let Some(worker) = self.existing_worker(uuid) {
+            *worker.running.write().await = false;
+            let queued = self.queue.lock().await.iter().any(|task| task.uuid == uuid);
+            let active = self.active.read().await.iter().any(|task| task.uuid == uuid);
+            if !queued && !active {
+                lock_unpoisoned(&self.workers).remove(uuid);
+            }
+        }
+        // A resume/requeue may have raced the previous worker's final iteration.
+        self.queue_changed.notify_one();
+    }
+
+    pub async fn workers_running(&self) -> bool {
+        let workers: Vec<_> = lock_unpoisoned(&self.workers).values().cloned().collect();
+        for worker in workers {
+            if *worker.running.read().await {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn mutate_optional_and_clear_control<F, R>(
         &self,
+        uuid: &str,
         expected: RecordingControl,
         op: F,
     ) -> Result<Option<R>, QueueMutationError>
@@ -938,9 +1077,11 @@ impl RecordingQueue {
         F: FnOnce(&mut PersistedRecordingQueue) -> Result<Option<R>, QueueMutationError>,
     {
         let _mutation = self.mutation_guard.lock().await;
+        let worker = self.existing_worker(uuid);
         let result = mutate_optional_locked(self, op).await?;
         if result.is_some() {
-            let mut control = self.control_signal.write().await;
+            let Some(worker) = worker else { return Ok(result) };
+            let mut control = worker.control_signal.write().await;
             if *control == expected {
                 *control = RecordingControl::None;
             }
@@ -957,7 +1098,7 @@ impl RecordingQueue {
         PersistedRecordingQueue {
             queue: queue.iter().map(Self::to_persisted).collect(),
             scheduled: scheduled.iter().map(Self::to_persisted).collect(),
-            active: active.as_ref().map(Self::to_persisted),
+            active: active.iter().map(Self::to_persisted).collect(),
             finished: finished.iter().map(Self::to_persisted).collect(),
             revision,
         }
@@ -972,10 +1113,10 @@ impl RecordingQueue {
     ///
     /// Takes the mutation guard first, like `committed_snapshot`, so the two
     /// cannot interleave their inner locks.
-    pub async fn active_scheduling_priority(&self) -> Option<(Option<Arc<str>>, i8)> {
+    pub async fn active_scheduling_priority(&self, uuid: &str) -> Option<(Option<Arc<str>>, i8)> {
         let _mutation = self.mutation_guard.lock().await;
         let active = self.active.read().await;
-        let active = active.as_ref()?;
+        let active = active.iter().find(|task| task.uuid == uuid)?;
         let media = crate::recording::recording_service::recording_identity_key(&active.recording, active.url.as_str());
         let queue = self.queue.lock().await;
         let scheduled = self.scheduled.read().await;
@@ -1000,8 +1141,7 @@ impl RecordingQueue {
         let scheduled = self.scheduled.read().await;
         let active = self.active.read().await;
         let finished = self.finished.read().await;
-        let mut tasks =
-            Vec::with_capacity(queue.len() + scheduled.len() + finished.len() + usize::from(active.is_some()));
+        let mut tasks = Vec::with_capacity(queue.len() + scheduled.len() + finished.len() + active.len());
         tasks.extend(queue.iter().cloned());
         tasks.extend(scheduled.iter().cloned());
         tasks.extend(active.iter().cloned());
@@ -1009,9 +1149,7 @@ impl RecordingQueue {
         (revision, tasks)
     }
 
-    pub async fn committed_partitioned_snapshot(
-        &self,
-    ) -> (Vec<RecordingTask>, Option<RecordingTask>, Vec<RecordingTask>) {
+    pub async fn committed_partitioned_snapshot(&self) -> (Vec<RecordingTask>, Vec<RecordingTask>, Vec<RecordingTask>) {
         let _mutation = self.mutation_guard.lock().await;
         let queue = self.queue.lock().await;
         let scheduled = self.scheduled.read().await;
@@ -1054,11 +1192,11 @@ impl RecordingQueue {
         Self {
             queue: Arc::from(Mutex::new(VecDeque::new())),
             scheduled: Arc::from(RwLock::new(Vec::new())),
-            active: Arc::from(RwLock::new(None)),
+            active: Arc::from(RwLock::new(Vec::new())),
             finished: Arc::from(RwLock::new(Vec::new())),
-            control_signal: Arc::from(RwLock::new(RecordingControl::None)),
-            control_notify: Arc::new(Notify::new()),
-            worker_running: Arc::from(RwLock::new(false)),
+            workers: StdMutex::new(HashMap::new()),
+            capacity_guard: Mutex::new(()),
+            queue_changed: Notify::new(),
             repository,
             slot_waiters: Arc::new(RecordingSlotWaitQueue::new()),
             revision: Arc::new(AtomicU64::new(0)),
@@ -1228,10 +1366,11 @@ impl RecordingQueue {
                 scheduled.push(task);
             }
         }
-        let active = match persisted.active {
-            Some(task) => Some(Self::recover_loaded_task(Self::from_persisted(task).map_err(invalid)?)),
-            None => None,
-        };
+        let active = persisted
+            .active
+            .into_iter()
+            .map(|task| Self::from_persisted(task).map(Self::recover_loaded_task).map_err(invalid))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut finished = Vec::with_capacity(persisted.finished.len());
         for task in persisted.finished {
             finished.push(Self::from_persisted(task).map_err(invalid)?);
@@ -1242,21 +1381,18 @@ impl RecordingQueue {
         *self.scheduled.write().await = scheduled;
         *self.finished.write().await = finished;
         self.revision.store(persisted.revision.0, Ordering::SeqCst);
-        if let Some(active) = active {
-            if active.paused || active.state == RecordingTaskState::Paused {
-                *self.active.write().await = Some(active);
-            } else if !active.finished && active.state != RecordingTaskState::Cancelled {
-                self.queue.lock().await.push_front(active);
-                *self.active.write().await = None;
+        let mut paused = Vec::new();
+        for task in active {
+            if task.paused || task.state == RecordingTaskState::Paused {
+                paused.push(task);
+            } else if !task.finished && task.state != RecordingTaskState::Cancelled {
+                self.queue.lock().await.push_front(task);
             } else {
-                self.finished.write().await.push(active);
-                *self.active.write().await = None;
+                self.finished.write().await.push(task);
             }
-        } else {
-            *self.active.write().await = None;
         }
-        *self.control_signal.write().await = RecordingControl::None;
-        *self.worker_running.write().await = false;
+        *self.active.write().await = paused;
+        lock_unpoisoned(&self.workers).clear();
         Ok(())
     }
 
@@ -1315,7 +1451,7 @@ impl RecordingQueue {
     pub async fn pause_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
         let _mutation = self.mutation_guard.lock().await;
         let changed = mutate_optional_locked(self, |candidate| {
-            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+            let Some(active) = candidate.active.iter_mut().find(|active| active.uuid == uuid) else {
                 return Ok(None);
             };
             active.state = recording_transition::transition(active.kind, active.state, RecordingCommand::Pause)
@@ -1329,8 +1465,9 @@ impl RecordingQueue {
         if !changed {
             return Ok(false);
         }
-        *self.control_signal.write().await = RecordingControl::Pause;
-        self.control_notify.notify_waiters();
+        let worker = self.worker(uuid);
+        *worker.control_signal.write().await = RecordingControl::Pause;
+        worker.control_notify.notify_waiters();
         Ok(true)
     }
 
@@ -1339,7 +1476,7 @@ impl RecordingQueue {
     pub async fn resume_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
         let _mutation = self.mutation_guard.lock().await;
         let changed = mutate_optional_locked(self, |candidate| {
-            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid && active.paused) else {
+            let Some(active) = candidate.active.iter_mut().find(|active| active.uuid == uuid && active.paused) else {
                 return Ok(None);
             };
             active.state = recording_transition::transition(active.kind, active.state, RecordingCommand::Resume)
@@ -1353,29 +1490,35 @@ impl RecordingQueue {
         if !changed {
             return Ok(false);
         }
-        *self.control_signal.write().await = RecordingControl::None;
-        self.control_notify.notify_waiters();
+        let worker = self.worker(uuid);
+        *worker.control_signal.write().await = RecordingControl::None;
+        worker.control_notify.notify_waiters();
         Ok(true)
     }
 
     /// Cancel the active task `uuid`, if it is still the active one.
     ///
-    /// A paused task holds no file handle or provider slot, so it is filed
-    /// as `Cancelled` right away. A running one is only marked `Cancelling`:
-    /// the worker still owns its file and slot and commits `Cancelled` once it
-    /// has released them. Returns whether the task was paused, or `None` when
-    /// `uuid` is not the active task.
+    /// A paused task with no running worker is filed as `Cancelled` immediately.
+    /// A worker still closing a paused stream is asked to cancel just like a
+    /// running one: it commits `Cancelled` after releasing its file and slot.
+    /// Returns whether cancellation finished immediately, or `None` when
+    /// `uuid` is not active.
     pub async fn cancel_requested(&self, uuid: &str) -> Result<Option<bool>, QueueMutationError> {
         let _mutation = self.mutation_guard.lock().await;
-        let was_paused = mutate_optional_locked(self, |candidate| {
-            let Some(active) = candidate.active.as_ref().filter(|active| active.uuid == uuid) else {
+        let worker_running = match self.existing_worker(uuid) {
+            Some(worker) => *worker.running.read().await,
+            None => false,
+        };
+        let cancelled_immediately = mutate_optional_locked(self, |candidate| {
+            let Some(active) = candidate.active.iter().find(|active| active.uuid == uuid) else {
                 return Ok(None);
             };
-            let was_paused = active.paused;
-            if was_paused {
-                let Some(mut cancelled) = candidate.active.take() else {
+            let cancelled_immediately = active.paused && !worker_running;
+            if cancelled_immediately {
+                let Some(index) = candidate.active.iter().position(|task| task.uuid == uuid) else {
                     return Ok(None);
                 };
+                let mut cancelled = candidate.active.remove(index);
                 cancelled.finished = true;
                 cancelled.paused = false;
                 cancelled.next_retry_at = None;
@@ -1384,28 +1527,39 @@ impl RecordingQueue {
                 cancelled.recording.reserved_bytes = 0;
                 candidate.finished.push(cancelled);
                 promote_from_queue(candidate);
-            } else if let Some(active) = candidate.active.as_mut() {
+            } else if let Some(active) = candidate.active.iter_mut().find(|task| task.uuid == uuid) {
                 // The worker still owns the file and the provider slot; it
                 // commits `Cancelled` once it has let go.
-                active.state = recording_transition::transition(
-                    active.kind,
-                    active.state,
-                    recording_transition::RecordingCommand::Cancel,
-                )
-                .unwrap_or(RecordingTaskState::Cancelling);
+                active.state = if active.paused {
+                    RecordingTaskState::Cancelling
+                } else {
+                    recording_transition::transition(
+                        active.kind,
+                        active.state,
+                        recording_transition::RecordingCommand::Cancel,
+                    )
+                    .unwrap_or(RecordingTaskState::Cancelling)
+                };
+                active.paused = false;
                 active.error = Some("Cancelled by user".to_string());
                 active.next_retry_at = None;
             }
-            Ok(Some(was_paused))
+            Ok(Some(cancelled_immediately))
         })
         .await?;
 
-        if let Some(was_paused) = was_paused {
-            *self.control_signal.write().await =
-                if was_paused { RecordingControl::None } else { RecordingControl::Cancel };
-            self.control_notify.notify_waiters();
+        if let Some(cancelled_immediately) = cancelled_immediately {
+            let worker = if cancelled_immediately { self.existing_worker(uuid) } else { Some(self.worker(uuid)) };
+            if let Some(worker) = worker {
+                *worker.control_signal.write().await =
+                    if cancelled_immediately { RecordingControl::None } else { RecordingControl::Cancel };
+                worker.control_notify.notify_waiters();
+                if cancelled_immediately {
+                    lock_unpoisoned(&self.workers).remove(uuid);
+                }
+            }
         }
-        Ok(was_paused)
+        Ok(cancelled_immediately)
     }
 
     /// Ask the worker to restart so it picks up a reloaded configuration.
@@ -1420,19 +1574,22 @@ impl RecordingQueue {
             }
             *control == RecordingControl::Restart
         }
-        if let Ok(mut control) = self.control_signal.try_write() {
-            if request(&mut control) {
-                self.control_notify.notify_waiters();
+        let workers: Vec<_> = lock_unpoisoned(&self.workers).values().cloned().collect();
+        for worker in workers {
+            if let Ok(mut control) = worker.control_signal.try_write() {
+                if request(&mut control) {
+                    worker.control_notify.notify_waiters();
+                }
+            } else {
+                let worker = Arc::clone(&worker);
+                tokio::spawn(async move {
+                    let mut control = worker.control_signal.write().await;
+                    if request(&mut control) {
+                        worker.control_notify.notify_waiters();
+                    }
+                });
             }
-            return;
         }
-        let control_signal = Arc::clone(&self.control_signal);
-        let control_notify = Arc::clone(&self.control_notify);
-        tokio::spawn(async move {
-            if request(&mut *control_signal.write().await) {
-                control_notify.notify_waiters();
-            }
-        });
     }
 
     pub async fn remove_from_queue(&self, uuid: &str) -> Result<bool, QueueMutationError> {
@@ -1501,6 +1658,13 @@ impl RecordingQueue {
     }
 
     pub async fn promote_due_scheduled(&self, now_ts: i64) -> usize {
+        let due = self.scheduled.read().await.iter().any(|task| {
+            task.recording.scheduled_start.is_some_and(|start| start <= now_ts)
+                || (task.kind == RecordingKind::Live && task.recording.scheduled_end.is_some_and(|end| now_ts >= end))
+        });
+        if !due {
+            return 0;
+        }
         let result = mutate_optional(self, |candidate| {
             let mut due_tasks = Vec::new();
             let mut missed_recordings = Vec::new();
@@ -1619,6 +1783,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovering_multiple_active_recordings_preserves_every_task_and_its_recovery_policy(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let queue = RecordingQueue::new_persistent(dir.path(), dir.path())?;
+        let mut tasks = Vec::new();
+        for index in 0..2 {
+            tasks.push(RecordingQueue::to_persisted(&task(
+                &format!("live-{index}"),
+                RecordingKind::Live,
+                RecordingTaskState::Running,
+            )));
+            let mut paused = task(&format!("paused-{index}"), RecordingKind::Vod, RecordingTaskState::Paused);
+            paused.paused = true;
+            tasks.push(RecordingQueue::to_persisted(&paused));
+            tasks.push(RecordingQueue::to_persisted(&task(
+                &format!("vod-{index}"),
+                RecordingKind::Vod,
+                RecordingTaskState::Running,
+            )));
+        }
+        mutate(&queue, |candidate| {
+            candidate.active = tasks;
+            Ok(())
+        })
+        .await?;
+        let restored = RecordingQueue::new_persistent(dir.path(), dir.path())?;
+        restored.load_from_disk().await?;
+        assert_eq!(restored.active.read().await.len(), 2);
+        assert!(restored.active.read().await.iter().all(|task| task.state == RecordingTaskState::Paused));
+        assert_eq!(restored.queue.lock().await.len(), 2);
+        assert!(restored.queue.lock().await.iter().all(|task| task.state == RecordingTaskState::Queued));
+        assert_eq!(restored.finished.read().await.len(), 2);
+        assert!(restored
+            .finished
+            .read()
+            .await
+            .iter()
+            .all(|task| task.state == RecordingTaskState::Failed && task.kind == RecordingKind::Live));
+        let (_, tasks) = restored.committed_snapshot().await;
+        assert_eq!(tasks.len(), 6);
+        assert!(!restored.workers_running().await);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn pause_and_resume_keep_active_download_resumable() {
         let queue = RecordingQueue::new();
         let active = RecordingTask {
@@ -1628,17 +1837,17 @@ mod tests {
             ..task("id", RecordingKind::Vod, RecordingTaskState::Running)
         };
 
-        *queue.active.write().await = Some(active);
+        *queue.active.write().await = vec![active];
         queue.pause_active("id").await.expect("pause active");
 
-        let paused = queue.active.read().await.clone().expect("active download");
+        let paused = queue.active.read().await.first().cloned().expect("active download");
         assert_eq!(paused.state, RecordingTaskState::Paused);
         assert!(paused.paused);
         assert!(!paused.finished);
 
         queue.resume_active("id").await.expect("resume active");
 
-        let resumed = queue.active.read().await.clone().expect("active download");
+        let resumed = queue.active.read().await.first().cloned().expect("active download");
         assert_eq!(resumed.state, RecordingTaskState::Running);
         assert!(!resumed.paused);
         assert!(!resumed.finished);
@@ -1647,17 +1856,243 @@ mod tests {
     #[tokio::test]
     async fn cancel_leaves_a_running_task_cancelling_until_the_worker_lets_go() {
         let queue = RecordingQueue::new();
+        let worker = queue.worker("id");
         let active = task("id", RecordingKind::Vod, RecordingTaskState::Running);
 
-        *queue.active.write().await = Some(active);
+        *queue.active.write().await = vec![active];
         assert_eq!(queue.cancel_requested("id").await.expect("cancel active"), Some(false));
 
-        let cancelled = queue.active.read().await.clone().expect("active download");
+        let cancelled = queue.active.read().await.first().cloned().expect("active download");
         assert_eq!(cancelled.state, RecordingTaskState::Cancelling);
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel);
+        assert_eq!(*worker.control_signal.read().await, RecordingControl::Cancel);
         assert!(!cancelled.finished);
         assert_eq!(cancelled.error.as_deref(), Some("Cancelled by user"));
         assert!(queue.finished.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_paused_task_releases_idle_worker_state() {
+        for running in [None, Some(false), Some(true)] {
+            let queue = RecordingQueue::new();
+            let mut paused = task("paused", RecordingKind::Vod, RecordingTaskState::Paused);
+            paused.paused = true;
+            queue.active.write().await.push(paused);
+            if let Some(running) = running {
+                *queue.worker("paused").running.write().await = running;
+            }
+            let immediate = running != Some(true);
+            assert_eq!(queue.cancel_requested("paused").await.expect("cancel paused"), Some(immediate));
+            if immediate {
+                assert!(queue.active.read().await.is_empty());
+                assert_eq!(queue.finished.read().await[0].state, RecordingTaskState::Cancelled);
+            } else {
+                assert!(queue.finished.read().await.is_empty(), "the stream has not closed yet");
+                assert_eq!(queue.active.read().await[0].state, RecordingTaskState::Cancelling);
+                assert_eq!(*queue.worker("paused").control_signal.read().await, RecordingControl::Cancel);
+                mutate(&queue, |candidate| {
+                    let mut task = candidate.active.remove(0);
+                    task.state = RecordingTaskState::Cancelled;
+                    task.finished = true;
+                    candidate.finished.push(task);
+                    Ok(())
+                })
+                .await
+                .expect("worker closes and commits");
+            }
+            let retained = queue.workers.lock().expect("worker map").contains_key("paused");
+            assert_eq!(retained, running == Some(true), "only an exiting worker retains its state");
+            queue.release_worker("paused").await;
+            assert!(!queue.workers.lock().expect("worker map").contains_key("paused"));
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_requeued_tasks_prunes_only_idle_workers() {
+        for running in [false, true] {
+            let queue = RecordingQueue::new();
+            queue.queue.lock().await.push_back(task("requeued", RecordingKind::Vod, RecordingTaskState::Queued));
+            let worker = queue.worker("requeued");
+            *worker.running.write().await = running;
+            assert!(queue.remove_from_queue("requeued").await.expect("remove"));
+            assert_eq!(queue.existing_worker("requeued").is_some(), running);
+            queue.request_worker_restart();
+            if !running {
+                assert_eq!(*worker.control_signal.read().await, RecordingControl::None);
+            }
+            queue.release_worker("requeued").await;
+            assert!(queue.existing_worker("requeued").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn attaching_requeued_tasks_prunes_their_idle_worker_state() {
+        let queue = RecordingQueue::new();
+        let completed = task("completed", RecordingKind::Vod, RecordingTaskState::Completed);
+        let mut waiting = task("waiting", RecordingKind::Vod, RecordingTaskState::Queued);
+        waiting.url = completed.url.clone();
+        queue.queue.lock().await.push_back(waiting);
+        queue.finished.write().await.push(completed);
+        queue.worker("waiting");
+        mutate(&queue, |candidate| {
+            assert!(promote_from_queue(candidate).is_none());
+            Ok(())
+        })
+        .await
+        .expect("attach existing recording");
+        assert!(queue.queue.lock().await.is_empty());
+        assert_eq!(queue.finished.read().await.len(), 2);
+        assert!(queue.existing_worker("waiting").is_none());
+    }
+
+    #[tokio::test]
+    async fn promotion_precheck_keeps_attachments_and_live_tasks_eligible_while_vod_is_running() {
+        let queue = RecordingQueue::new();
+        let active = task("active", RecordingKind::Vod, RecordingTaskState::Running);
+        let mut duplicate = task("duplicate", RecordingKind::Vod, RecordingTaskState::Queued);
+        duplicate.url = active.url.clone();
+        let completed = task("completed", RecordingKind::Series, RecordingTaskState::Completed);
+        let mut attached = task("attached", RecordingKind::Series, RecordingTaskState::Queued);
+        attached.url = completed.url.clone();
+        queue.active.write().await.push(active);
+        queue.finished.write().await.push(completed);
+        queue.queue.lock().await.extend([duplicate, attached]);
+        assert!(queue.has_promotable_queued().await);
+        mutate(&queue, |candidate| {
+            assert!(promote_from_queue(candidate).is_none());
+            Ok(())
+        })
+        .await
+        .expect("attach without starting a second transfer");
+        assert_eq!(queue.finished.read().await.len(), 2);
+        assert!(!queue.has_promotable_queued().await, "the duplicate waits for its active transfer");
+        queue.queue.lock().await.push_back(task("live", RecordingKind::Live, RecordingTaskState::Queued));
+        assert!(queue.has_promotable_queued().await);
+        mutate(&queue, |candidate| {
+            assert_eq!(promote_from_queue(candidate).map(|(uuid, _)| uuid).as_deref(), Some("live"));
+            Ok(())
+        })
+        .await
+        .expect("start live alongside the transfer");
+        assert_eq!(queue.active.read().await.len(), 2);
+        assert_eq!(queue.queue.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn promotion_precheck_matches_promotion_for_mixed_queues() {
+        fn fixture(uuid: &str, media: usize, kind: RecordingKind, state: RecordingTaskState) -> RecordingTask {
+            let mut entry = task(&format!("media-{media}"), kind, state);
+            entry.uuid = uuid.to_string();
+            entry.recording = media_meta("web:alice");
+            entry.recording.source.virtual_id = media.to_string();
+            match media % 3 {
+                1 => {
+                    entry.recording.program_start = Some(10);
+                    entry.recording.program_end = Some(20);
+                }
+                2 => {
+                    entry.recording.provenance.rule_id = Some("rule".to_string());
+                    entry.recording.provenance.occurrence_key = Some(media.to_string());
+                }
+                _ => {}
+            }
+            entry.paused = state == RecordingTaskState::Paused;
+            entry.finished = matches!(
+                state,
+                RecordingTaskState::Completed | RecordingTaskState::Failed | RecordingTaskState::Cancelled
+            );
+            entry
+        }
+        let kinds = [RecordingKind::Live, RecordingKind::Vod, RecordingKind::Series];
+        let active_states = [
+            RecordingTaskState::Running,
+            RecordingTaskState::Paused,
+            RecordingTaskState::WaitingForCapacity,
+            RecordingTaskState::RetryWaiting,
+        ];
+        let finished_states =
+            [RecordingTaskState::Completed, RecordingTaskState::Failed, RecordingTaskState::Cancelled];
+        let mut random = fastrand::Rng::with_seed(0x7265_636f_7264);
+        let (mut promotable, mut blocked, mut attachment_only) = (0, 0, 0);
+        for case in 0..512 {
+            let queue = RecordingQueue::new();
+            for index in 0..random.usize(0..12) {
+                queue.queue.lock().await.push_back(fixture(
+                    &format!("queued-{index}"),
+                    random.usize(0..6),
+                    kinds[random.usize(0..kinds.len())],
+                    RecordingTaskState::Queued,
+                ));
+            }
+            for index in 0..random.usize(0..4) {
+                queue.active.write().await.push(fixture(
+                    &format!("active-{index}"),
+                    random.usize(0..6),
+                    kinds[random.usize(0..kinds.len())],
+                    active_states[random.usize(0..active_states.len())],
+                ));
+            }
+            for index in 0..random.usize(0..6) {
+                queue.finished.write().await.push(fixture(
+                    &format!("finished-{index}"),
+                    random.usize(0..6),
+                    kinds[random.usize(0..kinds.len())],
+                    finished_states[random.usize(0..finished_states.len())],
+                ));
+            }
+            let precheck = queue.has_promotable_queued().await;
+            let mut snapshot = queue.snapshot_current(QueueRevision(0)).await;
+            let queued_before = snapshot.queue.len();
+            let promoted = promote_from_queue(&mut snapshot).is_some();
+            let attached = snapshot.queue.len() < queued_before;
+            assert_eq!(precheck, promoted || attached, "case {case}: {snapshot:?}");
+            if precheck {
+                promotable += 1;
+            } else {
+                blocked += 1;
+            }
+            if !promoted && attached {
+                attachment_only += 1;
+            }
+        }
+        assert!(promotable > 0 && blocked > 0 && attachment_only > 0);
+    }
+
+    #[tokio::test]
+    async fn worker_claims_do_not_create_state_for_missing_or_paused_tasks() {
+        let queue = RecordingQueue::new();
+        assert!(queue.claim_worker("missing").await.is_none());
+        let mut paused = task("paused", RecordingKind::Vod, RecordingTaskState::Paused);
+        paused.paused = true;
+        queue.active.write().await.push(paused);
+        assert!(queue.claim_worker("paused").await.is_none());
+        assert!(queue.workers.lock().expect("worker map").is_empty());
+        assert!(queue.resume_active("paused").await.expect("resume"));
+        assert!(queue.claim_worker("paused").await.is_some());
+        assert!(queue.claim_worker("paused").await.is_none(), "a worker can be claimed only once");
+    }
+
+    #[test]
+    fn bulk_transfers_stay_serial_while_live_tasks_promote_in_parallel() {
+        let mut candidate = PersistedRecordingQueue::default();
+        for index in 0..50 {
+            let mut transfer =
+                identified(&format!("transfer-{index}"), &format!("media-{index}"), RecordingTaskState::Queued);
+            transfer.kind = if index % 2 == 0 { RecordingKind::Vod } else { RecordingKind::Series };
+            transfer.input_name = None;
+            candidate.queue.push(transfer);
+        }
+        for index in 0..2 {
+            let mut live =
+                identified(&format!("live-{index}"), &format!("live-media-{index}"), RecordingTaskState::Queued);
+            live.kind = RecordingKind::Live;
+            candidate.queue.push(live);
+        }
+        while promote_from_queue(&mut candidate).is_some() {}
+        assert_eq!(candidate.active.len(), 3);
+        assert_eq!(candidate.active.iter().filter(|task| task.kind != RecordingKind::Live).count(), 1);
+        assert_eq!(candidate.queue.len(), 49);
+        candidate.active.retain(|task| task.kind == RecordingKind::Live);
+        assert_eq!(promote_from_queue(&mut candidate).map(|(uuid, _)| uuid).as_deref(), Some("transfer-1"));
     }
 
     fn identified(uuid: &str, identity: &str, state: RecordingTaskState) -> PersistedRecordingTask {
@@ -1710,14 +2145,14 @@ mod tests {
             (RecordingQueue::to_persisted(&background), RecordingQueue::to_persisted(&foreground));
         assert_eq!(background.media_identity, foreground.media_identity, "fixture must share one media");
         mutate(&queue, move |candidate| {
-            candidate.active = Some(background.clone());
+            candidate.active = vec![background.clone()];
             candidate.queue.push(foreground.clone());
             Ok(())
         })
         .await
         .expect("seed");
 
-        let (_input, priority) = queue.active_scheduling_priority().await.expect("an active transfer");
+        let (_input, priority) = queue.active_scheduling_priority("alice").await.expect("an active transfer");
         assert_eq!(priority, -3, "the transfer inherits Bob's urgency");
     }
 
@@ -1732,14 +2167,14 @@ mod tests {
         let (background, other) = (RecordingQueue::to_persisted(&background), RecordingQueue::to_persisted(&other));
         assert_ne!(background.media_identity, other.media_identity, "fixture must be different media");
         mutate(&queue, move |candidate| {
-            candidate.active = Some(background.clone());
+            candidate.active = vec![background.clone()];
             candidate.queue.push(other.clone());
             Ok(())
         })
         .await
         .expect("seed");
 
-        let (_input, priority) = queue.active_scheduling_priority().await.expect("an active transfer");
+        let (_input, priority) = queue.active_scheduling_priority("alice").await.expect("an active transfer");
         assert_eq!(priority, 5, "priority is shared only with entries on the same file");
     }
 
@@ -1754,7 +2189,7 @@ mod tests {
     fn a_queued_entry_waits_while_another_entry_produces_the_file() {
         // Promoting it would start a second transfer to the same path.
         let candidate = PersistedRecordingQueue {
-            active: Some(identified("a", "film-42", RecordingTaskState::Running)),
+            active: vec![identified("a", "film-42", RecordingTaskState::Running)],
             ..PersistedRecordingQueue::default()
         };
         let queued = identified("b", "film-42", RecordingTaskState::Queued);
@@ -1788,7 +2223,7 @@ mod tests {
         // two of them as the same recording would merge two different files.
         let candidate = PersistedRecordingQueue {
             finished: vec![identified("a", "", RecordingTaskState::Completed)],
-            active: Some(identified("c", "", RecordingTaskState::Running)),
+            active: vec![identified("c", "", RecordingTaskState::Running)],
             ..PersistedRecordingQueue::default()
         };
         let queued = identified("b", "", RecordingTaskState::Queued);
@@ -1817,7 +2252,7 @@ mod tests {
         };
         let promoted = promote_from_queue(&mut candidate);
         assert!(promoted.is_none(), "nothing needs to run");
-        assert!(candidate.active.is_none());
+        assert!(candidate.active.is_empty());
         assert!(candidate.queue.is_empty(), "bob left the queue");
         let bob = candidate.finished.iter().find(|task| task.uuid == "bob").expect("bob is filed");
         assert_eq!(bob.state, RecordingTaskState::Completed);
@@ -1832,7 +2267,7 @@ mod tests {
         };
         let promoted = promote_from_queue(&mut candidate);
         assert_eq!(promoted.map(|(uuid, _)| uuid), Some("bob".to_string()));
-        assert_eq!(candidate.active.as_ref().map(|task| task.uuid.as_str()), Some("bob"));
+        assert_eq!(candidate.active.first().map(|task| task.uuid.as_str()), Some("bob"));
     }
 
     #[test]
@@ -1902,7 +2337,7 @@ mod tests {
         };
 
         queue.queue.lock().await.push_back(queued);
-        *queue.active.write().await = Some(active);
+        *queue.active.write().await = vec![active];
         queue.finished.write().await.push(paused.clone());
         queue.persist_to_disk().await.expect("persist state");
 
@@ -1911,7 +2346,7 @@ mod tests {
 
         assert_eq!(restored.queue.lock().await.len(), 2);
         let restored_active = restored.active.read().await.clone();
-        assert!(restored_active.is_none());
+        assert!(restored_active.is_empty());
         let restored_finished = restored.finished.read().await.clone();
         assert_eq!(restored_finished.len(), 1);
         assert_eq!(restored_finished[0].uuid, paused.uuid);
@@ -1941,7 +2376,7 @@ mod tests {
         let restored = RecordingQueue::new_persistent(&state_file, &state_file).expect("open recording repository");
         restored.load_from_disk().await.expect("load state");
 
-        assert!(restored.active.read().await.is_none());
+        assert!(restored.active.read().await.is_empty());
         assert_eq!(restored.queue.lock().await.len(), 0);
         let restored_scheduled = restored.scheduled.read().await.clone();
         assert_eq!(restored_scheduled.len(), 1);
@@ -2377,7 +2812,7 @@ mod tests {
         });
 
         let waiter_b_id = loop {
-            let snapshots = queue.snapshots().await;
+            let snapshots = queue.snapshots();
             if snapshots.len() == 2 {
                 break snapshots
                     .into_iter()
@@ -2388,7 +2823,7 @@ mod tests {
             tokio::task::yield_now().await;
         };
 
-        assert!(queue.signal_waiter(waiter_b_id).await);
+        assert!(queue.signal_waiter(waiter_b_id));
         assert_eq!(
             timeout(Duration::from_millis(100), waiter_b).await.expect("waiter_b finished").expect("join ok"),
             RecordingWaitOutcome::Signalled
@@ -2405,9 +2840,10 @@ mod tests {
     #[tokio::test]
     async fn request_worker_restart_sets_restart_control_and_notifies_waiters() {
         let queue = RecordingQueue::new();
+        let worker = queue.worker("task");
         let waiter_queue = Arc::clone(&queue.slot_waiters);
-        let control_signal = Arc::clone(&queue.control_signal);
-        let control_notify = Arc::clone(&queue.control_notify);
+        let control_signal = Arc::clone(&worker.control_signal);
+        let control_notify = Arc::clone(&worker.control_notify);
 
         let waiter =
             tokio::spawn(
@@ -2421,7 +2857,7 @@ mod tests {
             timeout(Duration::from_millis(100), waiter).await.expect("waiter finished").expect("join ok"),
             RecordingWaitOutcome::Restarted
         );
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Restart);
+        assert_eq!(*worker.control_signal.read().await, RecordingControl::Restart);
     }
 
     /// Age the first recovery generation so the next commit wants a
@@ -2529,30 +2965,32 @@ mod tests {
         // or swallow a cancel, whichever of the two writes lands first.
         for pending in [RecordingControl::Pause, RecordingControl::Cancel] {
             let queue = RecordingQueue::new();
-            *queue.control_signal.write().await = pending;
+            let worker = queue.worker("task");
+            *worker.control_signal.write().await = pending;
             queue.request_worker_restart();
-            assert_eq!(*queue.control_signal.read().await, pending);
+            assert_eq!(*worker.control_signal.read().await, pending);
 
             // The deferred path, taken while another writer holds the lock.
-            let held = queue.control_signal.write().await;
+            let held = worker.control_signal.write().await;
             queue.request_worker_restart();
             drop(held);
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
-            assert_eq!(*queue.control_signal.read().await, pending);
+            assert_eq!(*worker.control_signal.read().await, pending);
         }
     }
 
     #[tokio::test]
     async fn wait_observes_preexisting_control_before_selecting() {
         let queue = RecordingQueue::new();
-        *queue.control_signal.write().await = RecordingControl::Pause;
+        let worker = queue.worker("task");
+        *worker.control_signal.write().await = RecordingControl::Pause;
 
         let outcome =
-            queue.slot_waiters.wait(None, 0, queue.control_signal.as_ref(), queue.control_notify.as_ref()).await;
+            queue.slot_waiters.wait(None, 0, worker.control_signal.as_ref(), worker.control_notify.as_ref()).await;
 
         assert_eq!(outcome, RecordingWaitOutcome::Paused);
-        assert!(queue.slot_waiters.snapshots().await.is_empty());
+        assert!(queue.slot_waiters.snapshots().is_empty());
     }
 
     #[test]
@@ -2670,15 +3108,16 @@ mod tests {
     #[tokio::test]
     async fn control_uuid_mismatch_is_noop_and_preserves_next_task() {
         let queue = RecordingQueue::new();
-        *queue.active.write().await = Some(make_test_recording_task("active", PathBuf::from("/tmp/active.ts")));
+        let worker = queue.worker("active");
+        *queue.active.write().await = vec![make_test_recording_task("active", PathBuf::from("/tmp/active.ts"))];
         queue.queue.lock().await.push_back(make_test_recording_task("next", PathBuf::from("/tmp/next.ts")));
 
         assert!(!queue.pause_active("next").await.expect("uuid mismatch"));
 
         assert_eq!(queue.revision.load(Ordering::SeqCst), 0);
-        assert_eq!(queue.active.read().await.as_ref().map(|download| download.uuid.as_str()), Some("active"));
+        assert_eq!(queue.active.read().await.first().map(|download| download.uuid.as_str()), Some("active"));
         assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("next"));
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::None);
+        assert_eq!(*worker.control_signal.read().await, RecordingControl::None);
     }
 
     #[tokio::test]
@@ -2785,15 +3224,16 @@ mod tests {
             unreachable!("snapshot task failed");
         };
         assert!(queued.is_empty());
-        assert!(active.is_none());
+        assert!(active.is_empty());
         assert!(finished.is_empty());
     }
 
     #[tokio::test]
     async fn control_signal_is_ordered_inside_mutation_guard() {
         let queue = Arc::new(RecordingQueue::new());
-        *queue.active.write().await = Some(make_test_transfer_task("active", PathBuf::from("/tmp/active.ts")));
-        let control_lock = queue.control_signal.write().await;
+        let worker = queue.worker("active");
+        *queue.active.write().await = vec![make_test_transfer_task("active", PathBuf::from("/tmp/active.ts"))];
+        let control_lock = worker.control_signal.write().await;
         let pause_queue = Arc::clone(&queue);
         let pause = tokio::spawn(async move { pause_queue.pause_active("active").await });
 
@@ -2812,27 +3252,28 @@ mod tests {
         drop(control_lock);
         assert!(pause.await.is_ok_and(|result| result.is_ok()));
         assert!(snapshot.await.is_ok());
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Pause);
+        assert_eq!(*worker.control_signal.read().await, RecordingControl::Pause);
     }
 
     #[tokio::test]
     async fn same_value_control_is_published_after_worker_commit_and_clear() {
         let queue = Arc::new(RecordingQueue::new());
-        *queue.active.write().await = Some(make_test_recording_task("task-a", PathBuf::from("/tmp/task-a.ts")));
+        let worker = queue.worker("task-a");
+        *queue.active.write().await = vec![make_test_recording_task("task-a", PathBuf::from("/tmp/task-a.ts"))];
         queue.queue.lock().await.push_back(make_test_recording_task("task-b", PathBuf::from("/tmp/task-b.ts")));
-        let mut control_lock = queue.control_signal.write().await;
+        let mut control_lock = worker.control_signal.write().await;
         *control_lock = RecordingControl::Cancel;
         let worker_queue = Arc::clone(&queue);
         let worker_commit = tokio::spawn(async move {
             worker_queue
-                .mutate_optional_and_clear_control(RecordingControl::Cancel, |candidate| {
-                    let Some(mut active) = candidate.active.take() else {
+                .mutate_optional_and_clear_control("task-a", RecordingControl::Cancel, |candidate| {
+                    let Some(mut active) = candidate.active.pop() else {
                         return Ok(None);
                     };
                     active.finished = true;
                     candidate.finished.push(active);
                     if !candidate.queue.is_empty() {
-                        candidate.active = Some(candidate.queue.remove(0));
+                        candidate.active = vec![candidate.queue.remove(0)];
                     }
                     Ok(Some(true))
                 })
@@ -2855,7 +3296,7 @@ mod tests {
 
         assert!(worker_commit.await.expect("worker task").expect("worker commit").is_some());
         assert_eq!(newer_cancel.await.expect("cancel task").expect("cancel commit"), Some(false));
-        assert_eq!(*queue.control_signal.read().await, RecordingControl::Cancel);
+        assert_eq!(*queue.worker("task-b").control_signal.read().await, RecordingControl::Cancel);
     }
 
     #[tokio::test]
@@ -2911,7 +3352,7 @@ mod tests {
         assert!(queue.queue.lock().await.is_empty());
         assert!(queue.scheduled.read().await.is_empty());
         assert!(queue.finished.read().await.is_empty());
-        assert!(queue.active.read().await.is_none());
+        assert!(queue.active.read().await.is_empty());
     }
 
     // --- Filename rendering + collision reservation ---
@@ -2928,7 +3369,7 @@ mod tests {
                 out.push(p.clone());
             }
         }
-        if let Some(d) = &candidate.active {
+        for d in &candidate.active {
             if let Some(p) = &d.recording.relative_path {
                 out.push(p.clone());
             }
@@ -2974,10 +3415,8 @@ mod tests {
                 d.recording.relative_path = Some(reserved.clone());
             }
         }
-        if let Some(d) = candidate.active.as_mut() {
-            if d.uuid == recording_uuid {
-                d.recording.relative_path = Some(reserved.clone());
-            }
+        if let Some(d) = candidate.active.iter_mut().find(|task| task.uuid == recording_uuid) {
+            d.recording.relative_path = Some(reserved.clone());
         }
         for d in &mut candidate.finished {
             if d.uuid == recording_uuid {
@@ -2998,7 +3437,7 @@ mod tests {
                 return d.recording.relative_path.clone();
             }
         }
-        if let Some(d) = &candidate.active {
+        for d in &candidate.active {
             if d.uuid == recording_uuid {
                 return d.recording.relative_path.clone();
             }
@@ -3068,11 +3507,11 @@ mod tests {
         let task = make_test_transfer_task("rec-1", dir.path().join("a.ts"));
         {
             let mut active = queue.active.write().await;
-            *active = Some(task);
+            *active = vec![task];
         }
         let prior_revision = queue.revision.load(Ordering::SeqCst);
         queue.pause_active("rec-1").await.expect("pause_active");
-        let active = queue.active.read().await.clone().expect("active");
+        let active = queue.active.read().await.first().cloned().expect("active");
         assert!(active.paused);
         assert_eq!(active.state, RecordingTaskState::Paused);
         assert!(active.next_retry_at.is_none());

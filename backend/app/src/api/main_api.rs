@@ -1040,7 +1040,7 @@ mod tests {
 
         load_persisted_recording_state(&recordings).await.expect("fresh install loads");
         assert!(recordings.queue.lock().await.is_empty());
-        assert!(recordings.active.read().await.is_none());
+        assert!(recordings.active.read().await.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

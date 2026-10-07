@@ -145,9 +145,7 @@ async fn recover_stuck_deletions<E: EventSink + Clone + 'static>(ctx: &Recording
                 candidate.queue.retain(|task| task.uuid != uuid);
                 candidate.scheduled.retain(|task| task.uuid != uuid);
                 candidate.finished.retain(|task| task.uuid != uuid);
-                if candidate.active.as_ref().is_some_and(|task| task.uuid == uuid) {
-                    candidate.active = None;
-                }
+                candidate.active.retain(|task| task.uuid != uuid);
             }
             Ok(())
         })

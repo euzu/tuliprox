@@ -670,7 +670,7 @@ impl RecordingService {
                 let task = match location {
                     RecordingLocation::Scheduled(i) => &candidate.scheduled[i],
                     RecordingLocation::Queue(i) => &candidate.queue[i],
-                    RecordingLocation::Active | RecordingLocation::Finished(_) => {
+                    RecordingLocation::Active(_) | RecordingLocation::Finished(_) => {
                         return Err(QueueMutationError::StateNotEditable);
                     }
                 };
@@ -836,8 +836,8 @@ impl RecordingService {
     /// there, and report success.
     pub async fn cancel_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        let active = self.recordings.active.read().await.clone();
-        if let Some(active) = active.filter(|active| active.uuid == uuid) {
+        let active = self.recordings.active.read().await.iter().find(|task| task.uuid == uuid).cloned();
+        if let Some(active) = active {
             let meta = active.recording.clone();
             let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
             if !matches!(authorize(claims, &owner_id, RecordingAction::Cancel, &subject), RecordingDecision::Allow) {
@@ -893,8 +893,8 @@ impl RecordingService {
     /// see [`Self::restore_cancelled_rule_recordings`].
     pub async fn pause_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        let active = self.recordings.active.read().await.clone();
-        if let Some(active) = active.filter(|active| active.uuid == uuid) {
+        let active = self.recordings.active.read().await.iter().find(|task| task.uuid == uuid).cloned();
+        if let Some(active) = active {
             let meta = active.recording.clone();
             if !active.kind.is_resumable() {
                 return Err(ServiceError::InvalidState); // Live cannot be paused
@@ -911,8 +911,8 @@ impl RecordingService {
 
     pub async fn resume_recording(&self, claims: &shared::model::Claims, uuid: &str) -> Result<bool, ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        let active = self.recordings.active.read().await.clone();
-        if let Some(active) = active.filter(|active| active.uuid == uuid) {
+        let active = self.recordings.active.read().await.iter().find(|task| task.uuid == uuid).cloned();
+        if let Some(active) = active {
             let meta = active.recording.clone();
             if !active.kind.is_resumable() {
                 return Err(ServiceError::InvalidState);
@@ -943,7 +943,7 @@ impl RecordingService {
                 // it here would leave the worker writing to a file no entry
                 // names, so refuse instead of silently doing nothing (the retain
                 // below cannot reach the active slot).
-                if candidate.active.as_ref().is_some_and(|active| active.uuid == uuid) {
+                if candidate.active.iter().any(|active| active.uuid == uuid) {
                     return Err(QueueMutationError::StateNotEditable);
                 }
                 // Removing an entry keeps a finished recording on disk; that is
@@ -1574,16 +1574,16 @@ fn task_relative_path(task: &PersistedRecordingTask) -> &str {
 ///   booked over and over.
 ///
 /// The identity is now derived from what the user actually asked for.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub enum RecordingIdentity {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum RecordingIdentity<S = String> {
     /// Materialization of one rule occurrence. Two tasks with the same
     /// `(rule_id, occurrence_key)` are the same recording by
     /// definition, whatever their window looks like.
-    Occurrence { rule_id: String, occurrence_key: String },
+    Occurrence { rule_id: S, occurrence_key: S },
     /// A concrete programme on a concrete source. Deliberately free of any
     /// owner: two users asking for the same programme are asking for the same
     /// file, and it is recorded once and linked twice.
-    Programme { target_id: String, virtual_id: String, program_start: i64, program_end: i64 },
+    Programme { target_id: S, virtual_id: S, program_start: i64, program_end: i64 },
     /// No programme metadata at all: every VOD and series transfer, and a
     /// Live capture whose programme window is unknown. Falls back to the
     /// resolved URL plus the *scheduled* (padded) window, which — unlike
@@ -1592,7 +1592,7 @@ pub enum RecordingIdentity {
     ///
     /// Owner-free for the same reason `Programme` is: the same URL over the
     /// same window is the same bytes, whoever asked for them.
-    Url { url: String, scheduled_start: Option<i64>, scheduled_end: Option<i64> },
+    Url { url: S, scheduled_start: Option<i64>, scheduled_end: Option<i64> },
 }
 
 /// A stable, field-named key for the media a request refers to.
@@ -1604,31 +1604,24 @@ pub fn recording_identity_key(meta: &RecordingMetadata, url: &str) -> String {
     serde_json::to_string(&recording_identity(meta, url)).unwrap_or_else(|_| format!("url:{url}"))
 }
 
-fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity {
+pub(crate) fn recording_identity<'a>(meta: &'a RecordingMetadata, url: &'a str) -> RecordingIdentity<&'a str> {
     if let (Some(rule_id), Some(occurrence_key)) =
         (meta.provenance.rule_id.as_deref(), meta.provenance.occurrence_key.as_deref())
     {
-        return RecordingIdentity::Occurrence {
-            rule_id: rule_id.to_string(),
-            occurrence_key: occurrence_key.to_string(),
-        };
+        return RecordingIdentity::Occurrence { rule_id, occurrence_key };
     }
     if let (Some(program_start), Some(program_end)) = (meta.program_start, meta.program_end) {
         return RecordingIdentity::Programme {
-            target_id: meta.source.target_id.clone(),
-            virtual_id: meta.source.virtual_id.clone(),
+            target_id: &meta.source.target_id,
+            virtual_id: &meta.source.virtual_id,
             program_start,
             program_end,
         };
     }
-    RecordingIdentity::Url {
-        url: url.to_string(),
-        scheduled_start: meta.scheduled_start,
-        scheduled_end: meta.scheduled_end,
-    }
+    RecordingIdentity::Url { url, scheduled_start: meta.scheduled_start, scheduled_end: meta.scheduled_end }
 }
 
-fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdentity {
+fn persisted_recording_identity(task: &PersistedRecordingTask) -> RecordingIdentity<&str> {
     recording_identity(&task.recording, &task.url)
 }
 
@@ -1673,7 +1666,7 @@ fn candidate_has_duplicate_recording(candidate: &PersistedRecordingQueue, task: 
 enum RecordingLocation {
     Scheduled(usize),
     Queue(usize),
-    Active,
+    Active(usize),
     Finished(usize),
 }
 
@@ -1689,8 +1682,8 @@ fn locate_recording(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<R
     if let Some(i) = candidate.queue.iter().position(matches_uuid) {
         return Some(RecordingLocation::Queue(i));
     }
-    if candidate.active.as_ref().is_some_and(matches_uuid) {
-        return Some(RecordingLocation::Active);
+    if let Some(i) = candidate.active.iter().position(matches_uuid) {
+        return Some(RecordingLocation::Active(i));
     }
     if let Some(i) = candidate.finished.iter().position(matches_uuid) {
         return Some(RecordingLocation::Finished(i));
@@ -1708,7 +1701,7 @@ fn recording_mut_at(
     match location {
         RecordingLocation::Scheduled(i) => candidate.scheduled.get_mut(i),
         RecordingLocation::Queue(i) => candidate.queue.get_mut(i),
-        RecordingLocation::Active => candidate.active.as_mut(),
+        RecordingLocation::Active(i) => candidate.active.get_mut(i),
         // Must be the located index, not element 0: returning the first
         // finished task would silently edit an unrelated recording.
         RecordingLocation::Finished(i) => candidate.finished.get_mut(i),
@@ -1934,6 +1927,30 @@ mod tests {
     }
 
     /// A VOD transfer for `owner`, resolved to `url`.
+    #[test]
+    fn borrowed_media_identity_preserves_persisted_keys() {
+        let url = "http://provider/film.mp4";
+        let mut meta = persisted_media("key", "web:alice", RecordingVisibility::Private, url).recording;
+        assert_eq!(
+            recording_identity_key(&meta, url),
+            r#"{"Url":{"url":"http://provider/film.mp4","scheduled_start":null,"scheduled_end":null}}"#
+        );
+        meta.source.target_id = "target".to_string();
+        meta.source.virtual_id = "channel".to_string();
+        meta.program_start = Some(10);
+        meta.program_end = Some(20);
+        assert_eq!(
+            recording_identity_key(&meta, url),
+            r#"{"Programme":{"target_id":"target","virtual_id":"channel","program_start":10,"program_end":20}}"#
+        );
+        meta.provenance.rule_id = Some("rule".to_string());
+        meta.provenance.occurrence_key = Some("occurrence".to_string());
+        assert_eq!(
+            recording_identity_key(&meta, url),
+            r#"{"Occurrence":{"rule_id":"rule","occurrence_key":"occurrence"}}"#
+        );
+    }
+
     fn persisted_media(uuid: &str, owner: &str, visibility: RecordingVisibility, url: &str) -> PersistedRecordingTask {
         let meta = RecordingMetadata::new_media(
             RecordingOwner::User(UserId::from(owner)),
@@ -2438,7 +2455,7 @@ mod tests {
             let claim_partial = partial.clone();
             let claim = tokio::spawn(async move {
                 mutate(&claim_queue, move |candidate| {
-                    candidate.active = Some(newcomer.clone());
+                    candidate.active = vec![newcomer.clone()];
                     Ok(())
                 })
                 .await
@@ -2453,7 +2470,7 @@ mod tests {
             assert!(removal.await.expect("join").expect("remove"));
             claim.await.expect("claim");
 
-            assert_eq!(queue.active.read().await.as_ref().map(|task| task.uuid.clone()).as_deref(), Some("newcomer"));
+            assert_eq!(queue.active.read().await.first().map(|task| task.uuid.clone()).as_deref(), Some("newcomer"));
             assert!(partial.exists(), "the newcomer's partial must survive the cleanup of the old entry");
         });
     }
@@ -2489,7 +2506,7 @@ mod tests {
         ))
         .expect("valid recording task");
         task.state = RecordingTaskState::Running;
-        *downloads.active.write().await = Some(task);
+        *downloads.active.write().await = vec![task];
 
         let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
         let claims = shared::model::Claims {
@@ -2506,7 +2523,7 @@ mod tests {
 
         service.cancel_recording(&claims, "recording").await.expect("cancel request accepted");
 
-        let active = downloads.active.read().await.clone().expect("the worker still owns it");
+        let active = downloads.active.read().await.first().cloned().expect("the worker still owns it");
         assert_eq!(active.state, RecordingTaskState::Cancelling, "the worker commits the terminal state");
         assert!(downloads.finished.read().await.is_empty(), "nothing terminal yet");
         assert!(
