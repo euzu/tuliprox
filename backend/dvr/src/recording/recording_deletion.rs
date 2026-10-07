@@ -61,7 +61,7 @@ pub enum DeletionError {
 enum Location {
     Queue(usize),
     Scheduled(usize),
-    Active,
+    Active(usize),
     Finished(usize),
 }
 
@@ -74,8 +74,8 @@ fn locate(candidate: &PersistedRecordingQueue, uuid: &str) -> Option<Location> {
     if let Some(idx) = candidate.scheduled.iter().position(matches) {
         return Some(Location::Scheduled(idx));
     }
-    if candidate.active.as_ref().is_some_and(matches) {
-        return Some(Location::Active);
+    if let Some(idx) = candidate.active.iter().position(matches) {
+        return Some(Location::Active(idx));
     }
     candidate.finished.iter().position(matches).map(Location::Finished)
 }
@@ -84,7 +84,7 @@ fn task_at(candidate: &PersistedRecordingQueue, location: Location) -> Option<&P
     match location {
         Location::Queue(idx) => candidate.queue.get(idx),
         Location::Scheduled(idx) => candidate.scheduled.get(idx),
-        Location::Active => candidate.active.as_ref(),
+        Location::Active(idx) => candidate.active.get(idx),
         Location::Finished(idx) => candidate.finished.get(idx),
     }
 }
@@ -93,7 +93,7 @@ fn task_at_mut(candidate: &mut PersistedRecordingQueue, location: Location) -> O
     match location {
         Location::Queue(idx) => candidate.queue.get_mut(idx),
         Location::Scheduled(idx) => candidate.scheduled.get_mut(idx),
-        Location::Active => candidate.active.as_mut(),
+        Location::Active(idx) => candidate.active.get_mut(idx),
         Location::Finished(idx) => candidate.finished.get_mut(idx),
     }
 }
@@ -102,7 +102,7 @@ fn remove_at(candidate: &mut PersistedRecordingQueue, location: Location) -> Opt
     match location {
         Location::Queue(idx) => (idx < candidate.queue.len()).then(|| candidate.queue.remove(idx)),
         Location::Scheduled(idx) => (idx < candidate.scheduled.len()).then(|| candidate.scheduled.remove(idx)),
-        Location::Active => candidate.active.take(),
+        Location::Active(idx) => (idx < candidate.active.len()).then(|| candidate.active.remove(idx)),
         Location::Finished(idx) => (idx < candidate.finished.len()).then(|| candidate.finished.remove(idx)),
     }
 }
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(leaving.media_identity, recording.media_identity, "fixture must share one media");
         mutate(&queue, move |candidate| {
             candidate.finished.push(leaving.clone());
-            candidate.active = Some(recording.clone());
+            candidate.active = vec![recording.clone()];
             Ok(())
         })
         .await
@@ -812,7 +812,7 @@ mod tests {
         finalize_deletion(&queue, "alice-entry").await.expect("finalize");
 
         assert!(partial.exists(), "B's in-flight transfer must keep its file");
-        let still_recording = queue.active.read().await.clone().expect("B is still active");
+        let still_recording = queue.active.read().await.first().cloned().expect("B is still active");
         assert_eq!(still_recording.uuid, "bob-entry");
         assert_eq!(still_recording.state, RecordingTaskState::Running, "A leaving must not stop B");
     }
@@ -999,7 +999,9 @@ mod tests {
         })
         .await
         .expect("seed");
+        queue.worker("r");
         finalize_deletion(&queue, "r").await.expect("finalize");
         assert!(queue.finished.read().await.is_empty());
+        assert!(queue.existing_worker("r").is_none());
     }
 }

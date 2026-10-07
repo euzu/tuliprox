@@ -312,7 +312,7 @@ pub async fn reconcilable_tasks<E: EventSink + Clone + 'static>(ctx: &RecordingC
     for task in ctx.recordings.scheduled.read().await.iter() {
         push_reconcilable(&mut tasks, task);
     }
-    if let Some(task) = ctx.recordings.active.read().await.as_ref() {
+    for task in ctx.recordings.active.read().await.iter() {
         push_reconcilable(&mut tasks, task);
     }
     for task in ctx.recordings.finished.read().await.iter() {

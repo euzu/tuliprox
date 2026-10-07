@@ -4,6 +4,11 @@
 
 ## ⚠️ Breaking Changes
 
+- **Recordings use the local API listener.** `api.host` must resolve locally to the
+  listener; wildcard binds use loopback. `web_ui.player_server` and public `api-proxy.yml`
+  servers no longer select recording capture URLs. Recording headers now apply to the
+  provider request, including HLS follow-ups. See [DVR](docs/src/operator/dvr.md).
+
 - **`video.download` is now `video.recording`, and VOD/series downloads are recordings.** Live
   captures and VOD/series transfers share one queue and one configuration block. A configuration
   that still contains `video.download` is rejected while loading. To migrate:

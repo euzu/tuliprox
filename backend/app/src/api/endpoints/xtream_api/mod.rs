@@ -863,9 +863,22 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
     let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    xtream_player_api_stream_with_resolved_target(fingerprint, req_headers, app_state, target, None, stream_req, None)
-        .await
-        .into_response()
+    xtream_player_api_stream_with_resolved_target(
+        fingerprint,
+        req_headers,
+        app_state,
+        target,
+        InternalPlaybackSource::WebUi,
+        stream_req,
+        None,
+    )
+    .await
+    .into_response()
+}
+
+pub(in crate::api) enum InternalPlaybackSource {
+    WebUi,
+    Recording(Arc<ConfigInput>),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -874,7 +887,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
     req_headers: &HeaderMap,
     app_state: &Arc<AppState>,
     target: Arc<ConfigTarget>,
-    expected_input: Option<Arc<ConfigInput>>,
+    source: InternalPlaybackSource,
     stream_req: ApiStreamRequest<'_>,
     provider_allocation_id: Option<u64>,
 ) -> impl IntoResponse + Send {
@@ -909,6 +922,10 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             format!("Failed to read xtream item for stream id {req_virtual_id}")
         );
         let virtual_id = pli.virtual_id;
+        let (is_recording, expected_input) = match source {
+            InternalPlaybackSource::WebUi => (false, None),
+            InternalPlaybackSource::Recording(input) => (true, Some(input)),
+        };
         if !recording_input_matches(expected_input.as_deref(), pli.input_name.as_ref()) {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
@@ -930,7 +947,11 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
 
-        let user = create_api_proxy_user(app_state);
+        let user = if is_recording {
+            crate::api::api_utils::create_recording_proxy_user(app_state)
+        } else {
+            create_api_proxy_user(app_state)
+        };
 
         if pli.item_type.is_local() {
             let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id.get(), false);

@@ -8169,6 +8169,384 @@ async fn hls_cache_entry_uses_legacy_path_when_target_hls_share_disabled() {
     assert_eq!(app_state.hls.proxy.metrics().snapshot().refresh_started, 0);
 }
 
+/// Origin that only answers requests carrying the configured recording header.
+async fn spawn_recording_header_origin() -> (String, Arc<std::sync::Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => request.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                seen.lock().expect("request log").push(request.clone());
+                let (status, body): (&str, &[u8]) = if !request.contains("\r\nx-recording-test: custom\r\n") {
+                    ("403 Forbidden", b"")
+                } else if path_has_extension(&path, "m3u8") {
+                    (
+                        "200 OK",
+                        b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.0,\nseg1.ts\n",
+                    )
+                } else {
+                    ("200 OK", b"segment-bytes")
+                };
+                let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(body).await;
+            });
+        }
+    });
+    (base_url, requests, task)
+}
+
+fn recording_test_router(app_state: &Arc<AppState>) -> axum::Router {
+    axum::Router::new()
+        .nest(
+            "/tuliprox/api/v1",
+            crate::api::endpoints::v1_api_playlist::v1_api_playlist_register_public(axum::Router::new()),
+        )
+        .merge(hls_api_register())
+        .merge(crate::api::endpoints::m3u_api::m3u_api_register())
+        .merge(crate::api::endpoints::xtream_api::xtream_api_register())
+        .with_state(Arc::clone(app_state))
+}
+
+async fn recording_test_response(
+    router: &axum::Router,
+    uri: &str,
+) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+    let mut request = Request::builder()
+        .uri(uri)
+        .header(header::USER_AGENT, shared::model::RECORDING_STREAM_USER_AGENT)
+        .body(Body::empty())?;
+    request.extensions_mut().insert(ConnectInfo(test_addr()));
+    Ok(router.clone().oneshot(request).await?)
+}
+
+fn configure_recording_test_listener(app_state: &Arc<AppState>, storage_root: &std::path::Path) {
+    let mut config = (*app_state.app_config.config.load_full()).clone();
+    config.api.host = "0.0.0.0".to_string();
+    config.api.port = 8901;
+    config.storage_dir = storage_root.to_string_lossy().into_owned();
+    config.web_ui = Some(crate::model::WebUiConfig::from(&shared::model::WebUiConfigDto {
+        path: Some("/tuliprox".to_string()),
+        ..Default::default()
+    }));
+    let mut recording = crate::model::RecordingConfig::from(&shared::model::RecordingConfigDto::default());
+    recording.headers = HashMap::from([("X-Recording-Test".to_string(), "custom".to_string())]);
+    config.video = Some(crate::model::VideoConfig { extensions: vec![], web_search: None, recording: Some(recording) });
+    app_state.app_config.config.store(Arc::new(config));
+}
+
+fn recording_test_url(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+) -> Result<String, Box<dyn std::error::Error>> {
+    tuliprox_dvr::recording::recording_url::build_stable_recording_url(
+        &app_state.app_config,
+        &target.name,
+        &input.name,
+        12345,
+        cluster,
+        None,
+    )
+    .ok_or_else(|| "recording URL missing".into())
+}
+
+fn local_recording_hls_url(manifest: &str) -> Result<url::Url, Box<dyn std::error::Error>> {
+    let resource =
+        manifest.lines().find(|line| !line.is_empty() && !line.starts_with('#')).ok_or("HLS resource URI missing")?;
+    let url = url::Url::parse(resource)?;
+    assert_eq!(url.scheme(), "http");
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert_eq!(url.port(), Some(8901));
+    assert!(url.path().starts_with("/hls/recording_user/"), "{url}");
+    Ok(url)
+}
+
+async fn cache_recording_test_item(
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
+    item: M3uPlaylistItem,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        api::model::{PlaylistStorage, PlaylistXtreamStorage},
+        repository::{BPlusTree, VirtualIdRecord},
+    };
+    if target.has_output(shared::model::TargetType::Xtream) {
+        let item = shared::model::XtreamPlaylistItem::from(&PlaylistItem::from(&item));
+        let mut mapping = BPlusTree::new();
+        mapping.insert(
+            item.virtual_id,
+            VirtualIdRecord::new(
+                item.provider_id,
+                item.virtual_id,
+                item.item_type,
+                VirtualId::new(0),
+                shared::model::UUIDType::default(),
+            ),
+        );
+        app_state.playlists.cache_id_mapping(&target.name, mapping).await;
+        let mut live = BPlusTree::new();
+        let mut vod = BPlusTree::new();
+        let mut series = BPlusTree::new();
+        match item.item_type.cluster() {
+            XtreamCluster::Live => live.insert(item.virtual_id.get(), item),
+            XtreamCluster::Video => vod.insert(item.virtual_id.get(), item),
+            XtreamCluster::Series => series.insert(item.virtual_id.get(), item),
+        }
+        app_state
+            .playlists
+            .cache_playlist(
+                &target.name,
+                PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage { live, vod, series })),
+            )
+            .await;
+    } else {
+        let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+        let input_storage = crate::repository::get_input_storage_path(&item.input_name, &storage_dir).await?;
+        let path = crate::repository::get_input_m3u_playlist_file_path(&input_storage, &item.input_name);
+        let group = shared::model::PlaylistGroup {
+            id: 1,
+            title: "recording".intern(),
+            xtream_cluster: item.item_type.cluster(),
+            channels: vec![PlaylistItem::from(&item)],
+        };
+        crate::repository::persist_input_m3u_playlist(&app_state.app_config, &path, &[group]).await?;
+        cache_test_m3u_hls_item(app_state, target, item).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn recording_hls_routes_keep_local_urls_and_headers_after_session_loss() -> Result<(), Box<dyn std::error::Error>>
+{
+    for (output, share) in [
+        (shared::model::TargetType::Xtream, false),
+        (shared::model::TargetType::M3u, false),
+        (shared::model::TargetType::Xtream, true),
+        (shared::model::TargetType::M3u, true),
+    ] {
+        let (origin_url, requests, origin_task) = spawn_recording_header_origin().await;
+        let input = ConfigInput {
+            id: 1,
+            name: Arc::from("recording-input"),
+            input_type: if output == shared::model::TargetType::Xtream { InputType::Xtream } else { InputType::M3u },
+            url: origin_url.clone(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            max_connections: 1,
+            enabled: true,
+            ..ConfigInput::default()
+        };
+        let mut target = test_hls_share_target(share);
+        target.use_memory_cache = true;
+        if output == shared::model::TargetType::M3u {
+            target.output = vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput::from(
+                &M3uTargetOutputDto::default(),
+            ))];
+        }
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        store_test_sources_with_target(&app_state, input.clone(), target.clone());
+        app_state.app_config.api_proxy.store(None);
+        if share {
+            enable_hls_cache(&app_state);
+        }
+        let storage = tempfile::tempdir()?;
+        configure_recording_test_listener(&app_state, storage.path());
+        let manifest_url = format!("{origin_url}/live/user/pass/12345.m3u8");
+        cache_recording_test_item(&app_state, &target, test_m3u_hls_item(&input, 12345, "12345", &manifest_url))
+            .await?;
+        let router = recording_test_router(&app_state);
+        let entry =
+            recording_test_response(&router, &recording_test_url(&app_state, &target, &input, XtreamCluster::Live)?)
+                .await?;
+        assert_eq!(entry.status(), StatusCode::OK, "{output:?}");
+        let master = String::from_utf8(entry.into_body().collect().await?.to_bytes().to_vec())?;
+        let variant_url = local_recording_hls_url(&master)?;
+        let mut public_credentials = variant_url.clone();
+        public_credentials.set_path(&variant_url.path().replacen(
+            &crate::api::api_utils::create_recording_proxy_user(&app_state).password,
+            crate::model::RECORDING_PROXY_USERNAME,
+            1,
+        ));
+        let denied = recording_test_response(&router, public_credentials.as_str()).await?;
+        assert!(!denied.status().is_success(), "the public recording_user password must not authorize HLS");
+        let token = variant_url.path_segments().and_then(Iterator::last).ok_or("HLS token missing")?;
+        let decoded = super::get_hls_session_token_and_url_from_token(&app_state.get_encrypt_secret(), token)
+            .ok_or("HLS token cannot be decoded")?;
+        let session_token = decoded.session_token.ok_or("HLS session token missing")?;
+        let variant = recording_test_response(&router, variant_url.as_str()).await?;
+        assert_eq!(variant.status(), StatusCode::OK, "{output:?}");
+        let media = String::from_utf8(variant.into_body().collect().await?.to_bytes().to_vec())?;
+        let segment_url = local_recording_hls_url(&media)?;
+        let segment = recording_test_response(&router, segment_url.as_str()).await?;
+        assert_eq!(segment.status(), StatusCode::OK, "{output:?}");
+        assert_eq!(segment.into_body().collect().await?.to_bytes().as_ref(), b"segment-bytes");
+        // The hand-off served the first variant; a refresh must fetch the origin again.
+        let refresh = recording_test_response(&router, variant_url.as_str()).await?;
+        assert_eq!(refresh.status(), StatusCode::OK, "{output:?}");
+        let refreshed = String::from_utf8(refresh.into_body().collect().await?.to_bytes().to_vec())?;
+        local_recording_hls_url(&refreshed)?;
+        assert!(app_state.active_users.terminate_session(crate::model::RECORDING_PROXY_USERNAME, &session_token).await);
+        let recreated = recording_test_response(&router, variant_url.as_str()).await?;
+        assert_eq!(recreated.status(), StatusCode::OK, "{output:?}");
+        let recreated = String::from_utf8(recreated.into_body().collect().await?.to_bytes().to_vec())?;
+        local_recording_hls_url(&recreated)?;
+        assert!(app_state
+            .active_users
+            .get_and_update_user_session(crate::model::RECORDING_PROXY_USERNAME, &session_token)
+            .await
+            .is_some());
+        let requests = requests.lock().map_err(|error| error.to_string())?.clone();
+        assert!(requests.iter().any(|request| request.contains("seg1.ts")), "{requests:?}");
+        assert_eq!(requests.iter().filter(|request| request.contains("12345.m3u8")).count(), 3);
+        assert!(requests.iter().all(|request| request.contains("x-recording-test: custom")), "{requests:?}");
+        origin_task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn recording_force_redirect_keeps_vod_and_series_on_the_provider_proxy() -> Result<(), Box<dyn std::error::Error>>
+{
+    for (output, cluster, item_type) in [
+        (shared::model::TargetType::M3u, XtreamCluster::Video, PlaylistItemType::Video),
+        (shared::model::TargetType::M3u, XtreamCluster::Series, PlaylistItemType::Series),
+        (shared::model::TargetType::Xtream, XtreamCluster::Video, PlaylistItemType::Video),
+        (shared::model::TargetType::Xtream, XtreamCluster::Series, PlaylistItemType::Series),
+    ] {
+        // The proxy answers for an origin that cannot be resolved directly.
+        let (proxy_url, requests, proxy_task) = spawn_recording_header_origin().await;
+        let provider_url = format!(
+            "http://recording-origin.invalid/{}/{}12345.mp4",
+            cluster.as_stream_type(),
+            if output == shared::model::TargetType::Xtream { "user/pass/" } else { "" }
+        );
+        let input = ConfigInput {
+            id: 1,
+            name: Arc::from("recording-input"),
+            input_type: if output == shared::model::TargetType::Xtream { InputType::Xtream } else { InputType::M3u },
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            url: if output == shared::model::TargetType::Xtream {
+                "http://recording-origin.invalid".to_string()
+            } else {
+                provider_url.clone()
+            },
+            max_connections: 1,
+            enabled: true,
+            ..ConfigInput::default()
+        };
+        let mut target = if output == shared::model::TargetType::Xtream {
+            test_hls_share_target(false)
+        } else {
+            test_m3u_hls_share_target()
+        };
+        target.use_memory_cache = true;
+        target.name = "default".to_string();
+        if let Some(options) = target.options.as_mut() {
+            options.force_redirect = Some(shared::model::ClusterFlags::all());
+        }
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        store_test_sources_with_target(&app_state, input.clone(), target.clone());
+        let storage = tempfile::tempdir()?;
+        configure_recording_test_listener(&app_state, storage.path());
+        let mut config = (*app_state.app_config.config.load_full()).clone();
+        config.proxy = Some(crate::model::ProxyConfig { url: proxy_url, username: None, password: None });
+        app_state.app_config.config.store(Arc::new(config));
+        let client = crate::utils::request::create_client(&app_state.app_config).build()?;
+        app_state.http_clients.default.store(Arc::new(client.clone()));
+        app_state.http_clients.no_redirect.store(Arc::new(client));
+        let mut item = test_m3u_hls_item(&input, 12345, "12345", &provider_url);
+        item.item_type = item_type;
+        cache_recording_test_item(&app_state, &target, item).await?;
+        let router = recording_test_router(&app_state);
+        let recording =
+            recording_test_response(&router, &recording_test_url(&app_state, &target, &input, cluster)?).await?;
+        assert_eq!(
+            recording.status(),
+            StatusCode::OK,
+            "{cluster:?}: the recording endpoint must relay the provider body"
+        );
+        assert_eq!(recording.into_body().collect().await?.to_bytes().as_ref(), b"segment-bytes");
+        let ordinary_url = if output == shared::model::TargetType::M3u {
+            format!(
+                "/{}/{}/hls-user/hls-pass/12345.mp4",
+                crate::repository::storage_const::M3U_STREAM_PATH,
+                cluster.as_stream_type()
+            )
+        } else {
+            format!("/{}/hls-user/hls-pass/12345.mp4", cluster.as_stream_type())
+        };
+        let ordinary = recording_test_response(&router, &ordinary_url).await?;
+        assert!(
+            ordinary.status().is_redirection(),
+            "{output:?}: ordinary playback keeps force_redirect: {}",
+            ordinary.status()
+        );
+        assert_eq!(
+            ordinary.headers().get(header::LOCATION).ok_or("redirect location missing")?.to_str()?,
+            provider_url
+        );
+        let requests = requests.lock().map_err(|error| error.to_string())?.clone();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].starts_with(&format!("get {provider_url} ")), "{requests:?}");
+        proxy_task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn recording_m3u_dash_keeps_the_redirect_for_relative_media_urls() -> Result<(), Box<dyn std::error::Error>> {
+    let (origin_url, requests, origin_task) = spawn_recording_header_origin().await;
+    let input = ConfigInput {
+        id: 1,
+        name: Arc::from("recording-input"),
+        input_type: InputType::M3u,
+        url: origin_url.clone(),
+        max_connections: 1,
+        enabled: true,
+        ..ConfigInput::default()
+    };
+    let mut target = test_m3u_hls_share_target();
+    target.name = "default".to_string();
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    store_test_sources_with_target(&app_state, input.clone(), target.clone());
+    let storage = tempfile::tempdir()?;
+    configure_recording_test_listener(&app_state, storage.path());
+    let router = recording_test_router(&app_state);
+    let manifest_url = format!("{origin_url}/live/manifest.mpd");
+    for item_type in [PlaylistItemType::LiveDash, PlaylistItemType::Live] {
+        let mut item = test_m3u_hls_item(&input, 12345, "12345", &manifest_url);
+        item.item_type = item_type;
+        cache_recording_test_item(&app_state, &target, item).await?;
+        let response =
+            recording_test_response(&router, &recording_test_url(&app_state, &target, &input, XtreamCluster::Live)?)
+                .await?;
+        assert!(response.status().is_redirection(), "{item_type:?}: {}", response.status());
+        assert_eq!(
+            response.headers().get(header::LOCATION).ok_or("redirect location missing")?.to_str()?,
+            manifest_url
+        );
+    }
+    assert!(requests.lock().map_err(|error| error.to_string())?.is_empty());
+    origin_task.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn legacy_hls_token_route_renders_channel_unavailable_inline_when_target_hls_share_enabled() {
     let app_state = test_app_state();

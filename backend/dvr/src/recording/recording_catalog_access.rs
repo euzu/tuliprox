@@ -187,10 +187,8 @@ pub async fn lookup_recording(
     if let Some(t) = queue.scheduled.read().await.iter().find(|d| d.uuid == uuid).cloned() {
         return Some(t);
     }
-    if let Some(t) = queue.active.read().await.as_ref() {
-        if t.uuid == uuid {
-            return Some(t.clone());
-        }
+    if let Some(t) = queue.active.read().await.iter().find(|task| task.uuid == uuid).cloned() {
+        return Some(t);
     }
     if let Some(t) = queue.finished.read().await.iter().find(|d| d.uuid == uuid).cloned() {
         return Some(t);

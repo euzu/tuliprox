@@ -7,12 +7,25 @@ use shared::model::{
     RecordingContainerFormat, RecordingDiskConfigDto, RecordingNotificationConfigDto, RecordingQuotaConfigDto,
     RecordingRetentionConfigDto, VideoConfigDto,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
+
+/// Derived headers belong to one immutable config snapshot. A cloned config
+/// rebuilds them so changes to headers, disabled fields or the user agent apply.
+#[derive(Debug, Default)]
+pub struct RecordingOriginHeaders(OnceLock<axum::http::HeaderMap>);
+
+impl Clone for RecordingOriginHeaders {
+    fn clone(&self) -> Self { Self::default() }
+}
 
 /// Backend domain type for DVR recording configuration.
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
     pub headers: HashMap<String, String>,
+    pub t_origin_headers: RecordingOriginHeaders,
     pub organize_into_directories: bool,
     pub episode_pattern: Option<Arc<Regex>>,
     pub priority: i8,
@@ -37,6 +50,19 @@ pub struct RecordingConfig {
     pub quota: Option<RecordingQuotaConfig>,
     pub notifications: RecordingNotificationConfig,
     pub fallback_bytes_per_minute: u64,
+}
+
+impl RecordingConfig {
+    pub fn origin_headers(&self, config: &crate::model::Config) -> &axum::http::HeaderMap {
+        self.t_origin_headers.0.get_or_init(|| {
+            crate::utils::request::get_request_headers(
+                Some(&self.headers),
+                None,
+                config.get_disabled_headers().as_ref(),
+                config.default_user_agent.as_deref(),
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +482,7 @@ impl From<&RecordingConfigDto> for RecordingConfig {
         let timezone = dto.timezone.as_deref().and_then(|s| s.parse::<Tz>().ok()).unwrap_or(chrono_tz::UTC);
         Self {
             headers: dto.headers.clone(),
+            t_origin_headers: RecordingOriginHeaders::default(),
             organize_into_directories: dto.organize_into_directories,
             episode_pattern: dto.episode_pattern.as_ref().and_then(|pattern| {
                 shared::model::REGEX_CACHE
@@ -644,6 +671,39 @@ mod recording_reload_tests {
         RecordingReloadEffect, RecordingReloadOutcome, RecordingRetentionConfig, RecordingRootChange,
     };
     use shared::model::RecordingConfigDto;
+
+    #[test]
+    fn recording_origin_headers_are_cached_and_rebuilt_for_changed_config() -> Result<(), Box<dyn std::error::Error>> {
+        let config = crate::model::Config::from(&shared::model::ConfigDto {
+            default_user_agent: Some("old-agent".to_string()),
+            video: Some(shared::model::VideoConfigDto {
+                recording: Some(shared::model::RecordingConfigDto {
+                    headers: std::collections::HashMap::from([("X-Capture".to_string(), "old-value".to_string())]),
+                    ..shared::model::RecordingConfigDto::default()
+                }),
+                ..shared::model::VideoConfigDto::default()
+            }),
+            ..shared::model::ConfigDto::default()
+        });
+        let recording = config.recording().ok_or("recording config missing")?;
+        let prepared = recording.origin_headers(&config);
+        assert!(std::ptr::eq(prepared, recording.origin_headers(&config)));
+        assert_eq!(prepared["x-capture"], "old-value");
+        assert_eq!(prepared["user-agent"], "old-agent");
+        let mut changed = config.clone();
+        changed.default_user_agent = Some("new-agent".to_string());
+        changed
+            .video
+            .as_mut()
+            .and_then(|v| v.recording.as_mut())
+            .ok_or("recording missing")?
+            .headers
+            .insert("X-Capture".to_string(), "new-value".to_string());
+        let refreshed = changed.recording().ok_or("recording missing")?.origin_headers(&changed);
+        assert_eq!(refreshed["x-capture"], "new-value");
+        assert_eq!(refreshed["user-agent"], "new-agent");
+        Ok(())
+    }
 
     fn base() -> RecordingConfig {
         let mut cfg = RecordingConfig::from(&RecordingConfigDto::default());

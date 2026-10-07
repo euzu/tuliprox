@@ -119,6 +119,7 @@ pub async fn create_recording_request(
         &mut source.virtual_id,
         &mut source.input_name,
         source.cluster,
+        body.channel_id.as_deref(),
         body.channel_name.as_deref(),
     )
     .await
@@ -418,7 +419,23 @@ pub async fn preview_recording_conflicts(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(body): axum::extract::Json<PreviewConflictsBody>,
 ) -> axum::response::Response {
-    let source = RecordingSourceInput::from(&body.source);
+    let mut source = RecordingSourceInput::from(&body.source);
+    // EPG rows do not know the input, so the preview resolves the same
+    // playlist channel the create request will record.
+    if resolve_recording_source(
+        &state,
+        &body.source.target_name,
+        &mut source.virtual_id,
+        &mut source.input_name,
+        source.cluster,
+        body.source.channel_id.as_deref(),
+        body.source.channel_name.as_deref(),
+    )
+    .await
+    .is_none()
+    {
+        return service_error_response(&ServiceError::InvalidSource);
+    }
     let request = crate::api::model::recording_service::ConflictPreviewRequest {
         source,
         padded_start: body.candidate.padded_start,
@@ -458,6 +475,12 @@ pub struct PreviewSourceDto {
     pub target_name: String,
     pub virtual_id: String,
     pub input_name: String,
+    /// EPG channel id for rows without a playlist id.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// Display title that picks among streams sharing one EPG id.
+    #[serde(default)]
+    pub channel_name: Option<String>,
 }
 
 impl From<&PreviewSourceDto> for RecordingSourceInput {
@@ -653,22 +676,32 @@ async fn resolve_recording_source(
     virtual_id: &mut String,
     input_name: &mut String,
     cluster: XtreamCluster,
+    epg_channel_id: Option<&str>,
     channel_name: Option<&str>,
 ) -> Option<crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource> {
-    if recording_virtual_id(virtual_id).is_none() {
+    // A missing playlist id is resolved from the separately submitted EPG id.
+    // Numeric EPG ids must not select a different playlist row by accident.
+    let epg_id = if virtual_id.trim().is_empty() {
+        Some(epg_channel_id.filter(|id| !id.trim().is_empty())?)
+    } else if recording_virtual_id(virtual_id).is_none() {
+        Some(virtual_id.as_str())
+    } else {
+        None
+    };
+    if let Some(epg_id) = epg_id {
         if cluster != XtreamCluster::Live {
             return None;
         }
         let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
             &app_state.app_config,
             target_name,
-            virtual_id,
+            input_name,
+            epg_id,
             channel_name,
         )
         .await?;
-        if !accept_resolved_recording_source(virtual_id, input_name, &resolved) {
-            return None;
-        }
+        // The EPG lookup already checked the input's scope.
+        return accept_resolved_recording_source(virtual_id, input_name, &resolved).then_some(resolved);
     }
     let virtual_id_value = recording_virtual_id(virtual_id)?;
     let resolved = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
@@ -732,6 +765,7 @@ pub async fn create_recording_rule(
         &mut body.virtual_id,
         &mut body.input_name,
         XtreamCluster::Live,
+        body.channel_id.as_deref(),
         None,
     )
     .await
@@ -1233,8 +1267,8 @@ mod tests {
     async fn wait_until_worker_owns_runnable_task(state: &AppState) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let running = *state.recordings.worker_running.read().await;
-                let runnable = state.recordings.active.read().await.as_ref().is_some_and(|task| {
+                let running = state.recordings.workers_running().await;
+                let runnable = state.recordings.active.read().await.first().is_some_and(|task| {
                     matches!(
                         task.state,
                         shared::model::RecordingTaskState::Running
@@ -1255,7 +1289,7 @@ mod tests {
     async fn resume_command_restarts_the_worker_for_a_paused_vod() {
         let mut state = enabled_recording_state();
         Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
-        *state.recordings.active.write().await = Some(resumable_vod(shared::model::RecordingTaskState::Paused));
+        *state.recordings.active.write().await = vec![resumable_vod(shared::model::RecordingTaskState::Paused)];
 
         let response = resume_recording_task(
             axum::extract::Path("vod".to_string()),
@@ -1329,6 +1363,269 @@ mod tests {
         }));
         Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
         state
+    }
+
+    async fn live_request_state(
+        dir: &std::path::Path,
+        output: shared::model::TargetType,
+    ) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
+        use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType, VirtualId};
+        use tuliprox_core::model::{M3uTargetOutput, TargetOutput, XtreamTargetOutput};
+        use tuliprox_repository::{
+            ensure_target_storage_path, ensure_xtream_storage_path, m3u_get_file_path_for_db, xtream_get_file_path,
+            BPlusTree,
+        };
+
+        let state = media_request_state(dir);
+        let mut config = (*state.app_config.config.load_full()).clone();
+        config.storage_dir = dir.to_string_lossy().into_owned();
+        state.app_config.config.store(Arc::new(config));
+        let mut sources = (*state.app_config.sources.load_full()).clone();
+        let mut target = (*sources.sources[0].targets[0]).clone();
+        target.output = vec![match output {
+            shared::model::TargetType::Xtream => {
+                TargetOutput::Xtream(XtreamTargetOutput::from(&shared::model::XtreamTargetOutputDto::default()))
+            }
+            _ => TargetOutput::M3u(M3uTargetOutput::from(&shared::model::M3uTargetOutputDto::default())),
+        }];
+        for (id, name) in [(8, "input-b"), (9, "foreign")] {
+            sources.inputs.push(Arc::new(tuliprox_core::model::ConfigInput {
+                id,
+                name: name.into(),
+                ..Default::default()
+            }));
+        }
+        sources.sources[0].inputs.push("input-b".into());
+        sources.sources[0].targets[0] = Arc::new(target.clone());
+        state.app_config.sources.store(Arc::new(sources));
+        let storage = ensure_target_storage_path(&state.app_config.config.load(), &target.name).await?;
+        let items = [
+            (42, "input-a", "Channel HD", "43"),
+            (43, "input-b", "Channel 4K", "43"),
+            (44, "foreign", "Foreign", "43"),
+            (45, "input-a", "Legacy", "shared.epg"),
+        ]
+        .map(|(id, input_name, title, epg_id)| PlaylistItem {
+            header: PlaylistItemHeader {
+                virtual_id: VirtualId::new(id),
+                input_name: input_name.into(),
+                name: title.into(),
+                title: title.into(),
+                group: "News".into(),
+                epg_channel_id: Some(epg_id.into()),
+                url: "http://upstream.example/live.ts".into(),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..Default::default()
+            },
+        });
+        if output == shared::model::TargetType::Xtream {
+            let storage = ensure_xtream_storage_path(&state.app_config.config.load(), &target.name).await?;
+            let path = xtream_get_file_path(&storage, XtreamCluster::Live);
+            std::fs::create_dir_all(path.parent().ok_or("database parent missing")?)?;
+            let mut tree = BPlusTree::new();
+            for item in &items {
+                tree.insert(item.header.virtual_id, shared::model::XtreamPlaylistItem::from(item));
+            }
+            tree.store(&path)?;
+        } else {
+            let path = m3u_get_file_path_for_db(&storage);
+            std::fs::create_dir_all(path.parent().ok_or("database parent missing")?)?;
+            let mut tree = BPlusTree::new();
+            for item in &items {
+                tree.insert(item.header.virtual_id, shared::model::M3uPlaylistItem::from(item));
+            }
+            tree.store(&path)?;
+        }
+        Ok(state)
+    }
+
+    async fn post_live(
+        state: &Arc<AppState>,
+        virtual_id: &str,
+        input_name: &str,
+    ) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+        let start = chrono::Utc::now().timestamp() + 3_600;
+        let body = serde_json::from_value(json!({
+            "source": {"target_id": "1", "virtual_id": virtual_id, "input_name": input_name, "cluster": "Live"},
+            "program_title": "News",
+            "program_start": start,
+            "program_end": start + 120,
+            "visibility": "private",
+            "channel_id": "43",
+            "channel_name": "Channel HD"
+        }))?;
+        Ok(create_recording_request(
+            State(Arc::clone(state)),
+            AuthClaims(creator_claims("alice", Permission::RecordingCreate.into())),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .into_response())
+    }
+
+    #[tokio::test]
+    async fn epg_recording_request_resolves_missing_input_from_the_exact_playlist_channel(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            let dir = tempfile::tempdir()?;
+            let state = live_request_state(dir.path(), output).await?;
+            // The title points at HD, but the selected playlist row is the 4K feed.
+            let response = post_live(&state, "43", "").await?;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{output:?}");
+            let (_, tasks) = state.recordings.committed_snapshot().await;
+            assert_eq!(tasks.len(), 1);
+            let task = &tasks[0];
+            assert_eq!(task.recording.source.virtual_id, "43");
+            assert_eq!(task.recording.source.input_name, "input-b");
+            assert_eq!(task.recording.group.as_deref(), Some("News"));
+            assert_eq!(task.state, shared::model::RecordingTaskState::Scheduled);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explorer_and_legacy_epg_recording_requests_still_resolve() -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            for (id, input, expected) in [("42", "input-a", "42"), ("shared.epg", "", "45")] {
+                let dir = tempfile::tempdir()?;
+                let state = live_request_state(dir.path(), output).await?;
+                assert_eq!(post_live(&state, id, input).await?.status(), StatusCode::NO_CONTENT);
+                let (_, tasks) = state.recordings.committed_snapshot().await;
+                assert_eq!(tasks[0].recording.source.virtual_id, expected);
+                assert_eq!(tasks[0].recording.source.input_name, "input-a");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_epg_recording_resolves_numeric_epg_id_without_using_it_as_a_playlist_id(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            let dir = tempfile::tempdir()?;
+            let state = live_request_state(dir.path(), output).await?;
+            // EPG channel 43 labels the HD feed, whose playlist id is 42.
+            // Playlist row 43 is a different stream with the same EPG id.
+            let response = post_live(&state, "", "").await?;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{output:?}");
+            let (_, tasks) = state.recordings.committed_snapshot().await;
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].recording.source.virtual_id, "42");
+            assert_eq!(tasks[0].recording.source.input_name, "input-a");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epg_recording_source_filters_input_before_title_hint() -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            let dir = tempfile::tempdir()?;
+            let state = live_request_state(dir.path(), output).await?;
+            for (input, title, expected) in [("input-a", "Channel 4K", "42"), ("input-b", "Channel HD", "43")] {
+                let mut virtual_id = String::new();
+                let mut input_name = input.to_string();
+                let resolved = resolve_recording_source(
+                    &state,
+                    "1",
+                    &mut virtual_id,
+                    &mut input_name,
+                    XtreamCluster::Live,
+                    Some("43"),
+                    Some(title),
+                )
+                .await;
+                assert!(resolved.is_some(), "{output:?}: {input}/{title}");
+                assert_eq!(virtual_id, expected);
+                assert_eq!(input_name, input);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epg_recording_rules_resolve_both_playlist_and_explicit_epg_identity(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            for (id, input, expected) in
+                [("43", "", "43"), ("", "", "42"), ("", "input-a", "42"), ("", "input-b", "43")]
+            {
+                let dir = tempfile::tempdir()?;
+                let state = live_request_state(dir.path(), output).await?;
+                let body = serde_json::from_value(json!({
+                    "target_id": "1", "virtual_id": id, "input_name": input, "channel_id": "43",
+                    "body": {"kind": "weekly_timeslot", "weekday": 3, "local_start_time": "20:00",
+                             "duration_secs": 120, "timezone": "America/Toronto"}
+                }))?;
+                let response = create_recording_rule(
+                    State(Arc::clone(&state)),
+                    AuthClaims(creator_claims("alice", Permission::RecordingManage.into())),
+                    Json(body),
+                )
+                .await
+                .into_response();
+                assert_eq!(response.status(), StatusCode::OK, "{output:?}: {id}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+                let rule: RecordingRule = serde_json::from_slice(&body)?;
+                assert_eq!(rule.source.virtual_id, expected);
+                assert_eq!(rule.source.input_name, if expected == "43" { "input-b" } else { "input-a" });
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recording_requests_reject_conflicting_unknown_and_out_of_scope_sources(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            for (id, input) in
+                [("43", "input-a"), ("999", ""), ("44", ""), ("42", "unknown"), ("", "unknown"), ("", "foreign")]
+            {
+                let dir = tempfile::tempdir()?;
+                let state = live_request_state(dir.path(), output).await?;
+                let response = post_live(&state, id, input).await?;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{output:?}: {id}/{input}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&body)?["error"], "recording_invalid_source");
+                assert_eq!(tasks_owned_by(&state, "web:alice").await, 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conflict_preview_resolves_epg_rows_without_playlist_id_or_input() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for output in [shared::model::TargetType::Xtream, shared::model::TargetType::M3u] {
+            let dir = tempfile::tempdir()?;
+            let state = live_request_state(dir.path(), output).await?;
+            let start = chrono::Utc::now().timestamp() + 3_600;
+            for (virtual_id, input_name, channel_id, expected) in [
+                ("", "", Some("43"), StatusCode::OK),
+                ("", "input-a", Some("43"), StatusCode::OK),
+                ("", "input-b", Some("43"), StatusCode::OK),
+                ("shared.epg", "input-a", None, StatusCode::OK),
+                ("", "", None, StatusCode::BAD_REQUEST),
+                ("", "input-a", None, StatusCode::BAD_REQUEST),
+                ("999", "input-a", None, StatusCode::BAD_REQUEST),
+                ("43", "input-a", None, StatusCode::BAD_REQUEST),
+            ] {
+                let body = serde_json::from_value(json!({
+                    "source": {"target_name": "1", "virtual_id": virtual_id, "input_name": input_name,
+                               "channel_id": channel_id, "channel_name": "Channel HD"},
+                    "candidate": {"padded_start": start, "padded_end": start + 120}
+                }))?;
+                let response = preview_recording_conflicts(
+                    AuthClaims(creator_claims("alice", Permission::RecordingCreate.into())),
+                    State(Arc::clone(&state)),
+                    Json(body),
+                )
+                .await;
+                assert_eq!(response.status(), expected, "{output:?}: {channel_id:?}");
+            }
+        }
+        Ok(())
     }
 
     fn vod_request(

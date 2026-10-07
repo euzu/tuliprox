@@ -30,8 +30,8 @@ use crate::{
     iptv::{stalker::client::validate_public_playable_url, xtream},
     model::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
-        ConfigInputOptions, ConfigInputUpdateQuality, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
-        ProcessTargets, SourcesConfig,
+        ConfigInputOptions, ConfigInputUpdateQuality, ConfigTarget, EpgSource, EpgSourceType, IcsDummyPolicy,
+        InputSource, ProcessTargets, SourcesConfig,
     },
     processing::{
         epg::get_input_raw_epg_file_path,
@@ -258,7 +258,14 @@ pub(in crate::api) async fn resolve_target_recording_source(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> Option<ResolvedRecordingSource> {
-    let target = resolve_recording_target(app_config, target_name, input_name)?;
+    // EPG grid rows carry the exact playlist id but do not know the input.
+    // Resolve it from the persisted item, then validate its configured scope.
+    let missing_input = input_name.trim().is_empty();
+    let target = if missing_input {
+        find_target_by_name(app_config, target_name)?
+    } else {
+        resolve_recording_target(app_config, target_name, input_name)?
+    };
     let wanted = VirtualId::new(virtual_id);
     let mut resolved = None;
     if target.has_output(TargetType::Xtream) {
@@ -300,7 +307,31 @@ pub(in crate::api) async fn resolve_target_recording_source(
         }
     }
     let resolved = resolved?;
+    if missing_input {
+        return is_recording_input_in_target_scope(app_config, &target, &resolved.input_name).then_some(resolved);
+    }
     (resolved.input_name == input_name).then_some(resolved)
+}
+
+/// `SourcesConfigDto::prepare` rejects duplicate target names across sources.
+fn find_target_by_name(app_config: &crate::model::AppConfig, target_name: &str) -> Option<Arc<ConfigTarget>> {
+    app_config
+        .sources
+        .load()
+        .sources
+        .iter()
+        .flat_map(|source| &source.targets)
+        .find(|target| target.name == target_name)
+        .cloned()
+}
+
+/// Whether `input_name` belongs to the source that configures `target`.
+fn is_recording_input_in_target_scope(
+    app_config: &crate::model::AppConfig,
+    target: &ConfigTarget,
+    input_name: &str,
+) -> bool {
+    resolve_recording_target(app_config, &target.name, input_name).is_some_and(|configured| configured.id == target.id)
 }
 
 /// Compares a playlist item's EPG channel id against a requested one under the
@@ -347,29 +378,17 @@ fn select_epg_channel_candidate(
 pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
     app_config: &crate::model::AppConfig,
     target_name: &str,
+    input_name: &str,
     epg_channel_id: &str,
     channel_name: Option<&str>,
 ) -> Option<ResolvedRecordingSource> {
-    let targets = app_config
-        .sources
-        .load()
-        .sources
-        .iter()
-        .flat_map(|source| source.targets.iter())
-        .filter(|target| target.name == target_name)
-        .cloned()
-        .collect::<Vec<_>>();
+    let target = find_target_by_name(app_config, target_name)?;
+    let output_case =
+        EpgIdOutputCase::from_lowercase(target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids));
+    let requested = canonicalize_untrusted_epg_id(epg_channel_id, output_case);
     let mut candidates = Vec::new();
-    for target in targets {
-        let output_case = EpgIdOutputCase::from_lowercase(
-            target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids),
-        );
-        let requested = canonicalize_untrusted_epg_id(epg_channel_id, output_case);
-        if target.has_output(TargetType::Xtream) {
-            let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await
-            else {
-                continue;
-            };
+    if target.has_output(TargetType::Xtream) {
+        if let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
@@ -384,11 +403,9 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                     }));
                 }
             }
-        } else if target.has_output(TargetType::M3u) {
-            let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await
-            else {
-                continue;
-            };
+        }
+    } else if target.has_output(TargetType::M3u) {
+        if let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
                 if epg_channel_id_matches(item.epg_channel_id.as_ref(), &requested, output_case) {
@@ -405,6 +422,11 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
             }
         }
     }
+    // Apply input constraints before the title hint can select another feed.
+    candidates.retain(|candidate| {
+        (input_name.trim().is_empty() || candidate.input_name == input_name)
+            && is_recording_input_in_target_scope(app_config, &target, &candidate.input_name)
+    });
     select_epg_channel_candidate(candidates, channel_name)
 }
 
@@ -1028,6 +1050,7 @@ async fn playlist_recording_stream(
     let Some(resolved) = resolved else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
+    let input = crate::api::api_utils::with_recording_headers(&app_state.app_config, resolved.input);
     if resolved.target.has_output(TargetType::Xtream) {
         let stream_id = virtual_id.to_string();
         return xtream_player_api_stream_with_resolved_target(
@@ -1035,7 +1058,7 @@ async fn playlist_recording_stream(
             &req_headers,
             &app_state,
             resolved.target,
-            Some(resolved.input),
+            super::xtream_api::InternalPlaybackSource::Recording(input),
             ApiStreamRequest::from_access_token(ctxt, &token, &stream_id, ""),
             query.provider_allocation_id,
         )
@@ -1051,10 +1074,10 @@ async fn playlist_recording_stream(
         true,
         format!("Failed to read m3u item for stream id {virtual_id}")
     );
-    if pli.input_name != resolved.input.name || pli.item_type.cluster() != ctxt.cluster() {
+    if pli.input_name != input.name || pli.item_type.cluster() != ctxt.cluster() {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
-    let user = Arc::new(create_api_proxy_user(&app_state));
+    let user = Arc::new(crate::api::api_utils::create_recording_proxy_user(&app_state));
     m3u_api_stream_loaded(
         user,
         resolved.target,
@@ -1062,7 +1085,7 @@ async fn playlist_recording_stream(
         &req_headers,
         &app_state,
         pli,
-        resolved.input,
+        input,
         None,
         None,
         query.provider_allocation_id,
@@ -2572,6 +2595,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn recording_headers_layer_under_input_headers_without_touching_the_worker_request() {
+        let mut recording = RecordingConfig::from(&shared::model::RecordingConfigDto::default());
+        recording.headers = HashMap::from([
+            ("User-Agent".to_string(), "VLC/3.0.16 LibVLC/3.0.16".to_string()),
+            ("Accept".to_string(), "video/*".to_string()),
+            ("X-Recording-Test".to_string(), "custom".to_string()),
+            ("invalid header".to_string(), "ignored".to_string()),
+        ]);
+        let state = crate::api::model::create_test_app_state(Config {
+            video: Some(tuliprox_core::model::VideoConfig {
+                extensions: vec![],
+                web_search: None,
+                recording: Some(recording),
+            }),
+            ..Default::default()
+        });
+        let header = |input: &ConfigInput, name: &str| {
+            input.headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.clone())
+        };
+
+        let plain = Arc::new(ConfigInput { name: "input".into(), ..Default::default() });
+        let merged = crate::api::api_utils::with_recording_headers(&state.app_config, Arc::clone(&plain));
+        assert_eq!(header(&merged, "user-agent").as_deref(), Some("VLC/3.0.16 LibVLC/3.0.16"));
+        assert_eq!(header(&merged, "accept").as_deref(), Some("video/*"));
+        assert_eq!(header(&merged, "x-recording-test").as_deref(), Some("custom"));
+        assert_eq!(header(&merged, "invalid header"), None);
+        assert_eq!(merged.name, plain.name);
+        assert!(plain.headers.is_empty(), "the configured input must stay untouched");
+
+        let with_agent = Arc::new(ConfigInput {
+            name: "input".into(),
+            headers: HashMap::from([("user-agent".to_string(), "input-agent".to_string())]),
+            ..Default::default()
+        });
+        let merged = crate::api::api_utils::with_recording_headers(&state.app_config, with_agent);
+        assert_eq!(header(&merged, "user-agent").as_deref(), Some("input-agent"));
+        assert_eq!(merged.headers.keys().filter(|key| key.eq_ignore_ascii_case("user-agent")).count(), 1);
+        assert_eq!(header(&merged, "accept").as_deref(), Some("video/*"));
     }
 
     #[tokio::test]

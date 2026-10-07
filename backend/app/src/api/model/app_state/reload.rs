@@ -176,7 +176,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
             let app_state = Arc::clone(app_state);
             tokio::spawn(async move {
                 for _ in 0..50 {
-                    if !*app_state.recordings.worker_running.read().await {
+                    if !app_state.recordings.workers_running().await {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;

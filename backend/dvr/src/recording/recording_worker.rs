@@ -77,26 +77,30 @@ const RETRYABLE_FFMPEG_PHRASES: &[&str] = &[
     "i/o error",
 ];
 
-/// Strip URL-shaped tokens out of a stderr line.
+/// URL-shaped token, also when wrapped in punctuation such as `(http://…)`.
 ///
 /// ffmpeg echoes the input URL in most of its error lines, so a
 /// provider whose path or query happens to contain e.g.
 /// `connection_refused` would flip every fatal error into a retryable
 /// one and the worker would spin until the recording window closed.
 /// The classifier must only see ffmpeg's own words.
-fn is_url_token(token: &str) -> bool {
-    token.starts_with("http://")
-        || token.starts_with("https://")
-        || token.starts_with("rtmp://")
-        || token.starts_with("rtsp://")
-        || token.starts_with("udp://")
-        || token.starts_with("srt://")
-        || token.starts_with("file://")
+fn is_url_token(token: &str) -> bool { token.contains("://") }
+
+/// Rebuild `message` with every URL token replaced, or dropped when
+/// `replacement` is `None`.
+fn replace_url_tokens(message: &str, replacement: Option<&str>) -> String {
+    message
+        .split_whitespace()
+        .filter_map(|token| if is_url_token(token) { replacement } else { Some(token) })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn strip_url_tokens(message: &str) -> String {
-    message.split_whitespace().filter(|token| !is_url_token(token)).collect::<Vec<_>>().join(" ").to_ascii_lowercase()
-}
+fn strip_url_tokens(message: &str) -> String { replace_url_tokens(message, None).to_ascii_lowercase() }
+
+/// Keep a transfer failure readable without exposing stream URLs or
+/// access tokens in logs, recording status and lifecycle notifications.
+pub(crate) fn redact_url_tokens(message: &str) -> String { replace_url_tokens(message, Some("[stream URL]")) }
 
 fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
     let msg = strip_url_tokens(message);
@@ -264,7 +268,7 @@ pub async fn run_recording_with_binary(
 
     let partial_path = recording_partial_path(&download.file_path);
     let args = build_recording_args(download, effective_duration_secs, &partial_path, container_format);
-    debug!("recording spawn: {} {}", ffmpeg_binary.display(), args.join(" "));
+    debug!("recording spawn: {} {}", ffmpeg_binary.display(), redact_url_tokens(&args.join(" ")));
     let mut command = tokio::process::Command::new(ffmpeg_binary);
     command
         .args(args)
@@ -273,6 +277,15 @@ pub async fn run_recording_with_binary(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    // The first HTTP hop is our own listener. Keep existing exclusions for
+    // external redirect targets while bypassing proxies for the listener host.
+    if let Some(host) = download.url.host_str() {
+        let lower = std::env::var("no_proxy").unwrap_or_default();
+        let upper = std::env::var("NO_PROXY").unwrap_or_default();
+        let host = host.trim_matches(['[', ']']);
+        let exclusions = format!("{lower},{upper},127.0.0.1,localhost,::1,{host}");
+        command.env("no_proxy", &exclusions).env("NO_PROXY", &exclusions);
+    }
     let mut child = match spawn_retrying_busy_executable(&mut command).await {
         Ok(child) => child,
         Err(err) => return RecordingExecutionResult::Failed(format!("Failed to spawn ffmpeg: {err}")),
@@ -395,8 +408,8 @@ mod tests {
     use super::{
         build_recording_args, classify_ffmpeg_failure, recording_partial_path,
         recording_resume_or_retry_is_unsupported, recording_start_missed_window, recovery_decision_for,
-        remaining_recording_duration_secs, run_recording_with_binary, spawn_retrying_busy_executable,
-        RecordingExecutionResult, RecoveryDecision,
+        redact_url_tokens, remaining_recording_duration_secs, run_recording_with_binary,
+        spawn_retrying_busy_executable, strip_url_tokens, RecordingExecutionResult, RecoveryDecision,
     };
     use crate::{
         recording::recording_queue::{RecordingControl, RecordingTask, RecordingTaskState},
@@ -530,6 +543,13 @@ mod tests {
         // line also carries the URL.
         let result = classify_ffmpeg_failure(b"http://host/live/1.ts: Connection refused\n");
         assert!(matches!(result, RecordingExecutionResult::Retryable(_)), "{result:?}");
+    }
+
+    #[test]
+    fn url_tokens_wrapped_in_punctuation_are_stripped_and_redacted() {
+        let message = "Error opening (http://user:secret@host/live/1.ts?token=abc) 'rtsp://cam/feed': Timed out";
+        assert_eq!(strip_url_tokens(message), "error opening timed out");
+        assert_eq!(redact_url_tokens(message), "Error opening [stream URL] [stream URL] Timed out");
     }
 
     #[test]
@@ -911,5 +931,88 @@ mod tests {
         let partial = dir.path().join("rec.ts.partial");
         let decision = recovery_decision_for(&link_path, &partial).await;
         assert_eq!(decision, RecoveryDecision::FailedNoFile);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recording_ffmpeg_reaches_listener_with_a_proxy_environment() -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let directory = tempfile::tempdir()?;
+        let input = directory.path().join("input.ts");
+        let generated = match tokio::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=mono",
+                "-t",
+                "2",
+                "-c:a",
+                "mp2",
+                "-f",
+                "mpegts",
+                "-y",
+            ])
+            .arg(&input)
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("ffmpeg unavailable; real live-capture test skipped");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+        let bytes = tokio::fs::read(&input).await?;
+        // This address is outside the usual environment's localhost exclusion.
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        let url =
+            reqwest::Url::parse(&format!("http://{}/api/v1/playlist/recording/secret/live", listener.local_addr()?))?;
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                if socket.read(&mut byte).await? == 0 {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            let _ = request_tx.send(String::from_utf8_lossy(&request).to_ascii_lowercase());
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+            socket.write_all(&bytes).await?;
+            Ok::<_, std::io::Error>(())
+        });
+        let wrapper = directory.path().join("ffmpeg-with-proxy");
+        tokio::fs::write(&wrapper, "#!/bin/sh\nexport http_proxy=http://127.0.0.1:9\nexec ffmpeg \"$@\"\n").await?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+        let mut recording = make_recording(chrono::Utc::now().timestamp(), 60);
+        recording.url = url;
+        recording.file_dir = directory.path().to_path_buf();
+        recording.file_path = directory.path().join("capture.ts");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            run_recording_with_binary(
+                &wrapper,
+                &recording,
+                &RwLock::new(RecordingControl::None),
+                &Notify::new(),
+                None,
+                RecordingContainerFormat::Mpegts,
+            ),
+        )
+        .await?;
+        server.abort();
+        assert!(matches!(result, RecordingExecutionResult::Completed), "{result:?}");
+        let request = request_rx.await?;
+        assert!(request.starts_with("get /api/v1/playlist/recording/secret/live "));
+        assert!(request.contains(&shared::model::RECORDING_STREAM_USER_AGENT.to_ascii_lowercase()));
+        assert!(tokio::fs::metadata(&recording.file_path).await?.len() > 0);
+        Ok(())
     }
 }
