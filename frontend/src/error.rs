@@ -38,6 +38,10 @@ pub enum Error {
     #[error("{0}")]
     Conflict(String),
 
+    /// 412
+    #[error("{0}")]
+    PreconditionFailed(String),
+
     /// 428
     #[error("{0}")]
     PreconditionRequired(String),

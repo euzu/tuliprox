@@ -266,6 +266,7 @@ where
                         Err(Error::Conflict(message))
                     }
                 }
+                412 => Err(Error::PreconditionFailed(extract_error_message(response).await)),
                 428 => {
                     let message = extract_error_message(response).await;
                     if message.trim().is_empty() {
@@ -377,6 +378,7 @@ pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
                 Err(Error::Conflict(message))
             }
         }
+        412 => Err(Error::PreconditionFailed(extract_error_message(response).await)),
         428 => {
             let message = extract_error_message(response).await;
             if message.trim().is_empty() {
@@ -532,6 +534,17 @@ pub fn get_base_href() -> String {
             href
         })
         .clone()
+}
+
+pub async fn request_delete_meta<T>(
+    url: &str,
+    request_headers: &[(String, String)],
+    response_header_keys: &[&str],
+) -> Result<ResponseMeta<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+{
+    request(RequestMethod::Delete, url, (), None, None, Some(request_headers), Some(response_header_keys)).await
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ use shared::{
     model::{ConfigPaths, ConfigReloadFailure},
 };
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
@@ -38,6 +39,9 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     // // Add a path to be watched. All files and directories at that path and
     // // below will be monitored for changes.
     let path = Path::new(paths.config_path.as_str());
+    let working_dir = std::env::current_dir()
+        .map_err(|err| TuliproxError::Io(format!("Failed to resolve config watcher directory {err}")))?;
+    let settings_root = normalized_watch_path(path, &working_dir).join("user_settings");
     let recursive_mode = if (!mapping_file_path.is_empty() && utils::is_directory(&mapping_file_path))
         || (!template_file_path.is_empty() && utils::is_directory(&template_file_path))
     {
@@ -114,6 +118,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                         if is_write_event {
                             let mut trigger = false;
                             for path in event.paths {
+                                if is_settings_path(&path, &settings_root, &working_dir) { continue; }
                                 let mut resolved = None;
                                 if let Some((config_file, _is_dir)) = files.get(&path) {
                                     resolved = Some(*config_file);
@@ -254,5 +259,58 @@ mod tests {
         locks.mark_internal_write_content(&external, &tokio::fs::read(&external).await?).await;
         assert!(!has_external_source_write(&locks, &paths).await);
         Ok(())
+    }
+}
+
+fn normalized_watch_path<'a>(path: &'a Path, working_dir: &Path) -> Cow<'a, Path> {
+    if path.is_absolute() && !path.components().any(|part| part == std::path::Component::ParentDir) {
+        return Cow::Borrowed(path);
+    }
+    let absolute = if path.is_absolute() { Cow::Borrowed(path) } else { Cow::Owned(working_dir.join(path)) };
+    let mut result = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => result.push(other.as_os_str()),
+        }
+    }
+    Cow::Owned(result)
+}
+
+fn is_settings_path(path: &Path, settings_root: &Path, working_dir: &Path) -> bool {
+    normalized_watch_path(path, working_dir).starts_with(settings_root)
+}
+
+#[cfg(test)]
+mod settings_watch_tests {
+    use super::*;
+    #[test]
+    fn relative_and_removed_settings_paths_use_cached_directory() {
+        let working_dir = Path::new("/tmp/work");
+        let config = Path::new("../config/./nested/..");
+        let root = normalized_watch_path(config, working_dir).join("user_settings");
+        assert_eq!(root, Path::new("/tmp/config/user_settings"));
+        for path in [
+            "../config/user_settings/web/missing.yml",
+            "../config/other/../user_settings/.tmp",
+            "/tmp/config/user_settings/web/missing.yml",
+        ] {
+            assert!(is_settings_path(Path::new(path), &root, working_dir));
+        }
+        assert!(!is_settings_path(Path::new("../config/user_settings/../config.yml"), &root, working_dir));
+        assert!(matches!(normalized_watch_path(Path::new("/tmp/config/config.yml"), working_dir), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn settings_subtree_is_excluded_without_excluding_neighbors() {
+        let root = Path::new("/tmp/config/user_settings");
+        let working_dir = Path::new("/tmp");
+        assert!(is_settings_path(Path::new("/tmp/config/user_settings/web/alice.yml"), root, working_dir));
+        assert!(is_settings_path(Path::new("/tmp/config/other/../user_settings/.tmp"), root, working_dir));
+        assert!(!is_settings_path(Path::new("/tmp/config/user_settings_backup/config.yml"), root, working_dir));
+        assert!(!is_settings_path(Path::new("/tmp/config/config.yml"), root, working_dir));
     }
 }

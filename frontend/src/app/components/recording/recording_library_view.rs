@@ -23,17 +23,26 @@ use shared::{
 use std::{cmp::Ordering, collections::HashSet, rc::Rc};
 use yew::{platform::spawn_local, prelude::*};
 
-const HEADERS: [&str; 9] = [
-    "LABEL.ACTIONS",
-    "LABEL.NAME",
-    "LABEL.TYPE",
-    "LABEL.STATUS",
-    "LABEL.RECORDING_TRANSFERRED",
-    "LABEL.RECORDING_FILE_SIZE",
-    "LABEL.START",
-    "LABEL.DURATION",
-    "LABEL.ERROR",
-];
+crate::app::components::define_table_columns! {
+    enum RecordingColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.ACTIONS"),
+        },
+        Name => ("name", "LABEL.NAME") {
+            can_hide: false,
+            sortable: true,
+        },
+        Type => ("type", "LABEL.TYPE") { sortable: true },
+        Status => ("status", "LABEL.STATUS") { sortable: true },
+        Transferred => ("recording_transferred", "LABEL.RECORDING_TRANSFERRED") { sortable: true },
+        FileSize => ("recording_file_size", "LABEL.RECORDING_FILE_SIZE") { sortable: true },
+        Start => ("start", "LABEL.START") { sortable: true },
+        Duration => ("duration", "LABEL.DURATION") { sortable: true },
+        Error => ("error", "LABEL.ERROR") { sortable: true },
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RecordingTab {
@@ -174,20 +183,26 @@ fn format_error(translate: &crate::i18n::YewI18n, task: &RecordingTaskDto) -> St
 }
 
 fn compare_tasks(a: &RecordingTaskDto, b: &RecordingTaskDto, col: usize) -> Ordering {
-    match col {
-        1 => a.title.cmp(&b.title),
-        2 => a.kind.cmp(&b.kind),
-        3 => a.status.cmp(&b.status),
-        4 => a.transferred_bytes.cmp(&b.transferred_bytes),
-        5 => a.total_bytes.unwrap_or(a.transferred_bytes).cmp(&b.total_bytes.unwrap_or(b.transferred_bytes)),
-        6 => a.scheduled_start.unwrap_or_default().cmp(&b.scheduled_start.unwrap_or_default()),
-        7 => a.scheduled_duration_secs().unwrap_or_default().cmp(&b.scheduled_duration_secs().unwrap_or_default()),
-        8 => a.error.as_deref().unwrap_or_default().cmp(b.error.as_deref().unwrap_or_default()),
+    match RecordingColumn::from_index(col) {
+        Some(RecordingColumn::Name) => a.title.cmp(&b.title),
+        Some(RecordingColumn::Type) => a.kind.cmp(&b.kind),
+        Some(RecordingColumn::Status) => a.status.cmp(&b.status),
+        Some(RecordingColumn::Transferred) => a.transferred_bytes.cmp(&b.transferred_bytes),
+        Some(RecordingColumn::FileSize) => {
+            a.total_bytes.unwrap_or(a.transferred_bytes).cmp(&b.total_bytes.unwrap_or(b.transferred_bytes))
+        }
+        Some(RecordingColumn::Start) => {
+            a.scheduled_start.unwrap_or_default().cmp(&b.scheduled_start.unwrap_or_default())
+        }
+        Some(RecordingColumn::Duration) => {
+            a.scheduled_duration_secs().unwrap_or_default().cmp(&b.scheduled_duration_secs().unwrap_or_default())
+        }
+        Some(RecordingColumn::Error) => {
+            a.error.as_deref().unwrap_or_default().cmp(b.error.as_deref().unwrap_or_default())
+        }
         _ => Ordering::Equal,
     }
 }
-
-fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
 
 /// Which controls a task offers: what the server says it would accept,
 /// narrowed to what this viewer is permitted to ask for.
@@ -287,6 +302,7 @@ pub struct RecordingLibraryViewProps {
 #[function_component(RecordingLibraryView)]
 pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
     let translate = use_translation();
+    let columns = use_memo((), |()| RecordingColumn::columns());
     let services = use_service_context();
     let config_ctx = use_context::<ConfigContext>();
     let recording_enabled =
@@ -488,7 +504,8 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
     let render_header_cell = {
         let translate = translate.clone();
         Callback::<usize, Html>::from(move |col| {
-            let header_text = HEADERS.get(col).copied().map_or_else(String::new, |key| translate.t(key));
+            let header_text =
+                RecordingColumn::from_index(col).map_or_else(String::new, |column| translate.t(column.header_label()));
 
             html! { { header_text } }
         })
@@ -503,8 +520,8 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
         let handle_delete_file = handle_delete_file.clone();
         let handle_retry = handle_retry.clone();
         Callback::<(usize, usize, Rc<RecordingTaskDto>), Html>::from(
-            move |(_row, col, dto): (usize, usize, Rc<RecordingTaskDto>)| match col {
-                0 => {
+            move |(_row, col, dto): (usize, usize, Rc<RecordingTaskDto>)| match RecordingColumn::from_index(col) {
+                Some(RecordingColumn::Actions) => {
                     let actions = action_availability(can_manage, can_delete, &dto);
                     let retry_label = if dto.status == TransferStatusDto::Cancelled { "Resume" } else { "Retry" };
                     let retry_icon = if dto.status == TransferStatusDto::Cancelled { "Play" } else { "Refresh" };
@@ -543,18 +560,18 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
                         </div>
                     }
                 }
-                1 => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
-                2 => html! { format_recording_kind(&translate, dto.kind) },
-                3 => {
+                Some(RecordingColumn::Name) => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
+                Some(RecordingColumn::Type) => html! { format_recording_kind(&translate, dto.kind) },
+                Some(RecordingColumn::Status) => {
                     html! { <TaskStatusBadge status={dto.status} detail={dto.restart_from_beginning_required.then(|| translate.t("MESSAGES.RECORDING.RANGE_UNSUPPORTED")).or_else(|| dto.error.clone())} /> }
                 }
-                4 => render_progress(&dto),
-                5 => {
+                Some(RecordingColumn::Transferred) => render_progress(&dto),
+                Some(RecordingColumn::FileSize) => {
                     html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }
                 }
-                6 => html! { <span class="tp__table__nowrap">{format_start(&dto)}</span> },
-                7 => html! { format_duration(&dto) },
-                8 => html! { format_error(&translate, &dto) },
+                Some(RecordingColumn::Start) => html! { <span class="tp__table__nowrap">{format_start(&dto)}</span> },
+                Some(RecordingColumn::Duration) => html! { format_duration(&dto) },
+                Some(RecordingColumn::Error) => html! { format_error(&translate, &dto) },
                 _ => html! {},
             },
         )
@@ -573,9 +590,11 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
     };
 
     let table_definition = Rc::new(TableDefinition::<RecordingTaskDto> {
+        table_id: "recording.library".into(),
+        columns: columns.clone(),
+        row_key: Callback::from(|(_, item): (usize, Rc<RecordingTaskDto>)| item.id.clone().into()),
         items: (*table_items).clone(),
-        num_cols: HEADERS.len(),
-        is_sortable: Callback::from(is_sortable),
+
         render_header_cell,
         render_data_cell,
         on_sort,
@@ -649,7 +668,9 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
                             if unavailable_code.is_some() {
                                 <NoContent text={translate.t("LABEL.RECORDING_UNAVAILABLE")} hint={unavailable_hint} />
                             } else if tasks_state.is_empty() {
-                                <NoContent text={translate.t("LABEL.RECORDING_EMPTY")} />
+                                <crate::app::components::TableShell table_id={table_definition.table_id.clone()} columns={table_definition.columns.clone()}>
+                                    <NoContent text={translate.t("LABEL.RECORDING_EMPTY")} />
+                                </crate::app::components::TableShell>
                             } else {
                                 <Table::<RecordingTaskDto> definition={table_definition} />
                             }
@@ -667,7 +688,7 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
 mod tests {
     use super::{
         action_availability, collect_sorted_tasks_for_tab, collect_tasks_for_tab, format_error_parts,
-        format_quota_pool, is_sortable, normalize_tab, should_apply_snapshot, RecordingTab,
+        format_quota_pool, normalize_tab, should_apply_snapshot, RecordingTab,
     };
     use shared::model::{
         RecordingAllowedActions, RecordingKind, RecordingTaskDto, RecordingVisibility, SortOrder, TaskPriorityDto,
@@ -877,11 +898,9 @@ mod tests {
 
     #[test]
     fn only_data_columns_are_sortable() {
-        assert!(!is_sortable(0), "the action column is not sortable");
-        for col in 1..=8 {
-            assert!(is_sortable(col));
-        }
-        assert!(!is_sortable(9));
+        let columns = super::RecordingColumn::columns();
+        assert!(!columns[0].sortable, "the action column is not sortable");
+        assert!(columns[1..].iter().all(|column| column.sortable));
     }
 
     #[test]

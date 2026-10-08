@@ -9,16 +9,29 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
 };
-use shared::{
-    concat_string,
-    model::{ClusterFlags, PlansConfigDto, ProxyType, SortOrder, UserPlanDto, UserPlanTrialDto},
-};
+use shared::model::{ClusterFlags, PlansConfigDto, ProxyType, SortOrder, UserPlanDto, UserPlanTrialDto};
 use std::{rc::Rc, str::FromStr};
 use web_sys::MouseEvent;
 use yew::{platform::spawn_local, prelude::*};
 
-const PLAN_HEADERS: [&str; 9] =
-    ["EMPTY", "NAME", "CLUSTER", "PROXY", "MAX_CONNECTIONS", "SOFT_CONNECTIONS", "FILTER", "TRIAL", "COMMENT"];
+crate::app::components::define_table_columns! {
+    enum PlanColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.EMPTY"),
+        },
+        Name => ("name", "LABEL.NAME") { can_hide: false },
+        Cluster => ("cluster", "LABEL.CLUSTER"),
+        Proxy => ("proxy", "LABEL.PROXY"),
+        MaxConnections => ("max_connections", "LABEL.MAX_CONNECTIONS"),
+        SoftConnections => ("soft_connections", "LABEL.SOFT_CONNECTIONS"),
+        Filter => ("filter", "LABEL.FILTER"),
+        Trial => ("trial", "LABEL.TRIAL"),
+        Comment => ("comment", "LABEL.COMMENT"),
+    }
+}
+
 const MSG_NON_UNIQUE_PLAN_NAME: &str = "MESSAGES.SAVE.API_PROXY_CONFIG.NON_UNIQUE_PLAN_NAME";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -91,6 +104,7 @@ where
 #[component]
 pub fn PlansView() -> Html {
     let translate = use_translation();
+    let columns = use_memo((), |()| PlanColumn::columns());
     let services = use_service_context();
 
     let plans = use_state(Vec::<UserPlanDto>::new);
@@ -275,20 +289,17 @@ pub fn PlansView() -> Html {
 
     let render_header_cell = {
         let translate = translate.clone();
-        Callback::<usize, Html>::from(move |col: usize| {
-            if col == 0 || col >= PLAN_HEADERS.len() {
-                html! {}
-            } else {
-                html! { {translate.t(&concat_string!("LABEL.", PLAN_HEADERS[col]))} }
-            }
+        Callback::<usize, Html>::from(move |col: usize| match PlanColumn::from_index(col) {
+            Some(PlanColumn::Actions) | None => html! {},
+            Some(column) => html! { {translate.t(column.header_label())} },
         })
     };
 
     let render_data_cell = {
         let popup_onclick = handle_popup_onclick.clone();
         Callback::<(usize, usize, Rc<UserPlanDto>), Html>::from(
-            move |(row, col, dto): (usize, usize, Rc<UserPlanDto>)| match PLAN_HEADERS[col] {
-                "EMPTY" => {
+            move |(row, col, dto): (usize, usize, Rc<UserPlanDto>)| match PlanColumn::from_index(col) {
+                Some(PlanColumn::Actions) => {
                     let popup_onclick = popup_onclick.clone();
                     html! {
                         <button
@@ -300,34 +311,37 @@ pub fn PlansView() -> Html {
                         </button>
                     }
                 }
-                "NAME" => html! {&dto.name},
-                "CLUSTER" => html! {cluster_flags_label(dto.output_clusters)},
-                "PROXY" => {
+                Some(PlanColumn::Name) => html! {&dto.name},
+                Some(PlanColumn::Cluster) => html! {cluster_flags_label(dto.output_clusters)},
+                Some(PlanColumn::Proxy) => {
                     dto.proxy.as_ref().map_or_else(|| html! {}, |proxy| html! {<ProxyTypeView value={*proxy} />})
                 }
-                "MAX_CONNECTIONS" => html! {dto.max_connections.to_string()},
-                "SOFT_CONNECTIONS" => html! {dto.soft_connections.to_string()},
-                "FILTER" => html! {dto.filter.clone().unwrap_or_default()},
-                "TRIAL" => html! {dto.trial.as_ref().map_or_else(String::new, |t| t.duration.clone())},
-                "COMMENT" => html! {dto.comment.clone().unwrap_or_default()},
+                Some(PlanColumn::MaxConnections) => html! {dto.max_connections.to_string()},
+                Some(PlanColumn::SoftConnections) => html! {dto.soft_connections.to_string()},
+                Some(PlanColumn::Filter) => html! {dto.filter.clone().unwrap_or_default()},
+                Some(PlanColumn::Trial) => html! {dto.trial.as_ref().map_or_else(String::new, |t| t.duration.clone())},
+                Some(PlanColumn::Comment) => html! {dto.comment.clone().unwrap_or_default()},
                 _ => html! {""},
             },
         )
     };
 
     let table_definition = {
-        let is_sortable = Callback::<usize, bool>::from(move |_col| false);
+        let columns = columns.clone();
+
         let on_sort = Callback::<Option<(usize, SortOrder)>, ()>::from(move |_args| {});
-        let num_cols = PLAN_HEADERS.len();
+
         let items = (*plans).clone();
         use_memo(items, move |items| TableDefinition::<UserPlanDto> {
+            table_id: "config.user_plans".into(),
+            columns: columns.clone(),
+            row_key: Callback::from(|(_, item): (usize, Rc<UserPlanDto>)| item.name.clone().into()),
             items: if items.is_empty() {
                 None
             } else {
                 Some(Rc::new(items.iter().map(|plan| Rc::new(plan.clone())).collect()))
             },
-            num_cols,
-            is_sortable,
+
             on_sort,
             render_header_cell: render_header_cell.clone(),
             render_data_cell: render_data_cell.clone(),
@@ -453,10 +467,12 @@ pub fn PlansView() -> Html {
                         {
                             if plans.is_empty() {
                                 html! {
+                                    <crate::app::components::TableShell table_id={table_definition.table_id.clone()} columns={table_definition.columns.clone()}>
                                     <NoContent
                                         text={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_PLANS_TITLE")}
                                         hint={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_PLANS_HINT")}
                                     />
+                                </crate::app::components::TableShell>
                                 }
                             } else {
                                 html! { <Table::<UserPlanDto> definition={table_definition.clone()} /> }

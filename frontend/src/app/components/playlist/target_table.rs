@@ -17,20 +17,26 @@ use shared::model::{ConfigTargetDto, SortOrder};
 use std::{rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
-const HEADERS: [&str; 12] = [
-    "LABEL.EMPTY",
-    "LABEL.ENABLED",
-    "LABEL.NAME",
-    "LABEL.OUTPUT",
-    "LABEL.OPTIONS",
-    "LABEL.SORT",
-    "LABEL.FILTER",
-    "LABEL.RENAME",
-    "LABEL.MAPPING",
-    "LABEL.PROCESSING_ORDER",
-    "LABEL.WATCH",
-    "LABEL.USE_MEMORY_CACHE",
-];
+crate::app::components::define_table_columns! {
+    enum TargetColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.EMPTY"),
+        },
+        Enabled => ("enabled", "LABEL.ENABLED"),
+        Name => ("name", "LABEL.NAME") { can_hide: false },
+        Output => ("output", "LABEL.OUTPUT"),
+        Options => ("options", "LABEL.OPTIONS"),
+        Sort => ("sort", "LABEL.SORT"),
+        Filter => ("filter", "LABEL.FILTER"),
+        Rename => ("rename", "LABEL.RENAME"),
+        Mapping => ("mapping", "LABEL.MAPPING"),
+        ProcessingOrder => ("processing_order", "LABEL.PROCESSING_ORDER"),
+        Watch => ("watch", "LABEL.WATCH"),
+        UseMemoryCache => ("use_memory_cache", "LABEL.USE_MEMORY_CACHE"),
+    }
+}
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct TargetTableProps {
@@ -40,6 +46,7 @@ pub struct TargetTableProps {
 #[component]
 pub fn TargetTable(props: &TargetTableProps) -> Html {
     let translate = use_translation();
+    let columns = use_memo((), |()| TargetColumn::columns());
     let services = use_service_context();
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
@@ -67,14 +74,16 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
         })
     };
 
-    let render_header_cell = make_translated_header_callback(translate.clone(), &HEADERS);
+    let render_header_cell = make_translated_header_callback(translate.clone(), |index| {
+        TargetColumn::from_index(index).map(TargetColumn::header_label)
+    });
 
     let render_data_cell = {
         let translator = translate.clone();
         let popup_onclick = handle_popup_onclick.clone();
         Callback::<(usize, usize, Rc<ConfigTargetDto>), Html>::from(
-            move |(row, col, dto): (usize, usize, Rc<ConfigTargetDto>)| match col {
-                0 => {
+            move |(row, col, dto): (usize, usize, Rc<ConfigTargetDto>)| match TargetColumn::from_index(col) {
+                Some(TargetColumn::Actions) => {
                     let popup_onclick = popup_onclick.clone();
                     html! {
                         <button class="tp__icon-button"
@@ -84,19 +93,19 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                         </button>
                     }
                 }
-                1 => html! { <Chip class={ convert_bool_to_chip_style(dto.enabled) }
+                Some(TargetColumn::Enabled) => html! { <Chip class={ convert_bool_to_chip_style(dto.enabled) }
                 label={if dto.enabled {translator.t("LABEL.ACTIVE")} else { translator.t("LABEL.DISABLED")} }
                  /> },
-                2 => html! { dto.name.as_str() },
-                3 => html! { <TargetOutput target={Rc::clone(&dto)} /> },
-                4 => {
+                Some(TargetColumn::Name) => html! { dto.name.as_str() },
+                Some(TargetColumn::Output) => html! { <TargetOutput target={Rc::clone(&dto)} /> },
+                Some(TargetColumn::Options) => {
                     html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><TargetOptions target={Rc::clone(&dto)} /></RevealContent> }
                 }
-                5 => dto.sort.as_ref().map_or_else(
+                Some(TargetColumn::Sort) => dto.sort.as_ref().map_or_else(
                     || html! {},
                     |_s| html! { <RevealContent><TargetSort target={Rc::clone(&dto)} /></RevealContent> },
                 ),
-                6 => {
+                Some(TargetColumn::Filter) => {
                     let filters = [
                         (translator.t("LABEL.FILTER"), dto.filter.t_processing.as_ref()),
                         (translator.t("LABEL.PERSIST_FILTER"), dto.filter.t_persist.as_ref()),
@@ -113,45 +122,49 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                     });
                     html! { <RevealContent>{ for rendered }</RevealContent> }
                 }
-                7 => dto.rename.as_ref().map_or_else(
+                Some(TargetColumn::Rename) => dto.rename.as_ref().map_or_else(
                     || html! {},
                     |_r| html! { <RevealContent><TargetRename target={Rc::clone(&dto)} /></RevealContent> },
                 ),
-                8 => {
+                Some(TargetColumn::Mapping) => {
                     let mapping_oneliner = dto.mapping.as_ref().map(|v| v.join(", ")).unwrap_or_default();
                     html_if!(!mapping_oneliner.is_empty(),
                             { <RevealContent preview={Some(html! { mapping_oneliner })}><PlaylistMappings mappings={dto.mapping.clone()} /></RevealContent> })
                 }
-                9 => html! { <PlaylistProcessing order={dto.processing_order} /> },
-                10 => html! { <TargetWatch  target={Rc::clone(&dto)} /> },
-                11 => html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} /> },
+                Some(TargetColumn::ProcessingOrder) => html! { <PlaylistProcessing order={dto.processing_order} /> },
+                Some(TargetColumn::Watch) => html! { <TargetWatch  target={Rc::clone(&dto)} /> },
+                Some(TargetColumn::UseMemoryCache) => {
+                    html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} /> }
+                }
                 _ => html! {""},
             },
         )
     };
 
-    let is_sortable = Callback::<usize, bool>::from(move |_col| false);
-
     let on_sort = Callback::<Option<(usize, SortOrder)>, ()>::from(move |_args| {});
 
     let table_definition = {
+        let columns = columns.clone();
         // first register for config update
         let render_header_cell_cb = render_header_cell.clone();
         let render_data_cell_cb = render_data_cell.clone();
-        let is_sortable = is_sortable.clone();
+
         let on_sort = on_sort.clone();
-        let num_cols = HEADERS.len();
+
         use_memo(props.targets.clone(), move |targets| {
-            targets.as_ref().map(|list| {
+            let list = targets.as_deref().unwrap_or_default();
+            {
                 Rc::new(TableDefinition::<ConfigTargetDto> {
-                    items: if list.is_empty() { None } else { Some(Rc::new(list.clone())) },
-                    num_cols,
-                    is_sortable,
+                    table_id: "playlist.targets".into(),
+                    columns: columns.clone(),
+                    row_key: Callback::from(|(_, item): (usize, Rc<ConfigTargetDto>)| item.id.to_string().into()),
+                    items: if list.is_empty() { None } else { Some(Rc::new(list.to_vec())) },
+
                     on_sort,
                     render_header_cell: render_header_cell_cb,
                     render_data_cell: render_data_cell_cb,
                 })
-            })
+            }
         })
     };
 
@@ -213,22 +226,12 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
 
     html! {
         <div class="tp__target-table">
-          {
-            if let Some(definition) = table_definition.as_ref() {
-                html! {
-                  <>
-                   <Table::<ConfigTargetDto> definition={definition.clone()} />
-                    <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
-                        <MenuItem icon="Refresh" name={TargetTableAction::Refresh.to_string()} label={translate.t("LABEL.REFRESH")} onclick={&handle_menu_click} class="tp__update_action"></MenuItem>
-                        <hr/>
-                        <MenuItem icon="Delete" name={TargetTableAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action"></MenuItem>
-                    </PopupMenu>
-                </>
-                  }
-            } else {
-              html! {}
-            }
-          }
+            <Table::<ConfigTargetDto> definition={(*table_definition).clone()} />
+            <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
+                <MenuItem icon="Refresh" name={TargetTableAction::Refresh.to_string()} label={translate.t("LABEL.REFRESH")} onclick={&handle_menu_click} class="tp__update_action"/>
+                <hr/>
+                <MenuItem icon="Delete" name={TargetTableAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action"/>
+            </PopupMenu>
         </div>
     }
 }

@@ -57,8 +57,10 @@ fn verify_claims(app_state: &Arc<AppState>, token: &str) -> Result<Claims, AuthE
     // Only web users have a password on file here. A proxy API user
     // authenticates against `api_proxy.yml` and carries no password version, so
     // there is nothing to compare and nothing to enforce.
-    if let Some(current) = web_auth_config.pwd_version_for(&claims.username) {
-        validate_password_version(&claims, current)?;
+    if !claims.subject_id.as_ref().is_some_and(shared::model::UserId::is_api) {
+        if let Some(current) = web_auth_config.pwd_version_for(&claims.username) {
+            validate_password_version(&claims, current)?;
+        }
     }
 
     Ok(claims)
@@ -90,7 +92,7 @@ fn effective_permissions(app_state: &Arc<AppState>, claims: &Claims) -> Permissi
 /// frontend can branch on it. `Forbidden` (a successful authentication
 /// that nonetheless cannot perform the action) maps to 403 so it does
 /// not collapse into the "you're not authenticated" 401 path.
-fn rejection_for(err: AuthError) -> axum::response::Response {
+pub(crate) fn rejection_for(err: AuthError) -> axum::response::Response {
     use axum::http::StatusCode;
     let status = match &err {
         AuthError::Forbidden => StatusCode::FORBIDDEN,
@@ -126,6 +128,75 @@ async fn authorize_role(
     }
     request.extensions_mut().insert(VerifiedClaims(claims));
     Ok(())
+}
+
+pub(crate) fn settings_owner(
+    app_state: &AppState,
+    claims: Option<&Claims>,
+) -> Result<tuliprox_repository::user_settings_repository::SettingsOwner, AuthError> {
+    use tuliprox_repository::user_settings_repository::SettingsOwner;
+    let config = app_state.app_config.config.load();
+    let Some(auth) = config.web_ui.as_ref().and_then(|ui| ui.auth.as_ref()).filter(|auth| auth.enabled) else {
+        return Ok(SettingsOwner::local());
+    };
+    let claims = claims.ok_or(AuthError::InvalidToken)?;
+    let subject = claims.subject_id.as_ref().ok_or(AuthError::InvalidToken)?;
+    let username = if subject.is_api() {
+        let user = app_state.app_config.get_user_credentials(&claims.username).ok_or(AuthError::InvalidToken)?;
+        if !user.ui_enabled || !config.web_ui.as_ref().is_some_and(|ui| ui.user_ui_enabled) {
+            return Err(AuthError::Forbidden);
+        }
+        if *subject != shared::model::UserId::api(&user.username) {
+            return Err(AuthError::InvalidToken);
+        }
+        user.username.clone()
+    } else {
+        let user = auth
+            .t_users
+            .as_ref()
+            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(&claims.username)))
+            .ok_or(AuthError::InvalidToken)?;
+        let admin = user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin"));
+        if subject.is_builtin_admin() {
+            if !admin {
+                return Err(AuthError::Forbidden);
+            }
+        } else if *subject != shared::model::UserId::web(&user.username) {
+            return Err(AuthError::InvalidToken);
+        }
+        user.username.clone()
+    };
+    SettingsOwner::authenticated(subject, &username).map_err(|_| AuthError::InvalidToken)
+}
+
+pub async fn validator_authenticated(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let enabled = app_state
+        .app_config
+        .config
+        .load()
+        .web_ui
+        .as_ref()
+        .and_then(|ui| ui.auth.as_ref())
+        .is_some_and(|auth| auth.enabled);
+    if !enabled {
+        return next.run(request).await;
+    }
+    let Ok(AuthBearer(token)) = AuthBearer::from_headers(request.headers()) else {
+        return rejection_for(AuthError::InvalidToken);
+    };
+    let claims = match authenticate(&app_state, &token).await {
+        Ok(claims) => claims,
+        Err(err) => return rejection_for(err),
+    };
+    if let Err(err) = settings_owner(&app_state, Some(&claims)) {
+        return rejection_for(err);
+    }
+    request.extensions_mut().insert(VerifiedClaims(claims));
+    next.run(request).await
 }
 
 pub async fn validator_admin(

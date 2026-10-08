@@ -69,6 +69,7 @@ mod ui_playlist_item;
 mod user_command;
 mod user_id;
 mod user_lifecycle;
+mod user_settings;
 mod uuidtype;
 pub mod view_type;
 mod watch_health;
@@ -92,3 +93,4 @@ pub use self::{
 };
 pub use ids::*;
 pub use prepare::*;
+pub use user_settings::*;

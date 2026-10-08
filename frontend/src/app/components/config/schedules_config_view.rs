@@ -25,11 +25,33 @@ use shared::model::{ScheduleConfigDto, ScheduleTaskType, SchedulesConfigDto};
 use std::{rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
+crate::app::components::define_table_columns! {
+    enum ScheduleColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+        },
+        Schedule => ("schedule", "LABEL.SCHEDULE"),
+        Type => ("type", "LABEL.TYPE"),
+        Targets => ("targets", "LABEL.TARGETS"),
+    }
+}
+
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
 const LABEL_TYPE: &str = "LABEL.TYPE";
 const LABEL_ALL_TARGETS: &str = "LABEL.ALL_TARGETS";
 const ALL_TARGETS_SENTINEL: &str = "__all_targets__";
+
+fn schedule_columns(deletable: bool) -> Vec<crate::app::components::TableColumn> {
+    let mut columns = ScheduleColumn::columns();
+    for (kind, column) in ScheduleColumn::ALL.iter().zip(&mut columns) {
+        if *kind == ScheduleColumn::Actions {
+            column.available = deletable;
+        }
+    }
+    columns
+}
 
 generate_form_reducer!(
     state: SchedulesConfigFormState { form: SchedulesConfigDto },
@@ -42,6 +64,10 @@ generate_form_reducer!(
 #[component]
 pub fn SchedulesConfigView() -> Html {
     let translate = use_translation();
+    let view_columns = use_memo((), |()| schedule_columns(false));
+    let edit_columns = use_memo((), |()| schedule_columns(true));
+    let content_columns =
+        use_memo((), |()| ScheduleColumn::columns().into_iter().filter(|column| column.content).collect::<Vec<_>>());
     let services_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
@@ -268,87 +294,71 @@ pub fn SchedulesConfigView() -> Html {
     };
 
     let render_view_mode = |deletable: bool| match form_state.data().schedules.as_ref() {
-        Some(schedules) => {
+        Some(_) => {
             let is_editing = editing_index.is_some();
-            let render_schedule_row = |(index, entry): (usize, &ScheduleConfigDto)| {
-                let handle_remove_clone = handle_remove.clone();
-                let handle_edit_clone = handle_edit.clone();
+            let form_state = form_state.clone();
+            let translator = translate.clone();
+            let handle_remove = handle_remove.clone();
+            let handle_edit = handle_edit.clone();
+            let render = Callback::from(move |visible: Rc<Vec<usize>>| {
                 html! {
-                    <tr>
-                        { html_if!(deletable, {
-                            <>
-                                <td>
-                                    {html_if!(!is_editing, {
-                                        <div class="tp__inline-toolbar">
-                                        <IconButton
-                                            class="tp__schedules-config-view__edit-btn"
-                                            name="EditSchedule"
-                                            icon="Edit"
-                                            onclick={Callback::from(move |_| handle_edit_clone.emit(index))}
-                                        />
-                                        <IconButton
-                                            class="tp__schedules-config-view__delete-btn"
-                                            name="RemoveSchedule"
-                                            icon="Delete"
-                                            onclick={Callback::from(move |_| handle_remove_clone.emit(index))}
-                                        />
-                                        </div>
-                                    })}
-                                </td>
-                            </>
-                        })}
-                        <td>{ entry.schedule.clone() }</td>
-                        <td>{ match entry.task_type {
-                            ScheduleTaskType::PlaylistUpdate => translate.t("LABEL.PLAYLIST_UPDATE"),
-                            ScheduleTaskType::LibraryScan => translate.t("LABEL.LIBRARY"),
-                            ScheduleTaskType::GeoIpUpdate => translate.t("LABEL.GEOIP"),
-                        }}</td>
-                        <td>
-                            <div class="tp__config-view__tags">
-                            {
-                            match entry.targets.as_ref() {
-                                Some(targets) if !targets.is_empty() => html! {
-                                    for t in targets.iter() {
-                                        <Chip label={t.clone()} />
+                    <table class="tp__config-view__table tp__table__table">
+                        <thead><tr>{for visible.iter().filter_map(|&index| ScheduleColumn::from_index(index)).map(|column| html! {
+                            <th key={column.id()} data-column-id={column.id()}>
+                                if column != ScheduleColumn::Actions { {translator.t(column.header_label())} }
+                            </th>
+                        })}</tr></thead>
+                        <tbody>{for form_state.data().schedules.iter().flatten().enumerate().map(|(index, entry)| html! {
+                            <tr key={index}>{for visible.iter().filter_map(|&index| ScheduleColumn::from_index(index)).map(|column| {
+                                let content = match column {
+                                    ScheduleColumn::Actions if !is_editing => {
+                                        let handle_remove = handle_remove.clone();
+                                        let handle_edit = handle_edit.clone();
+                                        html! {<div class="tp__inline-toolbar">
+                                            <IconButton class="tp__schedules-config-view__edit-btn" name="EditSchedule" icon="Edit"
+                                                onclick={Callback::from(move |_| handle_edit.emit(index))}/>
+                                            <IconButton class="tp__schedules-config-view__delete-btn" name="RemoveSchedule" icon="Delete"
+                                                onclick={Callback::from(move |_| handle_remove.emit(index))}/>
+                                        </div>}
                                     }
-                                },
-                                _ => html! {
-                                    <Chip label={translate.t(LABEL_ALL_TARGETS)} />
-                                },
-                            }
-                            }
-                         </div>
-                        </td>
-                    </tr>
+                                    ScheduleColumn::Schedule => html! {&entry.schedule},
+                                    ScheduleColumn::Type => html! {translator.t(match entry.task_type {
+                                        ScheduleTaskType::PlaylistUpdate => "LABEL.PLAYLIST_UPDATE",
+                                        ScheduleTaskType::LibraryScan => "LABEL.LIBRARY",
+                                        ScheduleTaskType::GeoIpUpdate => "LABEL.GEOIP",
+                                    })},
+                                    ScheduleColumn::Targets => html! {<div class="tp__config-view__tags">
+                                        {match entry.targets.as_ref() {
+                                            Some(targets) if !targets.is_empty() => html! {
+                                                for t in targets.iter() { <Chip label={t.clone()}/> }
+                                            },
+                                            _ => html! {<Chip label={translator.t(LABEL_ALL_TARGETS)}/>},
+                                        }}
+                                    </div>},
+                                    _ => html! {},
+                                };
+                                html! {<td key={column.id()} data-column-id={column.id()}>{content}</td>}
+                            })}</tr>
+                        })}</tbody>
+                    </table>
                 }
-            };
+            });
             html! {
                 <Card class="tp__config-view__card">
-                 <div class="tp__schedules-config-view__schedule">
-                    <table class="tp__config-view__table tp__table__table ">
-                        <thead>
-                            <tr>
-                                {html_if!(deletable, {
-                                   <th></th>
-                                })}
-                                <th>{ translate.t(LABEL_SCHEDULE) }</th>
-                                <th>{ translate.t(LABEL_TYPE) }</th>
-                                <th>{ translate.t(LABEL_TARGETS) }</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            { for schedules.iter().enumerate().map(render_schedule_row) }
-                        </tbody>
-                    </table>
-                </div>
-              </Card>
+                    <div class="tp__schedules-config-view__schedule">
+                        <crate::app::components::LayoutTable table_id="config.schedules"
+                            columns={if deletable { edit_columns.clone() } else { view_columns.clone() }} {render}/>
+                    </div>
+                </Card>
             }
         }
         None => html! {
+            <crate::app::components::TableShell table_id="config.schedules" columns={content_columns.clone()}>
             <NoContent
                 text={translate.t("MESSAGES.EMPTY_STATE.SCHEDULES_TITLE")}
                 hint={translate.t("MESSAGES.EMPTY_STATE.SCHEDULES_HINT")}
             />
+            </crate::app::components::TableShell>
         },
     };
 

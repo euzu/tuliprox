@@ -25,6 +25,19 @@ use shared::model::{
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 
+crate::app::components::define_table_columns! {
+    enum DirectoryColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+        },
+        Path => ("path", "LABEL.PATH"),
+        ContentType => ("content_type", "LABEL.CONTENT_TYPE"),
+        Enabled => ("enabled", "LABEL.ENABLED"),
+        Recursive => ("recursive", "LABEL.RECURSIVE"),
+    }
+}
+
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SCAN_DIRECTORIES: &str = "LABEL.SCAN_DIRECTORIES";
 const LABEL_ADD_DIRECTORY: &str = "LABEL.ADD_DIRECTORY";
@@ -39,9 +52,6 @@ const LABEL_JELLYFIN: &str = "LABEL.JELLYFIN";
 const LABEL_PLEX: &str = "LABEL.PLEX";
 const LABEL_FALLBACK_TO_FILENAME: &str = "LABEL.FALLBACK_TO_FILENAME";
 const LABEL_ADD_EXTENSION: &str = "LABEL.ADD_EXTENSION";
-const LABEL_RECURSIVE: &str = "LABEL.RECURSIVE";
-const LABEL_PATH: &str = "LABEL.PATH";
-const LABEL_CONTENT_TYPE: &str = "LABEL.CONTENT_TYPE";
 const LABEL_AUTO: &str = "LABEL.AUTO";
 const LABEL_MOVIE: &str = "LABEL.MOVIE";
 const LABEL_SERIES: &str = "LABEL.SERIES";
@@ -53,6 +63,19 @@ const LABEL_HEIGHT: &str = "LABEL.HEIGHT";
 const TYPE_AUTO: &str = "Auto";
 const TYPE_MOVIE: &str = "Movie";
 const TYPE_SERIES: &str = "Series";
+
+fn directory_columns(editable: bool) -> Vec<crate::app::components::TableColumn> {
+    let mut columns = DirectoryColumn::columns();
+    for (kind, column) in DirectoryColumn::ALL.iter().zip(&mut columns) {
+        if *kind == DirectoryColumn::Actions {
+            column.available = editable;
+        }
+        if editable {
+            column.can_hide = false;
+        }
+    }
+    columns
+}
 
 generate_form_reducer!(
     state: LibraryConfigFormState { form: LibraryConfigDto },
@@ -105,6 +128,8 @@ generate_form_reducer!(
 #[component]
 pub fn LibraryConfigView() -> Html {
     let translate = use_translation();
+    let view_columns = use_memo((), |()| directory_columns(false));
+    let edit_columns = use_memo((), |()| directory_columns(true));
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
@@ -319,62 +344,96 @@ pub fn LibraryConfigView() -> Html {
         }
     };
 
-    let render_scan_directories_view = |directories: &Vec<LibraryScanDirectoryDto>| {
-        html! {
-                <>
-                    <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
-                    <ul>
-                for dir in directories.iter() {
-                    <li class="tp__library-config-view__list"><span class="tp__library-config-view__list-item">{&dir.path}</span>
-                        <span>{format!("({}, {}, {}: {})",
-                            if dir.enabled { translate.t("LABEL.ENABLED") } else {translate.t("LABEL.DISABLED")},
-                            if dir.recursive { translate.t("LABEL.RECURSIVE") } else {translate.t("LABEL.NON_RECURSIVE")},
-                            translate.t(LABEL_CONTENT_TYPE),
-                            match dir.content_type {
-                                LibraryContentType::Auto => translate.t(LABEL_AUTO),
-                                LibraryContentType::Movie => translate.t(LABEL_MOVIE),
-                                LibraryContentType::Series => translate.t(LABEL_SERIES),
-                                LibraryContentType::Recording => "recording".to_string(),
-                            })}</span>
-                    </li>
-                }
-                    </ul>
-                 </>
-        }
+    let render_scan_directories_view = || {
+        let form_state = form_state.clone();
+        let translator = translate.clone();
+        let render = Callback::from(move |visible: Rc<Vec<usize>>| {
+            html! {
+                <table class="tp__config-view__table tp__table__table">
+                    <thead><tr>{for visible.iter().filter_map(|&index| DirectoryColumn::from_index(index)).map(|column| html! {
+                        <th key={column.id()} data-column-id={column.id()}>
+                            {translator.t(column.header_label())}
+                        </th>
+                    })}</tr></thead>
+                    <tbody>{for form_state.form.scan_directories.iter().enumerate().map(|(index, directory)| html! {
+                        <tr key={index}>{for visible.iter().filter_map(|&index| DirectoryColumn::from_index(index)).map(|column| html! {
+                            <td key={column.id()} data-column-id={column.id()}>
+                                {match column {
+                                    DirectoryColumn::Path => html! {&directory.path},
+                                    DirectoryColumn::ContentType => html! {translator.t(match directory.content_type {
+                                        LibraryContentType::Auto => LABEL_AUTO,
+                                        LibraryContentType::Movie => LABEL_MOVIE,
+                                        LibraryContentType::Series => LABEL_SERIES,
+                                        LibraryContentType::Recording => "LABEL.RECORDING",
+                                    })},
+                                    DirectoryColumn::Enabled => html! {translator.t(if directory.enabled { "LABEL.ENABLED" } else { "LABEL.DISABLED" })},
+                                    DirectoryColumn::Recursive => html! {translator.t(if directory.recursive { "LABEL.ENABLED" } else { "LABEL.DISABLED" })},
+                                    DirectoryColumn::Actions => html! {},
+                                }}
+                            </td>
+                        })}</tr>
+                    })}</tbody>
+                </table>
+            }
+        });
+        html! { <>
+            <h1>{translate.t(LABEL_SCAN_DIRECTORIES)}</h1>
+            <crate::app::components::LayoutTable table_id="config.library_directories"
+                columns={view_columns.clone()} {render}/>
+        </> }
     };
     let render_scan_directories_edit = || {
-        let rows = form_state
-            .form
-            .scan_directories
-            .iter()
-            .enumerate()
-            .map(|(idx, dir)| {
-                let on_remove = handle_remove_directory.clone();
-                let path_change = handle_path_change.clone();
-                let enabled_change = handle_enabled_change.clone();
-                let recursive_change = handle_recursive_change.clone();
-                let type_change = handle_type_change.clone();
-                let options = Rc::new(get_content_type_options.emit(dir.content_type));
-                html! {
-                    <tr>
-                        <td>
-                            <IconButton name="Delete" icon="Delete" onclick={Callback::from(move |_| on_remove.emit(idx))} />
-                        </td>
-                        <td><Input name="path" value={dir.path.clone()} on_change={Some(Callback::from(move |value| path_change.emit((idx, value))))} /></td>
-                        <td>
-                            <Select name="type" options={options} on_select={Callback::from(move |(_, selection)| type_change.emit((idx, selection)))} />
-                        </td>
-                        <td>
-                            <ToggleSwitch value={dir.enabled} readonly={false} on_change={Callback::from(move |value| enabled_change.emit((idx, value)))} />
-                        </td>
-                        <td>
-                            <ToggleSwitch value={dir.recursive} readonly={false} on_change={Callback::from(move |value| recursive_change.emit((idx, value)))} />
-                        </td>
-                    </tr>
-                }
-            })
-            .collect::<Html>();
-
+        let form_state = form_state.clone();
+        let translator = translate.clone();
+        let on_remove = handle_remove_directory.clone();
+        let path_change = handle_path_change.clone();
+        let enabled_change = handle_enabled_change.clone();
+        let recursive_change = handle_recursive_change.clone();
+        let type_change = handle_type_change.clone();
+        let get_options = get_content_type_options.clone();
+        let render = Callback::from(move |visible: Rc<Vec<usize>>| {
+            html! {
+                <table class="tp__config-view__table tp__table__table">
+                    <thead><tr>{for visible.iter().filter_map(|&index| DirectoryColumn::from_index(index)).map(|column| html! {
+                        <th key={column.id()} data-column-id={column.id()}
+                            style={if column == DirectoryColumn::Actions { Some("width: 50px;") } else { None }}>
+                            if column != DirectoryColumn::Actions { {translator.t(column.header_label())} }
+                        </th>
+                    })}</tr></thead>
+                    <tbody>{for form_state.form.scan_directories.iter().enumerate().map(|(idx, dir)| html! {
+                        <tr key={idx}>{for visible.iter().filter_map(|&index| DirectoryColumn::from_index(index)).map(|column| {
+                            let content = match column {
+                                DirectoryColumn::Actions => {
+                                    let on_remove = on_remove.clone();
+                                    html! {<IconButton name="Delete" icon="Delete" onclick={Callback::from(move |_| on_remove.emit(idx))}/>}
+                                }
+                                DirectoryColumn::Path => {
+                                    let path_change = path_change.clone();
+                                    html! {<Input name="path" value={dir.path.clone()}
+                                        on_change={Some(Callback::from(move |value| path_change.emit((idx, value))))}/>}
+                                }
+                                DirectoryColumn::ContentType => {
+                                    let type_change = type_change.clone();
+                                    html! {<Select name="type" options={Rc::new(get_options.emit(dir.content_type))}
+                                        on_select={Callback::from(move |(_, selection)| type_change.emit((idx, selection)))}/>}
+                                }
+                                DirectoryColumn::Enabled => {
+                                    let enabled_change = enabled_change.clone();
+                                    html! {<ToggleSwitch value={dir.enabled} readonly={false}
+                                        on_change={Callback::from(move |value| enabled_change.emit((idx, value)))}/>}
+                                }
+                                DirectoryColumn::Recursive => {
+                                    let recursive_change = recursive_change.clone();
+                                    html! {<ToggleSwitch value={dir.recursive} readonly={false}
+                                        on_change={Callback::from(move |value| recursive_change.emit((idx, value)))}/>}
+                                }
+                            };
+                            html! {<td key={column.id()} data-column-id={column.id()}>{content}</td>}
+                        })}</tr>
+                    })}</tbody>
+                </table>
+            }
+        });
         html! {
            <Card class="tp__config-view__card">
                 <div class="tp__library-config-view__card-header tp__config-view-page__header">
@@ -383,20 +442,8 @@ pub fn LibraryConfigView() -> Html {
                         <TextButton class="primary" name="add_directory" icon="Add" title={translate.t(LABEL_ADD_DIRECTORY)} onclick={handle_add_directory.clone()} />
                     </div>
                 </div>
-                <table class="tp__config-view__table tp__table__table">
-                   <thead>
-                       <tr>
-                            <th style="width: 50px;"></th>
-                            <th>{translate.t(LABEL_PATH)}</th>
-                            <th>{translate.t(LABEL_CONTENT_TYPE)}</th>
-                            <th>{translate.t(LABEL_ENABLED)}</th>
-                            <th>{translate.t(LABEL_RECURSIVE)}</th>
-                       </tr>
-                   </thead>
-                   <tbody>
-                       { rows }
-                   </tbody>
-               </table>
+                <crate::app::components::LayoutTable table_id="config.library_directories"
+                    columns={edit_columns.clone()} {render}/>
            </Card>
         }
     };
@@ -411,7 +458,7 @@ pub fn LibraryConfigView() -> Html {
             <>
             <div class="tp__library-config-view__header">
                 { config_field_bool!(form_state.form, translate.t(LABEL_ENABLED), enabled) }
-                { render_scan_directories_view(&form_state.form.scan_directories) }
+                { render_scan_directories_view() }
             </div>
             <div class="tp__library-config-view__body tp__config-view-page__body">
                 { render_extensions(&form_state.form.supported_extensions) }

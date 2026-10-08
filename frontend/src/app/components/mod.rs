@@ -12,7 +12,6 @@ mod collapse_panel;
 mod config;
 mod confirm_dialog;
 mod content_dialog;
-mod csv_table;
 mod custom_dialog;
 mod dashboard;
 mod date_input;
@@ -81,14 +80,14 @@ mod title_card;
 
 pub(crate) use self::{
     accordion::*, accordion_panel::*, authentication::*, breadcrumbs::*, card::*, cell_value::*, chip::*,
-    cluster_flags_input::*, collapse_panel::*, country::*, csv_table::*, custom_dialog::*, dashboard::*, date_input::*,
+    cluster_flags_input::*, collapse_panel::*, country::*, custom_dialog::*, dashboard::*, date_input::*,
     date_input_action::*, datetime_input::*, drop_down_icon_button::*, error_boundary::*, field_explanation::*,
     field_id::*, field_wrapper::*, filter::*, health_banner::*, hide_content::*, home::*, horizontal_shrink_panel::*,
     icon_button::*, key_value_editor::*, language_picker::*, loading_indicator::*, loading_screen::*, login::*,
     no_access::*, no_content::*, no_submit_form::*, panel::*, particle_flow_background::*, playlist::*,
     radio_button_group::*, range_slider::*, rbac::*, reveal_content::*, role_based_content::*, search::*, select::*,
-    select_helpers::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*, tabset::*, tag_list::*,
+    select_helpers::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, tabset::*, tag_list::*,
     task_status_badge::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*,
     userlist::*, websocket_status::*,
 };
-pub use self::{confirm_dialog::*, content_dialog::*};
+pub use self::{confirm_dialog::*, content_dialog::*, table::*};

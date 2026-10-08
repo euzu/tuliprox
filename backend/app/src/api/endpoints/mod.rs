@@ -25,3 +25,5 @@ pub(in crate::api) mod websocket_api;
 pub(in crate::api) mod xmltv_api;
 pub(in crate::api) mod xtream_api;
 pub(in crate::api) mod xtream_url;
+
+mod user_settings_api;

@@ -22,3 +22,6 @@ pub use self::{
     streams_service::*, target_bouquet_service::*, toastr_service::*, user_api_service::*, user_service::*,
     websocket_service::*,
 };
+
+mod user_settings_service;
+pub use user_settings_service::*;

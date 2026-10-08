@@ -160,6 +160,12 @@
 
 ## 🌟 New Features
 
+- **Personal Web UI table layouts.** Show or hide optional columns, reorder them with mouse, touch, or keyboard,
+  and save layouts per account. Restore defaults, cancel drafts, and resolve conflicting saves without losing edits.
+  Settings are stored under `<config_path>/user_settings/`; installations without Web UI authentication share one layout.
+  The `/api/v1/me/settings` endpoints expose the caller's preferences with ETag-based updates.
+  Accounts CSV layouts are scoped to their header schema. See [Personal table layouts](docs/src/features.md#personal-table-layouts).
+
 - **Target-owned discovery with TMDB Trending.** `target.curation` combines optional Trakt and TMDB sources under one
   `full`/`curated` policy. TMDB supports movie/TV day/week feeds with a unique-reference `limit` (default 100, range
   1..=500) and guarded internal pagination. It uses its own Bearer token, exact same-kind TMDB-ID matching, and optional
@@ -919,6 +925,11 @@
 
 ## ⚙️ Optimizations
 
+- **Shared table column metadata.** Column enums define stable IDs, labels, and display/sort behavior across Web UI
+  tables. Metadata is memoized, header observers persist across renders, and layout drafts and validation avoid redundant
+  clones and sets. Settings filenames build hash prefixes only when needed while preserving existing encoded names;
+  subject validation and Bearer parsing reuse the common identity and authentication types.
+
 - **The effective admission strategy list is carried as `Arc<[AdmissionStrategy]>`**: `GraceResolutionContext` is
   stored on `StreamInfo` and travels with every clone of it, so a `Vec<AdmissionStrategy>` field meant reallocating the
   list on each clone — and `get_effective_admission_strategies` handed back a fresh `Vec` that the context builder then
@@ -1063,6 +1074,10 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **Table pagination and settings errors.** Pagination clamps navigation and page ranges to valid bounds and rejects
+  unsupported page sizes. Internal settings task failures return HTTP 500; oversized request bodies return HTTP 413,
+  while other body read failures return HTTP 400. Account and token checks remain active after waiting for settings locks.
 
 - **Proxied live HLS keeps its provider account when the client IP changes.** A player that refreshes its playlist
   from alternating client IPs (dual-stack IPv4/IPv6, WLAN/mobile switching behind a reverse proxy) created a new
