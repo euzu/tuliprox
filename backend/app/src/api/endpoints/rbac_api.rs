@@ -513,6 +513,32 @@ async fn delete_user(
         return (StatusCode::CONFLICT, Json(json!({"error": "Cannot delete the last admin user"}))).into_response();
     }
 
+    let canonical_username = users[user_index].username.clone();
+    // A former administrator can retain settings in both namespaces after a group change.
+    let settings_owners = [shared::model::UserId::builtin_admin(), shared::model::UserId::web(&canonical_username)]
+        .iter()
+        .map(|subject| {
+            tuliprox_repository::user_settings_repository::SettingsOwner::authenticated(subject, &canonical_username)
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let settings_owners = match settings_owners {
+        Ok(owners) => owners,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":err.to_string()}))).into_response(),
+    };
+    let mut settings_paths = Vec::new();
+    for owner in settings_owners {
+        match tuliprox_repository::user_settings_repository::settings_path(FsPath::new(&config_path), &owner) {
+            Ok(path) => settings_paths.push((path, owner)),
+            Err(err) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":err.to_string()}))).into_response()
+            }
+        }
+    }
+    settings_paths.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut settings_guards = Vec::new();
+    for (path, _) in &settings_paths {
+        settings_guards.push(app_state.app_config.file_locks.write_lock(path).await);
+    }
     users.remove(user_index);
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
@@ -521,6 +547,11 @@ async fn delete_user(
         return response.into_response();
     }
 
+    for (path, owner) in &settings_paths {
+        if let Err(err) = tuliprox_repository::user_settings_repository::remove_settings_unlocked(path, owner).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
+        }
+    }
     info!("RBAC API: deleted web UI user '{username}'");
     StatusCode::OK.into_response()
 }
@@ -709,6 +740,84 @@ mod tests {
     use super::{reject_empty_groups, resolve_auth_paths, validate_permission_dependencies};
     use crate::{model::WebAuthConfig, utils};
     use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn deleting_former_admin_removes_corrupt_settings_without_locking_other_admins(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{
+            api::model::create_test_app_state,
+            auth::{create_jwt_web_user, AuthBearer},
+            model::Config,
+        };
+        use axum::{
+            extract::{Path, State},
+            response::IntoResponse,
+        };
+        use shared::model::{PermissionSet, UserId, WebAuthConfigDto, WebUiConfigDto};
+        use std::sync::Arc;
+        use tuliprox_repository::user_settings_repository::{settings_path, SettingsOwner};
+
+        let dir = tempfile::tempdir()?;
+        let userfile = dir.path().join("users.txt");
+        let groupfile = dir.path().join("groups.txt");
+        tokio::fs::write(&userfile, "Admin:hash:admin\nAlice:hash:viewer").await?;
+        tokio::fs::write(&groupfile, "viewer:config.read").await?;
+        let web_ui = WebUiConfigDto {
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "settings-delete-test".into(),
+                secret: "settings-delete-secret".into(),
+                userfile: Some(userfile.to_string_lossy().into_owned()),
+                groupfile: Some(groupfile.to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut config = Config { web_ui: Some((&web_ui).into()), ..Default::default() };
+        let auth = config.web_ui.as_mut().and_then(|ui| ui.auth.as_mut()).ok_or("missing auth")?;
+        auth.prepare(dir.path().to_str().ok_or("invalid directory")?)?;
+        let token = create_jwt_web_user(
+            auth,
+            "Admin",
+            PermissionSet::new(),
+            WebAuthConfig::pwd_version_from_hash("hash"),
+            UserId::web("Admin"),
+        )?;
+        let state = create_test_app_state(config);
+        let mut paths = (**state.app_config.paths.load()).clone();
+        paths.config_path = dir.path().to_string_lossy().into_owned();
+        state.app_config.paths.store(Arc::new(paths));
+
+        let mut alice_paths = Vec::new();
+        for subject in [UserId::web("Alice"), UserId::builtin_admin()] {
+            let owner = SettingsOwner::authenticated(&subject, "Alice")?;
+            let path = settings_path(dir.path(), &owner)?;
+            tokio::fs::create_dir_all(path.parent().ok_or("missing parent")?).await?;
+            tokio::fs::write(&path, "version: [").await?;
+            alice_paths.push(path);
+        }
+        let admin_path = settings_path(dir.path(), &SettingsOwner::authenticated(&UserId::builtin_admin(), "Admin")?)?;
+        tokio::fs::write(&admin_path, "admin-settings").await?;
+        let _admin_guard = state.app_config.file_locks.write_lock(&admin_path).await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::delete_user(State(state.clone()), AuthBearer(token), Path("aLiCe".into())),
+        )
+        .await?;
+        assert_eq!(response.into_response().status(), StatusCode::OK);
+        assert!(alice_paths.iter().all(|path| !path.exists()));
+        assert_eq!(tokio::fs::read_to_string(&admin_path).await?, "admin-settings");
+        assert_eq!(tokio::fs::read_to_string(&userfile).await?, "Admin:hash");
+        assert!(state
+            .app_config
+            .config
+            .load()
+            .web_ui
+            .as_ref()
+            .and_then(|ui| ui.auth.as_ref())
+            .is_some_and(|auth| auth.get_user_password("Alice").is_none()));
+        Ok(())
+    }
 
     #[test]
     fn rejects_write_permission_without_matching_read_permission() {

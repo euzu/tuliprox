@@ -44,7 +44,18 @@ enum FormMode {
     Edit(String),
 }
 
-const USER_HEADERS: [&str; 3] = ["LABEL.EMPTY", "LABEL.USERNAME", "LABEL.GROUPS"];
+crate::app::components::define_table_columns! {
+    enum WebUiUserColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.EMPTY"),
+        },
+        Username => ("username", "LABEL.USERNAME") { can_hide: false },
+        Groups => ("groups", "LABEL.GROUPS"),
+    }
+}
+
 const USER_DISPLAY_PANEL: &str = "display";
 const USER_EDIT_PANEL: &str = "edit";
 
@@ -79,6 +90,7 @@ pub struct UserManagementProps {
 pub fn UserManagement(props: &UserManagementProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
+    let columns = use_memo((), |()| WebUiUserColumn::columns());
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let can_read_users = services.auth.has_permission(Permission::UserRead);
     let can_write_users = services.auth.has_permission(Permission::UserWrite);
@@ -339,8 +351,8 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
         let translate = translate.clone();
         Callback::<usize, Html>::from(move |col| {
             html! {
-                if col < USER_HEADERS.len() {
-                    { translate.t(USER_HEADERS[col]) }
+                if let Some(column) = WebUiUserColumn::from_index(col) {
+                    { translate.t(column.header_label()) }
                 }
             }
         })
@@ -349,8 +361,8 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
     let render_data_cell = {
         let popup_onclick = handle_popup_onclick.clone();
         Callback::<(usize, usize, Rc<WebUiUserDto>), Html>::from(
-            move |(_row, col, dto): (usize, usize, Rc<WebUiUserDto>)| match col {
-                0 => {
+            move |(_row, col, dto): (usize, usize, Rc<WebUiUserDto>)| match WebUiUserColumn::from_index(col) {
+                Some(WebUiUserColumn::Actions) => {
                     if !can_write_users {
                         return html! {};
                     }
@@ -362,29 +374,31 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                         </button>
                     }
                 }
-                1 => html! { &dto.username },
-                2 => html! { dto.groups.join(", ") },
+                Some(WebUiUserColumn::Username) => html! { &dto.username },
+                Some(WebUiUserColumn::Groups) => html! { dto.groups.join(", ") },
                 _ => html! {},
             },
         )
     };
 
-    let is_sortable = Callback::<usize, bool>::from(|_col: usize| false);
     let on_sort = Callback::<Option<(usize, shared::model::SortOrder)>, ()>::from(|_| {});
 
     let table_definition = {
+        let columns = columns.clone();
         let render_header = render_header_cell.clone();
         let render_data = render_data_cell.clone();
-        let is_sortable = is_sortable.clone();
+
         let on_sort = on_sort.clone();
-        let num_cols = USER_HEADERS.len();
+
         use_memo((*users).clone(), move |user_list| {
             let items =
                 user_list.as_ref().map(|list| Rc::new(list.iter().map(|u| Rc::new(u.clone())).collect::<Vec<_>>()));
             TableDefinition::<WebUiUserDto> {
+                table_id: "rbac.users".into(),
+                columns: columns.clone(),
+                row_key: Callback::from(|(_, item): (usize, Rc<WebUiUserDto>)| item.username.clone().into()),
                 items,
-                num_cols,
-                is_sortable,
+
                 on_sort,
                 render_header_cell: render_header,
                 render_data_cell: render_data,

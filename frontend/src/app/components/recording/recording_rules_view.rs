@@ -121,13 +121,19 @@ pub fn reconciliation_error_to_i18n_key(primary: &str, secondary: &str) -> Strin
     format!("MESSAGES.RECORDING.PARTIAL_OPERATION/{primary}/{secondary}")
 }
 
-const RULE_HEADERS: &[&str] = &[
-    "LABEL.RECORDING_RULE_COLUMN_TARGET",
-    "LABEL.RECORDING_RULE_COLUMN_VISIBILITY",
-    "LABEL.RECORDING_RULE_COLUMN_SCHEDULE",
-    "LABEL.RECORDING_RULE_COLUMN_ENABLED",
-    "LABEL.RECORDING_COLUMN_ACTIONS",
-];
+crate::app::components::define_table_columns! {
+    enum RuleColumn {
+        Target => ("recording_rule_column_target", "LABEL.RECORDING_RULE_COLUMN_TARGET") { sortable: true },
+        Visibility => ("recording_rule_column_visibility", "LABEL.RECORDING_RULE_COLUMN_VISIBILITY") { sortable: true },
+        Schedule => ("recording_rule_column_schedule", "LABEL.RECORDING_RULE_COLUMN_SCHEDULE") { sortable: true },
+        Enabled => ("recording_rule_column_enabled", "LABEL.RECORDING_RULE_COLUMN_ENABLED"),
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.RECORDING_COLUMN_ACTIONS"),
+        },
+    }
+}
 
 pub fn rule_summary(rule: &RecordingRuleResponse) -> String {
     let s = &rule.rule.source;
@@ -180,6 +186,7 @@ pub struct RecordingRulesViewProps {
 #[function_component(RecordingRulesView)]
 pub fn recording_rules_view(props: &RecordingRulesViewProps) -> Html {
     let translate = use_translation();
+    let columns = use_memo((), |()| RuleColumn::columns());
     let services = use_service_context();
     let config_ctx = use_context::<ConfigContext>();
     let recording_enabled =
@@ -424,63 +431,70 @@ pub fn recording_rules_view(props: &RecordingRulesViewProps) -> Html {
         html! { <></> }
     };
 
-    let headers: Vec<String> = RULE_HEADERS.iter().map(|h| translate.t(h)).collect();
-    let render_header = Callback::from(move |col: usize| {
-        let headers = headers.clone();
-        let col_text = headers.get(col).cloned().unwrap_or_default();
-        html! { <>{ col_text }</> }
-    });
+    let render_header = {
+        let translate = translate.clone();
+        Callback::from(move |col: usize| {
+            let col_text =
+                RuleColumn::from_index(col).map_or_else(String::new, |column| translate.t(column.header_label()));
+            html! { <>{ col_text }</> }
+        })
+    };
 
     // The enabled column is a switch, not text: sorting by it would
     // reorder rows under the pointer mid-click.
-    let is_sortable = Callback::from(|col: usize| matches!(col, 0..=2));
+
     let on_sort = Callback::from(|_: Option<(usize, SortOrder)>| {});
 
     let rules_items: Rc<Vec<Rc<RecordingRuleResponse>>> = Rc::new((*rules).iter().cloned().map(Rc::new).collect());
     let is_empty = rules_items.is_empty();
     let render_data = {
         let translate = translate.clone();
-        Callback::from(move |(_row, col, rule): (usize, usize, Rc<RecordingRuleResponse>)| match col {
-            0 => html! { <>{ rule_summary(&rule) }</> },
-            1 => html! { <>{ rule_visibility_label(&translate, &rule) }</> },
-            2 => html! { <>{ rule_schedule_label(&translate, &rule) }</> },
-            3 => {
-                let enabled = rule.rule.enabled;
-                let on_change = toggle_enabled_click(rule.rule.id.clone(), enabled);
-                let label = translate.t(if enabled {
-                    "LABEL.RECORDING_RULE_ACTION_DISABLE"
-                } else {
-                    "LABEL.RECORDING_RULE_ACTION_ENABLE"
-                });
-                html! {
-                    <span class="tp__recording-rule-enabled" title={label.clone()} aria-label={label}>
-                        <ToggleSwitch value={enabled} compact={true} on_change={on_change} />
-                    </span>
+        Callback::from(
+            move |(_row, col, rule): (usize, usize, Rc<RecordingRuleResponse>)| match RuleColumn::from_index(col) {
+                Some(RuleColumn::Target) => html! { <>{ rule_summary(&rule) }</> },
+                Some(RuleColumn::Visibility) => html! { <>{ rule_visibility_label(&translate, &rule) }</> },
+                Some(RuleColumn::Schedule) => html! { <>{ rule_schedule_label(&translate, &rule) }</> },
+                Some(RuleColumn::Enabled) => {
+                    let enabled = rule.rule.enabled;
+                    let on_change = toggle_enabled_click(rule.rule.id.clone(), enabled);
+                    let label = translate.t(if enabled {
+                        "LABEL.RECORDING_RULE_ACTION_DISABLE"
+                    } else {
+                        "LABEL.RECORDING_RULE_ACTION_ENABLE"
+                    });
+                    html! {
+                        <span class="tp__recording-rule-enabled" title={label.clone()} aria-label={label}>
+                            <ToggleSwitch value={enabled} compact={true} on_change={on_change} />
+                        </span>
+                    }
                 }
-            }
-            _ => {
-                let id = rule.rule.id.clone();
-                let on_edit = edit_id_click(id.clone());
-                let on_delete = delete_id_click(id.clone());
-                let edit_label = translate.t("LABEL.RECORDING_ACTION_EDIT");
-                let delete_label = translate.t("LABEL.RECORDING_ACTION_DELETE");
-                let row = rule_summary(&rule);
-                html! {
-                    <div class="tp__recording-rule-row-actions">
-                        <TextButton name="rule_edit" icon="" title={edit_label.clone()}
-                            aria_label={format!("{edit_label}: {row}")} onclick={on_edit} />
-                        <TextButton name="rule_delete" icon="" class="tp__button--danger" title={delete_label.clone()}
-                            aria_label={format!("{delete_label}: {row}")} onclick={on_delete} />
-                    </div>
+                Some(RuleColumn::Actions) => {
+                    let id = rule.rule.id.clone();
+                    let on_edit = edit_id_click(id.clone());
+                    let on_delete = delete_id_click(id.clone());
+                    let edit_label = translate.t("LABEL.RECORDING_ACTION_EDIT");
+                    let delete_label = translate.t("LABEL.RECORDING_ACTION_DELETE");
+                    let row = rule_summary(&rule);
+                    html! {
+                        <div class="tp__recording-rule-row-actions">
+                            <TextButton name="rule_edit" icon="" title={edit_label.clone()}
+                                aria_label={format!("{edit_label}: {row}")} onclick={on_edit} />
+                            <TextButton name="rule_delete" icon="" class="tp__button--danger" title={delete_label.clone()}
+                                aria_label={format!("{delete_label}: {row}")} onclick={on_delete} />
+                        </div>
+                    }
                 }
-            }
-        })
+                None => html! {},
+            },
+        )
     };
 
     let table_def = Rc::new(TableDefinition::<RecordingRuleResponse> {
+        table_id: "recording.rules".into(),
+        columns: columns.clone(),
+        row_key: Callback::from(|(_, item): (usize, Rc<RecordingRuleResponse>)| item.rule.id.clone().into()),
         items: Some(rules_items),
-        num_cols: RULE_HEADERS.len(),
-        is_sortable,
+
         render_header_cell: render_header,
         render_data_cell: render_data,
         on_sort,

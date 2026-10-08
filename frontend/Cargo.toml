@@ -8,6 +8,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+blake3.workspace = true
 shared = { version = "3.3.142", path = "../shared" }
 chrono.workspace = true
 yew = "0.23.0"
@@ -24,7 +25,8 @@ log.workspace = true
 wasm-logger = "0.2.0"
 gloo-storage = "0.3.0"
 gloo-utils = "0.2.0"
-#gloo-render = "0.2.0"
+gloo-events = "0.2.0"
+gloo-render = "0.2.0"
 gloo-timers = { version = "0", features = ["futures"] }
 #implicit-clone = "0.6.0"
 futures-signals = "0.3.34"
@@ -42,7 +44,7 @@ strum_macros.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.104"
-features = ["AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "VisualViewport", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
+features = ["AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "VisualViewport", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "PointerEvent", "HtmlElement", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "ResizeObserver", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
 
 [dev-dependencies]
 web-sys = { version = "0.3.104", features = ["EventInit", "MessageEventInit"] }

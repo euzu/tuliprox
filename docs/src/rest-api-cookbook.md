@@ -474,6 +474,141 @@ form's scheduled interval, never as a hard block.
 | `GET` | `/api/v1/config/apiproxy` | Read `api-proxy.yml` |
 | `PUT` | `/api/v1/config/apiproxy` | Save `api-proxy.yml` |
 
+### Personal settings (`me`)
+
+`me` identifies the caller from the authenticated session. These routes do not accept a username or user ID
+to select another account. Web UI users and API proxy users with Web UI access can manage their own settings;
+administrator privileges are not required. If Web UI authentication is disabled, all callers use the same local
+settings and the response reports `shared: true`.
+
+The examples request JSON with `Accept: application/json`. Responses also support `Accept: application/cbor`,
+and `PUT` accepts CBOR with `Content-Type: application/cbor`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/me/settings` | Read the caller's preferences and per-table version tags |
+| `GET` | `/api/v1/me/settings/tables/{table}` | Read one table layout and its `ETag` header |
+| `PUT` | `/api/v1/me/settings/tables/{table}` | Replace one table layout; requires `If-Match` |
+| `DELETE` | `/api/v1/me/settings/tables/{table}` | Reset one table's layout overrides; requires `If-Match` |
+
+#### Read all preferences
+
+```bash
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+
+curl -sS "$BASE_URL/api/v1/me/settings" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" | jq .
+```
+
+An account without stored preferences returns:
+
+```json
+{
+  "preferences": {
+    "web_ui": {
+      "tables": {}
+    }
+  },
+  "section_etags": {},
+  "shared": false
+}
+```
+
+Stored layouts appear in `preferences.web_ui.tables`, keyed by table ID. `section_etags` contains the corresponding
+quoted version tags, also keyed by table ID. This endpoint does not return a top-level `ETag` header.
+To obtain a version tag for a table without stored overrides, read that table's endpoint.
+
+#### Read, save, and reset a table layout
+
+`{table}` is the stable table ID used by the Web UI, for example `users` for the API proxy user table.
+Percent-encode the ID when putting it in the URL. Column IDs are stable identifiers such as `username` and `enabled`,
+rather than translated display labels.
+
+A table layout has two fields:
+
+```json
+{
+  "column_order": ["username", "enabled"],
+  "column_visibility": {
+    "enabled": false
+  }
+}
+```
+
+`column_order` specifies the preferred order. `column_visibility` maps column IDs to visibility flags.
+Columns without overrides use the Web UI defaults, and required columns remain visible.
+`PUT` replaces both fields: omitted fields default to an empty list or map. Unknown payload fields and duplicate
+IDs in `column_order` are rejected.
+
+The following sequence reads the layout, saves an override, and then resets it. It uses the token obtained above.
+When authentication is disabled, omit the `Authorization` headers.
+
+```bash
+TABLE_URL="$BASE_URL/api/v1/me/settings/tables/users"
+HEADERS_FILE=$(mktemp)
+trap 'rm -f "$HEADERS_FILE"' EXIT
+
+# Read the layout and capture its quoted ETag, including for an unsaved table.
+curl --fail-with-body -sS -D "$HEADERS_FILE" "$TABLE_URL" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" || exit 1
+
+ETAG=$(awk 'tolower($1) == "etag:" {gsub("\r", "", $2); print $2}' "$HEADERS_FILE")
+
+# Save only if this table still matches the version just read.
+curl --fail-with-body -sS -D "$HEADERS_FILE" -X PUT "$TABLE_URL" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -H "If-Match: $ETAG" \
+    --data-raw '{"column_order":["username","enabled"],"column_visibility":{"enabled":false}}' || exit 1
+
+# Use the version returned by the successful save for the next change.
+ETAG=$(awk 'tolower($1) == "etag:" {gsub("\r", "", $2); print $2}' "$HEADERS_FILE")
+
+curl --fail-with-body -sS -i -X DELETE "$TABLE_URL" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" \
+    -H "If-Match: $ETAG" || exit 1
+```
+
+All three table operations return `200 OK`, the resulting layout, and its `ETag` header.
+An unsaved or reset layout is `{"column_order":[],"column_visibility":{}}`; the Web UI applies its defaults.
+`DELETE` resets only the selected table's layout overrides. It does not delete the account or other tables' settings.
+Successful settings responses use `Cache-Control: private, no-store`.
+
+#### Concurrent changes and errors
+
+Send exactly one `If-Match` header with the quoted tag returned by the server. Tags are scoped to the account and table;
+changes to another table do not invalidate this table's tag. Weak tags, `*`, unquoted tags, and lists of tags are rejected.
+
+If another client changes the same table before your save or reset, the server returns `412 Precondition Failed`
+without applying your change. Read the table again, reconcile your draft with the current layout, and use the fresh
+tag only after deciding to apply the change again.
+
+Settings validation and storage errors return a JSON object such as `{"error":"settings_precondition_failed"}`
+when requesting JSON. Authentication errors return a plain-text error message.
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `400` | `settings_precondition_invalid` | `If-Match` is malformed or supplied more than once |
+| `400` | `settings_payload_invalid` | Invalid layout payload, unknown fields, or duplicate ordered column IDs |
+| `400` | `settings_id_invalid` | Invalid table or column ID |
+| `400` | `settings_limits_exceeded` | The proposed layout or resulting settings exceeds a storage limit |
+| `401` / `403` | Authentication error | Invalid session or caller without Web UI access |
+| `409` | `settings_invalid`, `settings_version_unsupported`, `settings_owner_mismatch`, `settings_file_unsafe`, or `settings_limits_exceeded` | Stored settings cannot be safely read or changed |
+| `412` | `settings_precondition_failed` | The tag no longer matches the table |
+| `413` | `settings_request_too_large` | The `PUT` request body exceeds 64 KiB |
+| `428` | `settings_precondition_required` | `PUT` or `DELETE` is missing `If-Match` |
+| `500` | `settings_io_error` | Settings storage I/O failed |
+
+IDs must be nonempty, contain no control characters, and fit in 128 UTF-8 bytes. Each layout supports at most
+256 distinct column IDs across its order and visibility fields. Each account supports at most 64 stored tables
+and a 256 KiB settings file. Invalid or unsupported stored files are not overwritten.
+For storage locations and backup guidance, see [Personal table layouts](features.md#personal-table-layouts).
+
 ### API proxy users
 
 | Method | Path | Purpose |

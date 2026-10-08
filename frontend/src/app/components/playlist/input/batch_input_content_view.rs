@@ -6,6 +6,9 @@ use shared::model::ConfigInputDto;
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 
+const ACCOUNTS_TABLE_NAMESPACE: &str = "playlist.accounts_csv";
+const ACCOUNTS_SCHEMA_VERSION: &str = "accounts-v1";
+
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct BatchInputContentViewProps {
     pub input: Rc<ConfigInputDto>,
@@ -36,7 +39,8 @@ pub fn BatchInputContentView(props: &BatchInputContentViewProps) -> Html {
         <div class="tp__batch-input-content">
         {
             if let Some(csv) = (*batch_content).as_ref() {
-                html! { <CsvTable content={csv.clone()} separator={';'} first_row_is_header={true} /> }
+                html! { <CsvTable content={csv.clone()} separator={';'} first_row_is_header={true}
+                    table_namespace={ACCOUNTS_TABLE_NAMESPACE} schema_version={ACCOUNTS_SCHEMA_VERSION} /> }
             } else {
                 html! { <NoContent /> }
             }

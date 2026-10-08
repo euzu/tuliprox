@@ -25,10 +25,59 @@ use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::{prelude::*, use_mut_ref};
 
-const NUM_COLS: usize = 15;
-const SUMMARY_NUM_COLS: usize = 6;
-const QOS_SUMMARY_NUM_COLS: usize = 8;
-const QOS_DETAIL_NUM_COLS: usize = 8;
+crate::app::components::define_table_columns! {
+    enum HistoryColumn {
+        Time => ("stream_history_time", "LABEL.STREAM_HISTORY_TIME"),
+        Event => ("stream_history_event", "LABEL.STREAM_HISTORY_EVENT"),
+        Username => ("username", "LABEL.USERNAME"),
+        Group => ("group", "LABEL.GROUP"),
+        Title => ("title", "LABEL.TITLE"),
+        Provider => ("provider", "LABEL.PROVIDER"),
+        Duration => ("duration", "LABEL.DURATION"),
+        Bytes => ("stream_history_bytes", "LABEL.STREAM_HISTORY_BYTES"),
+        FirstByte => ("stream_history_first_byte", "LABEL.STREAM_HISTORY_FIRST_BYTE"),
+        UserAgent => ("user_agent", "LABEL.USER_AGENT"),
+        Type => ("type", "LABEL.TYPE"),
+        Container => ("container", "LABEL.CONTAINER"),
+        Reason => ("stream_history_reason", "LABEL.STREAM_HISTORY_REASON"),
+        Ip => ("stream_history_ip", "LABEL.STREAM_HISTORY_IP"),
+        Country => ("country", "LABEL.COUNTRY"),
+    }
+}
+crate::app::components::define_table_columns! {
+    enum ProviderSummaryColumn {
+        Provider => ("provider", "LABEL.PROVIDER"),
+        Sessions => ("stream_history_sessions", "LABEL.STREAM_HISTORY_SESSIONS"),
+        Bytes => ("stream_history_bytes", "LABEL.STREAM_HISTORY_BYTES"),
+        Duration => ("duration", "LABEL.DURATION"),
+        FirstByte => ("stream_history_first_byte", "LABEL.STREAM_HISTORY_FIRST_BYTE"),
+        Disconnects => ("stream_history_disconnects", "LABEL.STREAM_HISTORY_DISCONNECTS"),
+    }
+}
+crate::app::components::define_table_columns! {
+    enum QosSummaryColumn {
+        Input => ("input", "LABEL.INPUT"),
+        Provider => ("provider", "LABEL.PROVIDER"),
+        Target => ("target", "LABEL.TARGET"),
+        Type => ("type", "LABEL.TYPE"),
+        Quality => ("quality", "LABEL.QUALITY"),
+        Confidence => ("stream_history_confidence", "LABEL.STREAM_HISTORY_CONFIDENCE"),
+        FirstByte => ("stream_history_first_byte", "LABEL.STREAM_HISTORY_FIRST_BYTE"),
+        Duration => ("duration", "LABEL.DURATION"),
+    }
+}
+crate::app::components::define_table_columns! {
+    enum QosDetailColumn {
+        Window => ("stream_history_window", "LABEL.STREAM_HISTORY_WINDOW"),
+        Score => ("stream_history_score", "LABEL.STREAM_HISTORY_SCORE"),
+        Confidence => ("stream_history_confidence", "LABEL.STREAM_HISTORY_CONFIDENCE"),
+        Sessions => ("stream_history_sessions", "LABEL.STREAM_HISTORY_SESSIONS"),
+        ConnectFailed => ("stream_history_connect_failed", "LABEL.STREAM_HISTORY_CONNECT_FAILED"),
+        RuntimeAborts => ("stream_history_runtime_aborts", "LABEL.STREAM_HISTORY_RUNTIME_ABORTS"),
+        FirstByte => ("stream_history_first_byte", "LABEL.STREAM_HISTORY_FIRST_BYTE"),
+        Duration => ("duration", "LABEL.DURATION"),
+    }
+}
 
 const STREAM_HISTORY_TAB_HISTORY: &str = "stream-history";
 const STREAM_HISTORY_TAB_QOS: &str = "qos-snapshot";
@@ -229,6 +278,10 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
         .map_or((false, false), |cfg| (cfg.is_stream_history_enabled(), cfg.is_qos_aggregation_enabled()));
 
     let translate = use_translation();
+    let qos_detail_columns = use_memo((), |()| QosDetailColumn::columns());
+    let qos_summary_columns = use_memo((), |()| QosSummaryColumn::columns());
+    let provider_columns = use_memo((), |()| ProviderSummaryColumn::columns());
+    let history_columns = use_memo((), |()| HistoryColumn::columns());
     let from_date = use_state(|| Some(today_start_ts()));
     let to_date = use_state(|| Some(today_start_ts()));
     let paged_response = use_state(|| None::<PagedResponseDto<StreamHistoryRecordDto>>);
@@ -500,35 +553,23 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
     let table_def: Rc<TableDefinition<StreamHistoryRecordDto>> = use_memo(table_items.clone(), move |items| {
         let translate = translate_for_table.clone();
         TableDefinition {
+            table_id: "stream_history.records".into(),
+            columns: history_columns.clone(),
+            row_key: Callback::from(|(_, item): (usize, Rc<_>)| format!("{:p}", Rc::as_ptr(&item)).into()),
             items: Some(items.clone()),
-            num_cols: NUM_COLS,
-            is_sortable: Callback::from(|_| false),
+
             on_sort: Callback::noop(),
             render_header_cell: Callback::from(move |col: usize| {
-                let label = match col {
-                    0 => translate.t("LABEL.STREAM_HISTORY_TIME"),
-                    1 => translate.t("LABEL.STREAM_HISTORY_EVENT"),
-                    2 => translate.t("LABEL.USERNAME"),
-                    3 => translate.t("LABEL.GROUP"),
-                    4 => translate.t("LABEL.TITLE"),
-                    5 => translate.t("LABEL.PROVIDER"),
-                    6 => translate.t("LABEL.DURATION"),
-                    7 => translate.t("LABEL.STREAM_HISTORY_BYTES"),
-                    8 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
-                    9 => translate.t("LABEL.USER_AGENT"),
-                    10 => translate.t("LABEL.TYPE"),
-                    11 => translate.t("LABEL.CONTAINER"),
-                    12 => translate.t("LABEL.STREAM_HISTORY_REASON"),
-                    13 => translate.t("LABEL.STREAM_HISTORY_IP"),
-                    14 => translate.t("LABEL.COUNTRY"),
-                    _ => String::new(),
-                };
+                let label = HistoryColumn::from_index(col)
+                    .map_or_else(String::new, |column| translate.t(column.header_label()));
                 html! { <span>{label}</span> }
             }),
-            render_data_cell: Callback::from(
-                |(_, col, record): (usize, usize, Rc<StreamHistoryRecordDto>)| match col {
-                    0 => html! { <span class="tp__stream-history__cell--time">{format_ts(record.event_ts_utc)}</span> },
-                    1 => {
+            render_data_cell: Callback::from(|(_, col, record): (usize, usize, Rc<StreamHistoryRecordDto>)| {
+                match HistoryColumn::from_index(col) {
+                    Some(HistoryColumn::Time) => {
+                        html! { <span class="tp__stream-history__cell--time">{format_ts(record.event_ts_utc)}</span> }
+                    }
+                    Some(HistoryColumn::Event) => {
                         let is_connect = record.event_type == StreamHistoryEventType::Connect;
                         let badge_class = if is_connect {
                             "tp__stream-history__badge tp__stream-history__badge--connect"
@@ -537,14 +578,16 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
                         };
                         html! { <span class={badge_class}>{record.event_type.to_string()}</span> }
                     }
-                    2 => html! { <span>{record.api_username.as_deref().unwrap_or("-")}</span> },
-                    3 => {
+                    Some(HistoryColumn::Username) => {
+                        html! { <span>{record.api_username.as_deref().unwrap_or("-")}</span> }
+                    }
+                    Some(HistoryColumn::Group) => {
                         html! { <span class="tp__stream-history__cell--title">{record.group.as_deref().unwrap_or("-")}</span> }
                     }
-                    4 => {
+                    Some(HistoryColumn::Title) => {
                         html! { <span class="tp__stream-history__cell--title">{record.title.as_deref().unwrap_or("-")}</span> }
                     }
-                    5 => html! {
+                    Some(HistoryColumn::Provider) => html! {
                         <span>
                             {
                                 match (record.provider_name.as_deref(), record.provider_id) {
@@ -556,86 +599,85 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
                             }
                         </span>
                     },
-                    6 => html! {
+                    Some(HistoryColumn::Duration) => html! {
                         <span class="tp__stream-history__cell--mono">
                             {record.session_duration.map(format_duration).unwrap_or_default()}
                         </span>
                     },
-                    7 => html! {
+                    Some(HistoryColumn::Bytes) => html! {
                         <span class="tp__stream-history__cell--mono">
                             {record.bytes_sent.map(format_bytes).unwrap_or_default()}
                         </span>
                     },
-                    8 => html! {
+                    Some(HistoryColumn::FirstByte) => html! {
                         <span class="tp__stream-history__cell--mono">
                             {record.first_byte_latency_ms.map(|v| v.to_string()).unwrap_or_default()}
                         </span>
                     },
-                    9 => html! {
+                    Some(HistoryColumn::UserAgent) => html! {
                         <span class="tp__stream-history__cell--title">
                         <RevealContent preview={record.user_agent.as_deref().map(|ua| html! {ua})}>{record.user_agent.as_deref()}</RevealContent>
                         </span>
                     },
-                    10 => html! {
+                    Some(HistoryColumn::Type) => html! {
                         <span>
                             {optional_record_text(record.item_type.as_ref().map(ToString::to_string))}
                         </span>
                     },
-                    11 => html! {
+                    Some(HistoryColumn::Container) => html! {
                         <span>
                             {optional_record_text_str(record.container.as_deref())}
                         </span>
                     },
-                    12 => html! {
+                    Some(HistoryColumn::Reason) => html! {
                         <span>
                             {record.disconnect_reason.as_ref().map_or_else(|| String::from("-"), ToString::to_string).replace('_', " ")}
                         </span>
                     },
-                    13 => html! {
+                    Some(HistoryColumn::Ip) => html! {
                         <span class="tp__stream-history__cell--ip">
                             {record.source_addr.as_deref().unwrap_or("-")}
                         </span>
                     },
-                    14 => html! {
+                    Some(HistoryColumn::Country) => html! {
                         <span class="tp__stream-history__cell--country">
                             <Country country_code={record.country.clone()} />
                         </span>
                     },
                     _ => html! {},
-                },
-            ),
+                }
+            }),
         }
     });
     let translate_for_summary = translate.clone();
     let summary_table_def: Rc<TableDefinition<ProviderSummaryRow>> = use_memo(summary_rows.clone(), move |rows| {
         let translate = translate_for_summary.clone();
         TableDefinition {
+            table_id: "stream_history.providers".into(),
+            columns: provider_columns.clone(),
+            row_key: Callback::from(|(_, item): (usize, Rc<ProviderSummaryRow>)| item.provider_name.clone().into()),
             items: Some(rows.clone()),
-            num_cols: SUMMARY_NUM_COLS,
-            is_sortable: Callback::from(|_| false),
+
             on_sort: Callback::noop(),
             render_header_cell: Callback::from(move |col: usize| {
-                let label = match col {
-                    0 => translate.t("LABEL.PROVIDER"),
-                    1 => translate.t("LABEL.STREAM_HISTORY_SESSIONS"),
-                    2 => translate.t("LABEL.STREAM_HISTORY_BYTES"),
-                    3 => translate.t("LABEL.DURATION"),
-                    4 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
-                    5 => translate.t("LABEL.STREAM_HISTORY_DISCONNECTS"),
-                    _ => String::new(),
-                };
+                let label = ProviderSummaryColumn::from_index(col)
+                    .map_or_else(String::new, |column| translate.t(column.header_label()));
                 html! { <span>{label}</span> }
             }),
-            render_data_cell: Callback::from(|(_, col, row): (usize, usize, Rc<ProviderSummaryRow>)| match col {
-                0 => html! { <span>{row.provider_name.clone()}</span> },
-                1 => html! { <span>{row.session_count}</span> },
-                2 => html! { <span>{format_bytes(row.total_bytes_sent)}</span> },
-                3 => html! { <span>{row.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</span> },
-                4 => {
-                    html! { <span>{row.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</span> }
+            render_data_cell: Callback::from(|(_, col, row): (usize, usize, Rc<ProviderSummaryRow>)| {
+                match ProviderSummaryColumn::from_index(col) {
+                    Some(ProviderSummaryColumn::Provider) => html! { <span>{row.provider_name.clone()}</span> },
+                    Some(ProviderSummaryColumn::Sessions) => html! { <span>{row.session_count}</span> },
+                    Some(ProviderSummaryColumn::Bytes) => html! { <span>{format_bytes(row.total_bytes_sent)}</span> },
+                    Some(ProviderSummaryColumn::Duration) => {
+                        html! { <span>{row.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</span> }
+                    }
+                    Some(ProviderSummaryColumn::FirstByte) => {
+                        html! { <span>{row.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</span> }
+                    }
+                    Some(ProviderSummaryColumn::Disconnects) => html! { <span>{row.disconnect_count}</span> },
+                    _ => html! {},
                 }
-                5 => html! { <span>{row.disconnect_count}</span> },
-                _ => html! {},
             }),
         }
     });
@@ -647,51 +689,52 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
             let translate = translate_for_qos_summary.clone();
             let handle_qos_select = handle_qos_select_for_table.clone();
             TableDefinition {
+                table_id: "stream_history.qos_summary".into(),
+                columns: qos_summary_columns.clone(),
+                row_key: Callback::from(|(_, item): (usize, Rc<QosSummaryRow>)| {
+                    item.stream_identity_key.clone().into()
+                }),
                 items: Some(rows.clone()),
-                num_cols: QOS_SUMMARY_NUM_COLS,
-                is_sortable: Callback::from(|_| false),
+
                 on_sort: Callback::noop(),
                 render_header_cell: Callback::from(move |col: usize| {
-                    let label = match col {
-                        0 => translate.t("LABEL.INPUT"),
-                        1 => translate.t("LABEL.PROVIDER"),
-                        2 => translate.t("LABEL.TARGET"),
-                        3 => translate.t("LABEL.TYPE"),
-                        4 => translate.t("LABEL.QUALITY"),
-                        5 => translate.t("LABEL.STREAM_HISTORY_CONFIDENCE"),
-                        6 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
-                        7 => translate.t("LABEL.DURATION"),
-                        _ => String::new(),
-                    };
+                    let label = QosSummaryColumn::from_index(col)
+                        .map_or_else(String::new, |column| translate.t(column.header_label()));
                     html! { <span>{label}</span> }
                 }),
-                render_data_cell: Callback::from(move |(_, col, row): (usize, usize, Rc<QosSummaryRow>)| match col {
-                    0 => html! {
-                        <button
-                            type="button"
-                            class="tp__text-button"
-                            onclick={{
-                                let handle_qos_select = handle_qos_select.clone();
-                                let stream_identity_key = row.stream_identity_key.clone();
-                                Callback::from(move |_| handle_qos_select.emit(stream_identity_key.clone()))
-                            }}>
-                            {row.input_name.clone()}
-                        </button>
-                    },
-                    1 => html! { <span>{format!("{} (#{})", row.provider_name, row.provider_id)}</span> },
-                    2 => html! { <span>{row.target_name.clone()}</span> },
-                    3 => html! { <span>{row.item_type.clone()}</span> },
-                    4 => {
-                        html! { <span>{format!("{} ({})", row.window_24h.score, qos_score_label(row.window_24h.score))}</span> }
+                render_data_cell: Callback::from(move |(_, col, row): (usize, usize, Rc<QosSummaryRow>)| {
+                    match QosSummaryColumn::from_index(col) {
+                        Some(QosSummaryColumn::Input) => html! {
+                            <button
+                                type="button"
+                                class="tp__text-button"
+                                onclick={{
+                                    let handle_qos_select = handle_qos_select.clone();
+                                    let stream_identity_key = row.stream_identity_key.clone();
+                                    Callback::from(move |_| handle_qos_select.emit(stream_identity_key.clone()))
+                                }}>
+                                {row.input_name.clone()}
+                            </button>
+                        },
+                        Some(QosSummaryColumn::Provider) => {
+                            html! { <span>{format!("{} (#{})", row.provider_name, row.provider_id)}</span> }
+                        }
+                        Some(QosSummaryColumn::Target) => html! { <span>{row.target_name.clone()}</span> },
+                        Some(QosSummaryColumn::Type) => html! { <span>{row.item_type.clone()}</span> },
+                        Some(QosSummaryColumn::Quality) => {
+                            html! { <span>{format!("{} ({})", row.window_24h.score, qos_score_label(row.window_24h.score))}</span> }
+                        }
+                        Some(QosSummaryColumn::Confidence) => {
+                            html! { <span>{format!("{}%", row.window_24h.confidence)}</span> }
+                        }
+                        Some(QosSummaryColumn::FirstByte) => {
+                            html! { <span>{row.window_24h.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</span> }
+                        }
+                        Some(QosSummaryColumn::Duration) => {
+                            html! { <span>{row.window_24h.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</span> }
+                        }
+                        _ => html! {},
                     }
-                    5 => html! { <span>{format!("{}%", row.window_24h.confidence)}</span> },
-                    6 => {
-                        html! { <span>{row.window_24h.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</span> }
-                    }
-                    7 => {
-                        html! { <span>{row.window_24h.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</span> }
-                    }
-                    _ => html! {},
                 }),
             }
         },
@@ -700,38 +743,35 @@ pub fn StreamHistoryView(props: &StreamHistoryViewProps) -> Html {
     let qos_detail_table_def: Rc<TableDefinition<QosDetailRow>> = use_memo(qos_detail_rows_list.clone(), move |rows| {
         let translate = translate_for_qos_detail.clone();
         TableDefinition {
+            table_id: "stream_history.qos_details".into(),
+            columns: qos_detail_columns.clone(),
+            row_key: Callback::from(|(_, item): (usize, Rc<QosDetailRow>)| item.window_name.clone().into()),
             items: Some(rows.clone()),
-            num_cols: QOS_DETAIL_NUM_COLS,
-            is_sortable: Callback::from(|_| false),
+
             on_sort: Callback::noop(),
             render_header_cell: Callback::from(move |col: usize| {
-                let label = match col {
-                    0 => translate.t("LABEL.STREAM_HISTORY_WINDOW"),
-                    1 => translate.t("LABEL.STREAM_HISTORY_SCORE"),
-                    2 => translate.t("LABEL.STREAM_HISTORY_CONFIDENCE"),
-                    3 => translate.t("LABEL.STREAM_HISTORY_SESSIONS"),
-                    4 => translate.t("LABEL.STREAM_HISTORY_CONNECT_FAILED"),
-                    5 => translate.t("LABEL.STREAM_HISTORY_RUNTIME_ABORTS"),
-                    6 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
-                    7 => translate.t("LABEL.DURATION"),
-                    _ => String::new(),
-                };
+                let label = QosDetailColumn::from_index(col)
+                    .map_or_else(String::new, |column| translate.t(column.header_label()));
                 html! { <span>{label}</span> }
             }),
-            render_data_cell: Callback::from(|(_, col, row): (usize, usize, Rc<QosDetailRow>)| match col {
-                0 => html! { <span>{row.window_name.clone()}</span> },
-                1 => html! { <span>{format!("{} ({})", row.window.score, qos_score_label(row.window.score))}</span> },
-                2 => html! { <span>{format!("{}%", row.window.confidence)}</span> },
-                3 => html! { <span>{row.window.connect_count}</span> },
-                4 => html! { <span>{row.window.connect_failed_count}</span> },
-                5 => html! { <span>{row.window.runtime_abort_count}</span> },
-                6 => {
-                    html! { <span>{row.window.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</span> }
+            render_data_cell: Callback::from(|(_, col, row): (usize, usize, Rc<QosDetailRow>)| {
+                match QosDetailColumn::from_index(col) {
+                    Some(QosDetailColumn::Window) => html! { <span>{row.window_name.clone()}</span> },
+                    Some(QosDetailColumn::Score) => {
+                        html! { <span>{format!("{} ({})", row.window.score, qos_score_label(row.window.score))}</span> }
+                    }
+                    Some(QosDetailColumn::Confidence) => html! { <span>{format!("{}%", row.window.confidence)}</span> },
+                    Some(QosDetailColumn::Sessions) => html! { <span>{row.window.connect_count}</span> },
+                    Some(QosDetailColumn::ConnectFailed) => html! { <span>{row.window.connect_failed_count}</span> },
+                    Some(QosDetailColumn::RuntimeAborts) => html! { <span>{row.window.runtime_abort_count}</span> },
+                    Some(QosDetailColumn::FirstByte) => {
+                        html! { <span>{row.window.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</span> }
+                    }
+                    Some(QosDetailColumn::Duration) => {
+                        html! { <span>{row.window.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</span> }
+                    }
+                    _ => html! {},
                 }
-                7 => {
-                    html! { <span>{row.window.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</span> }
-                }
-                _ => html! {},
             }),
         }
     });

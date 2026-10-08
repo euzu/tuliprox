@@ -34,12 +34,15 @@ pub struct CustomDialogProps {
     pub on_close: Option<Callback<()>>,
     #[prop_or_default]
     pub aria_label: Option<String>,
+    #[prop_or_default]
+    pub node_ref: Option<NodeRef>,
 }
 
 #[component]
 pub fn CustomDialog(props: &CustomDialogProps) -> Html {
     let is_open = use_state(|| props.open);
-    let dialog_ref = use_node_ref();
+    let default_ref = use_node_ref();
+    let dialog_ref = props.node_ref.clone().unwrap_or(default_ref);
     let previously_focused = use_mut_ref(|| None::<HtmlElement>);
 
     // Update state when props change

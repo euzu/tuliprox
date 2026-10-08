@@ -1,9 +1,9 @@
 use crate::{
     app::{
         components::{
-            convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
-            AppIcon, CellValue, Chip, FilterView, HideContent, MaxConnections, PagedTable, ProxyTypeView,
-            RevealContent, TableDefinition, UserStatus, UserlistContext, UserlistPage, PAGE_SIZES, TP_PAGE_SIZE_KEY,
+            convert_bool_to_chip_style, menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, CellValue, Chip,
+            FilterView, HideContent, MaxConnections, PagedTable, ProxyTypeView, RevealContent, TableDefinition,
+            UserStatus, UserlistContext, UserlistPage, PAGE_SIZES, TP_PAGE_SIZE_KEY,
         },
         context::{target_users_to_api_proxy_users, TargetUser},
         ConfigContext, TargetUserList,
@@ -24,48 +24,64 @@ use shared::{
 use std::{cmp::Ordering, collections::HashSet, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
 
-const HEADERS: [&str; 20] = [
-    "LABEL.EMPTY",
-    "LABEL.ENABLED",
-    "LABEL.STATUS",
-    "LABEL.PLAYLIST",
-    "LABEL.USERNAME",
-    "LABEL.PASSWORD",
-    "LABEL.TOKEN",
-    "LABEL.PROXY",
-    "LABEL.SERVER",
-    "LABEL.MAX_CON",
-    "LABEL.SOFT_CON",
-    "LABEL.PRIORITY",
-    "LABEL.SOFT_PRIORITY",
-    "LABEL.UI_ENABLED",
-    "LABEL.EPG_TIMESHIFT",
-    "LABEL.EPG_REQUEST_TIMESHIFT",
-    "LABEL.CREATED_AT",
-    "LABEL.EXP_DATE",
-    "LABEL.COMMENT",
-    "LABEL.FILTER",
-];
-
-fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
-    match col {
-        1 => CellValue::Bool(user.credentials.is_active()),
-        2 => user.credentials.status.as_ref().map_or(CellValue::Empty, |s| CellValue::Status(*s)),
-        3 => CellValue::Text(user.target.as_str()),
-        4 => CellValue::Text(user.credentials.username.as_str()),
-        7 => CellValue::Proxy(user.credentials.proxy),
-        8 => user.credentials.server.as_ref().map_or(CellValue::Empty, |s| CellValue::Text(s)),
-        9 => CellValue::U32(user.credentials.max_connections),
-        10 => CellValue::U16(user.credentials.soft_connections),
-        11 => CellValue::I8(user.credentials.priority),
-        12 => CellValue::I8(user.credentials.soft_priority),
-        16 => user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
-        17 => user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
-        _ => CellValue::Empty,
+crate::app::components::define_table_columns! {
+    enum UsersColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+        },
+        Enabled => ("enabled", "LABEL.ENABLED") { sortable: true },
+        Status => ("status", "LABEL.STATUS") { sortable: true },
+        Playlist => ("playlist", "LABEL.PLAYLIST") { sortable: true },
+        Username => ("username", "LABEL.USERNAME") {
+            can_hide: false,
+            sortable: true,
+        },
+        Password => ("password", "LABEL.PASSWORD"),
+        Token => ("token", "LABEL.TOKEN"),
+        Proxy => ("proxy", "LABEL.PROXY") { sortable: true },
+        Server => ("server", "LABEL.SERVER") { sortable: true },
+        MaxConnections => ("max_connections", "LABEL.MAX_CON") { sortable: true },
+        SoftConnections => ("soft_connections", "LABEL.SOFT_CON") { sortable: true },
+        Priority => ("priority", "LABEL.PRIORITY") { sortable: true },
+        SoftPriority => ("soft_priority", "LABEL.SOFT_PRIORITY") { sortable: true },
+        UiEnabled => ("ui_enabled", "LABEL.UI_ENABLED"),
+        EpgTimeshift => ("epg_timeshift", "LABEL.EPG_TIMESHIFT"),
+        EpgRequestTimeshift => ("epg_request_timeshift", "LABEL.EPG_REQUEST_TIMESHIFT"),
+        CreatedAt => ("created_at", "LABEL.CREATED_AT") { sortable: true },
+        ExpDate => ("exp_date", "LABEL.EXP_DATE") { sortable: true },
+        Comment => ("comment", "LABEL.COMMENT"),
+        Filter => ("filter", "LABEL.FILTER"),
     }
 }
 
-fn is_col_sortable(col: usize) -> bool { matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 9 | 10 | 11 | 12 | 16 | 17) }
+impl UsersColumn {
+    const fn index(self) -> usize { self as usize }
+}
+
+fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
+    match UsersColumn::from_index(col) {
+        Some(UsersColumn::Enabled) => CellValue::Bool(user.credentials.is_active()),
+        Some(UsersColumn::Status) => {
+            user.credentials.status.as_ref().map_or(CellValue::Empty, |s| CellValue::Status(*s))
+        }
+        Some(UsersColumn::Playlist) => CellValue::Text(user.target.as_str()),
+        Some(UsersColumn::Username) => CellValue::Text(user.credentials.username.as_str()),
+        Some(UsersColumn::Proxy) => CellValue::Proxy(user.credentials.proxy),
+        Some(UsersColumn::Server) => user.credentials.server.as_ref().map_or(CellValue::Empty, |s| CellValue::Text(s)),
+        Some(UsersColumn::MaxConnections) => CellValue::U32(user.credentials.max_connections),
+        Some(UsersColumn::SoftConnections) => CellValue::U16(user.credentials.soft_connections),
+        Some(UsersColumn::Priority) => CellValue::I8(user.credentials.priority),
+        Some(UsersColumn::SoftPriority) => CellValue::I8(user.credentials.soft_priority),
+        Some(UsersColumn::CreatedAt) => {
+            user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d))
+        }
+        Some(UsersColumn::ExpDate) => {
+            user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d))
+        }
+        _ => CellValue::Empty,
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
 #[strum(serialize_all = "snake_case")]
@@ -84,6 +100,7 @@ pub struct UserTableProps {
 #[component]
 pub fn UserTable(props: &UserTableProps) -> Html {
     let translate = use_translation();
+    let columns = use_memo((), |()| UsersColumn::columns());
     let copy_to_clipboard = use_clipboard_copy();
     let service_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
@@ -146,7 +163,12 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         })
     };
 
-    let render_header_cell = make_translated_header_callback(translate.clone(), &HEADERS);
+    let render_header_cell = {
+        let translate = translate.clone();
+        Callback::from(
+            move |index| html! { {UsersColumn::from_index(index).map_or_else(String::new, |column| translate.t(column.header_label()))} },
+        )
+    };
 
     let templates = use_memo(config_ctx.clone(), |ctx| {
         ctx.config.as_ref().and_then(|config| {
@@ -166,8 +188,8 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         Callback::<(usize, usize, Rc<TargetUser>), Html>::from(
             move |(row, col, dto): (usize, usize, Rc<TargetUser>)| {
                 let user_active = dto.credentials.is_active();
-                match col {
-                    0 => {
+                match UsersColumn::from_index(col) {
+                    Some(UsersColumn::Actions) => {
                         let popup_onclick = popup_onclick.clone();
                         html! {
                             <button class="tp__icon-button"
@@ -177,31 +199,31 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                             </button>
                         }
                     }
-                    1 => html! { <Chip class={ convert_bool_to_chip_style(user_active ) }
+                    Some(UsersColumn::Enabled) => html! { <Chip class={ convert_bool_to_chip_style(user_active ) }
                                   label={if user_active {translator.t("LABEL.ENABLED")} else { translator.t("LABEL.DISABLED")} }
                                    /> },
-                    2 => html! { <UserStatus status={ dto.credentials.status } /> },
-                    3 => html! { <span class={if target_names.contains(dto.target.as_str()) {""} else {"tp__user-table__invalid-target"} }>{dto.target.as_str()}</span> },
-                    4 => html! { dto.credentials.username.as_str() },
-                    5 => html! { <HideContent content={dto.credentials.password.clone()}></HideContent> },
-                    6 => html! { dto.credentials.token.as_ref().map_or_else(|| html!{}, |token| html! { <HideContent content={token.clone()}></HideContent>}) },
-                    7 => html! {<ProxyTypeView value={dto.credentials.proxy} /> },
-                    8 => dto.credentials.server.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    9 => html! { <MaxConnections value={dto.credentials.max_connections} /> },
-                    10 => html! { <span class="tp__table__number-cell">{ dto.credentials.soft_connections }</span> },
-                    11 => html! { <span class="tp__table__number-cell">{ dto.credentials.priority }</span> },
-                    12 => html! { <span class="tp__table__number-cell">{ dto.credentials.soft_priority }</span> },
-                    13 => html! { <Chip class={ convert_bool_to_chip_style(dto.credentials.ui_enabled ) }
+                    Some(UsersColumn::Status) => html! { <UserStatus status={ dto.credentials.status } /> },
+                    Some(UsersColumn::Playlist) => html! { <span class={if target_names.contains(dto.target.as_str()) {""} else {"tp__user-table__invalid-target"} }>{dto.target.as_str()}</span> },
+                    Some(UsersColumn::Username) => html! { dto.credentials.username.as_str() },
+                    Some(UsersColumn::Password) => html! { <HideContent content={dto.credentials.password.clone()}></HideContent> },
+                    Some(UsersColumn::Token) => html! { dto.credentials.token.as_ref().map_or_else(|| html!{}, |token| html! { <HideContent content={token.clone()}></HideContent>}) },
+                    Some(UsersColumn::Proxy) => html! {<ProxyTypeView value={dto.credentials.proxy} /> },
+                    Some(UsersColumn::Server) => dto.credentials.server.as_ref().map_or_else(|| html! {}, |s| html! { s }),
+                    Some(UsersColumn::MaxConnections) => html! { <MaxConnections value={dto.credentials.max_connections} /> },
+                    Some(UsersColumn::SoftConnections) => html! { <span class="tp__table__number-cell">{ dto.credentials.soft_connections }</span> },
+                    Some(UsersColumn::Priority) => html! { <span class="tp__table__number-cell">{ dto.credentials.priority }</span> },
+                    Some(UsersColumn::SoftPriority) => html! { <span class="tp__table__number-cell">{ dto.credentials.soft_priority }</span> },
+                    Some(UsersColumn::UiEnabled) => html! { <Chip class={ convert_bool_to_chip_style(dto.credentials.ui_enabled ) }
                                    label={if dto.credentials.ui_enabled {translator.t("LABEL.ENABLED")} else { translator.t("LABEL.DISABLED")} }
                                     />  },
-                    14 => dto.credentials.epg_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    15 => dto.credentials.epg_request_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    16 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts)).map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { { s } }),
-                    17 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts)).map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { <span class="tp__table__nowrap">{ s }</span> }),
-                    18 => dto.credentials.comment.as_ref()
+                    Some(UsersColumn::EpgTimeshift) => dto.credentials.epg_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
+                    Some(UsersColumn::EpgRequestTimeshift) => dto.credentials.epg_request_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
+                    Some(UsersColumn::CreatedAt) => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts)).map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { { s } }),
+                    Some(UsersColumn::ExpDate) => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts)).map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { <span class="tp__table__nowrap">{ s }</span> }),
+                    Some(UsersColumn::Comment) => dto.credentials.comment.as_ref()
                         .map_or_else(|| html! {},
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),
-                    19 => dto.credentials.filter.as_ref().map_or_else(|| html! {}, |filter| {
+                    Some(UsersColumn::Filter) => dto.credentials.filter.as_ref().map_or_else(|| html! {}, |filter| {
                         let content = match get_filter(filter, templates.as_deref()) {
                             Ok(parsed) => html! { <FilterView pretty={true} filter={Some(parsed)} /> },
                             Err(_) => html! { <pre class="tp__filter__code">{filter}</pre> },
@@ -214,13 +236,15 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         )
     };
 
-    let is_sortable = Callback::<usize, bool>::from(is_col_sortable);
-
     let on_sort = {
         let users = props.users.clone();
         let user_list = user_list.clone();
         Callback::<Option<(usize, SortOrder)>, ()>::from(move |args| {
             if let Some((col, order)) = args {
+                let Some(column) = UsersColumn::from_index(col) else {
+                    return;
+                };
+                let col = column.index();
                 if let Some(new_user_list) = users.as_ref() {
                     let mut new_user_list = new_user_list.as_ref().clone();
                     new_user_list.sort_by(|a, b| {
@@ -241,16 +265,20 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     };
 
     let total_items = user_list.as_ref().map_or(0, |l| l.len()) as u64;
-    let total_pages = if total_items == 0 { 1 } else { total_items.div_ceil(u64::from(*page_size)) as u32 };
-    let current_page = (*page).min(total_pages);
+    let total_pages = if total_items == 0 {
+        1
+    } else {
+        u32::try_from(total_items.div_ceil(u64::from((*page_size).max(1)))).unwrap_or(u32::MAX)
+    };
+    let current_page = (*page).clamp(1, total_pages);
 
     let table_definition = {
+        let columns = columns.clone();
         // first register for config update
         let render_header_cell_cb = render_header_cell.clone();
         let render_data_cell_cb = render_data_cell.clone();
         let on_sort = on_sort.clone();
-        let is_sortable = is_sortable.clone();
-        let num_cols = HEADERS.len();
+
         let page_size_value = *page_size;
         // Dereference the UseStateHandle to pass the actual value as dependency.
         // Yew 0.22 compares UseStateHandle by identity, not value, so use_memo
@@ -262,16 +290,21 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                     None
                 } else {
                     targets.as_ref().map(|list| {
-                        let start = ((current_page - 1) as usize) * (*page_size as usize);
+                        let start = usize::try_from(u64::from(current_page.saturating_sub(1)) * u64::from(*page_size))
+                            .unwrap_or(usize::MAX);
                         let page_items =
                             list.iter().skip(start).take(*page_size as usize).cloned().collect::<Vec<Rc<TargetUser>>>();
                         Rc::new(page_items)
                     })
                 };
                 TableDefinition::<TargetUser> {
+                    table_id: "users".into(),
+                    columns: columns.clone(),
+                    row_key: Callback::from(|(_, user): (usize, Rc<TargetUser>)| {
+                        format!("{}:{}:{}", user.target.len(), user.target, user.credentials.username).into()
+                    }),
                     items,
-                    num_cols,
-                    is_sortable,
+
                     on_sort,
                     render_header_cell: render_header_cell_cb,
                     render_data_cell: render_data_cell_cb,
@@ -289,6 +322,9 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let page = page.clone();
         let page_size = page_size.clone();
         Callback::from(move |new_size: u16| {
+            if !PAGE_SIZES.contains(&new_size) {
+                return;
+            }
             set_local_storage_item(TP_PAGE_SIZE_KEY, &new_size.to_string());
             page_size.set(new_size);
             page.set(1);
@@ -421,3 +457,21 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         </div>
     }
 }
+
+#[cfg(test)]
+mod column_tests {
+    use super::UsersColumn;
+    #[test]
+    fn users_column_indices_and_ids_are_stable() {
+        for &column in UsersColumn::ALL {
+            assert_eq!(UsersColumn::from_index(column.index()), Some(column));
+        }
+        assert_eq!(UsersColumn::Filter.index(), 19);
+        assert_eq!(UsersColumn::Filter.id(), "filter");
+        assert_eq!(UsersColumn::from_index(20), None);
+    }
+}
+
+#[cfg(test)]
+#[path = "user_table.test.rs"]
+mod tests;

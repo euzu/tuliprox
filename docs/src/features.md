@@ -69,3 +69,29 @@ Tuliprox supports role-based access control (RBAC) for the Web UI:
 - compact bitmask encoding in JWT claims for low-overhead permission checks
 - backward-compatible user file format
 - Web UI admin panel for user and group management
+
+## Personal table layouts
+
+The **Columns** strip at the inline end of each Web UI table opens an overlay panel.
+Select columns with the checkboxes and reorder them with the handles using mouse or touch.
+For keyboard control, focus a handle, press Space or Enter, move with Up/Down, and press Space or Enter again to drop it.
+Escape cancels an active move; otherwise it closes the panel. Required fields remain visible.
+
+**Save** stores the layout for your account. **Cancel** discards the draft.
+**Restore defaults** resets the draft; save it to remove that table's stored overrides.
+Changes made in another browser are detected when saving. The panel keeps your draft and lets you explicitly apply it again.
+A token refresh preserves your layout; switching accounts clears the previous account's settings.
+Without Web UI authentication, the installation uses shared settings and labels them accordingly.
+
+Settings live under `<config_path>/user_settings/`, with separate `builtin`, `web`, `api`, and `local` directories.
+Back up this directory with the configuration volume. Ordinary lowercase names stay readable; special bytes are percent-encoded,
+and reserved or long names use a readable prefix plus a complete BLAKE3 hash.
+Explicit account deletion removes that account's settings. Configuration reloads do not run a settings garbage collector.
+After manually deleting and recreating an account while the server is stopped, remove its previous settings file yourself.
+Edit settings files while the server is stopped; invalid files and unsupported versions are never overwritten by the UI.
+
+Accounts CSV layouts are scoped to their header schema. Duplicate headers are distinguished by occurrence;
+without semantic header IDs, exchanging two identically named headers cannot preserve their individual identity.
+Ragged rows retain extra fields and show empty cells for missing values.
+CSV files wider than 256 columns remain readable with the default layout and explain why saving a layout is unavailable.
+Each settings file supports at most 64 stored tables and 256 KiB. Limit failures leave existing layouts unchanged.

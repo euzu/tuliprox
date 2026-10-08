@@ -224,6 +224,28 @@ async fn delete_config_api_proxy_user(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Path((target_name, username)): axum::extract::Path<(String, String)>,
 ) -> impl axum::response::IntoResponse + Send {
+    let paths = app_state.app_config.paths.load_full();
+    let _config_guard = app_state.app_config.file_locks.write_lock(Path::new(&paths.api_proxy_file_path)).await;
+    let settings_owner = match tuliprox_repository::user_settings_repository::SettingsOwner::authenticated(
+        &shared::model::UserId::api(&username),
+        &username,
+    ) {
+        Ok(owner) => owner,
+        Err(err) => {
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
+        }
+    };
+    let settings_path = match tuliprox_repository::user_settings_repository::settings_path(
+        Path::new(&paths.config_path),
+        &settings_owner,
+    ) {
+        Ok(path) => path,
+        Err(err) => {
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+                .into_response()
+        }
+    };
+    let _settings_guard = app_state.app_config.file_locks.write_lock(&settings_path).await;
     if let Some(old_api_proxy) = app_state.app_config.api_proxy.load().clone() {
         let mut api_proxy = (*old_api_proxy).clone();
         let mut modified = false;
@@ -265,6 +287,13 @@ async fn delete_config_api_proxy_user(
                 }
             }
             app_state.app_config.api_proxy.store(Some(Arc::clone(&new_api_proxy)));
+            if let Err(err) =
+                tuliprox_repository::user_settings_repository::remove_settings_unlocked(&settings_path, &settings_owner)
+                    .await
+            {
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
+                    .into_response();
+            }
 
             app_state.event_manager.send_event(EventMessage::UserLifecycle(UserLifecycleEvent::new(
                 username.as_str().into(),

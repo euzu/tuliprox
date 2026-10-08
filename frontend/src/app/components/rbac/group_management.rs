@@ -15,9 +15,27 @@ use std::{collections::HashSet, rc::Rc};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
+crate::app::components::define_table_columns! {
+    enum GroupColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.EMPTY"),
+        },
+        Name => ("name", "LABEL.NAME") { can_hide: false },
+        Permissions => ("rbac_permissions", "LABEL.RBAC_PERMISSIONS"),
+    }
+}
+crate::app::components::define_table_columns! {
+    enum PermissionColumn {
+        Domain => ("domain", "LABEL.RBAC_DOMAIN") { can_hide: false },
+        Read => ("read", "LABEL.RBAC_READ") { can_hide: false },
+        Write => ("write", "LABEL.RBAC_WRITE") { can_hide: false },
+    }
+}
+
 const PERMISSION_DOMAINS: &[&str] = &["config", "source", "user", "playlist", "library", "system", "epg"];
 
-const GROUP_HEADERS: [&str; 3] = ["LABEL.EMPTY", "LABEL.NAME", "LABEL.RBAC_PERMISSIONS"];
 const GROUP_DISPLAY_PANEL: &str = "display";
 const GROUP_EDIT_PANEL: &str = "edit";
 
@@ -113,6 +131,8 @@ pub struct GroupManagementProps {
 pub fn GroupManagement(props: &GroupManagementProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
+    let permission_columns = use_memo((), |()| PermissionColumn::columns());
+    let columns = use_memo((), |()| GroupColumn::columns());
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
 
     let form_mode = use_state(|| FormMode::Hidden);
@@ -307,8 +327,8 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
         let translate = translate.clone();
         Callback::<usize, Html>::from(move |col| {
             html! {
-                if col < GROUP_HEADERS.len() {
-                    { translate.t(GROUP_HEADERS[col]) }
+                if let Some(column) = GroupColumn::from_index(col) {
+                    { translate.t(column.header_label()) }
                 }
             }
         })
@@ -319,8 +339,8 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
         let popup_onclick = handle_popup_onclick.clone();
         let no_perms_label = no_perms_label.clone();
         Callback::<(usize, usize, Rc<RbacGroupDto>), Html>::from(
-            move |(_row, col, dto): (usize, usize, Rc<RbacGroupDto>)| match col {
-                0 => {
+            move |(_row, col, dto): (usize, usize, Rc<RbacGroupDto>)| match GroupColumn::from_index(col) {
+                Some(GroupColumn::Actions) => {
                     if dto.builtin {
                         return html! {};
                     }
@@ -332,7 +352,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                         </button>
                     }
                 }
-                1 => {
+                Some(GroupColumn::Name) => {
                     html! {
                         <>
                             { &dto.name }
@@ -344,29 +364,31 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                         </>
                     }
                 }
-                2 => html! { summarize_permissions(&dto.permissions, &no_perms_label) },
+                Some(GroupColumn::Permissions) => html! { summarize_permissions(&dto.permissions, &no_perms_label) },
                 _ => html! {},
             },
         )
     };
 
-    let is_sortable = Callback::<usize, bool>::from(|_col: usize| false);
     let on_sort = Callback::<Option<(usize, shared::model::SortOrder)>, ()>::from(|_| {});
 
     let table_definition = {
+        let columns = columns.clone();
         let render_header = render_header_cell.clone();
         let render_data = render_data_cell.clone();
-        let is_sortable = is_sortable.clone();
+
         let on_sort = on_sort.clone();
-        let num_cols = GROUP_HEADERS.len();
+
         let groups_val = props.groups.clone();
         use_memo(groups_val, move |group_list| {
             let items =
                 group_list.as_ref().map(|list| Rc::new(list.iter().map(|g| Rc::new(g.clone())).collect::<Vec<_>>()));
             TableDefinition::<RbacGroupDto> {
+                table_id: "rbac.groups".into(),
+                columns: columns.clone(),
+                row_key: Callback::from(|(_, item): (usize, Rc<RbacGroupDto>)| item.name.clone().into()),
                 items,
-                num_cols,
-                is_sortable,
+
                 on_sort,
                 render_header_cell: render_header,
                 render_data_cell: render_data,
@@ -418,58 +440,39 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                        <label class="tp__form-field__label">{ translate.t("LABEL.RBAC_PERMISSIONS") }</label>
                         <Card>
                             <div class={"tp__table"}>
-                            <div class={"tp__table__container"}>
-                            <table class="tp__table__table">
-                                <thead>
-                                    <tr>
-                                        <th>{ translate.t("LABEL.RBAC_DOMAIN") }</th>
-                                        <th>{ translate.t("LABEL.RBAC_READ") }</th>
-                                        <th>{ translate.t("LABEL.RBAC_WRITE") }</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    { for PERMISSION_DOMAINS.iter().map(|domain| {
-                                        let read_perm = format!("{domain}.read");
-                                        let write_perm = format!("{domain}.write");
-                                        let read_checked = form_state.form.permissions.contains(&read_perm);
-                                        let write_checked = form_state.form.permissions.contains(&write_perm);
-                                        let is_epg_domain = *domain == "epg";
+                            <crate::app::components::LayoutTable table_id="rbac.permission_matrix" columns={permission_columns.clone()}
+                                render={{
+                                    let translator = translate.clone();
+                                    let form_state = form_state.clone();
+                                    let toggle = on_permission_toggle.clone();
+                                    Callback::from(move |visible: Rc<Vec<usize>>| html! {
+                                        <table class="tp__table__table">
+                                            <thead><tr>{for visible.iter().filter_map(|&index| PermissionColumn::from_index(index)).map(|column| html! {
+                                                <th key={column.id()} data-column-id={column.id()}>
+                                                    {translator.t(column.header_label())}
+                                                </th>
+                                            })}</tr></thead>
+                                            <tbody>{for PERMISSION_DOMAINS.iter().map(|domain| html! {
+                                                <tr key={*domain}>{for visible.iter().filter_map(|&index| PermissionColumn::from_index(index)).map(|column| {
+                                                    let content = match column {
+                                                        PermissionColumn::Domain => html! {domain},
+                                                        PermissionColumn::Read | PermissionColumn::Write if column == PermissionColumn::Read || *domain != "epg" => {
+                                                            let permission = format!("{domain}.{}", if column == PermissionColumn::Read { "read" } else { "write" });
+                                                            let checked = form_state.form.permissions.contains(&permission);
+                                                            let toggle = toggle.clone();
+                                                            html! {<ToggleSwitch value={checked}
+                                                                on_change={Callback::from(move |value| toggle.emit((permission.clone(), value)))}/>}
+                                                        }
+                                                        _ => html! {<span/>},
+                                                    };
+                                                    html! {<td key={column.id()} data-column-id={column.id()}
+                                                        class={classes!((column != PermissionColumn::Domain).then_some("tp__table__cell--center"))}>{content}</td>}
+                                                })}</tr>
+                                            })}</tbody>
+                                        </table>
+                                    })
+                                }}/>
 
-                                        let on_read = {
-                                            let toggle = on_permission_toggle.clone();
-                                            let perm = read_perm.clone();
-                                            Callback::from(move |value: bool| toggle.emit((perm.clone(), value)))
-                                        };
-                                        let on_write = {
-                                            let toggle = on_permission_toggle.clone();
-                                            let perm = write_perm.clone();
-                                            Callback::from(move |value: bool| toggle.emit((perm.clone(), value)))
-                                        };
-
-                                        html! {
-                                            <tr key={*domain}>
-                                                <td>{ domain }</td>
-                                                <td class="tp__table__cell--center">
-                                                    <ToggleSwitch
-                                                        value={read_checked}
-                                                        on_change={on_read}
-                                                    />
-                                                </td>
-                                                <td class="tp__table__cell--center">
-                                                 { html_if!(!is_epg_domain, {
-                                                    <ToggleSwitch
-                                                        value={write_checked}
-                                                        on_change={on_write}
-                                                    />
-                                                  },
-                                                  { <span></span> })}
-                                                </td>
-                                            </tr>
-                                        }
-                                    })}
-                                </tbody>
-                            </table>
-                            </div>
                             </div>
                         </Card>
 

@@ -23,6 +23,8 @@ pub struct TextButtonProps {
     #[prop_or(None)]
     pub aria_pressed: Option<String>,
     #[prop_or(None)]
+    pub aria_haspopup: Option<String>,
+    #[prop_or(None)]
     pub hint: Option<String>,
 }
 
@@ -48,6 +50,7 @@ fn text_button_view(props: &TextButtonProps, handle_click: Callback<MouseEvent>)
             onclick={handle_click}
             aria-label={props.aria_label.clone()}
             aria-pressed={props.aria_pressed.clone()}
+            aria-haspopup={props.aria_haspopup.clone()}
             title={props.hint.clone()}
             class={classes!("tp__text-button", props.class.clone())}>
          if !props.icon.is_empty() {

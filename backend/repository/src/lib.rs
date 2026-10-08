@@ -81,3 +81,5 @@ pub use tuliprox_btree::*;
 pub use user_repository::*;
 pub use xtream_playlist_iterator::*;
 pub use xtream_repository::*;
+
+pub mod user_settings_repository;

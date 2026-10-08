@@ -8,6 +8,8 @@ pub struct ToggleSwitchProps {
     pub readonly: bool,
     #[prop_or_default]
     pub compact: bool,
+    #[prop_or_default]
+    pub aria_label: Option<String>,
     #[prop_or_else(Callback::noop)]
     pub on_change: Callback<bool>,
 }
@@ -47,6 +49,9 @@ pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
             if props.compact { "tp__toggle-switch--compact" } else { "" },
         )}>
             <input type="checkbox"
+                   role="switch"
+                   aria-label={props.aria_label.clone()}
+                   aria-checked={toggled.to_string()}
                    checked={*toggled}
                    disabled={props.readonly}
                    aria-readonly={props.readonly.to_string()}

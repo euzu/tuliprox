@@ -18,12 +18,26 @@ use crate::{
     i18n::use_translation,
     use_default_form_reducer,
 };
-use shared::{
-    concat_string,
-    model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder},
-};
+use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder};
 use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
+
+crate::app::components::define_table_columns! {
+    enum ServerColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.EMPTY"),
+        },
+        Name => ("name", "LABEL.NAME") { can_hide: false },
+        Protocol => ("protocol", "LABEL.PROTOCOL"),
+        Host => ("host", "LABEL.HOST"),
+        Port => ("port", "LABEL.PORT"),
+        Timezone => ("timezone", "LABEL.TIMEZONE"),
+        Message => ("message", "LABEL.MESSAGE"),
+        Path => ("path", "LABEL.PATH"),
+    }
+}
 
 const LABEL_NAME: &str = "LABEL.NAME";
 const LABEL_PROTOCOL: &str = "LABEL.PROTOCOL";
@@ -39,8 +53,6 @@ const LABEL_AUTH_ERROR_STATUS: &str = "LABEL.AUTH_ERROR_STATUS";
 const LABEL_SERVER: &str = "LABEL.SERVER";
 const LABEL_ADD_SERVER: &str = "LABEL.ADD_SERVER";
 const MSG_NON_UNIQUE_SERVER_NAME: &str = "MESSAGES.SAVE.API_PROXY_CONFIG.NON_UNIQUE_SERVER_NAME";
-
-const SERVER_HEADERS: [&str; 8] = ["EMPTY", "NAME", "PROTOCOL", "HOST", "PORT", "TIMEZONE", "MESSAGE", "PATH"];
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
 enum ServerTableAction {
@@ -118,6 +130,7 @@ generate_form_reducer!(
 #[component]
 pub fn ApiConfigView() -> Html {
     let translate = use_translation();
+    let columns = use_memo((), |()| ServerColumn::columns());
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
@@ -324,8 +337,8 @@ pub fn ApiConfigView() -> Html {
         Callback::<usize, Html>::from(move |col| {
             html! {
                 {
-                    if col < SERVER_HEADERS.len() {
-                        translator.t(&concat_string!("LABEL.", SERVER_HEADERS[col]))
+                    if let Some(column) = ServerColumn::from_index(col) {
+                        translator.t(column.header_label())
                     } else {
                         String::new()
                     }
@@ -338,8 +351,8 @@ pub fn ApiConfigView() -> Html {
         let popup_onclick = handle_popup_onclick.clone();
         let edit_mode_ref = edit_mode_ref.clone();
         Callback::<(usize, usize, Rc<ApiProxyServerInfoDto>), Html>::from(
-            move |(row, col, dto): (usize, usize, Rc<ApiProxyServerInfoDto>)| match SERVER_HEADERS[col] {
-                "EMPTY" => {
+            move |(row, col, dto): (usize, usize, Rc<ApiProxyServerInfoDto>)| match ServerColumn::from_index(col) {
+                Some(ServerColumn::Actions) => {
                     let popup_onclick = popup_onclick.clone();
                     let edit_mode_ref = edit_mode_ref.clone();
                     html! {
@@ -356,36 +369,39 @@ pub fn ApiConfigView() -> Html {
                         </button>
                     }
                 }
-                "NAME" => html! {&dto.name},
-                "PROTOCOL" => html! {&dto.protocol},
-                "HOST" => html! {&dto.host},
-                "PORT" => html! {dto.port.as_ref().map_or_else(String::new, ToString::to_string)},
-                "TIMEZONE" => html! {&dto.timezone},
-                "MESSAGE" => html! {&dto.message},
-                "PATH" => html! {dto.path.as_ref().map_or_else(String::new, ToString::to_string)},
+                Some(ServerColumn::Name) => html! {&dto.name},
+                Some(ServerColumn::Protocol) => html! {&dto.protocol},
+                Some(ServerColumn::Host) => html! {&dto.host},
+                Some(ServerColumn::Port) => html! {dto.port.as_ref().map_or_else(String::new, ToString::to_string)},
+                Some(ServerColumn::Timezone) => html! {&dto.timezone},
+                Some(ServerColumn::Message) => html! {&dto.message},
+                Some(ServerColumn::Path) => html! {dto.path.as_ref().map_or_else(String::new, ToString::to_string)},
                 _ => html! {""},
             },
         )
     };
 
     let table_definition = {
-        let is_sortable = Callback::<usize, bool>::from(move |_col| false);
+        let columns = columns.clone();
+
         let on_sort = Callback::<Option<(usize, SortOrder)>, ()>::from(move |_args| {});
         let render_header_cell = render_header_cell.clone();
         let render_data_cell = render_data_cell.clone();
-        let num_cols = SERVER_HEADERS.len();
+
         let servers = form_state_api_proxy_config.form.server.clone();
         let translation_marker = translate.t(LABEL_SERVER);
         use_memo((servers, translation_marker), move |(servers, _translation_marker)| TableDefinition::<
             ApiProxyServerInfoDto,
         > {
+            table_id: "config.api_servers".into(),
+            columns: columns.clone(),
+            row_key: Callback::from(|(_, item): (usize, Rc<ApiProxyServerInfoDto>)| item.name.clone().into()),
             items: if servers.is_empty() {
                 None
             } else {
                 Some(Rc::new(servers.iter().map(|server| Rc::new(server.clone())).collect()))
             },
-            num_cols,
-            is_sortable,
+
             on_sort,
             render_header_cell: render_header_cell.clone(),
             render_data_cell: render_data_cell.clone(),
@@ -472,11 +488,13 @@ pub fn ApiConfigView() -> Html {
                     {
                         if form_state_api_proxy_config.form.server.is_empty() {
                             html! {
+                                    <crate::app::components::TableShell table_id={table_definition.table_id.clone()} columns={table_definition.columns.clone()}>
                                 <NoContent
                                     text={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_SERVER_TITLE")}
                                     hint={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_SERVER_HINT")}
                                 />
-                            }
+                            </crate::app::components::TableShell>
+                                }
                         } else {
                             html! { <Table::<ApiProxyServerInfoDto> definition={table_definition.clone()} /> }
                         }
