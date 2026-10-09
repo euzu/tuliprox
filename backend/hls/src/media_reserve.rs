@@ -82,6 +82,7 @@ impl HlsManifestCommitIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsLeaseManifestSnapshot {
+    pub startup_revisions: Option<Arc<super::HlsManifestRevisions>>,
     pub delivery_mode: HlsManifestDeliveryMode,
     pub source_commit_identity: HlsManifestCommitIdentity,
     pub uri_materialization: Option<HlsLeaseManifestUriMaterialization>,
@@ -547,7 +548,25 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
         guaranteed_transition_margin(input.ready_timeline, guaranteed_ready_span, visible_tail_ms)
             .unwrap_or(input.manifest.target_duration_ms),
     );
-    let decision = if visible_contiguous_ready_duration_ms < minimum_startup_duration_ms {
+    let accelerated = input.manifest.startup_revisions.as_ref().is_some_and(|publication| {
+        input.origin_state != HlsStartupAdmissionOriginState::Degraded
+            && input
+                .manifest
+                .visible_segments
+                .iter()
+                .all(|segment| segment.encryption.is_none() && segment.map_ref_ready)
+            && input.manifest.visible_segments.iter().all(|segment| {
+                publication
+                    .revisions
+                    .get(&segment.proxy_seq)
+                    .is_some_and(|revision| revision.revision().is_publishable())
+            })
+            && publication
+                .revisions
+                .get(&input.manifest.first_proxy_seq)
+                .is_some_and(|head| head.revision().is_startup_head_ready(publication.mode))
+    });
+    let decision = if !accelerated && visible_contiguous_ready_duration_ms < minimum_startup_duration_ms {
         HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientVisibleReadyMedia)
     } else if input.origin_state == HlsStartupAdmissionOriginState::Degraded
         && prospective_lease_reserve_ms
@@ -572,6 +591,7 @@ mod tests {
 
     fn manifest() -> HlsLeaseManifestSnapshot {
         HlsLeaseManifestSnapshot {
+            startup_revisions: None,
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
             source_commit_identity: HlsManifestCommitIdentity::new(1),
             uri_materialization: None,
@@ -908,6 +928,88 @@ mod tests {
         let reserve = reserve(&manifest(), &HlsLeasePlaybackCursor::default(), &ready_timeline(), 20_000);
 
         assert!(!reserve.cutover_required);
+    }
+
+    #[test]
+    fn accelerated_admission_requires_every_published_prefix_and_a_complete_processed_head() -> std::io::Result<()> {
+        let store = crate::SegmentRevisionStore::default();
+        let mut manifest = manifest();
+        let mut owners = std::collections::BTreeMap::new();
+        for seq in 0..3 {
+            owners.insert(
+                seq,
+                store.create(crate::ProxySessionId("admission".into()), seq, crate::SegmentRevisionKind::Processed)?,
+            );
+        }
+        manifest.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            mode: shared::model::HlsStartupMode::FirstReady,
+            retained_start_seq: 0,
+            revisions: owners,
+        }));
+        let publication = manifest.startup_revisions.as_ref().ok_or_else(|| std::io::Error::other("publication"))?;
+        for owner in publication.revisions.values() {
+            owner.revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
+        }
+        let timeline = HlsReadyTimelineSnapshot { units: Arc::from([]) };
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        let head = publication.revisions.get(&0).ok_or_else(|| std::io::Error::other("head"))?;
+        head.revision().complete(crate::CachedSegmentMetadata { path: "head.ts".into(), size: 1 });
+        assert_eq!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Admit
+        );
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Degraded, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        Arc::make_mut(manifest.startup_revisions.as_mut().ok_or_else(|| std::io::Error::other("publication"))?)
+            .revisions
+            .remove(&2);
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn progressive_admission_rejects_discovered_header_only_and_failed_owners() -> std::io::Result<()> {
+        let store = crate::SegmentRevisionStore::default();
+        let mut manifest = manifest();
+        let mut owners = std::collections::BTreeMap::new();
+        for seq in 0..3 {
+            owners.insert(
+                seq,
+                store.create(crate::ProxySessionId("admission".into()), seq, crate::SegmentRevisionKind::Raw)?,
+            );
+        }
+        manifest.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            mode: shared::model::HlsStartupMode::Progressive,
+            retained_start_seq: 0,
+            revisions: owners,
+        }));
+        let timeline = HlsReadyTimelineSnapshot { units: Arc::from([]) };
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        let publication = manifest.startup_revisions.as_ref().ok_or_else(|| std::io::Error::other("publication"))?;
+        for owner in publication.revisions.values() {
+            owner.revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
+        }
+        assert_eq!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Admit
+        );
+        publication.revisions.get(&1).ok_or_else(|| std::io::Error::other("successor"))?.revision().fail();
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        Ok(())
     }
 
     #[test]

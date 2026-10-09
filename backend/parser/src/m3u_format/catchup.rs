@@ -803,7 +803,7 @@ mod tests {
         let expected = resolve_m3u_catchup_url(live_url, &catchup, Some(&format!("v0={start}&v1=14400")))?;
         for query in [
             format!("utc={start}&lutc={end}"),
-            format!("utc={start}&lutc={}&duration=99999999", start + 265000),
+            format!("utc={start}&lutc={}&duration=99999999", start + 265_000),
             format!("v0={start}&v1=864000"),
         ] {
             let resolved = resolve_m3u_catchup_url(live_url, &catchup, Some(&query))?;

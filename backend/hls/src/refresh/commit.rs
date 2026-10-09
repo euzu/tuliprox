@@ -176,6 +176,9 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
         ),
     };
     if result.is_ok() {
+        if matches!(session.mode, HlsSessionMode::TransientPassthrough { .. }) {
+            session.startup = None;
+        }
         clear_satisfied_fresh_manifest_requirement(session, request);
     }
     let configured_target_duration = session.target_duration;
@@ -274,6 +277,11 @@ fn commit_transient_fetched_manifest(
     fetch_finished_at_ms: u64,
     options: HlsTransientFetchedCommitOptions,
 ) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
+    if session.startup.is_some() && session.published_live_origin_baseline.is_some() {
+        return Err(HlsManifestCommitError::TimelineRejected {
+            reason: HlsManifestRejectLogReason::StartupRepresentationChange,
+        });
+    }
     let HlsTransientFetchedCommitOptions { acceptance_mode, reason, manifest_semantics, switch_metric } = options;
     let timeline = parse_transient_manifest_timeline_for_commit(session, &fetched.body)?;
     let quality = evaluate_manifest_acceptance_for_commit(

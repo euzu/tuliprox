@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
-    fn translate(results: Value, kind: TmdbTrendingKind, preceding: u32) -> Result<ValidatedPage, ()> {
+    fn translate(results: &Value, kind: TmdbTrendingKind, preceding: u32) -> Result<ValidatedPage, ()> {
         translate_page(
             &serde_json::to_vec(&json!({"page":2,"total_pages":3,"total_results":100,"results":results})).unwrap(),
             kind,
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn tmdb_wire_translation_preserves_every_row_and_cumulative_rank() {
         let page = translate(
-            json!([{"id":7,"title":"First","release_date":"2024-01-02"},{"id":7,"title":"Duplicate"},{"id":u32::MAX}]),
+            &json!([{"id":7,"title":"First","release_date":"2024-01-02"},{"id":7,"title":"Duplicate"},{"id":u32::MAX}]),
             TmdbTrendingKind::Movie,
             3,
         )
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(page.rows[2].rank, Some(6));
         assert_eq!(page.rows[2].tmdb_id, Some(u32::MAX));
         let page = translate(
-            json!([{"id":7,"media_type":"tv","name":"Show","first_air_date":"unknown"},{"id":8,"name":null}]),
+            &json!([{"id":7,"media_type":"tv","name":"Show","first_air_date":"unknown"},{"id":8,"name":null}]),
             TmdbTrendingKind::Tv,
             0,
         )
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(page.rows[0].title, "Show");
         assert_eq!(page.rows[0].year, None);
         assert_eq!(page.rows[1].title, "");
-        assert!(translate(json!([{"id":7}]), TmdbTrendingKind::Movie, u32::MAX).is_err());
+        assert!(translate(&json!([{"id":7}]), TmdbTrendingKind::Movie, u32::MAX).is_err());
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
             json!({}),
             json!({"id":0}),
             json!({"id":-1}),
-            json!({"id":4294967296_u64}),
+            json!({"id":4_294_967_296_u64}),
             json!({"id":"7"}),
             json!({"id":7.0}),
             json!({"id":7,"media_type":"tv"}),
@@ -140,7 +140,7 @@ mod tests {
             json!({"id":7,"title":42}),
             json!({"id":7,"release_date":false}),
         ] {
-            assert!(translate(json!([{"id":7},bad]), TmdbTrendingKind::Movie, 0).is_err());
+            assert!(translate(&json!([{"id":7},bad]), TmdbTrendingKind::Movie, 0).is_err());
         }
     }
 }

@@ -333,8 +333,7 @@ mod tests {
     use tuliprox_core::model::{Config, SourcesConfig};
 
     fn test_config_with_sources(temp_dir: &TempDir) -> (Config, SourcesConfig) {
-        let mut config = Config::default();
-        config.storage_dir = temp_dir.path().to_string_lossy().to_string();
+        let config = Config { storage_dir: temp_dir.path().to_string_lossy().to_string(), ..Config::default() };
 
         let sources_dto = SourcesConfigDto {
             inputs: vec![

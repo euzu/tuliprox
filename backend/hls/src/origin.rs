@@ -531,9 +531,17 @@ impl HlsBoundAccountAcquireErrorKind {
     pub fn allows_rebind(self) -> bool { matches!(self, Self::Missing | Self::Expired) }
 
     pub fn is_retryable_resource_failure(self) -> bool {
+        // A competing session or an in-flight binding handoff can temporarily
+        // deny origin I/O. Retry acquisition within the existing resource
+        // budget; never bypass ownership checks or rebind on this error.
         matches!(
             self,
-            Self::Exhausted | Self::WaitTimedOut | Self::AcquireTimedOut | Self::StoreRace | Self::Unavailable
+            Self::Exhausted
+                | Self::ReservedForOther
+                | Self::WaitTimedOut
+                | Self::AcquireTimedOut
+                | Self::StoreRace
+                | Self::Unavailable
         )
     }
 
@@ -1359,7 +1367,7 @@ mod tests {
     fn bound_account_acquire_error_resource_retry_policy_matches_handoff_semantics() {
         assert!(!HlsBoundAccountAcquireErrorKind::Missing.is_retryable_resource_failure());
         assert!(!HlsBoundAccountAcquireErrorKind::Expired.is_retryable_resource_failure());
-        assert!(!HlsBoundAccountAcquireErrorKind::ReservedForOther.is_retryable_resource_failure());
+        assert!(HlsBoundAccountAcquireErrorKind::ReservedForOther.is_retryable_resource_failure());
         assert!(!HlsBoundAccountAcquireErrorKind::Detached.is_retryable_resource_failure());
         assert!(HlsBoundAccountAcquireErrorKind::Exhausted.is_retryable_resource_failure());
         assert!(HlsBoundAccountAcquireErrorKind::WaitTimedOut.is_retryable_resource_failure());

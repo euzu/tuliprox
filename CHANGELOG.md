@@ -160,6 +160,13 @@
 
 ## 🌟 New Features
 
+- **Optional fast start for shared live HLS.** `reverse_proxy.hls_cache.startup.mode` selects `conservative`
+  (default, unchanged behavior), `first_ready` (admits playback after one processed start segment) or `progressive`
+  (streams the raw TS start segment while the shared origin fill is still running). Progressive replay memory,
+  reader lifetime and deferred repairs are bounded by the new `startup` limits; revision files share the existing
+  disk cache limits. Archive, encrypted and fMP4/MAP sessions keep the existing path. The Web UI exposes the mode
+  and its limits. See [Optional startup modes](docs/src/configuration/shared-hls-configuration.md#optional-startup-modes).
+
 - **Personal Web UI table layouts.** Show or hide optional columns, reorder them with mouse, touch, or keyboard,
   and save layouts per account. Restore defaults, cancel drafts, and resolve conflicting saves without losing edits.
   Settings are stored under `<config_path>/user_settings/`; installations without Web UI authentication share one layout.
@@ -1074,6 +1081,14 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **Shared HLS retries an origin account reserved for another session.** A bound account that is briefly reserved
+  by a competing session or an in-flight binding handoff is now retried within the existing acquire budget instead
+  of failing the segment fetch immediately. Ownership checks and rebinding rules are unchanged; a permanently
+  foreign reservation fails once that budget is spent.
+
+- **Shared HLS recovers from missing segments at the head of a new live window.** HTTP 404/410 responses for the
+  first segments of an unpublished live window advance the startup head instead of blocking the initial playlist.
 
 - **Table pagination and settings errors.** Pagination clamps navigation and page ranges to valid bounds and rejects
   unsupported page sizes. Internal settings task failures return HTTP 500; oversized request bodies return HTTP 413,

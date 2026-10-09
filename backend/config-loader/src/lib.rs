@@ -1460,35 +1460,35 @@ mod tests {
         let template_path = dir.path().join("template.yml");
         tokio::fs::write(
             &sources_path,
-            r#"
+            r"
 inputs: []
 sources: []
 templates:
   - name: source_group
     value: '${env:PATH}'
-"#,
+",
         )
         .await?;
         tokio::fs::write(
             &mapping_path,
-            r#"
+            r"
 mappings:
   templates:
     - name: mapping_group
       value: '${env:PATH}'
   mapping: []
-"#,
+",
         )
         .await?;
         tokio::fs::write(
             &template_path,
-            r#"
+            r"
 templates:
   - name: file_group
     value: '${env:PATH}'
   - name: combined
     value: '!source_group!'
-"#,
+",
         )
         .await?;
         let paths = shared::model::ConfigPaths {
@@ -1528,7 +1528,7 @@ templates:
     async fn curation_item_limits_survive_source_load_sanitize_save_reload() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("source.yml");
-        let document = r#"
+        let document = r"
 inputs: []
 sources:
   - inputs: []
@@ -1554,7 +1554,7 @@ sources:
                 limit: 100
               - kind: movie
                 time_window: day
-"#;
+";
         tokio::fs::write(&path, document).await.unwrap();
         let dto = super::parse_sources_file_from_path(&path, false).await.unwrap();
         let expected = dto.sources[0].targets[0].curation.clone();

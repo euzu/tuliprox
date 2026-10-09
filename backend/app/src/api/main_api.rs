@@ -1169,7 +1169,7 @@ mod tests {
             (status, body["status"].as_str().expect("status label").to_string())
         }
 
-        async fn acquire(state: &Arc<AppState>, input: &'static str, addr: &'static str) -> ProviderHandle {
+        fn acquire(state: &Arc<AppState>, input: &'static str, addr: &'static str) -> ProviderHandle {
             let addr: SocketAddr = addr.parse().expect("socket addr");
             state
                 .active_provider
@@ -1196,7 +1196,7 @@ mod tests {
         #[tokio::test]
         async fn ready_is_ready_while_capacity_remains() {
             let state = test_app_state(test_app_config(vec![test_input("prov", 2, true)]));
-            let allocation = acquire(&state, "prov", "127.0.0.1:45101").await;
+            let allocation = acquire(&state, "prov", "127.0.0.1:45101");
             let (status, label) = call_ready(state).await;
             assert_eq!(status, axum::http::StatusCode::OK);
             assert_eq!(label, "ready");
@@ -1206,7 +1206,7 @@ mod tests {
         #[tokio::test]
         async fn ready_is_exhausted_when_all_groups_are_full() {
             let state = test_app_state(test_app_config(vec![test_input("prov", 1, true)]));
-            let allocation = acquire(&state, "prov", "127.0.0.1:45102").await;
+            let allocation = acquire(&state, "prov", "127.0.0.1:45102");
             let (status, label) = call_ready(state).await;
             assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(label, "exhausted");

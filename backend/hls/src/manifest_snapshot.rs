@@ -192,7 +192,7 @@ fn derive_normal_snapshot(
         {
             return None;
         }
-        snapshot_from_segments(HlsLeaseManifestSnapshotParts {
+        let mut snapshot = snapshot_from_segments(HlsLeaseManifestSnapshotParts {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
             source_commit_identity,
             uri_materialization: None,
@@ -203,7 +203,19 @@ fn derive_normal_snapshot(
             segments,
             active_map: parsed.units.last().and_then(|unit| unit.active_map.clone()),
             active_encryption: parsed.units.last().and_then(|unit| unit.active_encryption.clone()),
-        })
+        })?;
+        if let Some(startup) = &session.startup {
+            let revisions = visible_proxy_seqs
+                .iter()
+                .map(|seq| Some((*seq, startup.revisions.get(seq)?.clone())))
+                .collect::<Option<std::collections::BTreeMap<_, _>>>()?;
+            snapshot.startup_revisions = Some(Arc::new(super::HlsManifestRevisions {
+                mode: startup.config.mode,
+                retained_start_seq: session.segments.first_key_value().map_or(first_proxy_seq, |(seq, _)| *seq),
+                revisions,
+            }));
+        }
+        Some(snapshot)
     })())
 }
 
@@ -217,6 +229,7 @@ fn derive_transient_snapshot(
     let first_proxy_seq = template.segments.first()?.proxy_seq;
     let last_proxy_seq = template.segments.last()?.proxy_seq;
     Some(HlsLeaseManifestSnapshot {
+        startup_revisions: None,
         delivery_mode: HlsManifestDeliveryMode::TransientPassthrough,
         source_commit_identity,
         uri_materialization,
@@ -268,6 +281,7 @@ fn snapshot_from_segments(parts: HlsLeaseManifestSnapshotParts) -> Option<HlsLea
         segments.iter().fold(0_u64, |duration_ms, segment| duration_ms.saturating_add(segment.duration_ms));
     let container = classify_container(active_map.as_ref(), &segments);
     Some(HlsLeaseManifestSnapshot {
+        startup_revisions: None,
         delivery_mode,
         source_commit_identity,
         uri_materialization,

@@ -1,0 +1,50 @@
+schema_version: 1
+name: m3u-hls-share-first-ready-startup
+tuliprox:
+  base_url: http://fixture.invalid
+  execution_mode: isolated_fixture
+  fixture_stream:
+    share_live_hls: true
+    share_live_mpeg_ts: false
+    hls_startup_mode: first_ready
+  bootstrap:
+    command: "${env:TULIPROX_TESTKIT_SUT_BINARY}"
+    arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]
+    readiness_url: "{base_url}/healthcheck"
+origin:
+  run_id: m3u-hls-share-first-ready-startup
+  hls_profile:
+    prefix_delay_millis: 1000
+    window_segments: 6
+    missing_head_segments: 0
+actors:
+  - id: viewer
+    agent: local
+    username: viewer
+    user_agent: tuliprox-testkit/viewer
+  - id: second-viewer
+    agent: local
+    username: other
+    user_agent: tuliprox-testkit/second-viewer
+channels:
+  shared-channel: { origin_marker: 17, protocol: hls }
+steps:
+  - command_id: first-viewer-starts
+    start: { actor: viewer, playback_id: first, session_group: first, channel: shared-channel }
+    await: { valid_frames: 2 }
+    assert_origin: { no_limit_rejections: true }
+  - command_id: second-viewer-joins
+    start: { actor: second-viewer, playback_id: second, session_group: second, channel: shared-channel }
+    await: { valid_frames: 2 }
+    assert_origin: { no_limit_rejections: true }
+  - command_id: first-viewer-stops
+    stop: { playback_id: first }
+  - command_id: second-viewer-stops
+    stop: { playback_id: second }
+    assert_runtime: { active_users: 0, active_user_connections: 0 }
+policy_contract:
+  user_access_control: true
+  users:
+    viewer: { max_connections: 4 }
+    other: { max_connections: 4 }
+  provider_max_connections: 8

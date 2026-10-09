@@ -1,0 +1,212 @@
+use super::{EpgEpisodeMetadata, RecordingVisibility, TaskPriorityDto, TransferStatusDto, UserId};
+use std::fmt;
+
+/// Media kind of a recording task. Determined by the server from the
+/// resolved catalog item; never accepted from a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingKind {
+    /// Scheduled live capture. Executed with ffmpeg, never resumable.
+    Live,
+    /// Video on demand. Executed over resumable HTTP.
+    Vod,
+    /// Series episode. Executed over resumable HTTP.
+    Series,
+}
+
+impl RecordingKind {
+    /// Live is captured within a programme window; VOD and Series run to EOF.
+    pub fn is_scheduled(self) -> bool { matches!(self, Self::Live) }
+
+    /// Only VOD and Series may be paused and resumed.
+    pub fn is_resumable(self) -> bool { matches!(self, Self::Vod | Self::Series) }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Vod => "vod",
+            Self::Series => "series",
+        }
+    }
+}
+
+impl fmt::Display for RecordingKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
+}
+
+/// Which controls a recording currently offers.
+///
+/// Computed server-side from the transition graph and carried on the DTO so a
+/// client renders buttons for exactly the commands the server would accept.
+// One flag per control is the point: the set maps 1:1 onto the buttons a
+// client renders, and collapsing it would hide which command was refused.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingAllowedActions {
+    pub pause: bool,
+    pub resume: bool,
+    pub cancel: bool,
+    pub retry: bool,
+    pub edit: bool,
+    pub remove: bool,
+}
+
+/// The caller's own quota, as carried in the recording snapshot.
+///
+/// Only the caller's private pool and the shared pool: there is no
+/// per-user breakdown here, because one user's consumption is not another
+/// user's business.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingQuotaSummaryDto {
+    pub private_used_bytes: u64,
+    pub private_limit_bytes: Option<u64>,
+    pub shared_used_bytes: u64,
+    pub shared_limit_bytes: Option<u64>,
+}
+
+/// Owner-safe public projection of a recording task. This is the only
+/// recording shape crossing the API or WebSocket boundary. It never carries
+/// the source URL, provider/source identifiers, configured headers,
+/// absolute/relative/partial paths, transfer validators, or another user's
+/// owner identifier.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingTaskDto {
+    pub id: String,
+    pub title: String,
+    pub kind: RecordingKind,
+    pub priority: TaskPriorityDto,
+    pub status: TransferStatusDto,
+    pub retry_attempts: u8,
+    pub transferred_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The provider ignored a byte-range request. Restarting from zero needs
+    /// the viewer's explicit confirmation before the partial is discarded.
+    #[serde(default)]
+    pub restart_from_beginning_required: bool,
+    /// `Some` only when the viewer owns the task; never another user's id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<UserId>,
+    pub visibility: RecordingVisibility,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_end: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_end: Option<i64>,
+    pub pre_roll_secs: u64,
+    pub post_roll_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    /// Filename component of the final relative path. The server does not
+    /// expose the directory structure or the recording root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epg: Option<EpgEpisodeMetadata>,
+    /// Immutable provenance for tasks generated by a recurring rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence_key: Option<String>,
+    /// What the server would accept for this recording right now, before the
+    /// viewer's permissions are applied.
+    #[serde(default)]
+    pub allowed_actions: RecordingAllowedActions,
+}
+
+impl RecordingTaskDto {
+    /// Lifecycle partition for the UI: non-terminal tasks are current,
+    /// terminal ones are completed.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.status, TransferStatusDto::Completed | TransferStatusDto::Failed | TransferStatusDto::Cancelled)
+    }
+
+    /// Effective duration of a scheduled window, when both bounds are known.
+    pub fn scheduled_duration_secs(&self) -> Option<u64> {
+        let (start, end) = self.scheduled_start.zip(self.scheduled_end)?;
+        u64::try_from(end.saturating_sub(start)).ok()
+    }
+}
+
+/// Execution state of a recording task as persisted.
+///
+/// Distinct from [`TransferStatusDto`](crate::model::TransferStatusDto),
+/// which is the wire projection: this one is written to the recording
+/// repository, so renaming a variant is a storage-format change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RecordingTaskState {
+    #[default]
+    Queued,
+    Scheduled,
+    WaitingForCapacity,
+    RetryWaiting,
+    Running,
+    Paused,
+    /// Cancellation was requested; the worker still owns the file and the
+    /// provider slot. Deliberately not terminal -- treating it as terminal
+    /// lets a deletion unlink the partial the worker is still writing.
+    Cancelling,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RecordingTaskState {
+    pub fn is_terminal(self) -> bool { matches!(self, Self::Completed | Self::Failed | Self::Cancelled) }
+
+    /// Stable label used by the edit rules, logs and errors.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Scheduled => "Scheduled",
+            Self::WaitingForCapacity => "WaitingForCapacity",
+            Self::RetryWaiting => "RetryWaiting",
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::Cancelling => "Cancelling",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+impl From<RecordingTaskState> for super::super::transfer::TransferStatusDto {
+    fn from(value: RecordingTaskState) -> Self {
+        match value {
+            RecordingTaskState::Queued => Self::Queued,
+            RecordingTaskState::Scheduled => Self::Scheduled,
+            RecordingTaskState::WaitingForCapacity => Self::WaitingForCapacity,
+            RecordingTaskState::RetryWaiting => Self::RetryWaiting,
+            RecordingTaskState::Running => Self::Running,
+            RecordingTaskState::Paused => Self::Paused,
+            RecordingTaskState::Cancelling => Self::Cancelling,
+            RecordingTaskState::Completed => Self::Completed,
+            RecordingTaskState::Failed => Self::Failed,
+            RecordingTaskState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Monotonic revision counter for the persisted recording queue. Increments
+/// once per committed queue mutation. Stored alongside the queue snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct QueueRevision(pub u64);
+
+impl fmt::Display for QueueRevision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.0) }
+}

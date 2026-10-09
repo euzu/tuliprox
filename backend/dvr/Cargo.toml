@@ -18,7 +18,6 @@ arc-swap.workspace = true
 chrono.workspace = true
 fastrand.workspace = true
 chrono-tz = "0.10.4"
-bytes.workspace = true
 futures.workspace = true
 libc = "0.2"
 log.workspace = true

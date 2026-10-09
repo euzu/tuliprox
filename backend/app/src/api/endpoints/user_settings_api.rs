@@ -503,6 +503,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn settings_are_isolated_between_authenticated_users() -> TestResult {
         let dir = tempfile::tempdir()?;
         let web_ui = WebUiConfigDto {
@@ -621,6 +622,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn settings_auth_is_namespace_scoped_and_rechecks_deleted_users_after_waiting() -> TestResult {
         let dir = tempfile::tempdir()?;
         let web_ui = WebUiConfigDto {

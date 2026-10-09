@@ -68,6 +68,8 @@ mod paths;
 mod post_refresh_availability;
 mod prefetch;
 mod prepared_terminal_bundle;
+mod progressive_budget;
+mod progressive_startup;
 mod qos;
 mod recovery_timing;
 mod refresh;
@@ -78,10 +80,13 @@ mod response;
 mod runtime_custom_tail;
 mod segment_fetcher;
 mod segment_repair;
+mod segment_revision;
 mod segment_watchdog;
 mod session;
 mod session_store;
 mod startup_observability;
+mod startup_policy;
+mod sync_ext;
 mod terminal_commit;
 mod terminal_pending;
 mod terminal_tail;
@@ -324,7 +329,14 @@ pub use self::{
         HlsTerminalTailCompatibility, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
     },
 };
+pub use cache::{HlsRevisionDiskReservation, HlsRevisionFilePin};
 pub use hls_ctx::{HlsCtx, WeakHlsCtx};
+pub use progressive_budget::ProgressiveBudgetManager;
+pub use segment_revision::{
+    SegmentRevision, SegmentRevisionGuard, SegmentRevisionId, SegmentRevisionKey, SegmentRevisionKind,
+    SegmentRevisionState, SegmentRevisionStore,
+};
+pub use startup_policy::{HlsManifestRevisions, HlsSessionStartup};
 pub use tuliprox_mpegts::ts_inspector::{
     evaluate_mpeg_ts_splice_boundary, hls_aes128_cbc_iv, inspect_mpeg_ts_async, inspect_mpeg_ts_media_evidence_async,
     HlsTrackEvidenceResolution, HlsTsMediaEvidence, HlsTsProbeBudget, HlsTsProbeProtection, HlsTsProtectionReason,

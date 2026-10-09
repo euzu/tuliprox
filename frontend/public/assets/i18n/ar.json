@@ -1,4 +1,5 @@
 {
+  "HLS_STARTUP_MODE_DESCRIPTION": "الوضع المحافظ يحافظ على سلوك البدء الحالي. وضع «أول جاهز» ينتظر مقطع بداية معالجًا. الوضع التدريجي يقدّم TS خامًا ويتطلب مصادر مناسبة؛ ويسري على الجلسات الجديدة.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "يجب أن يكون نطاق نسبة تباعد الارتداد بين 0 و95.",
   "COUNTRY": {
     "AD": "أندورا",
@@ -904,6 +905,16 @@
     "WEB_ROOT": "Web-Root: يحتوي على ملفات واجهة الويب. عادة ما يتم وضعها في نفس الدليل تحت ./web"
   },
   "LABEL": {
+    "HLS_STARTUP_LIMITS": "حدود البدء السريع",
+    "HLS_PROGRESSIVE_SEGMENTS": "الحد الأقصى للمقاطع التدريجية",
+    "HLS_PROGRESSIVE_BYTES_PER_SEGMENT": "ذاكرة المخزن المؤقت لكل مقطع",
+    "HLS_PROGRESSIVE_BYTES_TOTAL": "إجمالي ذاكرة المخزن المؤقت",
+    "HLS_PROGRESSIVE_READER_LIFETIME": "أقصى عمر للقارئ (بالثواني)",
+    "HLS_DEFERRED_REPAIRS": "الحد الأقصى لمهام الإصلاح المعلقة",
+    "HLS_STARTUP_MODE": "وضع بدء HLS",
+    "HLS_STARTUP_MODE_CONSERVATIVE": "محافظ",
+    "HLS_STARTUP_MODE_FIRST_READY": "أول جاهز",
+    "HLS_STARTUP_MODE_PROGRESSIVE": "تدريجي",
     "BACK": "رجوع",
     "BOUQUETS": "الباقات",
     "ALL_TARGETS": "جميع الأهداف",

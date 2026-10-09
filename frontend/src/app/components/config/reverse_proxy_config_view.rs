@@ -30,9 +30,10 @@ use shared::{
     model::{
         ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
         HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, Millis,
-        QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
-        ReverseProxyDisabledHeaderConfigDto, Secs, StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStartupConfigDto, HlsStartupMode, HlsStripConfigDto,
+        HlsStripMode, Millis, QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto,
+        ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, Secs, StreamBufferConfigDto, StreamConfigDto,
+        StreamHistoryConfigDto,
     },
     utils::format_float_localized,
 };
@@ -239,6 +240,7 @@ generate_form_reducer!(
         OriginSegmentTimeoutMs => origin_segment_timeout_ms: Millis,
         SessionIdleTimeout => session_idle_timeout: Secs,
         SegmentRepair => segment_repair: HlsSegmentRepairConfigDto,
+        Startup => startup: HlsStartupConfigDto,
     }
 );
 
@@ -414,6 +416,70 @@ fn clamp_usize_min(value: Option<i64>, min_value: usize) -> usize {
 
 fn clamp_u8_range(value: Option<i64>, min_value: u8, max_value: u8) -> u8 {
     value.and_then(|value| u8::try_from(value).ok()).map_or(min_value, |value| value.clamp(min_value, max_value))
+}
+
+fn render_hls_startup_limits(
+    state: &UseReducerHandle<HlsCacheConfigFormState>,
+    translate: &YewI18n,
+    edit: bool,
+) -> Html {
+    let number = |label: &str, field: &'static str, value: usize, set: fn(&mut HlsStartupConfigDto, usize)| {
+        let state = state.clone();
+        if edit {
+            html! {
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput label={translate.t(label)} name={field}
+                        value={i64::try_from(value).unwrap_or(i64::MAX)}
+                        on_change={Callback::from(move |value: Option<i64>| {
+                            let mut startup = state.form.startup.clone();
+                            set(&mut startup, clamp_usize_min(value, 1));
+                            state.dispatch(HlsCacheConfigFormAction::Startup(startup));
+                        })} />
+                </div>
+            }
+        } else {
+            config_field_child!(translate.t(label), field, {
+                html! { <span class="tp__form-field__value">{value.to_string()}</span> }
+            })
+        }
+    };
+    let bytes = |label: &str, field: &'static str, value: &ByteSize, set: fn(&mut HlsStartupConfigDto, ByteSize)| {
+        let state = state.clone();
+        if edit {
+            html! {
+                <div class="tp__form-field tp__form-field__text">
+                    <crate::app::components::input::Input label={translate.t(label)} name={field}
+                        value={value.to_string()} autocomplete={true}
+                        on_change={Callback::from(move |value: String| {
+                            let mut startup = state.form.startup.clone();
+                            set(&mut startup, ByteSize::new(value));
+                            state.dispatch(HlsCacheConfigFormAction::Startup(startup));
+                        })} />
+                </div>
+            }
+        } else {
+            config_field_child!(translate.t(label), field, {
+                html! { <span class="tp__form-field__value">{value.to_string()}</span> }
+            })
+        }
+    };
+    let startup = &state.form.startup;
+    html! {
+        <details>
+            <summary>{translate.t("LABEL.HLS_STARTUP_LIMITS")}</summary>
+            {number("LABEL.HLS_PROGRESSIVE_SEGMENTS", "hls_progressive_segments", startup.max_progressive_segments,
+                |startup, value| startup.max_progressive_segments = value)}
+            {bytes("LABEL.HLS_PROGRESSIVE_BYTES_PER_SEGMENT", "hls_progressive_bytes_per_segment", &startup.max_progressive_bytes_per_segment,
+                |startup, value| startup.max_progressive_bytes_per_segment = value)}
+            {bytes("LABEL.HLS_PROGRESSIVE_BYTES_TOTAL", "hls_progressive_bytes_total", &startup.max_progressive_bytes_total,
+                |startup, value| startup.max_progressive_bytes_total = value)}
+            {number("LABEL.HLS_PROGRESSIVE_READER_LIFETIME", "hls_progressive_reader_lifetime",
+                usize::try_from(startup.max_progressive_reader_lifetime_secs.get()).unwrap_or(usize::MAX),
+                |startup, value| startup.max_progressive_reader_lifetime_secs = Secs::new(u64::try_from(value).unwrap_or(u64::MAX)))}
+            {number("LABEL.HLS_DEFERRED_REPAIRS", "hls_deferred_repairs", startup.max_deferred_repairs,
+                |startup, value| startup.max_deferred_repairs = value)}
+        </details>
+    }
 }
 
 #[component]
@@ -802,6 +868,10 @@ pub fn ReverseProxyConfigView() -> Html {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
                 { config_field_optional!(hls_cache_state.form, translate.t(LABEL_CACHE_PATH), cache_path) }
+                { config_field_child!(translate.t("LABEL.HLS_STARTUP_MODE"), "HLS_CACHE_CONFIG.STARTUP_MODE", {
+                    html! { <span class="tp__form-field__value">{hls_cache_state.form.startup.mode.to_string()}</span> }
+                }) }
+                {render_hls_startup_limits(&hls_cache_state, &translate, false)}
                 { config_field_child!(translate.t(LABEL_STRIP_MODE), "HLS_CACHE_CONFIG.STRIP_MODE", {
                     html! { <span class="tp__form-field__value">{hls_strip_state.form.mode.to_string()}</span> }
                 }) }
@@ -913,6 +983,36 @@ pub fn ReverseProxyConfigView() -> Html {
                     </div>
                 }
             };
+        let selected_startup = hls_cache_state.form.startup.mode;
+        let startup_options = Rc::new(vec![
+            DropDownOption::new(
+                "conservative",
+                html! { translate.t("LABEL.HLS_STARTUP_MODE_CONSERVATIVE") },
+                selected_startup == HlsStartupMode::Conservative,
+            ),
+            DropDownOption::new(
+                "first_ready",
+                html! { translate.t("LABEL.HLS_STARTUP_MODE_FIRST_READY") },
+                selected_startup == HlsStartupMode::FirstReady,
+            ),
+            DropDownOption::new(
+                "progressive",
+                html! { translate.t("LABEL.HLS_STARTUP_MODE_PROGRESSIVE") },
+                selected_startup == HlsStartupMode::Progressive,
+            ),
+        ]);
+        let set_startup = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |(_, selections): (String, DropDownSelection)| {
+                if let DropDownSelection::Single(selection) = selections {
+                    if let Ok(mode) = HlsStartupMode::from_str(selection.as_str()) {
+                        let mut startup = hls_cache_state.form.startup.clone();
+                        startup.mode = mode;
+                        hls_cache_state.dispatch(HlsCacheConfigFormAction::Startup(startup));
+                    }
+                }
+            })
+        };
         let selected_manifest_recovery_burst = hls_cache_state.form.manifest_recovery_burst.level;
         let set_manifest_recovery_burst = {
             let hls_cache_state = hls_cache_state.clone();
@@ -930,6 +1030,11 @@ pub fn ReverseProxyConfigView() -> Html {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
                 { edit_field_text_option!(hls_cache_state, translate.t(LABEL_CACHE_PATH), cache_path, HlsCacheConfigFormAction::CachePath) }
+                { config_field_child!(translate.t("LABEL.HLS_STARTUP_MODE"), "HLS_CACHE_CONFIG.STARTUP_MODE", {
+                    html! { <Select name="hls_startup_mode" multi_select={false} options={startup_options} on_select={set_startup} /> }
+                }) }
+                <p>{translate.t("HLS_STARTUP_MODE_DESCRIPTION")}</p>
+                {render_hls_startup_limits(&hls_cache_state, &translate, true)}
                 { config_field_child!(translate.t(LABEL_STRIP_MODE), "HLS_CACHE_CONFIG.STRIP_MODE", {
                     html! {
                         <Select
