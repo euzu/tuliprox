@@ -1,9 +1,10 @@
+#[cfg(unix)]
+use super::ConcurrentLiveFixture;
 use super::{
     app_config_with_listener, bare_app_config, counting_ffmpeg, download_file, ensure_recording_worker_running,
     finish_active_and_promote, requeue_active_download_for_capacity_wait, scheduled_task, serve_range_fixture,
-    slot_queue, spawn_count, vod_entry, wait_for_provider_slot, ConcurrentLiveFixture, DownloadExecutionResult,
-    QuotaGate, RecordingNotificationPlan, DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
-    QUOTA_EXCEEDED_DURING_TRANSFER,
+    slot_queue, spawn_count, vod_entry, wait_for_provider_slot, DownloadExecutionResult, QuotaGate,
+    RecordingNotificationPlan, DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED, QUOTA_EXCEEDED_DURING_TRANSFER,
 };
 use crate::recording::{
     recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -13,11 +14,9 @@ use shared::model::{
     NoopSink, RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState,
     RecordingVisibility, UserId,
 };
-use std::{
-    path::Path,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::{path::Path, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio::sync::{Notify, RwLock};
 use tuliprox_core::model::RecordingConfig;

@@ -17,7 +17,9 @@ mod retry;
 mod startup;
 mod support;
 
+#[cfg(unix)]
+use self::support::ConcurrentLiveFixture;
 use self::support::{
     app_config_with_listener, bare_app_config, counting_ffmpeg, read_request, scheduled_task, serve_range_fixture,
-    slot_queue, spawn_count, vod_entry, ConcurrentLiveFixture,
+    slot_queue, spawn_count, vod_entry,
 };

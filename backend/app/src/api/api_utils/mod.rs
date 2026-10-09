@@ -252,8 +252,6 @@ mod stalker;
 mod strategy;
 mod streaming;
 
-#[cfg(windows)]
-use self::local_files::{same_windows_file_identity, windows_file_identity};
 #[cfg(test)]
 use self::metering::resolve_stream_config_u64;
 #[cfg(test)]

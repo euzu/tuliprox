@@ -1,24 +1,26 @@
+#[cfg(unix)]
 use super::{ensure_recording_worker_running, start_recording_scheduler};
-use crate::recording::{
-    recording_capacity::RecordingCapacityPort,
-    recording_queue::{PersistedRecordingTask, RecordingPartition, RecordingQueue, RecordingTask},
-};
+#[cfg(unix)]
+use crate::recording::recording_capacity::RecordingCapacityPort;
+use crate::recording::recording_queue::{PersistedRecordingTask, RecordingPartition, RecordingQueue, RecordingTask};
+#[cfg(unix)]
+use shared::model::NoopSink;
 use shared::model::{
-    NoopSink, RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState,
-    RecordingVisibility, UserId,
+    RecordingKind, RecordingMetadata, RecordingOwner, RecordingSource, RecordingTaskState, RecordingVisibility, UserId,
 };
+#[cfg(unix)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir;
+#[cfg(unix)]
 use tokio::sync::Notify;
+#[cfg(unix)]
 use tuliprox_core::model::RecordingConfig;
 
 /// A task whose Live window runs from `program_start` for `duration_secs`.

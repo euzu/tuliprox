@@ -405,11 +405,13 @@ pub async fn recovery_decision_for(final_path: &Path, partial: &Path) -> Recover
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::spawn_retrying_busy_executable;
     use super::{
         build_recording_args, classify_ffmpeg_failure, recording_partial_path,
         recording_resume_or_retry_is_unsupported, recording_start_missed_window, recovery_decision_for,
-        redact_url_tokens, remaining_recording_duration_secs, run_recording_with_binary,
-        spawn_retrying_busy_executable, strip_url_tokens, RecordingExecutionResult, RecoveryDecision,
+        redact_url_tokens, remaining_recording_duration_secs, run_recording_with_binary, strip_url_tokens,
+        RecordingExecutionResult, RecoveryDecision,
     };
     use crate::{
         recording::recording_queue::{RecordingControl, RecordingTask, RecordingTaskState},

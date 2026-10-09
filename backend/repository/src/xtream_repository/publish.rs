@@ -1,7 +1,5 @@
-#[cfg(all(not(unix), not(windows)))]
-use super::move_target_file_platform;
 #[cfg(windows)]
-use super::move_target_file_platform;
+use super::{move_target_file_platform, target_publish::TargetFileMoveMode};
 use super::{CategoryEntry, XtreamRefreshLease};
 use shared::error::TuliproxError;
 use std::{
@@ -65,6 +63,7 @@ pub(super) fn sync_published_file_parent(path: &Path) -> io::Result<()> { File::
 /// this barrier therefore means all preceding backup or publication moves
 /// have completed durably without a second raw rename.
 #[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)] // keeps the signature identical across platforms
 pub(super) fn sync_published_file_parent(_path: &Path) -> io::Result<()> { Ok(()) }
 
 /// There is no supported directory durability barrier for other targets.

@@ -115,9 +115,9 @@ impl DiskProbe {
             let ok = unsafe {
                 windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                     self.path.0.as_ptr(),
-                    &mut free_bytes_available,
-                    &mut total_bytes,
-                    &mut total_free_bytes,
+                    &raw mut free_bytes_available,
+                    &raw mut total_bytes,
+                    &raw mut total_free_bytes,
                 )
             };
             if ok == 0 {
@@ -149,6 +149,10 @@ impl DiskPath {
     fn from_path(path: &std::path::Path) -> Option<Self> {
         use std::os::windows::ffi::OsStrExt;
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        // Mirror the Unix `CString` check: an embedded NUL would truncate the path.
+        if wide.contains(&0) {
+            return None;
+        }
         wide.push(0);
         Some(Self(wide))
     }

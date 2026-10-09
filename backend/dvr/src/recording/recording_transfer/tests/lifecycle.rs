@@ -1,16 +1,14 @@
-use super::{
-    app_config_with_listener, counting_ffmpeg, ensure_recording_worker_running, scheduled_task, ConcurrentLiveFixture,
-};
+#[cfg(unix)]
+use super::ConcurrentLiveFixture;
+use super::{app_config_with_listener, counting_ffmpeg, ensure_recording_worker_running, scheduled_task};
 use crate::recording::{
     recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
     recording_queue::RecordingQueue,
 };
 use shared::model::{NoopSink, RecordingKind, RecordingTaskState};
-use std::{
-    path::Path,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::{path::Path, sync::Arc, time::Duration};
 use tuliprox_core::model::RecordingConfig;
 
 #[cfg(unix)]

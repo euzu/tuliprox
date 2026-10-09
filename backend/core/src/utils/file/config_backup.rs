@@ -61,6 +61,8 @@ async fn remove_snapshot(snapshot: &Path) -> io::Result<()> {
     {
         let mut permissions = tokio::fs::metadata(snapshot).await?.permissions();
         if permissions.readonly() {
+            // Windows maps this to clearing FILE_ATTRIBUTE_READONLY; it does not grant world-write.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             tokio::fs::set_permissions(snapshot, permissions).await?;
         }

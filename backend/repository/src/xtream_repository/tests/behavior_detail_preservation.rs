@@ -1,16 +1,14 @@
 use super::{
     behavior::read_live_props, fixed_refresh_paths, make_live_item, merge_preserved_stream_properties,
     needs_update_info_details, preserve_details_input_xtream_playlist_cluster_to_disk,
-    preserve_details_with_injected_operation_failure, refresh_staging_path, write_detail_preservation_fixture,
-    write_single_item, DetailPreservationOperation, PreserveDetailsOutcome,
+    preserve_details_with_injected_operation_failure, write_detail_preservation_fixture, write_single_item,
+    DetailPreservationOperation, PreserveDetailsOutcome,
 };
 use shared::{
     model::{CatchupProperties, LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties},
     utils::Internable,
 };
-use std::path::Path;
 use tempfile::tempdir;
-use uuid::Uuid;
 
 #[test]
 fn keeps_existing_details_when_new_timestamp_is_missing() {
@@ -264,7 +262,12 @@ fn preserve_details_empty_merge_reports_zero_updates() {
 #[cfg(unix)]
 #[test]
 fn refresh_staging_path_preserves_non_utf8_stem() {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use super::refresh_staging_path;
+    use std::{
+        os::unix::ffi::{OsStrExt, OsStringExt},
+        path::Path,
+    };
+    use uuid::Uuid;
 
     let mut input_name = std::ffi::OsString::from_vec(vec![b'l', b'i', b'v', b'e', 0xff]);
     input_name.push(".db");

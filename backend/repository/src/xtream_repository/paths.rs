@@ -120,13 +120,13 @@ pub(super) fn refresh_staging_path(path: &Path, generation: Uuid) -> Result<Path
 }
 
 #[cfg(windows)]
-pub(super) fn encode_windows_path(path: &Path) -> io::Result<Vec<u16>> {
+pub(super) fn encode_windows_path(path: &Path) -> std::io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
 
     let mut encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
     if encoded.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidInput,
             format!("Windows path contains an embedded NUL: {}", path.display()),
         ));
     }

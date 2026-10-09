@@ -111,9 +111,9 @@ use self::input_refresh::{
 };
 #[cfg(windows)]
 use self::paths::encode_windows_path;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use self::paths::refresh_staging_path;
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 use self::publish::publish_staged_file_with_parent_sync;
 #[cfg(all(not(unix), not(windows)))]
 use self::publish::sync_published_file_parent;

@@ -1,11 +1,12 @@
 use super::{
     acquire_result_after_wait, acquire_result_for_control, app_config_with_listener, bare_app_config,
-    continue_after_pause, counting_ffmpeg, download_file, ensure_recording_worker_running, finalize_http_transfer,
-    finish_active_and_promote, http_transfer_path, read_request, recording_deadline_instant,
-    requeue_active_download_for_capacity_wait, scheduled_task, serve_range_fixture, slot_queue,
-    start_recording_scheduler, wait_for_provider_slot, DownloadExecutionResult, ProviderAcquireResult,
-    RecordingNotificationPlan,
+    continue_after_pause, download_file, finalize_http_transfer, finish_active_and_promote, http_transfer_path,
+    read_request, recording_deadline_instant, requeue_active_download_for_capacity_wait, scheduled_task,
+    serve_range_fixture, slot_queue, start_recording_scheduler, wait_for_provider_slot, DownloadExecutionResult,
+    ProviderAcquireResult, RecordingNotificationPlan,
 };
+#[cfg(unix)]
+use super::{counting_ffmpeg, ensure_recording_worker_running};
 use crate::recording::{
     recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
     recording_queue::{RecordingControl, RecordingQueue, RecordingWaitOutcome},
