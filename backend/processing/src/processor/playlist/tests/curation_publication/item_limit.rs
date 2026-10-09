@@ -15,10 +15,14 @@ fn fail_late(server: &DiscoveryServer, failure: &str) {
     match failure {
         "status" => server.reply(MOVIES_2, 503, "sensitive-body-must-not-appear"),
         "wire" => {
-            server.reply(MOVIES_2, 200, r#"{"page":2,"total_pages":2,"total_results":2,"results":[{"id":7},{"id":0}]}"#)
+            server.reply(
+                MOVIES_2,
+                200,
+                r#"{"page":2,"total_pages":2,"total_results":2,"results":[{"id":7},{"id":0}]}"#,
+            );
         }
         "no-progress" => {
-            server.reply(MOVIES_2, 200, r#"{"page":2,"total_pages":2,"total_results":1,"results":[{"id":8}]}"#)
+            server.reply(MOVIES_2, 200, r#"{"page":2,"total_pages":2,"total_results":1,"results":[{"id":8}]}"#);
         }
         "empty" => server.reply(MOVIES_2, 200, r#"{"page":2,"total_pages":2,"total_results":0,"results":[]}"#),
         "body" => server.reply_raw(
@@ -40,7 +44,7 @@ fn fail_late(server: &DiscoveryServer, failure: &str) {
             server.reply_raw(MOVIES_2, response);
         }
         "bytes" => {
-            server.reply(MOVIES_2, 200, &format!("{MOVIE_PAGE_2}{}", " ".repeat(1024 * 1024 + 1 - MOVIE_PAGE_2.len())))
+            server.reply(MOVIES_2, 200, &format!("{MOVIE_PAGE_2}{}", " ".repeat(1024 * 1024 + 1 - MOVIE_PAGE_2.len())));
         }
         "requests" => {
             for p in 1..=33 {

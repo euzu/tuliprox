@@ -1103,7 +1103,10 @@ mod tests {
         require_matching_revision,
     };
     use crate::model::ConfigProvider;
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::{
+        http::{HeaderMap, HeaderValue, StatusCode},
+        response::IntoResponse,
+    };
     use shared::{
         model::{
             ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigDto, ConfigProviderDto, Permission,
@@ -1466,7 +1469,6 @@ mod tests {
             .await
             .expect("save_config_sources must not deadlock");
 
-        use axum::response::IntoResponse;
         assert_eq!(response.into_response().status(), StatusCode::OK);
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_1").await);
         assert!(!tuliprox_repository::target_bouquet_exists(temp_dir.path(), "target_renamed").await);

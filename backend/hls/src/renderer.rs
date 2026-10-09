@@ -107,6 +107,8 @@ impl HlsManifestRenderer {
 
 impl HlsSession {
     pub fn render_and_store_manifest(&mut self, rendered_at_ms: u64) -> Result<RenderedManifest, RenderError> {
+        self.reconcile_startup_eligibility();
+        super::segment_fetcher::recompute_unpublished_live_head(self);
         let rendered = HlsManifestRenderer::render(self, rendered_at_ms)?;
         match self.store_rendered_manifest(rendered.clone()) {
             RenderedManifestStoreOutcome::Stored => Ok(rendered),
@@ -194,6 +196,24 @@ impl HlsSession {
 }
 
 pub fn renderer_candidate_window_proxy_seqs(session: &HlsSession) -> Vec<u64> {
+    if session.startup.is_some() {
+        let Some((head, tail)) =
+            session.publishable_origin_head_proxy_seq.zip(session.publishable_origin_tail_proxy_seq)
+        else {
+            return Vec::new();
+        };
+        return (head..=tail.min(head.saturating_add(super::startup_policy::STARTUP_WINDOW_SUCCESSORS)))
+            .take_while(|seq| {
+                session.segments.get(seq).is_some_and(|entry| {
+                    entry.origin_fetch_ref.is_some()
+                        && !matches!(
+                            entry.status,
+                            SegmentCacheStatus::FailedPermanent { .. } | SegmentCacheStatus::Expired
+                        )
+                })
+            })
+            .collect();
+    }
     for render_gap_segments in 0..=session.render_policy.initial_render_gap_segments {
         if let Some(window) = select_window(session, render_gap_segments, RenderTailPolicy::RequirePlannedTail) {
             return window;
@@ -203,6 +223,10 @@ pub fn renderer_candidate_window_proxy_seqs(session: &HlsSession) -> Vec<u64> {
 }
 
 fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
+    if let Some(startup) = &session.startup {
+        return entry.is_fast_start_eligible()
+            && startup.revisions.get(&entry.proxy_seq).is_some_and(|revision| revision.revision().is_publishable());
+    }
     match entry.status {
         SegmentCacheStatus::Ready { .. } => {}
         SegmentCacheStatus::Queued { .. } | SegmentCacheStatus::Fetching { .. } => {
@@ -226,6 +250,23 @@ fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
 
 fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: RenderTailPolicy) -> Option<Vec<u64>> {
     let head_seq = session.publishable_origin_head_proxy_seq?;
+    if session.startup.is_some() {
+        let planned_tail =
+            session.publishable_origin_tail_proxy_seq?.checked_sub(u64::try_from(render_gap_segments).ok()?)?;
+        let wanted = if session.published_live_origin_baseline.is_none() {
+            MIN_VISIBLE_SEGMENTS
+        } else {
+            TARGET_VISIBLE_SEGMENTS
+        };
+        let mut window = Vec::new();
+        for seq in head_seq..=planned_tail.min(head_seq.saturating_add(u64::try_from(wanted).ok()?.saturating_sub(1))) {
+            if !session.segments.get(&seq).is_some_and(|entry| is_renderable(entry, session)) {
+                break;
+            }
+            window.push(seq);
+        }
+        return (window.len() >= MIN_VISIBLE_SEGMENTS).then_some(window);
+    }
     let requested_tail_seq =
         session.publishable_origin_tail_proxy_seq?.checked_sub(u64::try_from(render_gap_segments).ok()?)?;
     if requested_tail_seq < head_seq {

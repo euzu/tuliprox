@@ -261,10 +261,12 @@ pub struct HlsSession {
     pub origin_refresh: OriginRefreshState,
     pub origin_control: HlsSessionOriginControl,
     pub render_policy: RenderPolicy,
+    pub startup: Option<super::HlsSessionStartup>,
     pub last_rendered_manifest: Option<RenderedManifest>,
     manifest_commit_generation: u64,
     last_normal_manifest_commit_identity: Option<HlsManifestCommitIdentity>,
     pub(crate) published_live_origin_baseline: Option<HlsPublishedLiveOriginBaseline>,
+    pub(crate) missing_head_limit: Option<u64>,
     pub longest_rendered_playlist_duration_ms: u64,
     pub initial_prefetch_gap_segments: usize,
     pub segment_prefetch_queue: SegmentPrefetchQueue,
@@ -332,10 +334,12 @@ impl HlsSession {
             origin_refresh: OriginRefreshState::default(),
             origin_control: HlsSessionOriginControl::default(),
             render_policy: RenderPolicy::default(),
+            startup: None,
             last_rendered_manifest: None,
             manifest_commit_generation: 0,
             last_normal_manifest_commit_identity: None,
             published_live_origin_baseline: None,
+            missing_head_limit: None,
             longest_rendered_playlist_duration_ms: 0,
             initial_prefetch_gap_segments: 0,
             segment_prefetch_queue: SegmentPrefetchQueue::default(),
@@ -811,6 +815,8 @@ impl fmt::Debug for HlsSession {
             .field("last_effective_manifest_host", &self.last_effective_manifest_host)
             .field("origin_refresh", &self.origin_refresh)
             .field("render_policy", &self.render_policy)
+            .field("startup", &self.startup)
+            .field("missing_head_limit", &self.missing_head_limit)
             .field("last_rendered_manifest", &self.last_rendered_manifest)
             .field("manifest_commit_generation", &self.manifest_commit_generation)
             .field("last_normal_manifest_commit_identity", &self.last_normal_manifest_commit_identity)

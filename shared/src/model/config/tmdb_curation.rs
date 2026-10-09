@@ -101,6 +101,25 @@ impl Default for TmdbCurationConfigDto {
     fn default() -> Self { Self { enabled: true, api: TmdbCurationApiConfigDto::default(), trending: Vec::new() } }
 }
 
+impl TmdbCurationConfigDto {
+    pub(super) fn prepare(&mut self, curation_enabled: bool) -> Result<(), TuliproxError> {
+        self.api.access_token = self.api.access_token.trim().to_string();
+        for selector in &mut self.trending {
+            // Even disabled editor drafts must retain a valid acquisition bound.
+            if !is_valid_tmdb_trending_limit(selector.limit) {
+                return Err(TuliproxError::Config("TMDB trending limit must be an integer in 1..=500".to_string()));
+            }
+            prepare_selector_category(
+                &mut selector.category_name,
+                selector.create_xtream_category,
+                curation_enabled && self.enabled,
+                "TMDB trending",
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::model::ConfigTargetDto;
@@ -184,24 +203,5 @@ mod tests {
                 assert!(serde_saphyr::from_str::<ConfigTargetDto>(&document).is_err(), "{fields}");
             }
         }
-    }
-}
-
-impl TmdbCurationConfigDto {
-    pub(super) fn prepare(&mut self, curation_enabled: bool) -> Result<(), TuliproxError> {
-        self.api.access_token = self.api.access_token.trim().to_string();
-        for selector in &mut self.trending {
-            // Even disabled editor drafts must retain a valid acquisition bound.
-            if !is_valid_tmdb_trending_limit(selector.limit) {
-                return Err(TuliproxError::Config("TMDB trending limit must be an integer in 1..=500".to_string()));
-            }
-            prepare_selector_category(
-                &mut selector.category_name,
-                selector.create_xtream_category,
-                curation_enabled && self.enabled,
-                "TMDB trending",
-            )?;
-        }
-        Ok(())
     }
 }

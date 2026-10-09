@@ -20,6 +20,10 @@ pub use tuliprox_core::utils::content_coding::{
 /// In-memory counters for the live HLS cache path.
 #[derive(Debug, Default)]
 pub struct HlsCacheMetrics {
+    revision_disk_bytes: AtomicU64,
+    progressive_replay_bytes: AtomicU64,
+    progressive_active_fills: AtomicU64,
+    deferred_repairs: AtomicU64,
     sessions_created: AtomicU64,
     sessions_reused: AtomicU64,
     lease_granted: AtomicU64,
@@ -56,6 +60,10 @@ pub struct HlsCacheMetrics {
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct HlsCacheMetricsSnapshot {
+    pub revision_disk_bytes: u64,
+    pub progressive_replay_bytes: u64,
+    pub progressive_active_fills: u64,
+    pub deferred_repairs: u64,
     pub sessions_created: u64,
     pub sessions_reused: u64,
     pub lease_granted: u64,
@@ -91,6 +99,12 @@ pub struct HlsCacheMetricsSnapshot {
 }
 
 impl HlsCacheMetrics {
+    pub fn record_progressive_usage(&self, fills: usize, bytes: usize, repairs: usize) {
+        self.progressive_active_fills.store(u64::try_from(fills).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.progressive_replay_bytes.store(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.deferred_repairs.store(u64::try_from(repairs).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+    pub fn record_revision_disk_bytes(&self, bytes: u64) { self.revision_disk_bytes.store(bytes, Ordering::Relaxed); }
     pub fn record_session_created(&self) { increment(&self.sessions_created, 1); }
     pub fn record_session_reused(&self) { increment(&self.sessions_reused, 1); }
     pub fn record_lease_granted(&self) { increment(&self.lease_granted, 1); }
@@ -142,6 +156,10 @@ impl HlsCacheMetrics {
 
     pub fn snapshot(&self) -> HlsCacheMetricsSnapshot {
         HlsCacheMetricsSnapshot {
+            revision_disk_bytes: load(&self.revision_disk_bytes),
+            progressive_replay_bytes: load(&self.progressive_replay_bytes),
+            progressive_active_fills: load(&self.progressive_active_fills),
+            deferred_repairs: load(&self.deferred_repairs),
             sessions_created: load(&self.sessions_created),
             sessions_reused: load(&self.sessions_reused),
             lease_granted: load(&self.lease_granted),

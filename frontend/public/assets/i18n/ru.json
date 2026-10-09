@@ -1,4 +1,5 @@
 {
+  "HLS_STARTUP_MODE_DESCRIPTION": "«Консервативный» сохраняет прежнее поведение запуска. «Первый готовый» ждёт обработанный начальный сегмент. «Прогрессивный» отдаёт необработанный TS и требует подходящих источников; действует для новых сессий.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "Процент дрожания (jitter) при экспоненциальной задержке должен быть от 0 до 95.",
   "COUNTRY": {
     "AD": "Андорра",
@@ -904,6 +905,16 @@
     "WEB_ROOT": "Web-Root: Содержит файлы веб-интерфейса. Они обычно размещаются в той же директории под ./web"
   },
   "LABEL": {
+    "HLS_STARTUP_LIMITS": "Ограничения быстрого старта",
+    "HLS_PROGRESSIVE_SEGMENTS": "Максимум прогрессивных сегментов",
+    "HLS_PROGRESSIVE_BYTES_PER_SEGMENT": "Буферная память на сегмент",
+    "HLS_PROGRESSIVE_BYTES_TOTAL": "Общая буферная память",
+    "HLS_PROGRESSIVE_READER_LIFETIME": "Максимальное время жизни читателя (секунды)",
+    "HLS_DEFERRED_REPAIRS": "Максимум ожидающих задач восстановления",
+    "HLS_STARTUP_MODE": "Режим запуска HLS",
+    "HLS_STARTUP_MODE_CONSERVATIVE": "Консервативный",
+    "HLS_STARTUP_MODE_FIRST_READY": "Первый готовый",
+    "HLS_STARTUP_MODE_PROGRESSIVE": "Прогрессивный",
     "BACK": "Назад",
     "BOUQUETS": "Букеты",
     "ALL_TARGETS": "Все цели",

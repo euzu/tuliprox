@@ -258,7 +258,7 @@ doctor-check: ## Verify the DVR doctor still matches the routes it reports on
 .PHONY: lint
 lint: ## Run clippy linter (Nightly)
 	@echo "==> Running clippy (nightly)"
-	$(CARGO_NIGHTLY) clippy --workspace -- -D warnings
+	$(CARGO_NIGHTLY) clippy --workspace --all-targets -- -D warnings
 
 .PHONY: lint-fix
 lint-fix: ## Automatically fix clippy suggestions (Nightly)

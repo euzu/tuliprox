@@ -257,7 +257,60 @@ impl From<&HlsCorruptSegmentWatchdogConfig> for HlsCorruptSegmentWatchdogConfigD
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct HlsStartupConfig {
+    pub mode: shared::model::HlsStartupMode,
+    pub max_progressive_segments: usize,
+    pub max_progressive_bytes_per_segment: Bytes,
+    pub max_progressive_bytes_per_segment_str: String,
+    pub max_progressive_bytes_total: Bytes,
+    pub max_progressive_bytes_total_str: String,
+    pub max_progressive_reader_lifetime_secs: Secs,
+    pub max_deferred_repairs: usize,
+}
+
+impl From<&shared::model::HlsStartupConfigDto> for HlsStartupConfig {
+    fn from(dto: &shared::model::HlsStartupConfigDto) -> Self {
+        Self {
+            mode: dto.mode,
+            max_progressive_segments: dto.max_progressive_segments,
+            max_progressive_bytes_per_segment: parse_hls_byte_size_or_default(
+                &dto.max_progressive_bytes_per_segment,
+                shared::model::DEFAULT_HLS_PROGRESSIVE_BYTES_PER_SEGMENT,
+            ),
+            max_progressive_bytes_per_segment_str: dto.max_progressive_bytes_per_segment.as_str().to_string(),
+            max_progressive_bytes_total: parse_hls_byte_size_or_default(
+                &dto.max_progressive_bytes_total,
+                shared::model::DEFAULT_HLS_PROGRESSIVE_BYTES_TOTAL,
+            ),
+            max_progressive_bytes_total_str: dto.max_progressive_bytes_total.as_str().to_string(),
+            max_progressive_reader_lifetime_secs: dto.max_progressive_reader_lifetime_secs,
+            max_deferred_repairs: dto.max_deferred_repairs,
+        }
+    }
+}
+
+impl From<&HlsStartupConfig> for shared::model::HlsStartupConfigDto {
+    fn from(config: &HlsStartupConfig) -> Self {
+        Self {
+            mode: config.mode,
+            max_progressive_segments: config.max_progressive_segments,
+            max_progressive_bytes_per_segment: shared::model::ByteSize::new(
+                config.max_progressive_bytes_per_segment_str.clone(),
+            ),
+            max_progressive_bytes_total: shared::model::ByteSize::new(config.max_progressive_bytes_total_str.clone()),
+            max_progressive_reader_lifetime_secs: config.max_progressive_reader_lifetime_secs,
+            max_deferred_repairs: config.max_deferred_repairs,
+        }
+    }
+}
+
+impl Default for HlsStartupConfig {
+    fn default() -> Self { Self::from(&shared::model::HlsStartupConfigDto::default()) }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsCacheConfig {
+    pub startup: HlsStartupConfig,
     pub cache_path: String,
     pub strip: StripConfig,
     pub cache_duration: Secs,
@@ -289,6 +342,7 @@ pub fn default_hls_cache_path() -> String {
 impl From<&HlsCacheConfigDto> for HlsCacheConfig {
     fn from(dto: &HlsCacheConfigDto) -> Self {
         Self {
+            startup: HlsStartupConfig::from(&dto.startup),
             cache_path: dto.cache_path.as_ref().map_or_else(default_hls_cache_path, |path: &String| Clone::clone(path)),
             strip: StripConfig::from(&dto.strip),
             cache_duration: dto.cache_duration,
@@ -312,6 +366,7 @@ impl From<&HlsCacheConfigDto> for HlsCacheConfig {
 impl From<&HlsCacheConfig> for HlsCacheConfigDto {
     fn from(config: &HlsCacheConfig) -> Self {
         Self {
+            startup: shared::model::HlsStartupConfigDto::from(&config.startup),
             cache_path: Some(config.cache_path.clone()),
             strip: shared::model::HlsStripConfigDto::from(&config.strip),
             cache_duration: config.cache_duration,
@@ -399,6 +454,21 @@ mod tests {
         default_hls_cache_path, HlsCacheConfig, HlsManifestRecoveryBurstConfig, HlsSegmentRepairConfig,
         ReverseProxyConfig,
     };
+
+    #[test]
+    fn startup_config_preserves_mode_and_custom_budgets_across_dto_conversion() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut dto: shared::model::HlsCacheConfigDto = serde_json::from_str(
+            r#"{"startup":{"mode":"progressive","max_progressive_segments":3,"max_progressive_bytes_per_segment":"8MB","max_progressive_bytes_total":"24MB","max_progressive_reader_lifetime_secs":40,"max_deferred_repairs":7}}"#,
+        )?;
+        dto.prepare()?;
+        let domain = super::HlsCacheConfig::from(&dto);
+        let restored = shared::model::HlsCacheConfigDto::from(&domain);
+        assert_eq!(restored.startup, dto.startup);
+        assert_eq!(domain.startup.max_progressive_segments, 3);
+        assert_eq!(domain.startup.max_deferred_repairs, 7);
+        Ok(())
+    }
     use shared::model::{
         ByteSize, Bytes, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, Millis,
         QosAggregationConfigDto, ReverseProxyConfigDto, Secs, StreamHistoryConfigDto,
@@ -475,6 +545,7 @@ mod tests {
                 cache_bytes_str: "10GB".to_string(),
                 cache_bytes_per_session: Bytes::new(536_870_912), // 512 * 1024^2 (was 512 * 1e6 under SI decimal before consolidation)
                 cache_bytes_per_session_str: "512MB".to_string(),
+                startup: super::HlsStartupConfig::default(),
                 max_segments_prefetch: 6,
                 max_concurrent_segment_fetches_per_session: 2,
                 max_concurrent_segment_fetches_global: 64,

@@ -1362,6 +1362,7 @@ mod tests {
             terminal_media_preparation: HlsTerminalMediaPreparationState::Failed { key: None },
             reserve,
             manifest_snapshot: HlsLeaseManifestSnapshot {
+                startup_revisions: None,
                 delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
                 source_commit_identity: HlsManifestCommitIdentity::new(1),
                 uri_materialization: None,

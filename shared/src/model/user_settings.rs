@@ -92,7 +92,7 @@ mod tests {
         layout.column_order = vec!["future".into(), "future".into()];
         assert_eq!(layout.validate(true), Err("settings_payload_invalid"));
         assert_eq!(layout.validate(false), Ok(()));
-        layout.column_order = vec!["".into(), "".into()];
+        layout.column_order = vec![String::new(), String::new()];
         assert_eq!(layout.validate(true), Err("settings_payload_invalid"));
         assert_eq!(layout.validate(false), Err("settings_limits_exceeded"));
         layout.column_visibility.clear();

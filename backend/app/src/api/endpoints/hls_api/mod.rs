@@ -14,112 +14,51 @@ use super::{
 use crate::{
     api::{
         api_utils::{
-            connection_priority_for_kind, create_api_proxy_user, create_m3u_catchup_session_key,
-            create_playback_session_fingerprint, create_recording_proxy_user, create_session_fingerprint,
-            force_hls_resource_response, get_headers_from_request, get_hls_session_ttl_secs,
-            get_stream_alternative_url, input_for_user, is_hls_stream_share_enabled, local_stream_response,
-            record_connect_failed_attempt, resolve_playback_request_admission, select_provider_stream_url,
-            try_option_bad_request, try_unwrap_body, ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
+            connection_priority_for_kind, create_playback_session_fingerprint, force_hls_resource_response,
+            get_hls_session_ttl_secs, get_stream_alternative_url, resolve_playback_request_admission,
+            select_provider_stream_url, EvictionReentryGuard,
         },
         model::{
-            hls_cache::initial_strip::{
-                materialize_initial_hls_strip_view, HlsInitialStripOutcome, HlsInitialStripSkipReason,
-            },
-            hls_custom_video_manifest_response_for_access_lease, hls_custom_video_manifest_response_with_virtual_id,
-            hls_provisioning_discontinuity_sequence, hls_virtual_entry_redirect_response,
-            is_custom_video_stream_enabled, start_hls_panel_provisioning_once,
-            try_hls_panel_provisioning_manifest_response, AppState, ConnectionHistoryMode, CustomVideoStreamType,
-            GraceMode, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus, PlaybackLeaseRef, ProviderAllocation,
-            ProviderConfig as RuntimeProviderConfig, ProviderHandle, StreamMeterHandle, TransportStreamBuffer,
-            UserSession,
+            AppState, CustomVideoStreamType, GraceMode, PlaybackLeaseRef, ProviderAllocation,
+            ProviderConfig as RuntimeProviderConfig, ProviderHandle, UserSession,
         },
-        panel_api::can_provision_on_exhausted,
     },
     auth::{check_network_access_only, Fingerprint},
-    model::{
-        ConfigInput, ConfigInputFlags, ConfigProvider, ConfigTarget, InputSource, PlaybackKind, ProxyUserCredentials,
-        ReverseProxyDisabledHeaderConfig,
-    },
-    processing::parser::hls::{
-        get_hls_session_token_and_url_from_token, origin_manifest::HlsManifestWindowPolicy, rewrite_hls,
-        RewriteHlsProps,
-    },
-    repository::{
-        load_input_live_bitrate_bps, m3u_get_item_for_stream_id, persist_input_live_bitrate_bps, storage_const,
-        xtream_get_item_for_stream_id, LiveBitratePersistenceOutcome,
-    },
-    utils::{content_coding::OutboundContentCodingPolicy, debug_if_enabled, request, request::is_file_url},
+    model::{ConfigInput, ConfigProvider, ConfigTarget, PlaybackKind, ProxyUserCredentials},
+    processing::parser::hls::origin_manifest::HlsManifestWindowPolicy,
+    repository::{load_input_live_bitrate_bps, m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
+    utils::debug_if_enabled,
 };
 use axum::{
-    body::Body,
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
-use futures::FutureExt;
-use log::{debug, error, warn};
+use log::{debug, warn};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use shared::{
-    defaults::HLS_EXT,
     model::{
-        ConnectFailureReason, FailureStage, InputType, PlaylistEntry, PlaylistItemType, StreamChannel, StreamInfo,
-        StreamProperties, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
+        ConnectFailureReason, InputType, PlaylistEntry, PlaylistItemType, StreamChannel, StreamProperties, TargetType,
+        UserConnectionPermission, XtreamCluster,
     },
-    utils::{
-        generate_random_string, is_m3u_catchup_session_token, replace_url_extension, sanitize_sensitive_info,
-        Internable, PROVIDER_SCHEME_PREFIX,
-    },
+    utils::{is_m3u_catchup_session_token, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX},
 };
-use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tuliprox_core::utils::current_time_millis;
 use tuliprox_hls::{
     api::{
         begin_hls_origin_account_io_bounded, build_hls_origin_session_owner, build_proxy_session_id,
-        cold_start_retry_after_seconds, commit_hls_runtime_custom_tail, derive_hls_lease_manifest_snapshot,
-        extract_hls_provider_session_headers, fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
-        fetch_hls_transient_origin_response_with_attempt_prepare, finite_hls_terminal_key_response,
-        force_identity_without_range, hls_cached_manifest_options_for_requirement,
-        hls_committed_manifest_body_for_request, hls_manifest_acceptance_directive_for_session,
-        hls_manifest_commit_requirement, hls_object_body_deadline, hls_origin_account_status,
-        hls_should_wait_for_initial_manifest_commit, hls_startup_admission_allows_snapshot,
-        hls_transient_object_fetch_failure, hls_transient_origin_response, is_hls_provisioning_gap_segment,
-        is_hls_provisioning_segment, maybe_trigger_origin_refresh_with_outcome, new_hls_access_lease_id,
-        origin_account_binding_from_allocation, record_successful_transient_segment_fetch,
-        record_temporary_transient_segment_fetch_failure, register_hls_availability_reevaluation,
-        resolve_hls_transient_object_cache_action, safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key,
-        safe_user_session_token, scrub_hls_origin_headers, serve_hls_map_cache_outcome,
-        serve_hls_segment_cache_outcome, serve_hls_transient_object_cache_outcome,
-        serve_hls_transient_object_cache_response, should_remove_hls_origin_header, trigger_origin_refresh_sync,
-        validate_hls_access_lease, CacheAccessState, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLease,
-        HlsAccessLeaseActivation, HlsAccessLeaseId, HlsAccessLeasePendingDeadline, HlsAccessLeaseState,
-        HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsAccessLeaseValidationError, HlsAccountBindingProtection,
-        HlsAccountOverlapTiming, HlsAvailabilityReevaluationObservation, HlsAvailabilityReevaluationRegistration,
-        HlsBandwidthPersistenceOutcome, HlsBoundAccountAcquireErrorKind, HlsCacheResponseContext,
-        HlsCachedManifestOptions, HlsCommittedManifestBody, HlsEffectiveOriginAcquirePolicy, HlsLeaseManifestSnapshot,
-        HlsLeaseManifestSnapshotInput, HlsLeaseManifestUriMaterialization, HlsLeasePlaybackMode,
-        HlsLeaseStartupAdmissionState, HlsLogIdentity, HlsManifestAcceptanceDirective,
-        HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitIdentity, HlsManifestCommitRequirement,
-        HlsManifestLimitViolation, HlsMapFile, HlsMasterBandwidth, HlsMasterBandwidthSelection,
-        HlsMediaActivityCommitOutcome, HlsMediaActivityMarker, HlsMediaLeaseIdentity, HlsOriginAccountBinding,
-        HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext,
-        HlsOriginRefreshTriggerOutcome, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginSource,
-        HlsOriginSourceKind, HlsOriginWorkClass, HlsPlaybackFamilyKey, HlsPostRefreshRuntime,
-        HlsPublishedTransientResourceIds, HlsQosMeterInit, HlsQosRuntimeConfig, HlsResourceFetchAttempt,
-        HlsResourceServeFailure, HlsResourceServeOutcome, HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason,
-        HlsRuntimeCustomTailRequest, HlsSegmentFile, HlsSession, HlsSessionHandle, HlsSessionKey, HlsSessionMode,
-        HlsSessionStoreOutcome, HlsSingleVariantMasterPlaylist, HlsTerminalFailedClosedReason, HlsTerminalSegmentPath,
-        HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
-        HlsTransientManifestTemplate, HlsTransientObjectCacheAction, HlsTransientObjectFetchFailure,
-        HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest, HlsTransientOriginFetchRequest,
-        HlsTransientOriginIoGuard, HlsTransientResourceLeaseContext, LiveHlsOriginEntry, OriginRefreshRequest,
-        OriginSegmentKey, ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
-        SegmentEntry, SegmentFetchContext, SegmentFetchPolicy, TransientManifestGeneration, TransientObjectFetchToken,
-        TransientObjectUnavailableState, TransientPassthroughState, TransientResourceFile, TransientResourceId,
-        TransientResourceKind, TransientResourceRef, HLS_ACCESS_LEASE_ID_PLACEHOLDER,
-        HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS,
-        HLS_PROVISIONING_TARGET_DURATION_SECS, MAX_HLS_MANIFEST_BYTES,
+        cold_start_retry_after_seconds, hls_object_body_deadline, hls_origin_account_status, new_hls_access_lease_id,
+        origin_account_binding_from_allocation, safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key,
+        safe_user_session_token, HlsAccessContext, HlsAccessLease, HlsAccessLeaseState, HlsAccountBindingProtection,
+        HlsEffectiveOriginAcquirePolicy, HlsLogIdentity, HlsManifestCommitIdentity, HlsMasterBandwidth,
+        HlsMasterBandwidthSelection, HlsMediaLeaseIdentity, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
+        HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginSource,
+        HlsOriginSourceKind, HlsOriginWorkClass, HlsPlaybackFamilyKey, HlsPublishedTransientResourceIds,
+        HlsSegmentFile, HlsSessionHandle, HlsSessionMode, HlsSingleVariantMasterPlaylist, HlsTransientManifestTemplate,
+        HlsTransientOriginIoGuard, ProxySessionId, SegmentCacheStatus, TransientManifestGeneration,
+        TransientResourceFile,
     },
-    HlsCtx, MAX_MANUAL_REDIRECTS,
+    HlsCtx,
 };
 use url::Url;
 

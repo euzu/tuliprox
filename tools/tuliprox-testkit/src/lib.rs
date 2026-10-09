@@ -9,6 +9,7 @@ pub mod discovery;
 pub mod faults;
 pub mod frame;
 pub mod hls;
+pub mod hls_probe;
 pub mod observation;
 pub mod oracle;
 pub mod origin_events;

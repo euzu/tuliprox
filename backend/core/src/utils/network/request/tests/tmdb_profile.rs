@@ -96,13 +96,14 @@ async fn tmdb_profile_connect_timeout_covers_a_hanging_proxy_tunnel() {
 }
 
 #[test]
+
 fn tmdb_profile_construction_errors_are_not_unconfigured_fallbacks() {
     for proxy in ["not a url", "file:///tmp/proxy", "http://[invalid"] {
         let cfg = make_test_app_config(Config {
             proxy: Some(ProxyConfig { url: proxy.into(), username: None, password: None }),
             ..Config::default()
         });
-        let error = create_tmdb_client(&cfg).err().expect("malformed proxy must fail closed");
+        let error = create_tmdb_client(&cfg).expect_err("malformed proxy must fail closed");
         assert!(!error.to_string().contains(proxy));
     }
     let cfg = make_test_app_config(Config::default());

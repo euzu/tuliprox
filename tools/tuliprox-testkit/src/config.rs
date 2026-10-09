@@ -197,6 +197,8 @@ pub struct OriginConfig {
     pub account_limit: Option<usize>,
     #[serde(default)]
     pub limit_mode: Option<crate::origin_transport::OriginLimitMode>,
+    #[serde(default)]
+    pub hls_profile: Option<crate::hls_probe::HlsOriginProfile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,10 +240,12 @@ pub enum PlaybackEndpoint {
 pub struct FixtureStreamOptions {
     pub share_live_hls: bool,
     pub share_live_mpeg_ts: bool,
+    #[serde(default)]
+    pub hls_startup_mode: Option<crate::hls_probe::StartupMode>,
 }
 
 impl Default for FixtureStreamOptions {
-    fn default() -> Self { Self { share_live_hls: true, share_live_mpeg_ts: true } }
+    fn default() -> Self { Self { share_live_hls: true, share_live_mpeg_ts: true, hls_startup_mode: None } }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -499,6 +503,9 @@ impl Scenario {
         }
         if let Some(contract) = &self.policy_contract {
             validate_provider_pool_contract(contract)?;
+        }
+        if let Some(profile) = self.origin.as_ref().and_then(|origin| origin.hls_profile.as_ref()) {
+            profile.validate()?;
         }
         let actor_ids = self.actors.iter().map(|actor| actor.id.as_str()).collect::<HashSet<_>>();
         if actor_ids.len() != self.actors.len() || actor_ids.iter().any(|id| id.is_empty()) {
@@ -982,7 +989,7 @@ steps:
     }
 
     #[test]
-    fn stalker_fixture_validation_rejects_unknown_presets_and_markers() -> Result<(), TestkitError> {
+    fn stalker_fixture_validation_rejects_unknown_presets_and_markers() {
         let mut scenario = Scenario {
             schema_version: 1,
             name: "stalker".to_owned(),
@@ -1027,7 +1034,6 @@ steps:
         scenario.tuliprox.stalker.refuse_create_link_markers.clear();
         scenario.tuliprox.stalker.refuse_create_link_once = true;
         assert!(scenario.validate().is_err(), "portal refusals require a stalker input");
-        Ok(())
     }
 
     #[test]

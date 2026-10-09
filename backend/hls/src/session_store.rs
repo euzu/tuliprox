@@ -174,13 +174,25 @@ impl HlsSessionStore {
         reverse_proxy_rewrite_secret: &[u8],
         now_ms: u64,
     ) -> (HlsSessionHandle, HlsSessionStoreOutcome) {
+        self.get_or_create_session_with_startup(key, origin_source, reverse_proxy_rewrite_secret, now_ms, None).await
+    }
+
+    pub async fn get_or_create_session_with_startup(
+        &self,
+        key: HlsSessionKey,
+        origin_source: HlsOriginSource,
+        reverse_proxy_rewrite_secret: &[u8],
+        now_ms: u64,
+        startup: Option<super::HlsSessionStartup>,
+    ) -> (HlsSessionHandle, HlsSessionStoreOutcome) {
         let mut indexes = self.indexes.write().await;
         if let Some(session) = indexes.by_key.get(&key) {
             return (Arc::clone(session), HlsSessionStoreOutcome::Reused);
         }
 
-        let session =
+        let mut session =
             HlsSession::new_with_origin_source(key.clone(), origin_source, reverse_proxy_rewrite_secret, now_ms);
+        session.startup = startup;
         let proxy_session_id = session.proxy_session_id.clone();
         let session = Arc::new(RwLock::new(session));
         let _incarnation = self.register_session_incarnation(&session);

@@ -1,4 +1,5 @@
 {
+  "HLS_STARTUP_MODE_DESCRIPTION": "Conservative keeps the existing startup behavior. First ready waits for a processed start segment. Progressive delivers raw TS and requires suitable sources; it takes effect for new sessions.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "Backoff jitter percent must be between 0 and 95.",
   "COUNTRY": {
     "AD": "Andorra",
@@ -904,6 +905,16 @@
     "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web"
   },
   "LABEL": {
+    "HLS_STARTUP_LIMITS": "Fast start limits",
+    "HLS_PROGRESSIVE_SEGMENTS": "Maximum progressive segments",
+    "HLS_PROGRESSIVE_BYTES_PER_SEGMENT": "Replay memory per segment",
+    "HLS_PROGRESSIVE_BYTES_TOTAL": "Total replay memory",
+    "HLS_PROGRESSIVE_READER_LIFETIME": "Maximum reader lifetime (seconds)",
+    "HLS_DEFERRED_REPAIRS": "Maximum pending repair jobs",
+    "HLS_STARTUP_MODE": "HLS startup mode",
+    "HLS_STARTUP_MODE_CONSERVATIVE": "Conservative",
+    "HLS_STARTUP_MODE_FIRST_READY": "First ready",
+    "HLS_STARTUP_MODE_PROGRESSIVE": "Progressive",
     "ALL_TARGETS": "All targets",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Accept Insecure SSL Certificates",
     "ACTIVE": "Active",

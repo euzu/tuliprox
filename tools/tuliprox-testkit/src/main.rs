@@ -119,6 +119,9 @@ enum Command {
         /// Publish these catalog markers as HLS instead of MPEG-TS.
         #[arg(long, value_delimiter = ',')]
         hls_markers: Vec<u32>,
+        /// JSON HLS fault/timing profile; omitted preserves the legacy origin.
+        #[arg(long)]
+        hls_profile: Option<String>,
         #[arg(long)]
         account_limit: Option<usize>,
         #[arg(long, default_value = "observe_only")]
@@ -142,6 +145,23 @@ enum Command {
         agent_listen: SocketAddr,
         #[arg(long)]
         run_id: Option<String>,
+    },
+    /// Measure first HLS bytes and verify retry/range identity or a terminal body error.
+    HlsProbe {
+        #[arg(long)]
+        url: String,
+        #[arg(long, default_value = "local-run")]
+        run_id: String,
+        #[arg(long, default_value_t = 17)]
+        expected_marker: u32,
+        #[arg(long)]
+        verify_revision: bool,
+        #[arg(long)]
+        expect_body_error: bool,
+        #[arg(long)]
+        max_first_byte_millis: Option<u64>,
+        #[arg(long)]
+        min_prefix_to_eof_millis: Option<u64>,
     },
     /// Read and validate one framed playback URL; useful on a remote listener host.
     Agent {
@@ -168,6 +188,7 @@ struct OriginState {
     bitrate: u32,
     markers: Arc<Vec<u32>>,
     hls_markers: Arc<HashSet<u32>>,
+    hls_profile: Option<Arc<tuliprox_testkit::hls_probe::HlsOriginProfile>>,
     stream_counter: Arc<Mutex<u64>>,
     observations: Arc<Mutex<Vec<OriginObservation>>>,
     faults: Arc<Mutex<FaultSchedule>>,
@@ -296,6 +317,19 @@ async fn main() -> ExitCode {
     }
 }
 
+fn parse_hls_profile(
+    value: Option<&str>,
+) -> Result<Option<Arc<tuliprox_testkit::hls_probe::HlsOriginProfile>>, TestkitError> {
+    value
+        .map(|value| {
+            let profile: tuliprox_testkit::hls_probe::HlsOriginProfile =
+                serde_json::from_str(value).map_err(|error| TestkitError::Configuration(error.to_string()))?;
+            profile.validate()?;
+            Ok(Arc::new(profile))
+        })
+        .transpose()
+}
+
 async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
     match cli.command {
         Command::Origin {
@@ -305,6 +339,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
             bitrate,
             mut markers,
             hls_markers,
+            hls_profile,
             account_limit,
             limit_mode,
             stalker_refuse_create_link_once,
@@ -316,6 +351,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
             if markers.is_empty() {
                 return Err(TestkitError::Configuration("origin requires at least one channel marker".to_owned()));
             }
+            let hls_profile = parse_hls_profile(hls_profile.as_deref())?;
             let mode = match limit_mode.as_str() {
                 "reject_new" => OriginLimitMode::RejectNew,
                 "evict_oldest" => OriginLimitMode::EvictOldest,
@@ -331,6 +367,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                     bitrate,
                     markers: Arc::new(markers),
                     hls_markers: Arc::new(hls_markers.into_iter().collect()),
+                    hls_profile,
                     stream_counter: Arc::new(Mutex::new(0)),
                     observations: Arc::new(Mutex::new(Vec::new())),
                     faults: Arc::new(Mutex::new(FaultSchedule::default())),
@@ -344,6 +381,29 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                 },
             )
             .await
+        }
+        Command::HlsProbe {
+            url,
+            run_id,
+            expected_marker,
+            verify_revision,
+            expect_body_error,
+            max_first_byte_millis,
+            min_prefix_to_eof_millis,
+        } => {
+            let options = tuliprox_testkit::hls_probe::ProbeOptions {
+                verify_revision,
+                expect_body_error,
+                max_first_byte_millis,
+                min_prefix_to_eof_millis,
+            };
+            let result =
+                tuliprox_testkit::hls_probe::probe(&url, &RunId::new(run_id), expected_marker, &options).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|error| TestkitError::Protocol(error.to_string()))?
+            );
+            Ok(RunExit::Passed)
         }
         Command::Agent { url, expected_marker, frames, hls, controller, agent_id, run_id } => {
             if let Some(controller) = controller {
@@ -1138,10 +1198,20 @@ async fn hls(
             let encoded = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
             format!("&token={encoded}")
         });
-        let playlist = format!(
+        let playlist = if let Some(profile) = &state.hls_profile {
+            let first = sequence.saturating_sub(1) / 10;
+            let mut playlist =
+                format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+            for seq in first..first + u64::from(profile.window_segments) {
+                let _ = writeln!(playlist, "#EXTINF:4.0,\n{seq}.ts?run={}{account_query}", state.run_id.0);
+            }
+            playlist
+        } else {
+            format!(
             "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXTINF:1.0,\n{first}.ts?run={}{account_query}\n#EXTINF:1.0,\n{}.ts?run={}{account_query}\n",
             state.run_id.0, *sequence, state.run_id.0
-        );
+        )
+        };
         return hls_guarded_response(
             Bytes::from(playlist),
             "application/vnd.apple.mpegurl",
@@ -1155,6 +1225,15 @@ async fn hls(
     let Some(sequence) = segment else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if let Some(profile) = &state.hls_profile {
+        if sequence < u64::from(profile.missing_head_segments) {
+            let status = if sequence.is_multiple_of(2) { StatusCode::NOT_FOUND } else { StatusCode::GONE };
+            let mut response = hls_guarded_response(Bytes::new(), "video/mp2t", conn_id, req_id, &state.tracker).await;
+            *response.status_mut() = status;
+            return response;
+        }
+        return profiled_hls_response(&state, profile, marker, sequence, conn_id, req_id).await;
+    }
     let frame =
         Frame::synthetic(&state.run_id, &OriginStreamId::new(format!("hls-presentation-{marker}")), marker, sequence);
     let mut encoded = BytesMut::new();
@@ -1162,6 +1241,47 @@ async fn hls(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     hls_guarded_response(encoded.freeze(), "video/mp2t", conn_id, req_id, &state.tracker).await
+}
+
+async fn profiled_hls_response(
+    state: &OriginState,
+    profile: &tuliprox_testkit::hls_probe::HlsOriginProfile,
+    marker: u32,
+    sequence: u64,
+    conn_id: u64,
+    req_id: u64,
+) -> Response {
+    let Ok(parts) = tuliprox_testkit::hls_probe::segment_parts(&state.run_id, marker, sequence) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let length = (parts.0.len() + parts.1.len()) as u64;
+    let _evict_rx =
+        state.tracker.on_body_started(conn_id, req_id, if profile.unknown_length { None } else { Some(length) }).await;
+    let bytes_emitted = Arc::new(AtomicU64::new(0));
+    let guard = Arc::new(BodyDropGuard {
+        conn_id,
+        req_id,
+        tracker: state.tracker.clone(),
+        bytes_emitted: Arc::clone(&bytes_emitted),
+        start_time: Instant::now(),
+        closed: Arc::new(AtomicBool::new(false)),
+        evicted: Arc::new(AtomicBool::new(false)),
+    });
+    let stream = tuliprox_testkit::hls_probe::segment_stream(parts, profile, sequence).map(move |item| {
+        let _keep_guard = &guard;
+        if let Ok(chunk) = &item {
+            bytes_emitted.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        }
+        item
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp2t"));
+    if !profile.unknown_length {
+        if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
+    }
+    response
 }
 
 async fn vod(
@@ -3475,14 +3595,14 @@ mod tests {
         ]);
         let mut seen = HashSet::new();
         let session_id = observe_new_stream_session(&streams, "alice", &mut seen);
-        assert_eq!(session_id, Some((123_u64 << 32) | 17));
+        assert_eq!(session_id, Some((123_u64 << 32) | 0x11));
         let history = serde_json::json!({"items": [
-            {"session_id": (123_u64 << 32) | 18, "disconnect_reason": "client_kicked"},
-            {"session_id": (123_u64 << 32) | 17, "disconnect_reason": "client_closed"}
+            {"session_id": (123_u64 << 32) | 0x12, "disconnect_reason": "client_kicked"},
+            {"session_id": (123_u64 << 32) | 0x11, "disconnect_reason": "client_closed"}
         ]});
         assert!(!history_confirms_kick(&history, session_id.unwrap_or_default()));
         let kicked = serde_json::json!({"items": [
-            {"session_id": (123_u64 << 32) | 17, "disconnect_reason": "client_kicked"}
+            {"session_id": (123_u64 << 32) | 0x11, "disconnect_reason": "client_kicked"}
         ]});
         assert!(history_confirms_kick(&kicked, session_id.unwrap_or_default()));
     }
@@ -3536,6 +3656,7 @@ mod tests {
             bitrate: 64_000,
             markers: Arc::new(vec![17]),
             hls_markers: Arc::new(HashSet::new()),
+            hls_profile: None,
             stream_counter: Arc::new(Mutex::new(4)),
             observations: Arc::new(Mutex::new(Vec::new())),
             faults: Arc::new(Mutex::new(FaultSchedule::default())),

@@ -143,9 +143,9 @@ pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
         let ok = unsafe {
             windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                &mut free_bytes_available,
-                &mut total_bytes,
-                &mut total_free_bytes,
+                &raw mut free_bytes_available,
+                &raw mut total_bytes,
+                &raw mut total_free_bytes,
             )
         };
         if ok == 0 {
@@ -197,9 +197,9 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
         let ok = unsafe {
             windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                &mut free_bytes_available,
-                &mut total_bytes,
-                &mut total_free_bytes,
+                &raw mut free_bytes_available,
+                &raw mut total_bytes,
+                &raw mut total_free_bytes,
             )
         };
         if ok == 0 {

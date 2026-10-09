@@ -1221,14 +1221,14 @@ mod tests {
         let mut edits = Vec::new();
         plan_scalar_field_edits(fixture, &doc, &Arc::from("provider"), &before, &expected, &mut edits).expect("plan");
 
-        let patched = edits_to_text(fixture, edits);
+        let patched_text = edits_to_text(fixture, edits);
         for line in fixture.lines() {
-            assert!(patched.contains(line), "line lost after patch: {line}");
+            assert!(patched_text.contains(line), "line lost after patch: {line}");
         }
-        assert!(patched.contains("exp_date: 1700000000"));
+        assert!(patched_text.contains("exp_date: 1700000000"));
         // The exact bug signature: `pass\n    exp_date: ...` glued with no separator.
         assert!(
-            !patched.contains("pass1700000000") && !patched.contains("pass exp_date"),
+            !patched_text.contains("pass1700000000") && !patched_text.contains("pass exp_date"),
             "next line must not be glued to the inserted value"
         );
     }
@@ -1261,9 +1261,9 @@ mod tests {
             .expect("plan");
 
         assert_eq!(edits.len(), 1, "exactly one replacement edit, no insertion");
-        let patched = edits_to_text(fixture, edits);
-        assert!(patched.contains("enabled: false"));
-        assert_eq!(patched.matches("enabled:").count(), 1, "no duplicate `enabled:` key");
+        let patched_text = edits_to_text(fixture, edits);
+        assert!(patched_text.contains("enabled: false"));
+        assert_eq!(patched_text.matches("enabled:").count(), 1, "no duplicate `enabled:` key");
     }
 
     #[test]
@@ -1291,9 +1291,9 @@ mod tests {
         plan_scalar_field_edits(fixture, &doc, &Arc::from("provider"), &before, &expected, &mut edits).expect("plan");
 
         assert!(find_edit(&edits, "credits").is_some(), "credits edit planned");
-        let patched = edits_to_text(fixture, edits);
+        let patched_text = edits_to_text(fixture, edits);
         let reparsed: crate::config_loader::source_patch::SourcePatchDocument =
-            serde_saphyr::from_str(&patched).expect("reparse");
+            serde_saphyr::from_str(&patched_text).expect("reparse");
         let panel = reparsed.inputs[0].value.panel_api.as_ref().expect("panel");
         assert_eq!(panel.value.credits.as_ref().expect("credits").value, "42");
     }
@@ -1307,12 +1307,12 @@ mod tests {
         let anchor = span_byte_range(&input.name).expect("name span");
 
         let edit = build_field_insertion_edit(fixture, &anchor, "enabled", "false").expect("build edit");
-        let patched = edits_to_text(fixture, vec![edit]);
+        let patched_text = edits_to_text(fixture, vec![edit]);
         let reparsed: crate::config_loader::source_patch::SourcePatchDocument =
-            serde_saphyr::from_str(&patched).expect("reparse");
+            serde_saphyr::from_str(&patched_text).expect("reparse");
 
         assert!(!reparsed.inputs[0].value.enabled.as_ref().expect("enabled").value);
-        assert!(patched.contains("name: provider, enabled: false"));
+        assert!(patched_text.contains("name: provider, enabled: false"));
     }
 
     // -----------------------------------------------------------------------
@@ -1490,8 +1490,8 @@ sources: []
                             },
                         ];
                         assert!(execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
-                        let patched = std::fs::read_to_string(&source_path).expect("read patched");
-                        let mut parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
+                        let patched_text = std::fs::read_to_string(&source_path).expect("read patched_text");
+                        let mut parsed: SourcesConfigDto = serde_saphyr::from_str(&patched_text).expect("reparse");
                         let input = &parsed.inputs[0];
                         assert_eq!(input.username.as_deref(), Some("renewed-root"));
                         assert_eq!(input.exp_date, Some(4_102_444_900));
@@ -1504,15 +1504,15 @@ sources: []
                             ["added", "current"]
                         );
                         assert_eq!(aliases[1].password.as_deref(), Some("pass # with: {}, commas"));
-                        assert!(patched.contains("# - {name: commented-old, url: provider://example}"));
+                        assert!(patched_text.contains("# - {name: commented-old, url: provider://example}"));
                         let panel_start = fixture.find("  # keep panel settings").expect("panel");
-                        assert!(patched.ends_with(&fixture[panel_start..]));
+                        assert!(patched_text.ends_with(&fixture[panel_start..]));
                         let current_prefix = if style == "block" { "- name: current" } else { "- {name: current" };
-                        assert!(patched.contains(current_prefix));
+                        assert!(patched_text.contains(current_prefix));
                         // The initial sort makes the older entry the last item. In
                         // mixed lists its block style is the insertion convention.
                         let added_prefix = if style == "flow" { "- {name: added" } else { "- name: added" };
-                        assert!(patched.contains(added_prefix));
+                        assert!(patched_text.contains(added_prefix));
                         assert!(std::fs::read_dir(&backup_dir).expect("backups").any(|entry| {
                             let path = entry.expect("backup entry").path();
                             std::fs::read(path).is_ok_and(|bytes| bytes == fixture.as_bytes())
@@ -1628,8 +1628,8 @@ sources: []
             let written = execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch");
             assert!(written, "patch should report a write happened");
 
-            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read patched");
-            assert!(patched_text.contains("exp_date: 1700000000"), "patched file must contain inserted exp_date");
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read patched_text");
+            assert!(patched_text.contains("exp_date: 1700000000"), "patched_text file must contain inserted exp_date");
             for line in FIXTURE.lines() {
                 assert!(patched_text.contains(line), "line lost after patch: {line}");
             }
@@ -1673,8 +1673,8 @@ sources: []
             ];
 
             assert!(execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
-            let patched = tokio::fs::read_to_string(&source_path).await.expect("read patched");
-            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read patched_text");
+            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched_text).expect("reparse");
             assert_eq!(parsed.inputs[0].exp_date, Some(1_700_000_000));
             assert_eq!(parsed.inputs[0].aliases.as_ref().expect("aliases")[0].exp_date, Some(1_800_000_000));
 
@@ -1840,10 +1840,10 @@ sources: []
             ];
 
             assert!(execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
-            let patched = tokio::fs::read_to_string(&source_path).await.expect("read");
-            assert!(patched.find("name: new").expect("new") < patched.find("name: old").expect("old"));
-            assert_eq!(patched.matches("# old account").count(), 1);
-            assert!(patched.contains("\r\n"));
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read");
+            assert!(patched_text.find("name: new").expect("new") < patched_text.find("name: old").expect("old"));
+            assert_eq!(patched_text.matches("# old account").count(), 1);
+            assert!(patched_text.contains("\r\n"));
 
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1887,8 +1887,8 @@ sources: []
             }];
 
             assert!(execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
-            let patched = tokio::fs::read_to_string(&source_path).await.expect("read");
-            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read");
+            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched_text).expect("reparse");
 
             assert_eq!(parsed.inputs.len(), 2);
             assert!(parsed.inputs[0].panel_api.is_some());
@@ -1896,8 +1896,8 @@ sources: []
             assert_eq!(aliases.len(), 1);
             assert_eq!(aliases[0].name.as_ref(), "provider-new");
             assert_eq!(parsed.inputs[1].name.as_ref(), "next");
-            assert!(patched.contains("    aliases:\n      - name: provider-new"));
-            assert!(patched.contains("        remove_expired: true"));
+            assert!(patched_text.contains("    aliases:\n      - name: provider-new"));
+            assert!(patched_text.contains("        remove_expired: true"));
 
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1937,10 +1937,12 @@ sources: []
             ];
 
             assert!(execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
-            let patched = tokio::fs::read_to_string(&source_path).await.expect("read");
-            assert!(patched.find("name: first").expect("first") < patched.find("name: second").expect("second"));
-            assert!(patched.contains("exp_date: 300"));
-            assert!(patched.contains("max_connections: 1"));
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read");
+            assert!(
+                patched_text.find("name: first").expect("first") < patched_text.find("name: second").expect("second")
+            );
+            assert!(patched_text.contains("exp_date: 300"));
+            assert!(patched_text.contains("max_connections: 1"));
 
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1967,9 +1969,9 @@ sources: []
             let patches = [SourcesYmlPatch::RemoveExpiredAliases { input_name: Arc::from("provider") }];
 
             assert!(execute_fixture_patches(&app_cfg, &source_path, &patches).await.expect("patch"));
-            let patched = tokio::fs::read_to_string(&source_path).await.expect("read");
-            assert!(!patched.contains("name: expired"));
-            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched).expect("reparse");
+            let patched_text = tokio::fs::read_to_string(&source_path).await.expect("read");
+            assert!(!patched_text.contains("name: expired"));
+            let parsed: SourcesConfigDto = serde_saphyr::from_str(&patched_text).expect("reparse");
             assert!(parsed.inputs[0].aliases.as_ref().is_none_or(Vec::is_empty));
 
             let _ = std::fs::remove_dir_all(&dir);

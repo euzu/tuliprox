@@ -28,8 +28,10 @@ mod tests {
         let mut app_cfg = AppConfigDto::default();
         assert!(!app_cfg.is_recording_enabled());
 
-        let mut video = VideoConfigDto::default();
-        video.recording = Some(RecordingConfigDto { enabled: true, ..Default::default() });
+        let video = VideoConfigDto {
+            recording: Some(RecordingConfigDto { enabled: true, ..Default::default() }),
+            ..Default::default()
+        };
         app_cfg.config.video = Some(video);
         assert!(app_cfg.is_recording_enabled());
     }

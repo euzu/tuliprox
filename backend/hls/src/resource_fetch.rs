@@ -155,6 +155,7 @@ pub enum HlsOriginResourceFetchError {
     InvalidOriginUrl,
     InvalidByteRange,
     UnexpectedByteRangeStatus,
+    UnsupportedStartupMedia,
     ContentCoding(HlsContentCodingFailure),
     ContentDecoding(HlsContentDecodingFailure),
     CacheObjectLimit {
@@ -327,6 +328,7 @@ impl HlsOriginResourceFetchError {
                 | Self::InvalidOriginUrl
                 | Self::InvalidByteRange
                 | Self::UnexpectedByteRangeStatus
+                | Self::UnsupportedStartupMedia
                 | Self::ContentCoding(_)
                 | Self::CacheObjectLimit { .. }
         )
@@ -340,6 +342,7 @@ impl HlsOriginResourceFetchError {
             Self::Transport(_) | Self::InvalidOriginUrl | Self::InvalidByteRange | Self::UnexpectedByteRangeStatus => {
                 HlsResourceFetchLogStatus::TransportError
             }
+            Self::UnsupportedStartupMedia => HlsResourceFetchLogStatus::UnsupportedStartupMedia,
             Self::Redirect => HlsResourceFetchLogStatus::RedirectError,
             Self::Timeout => HlsResourceFetchLogStatus::Timeout,
             Self::Superseded => HlsResourceFetchLogStatus::Superseded,
@@ -364,6 +367,7 @@ impl HlsOriginResourceFetchError {
             | Self::InvalidOriginUrl
             | Self::InvalidByteRange
             | Self::UnexpectedByteRangeStatus
+            | Self::UnsupportedStartupMedia
             | Self::ContentCoding(_)
             | Self::CacheObjectLimit { .. }
             | Self::LocalCacheCapacity { .. }
@@ -744,6 +748,7 @@ enum HlsResourceFetchLogStatus {
     Superseded,
     TransportError,
     RedirectError,
+    UnsupportedStartupMedia,
     ContentCodingError(HlsContentCodingFailure),
     ContentDecodingError(HlsContentDecodingFailure),
     CacheObjectLimit { limit: u64 },
@@ -763,6 +768,7 @@ impl HlsResourceFetchLogStatus {
             Self::Superseded => "Superseded".to_string(),
             Self::TransportError => "TransportError".to_string(),
             Self::RedirectError => "RedirectError".to_string(),
+            Self::UnsupportedStartupMedia => "UnsupportedStartupMedia".to_string(),
             Self::ContentCodingError(failure) => failure.label(),
             Self::ContentDecodingError(failure) => failure.label(),
             Self::CacheObjectLimit { limit } => format!("CacheObjectLimit(limit={limit})"),
@@ -1037,6 +1043,16 @@ mod tests {
         assert!(!error.retryable_failure());
         assert!(error.aborts_without_retry());
         assert_eq!(error.log_status().label(), "ContentCodingError(Unsupported)");
+    }
+
+    #[test]
+    fn incompatible_startup_media_is_permanent_without_a_fabricated_origin_status() {
+        let error = HlsOriginResourceFetchError::UnsupportedStartupMedia;
+        assert!(!error.retryable_failure());
+        assert!(error.object_failure_is_permanent());
+        assert!(error.aborts_without_retry());
+        assert_eq!(error.permanent_status(), None);
+        assert_eq!(error.log_status().label(), "UnsupportedStartupMedia");
     }
 
     #[test]
@@ -1443,6 +1459,90 @@ mod tests {
 
         assert!(err.retryable_failure());
         assert!(!err.aborts_without_retry());
+    }
+
+    // Exercise the real retry runner, including attempt preparation and HTTP
+    // delivery. A denied reservation must never issue an upstream request.
+    async fn run_reserved_provider_scenario(
+        denied_attempts: usize,
+    ) -> std::io::Result<(Result<usize, HlsOriginResourceFetchError>, usize, usize, usize)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_request_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                read_request(&mut stream).await;
+                server_request_count.fetch_add(1, Ordering::Relaxed);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            }
+            Ok::<(), std::io::Error>(())
+        });
+        let prepare_count = Arc::new(AtomicUsize::new(0));
+        let attempt_prepare_count = Arc::clone(&prepare_count);
+        let commit_count = Arc::new(AtomicUsize::new(0));
+        let response_commit_count = Arc::clone(&commit_count);
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let identity = test_log_identity();
+        let result = run_hls_origin_resource_retry_loop_with_attempt_prepare(
+            fetch_target(format!("http://{address}/segment.ts")),
+            fetch_clients(false),
+            &policy,
+            &identity,
+            move |attempt| {
+                attempt_prepare_count.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt.attempt_index < denied_attempts {
+                        Err(HlsOriginResourceFetchError::ProviderUnavailable(
+                            HlsBoundAccountAcquireErrorKind::ReservedForOther,
+                        ))
+                    } else {
+                        Ok(attempt.attempt_index)
+                    }
+                }
+                .boxed()
+            },
+            |_guard| async {}.boxed(),
+            move |_response, _attempt, _deadline, guard| {
+                response_commit_count.fetch_add(1, Ordering::Relaxed);
+                async move { Ok(guard) }.boxed()
+            },
+        )
+        .await;
+        server.abort();
+        Ok((
+            result,
+            prepare_count.load(Ordering::Relaxed),
+            request_count.load(Ordering::Relaxed),
+            commit_count.load(Ordering::Relaxed),
+        ))
+    }
+
+    #[tokio::test]
+    async fn reserved_provider_retries_until_reservation_clears() -> std::io::Result<()> {
+        let (result, preparations, requests, commits) = run_reserved_provider_scenario(1).await?;
+        assert!(matches!(result, Ok(1)));
+        assert_eq!(preparations, 2);
+        assert_eq!(requests, 1);
+        assert_eq!(commits, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reserved_provider_stops_at_existing_retry_budget_without_origin_io() -> std::io::Result<()> {
+        let (result, preparations, requests, commits) = run_reserved_provider_scenario(usize::MAX).await?;
+        assert!(matches!(
+            result,
+            Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::ReservedForOther))
+        ));
+        assert_eq!(preparations, SegmentFetchPolicy::default().retry_delays_ms.len());
+        assert_eq!(requests, 0);
+        assert_eq!(commits, 0);
+        Ok(())
     }
 
     #[test]

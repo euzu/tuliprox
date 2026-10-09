@@ -1,4 +1,5 @@
 {
+  "HLS_STARTUP_MODE_DESCRIPTION": "Conservador mantiene el comportamiento de inicio existente. Primero listo espera un segmento inicial procesado. Progresivo entrega TS sin procesar y requiere fuentes adecuadas; se aplica a las sesiones nuevas.",
   "BACKOFF_JITTER_PERCENT_VALIDATION": "El porcentaje de fluctuación (jitter) del retroceso debe estar entre 0 y 95.",
   "COUNTRY": {
     "AD": "Andorra",
@@ -904,6 +905,16 @@
     "WEB_ROOT": "Web-Root: contiene los archivos de la interfaz web. Normalmente se colocan en el mismo directorio bajo ./web"
   },
   "LABEL": {
+    "HLS_STARTUP_LIMITS": "Límites de inicio rápido",
+    "HLS_PROGRESSIVE_SEGMENTS": "Máximo de segmentos progresivos",
+    "HLS_PROGRESSIVE_BYTES_PER_SEGMENT": "Memoria de búfer por segmento",
+    "HLS_PROGRESSIVE_BYTES_TOTAL": "Memoria de búfer total",
+    "HLS_PROGRESSIVE_READER_LIFETIME": "Vida máxima del lector (segundos)",
+    "HLS_DEFERRED_REPAIRS": "Máximo de reparaciones pendientes",
+    "HLS_STARTUP_MODE": "Modo de inicio HLS",
+    "HLS_STARTUP_MODE_CONSERVATIVE": "Conservador",
+    "HLS_STARTUP_MODE_FIRST_READY": "Primero listo",
+    "HLS_STARTUP_MODE_PROGRESSIVE": "Progresivo",
     "ALL_TARGETS": "Todos los destinos",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Aceptar certificados SSL no seguros",
     "ACTIVE": "Activo",

@@ -221,6 +221,7 @@ pub enum HlsManifestRejectLogReason {
     CriticalHandoffLockContentionExhausted,
     StagedSwitchInvalidated,
     MalformedTransientTimeline,
+    StartupRepresentationChange,
 }
 
 impl HlsManifestRejectLogReason {
@@ -271,6 +272,7 @@ impl HlsManifestRejectLogReason {
             Self::CriticalHandoffLockContentionExhausted => "critical-handoff-lock-contention-exhausted".to_string(),
             Self::StagedSwitchInvalidated => "staged-switch-invalidated".to_string(),
             Self::MalformedTransientTimeline => "malformed-transient-timeline".to_string(),
+            Self::StartupRepresentationChange => "startup-representation-change".to_string(),
         }
     }
 }

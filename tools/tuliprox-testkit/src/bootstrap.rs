@@ -62,10 +62,13 @@ impl FixturePaths {
         let config_file = root.join("config.yml");
         let source_file = root.join("source.yml");
         let api_proxy_file = root.join("api-proxy.yml");
-        std::fs::write(
-            &config_file,
-            render_config(tuliprox_address, &web_root, &storage_dir, &backup_dir, &history_dir, policy)?,
-        )?;
+        let mut config = render_config(tuliprox_address, &web_root, &storage_dir, &backup_dir, &history_dir, policy)?;
+        if let Some(mode) = fixture_stream.hls_startup_mode {
+            let _ = writeln!(config,
+                "  hls_cache:\n    cache_path: {}\n    max_concurrent_segment_fetches_per_session: 3\n    startup:\n      mode: {mode}",
+                yaml_scalar(&root.join("hls-cache")));
+        }
+        std::fs::write(&config_file, config)?;
         std::fs::write(
             &source_file,
             render_sources(run_id, origin_address, channels, policy, fixture_stream, add_xtream_output, input),
@@ -360,6 +363,11 @@ impl IsolatedFixture {
             origin_cmd.arg("--hls-markers").arg(hls_markers.iter().map(u32::to_string).collect::<Vec<_>>().join(","));
         }
         if let Some(origin_cfg) = origin_config {
+            if let Some(profile) = &origin_cfg.hls_profile {
+                origin_cmd.arg("--hls-profile").arg(
+                    serde_json::to_string(profile).map_err(|error| TestkitError::Configuration(error.to_string()))?,
+                );
+            }
             if let Some(limit) = origin_cfg.account_limit {
                 origin_cmd.arg("--account-limit").arg(limit.to_string());
             }
@@ -662,7 +670,11 @@ mod tests {
 
     #[test]
     fn render_sources_with_mpeg_ts_sharing_disabled() {
-        let opts = crate::config::FixtureStreamOptions { share_live_hls: true, share_live_mpeg_ts: false };
+        let opts = crate::config::FixtureStreamOptions {
+            share_live_hls: true,
+            share_live_mpeg_ts: false,
+            hls_startup_mode: None,
+        };
         let source =
             render_sources("run", "127.0.0.1:9910".parse().unwrap(), &HashMap::new(), None, &opts, false, &m3u_input());
         assert!(source.contains("mpeg_ts: false"));

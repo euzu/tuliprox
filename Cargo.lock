@@ -4615,7 +4615,6 @@ version = "3.3.143"
 dependencies = [
  "arc-swap",
  "blake3",
- "bytes",
  "chrono",
  "chrono-tz",
  "fastrand",
