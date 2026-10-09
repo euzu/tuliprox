@@ -314,7 +314,8 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         );
         let clear_invalid_epg_ids = target.options.as_ref().is_some_and(ConfigTargetOptions::clear_invalid_epg_ids);
         let input_epg_start = new_epg.len();
-        process_playlist_epg(&mut processed_fpl, &mut new_epg, clear_invalid_epg_ids).await;
+        let epg_assign_options = EpgAssignOptions::from_target_options(target.options.as_ref());
+        process_playlist_epg(&mut processed_fpl, &mut new_epg, epg_assign_options).await;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
@@ -326,6 +327,9 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
             deduplicate.then_some(&mut duplicates),
         ) {
             processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
+        }
+        if epg_assign_options.adopt_guide_id_case && processed_fpl.epg.is_some() {
+            adopt_guide_live_epg_id_case(&mut processed_fpl, &new_epg[input_epg_start..]);
         }
         if clear_invalid_epg_ids && processed_fpl.epg.is_some() {
             clear_invalid_live_epg_ids(&mut processed_fpl, &new_epg[input_epg_start..]);

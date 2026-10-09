@@ -488,13 +488,11 @@ pub fn ApiConfigView() -> Html {
                     {
                         if form_state_api_proxy_config.form.server.is_empty() {
                             html! {
-                                    <crate::app::components::TableShell table_id={table_definition.table_id.clone()} columns={table_definition.columns.clone()}>
                                 <NoContent
                                     text={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_SERVER_TITLE")}
                                     hint={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_SERVER_HINT")}
                                 />
-                            </crate::app::components::TableShell>
-                                }
+                            }
                         } else {
                             html! { <Table::<ApiProxyServerInfoDto> definition={table_definition.clone()} /> }
                         }

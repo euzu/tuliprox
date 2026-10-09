@@ -4,6 +4,18 @@
 
 ## ⚠️ Breaking Changes
 
+- **`clear_invalid_epg_ids` moved to `epg_output.clear_invalid_ids`.** The target option now sits next to the other
+  EPG id output options. The top-level `options.clear_invalid_epg_ids` and its legacy alias `options.required_epg` are
+  rejected while loading. To migrate, move the value:
+
+  ```yaml
+  options:
+    epg_output:
+      clear_invalid_ids: true
+  ```
+
+  In the Web UI the toggle is now part of the **EPG Output** group of the target options.
+
 - **Recordings use the local API listener.** `api.host` must resolve locally to the
   listener; wildcard binds use loopback. `web_ui.player_server` and public `api-proxy.yml`
   servers no longer select recording capture URLs. Recording headers now apply to the
@@ -1081,6 +1093,14 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **Short EPG and player guides stay empty when playlist and XMLTV ids differ only in case.** A live channel whose
+  EPG id matches a guide channel case-insensitively (for example `usa4k.us` against `<channel id="USA4K.us">`) now
+  adopts the guide's spelling, so the playlist `tvg-id` / `epg_channel_id`, the XMLTV `<channel id>` and the EPG db
+  key are identical. Previously the exact `get_short_epg` lookup and case-sensitive players missed these channels
+  unless `epg_output.lowercase_ids` was enabled. Affected ids change their visible case after the next target update.
+  The new target option `epg_output.adopt_guide_id_case` (default `true`, also in the Web UI target options) keeps
+  the playlist's original spelling when set to `false`.
 
 - **Shared HLS retries an origin account reserved for another session.** A bound account that is briefly reserved
   by a competing session or an in-flight binding handoff is now retried within the existing acquire budget instead

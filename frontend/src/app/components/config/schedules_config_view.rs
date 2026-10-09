@@ -66,8 +66,6 @@ pub fn SchedulesConfigView() -> Html {
     let translate = use_translation();
     let view_columns = use_memo((), |()| schedule_columns(false));
     let edit_columns = use_memo((), |()| schedule_columns(true));
-    let content_columns =
-        use_memo((), |()| ScheduleColumn::columns().into_iter().filter(|column| column.content).collect::<Vec<_>>());
     let services_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
@@ -353,12 +351,10 @@ pub fn SchedulesConfigView() -> Html {
             }
         }
         None => html! {
-            <crate::app::components::TableShell table_id="config.schedules" columns={content_columns.clone()}>
             <NoContent
                 text={translate.t("MESSAGES.EMPTY_STATE.SCHEDULES_TITLE")}
                 hint={translate.t("MESSAGES.EMPTY_STATE.SCHEDULES_HINT")}
             />
-            </crate::app::components::TableShell>
         },
     };
 

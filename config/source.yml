@@ -26,8 +26,9 @@ sources:
         filter: "!final_channel_lineup!"
         options:
           ignore_logo: false
-          clear_invalid_epg_ids: false
           epg_output:
+            clear_invalid_ids: false
+            adopt_guide_id_case: true
             lowercase_ids: false
             lowercase_xmltv_display_names: false
           share_live_streams:
@@ -101,8 +102,9 @@ sources:
         filter: "!final_channel_lineup!"
         options:
           ignore_logo: false
-          clear_invalid_epg_ids: false
           epg_output:
+            clear_invalid_ids: false
+            adopt_guide_id_case: true
             lowercase_ids: false
             lowercase_xmltv_display_names: false
           share_live_streams:

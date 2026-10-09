@@ -386,10 +386,11 @@
       "WATCH": "Lista de patrones de grupo a monitorizar para detectar cambios. Las notificaciones se envían mediante la mensajería configurada."
     },
     "CONFIG_TARGET_OPTIONS": {
-      "CLEAR_INVALID_EPG_IDS": "Borra los ID de EPG que no coinciden con los datos de EPG procesados. Las entradas de la lista de reproducción no se eliminan.",
       "SHARE_LIVE_STREAMS": "Habilita el uso compartido de streams en directo. El interruptor maestro activa HLS y MPEG-TS juntos; cada formato también se puede cambiar por separado."
     },
     "EPG_OUTPUT_OPTIONS": {
+      "CLEAR_INVALID_IDS": "Borra los ID de EPG que no coinciden con los datos de EPG procesados. Las entradas de la lista de reproducción no se eliminan.",
+      "ADOPT_GUIDE_ID_CASE": "Reescribe un ID de EPG de la lista que coincide con un canal de la guía solo sin distinguir mayúsculas con el ID exacto del canal de la guía, para que los ID de la lista, XMLTV y las consultas de la API de EPG sean idénticos. Activado por defecto; se requiere una actualización completa del destino tras cambiar esta opción.",
       "LOWERCASE_IDS": "Canoniza los ID técnicos de EPG a minúsculas ASCII en la salida M3U, Xtream, XMLTV y la API de EPG. Se requiere una actualización completa del destino tras cambiar esta opción.",
       "LOWERCASE_XMLTV_DISPLAY_NAMES": "Convierte solo el texto de display-name de XMLTV a minúsculas Unicode. Los nombres de la lista de reproducción y los títulos de programas no se modifican."
     },
@@ -1211,6 +1212,7 @@
     "LOG_ACTIVE_USER": "Registrar usuario activo",
     "LOG_CONFIG": "Registro",
     "LOG_LEVEL": "Nivel de registro",
+    "ADOPT_GUIDE_EPG_ID_CASE": "Adoptar mayúsculas del ID de la guía EPG",
     "LOWERCASE_EPG_IDS": "ID de EPG en minúsculas",
     "LOWERCASE_XMLTV_DISPLAY_NAMES": "Nombres de visualización XMLTV en minúsculas",
     "M3U": "m3u",

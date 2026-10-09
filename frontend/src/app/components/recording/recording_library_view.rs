@@ -668,9 +668,7 @@ pub fn recording_library_view(props: &RecordingLibraryViewProps) -> Html {
                             if unavailable_code.is_some() {
                                 <NoContent text={translate.t("LABEL.RECORDING_UNAVAILABLE")} hint={unavailable_hint} />
                             } else if tasks_state.is_empty() {
-                                <crate::app::components::TableShell table_id={table_definition.table_id.clone()} columns={table_definition.columns.clone()}>
-                                    <NoContent text={translate.t("LABEL.RECORDING_EMPTY")} />
-                                </crate::app::components::TableShell>
+                                <NoContent text={translate.t("LABEL.RECORDING_EMPTY")} />
                             } else {
                                 <Table::<RecordingTaskDto> definition={table_definition} />
                             }

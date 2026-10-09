@@ -1,6 +1,6 @@
 use super::*;
 use arc_swap::{ArcSwap, ArcSwapOption};
-use shared::model::{ConfigPaths, EpgSmartMatchConfigDto};
+use shared::model::{ConfigPaths, EpgOutputOptions, EpgSmartMatchConfigDto};
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
@@ -496,7 +496,10 @@ fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
                     build_mapping("rewrite", MappingStage::AfterEpg, r#"@epg_channel_id = "missing.epg""#);
                 let add_virtual = build_mapping("virtual", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
                 let mut target = build_target(vec![rewrite_epg, add_virtual], false);
-                target.options = Some(ConfigTargetOptions { clear_invalid_epg_ids: true, ..Default::default() });
+                target.options = Some(ConfigTargetOptions {
+                    epg_output: EpgOutputOptions { clear_invalid_ids: true, ..EpgOutputOptions::default() },
+                    ..Default::default()
+                });
                 let mut stats = HashMap::from([(
                     Arc::clone(&input.name),
                     create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
