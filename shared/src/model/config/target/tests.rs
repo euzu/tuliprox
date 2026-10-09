@@ -327,16 +327,31 @@ fn target_options_round_trips_partial_share_live_streams() {
 }
 
 #[test]
-fn target_options_clear_invalid_epg_ids_roundtrips_and_accepts_legacy_alias() {
-    let options = serde_saphyr::from_str::<ConfigTargetOptions>("required_epg: true\n")
-        .expect("legacy required_epg should deserialize");
+fn target_options_epg_output_clear_invalid_ids_roundtrips() {
+    let yaml = r"
+epg_output:
+  clear_invalid_ids: true
+";
+    let options = serde_saphyr::from_str::<ConfigTargetOptions>(yaml).expect("clear_invalid_ids should deserialize");
 
     assert!(options.clear_invalid_epg_ids());
     assert!(!options.is_empty());
 
-    let serialized = serde_saphyr::to_string(&options).expect("clear_invalid_epg_ids should serialize");
-    assert!(serialized.contains("clear_invalid_epg_ids: true"));
-    assert!(!serialized.contains("required_epg:"));
+    let serialized = serde_saphyr::to_string(&options).expect("clear_invalid_ids should serialize");
+    assert!(serialized.contains("clear_invalid_ids: true"), "got: {serialized}");
+    let roundtripped = serde_saphyr::from_str::<ConfigTargetOptions>(&serialized)
+        .expect("serialized clear_invalid_ids should deserialize");
+    assert_eq!(roundtripped, options);
+}
+
+#[test]
+fn target_options_reject_removed_top_level_clear_invalid_epg_ids() {
+    for yaml in ["clear_invalid_epg_ids: true\n", "required_epg: true\n"] {
+        assert!(
+            serde_saphyr::from_str::<ConfigTargetOptions>(yaml).is_err(),
+            "removed top-level key should be rejected: {yaml}"
+        );
+    }
 }
 
 #[test]
@@ -346,6 +361,7 @@ fn target_options_default_epg_output_is_disabled_and_omitted() {
 
     assert!(!options.lowercase_epg_ids());
     assert!(!options.lowercase_xmltv_display_names());
+    assert!(options.adopt_guide_epg_id_case());
     assert!(options.epg_output.is_empty());
     assert!(options.is_empty());
 
@@ -371,6 +387,26 @@ epg_output:
     let serialized = serde_saphyr::to_string(&options).expect("configured epg_output should serialize");
     let roundtripped =
         serde_saphyr::from_str::<ConfigTargetOptions>(&serialized).expect("serialized epg_output should deserialize");
+    assert_eq!(roundtripped, options);
+}
+
+#[test]
+fn target_options_epg_output_adopt_guide_id_case_can_be_disabled() {
+    let yaml = r"
+epg_output:
+  adopt_guide_id_case: false
+";
+
+    let options = serde_saphyr::from_str::<ConfigTargetOptions>(yaml).expect("disabled adoption should deserialize");
+
+    assert!(!options.adopt_guide_epg_id_case());
+    assert!(!options.is_empty());
+    assert!(ConfigTargetOptions::default().adopt_guide_epg_id_case());
+
+    let serialized = serde_saphyr::to_string(&options).expect("disabled adoption should serialize");
+    assert!(serialized.contains("adopt_guide_id_case: false"), "got: {serialized}");
+    let roundtripped =
+        serde_saphyr::from_str::<ConfigTargetOptions>(&serialized).expect("serialized adoption should deserialize");
     assert_eq!(roundtripped, options);
 }
 

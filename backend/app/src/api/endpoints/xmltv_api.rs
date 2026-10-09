@@ -1142,7 +1142,11 @@ mod tests {
     fn test_target_with_epg_options(lowercase_ids: bool, lowercase_display_names: bool) -> Arc<ConfigTarget> {
         let mut target = test_target_with_xtream_only();
         target.options = Some(ConfigTargetOptions {
-            epg_output: EpgOutputOptions { lowercase_ids, lowercase_xmltv_display_names: lowercase_display_names },
+            epg_output: EpgOutputOptions {
+                lowercase_ids,
+                lowercase_xmltv_display_names: lowercase_display_names,
+                ..EpgOutputOptions::default()
+            },
             ..ConfigTargetOptions::default()
         });
         Arc::new(target)

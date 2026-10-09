@@ -83,6 +83,9 @@ pub struct TableShellProps {
     pub children: Children,
     #[prop_or(true)]
     pub supported: bool,
+    /// Hides the column settings rail, e.g. while the table shows its empty state.
+    #[prop_or(true)]
+    pub show_columns: bool,
 }
 
 #[component]
@@ -92,8 +95,8 @@ pub fn TableShell(props: &TableShellProps) -> Html {
     {
         let content_ref = content_ref.clone();
         let strip_ref = strip_ref.clone();
-        use_effect_with((), move |()| {
-            let observers = content_ref.cast::<HtmlElement>().and_then(|content| {
+        use_effect_with(props.show_columns, move |show_columns| {
+            let observers = content_ref.cast::<HtmlElement>().filter(|_| *show_columns).and_then(|content| {
                 let strip = strip_ref.cast::<HtmlElement>()?;
                 HeaderObservers::new(&content, &strip)
             });
@@ -137,12 +140,14 @@ pub fn TableShell(props: &TableShellProps) -> Html {
             }
             if ready { <div class="tp__table__container">{for props.children.iter()}</div> } else { <LoadingIndicator loading={true}/> }
         </div>
-        <div ref={strip_ref} class="tp__table-shell__rail">
-            <div class="tp__table-shell__corner" aria-hidden="true"/>
-            <TextButton name="columns" class="tp__table-shell__columns" icon="Columns" title={translate.t("TABLE_COLUMNS.COLUMNS")}
-                onclick={open} disabled={!ready || context.is_none()} aria_haspopup={Some("dialog".to_owned())}
-                hint={Some(translate.t("TABLE_COLUMNS.OPEN"))} aria_label={Some(translate.t("TABLE_COLUMNS.OPEN"))}/>
-        </div>
+        if props.show_columns {
+            <div ref={strip_ref} class="tp__table-shell__rail">
+                <div class="tp__table-shell__corner" aria-hidden="true"/>
+                <TextButton name="columns" class="tp__table-shell__columns" icon="Columns" title={translate.t("TABLE_COLUMNS.COLUMNS")}
+                    onclick={open} disabled={!ready || context.is_none()} aria_haspopup={Some("dialog".to_owned())}
+                    hint={Some(translate.t("TABLE_COLUMNS.OPEN"))} aria_label={Some(translate.t("TABLE_COLUMNS.OPEN"))}/>
+            </div>
+        }
     </div> }
 }
 

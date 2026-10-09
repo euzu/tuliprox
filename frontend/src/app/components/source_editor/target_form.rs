@@ -42,6 +42,7 @@ const LABEL_MPEG_TS: &str = "LABEL.MPEG_TS";
 const LABEL_REMOVE_DUPLICATES: &str = "LABEL.REMOVE_DUPLICATES";
 const LABEL_FORCE_REDIRECT: &str = "LABEL.FORCE_REDIRECT";
 const LABEL_EPG_OUTPUT: &str = "LABEL.EPG_OUTPUT";
+const LABEL_ADOPT_GUIDE_EPG_ID_CASE: &str = "LABEL.ADOPT_GUIDE_EPG_ID_CASE";
 const LABEL_LOWERCASE_EPG_IDS: &str = "LABEL.LOWERCASE_EPG_IDS";
 const LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES: &str = "LABEL.LOWERCASE_XMLTV_DISPLAY_NAMES";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
@@ -140,6 +141,7 @@ pub enum ConfigTargetOptionsFormAction {
     ShareLiveStreamsHls(bool),
     ShareLiveStreamsMpegTs(bool),
     RemoveDuplicates(bool),
+    AdoptGuideEpgIdCase(bool),
     LowercaseEpgIds(bool),
     LowercaseXmltvDisplayNames(bool),
     ForceRedirect(Option<ClusterFlags>),
@@ -159,7 +161,7 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
                 modified = true;
             }
             ConfigTargetOptionsFormAction::ClearInvalidEpgIds(value) => {
-                form.clear_invalid_epg_ids = value;
+                form.epg_output.clear_invalid_ids = value;
                 modified = true;
             }
             ConfigTargetOptionsFormAction::ShareLiveStreamsHls(value) => {
@@ -172,6 +174,10 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
             }
             ConfigTargetOptionsFormAction::RemoveDuplicates(value) => {
                 form.remove_duplicates = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::AdoptGuideEpgIdCase(value) => {
+                form.epg_output.adopt_guide_id_case = value;
                 modified = true;
             }
             ConfigTargetOptionsFormAction::LowercaseEpgIds(value) => {
@@ -325,32 +331,50 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                     </div>
                 }
             };
-        let render_epg_output =
-            |readonly: bool, lowercase_ids_on_change: Callback<bool>, lowercase_names_on_change: Callback<bool>| {
-                html! {
-                    <div class="tp__target-options__group">
-                        <div class="tp__target-options__heading">
-                            <span class="tp__form-field__label">{ translate.t(LABEL_EPG_OUTPUT) }</span>
-                        </div>
-                        <div class="tp__target-options__children">
-                            { target_option_toggle(
-                                translate.t(LABEL_LOWERCASE_EPG_IDS),
-                                "EPG_OUTPUT_OPTIONS.LOWERCASE_IDS",
-                                target_options_state.form.epg_output.lowercase_ids,
-                                readonly,
-                                lowercase_ids_on_change,
-                            ) }
-                            { target_option_toggle(
-                                translate.t(LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES),
-                                "EPG_OUTPUT_OPTIONS.LOWERCASE_XMLTV_DISPLAY_NAMES",
-                                target_options_state.form.epg_output.lowercase_xmltv_display_names,
-                                readonly,
-                                lowercase_names_on_change,
-                            ) }
-                        </div>
+        let epg_output_on_change = |action: fn(bool) -> ConfigTargetOptionsFormAction| {
+            let target_options_state = target_options_state.clone();
+            Callback::from(move |value| target_options_state.dispatch(action(value)))
+        };
+        let render_epg_output = |readonly: bool| {
+            let epg_output = &target_options_state.form.epg_output;
+            html! {
+                <div class="tp__target-options__group">
+                    <div class="tp__target-options__heading">
+                        <span class="tp__form-field__label">{ translate.t(LABEL_EPG_OUTPUT) }</span>
                     </div>
-                }
-            };
+                    <div class="tp__target-options__children">
+                        { target_option_toggle(
+                            translate.t(LABEL_CLEAR_INVALID_EPG_IDS),
+                            "EPG_OUTPUT_OPTIONS.CLEAR_INVALID_IDS",
+                            epg_output.clear_invalid_ids,
+                            readonly,
+                            epg_output_on_change(ConfigTargetOptionsFormAction::ClearInvalidEpgIds),
+                        ) }
+                        { target_option_toggle(
+                            translate.t(LABEL_ADOPT_GUIDE_EPG_ID_CASE),
+                            "EPG_OUTPUT_OPTIONS.ADOPT_GUIDE_ID_CASE",
+                            epg_output.adopt_guide_id_case,
+                            readonly,
+                            epg_output_on_change(ConfigTargetOptionsFormAction::AdoptGuideEpgIdCase),
+                        ) }
+                        { target_option_toggle(
+                            translate.t(LABEL_LOWERCASE_EPG_IDS),
+                            "EPG_OUTPUT_OPTIONS.LOWERCASE_IDS",
+                            epg_output.lowercase_ids,
+                            readonly,
+                            epg_output_on_change(ConfigTargetOptionsFormAction::LowercaseEpgIds),
+                        ) }
+                        { target_option_toggle(
+                            translate.t(LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES),
+                            "EPG_OUTPUT_OPTIONS.LOWERCASE_XMLTV_DISPLAY_NAMES",
+                            epg_output.lowercase_xmltv_display_names,
+                            readonly,
+                            epg_output_on_change(ConfigTargetOptionsFormAction::LowercaseXmltvDisplayNames),
+                        ) }
+                    </div>
+                </div>
+            }
+        };
         if props.allow_write {
             let share_live_hls_on_change = {
                 let target_options_state = target_options_state.clone();
@@ -364,23 +388,11 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                     target_options_state.dispatch(ConfigTargetOptionsFormAction::ShareLiveStreamsMpegTs(value));
                 })
             };
-            let lowercase_epg_ids_on_change = {
-                let target_options_state = target_options_state.clone();
-                Callback::from(move |value| {
-                    target_options_state.dispatch(ConfigTargetOptionsFormAction::LowercaseEpgIds(value));
-                })
-            };
-            let lowercase_xmltv_display_names_on_change = {
-                let target_options_state = target_options_state.clone();
-                Callback::from(move |value| {
-                    target_options_state.dispatch(ConfigTargetOptionsFormAction::LowercaseXmltvDisplayNames(value));
-                })
-            };
             html! {
                 <Card class="tp__config-view__card">
                 <div class="tp__target-options">
                     { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
-                    { edit_field_bool!(target_options_state, translate.t(LABEL_CLEAR_INVALID_EPG_IDS), clear_invalid_epg_ids, ConfigTargetOptionsFormAction::ClearInvalidEpgIds) }
+                    { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
                     <div class="tp__target-options__group">
                         <div class="tp__target-options__heading">
                             <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
@@ -402,12 +414,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                             ) }
                         </div>
                     </div>
-                    { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
-                    { render_epg_output(
-                        false,
-                        lowercase_epg_ids_on_change,
-                        lowercase_xmltv_display_names_on_change,
-                    ) }
+                    { render_epg_output(false) }
                     <div class="tp__target-options__group">
                         <div class="tp__target-options__heading">
                             <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
@@ -433,7 +440,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     <div class="tp__target-options">
                         { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
-                        { config_field_bool!(target_options_state.form, translate.t(LABEL_CLEAR_INVALID_EPG_IDS), clear_invalid_epg_ids) }
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
                         <div class="tp__target-options__group">
                             <div class="tp__target-options__heading">
                                 <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
@@ -455,8 +462,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                                 ) }
                             </div>
                         </div>
-                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
-                        { render_epg_output(true, Callback::noop(), Callback::noop()) }
+                        { render_epg_output(true) }
                         <div class="tp__target-options__group">
                             <div class="tp__target-options__heading">
                                 <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
@@ -750,10 +756,22 @@ mod tests {
     }
 
     #[test]
+    fn adopt_guide_epg_id_case_defaults_on_and_action_updates_nested_option() {
+        let state = default_options_state();
+        assert!(state.form.epg_output.adopt_guide_id_case);
+
+        let state = state.reduce(ConfigTargetOptionsFormAction::AdoptGuideEpgIdCase(false));
+
+        assert!(!state.form.epg_output.adopt_guide_id_case);
+        assert!(state.modified);
+        assert!(!state.form.epg_output.lowercase_ids);
+    }
+
+    #[test]
     fn clear_invalid_epg_ids_action_updates_target_option() {
         let state = default_options_state().reduce(ConfigTargetOptionsFormAction::ClearInvalidEpgIds(true));
 
-        assert!(state.form.clear_invalid_epg_ids);
+        assert!(state.form.epg_output.clear_invalid_ids);
         assert!(state.modified);
     }
 

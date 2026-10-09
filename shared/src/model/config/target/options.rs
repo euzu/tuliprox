@@ -1,4 +1,7 @@
-use crate::{defaults::is_false, model::ClusterFlags};
+use crate::{
+    defaults::{default_as_true, is_false, is_true},
+    model::ClusterFlags,
+};
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -33,17 +36,40 @@ impl ConfigTargetShareLiveStreams {
 }
 
 /// Controls optional canonicalization of EPG data emitted for a target.
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EpgOutputOptions {
+    /// Clears a live channel EPG id that does not resolve to the processed EPG data.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_invalid_ids: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub lowercase_ids: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub lowercase_xmltv_display_names: bool,
+    /// Rewrites a playlist EPG id that matches a guide channel only case-insensitively to the
+    /// guide's exact `<channel id>` spelling.
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub adopt_guide_id_case: bool,
+}
+
+impl Default for EpgOutputOptions {
+    fn default() -> Self {
+        Self {
+            clear_invalid_ids: false,
+            lowercase_ids: false,
+            lowercase_xmltv_display_names: false,
+            adopt_guide_id_case: true,
+        }
+    }
 }
 
 impl EpgOutputOptions {
-    pub const fn is_empty(&self) -> bool { !self.lowercase_ids && !self.lowercase_xmltv_display_names }
+    pub const fn is_empty(&self) -> bool {
+        !self.clear_invalid_ids
+            && !self.lowercase_ids
+            && !self.lowercase_xmltv_display_names
+            && self.adopt_guide_id_case
+    }
 }
 
 #[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -82,9 +108,6 @@ pub struct DeduplicateConfig {
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_logo: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    #[serde(alias = "required_epg")]
-    pub clear_invalid_epg_ids: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_share_live_streams",
@@ -104,7 +127,6 @@ pub struct ConfigTargetOptions {
 impl ConfigTargetOptions {
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
-            && !self.clear_invalid_epg_ids
             && self.share_live_streams.is_empty()
             && !self.remove_duplicates
             && self.deduplicate.is_none()
@@ -116,7 +138,9 @@ impl ConfigTargetOptions {
 
     pub const fn lowercase_xmltv_display_names(&self) -> bool { self.epg_output.lowercase_xmltv_display_names }
 
-    pub const fn clear_invalid_epg_ids(&self) -> bool { self.clear_invalid_epg_ids }
+    pub const fn adopt_guide_epg_id_case(&self) -> bool { self.epg_output.adopt_guide_id_case }
+
+    pub const fn clear_invalid_epg_ids(&self) -> bool { self.epg_output.clear_invalid_ids }
 
     pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
 

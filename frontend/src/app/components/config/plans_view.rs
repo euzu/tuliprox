@@ -467,12 +467,10 @@ pub fn PlansView() -> Html {
                         {
                             if plans.is_empty() {
                                 html! {
-                                    <crate::app::components::TableShell table_id={table_definition.table_id.clone()} columns={table_definition.columns.clone()}>
                                     <NoContent
                                         text={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_PLANS_TITLE")}
                                         hint={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_PLANS_HINT")}
                                     />
-                                </crate::app::components::TableShell>
                                 }
                             } else {
                                 html! { <Table::<UserPlanDto> definition={table_definition.clone()} /> }

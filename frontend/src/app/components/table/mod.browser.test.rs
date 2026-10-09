@@ -263,3 +263,53 @@ async fn pagination_normalizes_pages_and_bounds_navigation_callbacks() -> Result
     }
     Ok(())
 }
+
+#[component]
+fn EmptyToggleHarness() -> Html {
+    let state = use_reducer(|| UserSettingsState { ready: true, ..Default::default() });
+    let filled = use_state_eq(|| false);
+    let toggle = {
+        let filled = filled.clone();
+        Callback::from(move |_| filled.set(!*filled))
+    };
+    let definition = Rc::new(TableDefinition {
+        items: Some(Rc::new(if *filled { vec![Rc::new(7)] } else { Vec::new() })),
+        table_id: "empty-test".into(),
+        columns: Rc::new(vec![TableColumn::new("value", "Value")]),
+        row_key: Callback::from(|(_, item): (usize, Rc<i32>)| AttrValue::from(item.to_string())),
+        render_header_cell: Callback::from(|_| html! {"Value"}),
+        render_data_cell: Callback::from(|(_, _, item): (usize, usize, Rc<i32>)| html! {*item}),
+        on_sort: Callback::noop(),
+    });
+    let context = UserSettingsContext { state, open_panel: Callback::noop(), retry_load: Callback::noop() };
+    html! {<I18nProvider><IconContextProvider icons={vec![]}><ContextProvider<UserSettingsContext> context={context}>
+        <button id="toggle-items" onclick={toggle}>{"Toggle"}</button>
+        <Table<i32> definition={definition}/>
+    </ContextProvider<UserSettingsContext>></IconContextProvider></I18nProvider>}
+}
+
+#[wasm_bindgen_test(async)]
+async fn column_rail_is_hidden_while_table_shows_no_content() -> Result<(), JsValue> {
+    let document = gloo_utils::document();
+    let root = document.create_element("div")?;
+    document.body().ok_or_else(|| JsValue::from_str("missing body"))?.append_child(&root)?;
+    let handle = yew::Renderer::<EmptyToggleHarness>::with_root(root.clone()).render();
+    settle().await;
+    assert!(root.query_selector(".tp__no_content")?.is_some());
+    assert!(root.query_selector(".tp__table-shell__rail")?.is_none());
+    assert!(root.query_selector(".tp__table-shell__columns")?.is_none());
+
+    click(&root, "#toggle-items")?;
+    settle().await;
+    let rail = element(&root, ".tp__table-shell__rail")?.dyn_into::<HtmlElement>()?;
+    assert!(root.query_selector(".tp__table-shell__columns")?.is_some());
+    let header_size = rail.style().get_property_value("--table-header-size")?;
+    assert!(header_size.trim_end_matches("px").parse::<f64>().is_ok_and(|size| size > 0.0));
+
+    click(&root, "#toggle-items")?;
+    settle().await;
+    assert!(root.query_selector(".tp__table-shell__rail")?.is_none());
+    handle.destroy();
+    root.remove();
+    Ok(())
+}

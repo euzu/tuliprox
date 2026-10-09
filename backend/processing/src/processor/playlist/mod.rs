@@ -6,7 +6,7 @@ use crate::{
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator},
     playlist_watch::{process_group_watch, process_target_groups_watch},
     processor::{
-        epg::{clear_invalid_live_epg_ids, process_playlist_epg, retain_epg_referenced_by_groups},
+        epg::{clear_invalid_live_epg_ids, process_playlist_epg, retain_epg_referenced_by_groups, EpgAssignOptions},
         sort::sort_playlist,
         xtream_series::playlist_resolve_series,
         xtream_vod::playlist_resolve_vod,

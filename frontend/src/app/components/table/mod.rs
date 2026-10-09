@@ -83,7 +83,8 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
             || ()
         });
     }
-    html! { <div class="tp__table"><TableShell table_id={props.definition.table_id.clone()} columns={props.definition.columns.clone()}>
+    html! { <div class="tp__table"><TableShell table_id={props.definition.table_id.clone()} columns={props.definition.columns.clone()}
+        show_columns={has_table_items(&props.definition.items)}>
         {table_markup(&props.definition, &visible, *sort_state, on_header_click, translate.t("LABEL.NO_CONTENT"))}
     </TableShell></div> }
 }

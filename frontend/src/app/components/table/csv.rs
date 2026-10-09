@@ -68,7 +68,7 @@ pub fn CsvTable(props: &CsvTableProps) -> Html {
     let data = if props.first_row_is_header { rows.get(1..).unwrap_or_default() } else { rows.as_slice() };
     let table_class = props.class.clone().unwrap_or_else(|| "tp__csv-table__table".into());
     html! { <div class="tp__csv-table tp__table">
-        <TableShell table_id={table_id.clone()} columns={columns.clone()} supported={supported}>
+        <TableShell table_id={table_id.clone()} columns={columns.clone()} supported={supported} show_columns={!data.is_empty()}>
             <table class={classes!("tp__table__table", table_class)}>
                 <thead><tr>{for visible.iter().map(|index| { let column = &columns[*index]; html! { <th key={column.id.as_str()} data-column-id={column.id.clone()}>{column.label.resolve(|key| translate.t(key))}</th> } })}</tr></thead>
                 <tbody>
