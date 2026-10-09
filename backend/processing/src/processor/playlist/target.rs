@@ -328,6 +328,9 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         ) {
             processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
         }
+        if epg_assign_options.adopt_guide_id_case && processed_fpl.epg.is_some() {
+            adopt_guide_live_epg_id_case(&mut processed_fpl, &new_epg[input_epg_start..]);
+        }
         if clear_invalid_epg_ids && processed_fpl.epg.is_some() {
             clear_invalid_live_epg_ids(&mut processed_fpl, &new_epg[input_epg_start..]);
         }

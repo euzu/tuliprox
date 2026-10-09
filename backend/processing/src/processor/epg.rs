@@ -849,6 +849,25 @@ pub(crate) fn clear_invalid_live_epg_ids(fp: &mut FetchedPlaylist<'_>, epg: &[Ep
     }
 }
 
+/// Re-adopts the guide id spelling for live channels whose ids were rewritten after EPG assignment,
+/// e.g. by `AfterEpg` mappings, so the playlist id stays identical to the processed guide channel id.
+pub(crate) fn adopt_guide_live_epg_id_case(fp: &mut FetchedPlaylist<'_>, epg: &[Epg]) {
+    if !fp.is_memory() {
+        return;
+    }
+    let guide_channels = epg
+        .iter()
+        .flat_map(|source| &source.children)
+        .map(|guide| (with_folded_epg_id(&guide.id, |folded| folded.intern()), guide.as_ref()))
+        .collect::<HashMap<Arc<str>, &EpgChannel>>();
+    if guide_channels.is_empty() {
+        return;
+    }
+    fp.items_mut()
+        .filter(|item| is_live_epg_item(item))
+        .for_each(|item| adopt_guide_epg_id_case(item, &guide_channels));
+}
+
 /// Assigns EPG IDs and logos to live playlist channels by matching them with EPG data.
 /// Invalid EPG IDs are optionally cleared without removing playlist entries.
 ///
@@ -1345,6 +1364,33 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn post_mapping_adoption_restores_guide_channel_casing() {
+        let input = ConfigInput::from(ConfigInputDto::default());
+        let groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![
+                live_playlist_item("USA 4K", Some("usa4k.us")),
+                live_playlist_item("Unknown", Some("unknown.id")),
+            ],
+            xtream_cluster: super::XtreamCluster::Live,
+        }];
+        let mut playlist =
+            FetchedPlaylist { input: &input, source: MemoryPlaylistSource::new(groups).into_source(), epg: None };
+        let epg = vec![super::Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![Arc::new(shared::model::EpgChannel::new("USA4K.us".intern()))],
+        }];
+
+        super::adopt_guide_live_epg_id_case(&mut playlist, &epg);
+
+        let ids = playlist.items_mut().map(|item| item.header.epg_channel_id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids.iter().map(Option::as_deref).collect::<Vec<_>>(), vec![Some("USA4K.us"), Some("unknown.id")]);
     }
 
     #[test]
