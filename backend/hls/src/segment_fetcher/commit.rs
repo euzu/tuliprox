@@ -162,14 +162,10 @@ pub(super) fn commit_failed_segment_fetch(
     finished_at_ms: u64,
 ) {
     let missing_candidate = session.origin_source.archive_reference.is_none()
-        && session.published_live_origin_baseline.is_none()
-        && session.publishable_origin_head_proxy_seq.is_some_and(|head| {
-            snapshot.proxy_seq >= head
-                && snapshot.proxy_seq
-                    <= session
-                        .missing_head_limit
-                        .unwrap_or_else(|| head.saturating_add(super::super::startup_policy::STARTUP_WINDOW_SUCCESSORS))
-        })
+        && session
+            .publishable_origin_head_proxy_seq
+            .is_some_and(|head| snapshot.proxy_seq >= head && snapshot.proxy_seq <= missing_head_bound(session, head))
+        && session.segments.get(&snapshot.proxy_seq).is_some_and(|entry| entry.last_rendered_at_ms.is_none())
         && error.permanent_status().is_some_and(is_missing_origin_status);
     if !error.is_local_cache_capacity() && !missing_candidate {
         session.origin_control.path_condition =
@@ -199,17 +195,28 @@ fn is_missing_origin_segment(status: &SegmentCacheStatus) -> bool {
     matches!(status, SegmentCacheStatus::FailedPermanent { status: Some(status), .. } if is_missing_origin_status(*status))
 }
 
+/// The missing-head scan limit stays fixed while it still covers the head, so
+/// the order in which failures arrive cannot widen it. A limit the head has
+/// moved past belongs to an earlier window and is replaced.
+fn missing_head_bound(session: &super::super::HlsSession, head: u64) -> u64 {
+    session
+        .missing_head_limit
+        .filter(|limit| *limit >= head)
+        .unwrap_or_else(|| head.saturating_add(super::super::startup_policy::STARTUP_WINDOW_SUCCESSORS))
+}
+
+/// Advances the live head past leading 404/410 segments that no manifest has
+/// exposed yet. This also covers a retained session whose head was moved to a
+/// new origin window: until a client has seen that head, skipping a missing
+/// object cannot open a hole in published media.
 pub(crate) fn recompute_unpublished_live_head(session: &mut super::super::HlsSession) {
-    if session.origin_source.archive_reference.is_some() || session.published_live_origin_baseline.is_some() {
+    if session.origin_source.archive_reference.is_some() {
         return;
     }
     let Some(head) = session.publishable_origin_head_proxy_seq else { return };
     let Some(tail) = session.publishable_origin_tail_proxy_seq else { return };
-    let bound = session
-        .missing_head_limit
-        .unwrap_or_else(|| head.saturating_add(super::super::startup_policy::STARTUP_WINDOW_SUCCESSORS))
-        .min(tail);
-    if session.missing_head_limit.is_none()
+    let bound = missing_head_bound(session, head).min(tail);
+    if session.missing_head_limit.is_none_or(|limit| limit < head)
         && session.segments.range(head..=bound).any(|(_, entry)| is_missing_origin_segment(&entry.status))
     {
         session.missing_head_limit = Some(bound);
@@ -218,7 +225,7 @@ pub(crate) fn recompute_unpublished_live_head(session: &mut super::super::HlsSes
     for seq in head..=bound {
         let Some(entry) = session.segments.get(&seq) else { break };
         match entry.status {
-            ref status if is_missing_origin_segment(status) => {
+            ref status if is_missing_origin_segment(status) && entry.last_rendered_at_ms.is_none() => {
                 let Some(next) = seq.checked_add(1) else { return };
                 next_head = next;
             }

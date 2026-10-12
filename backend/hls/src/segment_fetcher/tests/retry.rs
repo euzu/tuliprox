@@ -47,6 +47,43 @@ fn missing_head_is_order_independent_and_preserves_unrelated_degradation() -> st
 }
 
 #[test]
+fn missing_head_of_a_published_session_advances_only_while_no_manifest_exposed_it() -> std::io::Result<()> {
+    for (head_rendered, expected_offset) in [(false, 1_u64), (true, 0)] {
+        let mut session = crate::HlsSession::new(HlsSessionKey::new(1, "retained"), b"secret", 0);
+        for manifest in [
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4,\n0.ts\n#EXTINF:4,\n1.ts\n#EXTINF:4,\n2.ts\n#EXTINF:4,\n3.ts\n",
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:2\n#EXTINF:4,\n2.ts\n#EXTINF:4,\n3.ts\n#EXTINF:4,\n4.ts\n#EXTINF:4,\n5.ts\n",
+        ] {
+            session
+                .apply_origin_manifest(&normal_manifest(manifest))
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        }
+        let head = session.publishable_origin_head_proxy_seq.ok_or_else(|| std::io::Error::other("head"))?;
+        // An earlier window was published and its scan limit lies behind the new head.
+        session.published_live_origin_baseline = Some(crate::session::HlsPublishedLiveOriginBaseline {
+            evidence_proxy_seq: 0,
+            origin_epoch: 0,
+            rendered_at_ms: 1,
+        });
+        assert!(head > 0, "fixture head must leave room for a stale limit");
+        session.missing_head_limit = Some(head - 1);
+        for seq in head.saturating_add(1)..=head.saturating_add(3) {
+            let entry = session.segments.get_mut(&seq).ok_or_else(|| std::io::Error::other("successor"))?;
+            entry.status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 0 };
+        }
+        let entry = session.segments.get_mut(&head).ok_or_else(|| std::io::Error::other("head entry"))?;
+        entry.status =
+            SegmentCacheStatus::FailedPermanent { failed_at_ms: 1, status: Some(axum::http::StatusCode::NOT_FOUND) };
+        entry.last_rendered_at_ms = head_rendered.then_some(1);
+
+        super::super::recompute_unpublished_live_head(&mut session);
+
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(head + expected_offset));
+    }
+    Ok(())
+}
+
+#[test]
 fn segment_fetch_budget_accounts_for_serialized_key_and_media_retry_chains() {
     let policy = SegmentFetchPolicy {
         origin_segment_timeout_ms: 10_000,
