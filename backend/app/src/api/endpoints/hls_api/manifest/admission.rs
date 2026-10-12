@@ -27,10 +27,10 @@ use tuliprox_hls::api::{
     build_proxy_session_id, hls_cached_manifest_options_for_requirement, hls_manifest_acceptance_directive_for_session,
     hls_manifest_commit_requirement, register_hls_availability_reevaluation, safe_hls_access_lease_id,
     safe_proxy_session_id, safe_session_key, HlsAccessContext, HlsAccessLeaseId, HlsAccessLeasePendingDeadline,
-    HlsAccessLeaseState, HlsAccessLeaseTouch, HlsAccountBindingProtection, HlsCachedManifestOptions,
-    HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitRequirement,
-    HlsOriginIoContext, HlsOriginWorkClass, HlsPostRefreshRuntime, HlsRuntimeCustomTailReason, HlsSessionHandle,
-    HlsSessionStoreOutcome, LiveHlsOriginEntry, OriginRefreshRequest, ProxySessionId, RetryPolicy,
+    HlsAccessLeaseState, HlsAccessLeaseTouch, HlsAccountBindingProtection, HlsManifestAcceptanceDirective,
+    HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitRequirement, HlsOriginIoContext, HlsOriginWorkClass,
+    HlsPostRefreshRuntime, HlsRuntimeCustomTailReason, HlsSessionHandle, HlsSessionStoreOutcome, LiveHlsOriginEntry,
+    OriginRefreshRequest, ProxySessionId, RetryPolicy,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -520,7 +520,11 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
                         access_lease_state,
                         &strip,
                         server_path,
-                        HlsCachedManifestOptions::initial(Duration::ZERO),
+                        hls_cached_manifest_options_for_requirement(
+                            Duration::ZERO,
+                            manifest_commit_requirement,
+                            manifest_boundary_rendered_at_ms,
+                        ),
                         bandwidth_learning,
                     )
                     .await

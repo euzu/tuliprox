@@ -118,8 +118,9 @@ pub async fn hls_manifest_commit_requirement(
     if let Some(reason) = session.fresh_manifest_commit_required {
         return HlsManifestCommitRequirement::FreshCommitRequired { reason };
     }
-    if hls_committed_manifest_available_for_request(&session, now_ms) {
-        if new_playback_entry && !origin_window_is_fresh(&session, now_ms) {
+    if let Some(candidate) = hls_committed_manifest_for_request(&session, now_ms) {
+        // A finalized playlist no longer moves, so its window cannot fall behind the origin.
+        if new_playback_entry && !candidate.finalized && !origin_window_is_fresh(&session, now_ms) {
             return HlsManifestCommitRequirement::FreshCommitRequired {
                 reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
             };
@@ -151,12 +152,12 @@ fn origin_window_is_fresh(session: &HlsSession, now_ms: u64) -> bool {
         .is_some_and(|confirmed_at_ms| now_ms.saturating_sub(confirmed_at_ms) <= max_age_ms)
 }
 
-fn hls_committed_manifest_available_for_request(session: &HlsSession, now_ms: u64) -> bool {
+fn hls_committed_manifest_for_request(session: &HlsSession, now_ms: u64) -> Option<HlsCommittedManifestCandidate> {
     let protection = session.account_binding_protection(now_ms);
-    hls_committed_manifest_candidate(session).is_some_and(|candidate| {
+    hls_committed_manifest_candidate(session).filter(|candidate| {
         can_serve_committed_manifest(
             session,
-            &candidate,
+            candidate,
             protection,
             HlsCachedManifestPolicy::AllowInitialNoMediaYet,
             false,
@@ -222,8 +223,13 @@ fn committed_manifest_valid_at(candidate: &HlsCommittedManifestCandidate, now_ms
 
 #[cfg(test)]
 mod tests {
-    use super::{committed_manifest_valid_at, hls_committed_manifest_candidate};
-    use crate::{HlsSession, HlsSessionKey, HlsSessionMode, TransientPassthroughReason};
+    use super::{committed_manifest_valid_at, hls_committed_manifest_candidate, hls_manifest_commit_requirement};
+    use crate::{
+        HlsFreshManifestRequiredReason, HlsManifestCommitRequirement, HlsSession, HlsSessionKey, HlsSessionMode,
+        HlsSessionStoreOutcome, TransientPassthroughReason,
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     fn transient_session(body: &str) -> HlsSession {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "manifest-validity"), b"secret", 0);
@@ -254,5 +260,35 @@ mod tests {
         assert_eq!(candidate.valid_until_ms, Some(1_100));
         assert!(committed_manifest_valid_at(&candidate, 1_100));
         assert!(!committed_manifest_valid_at(&candidate, 1_101));
+    }
+
+    #[tokio::test]
+    async fn new_playback_entry_requires_fresh_commit_only_for_rolling_stale_windows() {
+        let now_ms = 100_000;
+        for (body, expected) in [
+            (
+                "#EXTM3U\n#EXTINF:1,\n/r/resource.ts\n#EXT-X-ENDLIST\n",
+                HlsManifestCommitRequirement::CommittedManifestAllowed,
+            ),
+            (
+                "#EXTM3U\n#EXTINF:1,\n/r/resource.ts\n",
+                HlsManifestCommitRequirement::FreshCommitRequired {
+                    reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
+                },
+            ),
+        ] {
+            let mut session = transient_session(body);
+            session.transient.replace_manifest_with_semantics(body.to_string(), now_ms, Some(1_000));
+            session.target_duration = Some(1);
+            session.mark_authorized_media_access(now_ms);
+            session.origin_refresh.last_success_at_ms = Some(now_ms - 16_000);
+            let session = Arc::new(RwLock::new(session));
+
+            assert_eq!(
+                hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
+                expected,
+                "{body:?}"
+            );
+        }
     }
 }
