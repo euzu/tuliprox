@@ -76,6 +76,7 @@ impl CanonicalOwnerHandoffFixture {
             server_path: None,
             manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
             manifest_boundary_rendered_at_ms: 0,
+            entry_origin_manifest_commits: 0,
             bandwidth_learning: super::super::super::HlsRuntimeBandwidthLearningContext::Disabled,
             request_deadline_ms,
             safe_session,

@@ -725,6 +725,7 @@ fn commit_transient_manifest(
         )?
     };
     session.transient.record_manifest_commit_identity(commit_identity);
+    session.record_origin_manifest_commit();
     session.record_manifest_commit_identity(commit_identity);
     session.transient.record_rolling_event_rewrite_seed(
         body,
@@ -859,6 +860,7 @@ fn commit_normal_manifest(
             reason: HlsManifestRejectLogReason::from(err),
         })?;
     }
+    session.record_origin_manifest_commit();
     session.transient.upsert_resources(key_resources);
     session.initial_prefetch_gap_segments = initial_prefetch_gap_segments;
     if provisioning_handoff {

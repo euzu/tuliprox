@@ -283,7 +283,22 @@ impl From<TimelineMapError> for HlsOriginHandoffPreviewError {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TimelineApplyMode {
     CurrentOrigin,
-    ExplicitHandoff { discontinuity_sequence: u64 },
+    ExplicitHandoff {
+        discontinuity_sequence: u64,
+    },
+    /// Handoff to a rebased origin baseline. Rebase is only allowed while no
+    /// viewer holds media protection, so no one depends on the retained head.
+    Rebase,
+}
+
+impl TimelineApplyMode {
+    const fn handoff_discontinuity_sequence(self) -> Option<u64> {
+        match self {
+            Self::CurrentOrigin => None,
+            Self::ExplicitHandoff { discontinuity_sequence } => Some(discontinuity_sequence),
+            Self::Rebase => Some(0),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -406,11 +421,7 @@ impl HlsSession {
             }
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
         } else {
-            draft.apply_manifest(
-                manifest,
-                effective_host_id,
-                TimelineApplyMode::ExplicitHandoff { discontinuity_sequence: 0 },
-            )?;
+            draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::Rebase)?;
         }
         self.commit_timeline_draft(draft);
         Ok(())
@@ -572,13 +583,17 @@ impl TimelineDraft {
         if candidate_plan.segments.is_empty() {
             return Ok(TimelineApplyResult::default());
         }
-        if let TimelineApplyMode::ExplicitHandoff { discontinuity_sequence } = mode {
+        if let Some(discontinuity_sequence) = mode.handoff_discontinuity_sequence() {
             self.pending_handoff_discontinuity_sequence = Some(discontinuity_sequence);
             self.pending_origin_epoch_handoff = true;
         }
         let handoff_discontinuity_sequence = self.pending_handoff_discontinuity_sequence.take();
+        // A rebase that shares no media with the retained timeline starts after a
+        // gap. Keeping the old head would publish historical media ahead of the
+        // discontinuity and make new playback jump forward.
+        let rebase_after_gap = mode == TimelineApplyMode::Rebase && !candidate_plan.trimmed_published_prefix;
         let handoff_publishable_head_proxy_seq =
-            handoff_discontinuity_sequence.and(self.publishable_origin_head_proxy_seq);
+            handoff_discontinuity_sequence.and(self.publishable_origin_head_proxy_seq).filter(|_| !rebase_after_gap);
         let origin_epoch_handoff = self.pending_origin_epoch_handoff;
         self.pending_origin_epoch_handoff = false;
         if self.segments.is_empty() {
@@ -628,7 +643,7 @@ impl TimelineDraft {
     ) -> Result<CandidateTimelinePlan<'a>, TimelineMapError> {
         let effective_host_changed =
             self.origin_epoch_effective_host_id.is_some_and(|committed_host_id| committed_host_id != effective_host_id);
-        let explicit_handoff = matches!(mode, TimelineApplyMode::ExplicitHandoff { .. })
+        let explicit_handoff = matches!(mode, TimelineApplyMode::ExplicitHandoff { .. } | TimelineApplyMode::Rebase)
             || self.pending_origin_epoch_handoff
             || effective_host_changed
             || self.should_start_new_origin_epoch_for_rollover(manifest);
@@ -1018,6 +1033,45 @@ mod tests {
             segment.status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: rendered_at_ms };
         }
         session.render_and_store_manifest(rendered_at_ms).expect("ready manifest should render").body
+    }
+
+    fn six_segment_manifest(first_sequence: u64) -> tuliprox_parser::hls::origin_manifest::ParsedOriginManifest {
+        let segments: String = (first_sequence..first_sequence + 6).fold(String::new(), |mut body, sequence| {
+            body.push_str("#EXTINF:4,\n");
+            body.push_str(&sequence.to_string());
+            body.push_str(".ts\n");
+            body
+        });
+        normal_manifest(&format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{first_sequence}\n{segments}"
+        ))
+    }
+
+    #[test]
+    fn rebase_after_origin_gap_publishes_from_the_new_window_head() {
+        let mut session = session();
+        session.apply_origin_manifest(&six_segment_manifest(0)).expect("baseline maps");
+        publish_ready_manifest(&mut session, 1);
+
+        let host_id = effective_origin_host_id("origin.example.com");
+        session.apply_origin_rebase_manifest(&six_segment_manifest(60), host_id).expect("rebase maps");
+
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(6));
+        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(11));
+        assert!(session.segments.get(&6).expect("first rebased segment").discontinuity_before);
+    }
+
+    #[test]
+    fn rebase_overlapping_the_retained_timeline_keeps_its_published_head() {
+        let mut session = session();
+        session.apply_origin_manifest(&six_segment_manifest(0)).expect("baseline maps");
+        publish_ready_manifest(&mut session, 1);
+
+        let host_id = effective_origin_host_id("origin.example.com");
+        session.apply_origin_rebase_manifest(&six_segment_manifest(3), host_id).expect("rebase maps");
+
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(0));
+        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(8));
     }
 
     #[test]

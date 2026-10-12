@@ -95,20 +95,29 @@ async fn first_origin_sequence_for_new_lease(
     session.segments.get(&first_proxy_seq).expect("published segment is mapped").origin_key.host_local_sequence
 }
 
-async fn age_retained_session(app_state: &Arc<AppState>, session_key: &HlsSessionKey, idle_ms: u64) {
+/// Moves the retained session's last origin confirmation `idle_ms` into the
+/// past. Media protection either stays active (short absence) or lapses with
+/// the idle time (long absence, origin rebase).
+async fn age_retained_session(app_state: &Arc<AppState>, session_key: &HlsSessionKey, idle_ms: u64, protected: bool) {
     let session = app_state.hls.proxy.sessions().get_by_key(session_key).await.expect("retained hls session");
     let mut session = session.write().await;
     let now_ms = super::super::current_time_millis();
-    // The retained session keeps its account protection, but the origin window
-    // was last confirmed `idle_ms` ago.
-    session.mark_authorized_media_access(now_ms);
+    session.activity.last_authorized_media_at_ms =
+        Some(if protected { now_ms } else { now_ms.saturating_sub(idle_ms) });
     session.origin_refresh.last_success_at_ms =
         session.origin_refresh.last_success_at_ms.map(|confirmed_at_ms| confirmed_at_ms.saturating_sub(idle_ms));
 }
 
 #[tokio::test]
 async fn new_playback_on_retained_session_starts_on_current_origin_window() {
-    for mode in [HlsStartupMode::Progressive, HlsStartupMode::FirstReady, HlsStartupMode::Conservative] {
+    for (mode, idle_ms, protected) in [
+        (HlsStartupMode::Progressive, 16_000, true),
+        (HlsStartupMode::FirstReady, 16_000, true),
+        (HlsStartupMode::Conservative, 16_000, true),
+        (HlsStartupMode::Progressive, 300_000, false),
+        (HlsStartupMode::FirstReady, 300_000, false),
+        (HlsStartupMode::Conservative, 300_000, false),
+    ] {
         let head = Arc::new(AtomicU64::new(0));
         let origin = spawn_moving_origin(Arc::clone(&head)).await;
         let input = ConfigInput {
@@ -127,14 +136,15 @@ async fn new_playback_on_retained_session_starts_on_current_origin_window() {
         create_active_hls_user_session(&app_state).await;
         let request_url = format!("{}/live/user/pass/12345.m3u8", origin.base_url);
         let session_key = super::super::build_hls_origin_source(&input, "12345").session_key();
+        let case = format!("{mode:?} idle_ms={idle_ms} protected={protected}");
 
         let first = first_origin_sequence_for_new_lease(&app_state, &input, &request_url, "lease-first").await;
-        assert!(first < 20, "{mode:?}: first playback starts on the initial window, got origin sequence {first}");
+        assert!(first < 20, "{case}: first playback starts on the initial window, got origin sequence {first}");
 
-        head.store(20, Ordering::SeqCst);
-        age_retained_session(&app_state, &session_key, 16_000).await;
+        head.store(60, Ordering::SeqCst);
+        age_retained_session(&app_state, &session_key, idle_ms, protected).await;
 
         let reentry = first_origin_sequence_for_new_lease(&app_state, &input, &request_url, "lease-reentry").await;
-        assert!(reentry >= 20, "{mode:?}: re-entry started on stale origin sequence {reentry}");
+        assert!(reentry >= 60, "{case}: re-entry started on stale origin sequence {reentry}");
     }
 }

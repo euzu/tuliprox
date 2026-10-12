@@ -86,6 +86,7 @@ async fn completed_owner_resolves_new_lease_standalone_without_reusing_old_termi
             server_path: None,
             manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
             manifest_boundary_rendered_at_ms: 0,
+            entry_origin_manifest_commits: 0,
             bandwidth_learning: super::super::HlsRuntimeBandwidthLearningContext::Disabled,
             request_deadline_ms: now_ms.saturating_add(60_000),
             safe_session,

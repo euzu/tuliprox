@@ -173,6 +173,7 @@ pub(in crate::api::endpoints::hls_api) struct HlsCanonicalOwnerHandoffContext<'a
     pub(in crate::api::endpoints::hls_api) server_path: Option<&'a str>,
     pub(in crate::api::endpoints::hls_api) manifest_commit_requirement: HlsManifestCommitRequirement,
     pub(in crate::api::endpoints::hls_api) manifest_boundary_rendered_at_ms: u64,
+    pub(in crate::api::endpoints::hls_api) entry_origin_manifest_commits: u64,
     pub(in crate::api::endpoints::hls_api) bandwidth_learning: HlsRuntimeBandwidthLearningContext<'a>,
     pub(in crate::api::endpoints::hls_api) request_deadline_ms: u64,
     pub(in crate::api::endpoints::hls_api) safe_session: String,
@@ -243,6 +244,7 @@ pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_han
             Duration::ZERO,
             context.manifest_commit_requirement,
             context.manifest_boundary_rendered_at_ms,
+            context.entry_origin_manifest_commits,
         );
         if let Some(response) = try_hls_cached_manifest_response(
             context.app_state,

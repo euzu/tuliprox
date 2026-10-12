@@ -29,16 +29,27 @@ pub struct HlsCachedManifestOptions {
     pub wait_timeout: Duration,
     policy: HlsCachedManifestPolicy,
     newer_than_rendered_at_ms: Option<u64>,
+    after_origin_manifest_commits: Option<u64>,
 }
 
 impl HlsCachedManifestOptions {
     #[cfg_attr(not(test), allow(dead_code))]
     pub const fn committed_only(wait_timeout: Duration) -> Self {
-        Self { wait_timeout, policy: HlsCachedManifestPolicy::CommittedOnly, newer_than_rendered_at_ms: None }
+        Self {
+            wait_timeout,
+            policy: HlsCachedManifestPolicy::CommittedOnly,
+            newer_than_rendered_at_ms: None,
+            after_origin_manifest_commits: None,
+        }
     }
 
     pub const fn initial(wait_timeout: Duration) -> Self {
-        Self { wait_timeout, policy: HlsCachedManifestPolicy::AllowInitialNoMediaYet, newer_than_rendered_at_ms: None }
+        Self {
+            wait_timeout,
+            policy: HlsCachedManifestPolicy::AllowInitialNoMediaYet,
+            newer_than_rendered_at_ms: None,
+            after_origin_manifest_commits: None,
+        }
     }
 
     pub const fn requiring_newer_manifest(mut self, rendered_at_ms: u64) -> Self {
@@ -46,17 +57,32 @@ impl HlsCachedManifestOptions {
         self
     }
 
-    const fn requires_newer_manifest(self) -> bool { self.newer_than_rendered_at_ms.is_some() }
+    /// Requires a committed manifest stored after an origin commit newer than
+    /// `origin_manifest_commits`.
+    pub const fn requiring_origin_commit_after(mut self, origin_manifest_commits: u64) -> Self {
+        self.after_origin_manifest_commits = Some(origin_manifest_commits);
+        self
+    }
+
+    const fn requires_newer_manifest(self) -> bool {
+        self.newer_than_rendered_at_ms.is_some() || self.after_origin_manifest_commits.is_some()
+    }
 }
 
 pub const fn hls_cached_manifest_options_for_requirement(
     wait_timeout: Duration,
     requirement: HlsManifestCommitRequirement,
     previous_rendered_at_ms: u64,
+    entry_origin_manifest_commits: u64,
 ) -> HlsCachedManifestOptions {
     let options = HlsCachedManifestOptions::initial(wait_timeout);
     match requirement {
         HlsManifestCommitRequirement::CommittedManifestAllowed => options,
+        HlsManifestCommitRequirement::FreshCommitRequired {
+            reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
+        } => options
+            .requiring_newer_manifest(previous_rendered_at_ms)
+            .requiring_origin_commit_after(entry_origin_manifest_commits),
         HlsManifestCommitRequirement::FreshCommitRequired { .. } => {
             options.requiring_newer_manifest(previous_rendered_at_ms)
         }
@@ -78,7 +104,10 @@ pub fn hls_committed_manifest_body_for_request(
             options.policy,
             candidate.rendered_at_ms >= started_at_ms,
             now_ms,
-        ) && manifest_rendered_after_required_boundary(Some(candidate.rendered_at_ms), options))
+        ) && manifest_rendered_after_required_boundary(Some(candidate.rendered_at_ms), options)
+            && options
+                .after_origin_manifest_commits
+                .is_none_or(|commits| session.committed_manifest_follows_origin_commit(commits)))
         .then_some(candidate.body)
     })
 }
@@ -223,12 +252,15 @@ fn committed_manifest_valid_at(candidate: &HlsCommittedManifestCandidate, now_ms
 
 #[cfg(test)]
 mod tests {
-    use super::{committed_manifest_valid_at, hls_committed_manifest_candidate, hls_manifest_commit_requirement};
+    use super::{
+        committed_manifest_valid_at, hls_cached_manifest_options_for_requirement,
+        hls_committed_manifest_body_for_request, hls_committed_manifest_candidate, hls_manifest_commit_requirement,
+    };
     use crate::{
         HlsFreshManifestRequiredReason, HlsManifestCommitRequirement, HlsSession, HlsSessionKey, HlsSessionMode,
         HlsSessionStoreOutcome, TransientPassthroughReason,
     };
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tokio::sync::RwLock;
 
     fn transient_session(body: &str) -> HlsSession {
@@ -290,5 +322,27 @@ mod tests {
                 "{body:?}"
             );
         }
+    }
+
+    #[test]
+    fn stale_entry_waits_for_a_manifest_stored_after_a_newer_origin_commit() {
+        let now_ms = 100_000;
+        let mut session = transient_session("#EXTM3U\n#EXTINF:1,\n/r/resource.ts\n");
+        session.mark_authorized_media_access(now_ms);
+        let options = hls_cached_manifest_options_for_requirement(
+            Duration::ZERO,
+            HlsManifestCommitRequirement::FreshCommitRequired {
+                reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
+            },
+            0,
+            session.origin_manifest_commits(),
+        );
+        assert!(hls_committed_manifest_body_for_request(&session, options, 0, now_ms).is_none());
+
+        session.record_origin_manifest_commit();
+        let identity = session.next_manifest_commit_identity(now_ms).expect("commit generation");
+        session.record_manifest_commit_identity(identity);
+
+        assert!(hls_committed_manifest_body_for_request(&session, options, 0, now_ms).is_some());
     }
 }

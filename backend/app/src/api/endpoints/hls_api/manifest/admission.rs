@@ -271,6 +271,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
     );
     let reservation_ttl_secs = hls_origin_account_reservation_ttl_secs_for_session(&session).await;
     let previous_manifest_rendered_at_ms = latest_shared_hls_manifest_rendered_at_ms(&session).await;
+    let entry_origin_manifest_commits = session.read().await.origin_manifest_commits();
     let handoff_previous_rendered_at_ms = maybe_mark_hls_provisioning_handoff_for_canonical_manifest(
         app_state,
         &session,
@@ -308,6 +309,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
         wait_timeout,
         manifest_commit_requirement,
         manifest_boundary_rendered_at_ms,
+        entry_origin_manifest_commits,
     );
     let bandwidth_learning = match context.known_bitrate_bps {
         Some(_) => HlsRuntimeBandwidthLearningContext::Disabled,
@@ -406,6 +408,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
                         server_path,
                         manifest_commit_requirement,
                         manifest_boundary_rendered_at_ms,
+                        entry_origin_manifest_commits,
                         bandwidth_learning,
                         request_deadline_ms,
                         safe_session,
@@ -524,6 +527,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
                             Duration::ZERO,
                             manifest_commit_requirement,
                             manifest_boundary_rendered_at_ms,
+                            entry_origin_manifest_commits,
                         ),
                         bandwidth_learning,
                     )
