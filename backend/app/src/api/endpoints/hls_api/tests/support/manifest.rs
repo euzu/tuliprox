@@ -74,6 +74,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn record_test_normal_manifest_com
         .next_manifest_commit_identity(rendered_at_ms)
         .expect("test manifest commit generation remains available");
     session.record_normal_manifest_commit_identity(identity);
+    session.origin_refresh.last_success_at_ms = Some(rendered_at_ms);
 }
 
 pub(in crate::api::endpoints::hls_api::tests) fn store_normal_manifest_body_range(

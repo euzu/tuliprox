@@ -212,7 +212,7 @@ async fn hls_hard_manifest_failure_forces_next_fresh_commit() {
     }
 
     assert_eq!(
-        super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, 2_000).await,
+        super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, false, 2_000).await,
         HlsManifestCommitRequirement::FreshCommitRequired {
             reason: HlsFreshManifestRequiredReason::PreviousHardManifestFailure
         }
@@ -249,7 +249,67 @@ async fn hls_normal_expired_session_allows_committed_manifest_while_manifest_val
     }
 
     assert_eq!(
-        super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, now_ms).await,
+        super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, false, now_ms).await,
+        HlsManifestCommitRequirement::CommittedManifestAllowed
+    );
+}
+
+async fn retained_session_with_valid_manifest(now_ms: u64, origin_confirmed_at_ms: Option<u64>) -> HlsSessionHandle {
+    let session = Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)));
+    {
+        let mut session = session.write().await;
+        let proxy_session_id = session.proxy_session_id.clone();
+        session.target_duration = Some(2);
+        session.mark_authorized_media_access(now_ms.saturating_sub(1_000));
+        session.origin_account_binding = Some(HlsOriginAccountBinding::new(
+            Arc::from("test-input"),
+            Arc::from("test-account"),
+            &proxy_session_id,
+            now_ms,
+        ));
+        session.origin_refresh.last_success_at_ms = origin_confirmed_at_ms;
+        session.last_rendered_manifest = Some(RenderedManifest {
+            body: "#EXTM3U\n#EXTINF:2.0,\n000001.ts\n".to_string(),
+            first_proxy_seq: 1,
+            last_proxy_seq: 1,
+            playlist_duration_ms: 2_000,
+            valid_until_ms: now_ms.saturating_add(10_000),
+            render_gap_segments: 0,
+            rendered_at_ms: now_ms.saturating_sub(1_000),
+            discontinuity_sequence: 0,
+            target_duration_ms: 2_000,
+            segment_proxy_seqs: vec![1],
+        });
+    }
+    session
+}
+
+#[tokio::test]
+async fn hls_new_playback_on_retained_session_requires_fresh_commit_for_stale_origin_window() {
+    let now_ms = 100_000;
+    for origin_confirmed_at_ms in [None, Some(now_ms - 16_000), Some(now_ms - 4_001)] {
+        let session = retained_session_with_valid_manifest(now_ms, origin_confirmed_at_ms).await;
+        assert_eq!(
+            super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
+            HlsManifestCommitRequirement::FreshCommitRequired {
+                reason: HlsFreshManifestRequiredReason::StaleEntryWindow
+            },
+            "origin confirmed at {origin_confirmed_at_ms:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hls_retained_session_serves_committed_manifest_for_fresh_window_or_active_lease() {
+    let now_ms = 100_000;
+    let fresh = retained_session_with_valid_manifest(now_ms, Some(now_ms - 4_000)).await;
+    assert_eq!(
+        super::hls_manifest_commit_requirement(&fresh, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
+        HlsManifestCommitRequirement::CommittedManifestAllowed
+    );
+    let stale = retained_session_with_valid_manifest(now_ms, Some(now_ms - 16_000)).await;
+    assert_eq!(
+        super::hls_manifest_commit_requirement(&stale, HlsSessionStoreOutcome::Reused, None, false, now_ms).await,
         HlsManifestCommitRequirement::CommittedManifestAllowed
     );
 }
@@ -284,7 +344,7 @@ async fn hls_normal_expired_session_requires_fresh_commit_after_manifest_validit
     }
 
     assert_eq!(
-        super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, now_ms).await,
+        super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, false, now_ms).await,
         HlsManifestCommitRequirement::FreshCommitRequired {
             reason: HlsFreshManifestRequiredReason::ExpiredRevalidation
         }

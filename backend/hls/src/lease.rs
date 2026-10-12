@@ -102,6 +102,9 @@ pub enum HlsFreshManifestRequiredReason {
     ExpiredRevalidation,
     PreviousHardManifestFailure,
     ProvisioningHandoff,
+    /// New playback entered a retained session whose origin window may have
+    /// moved on; the committed window must not open the lease.
+    StaleEntryWindow,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

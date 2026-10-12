@@ -280,8 +280,14 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
         now_ms,
     )
     .await;
-    let manifest_commit_requirement =
-        hls_manifest_commit_requirement(&session, session_outcome, handoff_previous_rendered_at_ms, now_ms).await;
+    let manifest_commit_requirement = hls_manifest_commit_requirement(
+        &session,
+        session_outcome,
+        handoff_previous_rendered_at_ms,
+        access_lease_state == HlsAccessLeaseState::Pending,
+        now_ms,
+    )
+    .await;
     let hls_ctx = app_state.hls_ctx();
     let acceptance_evaluation =
         hls_manifest_acceptance_directive_for_session(&hls_ctx, &session, path_proxy_session_id).await;

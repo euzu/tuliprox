@@ -102,6 +102,7 @@ pub async fn hls_manifest_commit_requirement(
     session: &HlsSessionHandle,
     session_outcome: HlsSessionStoreOutcome,
     handoff_previous_rendered_at_ms: Option<u64>,
+    new_playback_entry: bool,
     now_ms: u64,
 ) -> HlsManifestCommitRequirement {
     if handoff_previous_rendered_at_ms.is_some() {
@@ -118,12 +119,36 @@ pub async fn hls_manifest_commit_requirement(
         return HlsManifestCommitRequirement::FreshCommitRequired { reason };
     }
     if hls_committed_manifest_available_for_request(&session, now_ms) {
+        if new_playback_entry && !origin_window_is_fresh(&session, now_ms) {
+            return HlsManifestCommitRequirement::FreshCommitRequired {
+                reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
+            };
+        }
         HlsManifestCommitRequirement::CommittedManifestAllowed
     } else {
         HlsManifestCommitRequirement::FreshCommitRequired {
             reason: HlsFreshManifestRequiredReason::ExpiredRevalidation,
         }
     }
+}
+
+/// Live origins advance one segment per target duration. A window last
+/// confirmed more than two target durations ago may already be behind the
+/// origin, so new playback must wait for a fresh commit instead of starting on
+/// historical media and later jumping forward.
+fn origin_window_is_fresh(session: &HlsSession, now_ms: u64) -> bool {
+    let Some(target_duration_ms) = session
+        .target_duration
+        .map(|seconds| u64::from(seconds).saturating_mul(1_000))
+        .or_else(|| session.last_rendered_manifest.as_ref().map(|rendered| rendered.target_duration_ms))
+    else {
+        return false;
+    };
+    let max_age_ms = target_duration_ms.saturating_mul(2);
+    session
+        .origin_refresh
+        .last_success_at_ms
+        .is_some_and(|confirmed_at_ms| now_ms.saturating_sub(confirmed_at_ms) <= max_age_ms)
 }
 
 fn hls_committed_manifest_available_for_request(session: &HlsSession, now_ms: u64) -> bool {

@@ -136,6 +136,8 @@ async fn prepare_hls_revision_response(
         qos_meter: Arc::clone(&context.qos_meter),
         completion,
         observation,
+        expected_len: body_range.length,
+        bytes_sent: 0,
         first_chunk: true,
         finished: false,
         idle_deadline: Box::pin(sleep(hls_client_body_send_deadline())),
@@ -250,6 +252,16 @@ impl RevisionResponseStream {
             }
         }
     }
+
+    fn complete(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(marker) = self.completion.take() {
+            marker.spawn_mark_completion_now();
+        }
+        self.finish("completed");
+    }
 }
 
 impl Stream for RevisionResponseStream {
@@ -265,6 +277,7 @@ impl Stream for RevisionResponseStream {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 refresh_hls_client_body_send_deadline(self.idle_deadline.as_mut());
+                self.bytes_sent = self.bytes_sent.saturating_add(chunk.len() as u64);
                 if let Some(meter) = self.qos_meter.load_full() {
                     meter.record_bytes(chunk.len() as u64);
                 }
@@ -281,10 +294,7 @@ impl Stream for RevisionResponseStream {
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
-                if let Some(marker) = self.completion.take() {
-                    marker.spawn_mark_completion_now();
-                }
-                self.finish("completed");
+                self.complete();
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -293,5 +303,11 @@ impl Stream for RevisionResponseStream {
 }
 
 impl Drop for RevisionResponseStream {
-    fn drop(&mut self) { self.finish("dropped"); }
+    fn drop(&mut self) {
+        if self.expected_len.is_some_and(|expected_len| self.bytes_sent >= expected_len) {
+            self.complete();
+        } else {
+            self.finish("dropped");
+        }
+    }
 }

@@ -230,7 +230,10 @@ impl HlsManifestCommitRequirement {
 
     const fn acceptance_mode(self) -> HlsManifestCommitAcceptanceMode {
         match self {
-            Self::CommittedManifestAllowed => HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            Self::CommittedManifestAllowed
+            | Self::FreshCommitRequired { reason: HlsFreshManifestRequiredReason::StaleEntryWindow } => {
+                HlsManifestCommitAcceptanceMode::StrictPinnedHost
+            }
             Self::FreshCommitRequired {
                 reason: HlsFreshManifestRequiredReason::ColdStart | HlsFreshManifestRequiredReason::ProvisioningHandoff,
             } => HlsManifestCommitAcceptanceMode::FreshBaseline,
@@ -255,7 +258,8 @@ impl HlsManifestCommitRequirement {
                     HlsFreshManifestRequiredReason::ExpiredRevalidation
                     | HlsFreshManifestRequiredReason::PreviousHardManifestFailure,
             } => HlsManifestAcceptanceTrigger::RecoveryRequired,
-            Self::CommittedManifestAllowed => HlsManifestAcceptanceTrigger::None,
+            Self::FreshCommitRequired { reason: HlsFreshManifestRequiredReason::StaleEntryWindow }
+            | Self::CommittedManifestAllowed => HlsManifestAcceptanceTrigger::None,
         }
     }
 }
@@ -998,7 +1002,10 @@ fn recovery_prefetch_diagnostic(request: &OriginRefreshRequest) -> HlsRecoveryTr
             reason: HlsFreshManifestRequiredReason::PreviousHardManifestFailure,
         } => HlsRecoveryTriggerDiagnostic::new(HlsRecoveryTriggerSource::HardFetchFailure),
         HlsManifestCommitRequirement::FreshCommitRequired {
-            reason: HlsFreshManifestRequiredReason::ExpiredRevalidation | HlsFreshManifestRequiredReason::ColdStart,
+            reason:
+                HlsFreshManifestRequiredReason::ExpiredRevalidation
+                | HlsFreshManifestRequiredReason::ColdStart
+                | HlsFreshManifestRequiredReason::StaleEntryWindow,
         }
         | HlsManifestCommitRequirement::CommittedManifestAllowed => request
             .acceptance_directive

@@ -141,6 +141,10 @@ struct RevisionResponseStream {
     /// Marks the segment completed once the body ends without an error.
     completion: Option<HlsMediaActivityMarker>,
     observation: Option<HlsStartupBodyObservation>,
+    /// `Content-Length` of the response; HTTP/1 drops such a body after its
+    /// final byte without polling for the end of the stream.
+    expected_len: Option<u64>,
+    bytes_sent: u64,
     first_chunk: bool,
     finished: bool,
     idle_deadline: Pin<Box<Sleep>>,
