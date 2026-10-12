@@ -574,7 +574,7 @@ fn refresh_commit_trims_forward_manifest_with_published_stale_resource_prefix() 
     );
     let replay_then_new = fetched_manifest(
         "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:476\n\
-         #EXTINF:4,\n474.ts\n#EXTINF:4,\n480.ts\n#EXTINF:4,\n481.ts\n",
+         #EXTINF:4,\n474.ts\n#EXTINF:4,\n480.ts\n#EXTINF:4,\n481.ts\n#EXTINF:4,\n482.ts\n",
     );
 
     commit_fetched_manifest(&mut session, &baseline, &request, 100).expect("baseline refresh commits");
@@ -585,15 +585,17 @@ fn refresh_commit_trims_forward_manifest_with_published_stale_resource_prefix() 
     commit_fetched_manifest(&mut session, &replay_then_new, &request, 200)
         .expect("stale prefix is safely trimmed by refresh commit");
 
-    assert_eq!(session.proxy_next_seq, Some(8));
-    assert_eq!(session.publishable_origin_head_proxy_seq, Some(0));
+    assert_eq!(session.proxy_next_seq, Some(9));
+    // No viewer holds the retained head, and the new media does not continue the
+    // published tail, so publication starts at the first genuine new segment.
+    assert_eq!(session.publishable_origin_head_proxy_seq, Some(6));
     assert!(session.segments.get(&6).expect("first genuine media").discontinuity_before);
-    for proxy_seq in [6_u64, 7] {
+    for proxy_seq in [6_u64, 7, 8] {
         session.segments.get_mut(&proxy_seq).expect("new segment").status =
             SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 201 };
     }
     let rendered = session.render_and_store_manifest(201).expect("forward refresh renders without replay");
-    assert_eq!(rendered.first_proxy_seq, 2);
+    assert_eq!(rendered.first_proxy_seq, 6);
     assert!(rendered.body.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4.000,"));
     let identities = rendered
         .segment_proxy_seqs

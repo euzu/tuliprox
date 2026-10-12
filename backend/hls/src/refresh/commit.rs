@@ -852,7 +852,12 @@ fn commit_normal_manifest(
         session.advance_media_readiness_generation();
     } else {
         let apply_result = if sequence_relation == HlsManifestSequenceRelation::Rebase {
-            session.apply_origin_rebase_manifest(manifest, effective_host_id)
+            let retained_head_in_use = matches!(
+                session.account_binding_protection(rendered_at_ms),
+                crate::HlsAccountBindingProtection::HardActive { .. }
+                    | crate::HlsAccountBindingProtection::SoftActive { .. }
+            );
+            session.apply_origin_rebase_manifest(manifest, effective_host_id, retained_head_in_use)
         } else {
             session.apply_origin_manifest_for_host(manifest, effective_host_id)
         };

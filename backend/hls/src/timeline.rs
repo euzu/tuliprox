@@ -286,9 +286,11 @@ enum TimelineApplyMode {
     ExplicitHandoff {
         discontinuity_sequence: u64,
     },
-    /// Handoff to a rebased origin baseline. Rebase is only allowed while no
-    /// viewer holds media protection, so no one depends on the retained head.
-    Rebase,
+    /// Handoff to a rebased origin baseline. When no viewer holds the
+    /// retained head, a gap moves publication to the new window head.
+    Rebase {
+        retained_head_in_use: bool,
+    },
 }
 
 impl TimelineApplyMode {
@@ -296,7 +298,7 @@ impl TimelineApplyMode {
         match self {
             Self::CurrentOrigin => None,
             Self::ExplicitHandoff { discontinuity_sequence } => Some(discontinuity_sequence),
-            Self::Rebase => Some(0),
+            Self::Rebase { .. } => Some(0),
         }
     }
 }
@@ -348,6 +350,9 @@ enum CandidateSegmentDisposition {
 struct CandidateTimelinePlan<'a> {
     segments: Vec<&'a ParsedOriginSegment>,
     trimmed_published_prefix: bool,
+    /// The candidate repeats the publishable tail, so its new media continues
+    /// the retained timeline without a gap.
+    overlaps_publishable_tail: bool,
 }
 
 impl From<&HlsSession> for TimelineDraft {
@@ -404,11 +409,13 @@ impl HlsSession {
     ///
     /// A retained timeline is separated with an explicit discontinuity. If only stale baseline metadata remains,
     /// the epoch still advances, but no synthetic discontinuity is added ahead of the first media ever published by
-    /// this session.
+    /// this session. `retained_head_in_use` keeps the published head for viewers
+    /// that still hold media protection on the retained timeline.
     pub fn apply_origin_rebase_manifest(
         &mut self,
         manifest: &ParsedOriginManifest,
         effective_host_id: u64,
+        retained_head_in_use: bool,
     ) -> Result<(), TimelineMapError> {
         let mut draft = TimelineDraft::from(&*self);
         if draft.segments.is_empty() {
@@ -421,7 +428,7 @@ impl HlsSession {
             }
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
         } else {
-            draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::Rebase)?;
+            draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::Rebase { retained_head_in_use })?;
         }
         self.commit_timeline_draft(draft);
         Ok(())
@@ -591,7 +598,8 @@ impl TimelineDraft {
         // A rebase that shares no media with the retained timeline starts after a
         // gap. Keeping the old head would publish historical media ahead of the
         // discontinuity and make new playback jump forward.
-        let rebase_after_gap = mode == TimelineApplyMode::Rebase && !candidate_plan.trimmed_published_prefix;
+        let rebase_after_gap = mode == TimelineApplyMode::Rebase { retained_head_in_use: false }
+            && !candidate_plan.overlaps_publishable_tail;
         let handoff_publishable_head_proxy_seq =
             handoff_discontinuity_sequence.and(self.publishable_origin_head_proxy_seq).filter(|_| !rebase_after_gap);
         let origin_epoch_handoff = self.pending_origin_epoch_handoff;
@@ -643,18 +651,25 @@ impl TimelineDraft {
     ) -> Result<CandidateTimelinePlan<'a>, TimelineMapError> {
         let effective_host_changed =
             self.origin_epoch_effective_host_id.is_some_and(|committed_host_id| committed_host_id != effective_host_id);
-        let explicit_handoff = matches!(mode, TimelineApplyMode::ExplicitHandoff { .. } | TimelineApplyMode::Rebase)
-            || self.pending_origin_epoch_handoff
-            || effective_host_changed
-            || self.should_start_new_origin_epoch_for_rollover(manifest);
+        let explicit_handoff =
+            matches!(mode, TimelineApplyMode::ExplicitHandoff { .. } | TimelineApplyMode::Rebase { .. })
+                || self.pending_origin_epoch_handoff
+                || effective_host_changed
+                || self.should_start_new_origin_epoch_for_rollover(manifest);
         let mut segments = Vec::with_capacity(manifest.segments.len());
         let mut trimmed_published_prefix = false;
+        let mut overlaps_publishable_tail = false;
         let mut first_published_overlap = None;
 
         for (candidate_position, parsed) in manifest.segments.iter().enumerate() {
             let resource_identity =
                 HlsMediaResourceIdentity::from_url(&parsed.resolved_origin_url, parsed.origin_byte_range);
             let disposition = self.classify_candidate_segment(parsed, effective_host_id)?;
+            if let CandidateSegmentDisposition::CurrentMapping(proxy_seq)
+            | CandidateSegmentDisposition::PublishedOverlap(proxy_seq) = disposition
+            {
+                overlaps_publishable_tail |= self.publishable_origin_tail_proxy_seq == Some(proxy_seq);
+            }
             match disposition {
                 CandidateSegmentDisposition::CurrentMapping(proxy_seq) if !explicit_handoff => {
                     if trimmed_published_prefix {
@@ -706,7 +721,7 @@ impl TimelineDraft {
             });
         }
 
-        Ok(CandidateTimelinePlan { segments, trimmed_published_prefix })
+        Ok(CandidateTimelinePlan { segments, trimmed_published_prefix, overlaps_publishable_tail })
     }
 
     fn classify_candidate_segment(
@@ -1054,10 +1069,40 @@ mod tests {
         publish_ready_manifest(&mut session, 1);
 
         let host_id = effective_origin_host_id("origin.example.com");
-        session.apply_origin_rebase_manifest(&six_segment_manifest(60), host_id).expect("rebase maps");
+        session.apply_origin_rebase_manifest(&six_segment_manifest(60), host_id, false).expect("rebase maps");
 
         assert_eq!(session.publishable_origin_head_proxy_seq, Some(6));
         assert_eq!(session.publishable_origin_tail_proxy_seq, Some(11));
+        assert!(session.segments.get(&6).expect("first rebased segment").discontinuity_before);
+    }
+
+    #[test]
+    fn rebase_overlapping_only_before_the_published_tail_publishes_from_the_new_window_head() {
+        let mut session = session();
+        session.apply_origin_manifest(&six_segment_manifest(0)).expect("baseline maps");
+        publish_ready_manifest(&mut session, 1);
+
+        let host_id = effective_origin_host_id("origin.example.com");
+        let rebase = normal_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:59\n\
+             #EXTINF:4,\n3.ts\n#EXTINF:4,\n60.ts\n#EXTINF:4,\n61.ts\n#EXTINF:4,\n62.ts\n",
+        );
+        session.apply_origin_rebase_manifest(&rebase, host_id, false).expect("rebase maps");
+
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(6));
+        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(8));
+    }
+
+    #[test]
+    fn rebase_after_origin_gap_keeps_the_head_while_viewers_still_hold_it() {
+        let mut session = session();
+        session.apply_origin_manifest(&six_segment_manifest(0)).expect("baseline maps");
+        publish_ready_manifest(&mut session, 1);
+
+        let host_id = effective_origin_host_id("origin.example.com");
+        session.apply_origin_rebase_manifest(&six_segment_manifest(60), host_id, true).expect("rebase maps");
+
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(0));
         assert!(session.segments.get(&6).expect("first rebased segment").discontinuity_before);
     }
 
@@ -1068,7 +1113,7 @@ mod tests {
         publish_ready_manifest(&mut session, 1);
 
         let host_id = effective_origin_host_id("origin.example.com");
-        session.apply_origin_rebase_manifest(&six_segment_manifest(3), host_id).expect("rebase maps");
+        session.apply_origin_rebase_manifest(&six_segment_manifest(3), host_id, false).expect("rebase maps");
 
         assert_eq!(session.publishable_origin_head_proxy_seq, Some(0));
         assert_eq!(session.publishable_origin_tail_proxy_seq, Some(8));
