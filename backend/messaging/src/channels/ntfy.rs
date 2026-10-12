@@ -8,6 +8,10 @@ use reqwest::header;
 use shared::model::notification::{EventId, Severity};
 use tuliprox_core::model::{ChannelRouting, NtfyMessagingConfig};
 
+/// ntfy's default `message-size-limit`. A larger body is turned into an
+/// attachment, or rejected when the server has no attachment cache.
+const NTFY_BODY_LIMIT: usize = 4096;
+
 #[derive(Clone)]
 pub struct NtfyChannel {
     config: NtfyMessagingConfig,
@@ -76,12 +80,30 @@ impl NotificationChannel for NtfyChannel {
         }
     }
 
-    fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities { supports_templates: true, max_body_bytes: Some(NTFY_BODY_LIMIT) }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NtfyChannel, Severity};
+    use super::{NtfyChannel, Severity, NTFY_BODY_LIMIT};
+    use crate::channel::NotificationChannel;
+
+    #[test]
+    fn the_body_is_capped_at_the_ntfy_message_size_limit() {
+        let channel = NtfyChannel::new(
+            tuliprox_core::model::NtfyMessagingConfig {
+                url: "http://ntfy.local".to_string(),
+                topic: "t".to_string(),
+                token: None,
+                templates: std::collections::HashMap::new(),
+                routing: tuliprox_core::model::ChannelRouting::default(),
+            },
+            reqwest::Client::new(),
+        );
+        assert_eq!(channel.capabilities().max_body_bytes, Some(NTFY_BODY_LIMIT));
+    }
 
     #[test]
     fn severity_maps_onto_the_ntfy_priority_scale() {

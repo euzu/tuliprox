@@ -383,7 +383,7 @@
       "MAPPING": "Lista de ID de mapeo a aplicar a este destino.",
       "NAME": "Nombre legible para este elemento. Se utiliza para el procesamiento selectivo mediante el argumento CLI -t.",
       "USE_MEMORY_CACHE": "Si está habilitado, la lista de reproducción se guarda en caché en RAM para reducir la sobrecarga de disco (aumenta el uso de memoria).",
-      "WATCH": "Lista de patrones de grupo a monitorizar para detectar cambios. Las notificaciones se envían mediante la mensajería configurada."
+      "WATCH": "Lista de patrones de grupo a monitorizar. Cada patrón es una expresión regular que se compara con el nombre del grupo (p. ej. ^Sport.* o (?i)event). Cada entrada informa de cambios de canales, grupos nuevos y/o grupos eliminados. Las notificaciones se envían mediante la mensajería configurada."
     },
     "CONFIG_TARGET_OPTIONS": {
       "SHARE_LIVE_STREAMS": "Habilita el uso compartido de streams en directo. El interruptor maestro activa HLS y MPEG-TS juntos; cada formato también se puede cambiar por separado."
@@ -1808,6 +1808,9 @@
     "VOD": "VOD",
     "VOD_SHORT": "V",
     "WATCH": "Vigilancia",
+    "WATCH_CHANNELS": "Canales",
+    "WATCH_GROUP_ADDED": "Grupos nuevos",
+    "WATCH_GROUP_REMOVED": "Grupos eliminados",
     "WEBHOOK_URL": "URL del webhook",
     "WEB_AUTH": "Autenticación",
     "WEB_ROOT": "Web-Root",

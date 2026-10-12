@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 aes = "0.8.4"
-bitflags = "2.13.1"
 ciborium = "0.2.2"
 hex = "0.4.3"
 serde_tuple = "1.1.3"

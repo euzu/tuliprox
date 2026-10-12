@@ -516,7 +516,6 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         | EventMessage::DiskAlert(_)
         | EventMessage::ConfigReloadFailed(_)
         | EventMessage::PlaylistWatchChanged(_)
-        | EventMessage::PlaylistGroupsChanged(_)
         | EventMessage::PlaylistWatchDisabled(_)
         | EventMessage::PlaylistWatchUnmatched(_)
         | EventMessage::RecordingLifecycle(_)
@@ -704,9 +703,9 @@ mod tests {
     use shared::model::{
         AuthAuditEvent, AuthAuditOutcome, Claims, ConfigReloadFailure, DiskAlert, DiskAlertLevel,
         LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind,
-        Permission, PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
-        PlaylistUpdateState, PlaylistUpdateSummary, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage,
-        ProviderAccountEvent, ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
+        Permission, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState,
+        PlaylistUpdateSummary, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, ProviderAccountEvent,
+        ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
         ProviderPriorityFallback, RecordingLifecycleMessage, RoleSet, UserId, UserRole, WatchChanges, WatchDisabled,
         WatchDisabledReason, WatchUnmatched, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION,
         TOKEN_NO_AUTH,
@@ -745,13 +744,12 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 29] = [
+        const NOT_ON_THE_WIRE: [EventKind; 28] = [
             EventKind::ConnectionDenied,
             EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
             EventKind::ProviderPoolExhausted,
             EventKind::ProviderPriorityFallback,
-            EventKind::PlaylistGroupsChanged,
             EventKind::PlaylistWatchDisabled,
             EventKind::PlaylistWatchUnmatched,
             EventKind::NotificationDeadLettered,
@@ -893,13 +891,7 @@ mod tests {
                 paths: "config.yml".to_string(),
                 error: "boom".to_string(),
             }),
-            EventMessage::PlaylistWatchChanged(WatchChanges::new(
-                "t".to_string(),
-                "g".to_string(),
-                Vec::new(),
-                Vec::new(),
-            )),
-            EventMessage::PlaylistGroupsChanged(PlaylistGroupsChanged::new("t".to_string(), Vec::new(), Vec::new())),
+            EventMessage::PlaylistWatchChanged(WatchChanges::new("t".to_string(), Vec::new())),
             EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
                 "t".to_string(),
                 WatchDisabledReason::InvalidPatterns,

@@ -23,10 +23,10 @@ use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
     AuthAuditEvent, AuthAuditOutcome, ConnectionDenied, EventKind, EventKindMask, EventMessage,
-    LibraryScanSummaryStatus, MetadataUpdateFailure, PlaylistGroupsChanged, ProviderFetchFailure,
-    ProviderPoolExhausted, ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState,
-    StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled,
-    WatchDisabledReason, WatchUnmatched,
+    LibraryScanSummaryStatus, MetadataUpdateFailure, ProviderFetchFailure, ProviderPoolExhausted,
+    ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
+    StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled, WatchDisabledReason,
+    WatchUnmatched,
 };
 use std::{fmt::Write, sync::Arc};
 use tokio::sync::broadcast::error::RecvError;
@@ -77,7 +77,6 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::DiskAlert)
     .with(EventKind::ConfigReloadFailed)
     .with(EventKind::PlaylistWatchChanged)
-    .with(EventKind::PlaylistGroupsChanged)
     .with(EventKind::PlaylistWatchDisabled)
     .with(EventKind::PlaylistWatchUnmatched)
     .with(EventKind::ProviderAccountStatus)
@@ -210,17 +209,16 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             Some(NotificationEvent::new(id, title.clone(), title))
         }
 
-        // The three that already have a `MessageContent` shape reuse it:
-        // `from_content` is what built their title, body and template fields
-        // before, and rebuilding that here by hand would be a second copy
-        // free to drift from the templates that render it.
+        // Events that already have a `MessageContent` shape reuse its
+        // builders: `from_content` is what built their title, body and
+        // template fields before, and rebuilding that here by hand would be a
+        // second copy free to drift from the templates that render it. Watch
+        // changes use the same builders through a borrowing entry point, so
+        // the title lists are not cloned per notification.
         EventMessage::DiskAlert(alert) => {
             Some(NotificationEvent::from_content(&MessageContent::DiskAlert(alert.clone())))
         }
-        EventMessage::PlaylistWatchChanged(changes) => {
-            Some(NotificationEvent::from_content(&MessageContent::Watch(changes.clone())))
-        }
-        EventMessage::PlaylistGroupsChanged(changes) => Some(groups_changed_notification(id, changes)),
+        EventMessage::PlaylistWatchChanged(changes) => Some(NotificationEvent::from_watch_changes(changes)),
         EventMessage::PlaylistWatchDisabled(disabled) => {
             Some(watch_disabled_notification(id, disabled, message.severity()))
         }
@@ -310,34 +308,6 @@ fn metadata_failure_notification(
         format!("Metadata update for {} could not finish: {} task(s) exhausted", failure.input, failure.failed_tasks);
     let body = failure.last_error.as_ref().map_or_else(|| title.clone(), |err| format!("{title}\n\n{err}"));
     NotificationEvent::new(id, title, body).with_severity(severity).with_fields(failure)
-}
-
-fn groups_changed_notification(id: EventId, changes: &PlaylistGroupsChanged) -> NotificationEvent {
-    let title =
-        format!("{} group(s) added, {} removed in {}", changes.added_total, changes.removed_total, changes.target);
-    let mut body = title.clone();
-    push_sampled_list(&mut body, "Added", &changes.added, changes.added_total);
-    push_sampled_list(&mut body, "Removed", &changes.removed, changes.removed_total);
-    NotificationEvent::new(id, title, body).with_fields(changes)
-}
-
-/// Render one direction of a sampled change set.
-///
-/// The lists carry titles only and may be shorter than the total - or empty -
-/// so the omission is spelled out rather than smuggled into the list.
-fn push_sampled_list(body: &mut String, label: &str, names: &[String], total: usize) {
-    if total == 0 {
-        return;
-    }
-    let _ = write!(body, "\n\n{label} ({total}):");
-    for name in names {
-        body.push('\n');
-        body.push_str(name);
-    }
-    let omitted = total.saturating_sub(names.len());
-    if omitted > 0 {
-        let _ = write!(body, "\n... {omitted} more not listed");
-    }
 }
 
 fn watch_disabled_notification(id: EventId, disabled: &WatchDisabled, severity: Severity) -> NotificationEvent {
@@ -501,12 +471,11 @@ mod tests {
         notification::{registry, Severity},
         ActiveUserConnectionChange, AuthAuditEvent, AuthAuditOutcome, ConfigReloadFailure, ConfigType,
         ConnectionDenied, DiskAlert, DiskAlertLevel, EventKind, LibraryScanProgressEvent, LibraryScanSummary,
-        LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, PlaylistGroupsChanged,
-        PlaylistUpdateProgressEvent, PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent,
-        ProviderAccountState, ProviderFailureKind, ProviderFetchFailure, ProviderPoolExhausted,
-        ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
-        StreamProbeFailure, StreamProbeFailureReason, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
-        WatchDisabled, WatchDisabledReason, WatchUnmatched,
+        LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, PlaylistUpdateProgressEvent,
+        PlaylistUpdateState, PlaylistUpdateSummary, ProviderAccountEvent, ProviderAccountState, ProviderFailureKind,
+        ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback, RecordingLifecycleMessage,
+        ScheduledTaskFailure, ServerLifecycleEvent, StreamProbeFailure, StreamProbeFailureReason, SystemInfo,
+        UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchDisabledReason, WatchUnmatched,
     };
     use std::sync::Arc;
 
@@ -606,13 +575,7 @@ mod tests {
                 paths: "config.yml".to_string(),
                 error: "boom".to_string(),
             }),
-            EventMessage::PlaylistWatchChanged(WatchChanges::new(
-                "t".to_string(),
-                "g".to_string(),
-                Vec::new(),
-                Vec::new(),
-            )),
-            EventMessage::PlaylistGroupsChanged(PlaylistGroupsChanged::new("t".to_string(), Vec::new(), Vec::new())),
+            EventMessage::PlaylistWatchChanged(WatchChanges::new("t".to_string(), Vec::new())),
             EventMessage::PlaylistWatchDisabled(WatchDisabled::new(
                 "t".to_string(),
                 WatchDisabledReason::InvalidPatterns,

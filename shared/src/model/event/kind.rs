@@ -35,7 +35,6 @@ pub enum EventKind {
     DiskAlert,
     ConfigReloadFailed,
     PlaylistWatchChanged,
-    PlaylistGroupsChanged,
     PlaylistWatchDisabled,
     PlaylistWatchUnmatched,
     RecordingStarted,
@@ -68,7 +67,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 42] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -88,7 +87,6 @@ impl EventKind {
         Self::DiskAlert,
         Self::ConfigReloadFailed,
         Self::PlaylistWatchChanged,
-        Self::PlaylistGroupsChanged,
         Self::PlaylistWatchDisabled,
         Self::PlaylistWatchUnmatched,
         Self::RecordingStarted,
@@ -139,7 +137,6 @@ impl EventKind {
             Self::PlaylistUpdate
             | Self::PlaylistUpdateProgress
             | Self::PlaylistWatchChanged
-            | Self::PlaylistGroupsChanged
             | Self::PlaylistWatchDisabled
             | Self::PlaylistWatchUnmatched => Permission::PlaylistWrite,
             Self::LibraryScanProgress | Self::LibraryScanFailed => Permission::LibraryWrite,
@@ -254,7 +251,6 @@ impl EventKind {
             Self::DiskAlert => "system.disk.alert",
             Self::ConfigReloadFailed => "config.reload.failed",
             Self::PlaylistWatchChanged => "playlist.watch.changed",
-            Self::PlaylistGroupsChanged => "playlist.groups.changed",
             Self::PlaylistWatchDisabled => "playlist.watch.disabled",
             Self::PlaylistWatchUnmatched => "playlist.watch.unmatched",
             Self::RecordingStarted => "recording.started",
@@ -283,7 +279,14 @@ impl EventKind {
     /// Parse a wire name back. Unknown names are `None` rather than a
     /// fallback variant, so a typo in a subscription is visible.
     #[must_use]
-    pub fn from_wire_name(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|kind| kind.as_wire_name() == name) }
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        // `playlist.groups.changed` was folded into watch changes; existing
+        // plugin subscriptions keep working.
+        if name == "playlist.groups.changed" {
+            return Some(Self::PlaylistWatchChanged);
+        }
+        Self::ALL.into_iter().find(|kind| kind.as_wire_name() == name)
+    }
 }
 
 impl EventKindMask {

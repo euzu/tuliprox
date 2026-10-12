@@ -5,8 +5,8 @@ use crate::{
     },
     error::TuliproxError,
     model::{
-        ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, CurationConfigDto, HdHomeRunDeviceOverview,
-        PatternTemplate, Prepare, PrepareAll, ProcessingOrder, TargetType,
+        ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, ConfigWatchDto, CurationConfigDto,
+        HdHomeRunDeviceOverview, PatternTemplate, Prepare, PrepareAll, ProcessingOrder, TargetType,
     },
 };
 
@@ -47,7 +47,7 @@ pub struct ConfigTargetDto {
     #[serde(default, skip_serializing_if = "is_default_processing_order")]
     pub processing_order: ProcessingOrder,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watch: Option<Vec<String>>,
+    pub watch: Option<Vec<ConfigWatchDto>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_memory_cache: bool,
 }
@@ -236,13 +236,7 @@ impl ConfigTargetDto {
 
         self.favourites.prepare(templates)?;
 
-        if let Some(watch) = &self.watch {
-            for pat in watch {
-                if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(pat) {
-                    return Err(TuliproxError::ConfigTarget(format!("Invalid watch regular expression: {err}")));
-                }
-            }
-        }
+        self.watch.prepare_all(())?;
 
         self.filter.prepare(templates)?;
         self.rename.prepare_all(templates)?;

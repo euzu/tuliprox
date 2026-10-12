@@ -55,3 +55,10 @@ fn all_matches_every_kind() {
         assert!(EventKindMask::ALL.contains(kind));
     }
 }
+
+#[test]
+fn groups_changed_alias_resolves_for_kinds() {
+    // Folded into `playlist.watch.changed`; plugin manifests that subscribed
+    // to the old name keep receiving group changes.
+    assert_eq!(EventKind::from_wire_name("playlist.groups.changed"), Some(EventKind::PlaylistWatchChanged));
+}

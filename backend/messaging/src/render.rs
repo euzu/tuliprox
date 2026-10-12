@@ -12,8 +12,9 @@
 
 use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext};
 use log::{debug, error, warn};
+use serde::Deserialize;
 use shared::{
-    model::{notification::registry, InputFetchMethod},
+    model::{notification::registry, InputFetchMethod, WatchChanges},
     utils::Internable,
 };
 use std::{
@@ -249,7 +250,14 @@ pub fn context_for(event: &NotificationEvent) -> serde_json::Value {
             root.insert("message".to_string(), fields.clone());
         }
         id if id == registry::PLAYLIST_WATCH_CHANGED => {
-            root.insert("watch".to_string(), fields.clone());
+            // Templates get the grouped views. The event only carries JSON
+            // fields (it may come back from the outbox), so decode them in
+            // place; a payload that does not decode still renders as is.
+            let watch = WatchChanges::deserialize(fields)
+                .ok()
+                .and_then(|changes| serde_json::to_value(changes.template_view()).ok())
+                .unwrap_or_else(|| fields.clone());
+            root.insert("watch".to_string(), watch);
         }
         id if id == registry::PLAYLIST_UPDATE_COMPLETED || id == registry::PLAYLIST_UPDATE_FAILED => {
             root.insert("processing".to_string(), fields.clone());
@@ -316,8 +324,11 @@ fn legacy_kind_label(event: &NotificationEvent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_for, validate, TemplateSource};
-    use shared::model::{DiskAlert, DiskAlertLevel, InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
+    use super::{context_for, new_handlebars, validate, TemplateSource};
+    use shared::model::{
+        DiskAlert, DiskAlertLevel, InputStats, InputType, PlaylistStats, SourceStats, TargetStats, WatchChange,
+        WatchGroupItems, WatchItems,
+    };
     use tuliprox_core::model::{MessageContent, NotificationEvent, ProcessingStats, WatchChanges};
 
     fn stats_event() -> NotificationEvent {
@@ -412,17 +423,49 @@ mod tests {
         assert_eq!(ctx["disk"]["percent"], 95.0);
     }
 
+    fn watch_event() -> NotificationEvent {
+        let items = |names: &[&str]| WatchItems::complete(names.iter().map(|n| std::sync::Arc::from(*n)).collect());
+        NotificationEvent::from_content(&MessageContent::Watch(WatchChanges::new(
+            "sports".to_string(),
+            vec![
+                WatchChange::GroupsAdded(items(&["Event Bundesliga"])),
+                WatchChange::ChannelsAdded(WatchGroupItems { group: "DE Sport HD".into(), items: items(&["Sky 5"]) }),
+            ],
+        )))
+    }
+
     #[test]
-    fn legacy_watch_key_still_resolves() {
-        let event = NotificationEvent::from_content(&MessageContent::Watch(WatchChanges::new(
-            "T".to_string(),
-            "G".to_string(),
-            vec!["A".to_string()],
-            vec![],
-        )));
-        let ctx = context_for(&event);
+    fn watch_key_carries_grouped_views() {
+        let ctx = context_for(&watch_event());
         assert_eq!(ctx["kind"], "Watch");
-        assert_eq!(ctx["watch"]["target"], "T");
+        assert_eq!(ctx["watch"]["target"], "sports");
+        assert_eq!(ctx["watch"]["groups_added"]["items"][0], "Event Bundesliga");
+        assert_eq!(ctx["watch"]["channels_added"][0]["group"], "DE Sport HD");
+        assert!(ctx["watch"].get("groups_removed").is_none());
+        assert_eq!(ctx["watch"]["changes"][0]["kind"], "groups_added");
+    }
+
+    #[test]
+    fn the_feature_request_template_renders() {
+        let template = "{{#if watch.groups_added}}New:{{#each watch.groups_added.items}} {{this}}{{/each}}{{/if}}\
+                        {{#each watch.channels_added}}|{{group}}:{{#each items}} {{this}}{{/each}}{{/each}}";
+        let rendered = new_handlebars().render_template(template, &context_for(&watch_event())).expect("render");
+        assert_eq!(rendered, "New: Event Bundesliga|DE Sport HD: Sky 5");
+    }
+
+    #[test]
+    fn the_raw_list_works_with_eq() {
+        let template = "{{#each watch.changes}}{{#if (eq kind \"groups_added\")}}{{items.[0]}}{{/if}}{{/each}}";
+        let rendered = new_handlebars().render_template(template, &context_for(&watch_event())).expect("render");
+        assert_eq!(rendered, "Event Bundesliga");
+    }
+
+    #[test]
+    fn undecodable_watch_fields_fall_back_to_raw() {
+        let mut event = watch_event();
+        event.fields = serde_json::json!({ "target": "old", "group": "G" });
+        let ctx = context_for(&event);
+        assert_eq!(ctx["watch"]["group"], "G");
     }
 
     #[test]

@@ -1254,7 +1254,7 @@ mod tests {
                             processing: Some(String::from("group ~ 'secret'")),
                             ..Default::default()
                         },
-                        watch: Some(vec![String::from("watch-expr")]),
+                        watch: Some(vec![shared::model::ConfigWatchDto::channels("watch-expr")]),
                         mapping: Some(vec![String::from("mapping-name")]),
                         ..Default::default()
                     }],

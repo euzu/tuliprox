@@ -1,6 +1,6 @@
 use super::{
-    ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, EpgOutputOptions,
-    M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+    ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, ConfigWatchDto,
+    EpgOutputOptions, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
 };
 
 fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
@@ -451,4 +451,43 @@ fn target_options_mpeg_ts_helper_keeps_existing_stream_share_semantics() {
     assert!(hls_only.share_live_hls_enabled());
     assert!(!hls_only.share_live_mpeg_ts_enabled());
     assert!(mpeg_ts.share_live_mpeg_ts_enabled());
+}
+
+#[test]
+fn watch_entry_with_empty_on_is_rejected() {
+    let mut target = target_with_outputs(vec![xtream_output()]);
+    target.watch = Some(vec![ConfigWatchDto { pattern: "^A".to_string(), on: crate::model::WatchContextSet::new() }]);
+    let err = target.prepare(1, None, None).unwrap_err().to_string();
+    assert!(err.contains("empty 'on' list"), "{err}");
+}
+
+#[test]
+fn watch_entry_with_contexts_prepares() {
+    let mut target = target_with_outputs(vec![xtream_output()]);
+    target.watch =
+        Some(vec![ConfigWatchDto::channels("^A"), ConfigWatchDto::new("^B", [crate::model::WatchContext::GroupAdded])]);
+    target.prepare(1, None, None).unwrap();
+}
+
+#[test]
+fn watch_target_yaml_accepts_both_forms() {
+    let target: ConfigTargetDto =
+        serde_saphyr::from_str("name: watched\nwatch:\n  - \"^A\"\n  - pattern: \"^B\"\n    on: [group_added]\n")
+            .expect("target yaml");
+    let watch = target.watch.expect("watch set");
+    assert_eq!(watch[0], ConfigWatchDto::channels("^A"));
+    assert!(
+        watch[1].has(crate::model::WatchContext::GroupAdded) && !watch[1].has(crate::model::WatchContext::Channels)
+    );
+}
+
+#[test]
+fn every_bad_watch_entry_is_reported_at_once() {
+    let mut target = target_with_outputs(vec![xtream_output()]);
+    target.watch = Some(vec![
+        ConfigWatchDto { pattern: "^A".to_string(), on: crate::model::WatchContextSet::new() },
+        ConfigWatchDto::channels("^(B"),
+    ]);
+    let err = target.prepare(1, None, None).unwrap_err().to_string();
+    assert!(err.contains("empty 'on' list") && err.contains("Invalid watch regular expression"), "{err}");
 }

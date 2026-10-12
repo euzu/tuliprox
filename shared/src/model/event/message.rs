@@ -5,11 +5,10 @@ use crate::model::{
     stats::SourceStats,
     ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, LibraryScanProgressEvent,
     LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, Permission,
-    PlaylistGroupsChanged, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
-    PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted,
-    ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
-    ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
-    WatchDisabled, WatchUnmatched,
+    PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState,
+    ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
+    RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
+    SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -56,7 +55,6 @@ pub enum EventMessage {
     /// A target's `watch` config saw its group membership change.
     PlaylistWatchChanged(WatchChanges),
     /// A target gained or lost whole groups between refreshes.
-    PlaylistGroupsChanged(PlaylistGroupsChanged),
     /// A target's `watch` config is configured but not working.
     PlaylistWatchDisabled(WatchDisabled),
     /// `watch` patterns that matched no group in the refreshed playlist.
@@ -134,7 +132,6 @@ impl EventMessage {
             Self::DiskAlert(_) => EventKind::DiskAlert,
             Self::ConfigReloadFailed(_) => EventKind::ConfigReloadFailed,
             Self::PlaylistWatchChanged(_) => EventKind::PlaylistWatchChanged,
-            Self::PlaylistGroupsChanged(_) => EventKind::PlaylistGroupsChanged,
             Self::PlaylistWatchDisabled(_) => EventKind::PlaylistWatchDisabled,
             Self::PlaylistWatchUnmatched(_) => EventKind::PlaylistWatchUnmatched,
             // One payload, three kinds: a subscriber that only cares about
@@ -232,7 +229,6 @@ impl EventMessage {
             Self::DiskAlert(_) => registry::SYSTEM_DISK_ALERT,
             Self::ConfigReloadFailed(_) => registry::CONFIG_RELOAD_FAILED,
             Self::PlaylistWatchChanged(_) => registry::PLAYLIST_WATCH_CHANGED,
-            Self::PlaylistGroupsChanged(_) => registry::PLAYLIST_GROUPS_CHANGED,
             Self::PlaylistWatchDisabled(_) => registry::PLAYLIST_WATCH_DISABLED,
             Self::PlaylistWatchUnmatched(_) => registry::PLAYLIST_WATCH_UNMATCHED,
             Self::RecordingLifecycle(msg) => match msg.event {
@@ -309,7 +305,6 @@ impl EventMessage {
             Self::DiskAlert(alert) => encode(alert),
             Self::ConfigReloadFailed(failure) => encode(failure),
             Self::PlaylistWatchChanged(changes) => encode(changes),
-            Self::PlaylistGroupsChanged(changes) => encode(changes),
             Self::PlaylistWatchDisabled(disabled) => encode(disabled),
             Self::PlaylistWatchUnmatched(unmatched) => encode(unmatched),
             Self::RecordingLifecycle(msg) => encode(msg),

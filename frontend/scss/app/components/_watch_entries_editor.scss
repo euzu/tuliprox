@@ -1,0 +1,53 @@
+.tp__watch-entries-editor {
+  display: flex;
+  flex-flow: column;
+  box-sizing: border-box;
+  gap: var(--gap-small);
+
+  &__form {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    flex-flow: column;
+    box-sizing: border-box;
+    gap: var(--gap-small);
+    padding: var(--gap-small);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    background-color: var(--card-background-color);
+  }
+
+  &__pattern {
+    display: flex;
+    flex-flow: row;
+    align-items: center;
+    box-sizing: border-box;
+    gap: var(--gap-small);
+
+    .tp__input {
+      flex: 1;
+    }
+
+    .svg-icon {
+      height: 2rem;
+      width: 2rem;
+    }
+  }
+
+  &__entries {
+    display: flex;
+    flex-flow: row wrap;
+    box-sizing: border-box;
+    gap: var(--gap-small);
+  }
+
+  .tp__input.invalid input {
+    color: var(--attention-color);
+  }
+
+  &__error {
+    color: var(--attention-color);
+    font-size: var(--font-size-md);
+  }
+}

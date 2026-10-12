@@ -18,6 +18,7 @@ mod sidebar;
 mod target_form;
 mod trakt_chart_item_form;
 mod trakt_list_item_form;
+mod watch_entries_editor;
 
 pub(crate) use alias_item_form::*;
 pub(crate) use block_view::*;
@@ -38,3 +39,4 @@ pub(crate) use sidebar::*;
 pub(crate) use target_form::*;
 pub(crate) use trakt_chart_item_form::*;
 pub(crate) use trakt_list_item_form::*;
+pub(crate) use watch_entries_editor::*;

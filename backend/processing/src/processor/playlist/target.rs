@@ -1105,34 +1105,48 @@ pub(crate) async fn process_watch<E: EventSink>(
         return false;
     }
 
+    // One snapshot for the whole refresh rather than a config load per group.
+    let config = app_config.config.load_full();
+    let storage_dir = config.storage_dir.as_str();
+
     // Before the per-group fan-out: this is about which groups exist, not
     // what is inside the ones the patterns name, so it must see every group
     // rather than only the watched ones.
-    process_target_groups_watch(app_config, events, &target.name, new_playlist).await;
+    let group_changes = diff_target_groups(storage_dir, events, &target.name, new_playlist, watches).await;
 
+    // Only `channels` entries are matched against the current groups: they
+    // pick the groups to diff, and they are the only ones the unmatched
+    // warning reports on (`ConfigWatch::reports_unmatched`). Once a group is
+    // watched, an entry that already matched elsewhere needs no regex run.
     let mut matched = vec![false; watches.len()];
-    let mut watched_groups = Vec::new();
+    let mut group_watches = Vec::new();
     for group in new_playlist {
-        let mut any = false;
-        for (index, pattern) in watches.iter().enumerate() {
-            if pattern.is_match(&group.title) {
+        let mut watch_channels = false;
+        for (index, watch) in watches.iter().enumerate() {
+            if !watch.contexts.contains(WatchContext::Channels) || (watch_channels && matched[index]) {
+                continue;
+            }
+            if watch.pattern.is_match(&group.title) {
                 matched[index] = true;
-                any = true;
+                watch_channels = true;
             }
         }
-        if any {
-            watched_groups.push(group);
+        if watch_channels {
+            // Futures built up front: a lazy `map` closure over borrowed state
+            // trips the higher-ranked `Send` check of the spawned pipeline task.
+            group_watches.push(process_group_watch(storage_dir, events, &target.name, group));
         }
     }
 
-    // A pattern that matches nothing looks exactly like a group that has not
-    // changed. `EventKindMask::from_wire_names` already reports unmatched
-    // subscription names for the same reason: a typo must surface.
+    // A channel pattern that matches nothing looks exactly like a group that
+    // has not changed, so a typo must surface. Entries waiting for a group to
+    // appear, and removal-only entries, match nothing by design.
+    // `EventKindMask::from_wire_names` reports unmatched names for the same reason.
     let unmatched: Vec<String> = watches
         .iter()
-        .enumerate()
-        .filter(|(index, _)| !matched[*index])
-        .map(|(_, pattern)| pattern.as_str().to_string())
+        .zip(&matched)
+        .filter(|(watch, matched)| !**matched && watch.reports_unmatched())
+        .map(|(watch, _)| watch.pattern.as_str().to_string())
         .collect();
     if !unmatched.is_empty() {
         warn!("target '{}' has {} watch pattern(s) matching no group", target.name, unmatched.len());
@@ -1143,11 +1157,12 @@ pub(crate) async fn process_watch<E: EventSink>(
         )));
     }
 
-    futures::stream::iter(
-        watched_groups.into_iter().map(|pl| process_group_watch(app_config, events, &target.name, pl)),
-    )
-    .for_each_concurrent(16, |f| f)
-    .await;
+    let channel_diffs: Vec<_> =
+        futures::stream::iter(group_watches).buffer_unordered(16).filter_map(futures::future::ready).collect().await;
+
+    if let Some(changes) = assemble_watch_changes(&target.name, group_changes, channel_diffs) {
+        events.emit(EventMessage::PlaylistWatchChanged(changes));
+    }
 
     true
 }

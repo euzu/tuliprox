@@ -143,4 +143,5 @@ pub const LEGACY_ALIASES: &[(&str, EventId)] = &[
     ("recordingcompleted", registry::RECORDING_COMPLETED),
     ("recording_failed", registry::RECORDING_FAILED),
     ("recordingfailed", registry::RECORDING_FAILED),
+    ("playlist.groups.changed", registry::PLAYLIST_WATCH_CHANGED),
 ];

@@ -3799,7 +3799,6 @@ version = "3.3.147"
 dependencies = [
  "aes",
  "base64 0.23.1",
- "bitflags 2.13.1",
  "blake3",
  "brotli",
  "bytes",

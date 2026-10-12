@@ -181,7 +181,7 @@ async fn assert_curation_preserves_empty_mixed_output_guard(canonical: Option<sh
                 ..M3uTargetOutputDto::default()
             }),
         ],
-        watch: Some(vec![".*".to_string()]),
+        watch: Some(vec![shared::model::ConfigWatchDto::channels(".*")]),
         use_memory_cache: true,
         ..ConfigTargetDto::default()
     });
@@ -282,7 +282,7 @@ async fn complete_empty_curation_publishes_empty_watch_group_state() {
             }),
             ..XtreamTargetOutputDto::default()
         })],
-        watch: Some(vec![".*".to_string()]),
+        watch: Some(vec![shared::model::ConfigWatchDto::channels(".*")]),
         ..ConfigTargetDto::default()
     });
     let mut seeded = vec![PlaylistGroup {

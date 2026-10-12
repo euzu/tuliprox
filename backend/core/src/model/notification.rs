@@ -15,7 +15,7 @@ use chrono::Utc;
 use shared::{
     model::{
         notification::{registry, EventId, Severity},
-        DiskAlert, MsgKind,
+        DiskAlert, MsgKind, WatchChange, WatchChanges, WatchItems,
     },
     utils::human_readable_byte_size,
 };
@@ -113,6 +113,17 @@ impl NotificationEvent {
         event.fields = fields_for(content);
         event
     }
+
+    /// A watch notification from a borrowed payload.
+    ///
+    /// The event bus hands the bridge a `&WatchChanges`; going through
+    /// [`Self::from_content`] would mean cloning every title list into a
+    /// `MessageContent` just to read it back.
+    pub fn from_watch_changes(changes: &WatchChanges) -> Self {
+        let mut event = Self::new(registry::PLAYLIST_WATCH_CHANGED, watch_title(changes), watch_body(changes));
+        event.fields = serde_json::to_value(changes).unwrap_or(serde_json::Value::Null);
+        event
+    }
 }
 
 /// Canonical id for a legacy message.
@@ -181,11 +192,7 @@ pub fn recording_lifecycle_text(recording: &RecordingLifecycleMessage) -> String
 fn title_for(content: &MessageContent) -> String {
     match content {
         MessageContent::Info(s) | MessageContent::Error(s) => first_line(s),
-        MessageContent::Watch(w) => {
-            // The totals, not the list lengths: a large change ships a sample
-            // and the subject line must still report what actually happened.
-            format!("{} channel(s) added, {} removed in {}/{}", w.added_total, w.removed_total, w.target, w.group)
-        }
+        MessageContent::Watch(w) => watch_title(w),
         MessageContent::ProcessingStats(stats) => match (&stats.stats, &stats.errors) {
             (None, Some(_)) => "Playlist update failed".to_string(),
             (Some(sources), _) => {
@@ -208,25 +215,72 @@ fn title_for(content: &MessageContent) -> String {
     }
 }
 
-/// One direction of a watch change, rendered for a plain-text channel.
+/// Subject line for a watch change.
 ///
-/// `names` may be a sample of `total` - or empty, when the change was too
-/// large to list - so the omission is spelled out here rather than smuggled
-/// into the list itself.
-fn push_watch_section(out: &mut String, label: &str, names: &[String], total: usize) {
-    if total == 0 {
+/// The totals, not the list lengths: a large change ships a sample and the
+/// subject line must still report what actually happened.
+fn watch_title(changes: &WatchChanges) -> String {
+    let (mut groups_added, mut groups_removed, mut channel_changes) = (0usize, 0usize, 0usize);
+    for change in &changes.changes {
+        match change {
+            WatchChange::GroupsAdded(items) => groups_added += items.total,
+            WatchChange::GroupsRemoved(items) => groups_removed += items.total,
+            WatchChange::ChannelsAdded(group) | WatchChange::ChannelsRemoved(group) => {
+                channel_changes += group.items.total;
+            }
+        }
+    }
+    let mut title = format!("Watch changes in {}:", changes.target);
+    let mut separator = " ";
+    for (count, what) in
+        [(groups_added, "group(s) added"), (groups_removed, "group(s) removed"), (channel_changes, "channel change(s)")]
+    {
+        if count > 0 {
+            let _ = write!(title, "{separator}{count} {what}");
+            separator = ", ";
+        }
+    }
+    title
+}
+
+/// Plain-text body for a watch change: group sections, then channel sections.
+fn watch_body(changes: &WatchChanges) -> String {
+    let mut out = format!("Watch changes in {}.", changes.target);
+    for change in &changes.changes {
+        match change {
+            WatchChange::GroupsAdded(items) => push_watch_section(&mut out, "New groups", items),
+            WatchChange::GroupsRemoved(items) => push_watch_section(&mut out, "Removed groups", items),
+            WatchChange::ChannelsAdded(group) => {
+                push_watch_section(&mut out, format_args!("{} - added", group.group), &group.items);
+            }
+            WatchChange::ChannelsRemoved(group) => {
+                push_watch_section(&mut out, format_args!("{} - removed", group.group), &group.items);
+            }
+        }
+    }
+    out
+}
+
+/// One sampled list of a watch change, rendered for a plain-text channel.
+///
+/// `list.items` may be a sample of `list.total` - or empty, when the change
+/// was too large to list - so the omission is spelled out here rather than
+/// smuggled into the list itself. The label is `Display` so per-group labels
+/// need no temporary `String`.
+fn push_watch_section(out: &mut String, label: impl std::fmt::Display, list: &WatchItems) {
+    if list.total == 0 {
         return;
     }
-    let _ = write!(out, "\n\n{label} ({total}):");
-    if names.is_empty() {
+    let _ = write!(out, "\n\n{label} ({}):", list.total);
+    if list.items.is_empty() {
         out.push_str("\n(list suppressed for a large update)");
         return;
     }
-    for name in names {
+    for name in &list.items {
         out.push('\n');
         out.push_str(name);
     }
-    let omitted = total.saturating_sub(names.len());
+    let omitted = list.total.saturating_sub(list.items.len());
     if omitted > 0 {
         let _ = write!(out, "\n... {omitted} more not listed");
     }
@@ -239,12 +293,7 @@ fn push_watch_section(out: &mut String, label: &str, names: &[String], total: us
 fn body_for(content: &MessageContent) -> String {
     match content {
         MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-        MessageContent::Watch(w) => {
-            let mut out = format!("Watched group {}/{} changed.", w.target, w.group);
-            push_watch_section(&mut out, "Added", &w.added, w.added_total);
-            push_watch_section(&mut out, "Removed", &w.removed, w.removed_total);
-            out
-        }
+        MessageContent::Watch(w) => watch_body(w),
         MessageContent::ProcessingStats(stats) => {
             let mut out = String::new();
             if let Some(sources) = &stats.stats {
@@ -306,7 +355,10 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{super::messaging::ProcessingStats, *};
-    use shared::model::{DiskAlertLevel, InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
+    use shared::model::{
+        DiskAlertLevel, InputStats, InputType, PlaylistStats, SourceStats, TargetStats, WatchChange, WatchChanges,
+        WatchGroupItems, WatchItems,
+    };
 
     fn stats_content() -> MessageContent {
         let input = InputStats {
@@ -372,20 +424,67 @@ mod tests {
         }
     }
 
+    fn watch_items(names: &[&str]) -> WatchItems { WatchItems::complete(names.iter().map(|n| Arc::from(*n)).collect()) }
+
     #[test]
-    fn watch_body_lists_added_and_removed_instead_of_dumping_json() {
+    fn watch_text_lists_groups_then_channels_instead_of_dumping_json() {
         // Regression: the legacy default text for a watch change was a raw
         // `serde_json` dump, which is what Pushover received.
-        let content = MessageContent::Watch(super::super::messaging::WatchChanges::new(
-            "T".to_string(),
-            "G".to_string(),
-            vec!["Channel A".to_string()],
-            vec!["Channel B".to_string()],
+        let content = MessageContent::Watch(WatchChanges::new(
+            "sports".to_string(),
+            vec![
+                WatchChange::GroupsAdded(watch_items(&["Event Bundesliga"])),
+                WatchChange::GroupsRemoved(watch_items(&["DE Kids"])),
+                WatchChange::ChannelsAdded(WatchGroupItems {
+                    group: "DE Sport HD".into(),
+                    items: watch_items(&["Sky 5"]),
+                }),
+                WatchChange::ChannelsRemoved(WatchGroupItems {
+                    group: "DE Sport HD".into(),
+                    items: watch_items(&["Sky 6"]),
+                }),
+            ],
         ));
         let event = NotificationEvent::from_content(&content);
-        assert!(event.body.contains("Channel A"), "body missing added channel: {}", event.body);
-        assert!(event.body.contains("Channel B"), "body missing removed channel: {}", event.body);
-        assert!(!event.body.starts_with('{'), "body is still a json dump: {}", event.body);
+        assert_eq!(event.title, "Watch changes in sports: 1 group(s) added, 1 group(s) removed, 2 channel change(s)");
+        assert_eq!(
+            event.body,
+            "Watch changes in sports.\n\nNew groups (1):\nEvent Bundesliga\n\nRemoved groups (1):\nDE Kids\
+             \n\nDE Sport HD - added (1):\nSky 5\n\nDE Sport HD - removed (1):\nSky 6"
+        );
+    }
+
+    /// The bridge builds watch notifications from a borrowed payload; it must
+    /// produce exactly what the owned `MessageContent` path produces.
+    #[test]
+    fn from_watch_changes_matches_from_content() {
+        let changes = WatchChanges::new(
+            "sports".to_string(),
+            vec![
+                WatchChange::GroupsAdded(watch_items(&["New"])),
+                WatchChange::ChannelsRemoved(WatchGroupItems { group: "G".into(), items: watch_items(&["C"]) }),
+            ],
+        );
+        let borrowed = NotificationEvent::from_watch_changes(&changes);
+        let owned = NotificationEvent::from_content(&MessageContent::Watch(changes));
+        assert_eq!(borrowed.id, owned.id);
+        assert_eq!(borrowed.severity, owned.severity);
+        assert_eq!(borrowed.title, owned.title);
+        assert_eq!(borrowed.body, owned.body);
+        assert_eq!(borrowed.fields, owned.fields);
+    }
+
+    #[test]
+    fn suppressed_watch_list_says_so() {
+        let content = MessageContent::Watch(WatchChanges::new(
+            "t".to_string(),
+            vec![WatchChange::ChannelsAdded(WatchGroupItems {
+                group: "G".into(),
+                items: WatchItems { items: Vec::new(), total: 900, truncated: true },
+            })],
+        ));
+        let event = NotificationEvent::from_content(&content);
+        assert!(event.body.contains("G - added (900):\n(list suppressed for a large update)"), "{}", event.body);
     }
 
     #[test]

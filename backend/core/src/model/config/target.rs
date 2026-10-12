@@ -11,7 +11,7 @@ use shared::{
     model::{
         ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, HdHomeRunTargetOutputDto, M3uTargetOutputDto,
         MappingStage, PlaylistItemType, ProcessingOrder, StrmExportStyle, StrmTargetOutputDto, TargetOutputDto,
-        TargetType, TraktConfigDto, XtreamTargetOutputDto,
+        TargetType, TraktConfigDto, WatchContext, WatchContextSet, XtreamTargetOutputDto,
     },
 };
 use std::{borrow::Cow, sync::Arc};
@@ -319,6 +319,28 @@ impl From<&TargetOutput> for TargetOutputDto {
     }
 }
 
+/// One compiled `watch` entry.
+///
+/// `contexts` is the DTO's `u8` bitset, copied as is: "does this entry apply
+/// to X" is asked for every group, and a bit test is all it costs.
+#[derive(Debug, Clone)]
+pub struct ConfigWatch {
+    pub pattern: Arc<regex::Regex>,
+    pub contexts: WatchContextSet,
+}
+
+impl ConfigWatch {
+    /// Whether matching no current group means something is wrong.
+    ///
+    /// An entry waiting for a group to appear matches nothing by design, and a
+    /// `group_removed`-only entry is matched against the previous titles, not
+    /// the current playlist.
+    #[must_use]
+    pub fn reports_unmatched(&self) -> bool {
+        self.contexts.contains(WatchContext::Channels) && !self.contexts.contains(WatchContext::GroupAdded)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigTarget {
     pub id: u16,
@@ -335,7 +357,7 @@ pub struct ConfigTarget {
     pub favourites: Option<Vec<ConfigFavourites>>,
     pub processing_order: ProcessingOrder,
     pub execution_plan: TargetExecutionPlan,
-    pub watch: Option<Vec<Arc<regex::Regex>>>,
+    pub watch: Option<Vec<ConfigWatch>>,
     pub use_memory_cache: bool,
 }
 
@@ -414,10 +436,10 @@ impl From<&ConfigTargetDto> for ConfigTarget {
             // `playlist.watch.disabled`.
             watch: dto.watch.as_ref().map(|list| {
                 list.iter()
-                    .filter_map(|s| match shared::model::REGEX_CACHE.get_or_compile(s) {
-                        Ok(re) => Some(re),
+                    .filter_map(|entry| match shared::model::REGEX_CACHE.get_or_compile(&entry.pattern) {
+                        Ok(pattern) => Some(ConfigWatch { pattern, contexts: entry.on }),
                         Err(e) => {
-                            log::warn!("Invalid watch regex pattern '{s}': {e}");
+                            log::warn!("Invalid watch regex pattern '{}': {e}", entry.pattern);
                             None
                         }
                     })
@@ -431,6 +453,27 @@ impl From<&ConfigTargetDto> for ConfigTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_contexts_compile_to_flags() {
+        let dto = ConfigTargetDto {
+            name: "t".to_string(),
+            watch: Some(vec![
+                shared::model::ConfigWatchDto::channels("^A"),
+                shared::model::ConfigWatchDto::new(
+                    "^B",
+                    [shared::model::WatchContext::GroupAdded, shared::model::WatchContext::Channels],
+                ),
+            ]),
+            ..ConfigTargetDto::default()
+        };
+        let target = ConfigTarget::from(&dto);
+        let watch = target.watch.expect("watch");
+        assert_eq!(watch[0].contexts, dto.watch.as_ref().unwrap()[0].on);
+        assert!(watch[0].reports_unmatched());
+        assert!(watch[1].contexts.contains(WatchContext::GroupAdded));
+        assert!(!watch[1].reports_unmatched());
+    }
 
     #[test]
     fn effective_curation_retains_canonical_owner_and_credentials_without_legacy_output() {

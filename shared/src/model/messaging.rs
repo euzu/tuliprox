@@ -1,4 +1,5 @@
 use crate::concat_string;
+use std::sync::Arc;
 
 #[derive(
     Debug,
@@ -60,7 +61,49 @@ impl MsgKind {
 
 #[cfg(test)]
 mod tests {
-    use super::MsgKind;
+    use super::{MsgKind, WatchChange, WatchChanges, WatchGroupItems, WatchItems};
+    use std::sync::Arc;
+
+    fn titles(names: &[&str]) -> Vec<Arc<str>> { names.iter().map(|n| Arc::from(*n)).collect() }
+
+    fn sample_changes() -> WatchChanges {
+        WatchChanges::new(
+            "sports".to_string(),
+            vec![
+                WatchChange::GroupsAdded(WatchItems::complete(titles(&["Event Bundesliga"]))),
+                WatchChange::GroupsRemoved(WatchItems::complete(titles(&["DE Kids"]))),
+                WatchChange::ChannelsAdded(WatchGroupItems {
+                    group: "DE Sport HD".into(),
+                    items: WatchItems::complete(titles(&["Sky Sport 5"])),
+                }),
+            ],
+        )
+    }
+
+    #[test]
+    fn watch_changes_serialize_as_tagged_list() {
+        let json = serde_json::to_value(sample_changes()).expect("serialize");
+        assert_eq!(json["target"], "sports");
+        assert_eq!(json["changes"][0]["kind"], "groups_added");
+        assert_eq!(json["changes"][0]["items"][0], "Event Bundesliga");
+        assert_eq!(json["changes"][2]["kind"], "channels_added");
+        assert_eq!(json["changes"][2]["group"], "DE Sport HD");
+        assert_eq!(json["changes"][2]["total"], 1);
+        assert_eq!(json["changes"][2]["truncated"], false);
+        let back: WatchChanges = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, sample_changes());
+    }
+
+    #[test]
+    fn template_view_groups_changes_by_kind() {
+        let changes = sample_changes();
+        let view = serde_json::to_value(changes.template_view()).expect("serialize view");
+        assert_eq!(view["groups_added"]["items"][0], "Event Bundesliga");
+        assert_eq!(view["groups_removed"]["total"], 1);
+        assert_eq!(view["channels_added"][0]["group"], "DE Sport HD");
+        assert!(view.get("channels_removed").is_none(), "empty views must be absent");
+        assert_eq!(view["changes"].as_array().map(Vec::len), Some(3));
+    }
 
     #[test]
     fn wire_name_matches_serde_rename() {
@@ -110,48 +153,96 @@ mod tests {
     }
 }
 
-/// Group membership changes a target's `watch` config detected on refresh.
+/// Every watch change one target refresh detected.
 ///
 /// Lives here rather than in `tuliprox-core` because it is an event payload:
 /// `EventMessage::PlaylistWatchChanged` carries it, and `shared` is the one
-/// crate every emitter and every subscriber can name.
+/// crate every emitter and every subscriber can name. One event per target
+/// and refresh, so a reshuffle across many groups is one notification.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WatchChanges {
     pub target: String,
-    pub group: String,
-    /// Channel titles added, as a sample. Shorter than [`Self::added_total`]
-    /// when [`Self::truncated`] is set, and empty when the change was too
-    /// large to list at all - but never anything except channel titles.
-    pub added: Vec<String>,
-    /// Channel titles removed. Same sampling rule as [`Self::added`].
-    pub removed: Vec<String>,
-    /// How many channels were added, whatever the list above carries.
-    ///
-    /// The lists used to absorb their own truncation notice: a synthesised
-    /// `"... 42 more added entries omitted"` pushed in beside real channel
-    /// titles. That was legible to the text template and to nothing else -
-    /// [`crate::model::EventMessage::payload`] serialises this struct straight
-    /// to JSON for plugins, and a plugin cannot tell a sentinel from a channel
-    /// actually named that. The counts live here so the lists stay honest.
-    #[serde(default)]
-    pub added_total: usize,
-    /// How many channels were removed. See [`Self::added_total`].
-    #[serde(default)]
-    pub removed_total: usize,
-    /// Whether the lists are a sample rather than the whole change.
-    #[serde(default)]
+    /// Group changes first, then channel changes ordered by group title.
+    pub changes: Vec<WatchChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WatchChange {
+    ChannelsAdded(WatchGroupItems),
+    ChannelsRemoved(WatchGroupItems),
+    GroupsAdded(WatchItems),
+    GroupsRemoved(WatchItems),
+}
+
+/// A sampled list of titles.
+///
+/// `items` is shorter than `total` when `truncated` is set, and empty when the
+/// change was too large to list - but never anything except real titles. A
+/// plugin reading the JSON cannot tell a synthesised "... 42 more" entry from a
+/// channel actually named that, so the counts live beside the list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WatchItems {
+    pub items: Vec<Arc<str>>,
+    pub total: usize,
     pub truncated: bool,
 }
 
-impl WatchChanges {
-    /// A complete change set, nothing sampled.
-    ///
-    /// The totals follow the lists, so a caller that is not truncating cannot
-    /// get them out of step.
+impl WatchItems {
+    /// A complete list, nothing sampled.
     #[must_use]
-    pub fn new(target: String, group: String, added: Vec<String>, removed: Vec<String>) -> Self {
-        Self { target, group, added_total: added.len(), removed_total: removed.len(), added, removed, truncated: false }
+    pub fn complete(items: Vec<Arc<str>>) -> Self { Self { total: items.len(), items, truncated: false } }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WatchGroupItems {
+    pub group: Arc<str>,
+    #[serde(flatten)]
+    pub items: WatchItems,
+}
+
+impl WatchChanges {
+    #[must_use]
+    pub fn new(target: String, changes: Vec<WatchChange>) -> Self { Self { target, changes } }
+
+    /// The shape notification templates see under `watch`.
+    #[must_use]
+    pub fn template_view(&self) -> WatchTemplateView<'_> {
+        let mut view = WatchTemplateView {
+            target: &self.target,
+            changes: &self.changes,
+            groups_added: None,
+            groups_removed: None,
+            channels_added: Vec::new(),
+            channels_removed: Vec::new(),
+        };
+        for change in &self.changes {
+            match change {
+                WatchChange::GroupsAdded(items) => view.groups_added = Some(items),
+                WatchChange::GroupsRemoved(items) => view.groups_removed = Some(items),
+                WatchChange::ChannelsAdded(group) => view.channels_added.push(group),
+                WatchChange::ChannelsRemoved(group) => view.channels_removed.push(group),
+            }
+        }
+        view
     }
+}
+
+/// `changes` regrouped by kind, so a template can say
+/// `{{#each watch.groups_added.items}}` instead of filtering the raw list
+/// with `eq`. Borrows from the payload; absent keys mean "none".
+#[derive(Debug, serde::Serialize)]
+pub struct WatchTemplateView<'a> {
+    pub target: &'a str,
+    pub changes: &'a [WatchChange],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups_added: Option<&'a WatchItems>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups_removed: Option<&'a WatchItems>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channels_added: Vec<&'a WatchGroupItems>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channels_removed: Vec<&'a WatchGroupItems>,
 }
 
 /// One recording's lifecycle transition.

@@ -1,8 +1,9 @@
+use super::WatchEntriesEditor;
 use crate::{
     app::components::{
-        build_options, config::HasFormData, select::Select, selection_parse_first, AppIcon, BlockId, BlockInstance,
-        Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownSelection, EditMode, FilterInput, IconButton, Panel,
-        SourceEditorContext, TextButton, ToggleSwitch,
+        build_options, config::HasFormData, dto_field_id, select::Select, selection_parse_first, AppIcon, BlockId,
+        BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownSelection, EditMode, FilterInput,
+        IconButton, Panel, SourceEditorContext, TextButton, ToggleSwitch,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
     edit_field_text, generate_form_reducer,
@@ -14,7 +15,8 @@ use shared::{
     error::TuliproxError,
     model::{
         permission::Permission, ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions,
-        CurationCatalogSelection, CurationConfigDto, ProcessingOrder, TargetBouquetMode, TargetBouquetStatusDto,
+        ConfigWatchDto, CurationCatalogSelection, CurationConfigDto, ProcessingOrder, TargetBouquetMode,
+        TargetBouquetStatusDto,
     },
     utils::Internable,
 };
@@ -31,7 +33,6 @@ const LABEL_PERSIST_FILTER: &str = "LABEL.PERSIST_FILTER";
 const LABEL_MAPPING: &str = "LABEL.MAPPING";
 const LABEL_WATCH: &str = "LABEL.WATCH";
 const LABEL_ADD_MAPPING: &str = "LABEL.ADD_MAPPING";
-const LABEL_ADD_WATCH: &str = "LABEL.ADD_WATCH";
 const LABEL_USE_MEMORY_CACHE: &str = "LABEL.USE_MEMORY_CACHE";
 const LABEL_PROCESSING_ORDER: &str = "LABEL.PROCESSING_ORDER";
 const LABEL_IGNORE_LOGO: &str = "LABEL.IGNORE_LOGO";
@@ -77,11 +78,15 @@ fn curation_summary(curation: &CurationConfigDto, catalog_selection: &str) -> St
 enum TargetFormPage {
     Main,
     Options,
+    Mapping,
+    Watch,
 }
 
 impl TargetFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
+    const MAPPING: &str = "Mapping";
+    const WATCH: &str = "Watch";
 }
 
 impl FromStr for TargetFormPage {
@@ -91,6 +96,8 @@ impl FromStr for TargetFormPage {
         match s {
             Self::MAIN => Ok(TargetFormPage::Main),
             Self::OPTIONS => Ok(TargetFormPage::Options),
+            Self::MAPPING => Ok(TargetFormPage::Mapping),
+            Self::WATCH => Ok(TargetFormPage::Watch),
             _ => Err(TuliproxError::Config(format!("Unknown target form page: {s}"))),
         }
     }
@@ -101,6 +108,8 @@ impl Display for TargetFormPage {
         match *self {
             TargetFormPage::Main => write!(f, "{}", TargetFormPage::MAIN),
             TargetFormPage::Options => write!(f, "{}", TargetFormPage::OPTIONS),
+            TargetFormPage::Mapping => write!(f, "{}", TargetFormPage::MAPPING),
+            TargetFormPage::Watch => write!(f, "{}", TargetFormPage::WATCH),
         }
     }
 }
@@ -110,6 +119,8 @@ impl Internable for TargetFormPage {
         match self {
             Self::Main => TargetFormPage::MAIN,
             Self::Options => TargetFormPage::OPTIONS,
+            Self::Mapping => TargetFormPage::MAPPING,
+            Self::Watch => TargetFormPage::WATCH,
         }
         .intern()
     }
@@ -211,7 +222,7 @@ generate_form_reducer!(
         ProcessingOrder => processing_order: ProcessingOrder,
         Filter => filter: ConfigTargetFilterDto,
         Mapping => mapping: Option<Vec<String>>,
-        Watch => watch: Option<Vec<String>>,
+        Watch => watch: Option<Vec<ConfigWatchDto>>,
         UseMemoryCache => use_memory_cache: bool,
     }
 );
@@ -576,8 +587,6 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                             options={processing_orders.clone()}
                         />
                    }})}
-                { edit_field_list_option!(target_form_state, translate.t(LABEL_MAPPING), mapping, ConfigTargetFormAction::Mapping, translate.t(LABEL_ADD_MAPPING)) }
-                { edit_field_list_option!(target_form_state, translate.t(LABEL_WATCH), watch, ConfigTargetFormAction::Watch, translate.t(LABEL_ADD_WATCH)) }
                 </Card>
             }
         } else {
@@ -601,16 +610,48 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                         translate.t(LABEL_PROCESSING_ORDER),
                         target_form_state.form.processing_order.to_string()
                     ) }
-                    { config_field_custom!(
-                        translate.t(LABEL_MAPPING),
-                        target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))
-                    ) }
-                    { config_field_custom!(
-                        translate.t(LABEL_WATCH),
-                        target_form_state.form.watch.as_ref().map_or_else(String::new, |values| values.join(", "))
-                    ) }
                 </Card>
             }
+        }
+    };
+
+    let render_mapping = || {
+        if props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                { edit_field_list_option!(target_form_state, translate.t(LABEL_MAPPING), mapping, ConfigTargetFormAction::Mapping, translate.t(LABEL_ADD_MAPPING)) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                { config_field_custom!(
+                    translate.t(LABEL_MAPPING),
+                    target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))
+                ) }
+                </Card>
+            }
+        }
+    };
+
+    // Watch entries get their own page: a fixed input area on top, the
+    // configured entries below.
+    let render_watch = || {
+        let state = target_form_state.clone();
+        html! {
+            <Card class="tp__config-view__card">
+                { config_field_child!(translate.t(LABEL_WATCH), dto_field_id(&target_form_state.form, "watch"), {
+                    html! {
+                        <WatchEntriesEditor
+                            entries={Rc::new(target_form_state.form.watch.clone().unwrap_or_default())}
+                            readonly={!props.allow_write}
+                            on_change={Callback::from(move |entries: Vec<ConfigWatchDto>| {
+                                state.dispatch(ConfigTargetFormAction::Watch((!entries.is_empty()).then_some(entries)));
+                            })}
+                        />
+                    }
+                })}
+            </Card>
         }
     };
 
@@ -637,6 +678,12 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Panel value={TargetFormPage::Options.intern()} active={view_visible.intern()}>
                 {render_options()}
                 </Panel>
+                <Panel value={TargetFormPage::Mapping.intern()} active={view_visible.intern()}>
+                {render_mapping()}
+                </Panel>
+                <Panel value={TargetFormPage::Watch.intern()} active={view_visible.intern()}>
+                {render_watch()}
+                </Panel>
             </div>
             </div>
         }
@@ -647,6 +694,8 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             <div class="tp__source-editor-form__sidebar">
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Main, if *view_visible == TargetFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={TargetFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Options, if *view_visible == TargetFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={TargetFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Mapping, if *view_visible == TargetFormPage::Mapping { " active" } else {""})}  icon="Mapping" hint={translate.t(LABEL_MAPPING)} name={TargetFormPage::Mapping.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Watch, if *view_visible == TargetFormPage::Watch { " active" } else {""})}  icon="Visibility" hint={translate.t(LABEL_WATCH)} name={TargetFormPage::Watch.to_string()} onclick={&handle_menu_click}></IconButton>
           </div>
         }
     };

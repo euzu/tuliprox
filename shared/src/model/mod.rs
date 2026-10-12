@@ -28,7 +28,6 @@ mod pagination;
 mod playlist;
 mod playlist_categories;
 mod playlist_document;
-mod playlist_groups_changed;
 mod playlist_info_document;
 mod playlist_request;
 mod playlist_update_run;
@@ -82,14 +81,14 @@ pub use self::{
     custom_video_stream_type::*, epg::*, epg_grid::*, epg_request::*, event::*, input_refresh_policy::*,
     input_update_action::*, ip_check::*, item_field::*, library_request::*, log::*, mapping::*, media_properties::*,
     messaging::*, metadata_update_failure::*, notification::*, notification_dead_letter::*, pagination::*, playlist::*,
-    playlist_categories::*, playlist_groups_changed::*, playlist_info_document::*, playlist_request::*,
-    playlist_update_run::*, playlist_update_status::*, processing_order::*, progress::*, provider_fetch_failure::*,
-    provider_pool::*, recording::*, recording_math::*, regex_cache::*, resource::*, scheduled_task_failure::*,
-    search_fields::*, search_request::*, server_lifecycle::*, short_epg::*, stalker::*, stalker_item::*, stats::*,
-    status_check::*, stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*,
-    stream_probe_failure::*, stream_properties::*, strm_export_style::*, system_info::*, target_bouquet::*,
-    target_type::*, transfer::*, ui_playlist_item::*, user_command::*, user_id::*, user_lifecycle::*, uuidtype::*,
-    watch_health::*, web_socket::*, xtream::*,
+    playlist_categories::*, playlist_info_document::*, playlist_request::*, playlist_update_run::*,
+    playlist_update_status::*, processing_order::*, progress::*, provider_fetch_failure::*, provider_pool::*,
+    recording::*, recording_math::*, regex_cache::*, resource::*, scheduled_task_failure::*, search_fields::*,
+    search_request::*, server_lifecycle::*, short_epg::*, stalker::*, stalker_item::*, stats::*, status_check::*,
+    stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*, stream_probe_failure::*,
+    stream_properties::*, strm_export_style::*, system_info::*, target_bouquet::*, target_type::*, transfer::*,
+    ui_playlist_item::*, user_command::*, user_id::*, user_lifecycle::*, uuidtype::*, watch_health::*, web_socket::*,
+    xtream::*,
 };
 pub use ids::*;
 pub use prepare::*;

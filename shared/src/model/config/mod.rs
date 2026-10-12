@@ -44,6 +44,7 @@ mod template_definition;
 mod time_units;
 mod tmdb_curation;
 mod trakt;
+mod watch;
 mod web_auth;
 mod web_ui;
 
@@ -108,5 +109,6 @@ pub use template_definition::*;
 pub use time_units::*;
 pub use tmdb_curation::*;
 pub use trakt::*;
+pub use watch::*;
 pub use web_auth::*;
 pub use web_ui::*;

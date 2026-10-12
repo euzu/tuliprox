@@ -328,6 +328,8 @@ Notification capabilities include:
 - Preview/test endpoint so templates can be rendered without sending them
 - Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload  
   failures, metadata failures, scheduled-task failures, recording lifecycle, disk alerts, and more
+- Playlist change tracking: get told when channels in the groups you care about change, or when whole groups appear
+  or disappear — for example a new event or PPV group — each filtered by your own group patterns
 - Event statistics and a recent-event ring for troubleshooting
 - Disk usage alerts with warning/critical thresholds and configurable repeat intervals
 

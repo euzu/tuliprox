@@ -4,7 +4,7 @@ use crate::{
     input_cache,
     metadata_sink::{MetadataUpdateSink, NoopMetadataSink},
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator},
-    playlist_watch::{process_group_watch, process_target_groups_watch},
+    playlist_watch::{assemble_watch_changes, diff_target_groups, process_group_watch},
     processor::{
         epg::{
             adopt_guide_live_epg_id_case, clear_invalid_live_epg_ids, process_playlist_epg,
@@ -29,8 +29,8 @@ use shared::{
         InputRefreshOverride, InputRefreshPolicy, InputStats, InputType, InputUpdateAction, InputUpdateRequest,
         MappingStage, PipelineStats, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
         PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
-        PlaylistUpdateState, PlaylistUpdateSummary, StreamProperties, TargetStats, UUIDType, WatchDisabled,
-        WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        PlaylistUpdateState, PlaylistUpdateSummary, StreamProperties, TargetStats, UUIDType, WatchContext,
+        WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };

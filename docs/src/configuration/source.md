@@ -1294,7 +1294,7 @@ sources:
 | `output`           | List          |   Yes    |           | Mandatory list of output formats. A single target can generate multiple output representations (e.g., `xtream`, `m3u`, `strm`, `hdhomerun`) from the same transformed result set.                                            |
 | `curation`         | Object        |    No    |           | Optional target-wide catalog policy with Trakt and/or TMDB Trending sources. Mutually exclusive with legacy `output[].trakt`; see [target-wide curation](#target-wide-curation-curation).                                    |
 | `favourites`       | List          |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
-| `watch`            | List          |    No    |           | Defines watched group patterns. If matching groups change during updates, Tuliprox emits Messaging events so operational changes become observable automatically.                                                            |
+| `watch`            | List          |    No    |           | Watch entries for this target: channel changes in matching groups and/or matching groups that appear or disappear. Changes are reported as Messaging events; see [Watch](#329-watch-watch).                                  |
 | `use_memory_cache` | Bool          |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
 
 ---
@@ -2279,25 +2279,44 @@ favourites:
 
 ### 3.2.9 Watch (`watch`)
 
-For each target with a *unique name*, you can define watched groups.
-It is a list of group patterns Tuliprox monitors for content changes during updates.
+For each target with a *unique name*, you can define watch entries. Each entry is a regex matched against final group
+names and says which changes to report:
 
-If matching groups gain or lose channels, Tuliprox emits a Messaging event such as:
+| `on` value      | Reported change                                                |
+|:----------------|:---------------------------------------------------------------|
+| `channels`      | Channels added to or removed from a matching group.            |
+| `group_added`   | A matching group appeared that was not in the previous update. |
+| `group_removed` | A group that matched in the previous update is gone.           |
 
-* channels added
-* channels removed
+An entry is either a plain string, which means `on: [channels]`, or a map with `pattern` and `on`:
 
 ```yaml
 watch:
-  - group: '^Sports'
-  - group: '^Movies'
+  # Short form: channel changes in all German sports groups.
+  - "^DE Sport.*"
+  # Report new 4K/UHD groups only.
+  - pattern: "(?i)\\b(4K|UHD)\\b"
+    on: [group_added]
+  # Report every group that disappears.
+  - pattern: ".*"
+    on: [group_removed]
+  # Event groups: appearing, disappearing and their channel changes.
+  - pattern: "^Event.*|^PPV.*"
+    on: [channels, group_added, group_removed]
 ```
+
+The first update of a target only records the current state; changes are reported from the second update on. All
+changes of one update arrive as a single `playlist.watch.changed` event.
+
+A `playlist.watch.unmatched` warning is sent for entries that watch `channels` (without `group_added`) and match no
+group. Entries waiting for a group to appear, or reporting only removals, never trigger it.
 
 #### `watch` Parameters
 
-| Parameter | Type           | Required | Default | Technical Impact & Background                                                                                                                                                                                              |
-|:----------|:---------------|:--------:|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `group`   | String (Regex) |   Yes    |         | Regex pattern matched against final group names. This allows Tuliprox to detect meaningful content changes in selected areas of the playlist and notify operators automatically through the configured messaging backends. |
+| Parameter | Type           | Required | Default      | Technical Impact & Background                                         |
+|:----------|:---------------|:--------:|:-------------|:----------------------------------------------------------------------|
+| `pattern` | String (Regex) |   Yes    |              | Regex matched against final group names.                              |
+| `on`      | List           |    No    | `[channels]` | Any of `channels`, `group_added`, `group_removed`. Must not be empty. |
 
 > **Note:** `watch` is especially useful for monitoring premium groups, VOD collections,
 > or unstable provider segments where additions and removals should generate operational alerts.

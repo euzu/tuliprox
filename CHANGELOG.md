@@ -4,6 +4,17 @@
 
 ## ⚠️ Breaking Changes
 
+- **`playlist.watch.changed` carries every watch change of one update.** The payload is now
+  `{ target, changes: [...] }`, where each change has a `kind` (`groups_added`, `groups_removed`, `channels_added`,
+  `channels_removed`). Templates using `{{watch.group}}`, `{{watch.added}}` or `{{watch.removed}}` must be updated:
+
+  ```handlebars
+  {{!-- before --}}
+  {{watch.group}}: {{#each watch.added}}{{this}} {{/each}}
+  {{!-- after --}}
+  {{#each watch.channels_added}}{{group}}: {{#each items}}{{this}} {{/each}}{{/each}}
+  ```
+
 - **`clear_invalid_epg_ids` moved to `epg_output.clear_invalid_ids`.** The target option now sits next to the other
   EPG id output options. The top-level `options.clear_invalid_epg_ids` and its legacy alias `options.required_epg` are
   rejected while loading. To migrate, move the value:
@@ -317,16 +328,12 @@
     layer to stop discarding the distinction: an empty `Some` is now load-bearing and means "configured and unusable",
     which is not the same as "not configured". `playlist.watch.unmatched` covers the fourth silence — a pattern matching
     no group looks exactly like a group that has not changed, so a typo in `watch` was invisible.
-  - **`playlist.groups.changed`**: `watch` tracked channels inside named groups and was blind to the group set itself,
-    in both directions. A group appearing was silent — no baseline file, so one was written, nothing was emitted, and
-    the group's entire channel list read as "not new" from then on — and a group vanishing was worse, since it is absent
-    from the refreshed playlist and no code path observed the disappearance at all. The target's group titles are now
-    diffed against a persisted index before the per-group fan-out, so it sees every group rather than only the ones the
-    watch patterns name; the question is which groups exist, not what is inside the watched ones. The index sits beside
-    the per-group directory (`<target>.groups.bin`, not `<target>/__groups.bin`) so it cannot collide with a group whose
-    sanitized title matches, and first sight writes the baseline silently — announcing every existing group as new on
-    the first refresh after an upgrade would be noise. Gated on `target.watch` being configured, so it costs nothing for
-    targets that never asked to be watched.
+  - **Watch group contexts**: a `watch` entry can be a map with `pattern` and `on` (`channels`, `group_added`,
+    `group_removed`), so groups appearing in or vanishing from a target are reported, filtered per entry. Plain string
+    entries keep watching channels only. The target's group titles are diffed against a persisted index
+    (`<target>.groups.bin`) that always holds every group, so editing a pattern never reads as a change; first sight
+    writes the baseline silently. Group changes arrive in `playlist.watch.changed`; the short-lived
+    `playlist.groups.changed` event is gone and its name is accepted as an alias.
   - **`metadata.update.failed` for an input whose tasks burn through their retries**: the completion event only fires
     when a cycle drains *with changes*, and an exhausted task only reached a `debug!`, so an input whose resolves fail
     every time emitted a start and then nothing for as long as it stayed broken — on the bus, indistinguishable from one
@@ -1094,6 +1101,10 @@
 
 ## 🐛 Fixes
 
+- **Long Telegram and ntfy notifications are no longer rejected.** Telegram accepts at most 4096 characters (UTF-16
+  units) and ntfy 4096 bytes per message; neither channel had a limit, so a large watch or statistics notification
+  failed and landed in the dead letter queue. Telegram now cuts the final text, after `MarkdownV2` escaping, and drops
+  an escape that the cut separated from its character; ntfy bodies are truncated like Pushover's.
 - **Short EPG and player guides stay empty when playlist and XMLTV ids differ only in case.** A live channel whose
   EPG id matches a guide channel case-insensitively (for example `usa4k.us` against `<channel id="USA4K.us">`) now
   adopts the guide's spelling, so the playlist `tvg-id` / `epg_channel_id`, the XMLTV `<channel id>` and the EPG db
@@ -1732,6 +1743,8 @@
 
 ## 🛠 Maintenance
 
+- **`ClusterFlags` is built on `create_bitset!`.** It was the last user of the `bitflags` crate, which is removed
+  from `shared`. The API and the persisted `[live,vod]` form are unchanged.
 - **Testkit scenarios can pause and tune reconnect windows.** A step with only `pause_millis` (1 to 300000) idles the
   scenario, and `policy_contract` accepts `hls_session_ttl_secs` and `provider_affinity_ttl_secs`. The new scenario
   `m3u-hls-provider-affinity-after-lease-expiry` uses both to prove that a returning HLS playback stays on its

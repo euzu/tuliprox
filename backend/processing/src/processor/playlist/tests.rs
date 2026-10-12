@@ -22,6 +22,8 @@ mod mapping_stage;
 
 mod curation_effect_gate;
 
+mod watch_contexts;
+
 #[cfg(test)]
 mod quality_rejection_fallback;
 

@@ -383,7 +383,7 @@
       "MAPPING": "List of mapping IDs to apply to this target.",
       "NAME": "Human readable name for this entry. Used for selective processing via -t CLI arg.",
       "USE_MEMORY_CACHE": "If enabled, the playlist is cached in RAM to reduce disk overhead (increases memory usage).",
-      "WATCH": "List of group patterns to monitor for changes. Notifications are sent via configured messaging."
+      "WATCH": "List of group patterns to monitor. Each pattern is a regular expression matched against the group name (e.g. ^Sport.* or (?i)event). Each entry reports channel changes, new groups and/or removed groups. Notifications are sent via configured messaging."
     },
     "CONFIG_TARGET_OPTIONS": {
       "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately."
@@ -1808,6 +1808,9 @@
     "VOD": "VOD",
     "VOD_SHORT": "V",
     "WATCH": "Watch",
+    "WATCH_CHANNELS": "Channels",
+    "WATCH_GROUP_ADDED": "New groups",
+    "WATCH_GROUP_REMOVED": "Removed groups",
     "WEBHOOK_URL": "Webhook URL",
     "WEB_AUTH": "Auth",
     "WEB_ROOT": "Web-Root",

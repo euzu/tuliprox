@@ -206,3 +206,8 @@ fn registry_has_no_duplicate_ids() {
         assert!(seen.insert(descriptor.id), "duplicate registry entry for {}", descriptor.id);
     }
 }
+
+#[test]
+fn groups_changed_alias_resolves_for_ids() {
+    assert_eq!(EventId::from_wire("playlist.groups.changed"), Some(registry::PLAYLIST_WATCH_CHANGED));
+}
