@@ -244,7 +244,7 @@ async fn try_prepare_startup_fill(
     expected: Option<u64>,
     deadline: Instant,
 ) -> Result<Option<PreparedStartupFill>, SegmentFetchError> {
-    let (store, budget, mut mode, limit, session_id) = {
+    let (store, budget, mut mode, limit, session_id, decides_policy) = {
         let session = context.session.read().await;
         if !session.segments.get(&snapshot.proxy_seq).is_some_and(super::super::SegmentEntry::is_fast_start_eligible) {
             return Err(SegmentFetchError::UnsupportedStartupMedia);
@@ -259,13 +259,13 @@ async fn try_prepare_startup_fill(
             startup.config.mode,
             startup.config.max_progressive_bytes_per_segment.get(),
             session.proxy_session_id.clone(),
+            startup_fill_decides_policy(&session, snapshot.proxy_seq),
         )
     };
-    let mut replay = (mode == shared::model::HlsStartupMode::Progressive
-        && expected.is_none_or(|length| length <= limit))
-    .then(|| super::super::progressive_startup::ProgressiveReplay::new(&budget))
-    .flatten();
-    if mode == shared::model::HlsStartupMode::Progressive && replay.is_none() {
+    let mut replay = (mode.streams_raw_revisions() && expected.is_none_or(|length| length <= limit))
+        .then(|| super::super::progressive_startup::ProgressiveReplay::new(&budget))
+        .flatten();
+    if mode.streams_raw_revisions() && replay.is_none() && decides_policy {
         let mut session = context.session.write().await;
         if session.startup.as_ref().is_some_and(|startup| !startup.policy_fixed) {
             if let Some(startup) = &mut session.startup {
@@ -275,7 +275,7 @@ async fn try_prepare_startup_fill(
             debug!("HLS startup fallback: reason=replay_admission effective_mode=first_ready");
         }
     }
-    let raw = mode == shared::model::HlsStartupMode::Progressive;
+    let raw = mode.streams_raw_revisions();
     let kind = if raw { super::super::SegmentRevisionKind::Raw } else { super::super::SegmentRevisionKind::Processed };
     let revision =
         store.create(session_id, snapshot.proxy_seq, kind).map_err(|error| SegmentFetchError::cache_body(&error))?;
@@ -285,7 +285,7 @@ async fn try_prepare_startup_fill(
         .ok_or_else(|| SegmentFetchError::cache_body(&std::io::Error::other("revision peak overflow")))?;
     let mut reservation = match context.segment_cache.reserve_revision_peak(&revision.revision().key, peak).await {
         Ok(reservation) => reservation,
-        Err(_) if raw && fallback_to_first_ready(&context.session).await => {
+        Err(_) if raw && decides_policy && fallback_to_first_ready(&context.session).await => {
             debug!("HLS startup fallback: reason=disk_capacity effective_mode=first_ready");
             return Ok(None);
         }
@@ -345,11 +345,29 @@ async fn bind_startup_revision(
             "startup fetch generation retired",
         )));
     }
-    if let Some(startup) = &mut session.startup {
-        startup.policy_fixed = true;
-        startup.revisions.insert(snapshot.proxy_seq, revision.clone());
+    let decides_policy = startup_fill_decides_policy(&session, snapshot.proxy_seq);
+    let Some(startup) = &mut session.startup else { return Ok(()) };
+    startup.policy_fixed |= decides_policy;
+    startup.revisions.insert(snapshot.proxy_seq, revision.clone());
+    // An optimistic window may become complete when its last successor is
+    // accepted, after the head already has bytes.
+    if startup.config.mode.publishes_pending_successors() && session.last_rendered_manifest.is_none() {
+        if let Err(error) = session.render_and_store_manifest(current_time_millis()) {
+            debug!(
+                "HLS optimistic startup render after successor binding failed: proxy_seq={} error={error:?}",
+                snapshot.proxy_seq
+            );
+        }
     }
     Ok(())
+}
+
+/// Optimistic startup fills successors alongside the head, so only the head's
+/// fill may fix the session policy or fall back to `first_ready`. A successor
+/// without replay stays raw and is delivered once complete.
+fn startup_fill_decides_policy(session: &super::super::HlsSession, proxy_seq: u64) -> bool {
+    !session.startup_mode().publishes_pending_successors()
+        || session.publishable_origin_head_proxy_seq == Some(proxy_seq)
 }
 
 async fn fallback_to_first_ready(session: &HlsSessionHandle) -> bool {

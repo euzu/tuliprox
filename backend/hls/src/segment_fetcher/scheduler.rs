@@ -269,10 +269,15 @@ impl HlsSegmentWorkerPool {
             return None;
         }
         let initial_barrier = session.startup.as_ref().is_some_and(|startup| {
+            let mode = startup.config.mode;
+            // Optimistic startup lists successors before their bodies arrive,
+            // so they must start together with the head.
+            if mode.publishes_pending_successors() {
+                return false;
+            }
             let Some(head) = session.publishable_origin_head_proxy_seq else {
                 return true;
             };
-            let mode = startup.config.mode;
             startup.revisions.get(&head).is_none_or(|revision| {
                 mode != shared::model::HlsStartupMode::Conservative && !revision.revision().is_startup_head_ready(mode)
             })

@@ -63,10 +63,12 @@ pub(super) fn commit_lease_revision_bindings(lease: &mut HlsAccessLease, snapsho
     if let Some(publication) = &snapshot.startup_revisions {
         let current = lease.revision_bindings.as_ref();
         if publication.revisions.iter().any(|(seq, revision)| {
-            !revision.revision().is_publishable()
+            !revision.revision().is_window_publishable(publication.mode)
                 || current.is_some_and(|current| {
                     current.retired_through.is_some_and(|retired| *seq <= retired)
-                        || current.revisions.get(seq).is_some_and(|bound| bound != revision)
+                        || current.revisions.get(seq).is_some_and(|bound| {
+                            bound != revision && !bound.revision().is_replaceable_in(publication.mode)
+                        })
                 })
         }) {
             return false;

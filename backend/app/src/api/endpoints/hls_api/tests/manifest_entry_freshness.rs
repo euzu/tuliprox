@@ -114,9 +114,11 @@ async fn new_playback_on_retained_session_starts_on_current_origin_window() {
         (HlsStartupMode::Progressive, 16_000, true),
         (HlsStartupMode::FirstReady, 16_000, true),
         (HlsStartupMode::Conservative, 16_000, true),
+        (HlsStartupMode::Optimistic, 16_000, true),
         (HlsStartupMode::Progressive, 300_000, false),
         (HlsStartupMode::FirstReady, 300_000, false),
         (HlsStartupMode::Conservative, 300_000, false),
+        (HlsStartupMode::Optimistic, 300_000, false),
     ] {
         let head = Arc::new(AtomicU64::new(0));
         let origin = spawn_moving_origin(Arc::clone(&head)).await;

@@ -17,7 +17,7 @@ mod support;
 use self::support::{
     clear_scheduled_prefetch, cold_startup_round, commit_test_key_ready, committed_segment, encode_test_body,
     encrypted_fetch_context, fetch_context, fetch_context_with_access_lease, grant_usable_worker_access_lease,
-    grant_usable_worker_access_lease_at, install_startup, normal_manifest, prefix_drop_rounds,
-    shared_key_fetch_and_wait, spawn_segment_server, spawn_sequence_response_server, temp_cache_files,
-    test_segment_repair_manager, TestContentEncoding, TestOriginResponse, TestSegmentServer,
+    grant_usable_worker_access_lease_at, headers_only_successor_origin, install_startup, normal_manifest,
+    prefix_drop_rounds, shared_key_fetch_and_wait, spawn_segment_server, spawn_sequence_response_server,
+    temp_cache_files, test_segment_repair_manager, TestContentEncoding, TestOriginResponse, TestSegmentServer,
 };

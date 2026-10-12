@@ -81,3 +81,81 @@ fn startup_claim_only_accepts_the_published_head_once() {
     assert!(!leases.try_claim_progressive_startup(&lease_id, 40, 2102));
     assert!(!leases.try_claim_progressive_startup(&lease_id, 41, 2102));
 }
+
+#[test]
+fn optimistic_binding_accepts_pending_successors_but_not_failed_or_replaced_ones() -> std::io::Result<()> {
+    let store = crate::SegmentRevisionStore::default();
+    let session = ProxySessionId("optimistic".into());
+    let snapshot_with = |revisions: std::collections::BTreeMap<u64, crate::SegmentRevisionGuard>| {
+        let mut snapshot = manifest_snapshot(1);
+        snapshot.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            mode: shared::model::HlsStartupMode::Optimistic,
+            retained_start_seq: 0,
+            revisions,
+        }));
+        snapshot
+    };
+    let mut owners = std::collections::BTreeMap::new();
+    for seq in 0..3 {
+        owners.insert(seq, store.create(session.clone(), seq, crate::SegmentRevisionKind::Raw)?);
+    }
+    owners
+        .get(&0)
+        .ok_or_else(|| std::io::Error::other("head"))?
+        .revision()
+        .prefix_available
+        .store(1, std::sync::atomic::Ordering::Release);
+    let mut bound = lease(HlsAccessLeaseId("optimistic".into()), &session.0, 1000);
+    assert!(super::super::commit_lease_revision_bindings(&mut bound, &snapshot_with(owners.clone())));
+
+    let mut replaced = owners.clone();
+    replaced.insert(1, store.create(session.clone(), 1, crate::SegmentRevisionKind::Raw)?);
+    assert!(!super::super::commit_lease_revision_bindings(&mut bound, &snapshot_with(replaced)));
+
+    let mut fresh_lease = lease(HlsAccessLeaseId("failed".into()), &session.0, 1000);
+    owners.get(&2).ok_or_else(|| std::io::Error::other("successor"))?.revision().fail();
+    assert!(!super::super::commit_lease_revision_bindings(&mut fresh_lease, &snapshot_with(owners)));
+    Ok(())
+}
+
+#[test]
+fn failed_unexposed_successor_may_be_rebound_but_exposed_bytes_never_change() -> std::io::Result<()> {
+    let store = crate::SegmentRevisionStore::default();
+    let session = ProxySessionId("rebind".into());
+    let snapshot_with = |revisions: std::collections::BTreeMap<u64, crate::SegmentRevisionGuard>| {
+        let mut snapshot = manifest_snapshot(1);
+        snapshot.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            mode: shared::model::HlsStartupMode::Optimistic,
+            retained_start_seq: 0,
+            revisions,
+        }));
+        snapshot
+    };
+    let budget = crate::ProgressiveBudgetManager::new(tuliprox_core::model::HlsStartupConfig::default());
+    let mut owners = std::collections::BTreeMap::new();
+    for seq in 0..3 {
+        owners.insert(seq, store.create(session.clone(), seq, crate::SegmentRevisionKind::Raw)?);
+    }
+    let head = owners.get(&0).ok_or_else(|| std::io::Error::other("head"))?.clone();
+    let mut replay =
+        crate::progressive_startup::ProgressiveReplay::new(&budget).ok_or_else(|| std::io::Error::other("slot"))?;
+    replay.push(b"prefix")?;
+    *head.revision().replay.lock().map_err(|_| std::io::Error::other("replay"))? = Some(replay);
+    head.revision().prefix_available.store(6, std::sync::atomic::Ordering::Release);
+    let mut bound = lease(HlsAccessLeaseId("rebind".into()), &session.0, 1000);
+    assert!(super::super::commit_lease_revision_bindings(&mut bound, &snapshot_with(owners.clone())));
+
+    // The origin fails a listed successor before any byte reached a client; its retry may replace it.
+    owners.get(&1).ok_or_else(|| std::io::Error::other("successor"))?.revision().fail();
+    let mut retried = owners.clone();
+    retried.insert(1, store.create(session.clone(), 1, crate::SegmentRevisionKind::Raw)?);
+    assert!(super::super::commit_lease_revision_bindings(&mut bound, &snapshot_with(retried.clone())));
+
+    // A revision that streamed bytes stays bound even after it failed.
+    assert!(head.revision().expose());
+    head.revision().fail();
+    let mut replaced_head = retried;
+    replaced_head.insert(0, store.create(session, 0, crate::SegmentRevisionKind::Raw)?);
+    assert!(!super::super::commit_lease_revision_bindings(&mut bound, &snapshot_with(replaced_head)));
+    Ok(())
+}

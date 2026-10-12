@@ -916,6 +916,7 @@
     "HLS_STARTUP_MODE_CONSERVATIVE": "Conservador",
     "HLS_STARTUP_MODE_FIRST_READY": "Primero listo",
     "HLS_STARTUP_MODE_PROGRESSIVE": "Progresivo",
+    "HLS_STARTUP_MODE_OPTIMISTIC": "Optimista",
     "ALL_TARGETS": "Todos los destinos",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Aceptar certificados SSL no seguros",
     "ACTIVE": "Activo",

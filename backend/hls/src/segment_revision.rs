@@ -112,6 +112,15 @@ impl SegmentRevision {
         exposed
     }
 
+    /// An optimistic successor is listed before its body arrives. If it fails
+    /// before receiving any byte, a new attempt may take over its URI.
+    pub(crate) fn is_replaceable_in(&self, mode: HlsStartupMode) -> bool {
+        mode.publishes_pending_successors()
+            && matches!(*self.state.borrow(), SegmentRevisionState::Failed)
+            && !self.exposed.load(Ordering::Acquire)
+            && self.prefix_available.load(Ordering::Acquire) == 0
+    }
+
     pub(crate) fn replay_exhausted(&self) {
         self.state.send_if_modified(|state| {
             if !matches!(state, SegmentRevisionState::Pending) {
@@ -144,8 +153,19 @@ impl SegmentRevision {
     pub fn is_startup_head_ready(&self, mode: HlsStartupMode) -> bool {
         match mode {
             HlsStartupMode::FirstReady => self.is_complete(),
-            HlsStartupMode::Progressive => self.is_publishable(),
+            HlsStartupMode::Progressive | HlsStartupMode::Optimistic => self.is_publishable(),
             HlsStartupMode::Conservative => false,
+        }
+    }
+
+    /// Whether this revision may be listed in a startup window. Optimistic
+    /// startup lists a successor as soon as the origin accepted it; delivery
+    /// of a successor always waits for its complete body.
+    pub fn is_window_publishable(&self, mode: HlsStartupMode) -> bool {
+        if mode.publishes_pending_successors() {
+            !matches!(*self.state.borrow(), SegmentRevisionState::Failed)
+        } else {
+            self.is_publishable()
         }
     }
 
@@ -293,6 +313,21 @@ mod tests {
         assert_eq!(budget.usage(), (0, 0));
         assert!(owner.revision().complete(CachedSegmentMetadata { path: "raw.ts".into(), size: 6 }));
         assert!(owner.revision().expose());
+        Ok(())
+    }
+
+    #[test]
+    fn optimistic_window_accepts_pending_successors_but_never_failed_ones() -> io::Result<()> {
+        let store = SegmentRevisionStore::default();
+        let owner = store.create(ProxySessionId("window".into()), 1, SegmentRevisionKind::Raw)?;
+        let revision = owner.revision();
+        assert!(revision.is_window_publishable(HlsStartupMode::Optimistic));
+        assert!(!revision.is_window_publishable(HlsStartupMode::Progressive));
+        assert!(!revision.is_startup_head_ready(HlsStartupMode::Optimistic));
+        revision.prefix_available.store(1, Ordering::Release);
+        assert!(revision.is_startup_head_ready(HlsStartupMode::Optimistic));
+        revision.fail();
+        assert!(!revision.is_window_publishable(HlsStartupMode::Optimistic));
         Ok(())
     }
 

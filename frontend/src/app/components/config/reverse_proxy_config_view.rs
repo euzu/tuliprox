@@ -1000,6 +1000,11 @@ pub fn ReverseProxyConfigView() -> Html {
                 html! { translate.t("LABEL.HLS_STARTUP_MODE_PROGRESSIVE") },
                 selected_startup == HlsStartupMode::Progressive,
             ),
+            DropDownOption::new(
+                "optimistic",
+                html! { translate.t("LABEL.HLS_STARTUP_MODE_OPTIMISTIC") },
+                selected_startup == HlsStartupMode::Optimistic,
+            ),
         ]);
         let set_startup = {
             let hls_cache_state = hls_cache_state.clone();

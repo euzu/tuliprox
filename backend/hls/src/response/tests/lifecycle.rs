@@ -129,3 +129,78 @@ async fn dropped_full_range_segment_body_records_request_without_completion() {
     assert_eq!(fixture.meter.bytes_total(), u64::try_from(first_chunk.len()).expect("first chunk size"));
     assert_eq!(fixture.access.active_readers(), 0);
 }
+
+#[tokio::test]
+async fn optimistic_successor_that_fails_after_publication_is_a_permanent_segment_failure() -> std::io::Result<()> {
+    let fixture = CachedSegmentFixture::new(b"canonical-body".to_vec()).await;
+    let seq = fixture.segment_file.proxy_seq;
+    let head_seq = seq.checked_sub(1).ok_or_else(|| std::io::Error::other("fixture head"))?;
+    let config = tuliprox_core::model::HlsStartupConfig {
+        mode: shared::model::HlsStartupMode::Optimistic,
+        ..Default::default()
+    };
+    let store = Arc::new(crate::SegmentRevisionStore::default());
+    let head = store.create(fixture.proxy_session_id.clone(), head_seq, crate::SegmentRevisionKind::Raw)?;
+    head.revision().prefix_available.store(1, Ordering::Release);
+    let successor = store.create(fixture.proxy_session_id.clone(), seq, crate::SegmentRevisionKind::Raw)?;
+    let revisions = std::collections::BTreeMap::from([(head_seq, head), (seq, successor.clone())]);
+    fixture.session.write().await.startup = Some(crate::HlsSessionStartup {
+        config: config.clone(),
+        first_data_timeout_ms: 1000,
+        worker: Weak::new(),
+        access_leases: Arc::clone(fixture.manager.access_leases()),
+        revisions: revisions.clone(),
+        policy_fixed: true,
+        store,
+        budget: crate::ProgressiveBudgetManager::new(config.clone()),
+    });
+    let segment = |proxy_seq: u64, uri: &str| crate::HlsLeaseManifestSegment {
+        proxy_seq,
+        duration_ms: 4000,
+        uri: uri.into(),
+        discontinuity_before: false,
+        map_ref_ready: true,
+        encryption: None,
+    };
+    let snapshot = crate::HlsLeaseManifestSnapshot {
+        startup_revisions: Some(Arc::new(crate::HlsManifestRevisions {
+            mode: config.mode,
+            retained_start_seq: head_seq,
+            revisions,
+        })),
+        delivery_mode: crate::HlsManifestDeliveryMode::NormalCacheTimeline,
+        source_commit_identity: crate::HlsManifestCommitIdentity::new(1),
+        uri_materialization: None,
+        finalized_transient_manifest_generation: None,
+        snapshot_generation: 0,
+        delivered_at_ms: current_time_millis(),
+        first_proxy_seq: head_seq,
+        last_proxy_seq: seq,
+        visible_segments: Arc::from([segment(head_seq, "11.ts"), segment(seq, "12.ts")]),
+        discontinuity_sequence: 0,
+        target_duration_ms: 4000,
+        playlist_duration_ms: 8000,
+        last_visible_media_end_ms: 8000,
+        active_map: None,
+        active_encryption: None,
+        container: crate::HlsMediaContainer::MpegTs,
+    };
+    {
+        let mut leases = fixture.manager.access_leases().write().await;
+        let now = current_time_millis();
+        let guard = leases
+            .prepare_manifest_publication(&fixture.lease_id, &fixture.proxy_session_id, now)
+            .ok_or_else(|| std::io::Error::other("publication guard"))?;
+        assert!(leases
+            .commit_manifest_publication(&fixture.lease_id, &fixture.proxy_session_id, guard, snapshot, now)
+            .is_committed());
+    }
+    // Listing does not expose a revision; only streaming bytes does. The origin
+    // failing a listed successor therefore fails just that one segment.
+    successor.revision().fail();
+    assert!(matches!(
+        fixture.serve(None).await,
+        HlsResourceServeOutcome::Failure(HlsResourceServeFailure::PermanentFailed { .. })
+    ));
+    Ok(())
+}

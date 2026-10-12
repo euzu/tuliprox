@@ -189,6 +189,10 @@
   reader lifetime and deferred repairs are bounded by the new `startup` limits; revision files share the existing
   disk cache limits. Archive, encrypted and fMP4/MAP sessions keep the existing path. The Web UI exposes the mode
   and its limits. See [Optional startup modes](docs/src/configuration/shared-hls-configuration.md#optional-startup-modes).
+- **Optimistic fast start for shared live HLS.** `startup.mode: optimistic` works like `progressive`, but publishes
+  the first playlist as soon as the head segment has data and its successors were accepted by the origin, instead
+  of waiting for data from three segments. Successor fetches start together with the head. Opt-in; the default
+  stays `conservative`.
 
 - **Personal Web UI table layouts.** Show or hide optional columns, reorder them with mouse, touch, or keyboard,
   and save layouts per account. Restore defaults, cancel drafts, and resolve conflicting saves without losing edits.
