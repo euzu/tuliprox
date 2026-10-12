@@ -56,9 +56,11 @@ enum CandidateDecision {
 
 /// An entry with no context or a blank or duplicate pattern is never added,
 /// so the editor cannot produce a config that `prepare` rejects.
+///
+/// The pattern is kept verbatim: whitespace is part of a regex, and config
+/// load does not trim either. Trimming only detects blank input.
 fn candidate(pattern: &str, on: WatchContextSet, entries: &[ConfigWatchDto]) -> CandidateDecision {
-    let pattern = pattern.trim();
-    if pattern.is_empty() || on.is_empty() || entries.iter().any(|entry| entry.pattern == pattern) {
+    if pattern.trim().is_empty() || on.is_empty() || entries.iter().any(|entry| entry.pattern == pattern) {
         return CandidateDecision::Rejected;
     }
     let mut entry = ConfigWatchDto { pattern: pattern.to_string(), on };
@@ -240,7 +242,7 @@ mod tests {
     #[test]
     fn duplicate_pattern_is_rejected() {
         let existing = [ConfigWatchDto::channels("^A")];
-        assert_eq!(candidate(" ^A ", set(&[WatchContext::GroupAdded]), &existing), CandidateDecision::Rejected);
+        assert_eq!(candidate("^A", set(&[WatchContext::GroupAdded]), &existing), CandidateDecision::Rejected);
     }
 
     /// An invalid regex used to be added and only fail on save; the editor
@@ -255,11 +257,12 @@ mod tests {
         }
     }
 
+    /// Whitespace is part of a regex: `"^Sport "` must not become `"^Sport"`.
     #[test]
-    fn valid_candidate_is_trimmed() {
+    fn valid_candidate_keeps_its_pattern_verbatim() {
         assert_eq!(
-            candidate(" ^A ", set(&[WatchContext::GroupAdded]), &[]),
-            CandidateDecision::Accepted(ConfigWatchDto::new("^A", [WatchContext::GroupAdded]))
+            candidate("^Sport ", set(&[WatchContext::GroupAdded]), &[]),
+            CandidateDecision::Accepted(ConfigWatchDto::new("^Sport ", [WatchContext::GroupAdded]))
         );
     }
 
