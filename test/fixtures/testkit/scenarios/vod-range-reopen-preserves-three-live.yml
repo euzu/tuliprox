@@ -11,6 +11,9 @@ origin:
   run_id: vod-range-reopen-preserves-three-live
   account_limit: 5
   limit_mode: reject_new
+  # Emulates the handshake round trip of a remote provider, so the socket a reopen
+  # replaces is observed closed before its replacement; see OriginPolicy.
+  connect_latency_ms: 20
 actors:
   - id: live-viewer-1
     agent: local

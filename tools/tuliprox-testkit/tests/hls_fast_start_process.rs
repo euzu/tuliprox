@@ -39,8 +39,13 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
         abort_segments: if abort { vec![0] } else { Vec::new() },
         ..HlsOriginProfile::default()
     };
-    let origin =
-        OriginConfig { run_id: run_id.clone(), account_limit: None, limit_mode: None, hls_profile: Some(profile) };
+    let origin = OriginConfig {
+        run_id: run_id.clone(),
+        account_limit: None,
+        limit_mode: None,
+        connect_latency_ms: None,
+        hls_profile: Some(profile),
+    };
     let bootstrap = BootstrapConfig {
         command: sut,
         arguments: ["-s", "-c", "{config_file}", "-i", "{source_file}", "-a", "{api_proxy_file}"]

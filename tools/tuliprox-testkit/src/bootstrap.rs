@@ -371,6 +371,9 @@ impl IsolatedFixture {
             if let Some(limit) = origin_cfg.account_limit {
                 origin_cmd.arg("--account-limit").arg(limit.to_string());
             }
+            if let Some(latency_ms) = origin_cfg.connect_latency_ms {
+                origin_cmd.arg("--connect-latency-ms").arg(latency_ms.to_string());
+            }
             if let Some(mode) = origin_cfg.limit_mode {
                 let mode_str = match mode {
                     crate::origin_transport::OriginLimitMode::ObserveOnly => "observe_only",

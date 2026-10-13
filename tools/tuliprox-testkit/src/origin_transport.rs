@@ -29,10 +29,19 @@ pub enum OriginLimitMode {
 pub struct OriginPolicy {
     pub account_limit: Option<usize>,
     pub limit_mode: OriginLimitMode,
+    /// Delay before an accepted media connection is counted and served.
+    ///
+    /// A remote provider sees a replacement connection only after its handshake round trip,
+    /// while the FIN of the socket it replaces arrives within half of one. On loopback both
+    /// land at once, and the order in which the origin observes them depends on scheduling.
+    #[serde(default)]
+    pub connect_latency_ms: u64,
 }
 
 impl Default for OriginPolicy {
-    fn default() -> Self { Self { account_limit: None, limit_mode: OriginLimitMode::ObserveOnly } }
+    fn default() -> Self {
+        Self { account_limit: None, limit_mode: OriginLimitMode::ObserveOnly, connect_latency_ms: 0 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -388,13 +397,18 @@ pub async fn serve_tracked_media_listener(
 ) -> Result<(), std::io::Error> {
     loop {
         let (tcp_stream, remote_addr) = listener.accept().await?;
-        let conn_id = tracker.on_tcp_accepted(remote_addr).await;
-        let (tracked_io, _closed) = TrackedIo::new(tcp_stream, conn_id, tracker.clone());
-        let io = hyper_util::rt::TokioIo::new(tracked_io);
         let app = app.clone();
-        let conn_meta = OriginConnectionMeta { conn_id, remote_addr };
+        let tracker = tracker.clone();
 
         tokio::spawn(async move {
+            let connect_latency_ms = tracker.policy().await.connect_latency_ms;
+            if connect_latency_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(connect_latency_ms)).await;
+            }
+            let conn_id = tracker.on_tcp_accepted(remote_addr).await;
+            let (tracked_io, _closed) = TrackedIo::new(tcp_stream, conn_id, tracker.clone());
+            let io = hyper_util::rt::TokioIo::new(tracked_io);
+            let conn_meta = OriginConnectionMeta { conn_id, remote_addr };
             let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let mut req = req.map(axum::body::Body::new);
                 req.extensions_mut().insert(conn_meta.clone());
@@ -412,6 +426,40 @@ pub async fn serve_tracked_media_listener(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    async fn wait_for_active_tcp(tracker: &OriginTracker, expected: usize) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tracker.stats().await.active_tcp_connections != expected {
+            assert!(tokio::time::Instant::now() < deadline, "origin never counted {expected} active connection(s)");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_latency_observes_replaced_socket_closed_before_its_replacement() {
+        let policy = OriginPolicy { connect_latency_ms: 150, ..OriginPolicy::default() };
+        let tracker = OriginTracker::new("test-run", policy);
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("bind origin");
+        let addr = listener.local_addr().expect("origin address");
+        let server = tokio::spawn(serve_tracked_media_listener(listener, axum::Router::new(), tracker.clone()));
+
+        let replaced = tokio::net::TcpStream::connect(addr).await.expect("connect replaced socket");
+        wait_for_active_tcp(&tracker, 1).await;
+
+        let _replacement = tokio::net::TcpStream::connect(addr).await.expect("connect replacement socket");
+        drop(replaced);
+        wait_for_active_tcp(&tracker, 1).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tracker.stats().await.total_tcp_connections < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "origin never counted the replacement socket");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let stats = tracker.stats().await;
+        assert_eq!(stats.active_tcp_connections, 1);
+        assert_eq!(stats.max_active_tcp_connections, 1);
+        server.abort();
+    }
 
     #[tokio::test]
     async fn tracking_records_tcp_lifecycle_and_peak_counters() {
@@ -451,7 +499,8 @@ mod tests {
 
     #[tokio::test]
     async fn policy_rejects_new_when_account_limit_reached() {
-        let policy = OriginPolicy { account_limit: Some(1), limit_mode: OriginLimitMode::RejectNew };
+        let policy =
+            OriginPolicy { account_limit: Some(1), limit_mode: OriginLimitMode::RejectNew, connect_latency_ms: 0 };
         let tracker = OriginTracker::new("test-run", policy);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
 
@@ -466,7 +515,8 @@ mod tests {
 
     #[tokio::test]
     async fn policy_evicts_oldest_when_account_limit_reached() {
-        let policy = OriginPolicy { account_limit: Some(1), limit_mode: OriginLimitMode::EvictOldest };
+        let policy =
+            OriginPolicy { account_limit: Some(1), limit_mode: OriginLimitMode::EvictOldest, connect_latency_ms: 0 };
         let tracker = OriginTracker::new("test-run", policy);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
 
