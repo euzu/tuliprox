@@ -4,6 +4,9 @@
 
 ## ⚠️ Breaking Changes
 
+- **Web UI sessions must sign in again once.** The new maintenance permissions bump the permission schema, so tokens
+  issued before the update are rejected with `X-Token-Refresh: required` and the Web UI returns to the sign-in page.
+
 - **`playlist.watch.changed` carries every watch change of one update.** The payload is now
   `{ target, changes: [...] }`, where each change has a `kind` (`groups_added`, `groups_removed`, `channels_added`,
   `channels_removed`). Templates using `{{watch.group}}`, `{{watch.added}}` or `{{watch.removed}}` must be updated:
@@ -183,6 +186,12 @@
 
 ## 🌟 New Features
 
+- **Input maintenance mode.** Inputs can be put into maintenance from the new dashboard card or through
+  `/api/v1/maintenance` (`*` addresses all inputs). New streams of an input in maintenance get the new
+  `input_maintenance.ts` custom video; playlist and EPG updates keep the last persisted state, and probes, metadata
+  resolution, Stalker refreshes and DVR starts do not contact the provider. Running streams and recordings continue.
+  The state is stored in `maintenance.json` and survives restarts. New permissions `maintenance.read` and
+  `maintenance.write`. See [Input maintenance](docs/src/rest-api-cookbook.md#input-maintenance).
 - **Optional fast start for shared live HLS.** `reverse_proxy.hls_cache.startup.mode` selects `conservative`
   (default, unchanged behavior), `first_ready` (admits playback after one processed start segment) or `progressive`
   (streams the raw TS start segment while the shared origin fill is still running). Progressive replay memory,

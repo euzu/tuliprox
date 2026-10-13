@@ -1,7 +1,8 @@
 use super::{
-    activate_session_before_stream_open, cleanup_failed_detected_catchup_hls, connection_priority_for_kind,
-    create_stream_response_details, detected_catchup_hls_response, get_session_reservation_ttl_secs,
-    get_stream_options, is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
+    activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
+    cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
+    detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
+    is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
     no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering, probe_catchup_payload,
     record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
     resolve_xtream_vod_provider_url, select_provider_stream_url, should_pin_provider_for_session,
@@ -304,6 +305,17 @@ pub(crate) async fn stream_response_with_provider_handle(
     grace_mode: Option<crate::api::model::GraceMode>,
     preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
 ) -> impl IntoResponse + Send {
+    if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
+        return admission_failure_response(
+            app_state,
+            fingerprint,
+            user,
+            stream_channel,
+            Arc::clone(&input.name),
+            req_headers,
+            ConnectFailureReason::InputMaintenance,
+        );
+    }
     let _transition_guard = app_state.active_users.acquire_playback_transition(&user.username, session_token).await;
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
     if log_enabled!(log::Level::Trace) {

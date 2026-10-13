@@ -1327,6 +1327,7 @@ async fn test_channel_unavailable_fallback_does_not_register_body_owner_or_leak_
         user_account_expired: None,
         panel_api_provisioning: None,
         hls_session_or_lease_expired: None,
+        input_maintenance: None,
         panel_api_provisioning_hls_segments: Vec::new(),
     };
     app_state.app_config.custom_stream_response.store(Some(std::sync::Arc::new(custom_video)));

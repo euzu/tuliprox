@@ -239,6 +239,7 @@ mod activation;
 mod auth;
 mod catchup;
 mod clock;
+mod input_maintenance;
 mod local_files;
 mod media_server;
 mod metering;
@@ -323,6 +324,7 @@ pub use self::{
 pub(crate) use self::{
     auth::{input_for_user, with_recording_headers},
     catchup::get_catchup_session_ttl_secs,
+    input_maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
     local_files::local_stream_response,
     provider_acquire::{acquire_exact_provider_handle, stream_response_with_provider_handle},
     provider_urls::select_provider_stream_url,

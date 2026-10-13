@@ -60,6 +60,8 @@ pub enum EventKind {
     /// Payload-free progress nudge, appended last so no existing kind's bit
     /// position shifts.
     RecordingProgress,
+    /// Appended last for the same reason.
+    InputMaintenanceChanged,
 }
 
 impl EventKind {
@@ -67,7 +69,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -110,6 +112,7 @@ impl EventKind {
         Self::AuthSignInThrottled,
         Self::AuthPermissionDenied,
         Self::RecordingProgress,
+        Self::InputMaintenanceChanged,
     ];
 
     /// This kind's bit position.
@@ -175,6 +178,7 @@ impl EventKind {
             | Self::StreamProbeFailed
             | Self::NotificationDeadLettered
             | Self::ScheduledTaskFailed => Permission::SystemRead,
+            Self::InputMaintenanceChanged => Permission::MaintenanceRead,
         }
     }
 
@@ -273,6 +277,7 @@ impl EventKind {
             Self::AuthSignInFailed => "auth.sign_in.failed",
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
             Self::AuthPermissionDenied => "auth.permission.denied",
+            Self::InputMaintenanceChanged => "input.maintenance.changed",
         }
     }
 

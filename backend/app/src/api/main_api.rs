@@ -33,7 +33,10 @@ use crate::{
             exec_config_watch, exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync, spawn_ssdp_discover_task,
         },
     },
-    model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, HttpClients, ProcessTargets, RateLimitConfig},
+    model::{
+        AppConfig, Config, HdHomeRunFlags, Healthcheck, HttpClients, InputMaintenanceRegistry, ProcessTargets,
+        RateLimitConfig, INPUT_MAINTENANCE_FILE,
+    },
     processing::processor::{exec_processing, next_playlist_update_run_order, ProcessingRun},
     repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
@@ -189,6 +192,7 @@ fn spawn_metadata_trigger_update(
                             .with_update_guard(update_guard.clone())
                             .with_disabled_headers(disabled_headers.clone())
                             .with_provider_manager(app_state_clone.active_provider.clone())
+                            .with_input_maintenance(Arc::clone(&app_state_clone.input_maintenance))
                             .with_metadata_manager(app_state_clone.metadata_manager.clone())
                             .with_pre_processed_inputs(pre_processed_inputs.clone())
                             .with_acquired_permit(lock),
@@ -279,6 +283,14 @@ async fn ready(
     (status_code, axum::Json(ReadyResponse { status: status_label }))
 }
 
+/// The persisted maintenance state, already pruned against the configured inputs.
+pub(crate) async fn load_input_maintenance(app_config: &AppConfig) -> Arc<InputMaintenanceRegistry> {
+    let sources = app_config.sources.load();
+    let known: Vec<&str> = sources.inputs.iter().map(|input| input.name.as_ref()).collect();
+    let path = std::path::PathBuf::from(&app_config.config.load().storage_dir).join(INPUT_MAINTENANCE_FILE);
+    Arc::new(InputMaintenanceRegistry::load(path, &known).await)
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -359,6 +371,8 @@ async fn create_shared_data(
         TuliproxError::Server(format!("Cannot load token revocations: {err}"))
     })?;
 
+    let input_maintenance = load_input_maintenance(app_config).await;
+
     let app_state = AppState {
         app_config: Arc::clone(app_config),
         http_clients: Arc::new(HttpClients::new(
@@ -377,6 +391,7 @@ async fn create_shared_data(
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
             Arc::clone(&connection_manager),
+            Arc::clone(&input_maintenance),
         ),
         active_provider,
         connection_manager,
@@ -387,6 +402,7 @@ async fn create_shared_data(
         metadata_manager,
         auth: AuthState::new(token_revocations),
         playlist_updates: PlaylistUpdateControl::new(Arc::clone(forced_targets), manual_update_sender),
+        input_maintenance,
     };
 
     Ok((app_state, manual_update_rx))
@@ -426,6 +442,7 @@ async fn run_manual_update_worker(
             .with_update_guard(app_state.playlist_updates.update_guard.clone())
             .with_disabled_headers(app_state.get_disabled_headers())
             .with_provider_manager(Arc::clone(&app_state.active_provider))
+            .with_input_maintenance(Arc::clone(&app_state.input_maintenance))
             .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
             .with_acquired_permit(permit),
         )
@@ -504,6 +521,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                     .with_update_guard(update_guard)
                     .with_disabled_headers(disabled_headers)
                     .with_provider_manager(provider_manager)
+                    .with_input_maintenance(Arc::clone(&app_state_clone.input_maintenance))
                     .with_metadata_manager(metadata_manager),
             )
             .await;
@@ -1140,6 +1158,7 @@ mod tests {
                 recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
                     Arc::clone(&active_provider),
                     Arc::clone(&connection_manager),
+                    crate::api::model::create_test_input_maintenance(""),
                 ),
                 app_config: app_cfg,
                 http_clients: Arc::default(),
@@ -1158,6 +1177,7 @@ mod tests {
                 metadata_manager,
                 auth: crate::api::model::AuthState::for_tests(),
                 playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+                input_maintenance: crate::api::model::create_test_input_maintenance(""),
             })
         }
 

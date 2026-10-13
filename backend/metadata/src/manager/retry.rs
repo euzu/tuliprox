@@ -1,8 +1,8 @@
 use super::{
     load_metadata_retry_states_from_disk, persist_metadata_retry_state_to_disk, spawn_blocking_limited, InputWorker,
     MetadataUpdateManager, MetadataUpdateRuntimeSettings, ScopedTaskKey, TaskKey, METADATA_RETRY_STATE_FILE,
-    RETRY_STATE_MIN_TTL_SECS, RETRY_STATE_PRUNE_INTERVAL_SECS, TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED,
-    TASK_ERR_UPDATE_IN_PROGRESS,
+    RETRY_STATE_MIN_TTL_SECS, RETRY_STATE_PRUNE_INTERVAL_SECS, TASK_ERR_INPUT_MAINTENANCE, TASK_ERR_NO_CONNECTION,
+    TASK_ERR_PREEMPTED, TASK_ERR_UPDATE_IN_PROGRESS,
 };
 use crate::ctx::MetadataUpdateCtx;
 use log::warn;
@@ -451,7 +451,10 @@ impl InputWorker {
     }
 
     pub(super) fn is_transient_worker_error(message: &str) -> bool {
-        message == TASK_ERR_UPDATE_IN_PROGRESS || message == TASK_ERR_PREEMPTED || message == TASK_ERR_NO_CONNECTION
+        message == TASK_ERR_UPDATE_IN_PROGRESS
+            || message == TASK_ERR_PREEMPTED
+            || message == TASK_ERR_NO_CONNECTION
+            || message == TASK_ERR_INPUT_MAINTENANCE
     }
 
     #[inline]

@@ -238,6 +238,8 @@ impl RecordingCapacityPort for LimitedCapacity {
     }
 
     fn capacity_changed(&self) -> Arc<Notify> { self.notify.clone() }
+
+    fn is_input_in_maintenance(&self, _input_name: &str) -> bool { false }
 }
 
 #[cfg(unix)]

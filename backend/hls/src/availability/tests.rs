@@ -118,6 +118,7 @@ fn runtime_custom_responses_with_low_priority(low_priority_bytes: &[u8]) -> Arc<
         user_account_expired: Some(TransportStreamBuffer::new(ACCOUNT_EXPIRED_ASSET_BYTES.to_vec())),
         panel_api_provisioning: None,
         hls_session_or_lease_expired: Some(TransportStreamBuffer::new(SESSION_EXPIRED_ASSET_BYTES.to_vec())),
+        input_maintenance: None,
         panel_api_provisioning_hls_segments: Vec::new(),
     })
 }

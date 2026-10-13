@@ -74,12 +74,15 @@ fn resolve_direct_provider_location(input: &ConfigInput, url: &str) -> Result<St
 fn resolve_provider_playlist_item_location(
     user: &ProxyUserCredentials,
     force_redirect: bool,
+    input_in_maintenance: bool,
     output_kind: ProviderResolveOutputKind,
     server_info: &ApiProxyServerInfo,
     input: &ConfigInput,
     item: ProviderResolveItem<'_>,
 ) -> Result<String, TuliproxError> {
-    let redirect = user.proxy.is_redirect(item.item_type) || force_redirect;
+    // An input in maintenance is never redirected to its provider; the tuliprox stream URL
+    // answers with the maintenance clip.
+    let redirect = !input_in_maintenance && (user.proxy.is_redirect(item.item_type) || force_redirect);
     if redirect {
         return resolve_direct_provider_location(input, item.url);
     }
@@ -219,6 +222,7 @@ async fn provider_resolve(
     match resolve_provider_playlist_item_location(
         user.as_ref(),
         target.is_force_redirect(item.item_type),
+        app_state.input_maintenance.is_in_maintenance(&input.name),
         output_kind,
         &server_info,
         &input,
@@ -306,6 +310,7 @@ mod tests {
         let location = resolve_provider_playlist_item_location(
             &user(ProxyType::Redirect),
             false,
+            false,
             ProviderResolveOutputKind::Xtream,
             &server_info(),
             &input(),
@@ -314,6 +319,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(location, "http://provider.example.com/live/root/pass/81356.ts");
+    }
+
+    #[test]
+    fn provider_resolve_redirect_user_gets_tuliprox_location_for_input_in_maintenance() {
+        // A redirect would send the client to the provider; the tuliprox URL answers with the maintenance clip.
+        let item = ProviderResolveItem {
+            virtual_id: 81_356,
+            item_type: PlaylistItemType::Live,
+            cluster: XtreamCluster::Live,
+            url: "provider://myprovider/live/root/pass/81356.ts",
+        };
+
+        let location = resolve_provider_playlist_item_location(
+            &user(ProxyType::Redirect),
+            false,
+            true,
+            ProviderResolveOutputKind::Xtream,
+            &server_info(),
+            &input(),
+            item,
+        )
+        .unwrap();
+
+        assert!(location.starts_with("http://proxy.example.com/"), "{location}");
     }
 
     #[test]
@@ -331,6 +360,7 @@ mod tests {
 
         let location = resolve_provider_playlist_item_location(
             &user(ProxyType::Redirect),
+            false,
             false,
             ProviderResolveOutputKind::Xtream,
             &server_info(),
@@ -354,6 +384,7 @@ mod tests {
         let location = resolve_provider_playlist_item_location(
             &user(ProxyType::Reverse(None)),
             false,
+            false,
             ProviderResolveOutputKind::Xtream,
             &server_info(),
             &input(),
@@ -375,6 +406,7 @@ mod tests {
 
         let location = resolve_provider_playlist_item_location(
             &user(ProxyType::Reverse(None)),
+            false,
             false,
             ProviderResolveOutputKind::M3u,
             &server_info(),

@@ -130,3 +130,36 @@ async fn resolve_streaming_strategy_rejects_stalker_url_after_forced_provider_fa
     app_state.active_provider.release_connection(&busy_addr);
     app_state.active_provider.release_connection(&fallback_addr);
 }
+
+#[tokio::test]
+async fn initial_stalker_resolution_is_skipped_for_input_in_maintenance() {
+    let app_config = create_test_provider_app_config();
+    let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else { unreachable!() };
+    let mut stalker_input = (*configured_input).clone();
+    stalker_input.input_type = InputType::Stalker;
+    // Unreachable portal: a resolution attempt fails instead of answering.
+    stalker_input.url = "http://127.0.0.1:1".to_string();
+    app_config
+        .sources
+        .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(stalker_input)], ..SourcesConfig::default() }));
+    let app_state = create_test_app_state_for_config(Arc::new(app_config));
+    let input = Arc::clone(&app_state.app_config.sources.load().inputs[0]);
+    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
+    let mut viewer = crate::model::ProxyUserCredentials::default();
+    viewer.username = "viewer".to_string();
+    let empty: Arc<str> = "".into();
+
+    let resolved = super::resolve_initial_stalker_playback_url(
+        &app_state,
+        &input,
+        &viewer,
+        347,
+        XtreamCluster::Live,
+        PlaylistItemType::Live,
+        &empty,
+    )
+    .await;
+
+    // The portal is not contacted; the maintenance gate further down answers the request.
+    assert_eq!(resolved.ok().as_deref(), Some(""));
+}

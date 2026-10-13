@@ -1,6 +1,6 @@
 use super::{
-    get_redirect_alternative_url, get_stream_alternative_url, is_media_server_playback_url, redirect,
-    resolve_request_url_for_logging, RedirectParams,
+    blocks_new_playback, get_redirect_alternative_url, get_stream_alternative_url, is_media_server_playback_url,
+    redirect, resolve_request_url_for_logging, RedirectParams,
 };
 #[cfg(test)]
 use super::{resolve_streaming_strategy_with_provider_handle, StreamingAcquireOptions};
@@ -120,6 +120,11 @@ pub async fn redirect_response<'a, P>(
 where
     P: PlaylistEntry,
 {
+    // An input in maintenance is never redirected to its provider; the proxied
+    // path that follows answers with the maintenance clip.
+    if blocks_new_playback(app_state, params.input, params.user, false) {
+        return None;
+    }
     let item_type = params.item.get_item_type();
     let provider_url = params.item.get_provider_url();
     if is_media_server_playback_url(params.input, provider_url.as_ref()) {

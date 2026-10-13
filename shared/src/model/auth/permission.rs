@@ -20,7 +20,9 @@ create_bitset!(
     RecordingRead,
     RecordingCreate,
     RecordingManage,
-    RecordingDelete
+    RecordingDelete,
+    MaintenanceRead,
+    MaintenanceWrite
 );
 
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
@@ -44,6 +46,8 @@ pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("recording.create", Permission::RecordingCreate),
     ("recording.manage", Permission::RecordingManage),
     ("recording.delete", Permission::RecordingDelete),
+    ("maintenance.read", Permission::MaintenanceRead),
+    ("maintenance.write", Permission::MaintenanceWrite),
 ];
 
 pub fn permission_from_name(name: &str) -> Option<Permission> {
@@ -57,6 +61,15 @@ pub fn permission_to_name(perm: Permission) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_permissions_have_stable_names() {
+        assert_eq!(permission_from_name("maintenance.read"), Some(Permission::MaintenanceRead));
+        assert_eq!(permission_from_name("maintenance.write"), Some(Permission::MaintenanceWrite));
+        assert_eq!(permission_to_name(Permission::MaintenanceWrite), Some("maintenance.write"));
+        assert!(PERM_ALL.contains(Permission::MaintenanceRead));
+        assert!(PERM_ALL.contains(Permission::MaintenanceWrite));
+    }
 
     #[test]
     fn test_permission_set_new_is_empty() {
@@ -173,13 +186,15 @@ mod tests {
             ("recording.create", 1 << 15),
             ("recording.manage", 1 << 16),
             ("recording.delete", 1 << 17),
+            ("maintenance.read", 1 << 18),
+            ("maintenance.write", 1 << 19),
         ];
         // The table is the layout of this schema version. Changing a bit means
         // editing the table, and the version beside it has to move with it so
         // tokens minted under the old layout fail closed.
         assert_eq!(
             crate::model::CURRENT_PERMISSION_SCHEMA_VERSION,
-            4,
+            5,
             "the bit table changed: bump CURRENT_PERMISSION_SCHEMA_VERSION and this expected value together"
         );
         assert_eq!(PermissionSet::VARIANT_COUNT, expected.len());

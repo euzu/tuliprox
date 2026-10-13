@@ -47,5 +47,6 @@ pub const LOW_PRIORITY_PREEMPTED: &str = "low_priority_preempted.ts";
 pub const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
 pub const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
 pub const HLS_SESSION_OR_LEASE_EXPIRED: &str = "hls_session_or_lease_expired.ts";
+pub const INPUT_MAINTENANCE: &str = "input_maintenance.ts";
 pub const PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT: usize = 6;
 pub const PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX: &str = "panel_api_provisioning_hls_";

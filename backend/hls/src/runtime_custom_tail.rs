@@ -101,7 +101,8 @@ impl HlsRuntimeCustomTailReason {
             CustomVideoStreamType::ProviderConnectionsExhausted => Some(Self::ProviderConnectionsExhausted),
             CustomVideoStreamType::UserAccountExpired => Some(Self::UserAccountExpired),
             CustomVideoStreamType::HlsSessionOrLeaseExpired => Some(Self::SessionOrLeaseExpired),
-            CustomVideoStreamType::Provisioning => None,
+            // Maintenance only answers new entries; it never ends a running session as a tail.
+            CustomVideoStreamType::Provisioning | CustomVideoStreamType::InputMaintenance => None,
         }
     }
 }

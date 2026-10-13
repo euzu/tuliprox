@@ -63,6 +63,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
+    let input_maintenance = super::create_test_input_maintenance(&app_config.config.load().storage_dir);
     Arc::new(AppState {
         app_config,
         http_clients: Arc::default(),
@@ -75,6 +76,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
             Arc::clone(&connection_manager),
+            Arc::clone(&input_maintenance),
         ),
         active_provider,
         connection_manager,
@@ -85,5 +87,17 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         metadata_manager,
         auth: AuthState::for_tests(),
         playlist_updates: PlaylistUpdateControl::for_tests(),
+        input_maintenance,
     })
+}
+
+/// A maintenance registry for tests: persisted under the configured storage dir,
+/// or in memory only, so a test never writes into the working directory.
+pub fn create_test_input_maintenance(storage_dir: &str) -> Arc<crate::model::InputMaintenanceRegistry> {
+    if storage_dir.is_empty() {
+        return Arc::new(crate::model::InputMaintenanceRegistry::in_memory());
+    }
+    Arc::new(crate::model::InputMaintenanceRegistry::new(
+        std::path::PathBuf::from(storage_dir).join(crate::model::INPUT_MAINTENANCE_FILE),
+    ))
 }

@@ -110,6 +110,8 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::RecordingCreate => "recording.create",
         Permission::RecordingManage => "recording.manage",
         Permission::RecordingDelete => "recording.delete",
+        Permission::MaintenanceRead => "maintenance.read",
+        Permission::MaintenanceWrite => "maintenance.write",
     }
 }
 

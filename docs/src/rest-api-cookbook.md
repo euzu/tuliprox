@@ -349,6 +349,58 @@ Notes:
   are `null` for semantic errors without a source position (e.g. an invalid regex value).
 - The preview reads the target's already-processed playlist; it never contacts providers or triggers an update.
 
+## Input maintenance
+
+An input can be taken out of service while its provider is down. While an input is in maintenance:
+
+- every **new** stream request for it (live, VOD, series, catch-up, HLS entry, redirect mode) gets the
+  `input_maintenance.ts` custom video instead of a provider connection,
+- playlist and EPG updates keep serving the last persisted playlist and EPG without contacting the provider,
+- probes, metadata resolution and Stalker refreshes for the input are paused,
+- DVR recordings that would start fail with `Input is in maintenance mode`; use **Retry** afterwards.
+
+Running streams, seeks within them, and running recordings continue. The state is stored in
+`<storage_dir>/maintenance.json` and survives restarts. A corrupt file is moved aside as
+`maintenance.json.corrupt` and the server starts with no input in maintenance. A file that cannot be read at all
+(for example because of its permissions) stays in place; changes are then refused with `500` instead of overwriting
+it. A one-shot CLI update reads the file but never changes it. Entries for inputs that are removed
+from `source.yml` are dropped on the next source reload.
+
+The dashboard shows a **Maintenance** card that turns red while any input is in maintenance.
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+
+# Put one input into maintenance, with an optional remark
+curl -s -X PUT "$BASE_URL/api/v1/maintenance/provider_a" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    --data-raw '{"reason":"Provider down"}'
+
+# Take every input out of maintenance (`*`, URL-encoded as %2A)
+curl -s -X DELETE "$BASE_URL/api/v1/maintenance/%2A" -H "Authorization: Bearer $TOKEN"
+
+# Current state
+curl -s "$BASE_URL/api/v1/maintenance" -H "Authorization: Bearer $TOKEN"
+```
+
+Every call answers with the complete state:
+
+```json
+{
+  "entries": { "provider_a": { "since": 1760350000, "reason": "Provider down" } },
+  "inputs": ["provider_a", "provider_b"]
+}
+```
+
+- `*` addresses all inputs known at the time of the call; an input literally named `*` cannot be addressed alone.
+- Putting an input that is already in maintenance updates its remark and keeps `since`.
+- Unknown inputs answer `404`, remarks longer than 500 characters `400`.
+- Without Web UI authentication the endpoints are as open as the other `/api/v1` routes.
+
 ## Available `/api/v1` Endpoints
 
 This is a compact operator-oriented overview of the `/api/v1` REST API groups currently registered by the backend.
@@ -368,6 +420,14 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 | `GET` | `/api/v1/qos-snapshots` | List QoS snapshots |
 | `GET` | `/api/v1/qos-snapshots/{stream_identity_key}` | QoS detail for one stream |
 | `GET` | `/api/v1/geoip/update` | Trigger GeoIP DB update |
+
+### Input maintenance
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/maintenance` | Inputs in maintenance and all known input names (`maintenance.read`) |
+| `PUT` | `/api/v1/maintenance/{input}` | Put an input (or `*` for all) into maintenance, optional `{"reason": "..."}` body (`maintenance.write`) |
+| `DELETE` | `/api/v1/maintenance/{input}` | Take an input (or `*` for all) out of maintenance (`maintenance.write`) |
 
 ### Recordings
 
@@ -659,6 +719,8 @@ With Web UI authentication enabled, many endpoints require matching permissions 
 - `recording.create`
 - `recording.manage`
 - `recording.delete`
+- `maintenance.read`
+- `maintenance.write`
 
 If a request is rejected, verify the logged-in Web UI user's RBAC group assignments first.
 

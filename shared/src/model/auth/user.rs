@@ -16,7 +16,7 @@ pub const TOKEN_NO_AUTH: &str = "authorized";
 ///
 /// The layout this version stands for is pinned in the permission bit table
 /// test, next to the expected value of this constant.
-pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 4;
+pub const CURRENT_PERMISSION_SCHEMA_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {

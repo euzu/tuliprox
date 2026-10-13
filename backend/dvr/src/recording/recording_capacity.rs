@@ -34,6 +34,9 @@ pub trait RecordingCapacityPort: Send + Sync {
 
     /// Fires when a connection is freed anywhere, so waiters can re-check.
     fn capacity_changed(&self) -> Arc<Notify>;
+
+    /// Whether the input is in maintenance; a recording on it must not start.
+    fn is_input_in_maintenance(&self, input_name: &str) -> bool;
 }
 
 #[cfg(test)]
@@ -53,6 +56,7 @@ pub mod stub {
     /// Counts what the worker asked for, and hands out slots on request.
     pub struct StubCapacity {
         capacities: Mutex<Vec<ProviderCapacity>>,
+        maintenance: Mutex<Vec<String>>,
         notify: Arc<Notify>,
         pub acquires: AtomicUsize,
         pub releases: AtomicUsize,
@@ -74,6 +78,7 @@ pub mod stub {
         fn with_capacity(in_use: usize, limit: usize) -> Arc<Self> {
             Arc::new(Self {
                 capacities: Mutex::new(vec![(Arc::from("provider"), in_use, limit)]),
+                maintenance: Mutex::new(Vec::new()),
                 notify: Arc::new(Notify::new()),
                 acquires: AtomicUsize::new(0),
                 releases: AtomicUsize::new(0),
@@ -96,6 +101,15 @@ pub mod stub {
         pub fn acquire_count(&self) -> usize { self.acquires.load(Ordering::SeqCst) }
 
         pub fn release_count(&self) -> usize { self.releases.load(Ordering::SeqCst) }
+
+        /// Marks an input as in maintenance (or not) for the next acquire decision.
+        pub fn set_maintenance(&self, input_name: &str, on: bool) {
+            let mut names = self.maintenance.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            names.retain(|name| name != input_name);
+            if on {
+                names.push(input_name.to_string());
+            }
+        }
     }
 
     impl RecordingCapacityPort for StubCapacity {
@@ -117,6 +131,14 @@ pub mod stub {
         }
 
         fn capacity_changed(&self) -> Arc<Notify> { Arc::clone(&self.notify) }
+
+        fn is_input_in_maintenance(&self, input_name: &str) -> bool {
+            self.maintenance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|name| name == input_name)
+        }
     }
 }
 

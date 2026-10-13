@@ -1,0 +1,121 @@
+.tp__card--maintenance {
+  background-color: color-mix(in srgb, var(--theme-brand-danger) 22%, transparent);
+  border-color: var(--theme-brand-danger-strong);
+}
+
+// Doubled class: `.tp__custom-dialog` sets `width: auto` and `max-width: 90%` and must not win.
+.tp__custom-dialog.tp__maintenance-dialog {
+  width: min(64rem, 94vw);
+  max-width: 94vw;
+  height: min(44rem, 86vh);
+}
+
+.tp__maintenance-dialog {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  padding: var(--padding-default);
+  box-sizing: border-box;
+
+  h2 {
+    margin: 0;
+  }
+
+  // Bordered panel like the watch form of a target: input, remark and the add button in one row.
+  &__form {
+    display: flex;
+    flex-flow: row nowrap;
+    align-items: flex-end;
+    gap: var(--gap-default);
+    flex-shrink: 0;
+    padding: var(--padding-default);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+
+    > .tp__form-field {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+
+    > .tp__input {
+      flex: 2 1 0;
+      min-width: 0;
+    }
+  }
+
+  // Same height as the input boxes next to it, so it lines up with them and not with the labels.
+  &__add.tp__icon-button {
+    flex: 0 0 auto;
+    height: 2.5rem;
+    width: 2.5rem;
+
+    .svg-icon {
+      height: 1.75rem;
+      width: 1.75rem;
+    }
+  }
+
+  // Many inputs in maintenance scroll here; title, form and toolbar stay in place.
+  &__list {
+    flex: 1 1 auto;
+    min-height: 8rem;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+  }
+
+  &__empty {
+    margin: 0;
+    padding: var(--padding-default);
+    color: var(--modest-text-color);
+  }
+
+  &__table {
+    width: 100%;
+    border-collapse: collapse;
+
+    th,
+    td {
+      text-align: start;
+      padding: var(--padding-small) var(--padding-default);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background-color: var(--card-background-color);
+      color: var(--modest-text-color);
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+  }
+
+  // Draft rows that Save has not sent yet.
+  &__row--unsaved td {
+    font-style: italic;
+  }
+
+  &__actions {
+    display: flex;
+    gap: var(--gap-small);
+    justify-content: flex-end;
+  }
+
+  .tp__dialog__toolbar {
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 860px) {
+  .tp__maintenance-dialog__form {
+    flex-flow: row wrap;
+
+    > .tp__form-field {
+      flex: 1 1 100%;
+    }
+  }
+}

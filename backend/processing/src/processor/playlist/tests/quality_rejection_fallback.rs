@@ -240,6 +240,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         stalker_refresh_mode: StalkerRefreshMode::Complete,
         partial_refresh: Arc::new(AtomicBool::new(false)),
         had_quality_rejections: Arc::new(AtomicBool::new(false)),
+        input_maintenance: None,
     }
 }
 
@@ -1617,3 +1618,104 @@ mod m3u_update_quality;
 mod manual_update_integration;
 mod persisted_input_status;
 mod staged_completion;
+
+struct FixedGate(&'static str);
+
+impl tuliprox_core::model::InputMaintenanceGate for FixedGate {
+    fn is_in_maintenance(&self, input_name: &str) -> bool { input_name == self.0 }
+}
+
+fn quality_95() -> ConfigInputUpdateQualityDto { ConfigInputUpdateQualityDto { live: 95, vod: 95, series: 95 } }
+
+#[tokio::test]
+async fn maintenance_input_uses_persisted_playlist_without_download() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let mut ctx = processing_context(temp.path());
+    // cache_duration_seconds = 0: without maintenance this input is downloaded.
+    let input = test_input(&server.base_url, quality_95(), 0, &[]);
+    seed_baseline(&ctx, &input).await;
+    ctx.input_maintenance = Some(Arc::new(FixedGate("quality-provider")));
+
+    let mut result = download_input(&ctx, &input, false).await;
+
+    assert!(result.errors.is_empty(), "maintenance must not fail the input: {:?}", result.errors);
+    let baseline_channels: usize = baseline_groups().iter().map(|group| group.channels.len()).sum();
+    assert_eq!(result.source.get_channel_count(), baseline_channels, "the persisted playlist is served");
+    assert_requested_actions(server.finish(), &[]);
+}
+
+#[tokio::test]
+async fn maintenance_input_without_cache_contributes_nothing() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let mut ctx = processing_context(temp.path());
+    let input = test_input(&server.base_url, quality_95(), 0, &[]);
+    ctx.input_maintenance = Some(Arc::new(FixedGate("quality-provider")));
+
+    let mut result = download_input(&ctx, &input, false).await;
+
+    assert!(result.errors.is_empty(), "a missing cache is not an error in maintenance: {:?}", result.errors);
+    assert_eq!(result.source.get_channel_count(), 0);
+    assert_requested_actions(server.finish(), &[]);
+}
+
+#[tokio::test]
+async fn input_not_in_maintenance_still_downloads() {
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let mut ctx = processing_context(temp.path());
+    let input = test_input(&server.base_url, quality_95(), 0, &[]);
+    seed_baseline(&ctx, &input).await;
+    ctx.input_maintenance = Some(Arc::new(FixedGate("some-other-input")));
+
+    let mut result = download_input(&ctx, &input, false).await;
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.source.get_channel_count(), 6);
+    assert!(!server.finish().is_empty(), "the provider was contacted");
+}
+
+#[tokio::test]
+async fn maintenance_input_skips_epg_download_and_keeps_existing_file() {
+    use tuliprox_core::model::{EpgConfig, EpgSource, EpgSourceType};
+
+    let temp = tempfile::tempdir().expect("temporary storage");
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let mut ctx = processing_context(temp.path());
+    let mut input = (*test_input(&server.base_url, quality_95(), 0, &[])).clone();
+    let epg_source = EpgSource {
+        source_type: EpgSourceType::Xmltv,
+        url: format!("{}/xmltv.php", server.base_url),
+        priority: 0,
+        logo_override: false,
+        channel_id: None,
+        channel_title: None,
+        match_names: Vec::new(),
+        ics: None,
+    };
+    input.epg = Some(EpgConfig { sources: vec![epg_source.clone()], smart_match: None });
+    let storage_dir = temp.path().to_string_lossy().into_owned();
+    let epg_path =
+        crate::epg::get_input_raw_epg_file_path(&epg_source, &input, &storage_dir).await.expect("epg file path");
+    tokio::fs::write(&epg_path, "<tv></tv>").await.expect("seed persisted epg");
+    ctx.input_maintenance = Some(Arc::new(FixedGate("quality-provider")));
+
+    let (guide, errors) = crate::epg::get_xmltv(&ctx, &input, None, &storage_dir).await;
+
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(guide.is_some(), "the persisted epg is used");
+    assert!(epg_path.exists(), "maintenance must not clean up the persisted epg");
+    assert_requested_actions(server.finish(), &[]);
+}
+
+#[test]
+fn resolve_stage_checks_maintenance_before_any_provider_work() {
+    let source = include_str!("../target.rs");
+    let start = source.find("pub(crate) async fn playlist_resolve<").expect("playlist_resolve");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("function end")];
+    let gate = body.find("if ctx.is_input_in_maintenance(").expect("maintenance gate in playlist_resolve");
+    let series = body.find("playlist_resolve_series(").expect("series resolve call");
+    assert!(gate < series, "the gate must run before resolve and probe");
+}

@@ -1,14 +1,15 @@
 use crate::{
     api::{
         api_utils::{
-            admission_failure_response, coalesce_byte_stream, create_m3u_catchup_session_key,
+            admission_failure_response, blocks_new_playback, coalesce_byte_stream, create_m3u_catchup_session_key,
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response,
-            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials,
+            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_running_playback,
             is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
-            redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
-            resource_proxy_response, resource_redirect_or_proxy, separate_number_and_remainder,
-            should_allow_exhausted_shared_reconnect, stream_response_with_provider_handle, try_option_bad_request,
-            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            maintenance_rejection_response, redirect_response, reentry_suppressed_response,
+            resolve_initial_stalker_playback_url, resource_proxy_response, resource_redirect_or_proxy,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect,
+            stream_response_with_provider_handle, try_option_bad_request, try_result_bad_request, try_result_not_found,
+            try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::{
@@ -251,6 +252,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     pli.url = match resolve_initial_stalker_playback_url(
         app_state,
         &input,
+        &user,
         pli.get_provider_id().unwrap_or_default(),
         cluster,
         pli.item_type,
@@ -379,6 +381,19 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     } else {
         pli.url.clone()
     };
+
+    if !is_running_playback(user_session.as_ref()) && blocks_new_playback(app_state, &input, &user, false) {
+        return maintenance_rejection_response(
+            app_state,
+            fingerprint,
+            &user,
+            stream_channel(),
+            &input,
+            req_headers,
+            extension == HLS_EXT,
+        )
+        .await;
+    }
 
     let (connection_admission, grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
         &app_state.admission_ctx(),

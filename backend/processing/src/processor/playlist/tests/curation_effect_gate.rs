@@ -73,6 +73,7 @@ pub(super) fn processing_context(
         stalker_refresh_mode: StalkerRefreshMode::Complete,
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        input_maintenance: None,
         input_refresh: None,
         library_update_mode: LibraryUpdateMode::ExistingCatalog,
     }

@@ -219,3 +219,60 @@ fn qos_aggregation_changed_detects_compaction_interval_changes() {
 
     assert!(qos_aggregation_changed(&old_config, &new_config));
 }
+
+#[tokio::test]
+async fn source_reload_prunes_removed_inputs_from_maintenance() {
+    use crate::{api::model::update_app_state_sources, model::SourcesConfig};
+    use shared::model::{ConfigInputDto, EventMessage, SourcesConfigDto};
+    use std::sync::Arc;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
+    let app_state = super::create_test_app_state(config);
+    let sources = |names: &[&str]| {
+        let dto = SourcesConfigDto {
+            inputs: names
+                .iter()
+                .map(|name| ConfigInputDto {
+                    name: (*name).to_string().into(),
+                    url: "http://localhost/playlist.m3u".to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        SourcesConfig::try_from(&dto).unwrap()
+    };
+    app_state.app_config.sources.store(Arc::new(sources(&["provider_a", "provider_b"])));
+    app_state.input_maintenance.add_all(&["provider_a", "provider_b"], None, 1).await.unwrap();
+    let mut events = app_state.event_manager.get_event_channel();
+
+    update_app_state_sources(&app_state, sources(&["provider_a"]), None).await.unwrap();
+
+    assert!(app_state.input_maintenance.is_in_maintenance("provider_a"));
+    assert!(!app_state.input_maintenance.is_in_maintenance("provider_b"));
+    let pruned = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            EventMessage::InputMaintenanceChanged(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("pruning emits a change event");
+    assert_eq!(pruned.len(), 1);
+}
+
+#[tokio::test]
+async fn contactable_input_hides_inputs_in_maintenance() {
+    use crate::model::{ConfigInput, SourcesConfig};
+    use std::sync::Arc;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
+    let app_state = super::create_test_app_state(config);
+    let input = Arc::new(ConfigInput { name: Arc::from("provider_a"), ..ConfigInput::default() });
+    app_state.app_config.sources.store(Arc::new(SourcesConfig { inputs: vec![input], ..SourcesConfig::default() }));
+    let name: Arc<str> = Arc::from("provider_a");
+
+    assert!(app_state.contactable_input(&name).is_some());
+    app_state.input_maintenance.add("provider_a", None, 1).await.unwrap();
+    assert!(app_state.contactable_input(&name).is_none(), "an input in maintenance is not contacted");
+}

@@ -9,7 +9,7 @@
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tuliprox_core::model::ProviderHandle;
+use tuliprox_core::model::{InputMaintenanceGate, ProviderHandle};
 use tuliprox_dvr::recording::recording_capacity::{ProviderCapacity, RecordingCapacityPort};
 use tuliprox_session::{ActiveProviderManager, ConnectionManager};
 
@@ -17,11 +17,16 @@ use tuliprox_session::{ActiveProviderManager, ConnectionManager};
 pub struct ProviderCapacityAdapter {
     active_provider: Arc<ActiveProviderManager>,
     connection_manager: Arc<ConnectionManager>,
+    input_maintenance: Arc<dyn InputMaintenanceGate>,
 }
 
 impl ProviderCapacityAdapter {
-    pub fn new(active_provider: Arc<ActiveProviderManager>, connection_manager: Arc<ConnectionManager>) -> Arc<Self> {
-        Arc::new(Self { active_provider, connection_manager })
+    pub fn new<G: InputMaintenanceGate + 'static>(
+        active_provider: Arc<ActiveProviderManager>,
+        connection_manager: Arc<ConnectionManager>,
+        input_maintenance: Arc<G>,
+    ) -> Arc<Self> {
+        Arc::new(Self { active_provider, connection_manager, input_maintenance })
     }
 }
 
@@ -40,4 +45,6 @@ impl RecordingCapacityPort for ProviderCapacityAdapter {
     }
 
     fn capacity_changed(&self) -> Arc<Notify> { self.connection_manager.capacity_notified() }
+
+    fn is_input_in_maintenance(&self, input_name: &str) -> bool { self.input_maintenance.is_in_maintenance(input_name) }
 }

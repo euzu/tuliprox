@@ -177,6 +177,13 @@ ok_custom_stream_factory!(
     "Streaming response hls session or lease expired"
 );
 
+ok_custom_stream_factory!(
+    create_input_maintenance_stream,
+    input_maintenance,
+    CustomVideoStreamType::InputMaintenance,
+    "Streaming response input maintenance"
+);
+
 pub fn create_panel_api_provisioning_stream_with_stop(
     cfg: &AppConfig,
     headers: &[(String, String)],
@@ -216,6 +223,7 @@ pub fn create_custom_video_stream_response(
         CustomVideoStreamType::UserAccountExpired => create_user_account_expired_stream(config, &[]),
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
         CustomVideoStreamType::HlsSessionOrLeaseExpired => create_hls_session_or_lease_expired_stream(config, &[]),
+        CustomVideoStreamType::InputMaintenance => create_input_maintenance_stream(config, &[]),
     } {
         let mut builder = axum::response::Response::builder().status(status_code);
         for (key, value) in headers {
@@ -327,6 +335,7 @@ mod tests {
             user_account_expired: None,
             panel_api_provisioning: None,
             hls_session_or_lease_expired: None,
+            input_maintenance: None,
             panel_api_provisioning_hls_segments: Vec::new(),
         })));
         app_cfg
@@ -366,6 +375,31 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(matches!(stream_type, Some(CustomVideoStreamType::ChannelUnavailable)));
+    }
+
+    #[tokio::test]
+    async fn input_maintenance_factory_serves_its_own_clip() {
+        use super::create_input_maintenance_stream;
+        use crate::api::model::TransportStreamBuffer;
+
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let mut current = (*app_cfg.custom_stream_response.load_full().expect("custom response set")).clone();
+        current.input_maintenance = Some(TransportStreamBuffer::new(ts_packet));
+        app_cfg.custom_stream_response.store(Some(Arc::new(current)));
+
+        let (_stream, info) = create_input_maintenance_stream(&app_cfg, &[]);
+        let (_headers, status, _url, stream_type) = info.expect("input maintenance clip should exist");
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(stream_type, Some(CustomVideoStreamType::InputMaintenance)));
+    }
+
+    #[tokio::test]
+    async fn input_maintenance_without_clip_has_no_stream() {
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let (stream, info) = super::create_input_maintenance_stream(&app_cfg, &[]);
+        assert!(stream.is_none() && info.is_none());
     }
 
     /// The `ok_custom_stream_factory!` macro generates a public factory for

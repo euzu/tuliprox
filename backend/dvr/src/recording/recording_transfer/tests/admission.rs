@@ -4,7 +4,8 @@ use super::{
     app_config_with_listener, bare_app_config, counting_ffmpeg, download_file, ensure_recording_worker_running,
     finish_active_and_promote, requeue_active_download_for_capacity_wait, scheduled_task, serve_range_fixture,
     slot_queue, spawn_count, vod_entry, wait_for_provider_slot, DownloadExecutionResult, QuotaGate,
-    RecordingNotificationPlan, DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED, QUOTA_EXCEEDED_DURING_TRANSFER,
+    RecordingNotificationPlan, DOWNLOAD_PREEMPTED_REASON, INPUT_MAINTENANCE_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
+    QUOTA_EXCEEDED_DURING_TRANSFER,
 };
 use crate::recording::{
     recording_capacity::{stub::StubCapacity, RecordingCapacityPort},
@@ -424,4 +425,114 @@ async fn a_live_capture_asks_for_capacity_once_runs_the_encoder_once_and_complet
     );
     assert!(!crate::recording_partial_path(&capture.file_path).exists(), "and nothing was left staged");
     assert_eq!(settled.recording.reserved_bytes, 0, "and it is not still holding disk");
+}
+
+async fn start_worker_with(stub: &Arc<StubCapacity>, queue: &Arc<RecordingQueue>) {
+    let capacity: Arc<dyn RecordingCapacityPort> = Arc::clone(stub) as Arc<dyn RecordingCapacityPort>;
+    ensure_recording_worker_running(
+        &bare_app_config(),
+        &RecordingConfig::from(&shared::model::RecordingConfigDto {
+            enabled: true,
+            ..shared::model::RecordingConfigDto::default()
+        }),
+        queue,
+        &NoopSink,
+        &capacity,
+        Path::new(crate::recording::recording_worker::FFMPEG_BINARY),
+    )
+    .await
+    .expect("worker started");
+}
+
+async fn queued_live_capture(dir: &TempDir) -> Arc<RecordingQueue> { queued_live_capture_with(dir, 0).await }
+
+async fn queued_live_capture_with(dir: &TempDir, retry_attempts: u8) -> Arc<RecordingQueue> {
+    let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
+    let now = chrono::Utc::now().timestamp();
+    let mut capture = scheduled_task(RecordingKind::Live, now, 1_800);
+    capture.uuid = "live".to_string();
+    capture.state = RecordingTaskState::Queued;
+    capture.input_name = Some(Arc::from("provider"));
+    capture.retry_attempts = retry_attempts;
+    let capture = RecordingQueue::to_persisted(&capture);
+    crate::recording::recording_queue::mutate(&queue, move |candidate| {
+        candidate.queue.push(capture.clone());
+        Ok(())
+    })
+    .await
+    .expect("seed");
+    queue
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_on_an_input_in_maintenance_fails_without_asking_for_a_slot() {
+    let dir = TempDir::new().expect("tempdir");
+    let queue = queued_live_capture(&dir).await;
+    let stub = StubCapacity::with_room();
+    stub.set_maintenance("provider", true);
+
+    start_worker_with(&stub, &queue).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let finished = queue.finished.read().await;
+    let settled = finished.first().expect("the capture reached a terminal state");
+    assert_eq!(settled.state, RecordingTaskState::Failed);
+    assert_eq!(settled.error.as_deref(), Some(INPUT_MAINTENANCE_REASON), "and it says why");
+    assert_eq!(stub.acquire_count(), 0, "no provider slot was requested");
+    assert_eq!(stub.release_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn maintenance_on_another_input_does_not_block_the_capture() {
+    let dir = TempDir::new().expect("tempdir");
+    let queue = queued_live_capture(&dir).await;
+    let stub = StubCapacity::with_room();
+    stub.set_maintenance("some-other-input", true);
+
+    start_worker_with(&stub, &queue).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(stub.acquire_count(), 1, "the capture asked for its slot as before");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_that_already_ran_keeps_retrying_during_maintenance() {
+    // A retry or a reload requeue of a recording that already ran is not a new start:
+    // running recordings, including their reconnects, are not affected by maintenance.
+    let dir = TempDir::new().expect("tempdir");
+    let queue = queued_live_capture_with(&dir, 1).await;
+    let stub = StubCapacity::with_room();
+    stub.set_maintenance("provider", true);
+
+    start_worker_with(&stub, &queue).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(stub.acquire_count(), 1, "the retry asked for its slot as before");
+    let finished = queue.finished.read().await;
+    assert!(
+        finished.iter().all(|task| task.error.as_deref() != Some(INPUT_MAINTENANCE_REASON)),
+        "a running recording is never failed for maintenance"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_waiting_for_capacity_fails_when_maintenance_starts() {
+    let dir = TempDir::new().expect("tempdir");
+    let queue = queued_live_capture(&dir).await;
+    let stub = StubCapacity::full();
+
+    start_worker_with(&stub, &queue).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(stub.acquire_count(), 1, "waiting for a slot");
+    stub.set_maintenance("provider", true);
+    // What the capacity bridge does when a slot frees up somewhere.
+    for waiter in queue.slot_waiters.snapshots() {
+        let _ = queue.slot_waiters.signal_waiter(waiter.id);
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let finished = queue.finished.read().await;
+    let settled = finished.first().expect("the capture reached a terminal state");
+    assert_eq!(settled.error.as_deref(), Some(INPUT_MAINTENANCE_REASON));
+    assert_eq!(stub.acquire_count(), 1, "no further slot was requested");
 }

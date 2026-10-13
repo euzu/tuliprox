@@ -179,6 +179,9 @@ Upstream providers are not always reliable. Tuliprox is designed to preserve usa
 - Independent inputs can update in parallel while optional sequential groups protect providers that must not be refreshed concurrently
 - Automatic Xtream account-expiration refresh with throttling designed to reduce unnecessary provider requests
 - Stalker capability knowledge is reused during a running client session to avoid repeatedly probing known-failing endpoint variants
+- **Input maintenance mode** takes an input out of service from the dashboard or the REST API: new streams get a
+  dedicated maintenance video, the last playlist and EPG keep being served, and no subsystem contacts the provider until
+  maintenance ends; running streams and recordings continue
 
 **Benefit:** a broken refresh or failing alias does not have to destroy an otherwise usable catalog.
 
@@ -219,6 +222,8 @@ Tuliprox can improve incomplete provider data and make large catalogs easier to 
 Tuliprox can be configured and monitored directly from the browser.
 
 - **Dashboard** with backend status, active streams, system metrics, and provider capacity
+- **Maintenance card** on the dashboard that turns red while inputs are in maintenance, with a dialog to put inputs
+  into or take them out of maintenance with a remark
 - **Source Editor** for M3U, Xtream, Stalker, Plex, Emby, Jellyfin, local-library, and target configuration
 - Drag & drop, block selection, batch editing, and target bouquet whitelist/blacklist editing
 - **Input-focused Update view** with per-input actions, affected-target selection, status, last update time, and  
@@ -271,7 +276,7 @@ Expose one Tuliprox instance to multiple users without giving everyone identical
 
 #### RBAC
 
-- 14 permissions across 7 domains
+- 20 permissions across 9 domains
 - Independent `.read` and `.write` grants
 - Custom groups and multi-group membership
 - Additive permission resolution

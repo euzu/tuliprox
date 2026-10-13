@@ -609,6 +609,10 @@ pub(crate) async fn playlist_resolve<E: EventSink + Clone + 'static, M: Metadata
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
 ) {
+    // Resolve and probe talk to the provider; an input in maintenance keeps what it has.
+    if ctx.is_input_in_maintenance(&processed_fpl.input.name) {
+        return;
+    }
     playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
     playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
     playlist_probe(ctx, target, processed_fpl).await;

@@ -28,6 +28,8 @@ const RECORDING_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 
 const LIVE_CAPACITY_WINDOW_CLOSED: &str = "No provider capacity became available before the recording window closed";
 
+const INPUT_MAINTENANCE_REASON: &str = "Input is in maintenance mode";
+
 const DOWNLOAD_PREEMPTED_REASON: &str = "Preempted by higher-priority foreground stream";
 
 const RECORDING_PREEMPTED_REASON: &str =

@@ -3,12 +3,15 @@ use crate::{
         ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, PlaylistStorage,
         PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
     },
-    model::{AppConfig, GracePeriodOptions, HdHomeRunDeviceConfig, HttpClients, ReverseProxyDisabledHeaderConfig},
+    model::{
+        AppConfig, GracePeriodOptions, HdHomeRunDeviceConfig, HttpClients, InputMaintenanceRegistry, MaintenanceWrite,
+        ReverseProxyDisabledHeaderConfig,
+    },
     repository::GeoIp,
     utils::LRUResourceCache,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
-use shared::model::UserConnectionPermission;
+use shared::model::{EventMessage, UserConnectionPermission};
 use std::sync::{atomic::AtomicI8, Arc};
 use tokio::sync::RwLock;
 use tuliprox_metadata::manager::MetadataUpdateManager;
@@ -28,7 +31,7 @@ mod tests;
 mod view;
 
 #[cfg(test)]
-pub use self::test_support::create_test_app_state;
+pub use self::test_support::{create_test_app_state, create_test_input_maintenance};
 pub use self::{
     auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, reload::*,
     resource_cache::*, view::*,
@@ -58,9 +61,34 @@ pub struct AppState {
     pub metadata_manager: Arc<MetadataUpdateManager>,
     pub auth: AuthState,
     pub playlist_updates: PlaylistUpdateControl,
+    /// Inputs taken out of service; read on every new stream request.
+    pub input_maintenance: Arc<InputMaintenanceRegistry>,
 }
 
 impl AppState {
+    /// The configured input, unless it is in maintenance: for code that would contact its provider.
+    pub fn contactable_input(&self, input_name: &Arc<str>) -> Option<Arc<crate::model::ConfigInput>> {
+        self.app_config
+            .get_input_by_name(input_name)
+            .filter(|input| !self.input_maintenance.is_in_maintenance(&input.name))
+    }
+
+    pub fn is_known_input_name(&self, input_name: &str) -> bool {
+        self.app_config.sources.load().inputs.iter().any(|input| input.name.as_ref() == input_name)
+    }
+
+    pub fn known_input_names(&self) -> Vec<Arc<str>> {
+        self.app_config.sources.load().inputs.iter().map(|input| Arc::clone(&input.name)).collect()
+    }
+
+    /// Emits the change event for a write that changed something.
+    pub fn publish_input_maintenance(&self, write: MaintenanceWrite) -> std::io::Result<()> {
+        if let Some(entries) = write? {
+            self.event_manager.send_event(EventMessage::InputMaintenanceChanged(entries));
+        }
+        Ok(())
+    }
+
     pub async fn get_active_connections_for_user(&self, username: &str) -> u32 {
         self.active_users.user_connections(username).await
     }

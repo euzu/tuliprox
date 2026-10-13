@@ -117,6 +117,9 @@ pub enum ProtocolMessage {
     /// re-fetches `/api/v1/recording/rules` on receipt. No payload
     /// — the rule list is small and the GET is cheap.
     RecordingRulesChanged,
+    /// Inputs in maintenance after a change. Carries the whole map: it is small,
+    /// and a client never has to merge.
+    InputMaintenanceChangedResponse(crate::model::InputMaintenanceEntries),
     /// The socket cannot serve recordings to this session, and the reason
     /// is actionable.
     ///

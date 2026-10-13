@@ -33,6 +33,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn enable_runtime_policy_custom_re
         user_account_expired: None,
         panel_api_provisioning: None,
         hls_session_or_lease_expired: None,
+        input_maintenance: None,
         panel_api_provisioning_hls_segments: Vec::new(),
     })));
 }

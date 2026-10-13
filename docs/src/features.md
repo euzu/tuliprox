@@ -37,6 +37,7 @@ That makes it usable both for IPTV players and for media-server-oriented workflo
 - enforce user connection limits
 - prioritize higher-value sessions over lower-priority traffic
 - serve custom fallback videos for failure cases
+- put inputs into maintenance mode: new streams get a maintenance video, the provider is not contacted
 - persist optional stream history for per-variant connect/disconnect, startup-failure, and reconnect telemetry
 - aggregate optional QoS snapshots from stream history to rank equivalent channel variants by reliability
 
@@ -63,7 +64,8 @@ Tuliprox also includes:
 
 Tuliprox supports role-based access control (RBAC) for the Web UI:
 
-- fine-grained permissions across 7 domains (config, source, user, playlist, library, system, epg)
+- fine-grained permissions across 9 domains (config, source, user, playlist, library, system, epg, recording,
+  maintenance)
 - custom groups with configurable permission sets
 - user-to-group assignments with union-based permission resolution
 - compact bitmask encoding in JWT claims for low-overhead permission checks

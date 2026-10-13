@@ -6,6 +6,7 @@ mod cleanup;
 mod http_load;
 mod http_smoke;
 mod http_soak;
+mod input_maintenance;
 mod local_files;
 mod network_access;
 mod provider_leases;

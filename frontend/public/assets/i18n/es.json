@@ -869,6 +869,10 @@
       "SKIP_LIVE_DIRECT_SOURCE": "Si está habilitado, los streams en directo no se enlazan directamente sino que se proxyfican/resuelven.",
       "SKIP_SERIES_DIRECT_SOURCE": "Si está habilitado, los episodios de series no se enlazan directamente sino que se proxyfican/resuelven.",
       "SKIP_VIDEO_DIRECT_SOURCE": "Si está habilitado, los archivos VOD no se enlazan directamente sino que se proxyfican/resuelven."
+    },
+    "MAINTENANCE": {
+      "INPUT": "Entrada que se retira del servicio. Mientras está en mantenimiento, las nuevas reproducciones reciben el vídeo de mantenimiento y Tuliprox no contacta con su proveedor; las reproducciones y grabaciones en curso continúan.",
+      "REASON": "Observación opcional que se muestra en la lista de mantenimiento, por ejemplo por qué el proveedor no está disponible. Máximo 500 caracteres."
     }
   },
   "HINT": {
@@ -939,6 +943,15 @@
     "ADD_PROPERTY": "Añadir propiedad",
     "ADD_PROVIDER": "Añadir proveedor",
     "ADD_QUALITY_TO_FILENAME": "Calidad",
+    "MAINTENANCE": "Mantenimiento",
+    "MAINTENANCE_ADD_ALL": "Todas a mantenimiento",
+    "MAINTENANCE_COUNT": "{count} entradas en mantenimiento",
+    "MAINTENANCE_COUNT_ONE": "1 entrada en mantenimiento",
+    "MAINTENANCE_NONE": "Ninguna entrada en mantenimiento",
+    "MAINTENANCE_REASON": "Observación",
+    "MAINTENANCE_REMOVE_ALL": "Terminar todo el mantenimiento",
+    "MAINTENANCE_SINCE": "Desde",
+    "MANAGE": "Gestionar",
     "USE_METADATA": "Usar metadatos",
     "ADD_SERVER": "Añadir servidor",
     "ADD_PLAN": "Añadir plan",
@@ -1286,6 +1299,7 @@
     "MPEG_TS": "MPEG-TS",
     "MSG_KIND_ERROR": "Error",
     "MSG_KIND_INFO": "Info",
+    "MSG_KIND_INPUT_MAINTENANCE_CHANGED": "Mantenimiento de entrada cambiado",
     "MSG_KIND_LIBRARY_SCAN_COMPLETED": "Escaneo de biblioteca completado",
     "MSG_KIND_LIBRARY_SCAN_FAILED": "Escaneo de biblioteca fallido",
     "MSG_KIND_METADATA_UPDATE_COMPLETED": "Actualización de metadatos completada",
@@ -1939,6 +1953,11 @@
     "LOGIN": {
       "MESSAGE": "Introduzca sus credenciales",
       "FAILED": "No se pudo iniciar sesión"
+    },
+    "MAINTENANCE": {
+      "LOAD_FAILED": "No se pudo cargar el estado de mantenimiento",
+      "REASON_TOO_LONG": "La observación puede tener como máximo 500 caracteres",
+      "SAVE_FAILED": "No se pudo guardar el estado de mantenimiento"
     },
     "SESSION": {
       "EXPIRED": "Su sesión ha expirado. Por favor, inicie sesión de nuevo."

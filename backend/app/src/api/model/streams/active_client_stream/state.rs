@@ -161,7 +161,9 @@ impl ActiveClientStreamState {
             CustomVideoStreamType::ProviderConnectionsExhausted => Some(StreamMode::ProviderExhausted),
             CustomVideoStreamType::LowPriorityPreempted => Some(StreamMode::LowPriorityPreempted),
             CustomVideoStreamType::Provisioning => Some(StreamMode::Provisioning),
-            CustomVideoStreamType::UserAccountExpired | CustomVideoStreamType::HlsSessionOrLeaseExpired => None,
+            CustomVideoStreamType::UserAccountExpired
+            | CustomVideoStreamType::HlsSessionOrLeaseExpired
+            | CustomVideoStreamType::InputMaintenance => None,
         }
     }
 

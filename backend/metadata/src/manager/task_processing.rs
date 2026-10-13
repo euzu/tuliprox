@@ -1,6 +1,6 @@
 use super::{
     spawn_blocking_limited, DbHandle, InputWorker, RetryDomain, TaskKey, PROBE_TASK_TIMEOUT_SECS,
-    TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED, TASK_ERR_UPDATE_IN_PROGRESS,
+    TASK_ERR_INPUT_MAINTENANCE, TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED, TASK_ERR_UPDATE_IN_PROGRESS,
 };
 use crate::ctx::MetadataUpdateCtx;
 use log::{debug, error, warn};
@@ -115,6 +115,11 @@ impl InputWorker {
 
         if !input_base.enabled {
             return Err(shared::error::TuliproxError::Config(format!("Input {input_name} is disabled")));
+        }
+
+        // Waits instead of failing: the task is requeued and resolved once maintenance ends.
+        if ctx.input_maintenance.is_in_maintenance(&input_base.name) {
+            return Err(shared::error::TuliproxError::Config(TASK_ERR_INPUT_MAINTENANCE.to_string()));
         }
 
         // Background metadata/probe tasks are low-priority.

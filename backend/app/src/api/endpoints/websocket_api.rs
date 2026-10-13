@@ -498,6 +498,10 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // enforces the session filter server-side, so this is a bare nudge:
         // the frontend re-fetches.
         EventMessage::RecordingRulesChanged => (ProtocolMessage::RecordingRulesChanged, "Recording rules changed"),
+        EventMessage::InputMaintenanceChanged(entries) => (
+            ProtocolMessage::InputMaintenanceChangedResponse(unwrap_or_clone(entries)),
+            "Input maintenance changed",
+        ),
 
         // Handled by `handle_event_message`, not translatable here:
         // `RecordingChanged` needs a per-session snapshot re-fetch, and the
@@ -936,6 +940,7 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInFailed),
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
+            EventMessage::InputMaintenanceChanged(Arc::default()),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -1129,6 +1134,22 @@ mod tests {
         assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingChanged));
         assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingProgress));
         assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::RecordingRulesChanged));
+    }
+
+    #[test]
+    fn input_maintenance_event_needs_maintenance_read() {
+        let event = EventMessage::InputMaintenanceChanged(Arc::default());
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::MaintenanceRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+        assert!(websocket_can_receive_runtime_events(&mem, &event));
+
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::SystemRead.into(), ..ProtocolHandlerMemory::default() };
+        mem.role = UserRole::User;
+        assert!(!websocket_can_receive_runtime_events(&mem, &event));
     }
 
     #[test]

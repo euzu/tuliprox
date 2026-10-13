@@ -868,3 +868,145 @@ async fn xtream_token_stream_rejects_m3u_timeshift_with_bad_request() {
 
     assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
 }
+
+/// Serves a recognisable clip for `input_maintenance`.
+fn enable_maintenance_clip(app_state: &Arc<AppState>) {
+    let mut cfg = (**app_state.app_config.config.load()).clone();
+    cfg.custom_stream_response_enabled = true;
+    app_state.app_config.config.store(Arc::new(cfg));
+    let mut packet = vec![0xff_u8; 188];
+    packet[..4].copy_from_slice(&[0x47, 0x01, 0x00, 0x10]);
+    packet[4..9].copy_from_slice(b"MAINT");
+    app_state.app_config.custom_stream_response.store(Some(Arc::new(crate::model::CustomStreamResponse {
+        channel_unavailable: None,
+        user_connections_exhausted: None,
+        provider_connections_exhausted: None,
+        low_priority_preempted: None,
+        user_account_expired: None,
+        panel_api_provisioning: None,
+        hls_session_or_lease_expired: None,
+        input_maintenance: Some(crate::api::model::TransportStreamBuffer::new(packet)),
+        panel_api_provisioning_hls_segments: Vec::new(),
+    })));
+}
+
+/// Gives `user` (limited to one connection) a running stream on another channel.
+async fn occupy_the_only_connection(app_state: &Arc<AppState>, user: &ProxyUserCredentials) {
+    let busy_addr = "127.0.0.1:55401".parse().expect("addr");
+    let busy = Fingerprint::new("fp-busy".to_string(), "127.0.0.1".to_string(), busy_addr);
+    app_state.connection_manager.add_connection(&busy_addr).await;
+    app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user,
+            session_token: "busy-session",
+            virtual_id: 7,
+            provider: "provider-b",
+            stream_url: "http://other.example/live/7.ts",
+            addr: &busy_addr,
+            connection_permission: shared::model::UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    let channel = shared::model::StreamChannel {
+        target_id: 1,
+        virtual_id: 7,
+        provider_id: 7,
+        input_name: "provider-b".intern(),
+        item_type: PlaylistItemType::Live,
+        cluster: XtreamCluster::Live,
+        group: "Live".intern(),
+        title: "Busy".intern(),
+        url: "http://other.example/live/7.ts".into(),
+        shared: false,
+        shared_joined_existing: None,
+        shared_stream_id: None,
+        technical: None,
+        epg_channel_id: None,
+        epg_reference_ts: None,
+        upstream_user_agent: None,
+    };
+    app_state
+        .connection_manager
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid: 401,
+            username: "busy",
+            max_connections: 1,
+            soft_connections: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &busy,
+            provider: "provider-b".intern(),
+            stream_channel: &channel,
+            user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+            session_token: Some("busy-session"),
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn maintenance_answers_before_admission_for_an_exhausted_user() {
+    // An exhausted user asking for an input in maintenance gets the maintenance clip, and the
+    // request never reaches admission (no connection-denied event, no eviction).
+    let dir = tempdir().expect("temp dir");
+    let config = Config {
+        storage_dir: dir.path().to_string_lossy().into_owned(),
+        user_access_control: true,
+        ..Config::default()
+    };
+    let app_state = create_test_app_state(config);
+    enable_maintenance_clip(&app_state);
+    let target = Arc::new(short_epg_target());
+    let mut item = short_epg_live_item();
+    item.provider_id = 100;
+    item.input_name = "provider_a".intern();
+    item.url = "http://127.0.0.1:1/live/user/pass/100.ts".intern();
+    let input = ConfigInput {
+        id: 1,
+        name: "provider_a".intern(),
+        input_type: InputType::Xtream,
+        url: "http://127.0.0.1:1".to_string(),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        enabled: true,
+        max_connections: 5,
+        ..ConfigInput::default()
+    };
+    cache_xtream_test_item(&app_state, &target, item, Some(input)).await;
+    app_state.input_maintenance.add("provider_a", None, 1).await.expect("maintenance");
+
+    let mut user = ProxyUserCredentials::default();
+    user.username = "busy".to_string();
+    user.password = "busy".to_string();
+    user.max_connections = 1;
+    user.soft_connections = 0;
+    user.proxy = shared::model::ProxyType::Reverse(None);
+    user.output_clusters = ClusterFlags::all();
+    occupy_the_only_connection(&app_state, &user).await;
+
+    let addr = "127.0.0.1:55402".parse().expect("addr");
+    let fingerprint = Fingerprint::new("fp-new".to_string(), "127.0.0.1".to_string(), addr);
+    let response = xtream_player_api_stream(
+        &fingerprint,
+        &HeaderMap::new(),
+        &app_state,
+        &UserApiRequest::default(),
+        ApiStreamRequest::from(ApiStreamContext::LiveAlt, "busy", "busy", "100.ts", ""),
+        Some((Arc::new(user), target)),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK, "the maintenance clip answers");
+    let denied = app_state
+        .active_users
+        .events()
+        .stats()
+        .emitted()
+        .into_iter()
+        .find_map(|(kind, count)| (kind == shared::model::EventKind::ConnectionDenied).then_some(count))
+        .unwrap_or(0);
+    assert_eq!(denied, 0, "the request never reached admission");
+}

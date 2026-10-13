@@ -306,6 +306,12 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         if already_processed {
             // Use empty results, will load from disk below
             in_run_reuse_playlist_download_result()
+        } else if ctx.is_input_in_maintenance(&input.name) {
+            // Keep serving what was fetched last; the provider is out of service. This also
+            // covers the Stalker refresh, which only runs inside the provider download.
+            debug!("Input '{}' is in maintenance; using its persisted playlist", input.name);
+            mark_as_processed = true;
+            cached_playlist_download_result(input, refresh_policy)
         } else if ctx.pre_processed_inputs.as_ref().is_some_and(|s| s.contains(&input.name)) {
             // Input was already processed in a prior session; skip download and load from disk.
             // Mark only after load succeeds (or fails) to avoid exposing a half-ready state.
@@ -335,7 +341,12 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         // Defensive fallback: if cache metadata says "valid" but persisted data is unreadable,
         // retry once before forcing a refresh.
         let must_force_refresh = cached_error.is_some();
-        if must_force_refresh {
+        if must_force_refresh && ctx.is_input_in_maintenance(&input.name) {
+            // A refresh would contact the provider; without a persisted playlist the input
+            // contributes nothing until maintenance ends.
+            warn!("Input '{}' is in maintenance and has no readable persisted playlist; skipping it", input.name);
+            preloaded_playlist = Some((MemoryPlaylistSource::default().into_source(), None));
+        } else if must_force_refresh {
             warn!("Input '{}' cache hit produced unreadable playlist; retrying cached load once", input.name);
             let (retry_playlist, retry_error) = load_cached_input_playlist(ctx, input).await;
             if retry_error.is_none() {

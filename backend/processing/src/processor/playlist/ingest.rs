@@ -114,6 +114,8 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     /// Optional request-local behavior for one manually selected input.
     pub input_refresh: Option<InputRefreshOverride>,
     pub(crate) library_update_mode: LibraryUpdateMode,
+    /// Inputs in maintenance: their persisted state is reused, their provider is not contacted.
+    pub input_maintenance: Option<Arc<dyn tuliprox_core::model::InputMaintenanceGate>>,
 }
 
 #[cfg(test)]

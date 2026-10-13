@@ -1014,3 +1014,135 @@ async fn hls_proxy_manifest_invalid_token_starts_no_origin_work() {
     assert_eq!(app_state.hls.proxy.metrics().snapshot().refresh_started, 0);
     assert!(app_state.hls.proxy.sessions().is_empty().await);
 }
+
+#[tokio::test]
+async fn hls_entry_for_input_in_maintenance_opens_no_session() {
+    // Same setup as `hls_cache_entry_master_playlist_uses_cache_when_target_hls_share_enabled`,
+    // which answers 200 with one access lease when the input is not in maintenance.
+    let app_state = test_app_state();
+    enable_hls_cache(&app_state);
+    configure_default_test_server(&app_state);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "hls-user".to_string();
+    user.password = "hls-pass".to_string();
+    let input = test_hls_input();
+    let target = test_hls_share_target(true);
+    let original_hls_entry_path = super::super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
+    app_state.input_maintenance.add(&input.name, None, 1).await.expect("maintenance");
+
+    let response = super::super::handle_hls_stream_request(
+        &test_fingerprint(),
+        &app_state,
+        &user,
+        &target,
+        None,
+        None,
+        "http://origin.example.com/live/user/pass/1001.m3u8",
+        None,
+        test_hls_entry_stream_context(1001, "80510", Some(2_500_000)),
+        &input,
+        &HeaderMap::new(),
+        UserConnectionPermission::Allowed,
+        Some(ConnectionKind::Normal),
+        &original_hls_entry_path,
+        super::super::HlsRequestStage::Entry,
+    )
+    .await
+    .into_response();
+
+    // No maintenance clip is configured here, so the configured fallback status answers.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(app_state.hls.proxy.access_leases().read().await.is_empty(), "no lease for a maintenance input");
+    assert!(app_state.active_users.active_streams().await.is_empty());
+}
+
+#[tokio::test]
+async fn hls_entry_refresh_of_a_running_session_is_not_gated() {
+    // Without media-playlist wrapping the player re-polls the entry URL; a known user session
+    // is a running playback and keeps playing through maintenance.
+    let app_state = test_app_state();
+    enable_hls_cache(&app_state);
+    configure_default_test_server(&app_state);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "hls-user".to_string();
+    user.password = "hls-pass".to_string();
+    let input = test_hls_input();
+    let target = test_hls_share_target(true);
+    let original_hls_entry_path = super::super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
+    app_state.input_maintenance.add(&input.name, None, 1).await.expect("maintenance");
+    let session = crate::api::model::UserSession {
+        token: "running-hls-session".to_string(),
+        virtual_id: 1001,
+        provider: Arc::clone(&input.name),
+        lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        ..Default::default()
+    };
+
+    let response = super::super::handle_hls_stream_request(
+        &test_fingerprint(),
+        &app_state,
+        &user,
+        &target,
+        Some(&session),
+        None,
+        "http://origin.example.com/live/user/pass/1001.m3u8",
+        None,
+        test_hls_entry_stream_context(1001, "80510", Some(2_500_000)),
+        &input,
+        &HeaderMap::new(),
+        UserConnectionPermission::Allowed,
+        Some(ConnectionKind::Normal),
+        &original_hls_entry_path,
+        super::super::HlsRequestStage::Entry,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK, "a running session is not switched to the maintenance clip");
+}
+
+#[tokio::test]
+async fn hls_entry_with_an_expired_session_is_gated() {
+    // A known but no longer counted session is not a running playback: it would be admitted
+    // anew, so maintenance answers it.
+    let app_state = test_app_state();
+    enable_hls_cache(&app_state);
+    configure_default_test_server(&app_state);
+    let mut user = ProxyUserCredentials::default();
+    user.username = "hls-user".to_string();
+    user.password = "hls-pass".to_string();
+    let input = test_hls_input();
+    let target = test_hls_share_target(true);
+    let original_hls_entry_path = super::super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
+    app_state.input_maintenance.add(&input.name, None, 1).await.expect("maintenance");
+    let session = crate::api::model::UserSession {
+        token: "expired-hls-session".to_string(),
+        virtual_id: 1001,
+        provider: Arc::clone(&input.name),
+        lifecycle: crate::api::model::PlaybackLifecycle::Expired,
+        ..Default::default()
+    };
+
+    let response = super::super::handle_hls_stream_request(
+        &test_fingerprint(),
+        &app_state,
+        &user,
+        &target,
+        Some(&session),
+        None,
+        "http://origin.example.com/live/user/pass/1001.m3u8",
+        None,
+        test_hls_entry_stream_context(1001, "80510", Some(2_500_000)),
+        &input,
+        &HeaderMap::new(),
+        UserConnectionPermission::Allowed,
+        Some(ConnectionKind::Normal),
+        &original_hls_entry_path,
+        super::super::HlsRequestStage::Entry,
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(app_state.hls.proxy.access_leases().read().await.is_empty(), "no lease for a maintenance input");
+}

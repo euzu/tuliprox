@@ -469,6 +469,7 @@ async fn initial_stalker_playback_resolution_uses_the_requested_items_own_comman
             crate::api::api_utils::resolve_initial_stalker_playback_url(
                 &app_state,
                 &live_input,
+                &crate::model::ProxyUserCredentials::default(),
                 provider_id,
                 XtreamCluster::Live,
                 live,
@@ -501,6 +502,7 @@ async fn initial_stalker_playback_resolution_uses_the_requested_items_own_comman
     let passthrough = crate::api::api_utils::resolve_initial_stalker_playback_url(
         &app_state,
         &live_input,
+        &crate::model::ProxyUserCredentials::default(),
         101,
         XtreamCluster::Live,
         live,

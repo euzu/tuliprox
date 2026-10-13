@@ -1207,6 +1207,8 @@ mod tests {
         fn release(&self, _handle: Option<ProviderHandle>) -> BoxFuture<'_, ()> { Box::pin(async {}) }
 
         fn capacity_changed(&self) -> Arc<Notify> { Arc::clone(&self.notify) }
+
+        fn is_input_in_maintenance(&self, _input_name: &str) -> bool { false }
     }
 
     fn edit_claims(subject_id: Option<UserId>, admin: bool) -> shared::model::Claims {

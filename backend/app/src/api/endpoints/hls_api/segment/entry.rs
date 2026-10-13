@@ -11,8 +11,9 @@ use super::{
 use crate::{
     api::{
         api_utils::{
-            acquire_exact_provider_handle, connection_priority_for_kind, get_hls_playback_ttl_secs,
-            select_provider_stream_url, ExactProviderAcquire, HLS_MANIFEST_CAPACITY_WAIT,
+            acquire_exact_provider_handle, blocks_new_playback, connection_priority_for_kind,
+            get_hls_playback_ttl_secs, is_running_playback, select_provider_stream_url, ExactProviderAcquire,
+            HLS_MANIFEST_CAPACITY_WAIT,
         },
         model::{AppState, CustomVideoStreamType, PlaybackLeaseRef, ProviderAllocation, UserSession},
     },
@@ -86,6 +87,20 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let virtual_id = stream_context.virtual_id();
     if app_state.active_users.is_user_blocked_for_stream(&user.username, VirtualId::new(virtual_id)).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+    // Only a fresh entry is gated. Variant refreshes, segments and entry re-polls of a running
+    // session (unwrapped media playlists) belong to a running playback.
+    if matches!(stage, HlsRequestStage::Entry)
+        && !is_running_playback(user_session)
+        && blocks_new_playback(app_state, input, user, false)
+    {
+        return hls_custom_video_manifest_response(
+            app_state,
+            user,
+            CustomVideoStreamType::InputMaintenance,
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .await;
     }
 
     let stream_ref = stream_context.stream_ref().to_string();

@@ -256,6 +256,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
             Arc::clone(&connection_manager),
+            crate::api::model::create_test_input_maintenance(""),
         ),
         app_config,
         http_clients: Arc::new(tuliprox_core::model::HttpClients::new(
@@ -283,6 +284,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+        input_maintenance: crate::api::model::create_test_input_maintenance(""),
     })
 }
 

@@ -22,6 +22,7 @@ pub(super) fn admission_failure_video_type(reason: ConnectFailureReason) -> Opti
         ConnectFailureReason::UserAccountExpired => Some(CustomVideoStreamType::UserAccountExpired),
         ConnectFailureReason::UserConnectionsExhausted => Some(CustomVideoStreamType::UserConnectionsExhausted),
         ConnectFailureReason::ProviderConnectionsExhausted => Some(CustomVideoStreamType::ProviderConnectionsExhausted),
+        ConnectFailureReason::InputMaintenance => Some(CustomVideoStreamType::InputMaintenance),
         _ => None,
     }
 }

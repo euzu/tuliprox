@@ -512,6 +512,9 @@ pub(crate) async fn sync_panel_api_exp_dates(app_state: &Arc<AppState>) {
 
     let sources = app_state.app_config.sources.load();
     for input in &sources.inputs {
+        if app_state.input_maintenance.is_in_maintenance(&input.name) {
+            continue;
+        }
         if sync_panel_api_for_input_on_boot(app_state, input, sources_path.as_path()).await {
             any_change = true;
         }
@@ -543,6 +546,9 @@ pub(crate) async fn sync_panel_api_alias_pool_for_target(app_state: &Arc<AppStat
             let Some(input) = sources.get_input_by_name(input_name) else {
                 continue;
             };
+            if app_state.input_maintenance.is_in_maintenance(&input.name) {
+                continue;
+            }
             let Some(panel_cfg) = input.panel_api.as_ref() else {
                 continue;
             };

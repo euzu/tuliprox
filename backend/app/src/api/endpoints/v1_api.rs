@@ -199,6 +199,7 @@ pub fn v1_api_register(
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
             .merge(target_bouquet_api_register_with_permissions(app_state))
+            .merge(super::maintenance_api::maintenance_api_register_with_permissions(app_state))
             .merge(rbac_api_register(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             // `recording.enabled: false` turns the DVR off end to end:
@@ -219,6 +220,7 @@ pub fn v1_api_register(
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
             .merge(target_bouquet_api_register_unprotected())
+            .merge(super::maintenance_api::maintenance_api_register_unprotected())
             .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             .merge(

@@ -8,6 +8,7 @@ mod hls_terminal_response;
 mod library_api;
 pub(in crate::api) mod log_ws_api;
 pub(in crate::api) mod m3u_api;
+mod maintenance_api;
 pub(in crate::api) mod provider_resolve_api;
 mod rbac_api;
 pub(in crate::api) mod recording_api;

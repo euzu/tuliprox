@@ -51,6 +51,9 @@ impl AppState {
 /// event_manager` - or for a handle `AppState` keeps inside a container -
 /// `hls_proxy <- hls.proxy`. The context names the handle by the role it
 /// plays; the view still reads exactly the handle it names.
+///
+/// A context that holds a handle as a trait object says so with `as` -
+/// `input_maintenance as Arc<dyn InputMaintenanceGate>`.
 macro_rules! view_field {
     ($state:ident, $field:ident) => {
         ::core::clone::Clone::clone(&$state.$field)
@@ -63,12 +66,12 @@ macro_rules! view_field {
 macro_rules! app_state_views {
     ($(
         $(#[$meta:meta])*
-        $accessor:ident => $ctx:ty { $($field:ident $(<- $($source:ident).+)?),+ $(,)? }
+        $accessor:ident => $ctx:ty { $($field:ident $(<- $($source:ident).+)? $(as $cast:ty)?),+ $(,)? }
     )+) => {
         $(
             impl AppStateView for $ctx {
                 fn from_app_state(state: &AppState) -> Self {
-                    Self { $($field: view_field!(state, $field $(, $($source).+)?)),+ }
+                    Self { $($field: view_field!(state, $field $(, $($source).+)?) $(as $cast)?),+ }
                 }
             }
 
@@ -110,5 +113,6 @@ app_state_views! {
     metadata_update_ctx => tuliprox_metadata::ctx::BoundMetadataUpdateCtx {
         app_config, active_provider, connection_manager, events <- event_manager, playlists,
         update_guard <- playlist_updates.update_guard, http_clients,
+        input_maintenance as std::sync::Arc<dyn tuliprox_core::model::InputMaintenanceGate>,
     }
 }

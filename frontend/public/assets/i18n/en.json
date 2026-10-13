@@ -869,6 +869,10 @@
       "SKIP_LIVE_DIRECT_SOURCE": "If enabled, live streams are not linked directly but proxied/resolved.",
       "SKIP_SERIES_DIRECT_SOURCE": "If enabled, series episodes are not linked directly but proxied/resolved.",
       "SKIP_VIDEO_DIRECT_SOURCE": "If enabled, VOD files are not linked directly but proxied/resolved."
+    },
+    "MAINTENANCE": {
+      "INPUT": "Input to take out of service. While it is in maintenance, new streams get the maintenance video and Tuliprox does not contact its provider; running streams and recordings continue.",
+      "REASON": "Optional remark shown in the maintenance list, for example why the provider is down. At most 500 characters."
     }
   },
   "HINT": {
@@ -939,6 +943,15 @@
     "ADD_PROPERTY": "Add Property",
     "ADD_PROVIDER": "Add Provider",
     "ADD_QUALITY_TO_FILENAME": "Quality",
+    "MAINTENANCE": "Maintenance",
+    "MAINTENANCE_ADD_ALL": "All into maintenance",
+    "MAINTENANCE_COUNT": "{count} inputs in maintenance",
+    "MAINTENANCE_COUNT_ONE": "1 input in maintenance",
+    "MAINTENANCE_NONE": "No input in maintenance",
+    "MAINTENANCE_REASON": "Remark",
+    "MAINTENANCE_REMOVE_ALL": "End all maintenance",
+    "MAINTENANCE_SINCE": "Since",
+    "MANAGE": "Manage",
     "USE_METADATA": "Use metadata",
     "ADD_SERVER": "Add Server",
     "ADD_PLAN": "Add Plan",
@@ -1286,6 +1299,7 @@
     "MPEG_TS": "MPEG-TS",
     "MSG_KIND_ERROR": "Error",
     "MSG_KIND_INFO": "Info",
+    "MSG_KIND_INPUT_MAINTENANCE_CHANGED": "Input Maintenance Changed",
     "MSG_KIND_LIBRARY_SCAN_COMPLETED": "Library Scan Completed",
     "MSG_KIND_LIBRARY_SCAN_FAILED": "Library Scan Failed",
     "MSG_KIND_METADATA_UPDATE_COMPLETED": "Metadata Update Completed",
@@ -1939,6 +1953,11 @@
     "LOGIN": {
       "MESSAGE": "Enter Your Credentials",
       "FAILED": "Failed to login"
+    },
+    "MAINTENANCE": {
+      "LOAD_FAILED": "Could not load maintenance state",
+      "REASON_TOO_LONG": "The remark may have at most 500 characters",
+      "SAVE_FAILED": "Could not save maintenance state"
     },
     "SESSION": {
       "EXPIRED": "Your session has expired. Please log in again."

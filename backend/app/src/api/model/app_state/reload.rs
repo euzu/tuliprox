@@ -80,6 +80,12 @@ pub async fn update_app_state_sources(
     };
     app_state.playlist_updates.forced_targets.store(targets);
     let updates = app_state.set_sources(sources)?;
+    let known = app_state.known_input_names();
+    let known: Vec<&str> = known.iter().map(AsRef::as_ref).collect();
+    if let Err(err) = app_state.publish_input_maintenance(app_state.input_maintenance.retain_known(&known).await) {
+        // The reload itself succeeded; a stale entry only matches an input that no longer exists.
+        error!("Could not persist pruned maintenance state: {err}");
+    }
     update_target_caches(app_state, updates.targets.as_ref()).await;
     restart_services(app_state, &updates);
     Ok(())

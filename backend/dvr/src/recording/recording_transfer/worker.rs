@@ -8,7 +8,7 @@ use super::{
     requeue_active_download_for_retry, set_active_download_state, should_exit_worker_after_preempt,
     spawn_recording_notification_after_persist, take_active, wait_for_provider_slot, write_completion_sidecar,
     ProviderAcquireResult, ProviderCapacities, QuotaGate, RetryCommit, DOWNLOAD_PREEMPTED_REASON,
-    LIVE_CAPACITY_WINDOW_CLOSED, RECORDING_PROGRESS_UPDATE_INTERVAL,
+    INPUT_MAINTENANCE_REASON, LIVE_CAPACITY_WINDOW_CLOSED, RECORDING_PROGRESS_UPDATE_INTERVAL,
 };
 use crate::recording::{
     recording_capacity::RecordingCapacityPort,
@@ -147,14 +147,14 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                 'worker: loop {
                     // One read: the uuid, pause flag and live window must describe
                     // the same task.
-                    let active_head = dq
-                        .active
-                        .read()
-                        .await
-                        .iter()
-                        .find(|task| task.uuid == worker_uuid)
-                        .map(|download| (download.paused, recording_deadline_instant(download)));
-                    if let Some((paused, window_deadline)) = active_head {
+                    let active_head =
+                        dq.active.read().await.iter().find(|task| task.uuid == worker_uuid).map(|download| {
+                            // A retry or a requeue of a recording that already ran is not a new
+                            // start; maintenance only refuses new ones.
+                            let first_start = download.size == 0 && download.retry_attempts == 0;
+                            (download.paused, recording_deadline_instant(download), first_start)
+                        });
+                    if let Some((paused, window_deadline, first_start)) = active_head {
                         if paused {
                             break;
                         }
@@ -168,6 +168,11 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             // Only live work has a window deadline; a transfer waits as long as it takes.
                             if let Some(input_name) = input_name {
                                 loop {
+                                    // Checked before every slot request, also after waiting, so
+                                    // nothing has to be released.
+                                    if first_start && capacity.is_input_in_maintenance(&input_name) {
+                                        break ProviderAcquireResult::InputMaintenance;
+                                    }
                                     if let Some(stopped) = acquire_result_for_control(*control_signal.read().await) {
                                         break stopped;
                                     }
@@ -253,6 +258,17 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                     &event_manager,
                                     fail_active_download(&dq, &worker_uuid, LIVE_CAPACITY_WINDOW_CLOSED).await,
                                     "live capacity window closed",
+                                ) {
+                                    error!("Download worker commit failed: {err}");
+                                    break 'worker;
+                                }
+                                continue;
+                            }
+                            ProviderAcquireResult::InputMaintenance => {
+                                if let Err(err) = broadcast_required_worker_mutation(
+                                    &event_manager,
+                                    fail_active_download(&dq, &worker_uuid, INPUT_MAINTENANCE_REASON).await,
+                                    "input maintenance",
                                 ) {
                                     error!("Download worker commit failed: {err}");
                                     break 'worker;

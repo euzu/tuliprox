@@ -1,4 +1,9 @@
-use crate::{api::model::AppState, model::ConfigInput, processing::processor::re_resolve_stalker_url};
+use super::blocks_new_playback;
+use crate::{
+    api::model::AppState,
+    model::{ConfigInput, ProxyUserCredentials},
+    processing::processor::re_resolve_stalker_url,
+};
 use axum::http::StatusCode;
 use shared::{
     error::TuliproxError,
@@ -46,12 +51,16 @@ pub(super) async fn re_resolve_stalker_url_singleflight(
 pub(crate) async fn resolve_initial_stalker_playback_url(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
+    user: &ProxyUserCredentials,
     provider_id: u32,
     cluster: XtreamCluster,
     item_type: PlaylistItemType,
     stream_url: &Arc<str>,
 ) -> Result<Arc<str>, TuliproxError> {
-    if !needs_initial_stalker_resolution(input.input_type, stream_url) {
+    // An input in maintenance is not contacted; the maintenance gate further down answers.
+    if !needs_initial_stalker_resolution(input.input_type, stream_url)
+        || blocks_new_playback(app_state, input, user, false)
+    {
         return Ok(Arc::clone(stream_url));
     }
     re_resolve_stalker_url_singleflight(app_state, input, provider_id, stalker_stream_kind(cluster, item_type), false)
