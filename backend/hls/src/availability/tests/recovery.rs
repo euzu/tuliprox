@@ -386,3 +386,287 @@ fn hls_session_recovery_pressure_new_publication_lateness_uses_current_reserve_e
     assert!(pressure.decision.close_admission);
     assert!(!pressure.decision.evaluate_lease_cutovers);
 }
+
+async fn wait_for_terminal_mode(fixture: &PostRefreshTerminalFixture) -> HlsLeasePlaybackMode {
+    tokio::time::timeout(Duration::from_millis(4_500), async {
+        loop {
+            let lease = fixture
+                .ctx
+                .hls_proxy
+                .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
+                .await
+                .expect("active lease");
+            if lease.playback_mode != HlsLeasePlaybackMode::Live {
+                return lease.playback_mode;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal decision before reserve is exhausted")
+}
+
+#[tokio::test]
+async fn live_reserve_deadline_commits_without_another_client_poll_while_refresh_is_in_flight() {
+    let fixture = post_refresh_terminal_fixture_with_progress("autonomous-reserve-deadline", true, false).await;
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &fixture.lease_id,
+        18_000,
+        fixture.now_ms,
+    )
+    .await;
+    {
+        let mut session = fixture.session.write().await;
+        session.origin_control.path_condition = HlsOriginPathCondition::RetryableFetchFailure;
+        session.origin_refresh.mark_started(fixture.now_ms);
+    }
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .expect("live lease");
+    let result = commit_terminal_tail_if_lease_reserve_requires_cutover(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &lease,
+        fixture.now_ms,
+    )
+    .await;
+    assert_eq!(result, HlsTerminalResolution::LiveAllowed);
+    assert_eq!(fixture.ctx.hls_proxy.availability_reevaluations().owner_count(), 1);
+
+    // R=17,100 ms and M=12,000 ms: the next six-second client poll would be too late.
+    // Only read the resulting state; do not issue another terminal/manifest request.
+    let mode = wait_for_terminal_mode(&fixture).await;
+    assert!(matches!(mode, HlsLeasePlaybackMode::TerminalTail(_)), "{mode:?}");
+    assert!(current_time_millis() < fixture.now_ms + 5_100);
+    assert!(fixture.session.read().await.origin_refresh.in_flight);
+}
+
+#[tokio::test]
+async fn first_http_502_arms_cutover_before_retry_after_sleep_finishes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fixture = post_refresh_terminal_fixture_with_progress("first-http-failure-cutover", true, false).await;
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &fixture.lease_id,
+        18_000,
+        fixture.now_ms,
+    )
+    .await;
+    fixture.session.write().await.origin_control.record_media_progress(fixture.now_ms, 12_000);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let handler_hits = Arc::clone(&hits);
+    let router = axum::Router::new().route(
+        "/index.m3u8",
+        axum::routing::get(move || {
+            let handler_hits = Arc::clone(&handler_hits);
+            async move {
+                let status = if handler_hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    axum::http::StatusCode::BAD_GATEWAY
+                } else {
+                    axum::http::StatusCode::NOT_FOUND
+                };
+                (status, [(axum::http::header::RETRY_AFTER, "60")], "origin failure")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local origin binds");
+    let address = listener.local_addr().expect("local origin address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("local origin serves");
+    });
+    let mut request = post_refresh_owner_request(&fixture);
+    request.origin_entry = crate::manifest_fetch::LiveHlsOriginEntry::parse(&format!("http://{address}/index.m3u8"))
+        .expect("local origin URL");
+    let refresh = tokio::spawn(crate::refresh::trigger_origin_refresh_sync(request));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if fixture.session.read().await.origin_control.path_condition
+                == HlsOriginPathCondition::RetryableFetchFailure
+                && fixture.ctx.hls_proxy.availability_reevaluations().owner_count() == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("first failed attempt publishes degraded evidence and owns the deadline");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(fixture.session.read().await.origin_refresh.in_flight);
+
+    let mode = wait_for_terminal_mode(&fixture).await;
+    assert!(matches!(mode, HlsLeasePlaybackMode::TerminalTail(_)), "{mode:?}");
+    assert!(current_time_millis() < fixture.now_ms + 5_100);
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "cutover must precede the capped six-second retry");
+    assert!(fixture.session.read().await.origin_refresh.in_flight);
+    assert!(tokio::time::timeout(Duration::from_secs(8), refresh)
+        .await
+        .expect("refresh finishes")
+        .expect("refresh task"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovered_origin_cancels_the_retained_reserve_cutover() {
+    let fixture = post_refresh_terminal_fixture_with_progress("recovered-reserve-owner", true, false).await;
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &fixture.lease_id,
+        18_000,
+        fixture.now_ms,
+    )
+    .await;
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .expect("live lease");
+    assert_eq!(
+        commit_terminal_tail_if_lease_reserve_requires_cutover(
+            &fixture.ctx,
+            &fixture.session,
+            &fixture.proxy_session_id,
+            &lease,
+            fixture.now_ms,
+        )
+        .await,
+        HlsTerminalResolution::LiveAllowed
+    );
+    assert_eq!(fixture.ctx.hls_proxy.availability_reevaluations().owner_count(), 1);
+    fixture.session.write().await.origin_control.record_media_progress(current_time_millis(), 12_000);
+    fixture.ctx.hls_proxy.availability_reevaluations().notify_session_evidence_changed(&fixture.proxy_session_id);
+    wait_for_availability_owner_completion(&fixture).await;
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
+        .await
+        .expect("recovered lease");
+    assert_eq!(lease.playback_mode, HlsLeasePlaybackMode::Live);
+}
+
+#[tokio::test]
+async fn expired_splice_deadline_finishes_unavailable_once_instead_of_leaving_a_live_lease() {
+    let fixture = post_refresh_terminal_fixture_with_progress("expired-splice-unavailable", true, false).await;
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &fixture.lease_id,
+        26_000,
+        fixture.now_ms,
+    )
+    .await;
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .expect("live lease");
+    assert_eq!(
+        commit_terminal_tail_if_lease_reserve_requires_cutover(
+            &fixture.ctx,
+            &fixture.session,
+            &fixture.proxy_session_id,
+            &lease,
+            fixture.now_ms,
+        )
+        .await,
+        HlsTerminalResolution::Committed
+    );
+    let terminal = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
+        .await
+        .expect("terminal lease");
+    assert!(matches!(terminal.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
+    assert_eq!(
+        commit_terminal_tail_if_lease_reserve_requires_cutover(
+            &fixture.ctx,
+            &fixture.session,
+            &fixture.proxy_session_id,
+            &terminal,
+            current_time_millis(),
+        )
+        .await,
+        HlsTerminalResolution::Committed
+    );
+    assert!(!fixture.session.read().await.has_terminal_tail_protections());
+}
+
+#[tokio::test(start_paused = true)]
+async fn post_refresh_recovery_request_replaces_a_reserve_only_worker_without_losing_refresh_work() {
+    let fixture = post_refresh_terminal_fixture_with_progress("reserve-owner-recovery-upgrade", true, false).await;
+    fixture.session.write().await.origin_refresh.mark_started(fixture.now_ms);
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .expect("live lease");
+    assert_eq!(
+        commit_terminal_tail_if_lease_reserve_requires_cutover(
+            &fixture.ctx,
+            &fixture.session,
+            &fixture.proxy_session_id,
+            &lease,
+            fixture.now_ms,
+        )
+        .await,
+        HlsTerminalResolution::LiveAllowed
+    );
+    assert_eq!(fixture.ctx.hls_proxy.availability_reevaluations().owner_count(), 1);
+    assert_post_refresh_owner_checks_refresh_gate_once(&fixture).await;
+}
+
+#[tokio::test]
+async fn publication_late_origin_can_finish_unavailable_after_the_splice_deadline() {
+    let fixture = post_refresh_terminal_fixture_with_progress("publication-late-unavailable", true, false).await;
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &fixture.lease_id,
+        26_000,
+        fixture.now_ms,
+    )
+    .await;
+    fixture.session.write().await.origin_control.record_media_progress(fixture.now_ms - 18_000, 12_000);
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .expect("live lease");
+    assert_eq!(
+        commit_terminal_tail_if_lease_reserve_requires_cutover(
+            &fixture.ctx,
+            &fixture.session,
+            &fixture.proxy_session_id,
+            &lease,
+            fixture.now_ms,
+        )
+        .await,
+        HlsTerminalResolution::Committed
+    );
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
+        .await
+        .expect("terminal lease");
+    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
+}

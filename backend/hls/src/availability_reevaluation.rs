@@ -81,6 +81,8 @@ pub enum HlsAvailabilityReevaluationRegistration {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HlsAvailabilityReevaluationMode {
     RecoveryPressure,
+    /// Tracks a live reserve deadline independently of a client request or a running origin fetch.
+    TerminalReserve,
     PostRefresh(HlsPostRefreshAvailabilityReason),
 }
 
@@ -90,8 +92,10 @@ impl HlsAvailabilityReevaluationMode {
             (Self::PostRefresh(current), Self::PostRefresh(incoming)) => {
                 Self::PostRefresh(stronger_post_refresh_reason(current, incoming))
             }
-            (Self::PostRefresh(reason), Self::RecoveryPressure)
-            | (Self::RecoveryPressure, Self::PostRefresh(reason)) => Self::PostRefresh(reason),
+            (Self::PostRefresh(reason), Self::RecoveryPressure | Self::TerminalReserve)
+            | (Self::RecoveryPressure | Self::TerminalReserve, Self::PostRefresh(reason)) => Self::PostRefresh(reason),
+            (Self::TerminalReserve, Self::RecoveryPressure | Self::TerminalReserve)
+            | (Self::RecoveryPressure, Self::TerminalReserve) => Self::TerminalReserve,
             (Self::RecoveryPressure, Self::RecoveryPressure) => Self::RecoveryPressure,
         }
     }
@@ -106,10 +110,14 @@ const fn stronger_post_refresh_reason(
         | (_, HlsPostRefreshAvailabilityReason::HardManifestFailure) => {
             HlsPostRefreshAvailabilityReason::HardManifestFailure
         }
+        (HlsPostRefreshAvailabilityReason::DeterministicTimelineConflict, _)
+        | (_, HlsPostRefreshAvailabilityReason::DeterministicTimelineConflict) => {
+            HlsPostRefreshAvailabilityReason::DeterministicTimelineConflict
+        }
         (
-            HlsPostRefreshAvailabilityReason::DeterministicTimelineConflict,
-            HlsPostRefreshAvailabilityReason::DeterministicTimelineConflict,
-        ) => HlsPostRefreshAvailabilityReason::DeterministicTimelineConflict,
+            HlsPostRefreshAvailabilityReason::RetryableManifestFailure,
+            HlsPostRefreshAvailabilityReason::RetryableManifestFailure,
+        ) => HlsPostRefreshAvailabilityReason::RetryableManifestFailure,
     }
 }
 
@@ -174,7 +182,7 @@ impl HlsAvailabilityReevaluationCoordinator {
     pub fn register<Work, WorkFuture>(
         self: &Arc<Self>,
         key: HlsAvailabilityReevaluationOwnerKey,
-        mode: HlsAvailabilityReevaluationMode,
+        mut mode: HlsAvailabilityReevaluationMode,
         work: Work,
     ) -> HlsAvailabilityReevaluationRegistration
     where
@@ -186,24 +194,25 @@ impl HlsAvailabilityReevaluationCoordinator {
         };
         let mut state = self.lock_state();
         if let Some(current) = state.owners.get_mut(&key.proxy_session_id) {
-            if current.key == key {
-                current.mode = current.mode.merge(mode);
-                current.rerun_requested = true;
-                current.wake.notify_one();
-                return HlsAvailabilityReevaluationRegistration::AlreadyOwned;
-            }
-            if !key.supersedes(&current.key) {
+            if current.key != key && !key.supersedes(&current.key) {
                 return HlsAvailabilityReevaluationRegistration::Superseded;
             }
+            let installs_refresh_payload = current.mode == HlsAvailabilityReevaluationMode::TerminalReserve
+                && mode != HlsAvailabilityReevaluationMode::TerminalReserve;
+            mode = current.mode.merge(mode);
             // A newer demand for the same proxy session is owned by the
             // already-counted task. The worker will snapshot current session
             // evidence and atomically rekey itself without acquiring another
             // permit. Keeping one dirty bit preserves a bounded successor
             // cycle while coalescing repeated registrations.
-            current.mode = current.mode.merge(mode);
-            current.rerun_requested = true;
-            current.wake.notify_one();
-            return HlsAvailabilityReevaluationRegistration::AlreadyOwned;
+            // A reserve-only worker has no origin request payload. Replace it
+            // when recovery work arrives so merging the mode cannot discard that work.
+            if !installs_refresh_payload {
+                current.mode = mode;
+                current.rerun_requested = true;
+                current.wake.notify_one();
+                return HlsAvailabilityReevaluationRegistration::AlreadyOwned;
+            }
         }
         let Ok(task_permit) = Arc::clone(&self.task_capacity).try_acquire_owned() else {
             return HlsAvailabilityReevaluationRegistration::CapacityExceeded;

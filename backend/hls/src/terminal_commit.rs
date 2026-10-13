@@ -303,6 +303,16 @@ impl HlsTerminalCommitCommand {
         self.preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch()
     }
 
+    fn submission_deadline_ms(&self, now_ms: u64) -> u64 {
+        if self.is_unavailable_after_owner_failure() {
+            // No media is spliced by this decision. It gets one bounded CAS budget,
+            // even when the media deadline has already elapsed; repeated submissions cannot renew it.
+            now_ms.saturating_add(terminal_commit_retry_schedule_budget_ms())
+        } else {
+            self.latest_safe_terminal_commit_at_ms()
+        }
+    }
+
     /// Monotonic session/lease evidence used to prevent a late stale request
     /// from replacing a newer command for the same lease decision generation.
     fn evidence_version(&self) -> [u64; 7] {
@@ -656,7 +666,7 @@ impl HlsTerminalCommitRetryCoordinator {
             return HlsTerminalCommitSubmissionDecision::Cancelled;
         }
         let key = command.key.clone();
-        let incoming_deadline_ms = command.latest_safe_terminal_commit_at_ms();
+        let incoming_deadline_ms = command.submission_deadline_ms(now_ms);
         if let Some(existing) = state.owners.get(&key).map(HlsTerminalCommitExistingOwner::snapshot) {
             return self.submit_existing(&mut state, command, &key, now_ms, incoming_deadline_ms, existing);
         }
@@ -672,8 +682,21 @@ impl HlsTerminalCommitRetryCoordinator {
         incoming_deadline_ms: u64,
         existing: HlsTerminalCommitExistingOwner,
     ) -> HlsTerminalCommitSubmissionDecision {
-        let effective_deadline_ms = existing.effective_deadline_ms.min(incoming_deadline_ms);
-        if !command.may_replace(&existing.command) {
+        let may_replace = command.may_replace(&existing.command);
+        let changes_deadline_kind =
+            command.is_unavailable_after_owner_failure() != existing.command.is_unavailable_after_owner_failure();
+        let replaces_media_with_unavailable =
+            changes_deadline_kind && may_replace && command.is_unavailable_after_owner_failure();
+        let effective_deadline_ms = if changes_deadline_kind {
+            if may_replace {
+                incoming_deadline_ms
+            } else {
+                existing.effective_deadline_ms
+            }
+        } else {
+            existing.effective_deadline_ms.min(incoming_deadline_ms)
+        };
+        if !may_replace {
             let deadline_tightened = effective_deadline_ms < existing.effective_deadline_ms;
             let tightened_scheduled_at_ms = if deadline_tightened {
                 terminal_commit_scheduled_before_deadline(existing.scheduled_at_ms, now_ms, effective_deadline_ms)
@@ -732,7 +755,8 @@ impl HlsTerminalCommitRetryCoordinator {
         if let Some(owner) = state.owners.get_mut(key) {
             owner.owner_token = owner_token;
             owner.command = Arc::clone(&command);
-            owner.attempts_completed = existing.attempts_completed.max(1);
+            owner.attempts_completed =
+                if replaces_media_with_unavailable { 1 } else { existing.attempts_completed.max(1) };
             owner.effective_deadline_ms = effective_deadline_ms;
             owner.scheduled_at_ms = now_ms;
             owner.scheduling_sequence = scheduling_sequence;
@@ -1582,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_after_owner_failure_retains_the_exclusive_media_tail_deadline() {
+    fn unavailable_after_owner_failure_has_a_separate_bounded_cas_deadline() {
         let mut command = retry_command("failed-closed-unavailable", 10_000, 1, 1);
         let media_tail_deadline =
             command.preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch();
@@ -1591,10 +1615,11 @@ mod tests {
         command.decision =
             HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(HlsTerminalTailCompatibility::TerminalMediaNotReady);
         assert_eq!(command.latest_safe_terminal_commit_at_ms(), media_tail_deadline);
+        assert_eq!(command.submission_deadline_ms(20_000), 20_000 + super::terminal_commit_retry_schedule_budget_ms());
     }
 
     #[test]
-    fn failed_media_tail_owner_cannot_be_replaced_at_the_exclusive_deadline() {
+    fn failed_media_tail_owner_can_finish_unavailable_at_the_exclusive_deadline() {
         let coordinator = HlsTerminalCommitRetryCoordinator::default();
         let command = retry_command("failed-owner-replacement", 10_000, 1, 1);
         let key = command.key.clone();
@@ -1608,7 +1633,7 @@ mod tests {
         coordinator.fail_owner(&key, owner_token, HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed);
 
         let replacement = HlsTerminalCommitCommand {
-            key,
+            key: key.clone(),
             session,
             session_incarnation,
             preparation,
@@ -1622,8 +1647,11 @@ mod tests {
         };
         assert!(matches!(
             coordinator.submit(replacement, failed_at_ms),
-            HlsTerminalCommitSubmissionDecision::Failed(HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed)
+            HlsTerminalCommitSubmissionDecision::Attempt { .. }
         ));
+        let owner = coordinator.owner_snapshot(&key).expect("unavailable CAS owner");
+        assert_eq!(owner.effective_deadline_ms, failed_at_ms + super::terminal_commit_retry_schedule_budget_ms());
+        assert_eq!(owner.attempts_completed, 1);
     }
 
     #[test]
@@ -1896,5 +1924,36 @@ mod tests {
         ));
         assert!(!coordinator.owner_snapshot(&first_key).expect("released worker owner").in_flight);
         assert!(coordinator.owner_snapshot(&second_key).expect("unrelated client owner").in_flight);
+    }
+
+    #[test]
+    fn unavailable_cas_budget_is_neither_renewed_by_polls_nor_poisoned_by_stale_media_deadlines() {
+        let coordinator = HlsTerminalCommitRetryCoordinator::default();
+        let mut initial = retry_command("bounded-unavailable", 10_000, 1, 1);
+        initial.decision =
+            HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(HlsTerminalTailCompatibility::TerminalMediaNotReady);
+        let session = Arc::clone(&initial.session);
+        let key = initial.key.clone();
+        assert!(matches!(coordinator.submit(initial, 10_000), HlsTerminalCommitSubmissionDecision::Attempt { .. }));
+        let deadline = coordinator.owner_snapshot(&key).expect("initial owner").effective_deadline_ms;
+        let mut stale_media = retry_command("bounded-unavailable", 10_000, 2, 1);
+        stale_media.session = Arc::clone(&session);
+        assert!(matches!(
+            coordinator.submit(stale_media, 10_100),
+            HlsTerminalCommitSubmissionDecision::PendingExisting { .. }
+        ));
+        assert_eq!(
+            coordinator.owner_snapshot(&key).expect("unavailable owner survives stale media").effective_deadline_ms,
+            deadline
+        );
+        let mut duplicate = retry_command("bounded-unavailable", 10_000, 3, 1);
+        duplicate.session = session;
+        duplicate.decision =
+            HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(HlsTerminalTailCompatibility::TerminalMediaNotReady);
+        assert!(matches!(
+            coordinator.submit(duplicate, deadline),
+            HlsTerminalCommitSubmissionDecision::Failed(HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed)
+        ));
+        assert_eq!(coordinator.owner_snapshot(&key).expect("bounded owner").effective_deadline_ms, deadline);
     }
 }

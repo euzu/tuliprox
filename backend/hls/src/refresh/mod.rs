@@ -183,6 +183,7 @@ pub struct HlsPostRefreshRuntime {
 pub enum HlsPostRefreshAvailabilityReason {
     DeterministicTimelineConflict,
     HardManifestFailure,
+    RetryableManifestFailure,
 }
 
 impl HlsPostRefreshAvailabilityReason {
@@ -190,6 +191,7 @@ impl HlsPostRefreshAvailabilityReason {
         match self {
             Self::DeterministicTimelineConflict => "deterministic_timeline_conflict",
             Self::HardManifestFailure => "hard_manifest_failure",
+            Self::RetryableManifestFailure => "retryable_manifest_failure",
         }
     }
 }
@@ -864,6 +866,7 @@ fn manifest_fetch_context(request: &OriginRefreshRequest) -> HlsOriginManifestFe
     HlsOriginManifestFetchContext {
         app_config: Arc::clone(&request.app_config),
         session: Arc::clone(&request.session),
+        availability_runtime: request.post_refresh_runtime.as_ref().map(|runtime| runtime.ctx.clone()),
         origin_entry: request.origin_entry.clone(),
         headers: hls_origin_headers_with_provider_session(&request.headers, &request.origin_provider_session_headers),
         client: request.client.clone(),

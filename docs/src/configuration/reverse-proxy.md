@@ -351,9 +351,16 @@ Important boundaries:
 
 * `reverse_proxy.hls_cache` only prepares the global cache engine. A target must also set
   `options.share_live_streams.hls: true` in `source.yml` before generated HLS live entries use the shared HLS path.
-* HLS cache retry behavior is fixed internally and is not user-configurable.
+* HLS cache retry behavior is fixed internally and is not user-configurable. Shared HLS origin-manifest retries cap an
+  upstream `Retry-After` delay at half the last known target duration. When no target duration is available, the
+  15-second fallback limits the delay to 7.5 seconds.
 * Playback reserve uses a stable session media clock and completed segment deliveries. Removing old cache entries
   does not reset the playback position; missing segments, MAPs and keys still limit the usable reserve.
+* A retryable manifest failure marks the origin as degraded on the first failed attempt. A bounded background owner
+  reevaluates the remaining reserve and schedules the terminal transition independently of origin retries and client
+  playlist polling. New origin progress invalidates the pending transition.
+* A terminal video transition must commit before its safe splice deadline. If that deadline has already elapsed,
+  the lease becomes terminal-unavailable through a separate bounded state commit; it cannot publish a late video splice.
 * `reverse_proxy.rewrite_secret` must stay stable. It is used for future HLS `proxy_session_id` values and transient resource IDs.
 * `session_idle_timeout` controls HLS cache access-lease validity and idle cleanup. It is independent from
   `reverse_proxy.stream.hls_session_ttl_secs`, which belongs to the non-cache HLS request continuity path.

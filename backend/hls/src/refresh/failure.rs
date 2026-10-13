@@ -163,7 +163,7 @@ pub(super) fn apply_manifest_fetch_failure_signal(
     } else if signal.is_hard() {
         Some(HlsPostRefreshAvailabilityReason::HardManifestFailure)
     } else {
-        None
+        Some(HlsPostRefreshAvailabilityReason::RetryableManifestFailure)
     };
     reason.map_or(HlsPostRefreshAvailabilityAction::None, |reason| HlsPostRefreshAvailabilityAction::Reevaluate {
         reason,

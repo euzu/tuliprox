@@ -155,6 +155,18 @@ impl HlsSessionOriginControl {
 
     pub fn record_origin_response(&mut self, now_ms: u64) { self.last_origin_response_at_ms = Some(now_ms); }
 
+    /// Includes publication lateness even when the most recent HTTP request has not failed yet.
+    pub(crate) fn path_is_degraded_at(&self, now_ms: u64) -> bool {
+        self.path_condition.is_degraded()
+            || self.last_media_progress_at_ms.zip(self.target_duration_snapshot_ms).is_some_and(
+                |(last_progress_ms, target_duration_ms)| {
+                    target_duration_ms > 0
+                        && now_ms.saturating_sub(last_progress_ms)
+                            >= crate::origin_progress::publication_late_after_ms(target_duration_ms)
+                },
+            )
+    }
+
     pub fn record_media_progress(&mut self, now_ms: u64, target_duration_ms: u64) {
         self.last_origin_response_at_ms = Some(now_ms);
         self.last_media_progress_at_ms = Some(now_ms);

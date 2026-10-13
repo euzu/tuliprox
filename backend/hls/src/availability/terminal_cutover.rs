@@ -239,7 +239,7 @@ pub async fn commit_terminal_tail_if_lease_reserve_requires_cutover(
     lease: &HlsAccessLease,
     now_ms: u64,
 ) -> HlsTerminalResolution {
-    commit_terminal_tail_if_lease_reserve_requires_cutover_detailed(
+    let detailed = commit_terminal_tail_if_lease_reserve_requires_cutover_detailed(
         ctx,
         session,
         proxy_session_id,
@@ -247,8 +247,30 @@ pub async fn commit_terminal_tail_if_lease_reserve_requires_cutover(
         now_ms,
         HlsTerminalDecisionPurpose::OrdinaryCutover,
     )
-    .await
-    .resolution
+    .await;
+    if detailed.live_reserve_deadline.is_some()
+        && matches!(detailed.resolution, HlsTerminalResolution::LiveAllowed | HlsTerminalResolution::Reevaluate)
+    {
+        let registration =
+            super::reevaluation::register_terminal_reserve_reevaluation(ctx.clone(), Arc::clone(session)).await;
+        if matches!(
+            registration,
+            crate::availability_reevaluation::HlsAvailabilityReevaluationRegistration::CapacityExceeded
+                | crate::availability_reevaluation::HlsAvailabilityReevaluationRegistration::RuntimeUnavailable
+        ) {
+            return commit_terminal_tail_if_lease_reserve_requires_cutover_detailed(
+                ctx,
+                session,
+                proxy_session_id,
+                lease,
+                now_ms,
+                HlsTerminalDecisionPurpose::AutonomousOwnerFailureFallback,
+            )
+            .await
+            .resolution;
+        }
+    }
+    detailed.resolution
 }
 
 pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detailed(

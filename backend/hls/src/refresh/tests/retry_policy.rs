@@ -1118,6 +1118,7 @@ async fn shared_initial_manifest_decoder_failure_retries_until_success() {
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),
@@ -1164,6 +1165,7 @@ async fn shared_initial_manifest_waits_for_next_attempt_base_delay() {
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),
@@ -1202,6 +1204,7 @@ async fn shared_initial_manifest_decoder_failures_stop_at_attempt_budget() {
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),
@@ -1448,4 +1451,39 @@ async fn cold_start_hard_error_is_preserved_by_fetch_policy() {
         session.origin_control.progress_phase,
         super::super::super::origin_progress::HlsOriginProgressPhase::Cold
     );
+}
+
+#[tokio::test]
+async fn shared_initial_manifest_caps_retry_after_at_half_target_duration() {
+    for use_manual_redirects in [false, true] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let server = spawn_test_origin(Arc::new(move |_path| {
+            if hits_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+                return (502, vec![("Retry-After", "60".to_string())], "retry".to_string());
+            }
+            (200, Vec::new(), manifest_body())
+        }))
+        .await;
+        let session = test_session();
+        session.write().await.origin_control.record_media_progress(50, 1_000);
+        let mut request = test_origin_refresh_request(session);
+        request.origin_entry =
+            LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url)).expect("entry url");
+        request.use_manual_redirects = use_manual_redirects;
+        let context = super::manifest_fetch_context(&request);
+        let started_at = std::time::Instant::now();
+
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context)),
+        )
+        .await
+        .expect("Retry-After must not stall the manifest fetch for 60 seconds")
+        .expect("second logical attempt should succeed");
+
+        assert_eq!(fetched.attempts, 2);
+        assert_eq!(server.requests.lock().await.len(), 2);
+        assert!(started_at.elapsed() >= std::time::Duration::from_millis(500));
+    }
 }

@@ -218,6 +218,7 @@ async fn shared_initial_manifest_automatic_cross_origin_redirect_keeps_identity_
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers,
         client: reqwest::Client::builder().no_proxy().build().expect("client"),
@@ -276,6 +277,7 @@ async fn shared_initial_manifest_budget_covers_status_decoder_redirect_and_succe
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),

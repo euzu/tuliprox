@@ -99,13 +99,12 @@ fn evaluate_terminal_commit_authorization(
         ) => (HlsTerminalCutoverCapability::TailUnavailable(*reason), preparation.terminal_media_preparation),
     };
     if matches!(decision, HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_)) {
-        if !session.origin_control.path_condition.is_degraded() {
+        if !session.origin_control.path_is_degraded_at(now_ms) {
             return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::CutoverNoLongerRequired);
         }
-        // This fallback publishes no media bytes. Submission arbitration and
-        // the terminal precondition retain the preparation's original
-        // exclusive deadline, so this authorization is reachable only while
-        // the autonomous owner still has time to commit safely.
+        // This fallback publishes no media bytes. Submission arbitration gives it
+        // a bounded CAS budget independent of the expired media-splice deadline.
+        // Session, recovery and lease generations still have to match.
         return HlsTerminalCommitAuthorization::Authorized { protection_capacity_exceeded: false };
     }
     if preparation.trigger.is_runtime_policy() {
@@ -277,7 +276,7 @@ impl HlsProxyManager {
                 session.activity.media_readiness_generation,
                 session.origin_control.origin_epoch,
                 session.origin_control.last_media_progress_at_ms,
-                session.origin_control.path_condition.is_degraded(),
+                session.origin_control.path_is_degraded_at(now_ms),
                 recovery_snapshot,
             )
         };

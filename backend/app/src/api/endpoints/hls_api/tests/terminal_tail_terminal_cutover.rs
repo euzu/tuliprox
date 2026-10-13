@@ -156,7 +156,17 @@ async fn warm_fmp4_map_cutover_without_ready_reserve_fails_closed_without_a_ts_s
         .access_lease_response_snapshot(&lease_id, &proxy_session_id, super::super::current_time_millis())
         .await
         .expect("failed-closed lease snapshot");
-    assert_eq!(lease.playback_mode, HlsLeasePlaybackMode::Live);
+    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
+    let repeated = get_response(Arc::clone(&app_state), &manifest_uri, None).await;
+    assert_eq!(repeated.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response_body(repeated).await.is_empty());
+    let repeated_lease = app_state
+        .hls
+        .proxy
+        .access_lease_response_snapshot(&lease_id, &proxy_session_id, super::super::current_time_millis())
+        .await
+        .expect("stable terminal-unavailable lease");
+    assert_eq!(repeated_lease.playback_mode, lease.playback_mode);
     let terminal_uri = format!("/hls/shared/live/{}/{}/terminal/1/0.ts", proxy_session_id.0, lease_id.0);
     let terminal_response = get_response(app_state, &terminal_uri, None).await;
     assert_eq!(terminal_response.status(), StatusCode::NOT_FOUND);
