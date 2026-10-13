@@ -64,8 +64,9 @@ pub fn exec_xtream_expiry_sync(app_state: &Arc<AppState>, cancel: &CancellationT
         let mut state_dirty = false;
         loop {
             let now = Utc::now().timestamp();
-            let accounts = collect_accounts(&app_state);
+            let mut accounts = collect_accounts(&app_state);
             state_dirty |= prune_state(&mut state, &accounts, now);
+            retain_queryable(&app_state, &mut accounts);
             fetch_due_accounts(
                 &app_state,
                 &accounts,
@@ -255,15 +256,18 @@ fn prune_state(state: &mut ExpiryState, accounts: &[Account], now: i64) -> bool 
             + state.cooldown_until.len()
 }
 
+/// An input in maintenance keeps its throttle state (pruning sees every account) but is
+/// neither queried nor persisted; its accounts are picked up again afterwards.
+fn retain_queryable(app_state: &AppState, accounts: &mut Vec<Account>) {
+    accounts.retain(|account| !app_state.maintenance.is_in_maintenance(&account.input_name));
+}
+
 fn collect_accounts(app_state: &AppState) -> Vec<Account> {
     let sources = app_state.app_config.sources.load();
     sources
         .inputs
         .iter()
-        // An input in maintenance is not queried; its accounts are picked up again afterwards.
-        .filter(|input| {
-            input.enabled && input.input_type.is_xtream() && !app_state.maintenance.is_in_maintenance(&input.name)
-        })
+        .filter(|input| input.enabled && input.input_type.is_xtream())
         .flat_map(|input| {
             let panel = Arc::<str>::from(panel_identity(&input.url, &input.name));
             let root = input.username.as_ref().zip(input.password.as_ref()).and_then(|(username, password)| {
@@ -520,11 +524,16 @@ mod tests {
     #[tokio::test]
     async fn accounts_of_inputs_in_maintenance_are_not_queried() -> Result<(), Box<dyn std::error::Error>> {
         let (_dir, app, _path) = super::super::provider_account_state::tests::fixture(false).await?;
-        assert!(!super::collect_accounts(&app).is_empty(), "the fixture input is queried normally");
+        let mut accounts = super::collect_accounts(&app);
+        super::retain_queryable(&app, &mut accounts);
+        assert!(!accounts.is_empty(), "the fixture input is queried normally");
 
         app.maintenance.add("root", None, 1).await?;
 
-        assert!(super::collect_accounts(&app).is_empty(), "an input in maintenance is not contacted");
+        let mut accounts = super::collect_accounts(&app);
+        assert!(!accounts.is_empty(), "pruning still sees accounts of an input in maintenance");
+        super::retain_queryable(&app, &mut accounts);
+        assert!(accounts.is_empty(), "an input in maintenance is not contacted");
         Ok(())
     }
 

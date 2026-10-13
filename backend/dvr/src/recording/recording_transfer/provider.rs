@@ -106,6 +106,7 @@ pub(super) async fn commit_acquired_download(
         active.error = None;
         active.paused = false;
         active.finished = false;
+        active.recording.provider_started = true;
         let notification = mark_recording_metadata_notification(&mut active.recording, LifecycleEvent::Started, None);
         Ok(Some(notification))
     })

@@ -1000,6 +1000,14 @@ async fn maintenance_answers_before_admission_for_an_exhausted_user() {
     .into_response();
 
     assert_eq!(response.status(), axum::http::StatusCode::OK, "the maintenance clip answers");
+    let body = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut body = response.into_body();
+        let frame = http_body_util::BodyExt::frame(&mut body).await;
+        frame.and_then(Result::ok).and_then(|frame| frame.into_data().ok()).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    assert!(body.windows(5).any(|window| window == b"MAINT"), "the maintenance clip is served");
     let denied = app_state
         .active_users
         .events()

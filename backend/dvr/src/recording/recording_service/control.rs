@@ -250,6 +250,7 @@ impl RecordingService {
                 task.state = RecordingTaskState::Queued;
                 task.retry_attempts = 0;
                 task.next_retry_at = None;
+                task.recording.provider_started = false;
                 candidate.queue.push(task);
                 Ok(true)
             },

@@ -308,6 +308,7 @@ impl RecordingQueue {
                 task.state = next;
                 task.retry_attempts = 0;
                 task.next_retry_at = None;
+                task.recording.provider_started = false;
                 candidate.queue.push(task);
                 Ok(Some(true))
             } else {

@@ -444,16 +444,16 @@ async fn start_worker_with(stub: &Arc<StubCapacity>, queue: &Arc<RecordingQueue>
     .expect("worker started");
 }
 
-async fn queued_live_capture(dir: &TempDir) -> Arc<RecordingQueue> { queued_live_capture_with(dir, 0).await }
+async fn queued_live_capture(dir: &TempDir) -> Arc<RecordingQueue> { queued_live_capture_with(dir, false).await }
 
-async fn queued_live_capture_with(dir: &TempDir, retry_attempts: u8) -> Arc<RecordingQueue> {
+async fn queued_live_capture_with(dir: &TempDir, provider_started: bool) -> Arc<RecordingQueue> {
     let queue = Arc::new(RecordingQueue::new_persistent(dir.path(), dir.path()).expect("open repository"));
     let now = chrono::Utc::now().timestamp();
     let mut capture = scheduled_task(RecordingKind::Live, now, 1_800);
     capture.uuid = "live".to_string();
     capture.state = RecordingTaskState::Queued;
     capture.input_name = Some(Arc::from("provider"));
-    capture.retry_attempts = retry_attempts;
+    capture.recording.provider_started = provider_started;
     let capture = RecordingQueue::to_persisted(&capture);
     crate::recording::recording_queue::mutate(&queue, move |candidate| {
         candidate.queue.push(capture.clone());
@@ -500,7 +500,7 @@ async fn a_capture_that_already_ran_keeps_retrying_during_maintenance() {
     // A retry or a reload requeue of a recording that already ran is not a new start:
     // running recordings, including their reconnects, are not affected by maintenance.
     let dir = TempDir::new().expect("tempdir");
-    let queue = queued_live_capture_with(&dir, 1).await;
+    let queue = queued_live_capture_with(&dir, true).await;
     let stub = StubCapacity::with_room();
     stub.set_maintenance("provider", true);
 

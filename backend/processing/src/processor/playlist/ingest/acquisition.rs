@@ -516,6 +516,12 @@ async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: Metadat
     input: &ConfigInput,
 ) -> Vec<TuliproxError> {
     let Some(aliases) = input.get_enabled_aliases() else { return vec![] };
+    // Maintenance is keyed by the parent input; an alias carries its own name and would
+    // otherwise contact the provider. Its persisted playlist stays in place.
+    if ctx.is_input_in_maintenance(&input.name) {
+        debug!("Input '{}' is in maintenance; skipping its M3U alias downloads", input.name);
+        return vec![];
+    }
     let mut errors = Vec::new();
 
     for alias in aliases {

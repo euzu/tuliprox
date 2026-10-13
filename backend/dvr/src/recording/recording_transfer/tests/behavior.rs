@@ -1,9 +1,9 @@
 use super::{
     acquire_result_after_wait, acquire_result_for_control, app_config_with_listener, bare_app_config,
-    continue_after_pause, download_file, finalize_http_transfer, finish_active_and_promote, http_transfer_path,
-    read_request, recording_deadline_instant, requeue_active_download_for_capacity_wait, scheduled_task,
-    serve_range_fixture, slot_queue, start_recording_scheduler, wait_for_provider_slot, DownloadExecutionResult,
-    ProviderAcquireResult, RecordingNotificationPlan,
+    commit_acquired_download, continue_after_pause, download_file, finalize_http_transfer, finish_active_and_promote,
+    http_transfer_path, read_request, recording_deadline_instant, requeue_active_download_for_capacity_wait,
+    scheduled_task, serve_range_fixture, slot_queue, start_recording_scheduler, wait_for_provider_slot,
+    DownloadExecutionResult, ProviderAcquireResult, RecordingNotificationPlan,
 };
 #[cfg(unix)]
 use super::{counting_ffmpeg, ensure_recording_worker_running};
@@ -97,6 +97,25 @@ async fn a_restart_requeue_consumes_the_restart_signal() {
 
     assert!(requeued);
     assert_eq!(*queue.worker("task").control_signal.read().await, RecordingControl::None);
+}
+
+#[tokio::test]
+async fn a_preempted_capture_stays_started_across_its_requeue() {
+    // Maintenance refuses only new starts; a capture that already held a provider slot
+    // must still count as started once a preemption put it back into the queue.
+    let queue = RecordingQueue::new();
+    *queue.active.write().await = vec![scheduled_task(RecordingKind::Live, 0, 60)];
+    assert!(!queue.active.read().await[0].recording.provider_started);
+
+    commit_acquired_download(&queue, "task").await.expect("commit");
+    assert!(queue.active.read().await[0].recording.provider_started);
+
+    assert!(requeue_active_download_for_capacity_wait(&queue, "task", "preempted", false, None)
+        .await
+        .expect("requeue"));
+    let queued = queue.queue.lock().await;
+    let task = queued.iter().find(|task| task.uuid == "task").expect("requeued task");
+    assert!(task.recording.provider_started);
 }
 
 #[test]

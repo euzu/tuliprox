@@ -151,7 +151,7 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                         dq.active.read().await.iter().find(|task| task.uuid == worker_uuid).map(|download| {
                             // A retry or a requeue of a recording that already ran is not a new
                             // start; maintenance only refuses new ones.
-                            let first_start = download.size == 0 && download.retry_attempts == 0;
+                            let first_start = !download.recording.provider_started;
                             (download.paused, recording_deadline_instant(download), first_start)
                         });
                     if let Some((paused, window_deadline, first_start)) = active_head {
@@ -168,11 +168,6 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                             // Only live work has a window deadline; a transfer waits as long as it takes.
                             if let Some(input_name) = input_name {
                                 loop {
-                                    // Checked before every slot request, also after waiting, so
-                                    // nothing has to be released.
-                                    if first_start && capacity.is_input_in_maintenance(&input_name) {
-                                        break ProviderAcquireResult::Maintenance;
-                                    }
                                     if let Some(stopped) = acquire_result_for_control(*control_signal.read().await) {
                                         break stopped;
                                     }
@@ -181,6 +176,11 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                         // concurrent recording starts respect background limits.
                                         let _capacity = dq.capacity_guard.lock().await;
                                         let capacities = capacity.capacities_for_input(&input_name).await;
+                                        // Checked right before every slot request, after every await
+                                        // of this attempt, so nothing has to be released.
+                                        if first_start && capacity.is_input_in_maintenance(&input_name) {
+                                            break ProviderAcquireResult::Maintenance;
+                                        }
                                         let live_config = app_config.config.load();
                                         let capacity_cfg = live_config.recording().unwrap_or(&download_cfg);
                                         if background_download_should_wait(priority, &capacities, capacity_cfg) {

@@ -126,6 +126,11 @@ pub struct RecordingMetadata {
     /// Persisted at-most-once notification markers.
     #[serde(default)]
     pub notification_markers: Vec<NotificationMarker>,
+    /// Set once the first provider connection was acquired. A later acquisition
+    /// (retry, requeue after preemption, restart) resumes the recording rather
+    /// than starting a new one. Internal; never projected into a DTO.
+    #[serde(default)]
+    pub provider_started: bool,
     /// Terminal-only previous state while a deletion is in progress. `None`
     /// outside the `Deleting` transitional state.
     pub deleting_previous_state: Option<DeletionPreviousState>,
@@ -167,6 +172,7 @@ impl RecordingMetadata {
             measured_bytes: 0,
             completed_at: None,
             notification_markers: Vec::new(),
+            provider_started: false,
             group: None,
             series_name: None,
             deleting_previous_state: None,
