@@ -11,16 +11,16 @@ use crate::{
     i18n::use_translation,
     services::MaintenanceService,
 };
-use shared::model::{InputMaintenanceEntries, InputMaintenanceStateDto};
+use shared::model::{MaintenanceEntries, MaintenanceStateDto};
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct MaintenanceDialogProps {
-    pub state: Rc<InputMaintenanceStateDto>,
+    pub state: Rc<MaintenanceStateDto>,
     pub can_write: bool,
-    pub on_state: Callback<InputMaintenanceStateDto>,
+    pub on_state: Callback<MaintenanceStateDto>,
     pub on_close: Callback<()>,
 }
 
@@ -37,7 +37,7 @@ fn now_secs() -> i64 { (js_sys::Date::now() / 1000.0) as i64 }
 async fn apply_changes(
     service: &MaintenanceService,
     changes: PendingChanges,
-) -> Result<InputMaintenanceStateDto, crate::error::Error> {
+) -> Result<MaintenanceStateDto, crate::error::Error> {
     for name in &changes.deletes {
         service.remove(name).await?;
     }
@@ -93,7 +93,7 @@ pub fn MaintenanceDialog(props: &MaintenanceDialogProps) -> Html {
 
     let on_remove_all = {
         let draft = draft.clone();
-        Callback::from(move |_: String| draft.set(InputMaintenanceEntries::new()))
+        Callback::from(move |_: String| draft.set(MaintenanceEntries::new()))
     };
 
     let on_save = {

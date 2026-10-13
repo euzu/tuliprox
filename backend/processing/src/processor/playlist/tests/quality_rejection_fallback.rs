@@ -240,7 +240,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         stalker_refresh_mode: StalkerRefreshMode::Complete,
         partial_refresh: Arc::new(AtomicBool::new(false)),
         had_quality_rejections: Arc::new(AtomicBool::new(false)),
-        input_maintenance: None,
+        maintenance: None,
     }
 }
 
@@ -1621,7 +1621,7 @@ mod staged_completion;
 
 struct FixedGate(&'static str);
 
-impl tuliprox_core::model::InputMaintenanceGate for FixedGate {
+impl tuliprox_core::model::MaintenanceGate for FixedGate {
     fn is_in_maintenance(&self, input_name: &str) -> bool { input_name == self.0 }
 }
 
@@ -1635,7 +1635,7 @@ async fn maintenance_input_uses_persisted_playlist_without_download() {
     // cache_duration_seconds = 0: without maintenance this input is downloaded.
     let input = test_input(&server.base_url, quality_95(), 0, &[]);
     seed_baseline(&ctx, &input).await;
-    ctx.input_maintenance = Some(Arc::new(FixedGate("quality-provider")));
+    ctx.maintenance = Some(Arc::new(FixedGate("quality-provider")));
 
     let mut result = download_input(&ctx, &input, false).await;
 
@@ -1651,7 +1651,7 @@ async fn maintenance_input_without_cache_contributes_nothing() {
     let server = TestXtreamServer::start([2, 2, 2]);
     let mut ctx = processing_context(temp.path());
     let input = test_input(&server.base_url, quality_95(), 0, &[]);
-    ctx.input_maintenance = Some(Arc::new(FixedGate("quality-provider")));
+    ctx.maintenance = Some(Arc::new(FixedGate("quality-provider")));
 
     let mut result = download_input(&ctx, &input, false).await;
 
@@ -1667,7 +1667,7 @@ async fn input_not_in_maintenance_still_downloads() {
     let mut ctx = processing_context(temp.path());
     let input = test_input(&server.base_url, quality_95(), 0, &[]);
     seed_baseline(&ctx, &input).await;
-    ctx.input_maintenance = Some(Arc::new(FixedGate("some-other-input")));
+    ctx.maintenance = Some(Arc::new(FixedGate("some-other-input")));
 
     let mut result = download_input(&ctx, &input, false).await;
 
@@ -1699,7 +1699,7 @@ async fn maintenance_input_skips_epg_download_and_keeps_existing_file() {
     let epg_path =
         crate::epg::get_input_raw_epg_file_path(&epg_source, &input, &storage_dir).await.expect("epg file path");
     tokio::fs::write(&epg_path, "<tv></tv>").await.expect("seed persisted epg");
-    ctx.input_maintenance = Some(Arc::new(FixedGate("quality-provider")));
+    ctx.maintenance = Some(Arc::new(FixedGate("quality-provider")));
 
     let (guide, errors) = crate::epg::get_xmltv(&ctx, &input, None, &storage_dir).await;
 

@@ -4,7 +4,7 @@ use super::{
     app_config_with_listener, bare_app_config, counting_ffmpeg, download_file, ensure_recording_worker_running,
     finish_active_and_promote, requeue_active_download_for_capacity_wait, scheduled_task, serve_range_fixture,
     slot_queue, spawn_count, vod_entry, wait_for_provider_slot, DownloadExecutionResult, QuotaGate,
-    RecordingNotificationPlan, DOWNLOAD_PREEMPTED_REASON, INPUT_MAINTENANCE_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
+    RecordingNotificationPlan, DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED, MAINTENANCE_REASON,
     QUOTA_EXCEEDED_DURING_TRANSFER,
 };
 use crate::recording::{
@@ -477,7 +477,7 @@ async fn a_capture_on_an_input_in_maintenance_fails_without_asking_for_a_slot() 
     let finished = queue.finished.read().await;
     let settled = finished.first().expect("the capture reached a terminal state");
     assert_eq!(settled.state, RecordingTaskState::Failed);
-    assert_eq!(settled.error.as_deref(), Some(INPUT_MAINTENANCE_REASON), "and it says why");
+    assert_eq!(settled.error.as_deref(), Some(MAINTENANCE_REASON), "and it says why");
     assert_eq!(stub.acquire_count(), 0, "no provider slot was requested");
     assert_eq!(stub.release_count(), 0);
 }
@@ -510,7 +510,7 @@ async fn a_capture_that_already_ran_keeps_retrying_during_maintenance() {
     assert_eq!(stub.acquire_count(), 1, "the retry asked for its slot as before");
     let finished = queue.finished.read().await;
     assert!(
-        finished.iter().all(|task| task.error.as_deref() != Some(INPUT_MAINTENANCE_REASON)),
+        finished.iter().all(|task| task.error.as_deref() != Some(MAINTENANCE_REASON)),
         "a running recording is never failed for maintenance"
     );
 }
@@ -533,6 +533,6 @@ async fn a_capture_waiting_for_capacity_fails_when_maintenance_starts() {
 
     let finished = queue.finished.read().await;
     let settled = finished.first().expect("the capture reached a terminal state");
-    assert_eq!(settled.error.as_deref(), Some(INPUT_MAINTENANCE_REASON));
+    assert_eq!(settled.error.as_deref(), Some(MAINTENANCE_REASON));
     assert_eq!(stub.acquire_count(), 1, "no further slot was requested");
 }

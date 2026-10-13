@@ -428,7 +428,7 @@ constant; pre-bump tokens become stale:
 Operators do **not** need to manually invalidate tokens on a schema bump; the next sign-in issues a
 token with the current schema and the user's derived `subject_id`.
 
-## 10.1 Input maintenance
+## 10.1 Maintenance mode
 
 A recording whose input is in maintenance when it would start is not started: it fails with
 `Input is in maintenance mode` without requesting a provider slot. Running recordings, including their internal

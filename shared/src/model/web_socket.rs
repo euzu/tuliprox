@@ -119,7 +119,7 @@ pub enum ProtocolMessage {
     RecordingRulesChanged,
     /// Inputs in maintenance after a change. Carries the whole map: it is small,
     /// and a client never has to merge.
-    InputMaintenanceChangedResponse(crate::model::InputMaintenanceEntries),
+    MaintenanceChangedResponse(crate::model::MaintenanceEntries),
     /// The socket cannot serve recordings to this session, and the reason
     /// is actionable.
     ///

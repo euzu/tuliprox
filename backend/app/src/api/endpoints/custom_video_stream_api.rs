@@ -584,7 +584,7 @@ mod tests {
                 ))
                 .to_vec(),
             )),
-            input_maintenance: None,
+            maintenance: None,
             panel_api_provisioning_hls_segments: Vec::new(),
         }
     }
@@ -718,7 +718,7 @@ mod tests {
             recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
                 Arc::clone(&active_provider),
                 Arc::clone(&connection_manager),
-                crate::api::model::create_test_input_maintenance(""),
+                crate::api::model::create_test_maintenance(""),
             ),
             app_config: app_cfg,
             http_clients: Arc::default(),
@@ -737,7 +737,7 @@ mod tests {
             metadata_manager,
             auth: crate::api::model::AuthState::for_tests(),
             playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
-            input_maintenance: crate::api::model::create_test_input_maintenance(""),
+            maintenance: crate::api::model::create_test_maintenance(""),
         })
     }
 

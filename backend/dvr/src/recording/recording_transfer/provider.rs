@@ -23,7 +23,7 @@ pub(super) enum ProviderAcquireResult {
     /// A live capture waited for capacity until its broadcast window closed.
     WindowClosed,
     /// The input is in maintenance; the recording must not contact its provider.
-    InputMaintenance,
+    Maintenance,
 }
 
 pub(super) fn background_download_should_wait(

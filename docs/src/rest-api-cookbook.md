@@ -349,12 +349,12 @@ Notes:
   are `null` for semantic errors without a source position (e.g. an invalid regex value).
 - The preview reads the target's already-processed playlist; it never contacts providers or triggers an update.
 
-## Input maintenance
+## Maintenance mode
 
 An input can be taken out of service while its provider is down. While an input is in maintenance:
 
 - every **new** stream request for it (live, VOD, series, catch-up, HLS entry, redirect mode) gets the
-  `input_maintenance.ts` custom video instead of a provider connection,
+  `maintenance.ts` custom video instead of a provider connection,
 - playlist and EPG updates keep serving the last persisted playlist and EPG without contacting the provider,
 - probes, metadata resolution and Stalker refreshes for the input are paused,
 - DVR recordings that would start fail with `Input is in maintenance mode`; use **Retry** afterwards.
@@ -421,7 +421,7 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 | `GET` | `/api/v1/qos-snapshots/{stream_identity_key}` | QoS detail for one stream |
 | `GET` | `/api/v1/geoip/update` | Trigger GeoIP DB update |
 
-### Input maintenance
+### Maintenance mode
 
 | Method | Path | Purpose |
 | --- | --- | --- |

@@ -163,7 +163,7 @@ impl ActiveClientStreamState {
             CustomVideoStreamType::Provisioning => Some(StreamMode::Provisioning),
             CustomVideoStreamType::UserAccountExpired
             | CustomVideoStreamType::HlsSessionOrLeaseExpired
-            | CustomVideoStreamType::InputMaintenance => None,
+            | CustomVideoStreamType::Maintenance => None,
         }
     }
 

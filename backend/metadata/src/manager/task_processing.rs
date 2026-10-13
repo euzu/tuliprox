@@ -1,6 +1,6 @@
 use super::{
-    spawn_blocking_limited, DbHandle, InputWorker, RetryDomain, TaskKey, PROBE_TASK_TIMEOUT_SECS,
-    TASK_ERR_INPUT_MAINTENANCE, TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED, TASK_ERR_UPDATE_IN_PROGRESS,
+    spawn_blocking_limited, DbHandle, InputWorker, RetryDomain, TaskKey, PROBE_TASK_TIMEOUT_SECS, TASK_ERR_MAINTENANCE,
+    TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED, TASK_ERR_UPDATE_IN_PROGRESS,
 };
 use crate::ctx::MetadataUpdateCtx;
 use log::{debug, error, warn};
@@ -118,8 +118,8 @@ impl InputWorker {
         }
 
         // Waits instead of failing: the task is requeued and resolved once maintenance ends.
-        if ctx.input_maintenance.is_in_maintenance(&input_base.name) {
-            return Err(shared::error::TuliproxError::Config(TASK_ERR_INPUT_MAINTENANCE.to_string()));
+        if ctx.maintenance.is_in_maintenance(&input_base.name) {
+            return Err(shared::error::TuliproxError::Config(TASK_ERR_MAINTENANCE.to_string()));
         }
 
         // Background metadata/probe tasks are low-priority.

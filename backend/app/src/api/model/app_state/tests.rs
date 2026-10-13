@@ -244,16 +244,16 @@ async fn source_reload_prunes_removed_inputs_from_maintenance() {
         SourcesConfig::try_from(&dto).unwrap()
     };
     app_state.app_config.sources.store(Arc::new(sources(&["provider_a", "provider_b"])));
-    app_state.input_maintenance.add_all(&["provider_a", "provider_b"], None, 1).await.unwrap();
+    app_state.maintenance.add_all(&["provider_a", "provider_b"], None, 1).await.unwrap();
     let mut events = app_state.event_manager.get_event_channel();
 
     update_app_state_sources(&app_state, sources(&["provider_a"]), None).await.unwrap();
 
-    assert!(app_state.input_maintenance.is_in_maintenance("provider_a"));
-    assert!(!app_state.input_maintenance.is_in_maintenance("provider_b"));
+    assert!(app_state.maintenance.is_in_maintenance("provider_a"));
+    assert!(!app_state.maintenance.is_in_maintenance("provider_b"));
     let pruned = std::iter::from_fn(|| events.try_recv().ok())
         .find_map(|event| match event {
-            EventMessage::InputMaintenanceChanged(entries) => Some(entries),
+            EventMessage::MaintenanceChanged(entries) => Some(entries),
             _ => None,
         })
         .expect("pruning emits a change event");
@@ -273,6 +273,6 @@ async fn contactable_input_hides_inputs_in_maintenance() {
     let name: Arc<str> = Arc::from("provider_a");
 
     assert!(app_state.contactable_input(&name).is_some());
-    app_state.input_maintenance.add("provider_a", None, 1).await.unwrap();
+    app_state.maintenance.add("provider_a", None, 1).await.unwrap();
     assert!(app_state.contactable_input(&name).is_none(), "an input in maintenance is not contacted");
 }

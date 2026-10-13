@@ -71,7 +71,7 @@ pub const STREAM_PROBE_FAILED: EventId = EventId::new("stream.probe.failed");
 // ---- dvr ------------------------------------------------------------
 pub const RECORDING_QUEUE_CHANGED: EventId = EventId::new("recording.queue.changed");
 pub const RECORDING_RULES_CHANGED: EventId = EventId::new("recording.rules.changed");
-pub const INPUT_MAINTENANCE_CHANGED: EventId = EventId::new("input.maintenance.changed");
+pub const MAINTENANCE_CHANGED: EventId = EventId::new("maintenance.changed");
 
 // ---- scheduler -------------------------------------------------------
 pub const SCHEDULED_TASK_FAILED: EventId = EventId::new("scheduled_task.failed");
@@ -259,7 +259,7 @@ pub const ALL: &[EventDescriptor] = &[
             description: "The recording rule set changed.",
         },
         EventDescriptor {
-            id: INPUT_MAINTENANCE_CHANGED,
+            id: MAINTENANCE_CHANGED,
             severity: Severity::Warn,
             description: "An input was put into or taken out of maintenance mode.",
         },

@@ -1298,7 +1298,7 @@
     "MPEG_TS": "MPEG-TS",
     "MSG_KIND_ERROR": "خطأ",
     "MSG_KIND_INFO": "معلومات",
-    "MSG_KIND_INPUT_MAINTENANCE_CHANGED": "تغيير وضع صيانة المدخل",
+    "MSG_KIND_MAINTENANCE_CHANGED": "تغيير وضع صيانة المدخل",
     "MSG_KIND_LIBRARY_SCAN_COMPLETED": "اكتمل فحص المكتبة",
     "MSG_KIND_LIBRARY_SCAN_FAILED": "فشل فحص المكتبة",
     "MSG_KIND_METADATA_UPDATE_COMPLETED": "اكتمل تحديث البيانات الوصفية",

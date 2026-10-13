@@ -44,7 +44,7 @@ pub(in crate::api::endpoints::hls_api) fn hls_custom_video_type_for_failure_reas
         ConnectFailureReason::Preempted => CustomVideoStreamType::LowPriorityPreempted,
         ConnectFailureReason::Provisioning => CustomVideoStreamType::Provisioning,
         ConnectFailureReason::SessionExpired => CustomVideoStreamType::HlsSessionOrLeaseExpired,
-        ConnectFailureReason::InputMaintenance => CustomVideoStreamType::InputMaintenance,
+        ConnectFailureReason::Maintenance => CustomVideoStreamType::Maintenance,
         ConnectFailureReason::ProviderError
         | ConnectFailureReason::ProviderClosed
         | ConnectFailureReason::ChannelUnavailable => CustomVideoStreamType::ChannelUnavailable,

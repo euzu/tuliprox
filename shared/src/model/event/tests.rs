@@ -64,10 +64,10 @@ fn groups_changed_alias_resolves_for_kinds() {
 }
 
 #[test]
-fn input_maintenance_changed_requires_maintenance_read() {
+fn maintenance_changed_requires_maintenance_read() {
     assert_eq!(
-        EventKind::InputMaintenanceChanged.required_permission(),
+        EventKind::MaintenanceChanged.required_permission(),
         crate::model::permission::Permission::MaintenanceRead
     );
-    assert_eq!(EventKind::InputMaintenanceChanged.as_wire_name(), "input.maintenance.changed");
+    assert_eq!(EventKind::MaintenanceChanged.as_wire_name(), "maintenance.changed");
 }

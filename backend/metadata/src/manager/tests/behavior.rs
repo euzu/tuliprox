@@ -1,6 +1,6 @@
 use super::{
     create_test_worker, InputWorker, MetadataUpdateManager, MetadataUpdateRuntimeSettings, PendingTask, RetryDomain,
-    ScopedTaskKey, SubmitTaskResult, TaskKey, TASK_ERR_INPUT_MAINTENANCE, TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED,
+    ScopedTaskKey, SubmitTaskResult, TaskKey, TASK_ERR_MAINTENANCE, TASK_ERR_NO_CONNECTION, TASK_ERR_PREEMPTED,
     TASK_ERR_UPDATE_IN_PROGRESS,
 };
 use dashmap::DashMap;
@@ -827,10 +827,10 @@ fn playlist_trigger_keeps_info_changes() {
 }
 
 #[test]
-fn input_maintenance_is_a_transient_worker_error() {
+fn maintenance_is_a_transient_worker_error() {
     // Transient errors are requeued without counting an attempt, so the item is
     // resolved after maintenance ends instead of being marked as failed.
-    assert!(InputWorker::is_transient_worker_error(TASK_ERR_INPUT_MAINTENANCE));
+    assert!(InputWorker::is_transient_worker_error(TASK_ERR_MAINTENANCE));
 }
 
 #[test]
@@ -840,7 +840,7 @@ fn maintenance_check_precedes_probe_connection() {
     let body = &source[start..];
     // Methods are indented once, so their closing brace is `\n    }\n`.
     let body = &body[..body.find("\n    }\n").expect("function end")];
-    let gate = body.find("if ctx.input_maintenance.is_in_maintenance(").expect("maintenance gate");
+    let gate = body.find("if ctx.maintenance.is_in_maintenance(").expect("maintenance gate");
     let probe = body.find("acquire_connection_for_probe(").expect("probe acquisition");
     assert!(gate < probe, "no provider connection may be taken for an input in maintenance");
 }

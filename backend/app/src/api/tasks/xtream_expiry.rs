@@ -262,7 +262,7 @@ fn collect_accounts(app_state: &AppState) -> Vec<Account> {
         .iter()
         // An input in maintenance is not queried; its accounts are picked up again afterwards.
         .filter(|input| {
-            input.enabled && input.input_type.is_xtream() && !app_state.input_maintenance.is_in_maintenance(&input.name)
+            input.enabled && input.input_type.is_xtream() && !app_state.maintenance.is_in_maintenance(&input.name)
         })
         .flat_map(|input| {
             let panel = Arc::<str>::from(panel_identity(&input.url, &input.name));
@@ -522,7 +522,7 @@ mod tests {
         let (_dir, app, _path) = super::super::provider_account_state::tests::fixture(false).await?;
         assert!(!super::collect_accounts(&app).is_empty(), "the fixture input is queried normally");
 
-        app.input_maintenance.add("root", None, 1).await?;
+        app.maintenance.add("root", None, 1).await?;
 
         assert!(super::collect_accounts(&app).is_empty(), "an input in maintenance is not contacted");
         Ok(())

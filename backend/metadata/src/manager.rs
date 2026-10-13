@@ -17,7 +17,7 @@ const TASK_ERR_PREEMPTED: &str = "Task preempted";
 
 const TASK_ERR_UPDATE_IN_PROGRESS: &str = "Playlist update in progress";
 
-const TASK_ERR_INPUT_MAINTENANCE: &str = "Input in maintenance";
+const TASK_ERR_MAINTENANCE: &str = "Input in maintenance";
 
 // Per-task execution timeout.  ffprobe defaults to 60 s; allow extra headroom for network
 // fetches, TMDB lookups, and B+Tree writes before declaring the task stuck.

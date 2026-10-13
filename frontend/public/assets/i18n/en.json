@@ -1299,7 +1299,7 @@
     "MPEG_TS": "MPEG-TS",
     "MSG_KIND_ERROR": "Error",
     "MSG_KIND_INFO": "Info",
-    "MSG_KIND_INPUT_MAINTENANCE_CHANGED": "Input Maintenance Changed",
+    "MSG_KIND_MAINTENANCE_CHANGED": "Maintenance Changed",
     "MSG_KIND_LIBRARY_SCAN_COMPLETED": "Library Scan Completed",
     "MSG_KIND_LIBRARY_SCAN_FAILED": "Library Scan Failed",
     "MSG_KIND_METADATA_UPDATE_COMPLETED": "Metadata Update Completed",

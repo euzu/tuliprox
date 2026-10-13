@@ -99,7 +99,7 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ActiveProvider)
     .with(EventKind::RecordingChanged)
     .with(EventKind::RecordingRulesChanged)
-    .with(EventKind::InputMaintenanceChanged)
+    .with(EventKind::MaintenanceChanged)
     .with(EventKind::UserCreated)
     .with(EventKind::UserUpdated)
     .with(EventKind::UserDeleted)
@@ -209,7 +209,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             let title = "Recording rules changed".to_string();
             Some(NotificationEvent::new(id, title.clone(), title))
         }
-        EventMessage::InputMaintenanceChanged(entries) => {
+        EventMessage::MaintenanceChanged(entries) => {
             let title = if entries.is_empty() {
                 "No input in maintenance".to_string()
             } else {
@@ -571,7 +571,7 @@ mod tests {
             EventMessage::RecordingChanged,
             EventMessage::RecordingProgress,
             EventMessage::RecordingRulesChanged,
-            EventMessage::InputMaintenanceChanged(std::sync::Arc::default()),
+            EventMessage::MaintenanceChanged(std::sync::Arc::default()),
             EventMessage::InputMetadataUpdatesStarted("a".into()),
             EventMessage::InputMetadataUpdatesFailed(MetadataUpdateFailure::new("a".into(), 1, false, None)),
             EventMessage::InputMetadataUpdatesCompleted("a".into()),
@@ -716,7 +716,7 @@ mod tests {
             EventMessage::ActiveProvider("provider-a".into(), 3),
             EventMessage::RecordingChanged,
             EventMessage::RecordingRulesChanged,
-            EventMessage::InputMaintenanceChanged(std::sync::Arc::default()),
+            EventMessage::MaintenanceChanged(std::sync::Arc::default()),
         ];
         for message in messages {
             let event = to_notification(&message).expect("mapped");
@@ -738,7 +738,7 @@ mod tests {
             EventMessage::ActiveProvider("a".into(), 1),
             EventMessage::RecordingChanged,
             EventMessage::RecordingRulesChanged,
-            EventMessage::InputMaintenanceChanged(std::sync::Arc::default()),
+            EventMessage::MaintenanceChanged(std::sync::Arc::default()),
         ];
         for message in messages {
             let event = to_notification(&message).expect("mapped");

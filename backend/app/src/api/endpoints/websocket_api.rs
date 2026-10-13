@@ -498,8 +498,8 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // enforces the session filter server-side, so this is a bare nudge:
         // the frontend re-fetches.
         EventMessage::RecordingRulesChanged => (ProtocolMessage::RecordingRulesChanged, "Recording rules changed"),
-        EventMessage::InputMaintenanceChanged(entries) => (
-            ProtocolMessage::InputMaintenanceChangedResponse(unwrap_or_clone(entries)),
+        EventMessage::MaintenanceChanged(entries) => (
+            ProtocolMessage::MaintenanceChangedResponse(unwrap_or_clone(entries)),
             "Input maintenance changed",
         ),
 
@@ -940,7 +940,7 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInFailed),
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
-            EventMessage::InputMaintenanceChanged(Arc::default()),
+            EventMessage::MaintenanceChanged(Arc::default()),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -1137,8 +1137,8 @@ mod tests {
     }
 
     #[test]
-    fn input_maintenance_event_needs_maintenance_read() {
-        let event = EventMessage::InputMaintenanceChanged(Arc::default());
+    fn maintenance_event_needs_maintenance_read() {
+        let event = EventMessage::MaintenanceChanged(Arc::default());
         let mut mem = ProtocolHandlerMemory {
             permissions: Permission::MaintenanceRead.into(),
             ..ProtocolHandlerMemory::default()

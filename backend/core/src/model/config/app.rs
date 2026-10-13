@@ -11,8 +11,8 @@ use log::{error, warn};
 use rand::Rng;
 use shared::{
     defaults::{
-        CHANNEL_UNAVAILABLE, HLS_SESSION_OR_LEASE_EXPIRED, INPUT_MAINTENANCE, LOW_PRIORITY_PREEMPTED,
-        PANEL_API_PROVISIONING, PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT, PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX,
+        CHANNEL_UNAVAILABLE, HLS_SESSION_OR_LEASE_EXPIRED, LOW_PRIORITY_PREEMPTED, MAINTENANCE, PANEL_API_PROVISIONING,
+        PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT, PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX,
         PROVIDER_CONNECTIONS_EXHAUSTED, USER_ACCOUNT_EXPIRED, USER_CONNECTIONS_EXHAUSTED,
     },
     error::TuliproxError,
@@ -509,7 +509,7 @@ impl AppConfig {
             let user_account_expired = load_and_set_file(&path.join(USER_ACCOUNT_EXPIRED));
             let panel_api_provisioning = load_and_set_file(&path.join(PANEL_API_PROVISIONING));
             let hls_session_or_lease_expired = load_and_set_file(&path.join(HLS_SESSION_OR_LEASE_EXPIRED));
-            let input_maintenance = load_and_set_file(&path.join(INPUT_MAINTENANCE));
+            let maintenance = load_and_set_file(&path.join(MAINTENANCE));
             let panel_api_provisioning_hls_segments = (0..PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT)
                 .filter_map(|index| {
                     let filename = format!("{PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX}{index:03}.ts");
@@ -524,7 +524,7 @@ impl AppConfig {
                 user_account_expired,
                 panel_api_provisioning,
                 hls_session_or_lease_expired,
-                input_maintenance,
+                maintenance,
                 panel_api_provisioning_hls_segments,
             })));
         }

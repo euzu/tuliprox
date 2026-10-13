@@ -97,7 +97,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         return hls_custom_video_manifest_response(
             app_state,
             user,
-            CustomVideoStreamType::InputMaintenance,
+            CustomVideoStreamType::Maintenance,
             StatusCode::SERVICE_UNAVAILABLE,
         )
         .await;

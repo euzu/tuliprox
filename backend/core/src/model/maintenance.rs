@@ -6,25 +6,25 @@
 
 use arc_swap::ArcSwapOption;
 use log::{error, warn};
-use shared::model::{InputMaintenance, InputMaintenanceEntries};
+use shared::model::{InputMaintenance, MaintenanceEntries};
 use std::{path::PathBuf, sync::Arc};
 
-pub const INPUT_MAINTENANCE_FILE: &str = "maintenance.json";
+pub const MAINTENANCE_FILE: &str = "maintenance.json";
 
 /// The read side, for crates that must not depend on the registry itself.
-pub trait InputMaintenanceGate: Send + Sync {
+pub trait MaintenanceGate: Send + Sync {
     fn is_in_maintenance(&self, input_name: &str) -> bool;
 }
 
 /// `Ok(Some(state))` when the call changed something, `Ok(None)` for a no-op.
-pub type MaintenanceWrite = std::io::Result<Option<Arc<InputMaintenanceEntries>>>;
+pub type MaintenanceWrite = std::io::Result<Option<Arc<MaintenanceEntries>>>;
 
 const REFUSE_UNREADABLE: &str = "maintenance state could not be read; it is not overwritten";
 const REFUSE_READ_ONLY: &str = "maintenance state was loaded read-only";
 
-pub struct InputMaintenanceRegistry {
+pub struct MaintenanceRegistry {
     /// `None` while no input is in maintenance, which keeps the common check to one load.
-    entries: ArcSwapOption<InputMaintenanceEntries>,
+    entries: ArcSwapOption<MaintenanceEntries>,
     write_lock: tokio::sync::Mutex<()>,
     /// Where the state is persisted; `None` keeps it in memory only.
     path: Option<PathBuf>,
@@ -32,15 +32,15 @@ pub struct InputMaintenanceRegistry {
     refuse_writes: Option<&'static str>,
 }
 
-impl InputMaintenanceRegistry {
+impl MaintenanceRegistry {
     #[must_use]
-    pub fn new(path: PathBuf) -> Self { Self::with(Some(path), InputMaintenanceEntries::new(), None) }
+    pub fn new(path: PathBuf) -> Self { Self::with(Some(path), MaintenanceEntries::new(), None) }
 
     /// A registry that never touches the file system.
     #[must_use]
-    pub fn in_memory() -> Self { Self::with(None, InputMaintenanceEntries::new(), None) }
+    pub fn in_memory() -> Self { Self::with(None, MaintenanceEntries::new(), None) }
 
-    fn with(path: Option<PathBuf>, entries: InputMaintenanceEntries, refuse_writes: Option<&'static str>) -> Self {
+    fn with(path: Option<PathBuf>, entries: MaintenanceEntries, refuse_writes: Option<&'static str>) -> Self {
         Self {
             entries: ArcSwapOption::new(non_empty(entries)),
             write_lock: tokio::sync::Mutex::new(()),
@@ -56,7 +56,7 @@ impl InputMaintenanceRegistry {
     /// cannot be read at all stays where it is and is never overwritten.
     pub async fn load(path: PathBuf, known: &[&str]) -> Self {
         let (entries, refuse_writes) = match tokio::fs::read(&path).await {
-            Ok(bytes) => match serde_json::from_slice::<InputMaintenanceEntries>(&bytes) {
+            Ok(bytes) => match serde_json::from_slice::<MaintenanceEntries>(&bytes) {
                 Ok(entries) => (entries, None),
                 Err(err) => {
                     error!("Unreadable maintenance state {}: {err}", path.display());
@@ -64,13 +64,13 @@ impl InputMaintenanceRegistry {
                     if let Err(err) = tokio::fs::rename(&path, &corrupt).await {
                         error!("Could not move {} aside: {err}", path.display());
                     }
-                    (InputMaintenanceEntries::new(), None)
+                    (MaintenanceEntries::new(), None)
                 }
             },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (InputMaintenanceEntries::new(), None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (MaintenanceEntries::new(), None),
             Err(err) => {
                 error!("Could not read maintenance state {}: {err}; changes are refused", path.display());
-                (InputMaintenanceEntries::new(), Some(REFUSE_UNREADABLE))
+                (MaintenanceEntries::new(), Some(REFUSE_UNREADABLE))
             }
         };
         let registry = Self::with(Some(path), entries, refuse_writes);
@@ -86,14 +86,14 @@ impl InputMaintenanceRegistry {
     /// share the storage directory with a running server.
     pub async fn load_read_only(path: PathBuf) -> Self {
         let entries = match tokio::fs::read(&path).await {
-            Ok(bytes) => serde_json::from_slice::<InputMaintenanceEntries>(&bytes).unwrap_or_else(|err| {
+            Ok(bytes) => serde_json::from_slice::<MaintenanceEntries>(&bytes).unwrap_or_else(|err| {
                 warn!("Ignoring unreadable maintenance state {}: {err}", path.display());
-                InputMaintenanceEntries::new()
+                MaintenanceEntries::new()
             }),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => InputMaintenanceEntries::new(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => MaintenanceEntries::new(),
             Err(err) => {
                 warn!("Could not read maintenance state {}: {err}", path.display());
-                InputMaintenanceEntries::new()
+                MaintenanceEntries::new()
             }
         };
         Self::with(Some(path), entries, Some(REFUSE_READ_ONLY))
@@ -105,7 +105,7 @@ impl InputMaintenanceRegistry {
     }
 
     /// The current state; an empty map when no input is in maintenance.
-    pub fn snapshot(&self) -> Arc<InputMaintenanceEntries> { self.entries.load_full().unwrap_or_default() }
+    pub fn snapshot(&self) -> Arc<MaintenanceEntries> { self.entries.load_full().unwrap_or_default() }
 
     pub async fn add(&self, name: &str, reason: Option<String>, now: i64) -> MaintenanceWrite {
         self.mutate(|entries| upsert(entries, name, reason, now)).await
@@ -163,7 +163,7 @@ impl InputMaintenanceRegistry {
         .await
     }
 
-    async fn mutate(&self, apply: impl FnOnce(&mut InputMaintenanceEntries) -> bool) -> MaintenanceWrite {
+    async fn mutate(&self, apply: impl FnOnce(&mut MaintenanceEntries) -> bool) -> MaintenanceWrite {
         if let Some(reason) = self.refuse_writes {
             return Err(std::io::Error::other(reason));
         }
@@ -185,16 +185,16 @@ impl InputMaintenanceRegistry {
     }
 }
 
-impl InputMaintenanceGate for InputMaintenanceRegistry {
+impl MaintenanceGate for MaintenanceRegistry {
     #[inline]
     fn is_in_maintenance(&self, input_name: &str) -> bool { Self::is_in_maintenance(self, input_name) }
 }
 
-fn non_empty(entries: InputMaintenanceEntries) -> Option<Arc<InputMaintenanceEntries>> {
+fn non_empty(entries: MaintenanceEntries) -> Option<Arc<MaintenanceEntries>> {
     (!entries.is_empty()).then(|| Arc::new(entries))
 }
 
-fn upsert(entries: &mut InputMaintenanceEntries, name: &str, reason: Option<String>, now: i64) -> bool {
+fn upsert(entries: &mut MaintenanceEntries, name: &str, reason: Option<String>, now: i64) -> bool {
     match entries.get_mut(name) {
         Some(existing) if existing.reason == reason => false,
         Some(existing) => {
@@ -213,9 +213,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn registry_in(dir: &TempDir) -> InputMaintenanceRegistry {
-        InputMaintenanceRegistry::new(dir.path().join(INPUT_MAINTENANCE_FILE))
-    }
+    fn registry_in(dir: &TempDir) -> MaintenanceRegistry { MaintenanceRegistry::new(dir.path().join(MAINTENANCE_FILE)) }
 
     #[tokio::test]
     async fn empty_registry_reports_nothing_in_maintenance() {
@@ -234,7 +232,7 @@ mod tests {
         assert!(registry.is_in_maintenance("provider_a"));
         assert!(!registry.is_in_maintenance("provider_b"));
 
-        let reloaded = InputMaintenanceRegistry::load(dir.path().join(INPUT_MAINTENANCE_FILE), &["provider_a"]).await;
+        let reloaded = MaintenanceRegistry::load(dir.path().join(MAINTENANCE_FILE), &["provider_a"]).await;
         let entry = reloaded.snapshot().get("provider_a").cloned().unwrap();
         assert_eq!(entry, InputMaintenance { since: 100, reason: Some("down".into()) });
     }
@@ -295,10 +293,10 @@ mod tests {
     async fn failed_persist_leaves_runtime_unchanged() {
         let dir = TempDir::new().unwrap();
         // A non-empty directory where the file should be makes the atomic rename fail.
-        let path = dir.path().join(INPUT_MAINTENANCE_FILE);
+        let path = dir.path().join(MAINTENANCE_FILE);
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("blocker"), b"x").unwrap();
-        let registry = InputMaintenanceRegistry::new(path);
+        let registry = MaintenanceRegistry::new(path);
         assert!(registry.add("provider_a", None, 100).await.is_err());
         assert!(!registry.is_in_maintenance("provider_a"));
     }
@@ -306,16 +304,16 @@ mod tests {
     #[tokio::test]
     async fn load_of_missing_file_is_empty() {
         let dir = TempDir::new().unwrap();
-        let registry = InputMaintenanceRegistry::load(dir.path().join(INPUT_MAINTENANCE_FILE), &["provider_a"]).await;
+        let registry = MaintenanceRegistry::load(dir.path().join(MAINTENANCE_FILE), &["provider_a"]).await;
         assert!(registry.snapshot().is_empty());
     }
 
     #[tokio::test]
     async fn load_moves_corrupt_file_aside() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join(INPUT_MAINTENANCE_FILE);
+        let path = dir.path().join(MAINTENANCE_FILE);
         std::fs::write(&path, b"{ not json").unwrap();
-        let registry = InputMaintenanceRegistry::load(path.clone(), &["provider_a"]).await;
+        let registry = MaintenanceRegistry::load(path.clone(), &["provider_a"]).await;
         assert!(registry.snapshot().is_empty());
         assert!(!path.exists());
         assert!(dir.path().join("maintenance.json.corrupt").exists());
@@ -324,12 +322,12 @@ mod tests {
     #[tokio::test]
     async fn load_prunes_unknown_inputs_and_persists_the_result() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join(INPUT_MAINTENANCE_FILE);
+        let path = dir.path().join(MAINTENANCE_FILE);
         std::fs::write(&path, br#"{"gone":{"since":1},"provider_a":{"since":2}}"#).unwrap();
-        let registry = InputMaintenanceRegistry::load(path.clone(), &["provider_a"]).await;
+        let registry = MaintenanceRegistry::load(path.clone(), &["provider_a"]).await;
         assert!(!registry.is_in_maintenance("gone"));
         assert!(registry.is_in_maintenance("provider_a"));
-        let persisted: InputMaintenanceEntries = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let persisted: MaintenanceEntries = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted.keys().collect::<Vec<_>>(), vec!["provider_a"]);
     }
 
@@ -338,7 +336,7 @@ mod tests {
     async fn unreadable_file_is_never_overwritten() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join(INPUT_MAINTENANCE_FILE);
+        let path = dir.path().join(MAINTENANCE_FILE);
         std::fs::write(&path, br#"{"provider_a":{"since":1}}"#).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read(&path).is_ok() {
@@ -346,7 +344,7 @@ mod tests {
             return;
         }
 
-        let registry = InputMaintenanceRegistry::load(path.clone(), &["provider_a"]).await;
+        let registry = MaintenanceRegistry::load(path.clone(), &["provider_a"]).await;
         let write = registry.add("provider_b", None, 2).await;
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -357,10 +355,10 @@ mod tests {
     #[tokio::test]
     async fn read_only_load_never_touches_the_file() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join(INPUT_MAINTENANCE_FILE);
+        let path = dir.path().join(MAINTENANCE_FILE);
         std::fs::write(&path, br#"{"gone":{"since":1},"provider_a":{"since":2}}"#).unwrap();
 
-        let registry = InputMaintenanceRegistry::load_read_only(path.clone()).await;
+        let registry = MaintenanceRegistry::load_read_only(path.clone()).await;
 
         assert!(registry.is_in_maintenance("provider_a"));
         assert!(registry.add("provider_b", None, 3).await.is_err(), "a read-only registry refuses writes");
@@ -368,14 +366,14 @@ mod tests {
 
         let corrupt = dir.path().join("corrupt.json");
         std::fs::write(&corrupt, b"{ not json").unwrap();
-        let registry = InputMaintenanceRegistry::load_read_only(corrupt.clone()).await;
+        let registry = MaintenanceRegistry::load_read_only(corrupt.clone()).await;
         assert!(registry.snapshot().is_empty());
         assert!(corrupt.exists(), "a read-only load never moves the file aside");
     }
 
     #[tokio::test]
     async fn in_memory_registry_works_without_any_file() {
-        let registry = InputMaintenanceRegistry::in_memory();
+        let registry = MaintenanceRegistry::in_memory();
         assert!(registry.add("provider_a", None, 1).await.unwrap().is_some());
         assert!(registry.is_in_maintenance("provider_a"));
         assert!(registry.remove_all().await.unwrap().is_some());
@@ -386,7 +384,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let registry = Arc::new(registry_in(&dir));
         registry.add("provider_a", None, 1).await.unwrap();
-        let gate: Arc<dyn InputMaintenanceGate> = registry;
+        let gate: Arc<dyn MaintenanceGate> = registry;
         assert!(gate.is_in_maintenance("provider_a"));
     }
 }

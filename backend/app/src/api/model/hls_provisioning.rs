@@ -341,7 +341,7 @@ fn custom_video_asset(
         CustomVideoStreamType::UserAccountExpired => response.user_account_expired.as_ref(),
         CustomVideoStreamType::Provisioning => response.panel_api_provisioning.as_ref(),
         CustomVideoStreamType::HlsSessionOrLeaseExpired => response.hls_session_or_lease_expired.as_ref(),
-        CustomVideoStreamType::InputMaintenance => response.input_maintenance.as_ref(),
+        CustomVideoStreamType::Maintenance => response.maintenance.as_ref(),
     }
 }
 

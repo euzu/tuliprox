@@ -482,7 +482,7 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `user.connection.denied` | warn | A user was refused a connection because their limits were full. |
 | `recording.queue.changed` | info | The recording queue changed. |
 | `recording.rules.changed` | info | The recording rule set changed. |
-| `input.maintenance.changed` | warn | An input was put into or taken out of maintenance mode. |
+| `maintenance.changed` | warn | An input was put into or taken out of maintenance mode. |
 | `scheduled_task.failed` | error | A scheduled task could not complete. |
 | `notification.dead_lettered` | error | A notification was permanently undeliverable and has been dropped. |
 | `user.created` | info | An API-proxy user account was created. |
@@ -1199,7 +1199,7 @@ custom_stream_response_timeout_secs: 20
 * `user_account_expired.ts` (User's `exp_date` reached)
 * `panel_api_provisioning.ts` (Loops while a new Provider Account is generated via Panel API)
 * `hls_session_or_lease_expired.ts` (Shared-HLS session or access lease expired; restart stream)
-* `input_maintenance.ts` (The input is in maintenance mode; see [Input maintenance](../rest-api-cookbook.md#input-maintenance))
+* `maintenance.ts` (The input is in maintenance mode; see [Maintenance mode](../rest-api-cookbook.md#maintenance-mode))
 
 > **Note**: These Video files are all available in the docker image.
 

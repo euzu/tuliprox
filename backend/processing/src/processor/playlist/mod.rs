@@ -146,7 +146,7 @@ pub struct ProcessingRun<
     acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
     input_refresh: Option<InputRefreshOverride>,
     library_update_mode: LibraryUpdateMode,
-    input_maintenance: Option<Arc<dyn tuliprox_core::model::InputMaintenanceGate>>,
+    maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
 }
 
 impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
@@ -179,7 +179,7 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataS
             acquired_permit: None,
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
-            input_maintenance: None,
+            maintenance: None,
         }
     }
 }
@@ -207,7 +207,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
             acquired_permit: self.acquired_permit,
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
-            input_maintenance: self.input_maintenance,
+            maintenance: self.maintenance,
         }
     }
 
@@ -258,7 +258,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
             acquired_permit: self.acquired_permit,
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
-            input_maintenance: self.input_maintenance,
+            maintenance: self.maintenance,
         }
     }
 
@@ -297,11 +297,8 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
 
     /// Inputs taken out of service; their provider is not contacted during this run.
     #[must_use]
-    pub fn with_input_maintenance<G: tuliprox_core::model::InputMaintenanceGate + 'static>(
-        mut self,
-        gate: Arc<G>,
-    ) -> Self {
-        self.input_maintenance = Some(gate);
+    pub fn with_maintenance<G: tuliprox_core::model::MaintenanceGate + 'static>(mut self, gate: Arc<G>) -> Self {
+        self.maintenance = Some(gate);
         self
     }
 
@@ -333,7 +330,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
         acquired_permit,
         input_refresh,
         library_update_mode,
-        input_maintenance,
+        maintenance,
     } = run;
 
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
@@ -411,7 +408,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         input_refresh,
         library_update_mode,
-        input_maintenance,
+        maintenance,
     };
 
     let start_time = Instant::now();

@@ -44,7 +44,7 @@ pub(crate) async fn maintenance_rejection_response(
             stream_channel,
             Arc::clone(&input.name),
             req_headers,
-            ConnectFailureReason::InputMaintenance,
+            ConnectFailureReason::Maintenance,
         )
         .await;
     }
@@ -55,7 +55,7 @@ pub(crate) async fn maintenance_rejection_response(
         stream_channel,
         Arc::clone(&input.name),
         req_headers,
-        ConnectFailureReason::InputMaintenance,
+        ConnectFailureReason::Maintenance,
     )
 }
 
@@ -65,7 +65,5 @@ pub(crate) fn blocks_new_playback(
     user: &ProxyUserCredentials,
     has_preacquired_handle: bool,
 ) -> bool {
-    !has_preacquired_handle
-        && !user.is_recording_proxy_user()
-        && app_state.input_maintenance.is_in_maintenance(&input.name)
+    !has_preacquired_handle && !user.is_recording_proxy_user() && app_state.maintenance.is_in_maintenance(&input.name)
 }

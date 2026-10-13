@@ -945,7 +945,7 @@ pub(in crate::refresh::tests) fn critical_handoff_app_config() -> Arc<AppConfig>
         user_account_expired: None,
         panel_api_provisioning: None,
         hls_session_or_lease_expired: None,
-        input_maintenance: None,
+        maintenance: None,
         panel_api_provisioning_hls_segments: Vec::new(),
     })));
     app_config

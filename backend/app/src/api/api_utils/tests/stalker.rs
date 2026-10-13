@@ -144,7 +144,7 @@ async fn initial_stalker_resolution_is_skipped_for_input_in_maintenance() {
         .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(stalker_input)], ..SourcesConfig::default() }));
     let app_state = create_test_app_state_for_config(Arc::new(app_config));
     let input = Arc::clone(&app_state.app_config.sources.load().inputs[0]);
-    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
+    app_state.maintenance.add(&input.name, None, 1).await.unwrap();
     let mut viewer = crate::model::ProxyUserCredentials::default();
     viewer.username = "viewer".to_string();
     let empty: Arc<str> = "".into();

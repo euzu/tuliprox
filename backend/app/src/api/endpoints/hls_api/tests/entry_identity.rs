@@ -1028,7 +1028,7 @@ async fn hls_entry_for_input_in_maintenance_opens_no_session() {
     let input = test_hls_input();
     let target = test_hls_share_target(true);
     let original_hls_entry_path = super::super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
-    app_state.input_maintenance.add(&input.name, None, 1).await.expect("maintenance");
+    app_state.maintenance.add(&input.name, None, 1).await.expect("maintenance");
 
     let response = super::super::handle_hls_stream_request(
         &test_fingerprint(),
@@ -1069,7 +1069,7 @@ async fn hls_entry_refresh_of_a_running_session_is_not_gated() {
     let input = test_hls_input();
     let target = test_hls_share_target(true);
     let original_hls_entry_path = super::super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
-    app_state.input_maintenance.add(&input.name, None, 1).await.expect("maintenance");
+    app_state.maintenance.add(&input.name, None, 1).await.expect("maintenance");
     let session = crate::api::model::UserSession {
         token: "running-hls-session".to_string(),
         virtual_id: 1001,
@@ -1114,7 +1114,7 @@ async fn hls_entry_with_an_expired_session_is_gated() {
     let input = test_hls_input();
     let target = test_hls_share_target(true);
     let original_hls_entry_path = super::super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
-    app_state.input_maintenance.add(&input.name, None, 1).await.expect("maintenance");
+    app_state.maintenance.add(&input.name, None, 1).await.expect("maintenance");
     let session = crate::api::model::UserSession {
         token: "expired-hls-session".to_string(),
         virtual_id: 1001,

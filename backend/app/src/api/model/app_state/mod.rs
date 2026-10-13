@@ -4,7 +4,7 @@ use crate::{
         PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
     },
     model::{
-        AppConfig, GracePeriodOptions, HdHomeRunDeviceConfig, HttpClients, InputMaintenanceRegistry, MaintenanceWrite,
+        AppConfig, GracePeriodOptions, HdHomeRunDeviceConfig, HttpClients, MaintenanceRegistry, MaintenanceWrite,
         ReverseProxyDisabledHeaderConfig,
     },
     repository::GeoIp,
@@ -31,7 +31,7 @@ mod tests;
 mod view;
 
 #[cfg(test)]
-pub use self::test_support::{create_test_app_state, create_test_input_maintenance};
+pub use self::test_support::{create_test_app_state, create_test_maintenance};
 pub use self::{
     auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, reload::*,
     resource_cache::*, view::*,
@@ -62,15 +62,13 @@ pub struct AppState {
     pub auth: AuthState,
     pub playlist_updates: PlaylistUpdateControl,
     /// Inputs taken out of service; read on every new stream request.
-    pub input_maintenance: Arc<InputMaintenanceRegistry>,
+    pub maintenance: Arc<MaintenanceRegistry>,
 }
 
 impl AppState {
     /// The configured input, unless it is in maintenance: for code that would contact its provider.
     pub fn contactable_input(&self, input_name: &Arc<str>) -> Option<Arc<crate::model::ConfigInput>> {
-        self.app_config
-            .get_input_by_name(input_name)
-            .filter(|input| !self.input_maintenance.is_in_maintenance(&input.name))
+        self.app_config.get_input_by_name(input_name).filter(|input| !self.maintenance.is_in_maintenance(&input.name))
     }
 
     pub fn is_known_input_name(&self, input_name: &str) -> bool {
@@ -82,9 +80,9 @@ impl AppState {
     }
 
     /// Emits the change event for a write that changed something.
-    pub fn publish_input_maintenance(&self, write: MaintenanceWrite) -> std::io::Result<()> {
+    pub fn publish_maintenance(&self, write: MaintenanceWrite) -> std::io::Result<()> {
         if let Some(entries) = write? {
-            self.event_manager.send_event(EventMessage::InputMaintenanceChanged(entries));
+            self.event_manager.send_event(EventMessage::MaintenanceChanged(entries));
         }
         Ok(())
     }

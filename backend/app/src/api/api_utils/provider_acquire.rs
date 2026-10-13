@@ -313,7 +313,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             stream_channel,
             Arc::clone(&input.name),
             req_headers,
-            ConnectFailureReason::InputMaintenance,
+            ConnectFailureReason::Maintenance,
         );
     }
     let _transition_guard = app_state.active_users.acquire_playback_transition(&user.username, session_token).await;

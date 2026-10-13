@@ -53,7 +53,7 @@ impl AppState {
 /// plays; the view still reads exactly the handle it names.
 ///
 /// A context that holds a handle as a trait object says so with `as` -
-/// `input_maintenance as Arc<dyn InputMaintenanceGate>`.
+/// `maintenance as Arc<dyn MaintenanceGate>`.
 macro_rules! view_field {
     ($state:ident, $field:ident) => {
         ::core::clone::Clone::clone(&$state.$field)
@@ -113,6 +113,6 @@ app_state_views! {
     metadata_update_ctx => tuliprox_metadata::ctx::BoundMetadataUpdateCtx {
         app_config, active_provider, connection_manager, events <- event_manager, playlists,
         update_guard <- playlist_updates.update_guard, http_clients,
-        input_maintenance as std::sync::Arc<dyn tuliprox_core::model::InputMaintenanceGate>,
+        maintenance as std::sync::Arc<dyn tuliprox_core::model::MaintenanceGate>,
     }
 }

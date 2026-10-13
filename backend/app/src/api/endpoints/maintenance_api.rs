@@ -13,8 +13,7 @@ use axum::{
 };
 use log::error;
 use shared::model::{
-    normalize_maintenance_reason, InputMaintenanceRequestDto, InputMaintenanceStateDto, Permission,
-    MAINTENANCE_WILDCARD,
+    normalize_maintenance_reason, MaintenanceRequestDto, MaintenanceStateDto, Permission, MAINTENANCE_WILDCARD,
 };
 use std::sync::Arc;
 use tuliprox_core::model::MaintenanceWrite;
@@ -35,16 +34,16 @@ pub fn maintenance_api_register_unprotected() -> Router<Arc<AppState>> {
         .route("/maintenance/{input}", axum::routing::put(put_maintenance).delete(delete_maintenance))
 }
 
-fn current_state(app_state: &AppState) -> InputMaintenanceStateDto {
+fn current_state(app_state: &AppState) -> MaintenanceStateDto {
     let sources = app_state.app_config.sources.load();
-    InputMaintenanceStateDto {
-        entries: (*app_state.input_maintenance.snapshot()).clone(),
+    MaintenanceStateDto {
+        entries: (*app_state.maintenance.snapshot()).clone(),
         inputs: sources.inputs.iter().map(|input| input.name.to_string()).collect(),
     }
 }
 
 fn respond(app_state: &AppState, write: MaintenanceWrite) -> axum::response::Response {
-    if let Err(err) = app_state.publish_input_maintenance(write) {
+    if let Err(err) = app_state.publish_maintenance(write) {
         error!("Could not persist maintenance state: {err}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -62,9 +61,9 @@ async fn put_maintenance(
     body: Bytes,
 ) -> axum::response::Response {
     let request = if body.is_empty() {
-        InputMaintenanceRequestDto::default()
+        MaintenanceRequestDto::default()
     } else {
-        match serde_json::from_slice::<InputMaintenanceRequestDto>(&body) {
+        match serde_json::from_slice::<MaintenanceRequestDto>(&body) {
             Ok(request) => request,
             Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
         }
@@ -77,9 +76,9 @@ async fn put_maintenance(
     let write = if input == MAINTENANCE_WILDCARD {
         let sources = app_state.app_config.sources.load();
         let names: Vec<&str> = sources.inputs.iter().map(|input| input.name.as_ref()).collect();
-        app_state.input_maintenance.add_all(&names, reason, now).await
+        app_state.maintenance.add_all(&names, reason, now).await
     } else if app_state.is_known_input_name(&input) {
-        app_state.input_maintenance.add(&input, reason, now).await
+        app_state.maintenance.add(&input, reason, now).await
     } else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -91,9 +90,9 @@ async fn delete_maintenance(
     Path(input): Path<String>,
 ) -> axum::response::Response {
     let write = if input == MAINTENANCE_WILDCARD {
-        app_state.input_maintenance.remove_all().await
+        app_state.maintenance.remove_all().await
     } else if app_state.is_known_input_name(&input) {
-        app_state.input_maintenance.remove(&input).await
+        app_state.maintenance.remove(&input).await
     } else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -148,7 +147,7 @@ mod tests {
         (status, response.into_body().collect().await.unwrap().to_bytes().to_vec())
     }
 
-    fn state_of(body: &[u8]) -> InputMaintenanceStateDto { serde_json::from_slice(body).unwrap() }
+    fn state_of(body: &[u8]) -> MaintenanceStateDto { serde_json::from_slice(body).unwrap() }
 
     #[tokio::test]
     async fn get_lists_known_inputs_and_empty_entries() {
@@ -169,7 +168,7 @@ mod tests {
         let (status, body) = call(&router, "PUT", "/maintenance/provider_a", Some(r#"{"reason":"  down "}"#)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(state_of(&body).entries["provider_a"].reason.as_deref(), Some("down"));
-        assert!(state.input_maintenance.is_in_maintenance("provider_a"));
+        assert!(state.maintenance.is_in_maintenance("provider_a"));
 
         let (status, body) = call(&router, "DELETE", "/maintenance/provider_a", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -212,7 +211,7 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = call(&router, "DELETE", "/maintenance/nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(state.input_maintenance.snapshot().is_empty());
+        assert!(state.maintenance.snapshot().is_empty());
     }
 
     #[tokio::test]
@@ -236,13 +235,13 @@ mod tests {
     async fn persist_failure_is_internal_error() {
         let dir = TempDir::new().unwrap();
         let state = app_state(&dir);
-        let blocked = dir.path().join(crate::model::INPUT_MAINTENANCE_FILE);
+        let blocked = dir.path().join(crate::model::MAINTENANCE_FILE);
         std::fs::create_dir(&blocked).unwrap();
         std::fs::write(blocked.join("blocker"), b"x").unwrap();
         let router = maintenance_api_register_unprotected().with_state(Arc::clone(&state));
         let (status, _) = call(&router, "PUT", "/maintenance/provider_a", None).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(!state.input_maintenance.is_in_maintenance("provider_a"));
+        assert!(!state.maintenance.is_in_maintenance("provider_a"));
     }
 
     #[tokio::test]
@@ -285,7 +284,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let response = router.clone().oneshot(request("PUT", "/maintenance/provider_a", &reader)?).await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(!state.input_maintenance.is_in_maintenance("provider_a"));
+        assert!(!state.maintenance.is_in_maintenance("provider_a"));
         Ok(())
     }
 }

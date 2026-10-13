@@ -38,21 +38,21 @@ async fn input_not_in_maintenance_is_not_gated() {
 #[tokio::test]
 async fn input_in_maintenance_is_gated() {
     let (app_state, input) = provider_state();
-    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
+    app_state.maintenance.add(&input.name, None, 1).await.unwrap();
     assert!(blocks_new_playback(&app_state, &input, &viewer(), false));
 }
 
 #[tokio::test]
 async fn preacquired_handle_is_not_gated() {
     let (app_state, input) = provider_state();
-    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
+    app_state.maintenance.add(&input.name, None, 1).await.unwrap();
     assert!(!blocks_new_playback(&app_state, &input, &viewer(), true));
 }
 
 #[tokio::test]
 async fn recording_proxy_user_is_not_gated() {
     let (app_state, input) = provider_state();
-    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
+    app_state.maintenance.add(&input.name, None, 1).await.unwrap();
     let mut recorder = ProxyUserCredentials::default();
     recorder.username = RECORDING_PROXY_USERNAME.to_string();
     recorder.t_is_api_user = true;
@@ -82,8 +82,8 @@ async fn aliased_input_is_gated_by_canonical_name() {
         .app_config
         .sources
         .store(Arc::new(SourcesConfig { inputs: vec![Arc::clone(&input)], ..SourcesConfig::default() }));
-    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
-    assert!(!app_state.input_maintenance.is_in_maintenance("provider_1_alias"), "aliases are never keys");
+    app_state.maintenance.add(&input.name, None, 1).await.unwrap();
+    assert!(!app_state.maintenance.is_in_maintenance("provider_1_alias"), "aliases are never keys");
     assert!(blocks_new_playback(&app_state, &input, &viewer(), false));
 }
 
@@ -158,11 +158,11 @@ async fn new_ts_stream_for_input_in_maintenance_gets_the_clip_without_provider_s
         user_account_expired: None,
         panel_api_provisioning: None,
         hls_session_or_lease_expired: None,
-        input_maintenance: Some(crate::api::model::TransportStreamBuffer::new(maintenance_packet())),
+        maintenance: Some(crate::api::model::TransportStreamBuffer::new(maintenance_packet())),
         panel_api_provisioning_hls_segments: Vec::new(),
     })));
     let input = provider_state_input(&app_state);
-    app_state.input_maintenance.add(&input.name, None, 1).await.unwrap();
+    app_state.maintenance.add(&input.name, None, 1).await.unwrap();
     // Unreachable: a provider connect attempt would fail instead of answering with the clip.
     let stream_url = "http://127.0.0.1:1/live/user/pass/42.ts";
 

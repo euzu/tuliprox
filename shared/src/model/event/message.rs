@@ -3,9 +3,9 @@ use crate::model::{
     auth_audit::{AuthAuditEvent, AuthAuditOutcome},
     notification::{registry, EventId, Severity},
     stats::SourceStats,
-    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, InputMaintenanceEntries,
-    LibraryScanProgressEvent, LibraryScanSummaryStatus, MetadataUpdateFailure, MsgKind, NotificationDeadLetter,
-    Permission, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState,
+    ActiveUserConnectionChange, ConfigReloadFailure, ConfigType, ConnectionDenied, DiskAlert, LibraryScanProgressEvent,
+    LibraryScanSummaryStatus, MaintenanceEntries, MetadataUpdateFailure, MsgKind, NotificationDeadLetter, Permission,
+    PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState,
     ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted, ProviderPriorityFallback,
     RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
     SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges, WatchDisabled, WatchUnmatched,
@@ -35,7 +35,7 @@ pub enum EventMessage {
     RecordingProgress,
     RecordingRulesChanged,
     /// Inputs in maintenance after a change; the whole map, it is small.
-    InputMaintenanceChanged(Arc<InputMaintenanceEntries>),
+    MaintenanceChanged(Arc<MaintenanceEntries>),
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),
     /// A metadata update cycle ended with tasks it could not finish.
@@ -128,7 +128,7 @@ impl EventMessage {
             Self::RecordingChanged => EventKind::RecordingChanged,
             Self::RecordingProgress => EventKind::RecordingProgress,
             Self::RecordingRulesChanged => EventKind::RecordingRulesChanged,
-            Self::InputMaintenanceChanged(_) => EventKind::InputMaintenanceChanged,
+            Self::MaintenanceChanged(_) => EventKind::MaintenanceChanged,
             Self::InputMetadataUpdatesCompleted(_) => EventKind::InputMetadataUpdatesCompleted,
             Self::InputMetadataUpdatesStarted(_) => EventKind::InputMetadataUpdatesStarted,
             Self::InputMetadataUpdatesFailed(_) => EventKind::InputMetadataUpdatesFailed,
@@ -266,7 +266,7 @@ impl EventMessage {
             Self::ActiveProvider(_, _) => registry::PROVIDER_CONNECTIONS_CHANGED,
             Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
             Self::RecordingRulesChanged => registry::RECORDING_RULES_CHANGED,
-            Self::InputMaintenanceChanged(_) => registry::INPUT_MAINTENANCE_CHANGED,
+            Self::MaintenanceChanged(_) => registry::MAINTENANCE_CHANGED,
             Self::PlaylistUpdateProgress(_) | Self::SystemInfoUpdate(_) | Self::RecordingProgress => return None,
         })
     }
@@ -302,7 +302,7 @@ impl EventMessage {
             Self::SystemInfoUpdate(info) => encode(info.as_ref()),
             Self::LibraryScanProgress(progress) => encode(progress),
             Self::RecordingChanged | Self::RecordingProgress | Self::RecordingRulesChanged => serde_json::Value::Null,
-            Self::InputMaintenanceChanged(entries) => encode(entries.as_ref()),
+            Self::MaintenanceChanged(entries) => encode(entries.as_ref()),
             Self::InputMetadataUpdatesStarted(input) | Self::InputMetadataUpdatesCompleted(input) => {
                 serde_json::json!({ "input": input.as_ref() })
             }

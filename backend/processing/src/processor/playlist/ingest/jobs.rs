@@ -466,14 +466,14 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingCo
             had_quality_rejections: Arc::clone(&self.had_quality_rejections),
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
-            input_maintenance: self.input_maintenance.clone(),
+            maintenance: self.maintenance.clone(),
         }
     }
 }
 
 impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> PlaylistProcessingContext<E, M> {
     pub fn is_input_in_maintenance(&self, input_name: &str) -> bool {
-        self.input_maintenance.as_ref().is_some_and(|gate| gate.is_in_maintenance(input_name))
+        self.maintenance.as_ref().is_some_and(|gate| gate.is_in_maintenance(input_name))
     }
 
     #[must_use]

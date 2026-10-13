@@ -869,7 +869,7 @@ async fn xtream_token_stream_rejects_m3u_timeshift_with_bad_request() {
     assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
 }
 
-/// Serves a recognisable clip for `input_maintenance`.
+/// Serves a recognisable clip for `maintenance`.
 fn enable_maintenance_clip(app_state: &Arc<AppState>) {
     let mut cfg = (**app_state.app_config.config.load()).clone();
     cfg.custom_stream_response_enabled = true;
@@ -885,7 +885,7 @@ fn enable_maintenance_clip(app_state: &Arc<AppState>) {
         user_account_expired: None,
         panel_api_provisioning: None,
         hls_session_or_lease_expired: None,
-        input_maintenance: Some(crate::api::model::TransportStreamBuffer::new(packet)),
+        maintenance: Some(crate::api::model::TransportStreamBuffer::new(packet)),
         panel_api_provisioning_hls_segments: Vec::new(),
     })));
 }
@@ -975,7 +975,7 @@ async fn maintenance_answers_before_admission_for_an_exhausted_user() {
         ..ConfigInput::default()
     };
     cache_xtream_test_item(&app_state, &target, item, Some(input)).await;
-    app_state.input_maintenance.add("provider_a", None, 1).await.expect("maintenance");
+    app_state.maintenance.add("provider_a", None, 1).await.expect("maintenance");
 
     let mut user = ProxyUserCredentials::default();
     user.username = "busy".to_string();

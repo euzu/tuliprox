@@ -70,7 +70,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
             Arc::clone(&connection_manager),
-            crate::api::model::create_test_input_maintenance(""),
+            crate::api::model::create_test_maintenance(""),
         ),
         app_config: Arc::new(app_cfg),
         http_clients: Arc::default(),
@@ -89,7 +89,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
-        input_maintenance: crate::api::model::create_test_input_maintenance(""),
+        maintenance: crate::api::model::create_test_maintenance(""),
     })
 }
 

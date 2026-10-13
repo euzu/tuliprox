@@ -8,7 +8,7 @@ use super::{
     requeue_active_download_for_retry, set_active_download_state, should_exit_worker_after_preempt,
     spawn_recording_notification_after_persist, take_active, wait_for_provider_slot, write_completion_sidecar,
     ProviderAcquireResult, ProviderCapacities, QuotaGate, RetryCommit, DOWNLOAD_PREEMPTED_REASON,
-    INPUT_MAINTENANCE_REASON, LIVE_CAPACITY_WINDOW_CLOSED, RECORDING_PROGRESS_UPDATE_INTERVAL,
+    LIVE_CAPACITY_WINDOW_CLOSED, MAINTENANCE_REASON, RECORDING_PROGRESS_UPDATE_INTERVAL,
 };
 use crate::recording::{
     recording_capacity::RecordingCapacityPort,
@@ -171,7 +171,7 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                     // Checked before every slot request, also after waiting, so
                                     // nothing has to be released.
                                     if first_start && capacity.is_input_in_maintenance(&input_name) {
-                                        break ProviderAcquireResult::InputMaintenance;
+                                        break ProviderAcquireResult::Maintenance;
                                     }
                                     if let Some(stopped) = acquire_result_for_control(*control_signal.read().await) {
                                         break stopped;
@@ -264,10 +264,10 @@ async fn start_recording_worker<E: EventSink + Clone + 'static>(
                                 }
                                 continue;
                             }
-                            ProviderAcquireResult::InputMaintenance => {
+                            ProviderAcquireResult::Maintenance => {
                                 if let Err(err) = broadcast_required_worker_mutation(
                                     &event_manager,
-                                    fail_active_download(&dq, &worker_uuid, INPUT_MAINTENANCE_REASON).await,
+                                    fail_active_download(&dq, &worker_uuid, MAINTENANCE_REASON).await,
                                     "input maintenance",
                                 ) {
                                     error!("Download worker commit failed: {err}");

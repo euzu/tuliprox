@@ -16,18 +16,18 @@ pub struct InputMaintenance {
 }
 
 /// Inputs in maintenance, keyed by canonical input name.
-pub type InputMaintenanceEntries = BTreeMap<String, InputMaintenance>;
+pub type MaintenanceEntries = BTreeMap<String, InputMaintenance>;
 
 /// What the maintenance API returns after every call.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputMaintenanceStateDto {
-    pub entries: InputMaintenanceEntries,
+pub struct MaintenanceStateDto {
+    pub entries: MaintenanceEntries,
     /// Canonical names of all configured inputs, for the selection in the dialog.
     pub inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputMaintenanceRequestDto {
+pub struct MaintenanceRequestDto {
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -81,16 +81,16 @@ mod tests {
 
     #[test]
     fn state_dto_round_trips_as_json() {
-        let mut entries = InputMaintenanceEntries::new();
+        let mut entries = MaintenanceEntries::new();
         entries
             .insert("provider_a".to_string(), InputMaintenance { since: 1_760_350_000, reason: Some("down".into()) });
-        let dto = InputMaintenanceStateDto { entries, inputs: vec!["provider_a".into(), "provider_b".into()] };
+        let dto = MaintenanceStateDto { entries, inputs: vec!["provider_a".into(), "provider_b".into()] };
         let json = serde_json::to_string(&dto).unwrap();
         assert_eq!(
             json,
             r#"{"entries":{"provider_a":{"since":1760350000,"reason":"down"}},"inputs":["provider_a","provider_b"]}"#
         );
-        assert_eq!(serde_json::from_str::<InputMaintenanceStateDto>(&json).unwrap(), dto);
+        assert_eq!(serde_json::from_str::<MaintenanceStateDto>(&json).unwrap(), dto);
     }
 
     #[test]

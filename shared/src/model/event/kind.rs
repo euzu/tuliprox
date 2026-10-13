@@ -61,7 +61,7 @@ pub enum EventKind {
     /// position shifts.
     RecordingProgress,
     /// Appended last for the same reason.
-    InputMaintenanceChanged,
+    MaintenanceChanged,
 }
 
 impl EventKind {
@@ -112,7 +112,7 @@ impl EventKind {
         Self::AuthSignInThrottled,
         Self::AuthPermissionDenied,
         Self::RecordingProgress,
-        Self::InputMaintenanceChanged,
+        Self::MaintenanceChanged,
     ];
 
     /// This kind's bit position.
@@ -178,7 +178,7 @@ impl EventKind {
             | Self::StreamProbeFailed
             | Self::NotificationDeadLettered
             | Self::ScheduledTaskFailed => Permission::SystemRead,
-            Self::InputMaintenanceChanged => Permission::MaintenanceRead,
+            Self::MaintenanceChanged => Permission::MaintenanceRead,
         }
     }
 
@@ -277,7 +277,7 @@ impl EventKind {
             Self::AuthSignInFailed => "auth.sign_in.failed",
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
             Self::AuthPermissionDenied => "auth.permission.denied",
-            Self::InputMaintenanceChanged => "input.maintenance.changed",
+            Self::MaintenanceChanged => "maintenance.changed",
         }
     }
 

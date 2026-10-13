@@ -222,7 +222,7 @@ async fn provider_resolve(
     match resolve_provider_playlist_item_location(
         user.as_ref(),
         target.is_force_redirect(item.item_type),
-        app_state.input_maintenance.is_in_maintenance(&input.name),
+        app_state.maintenance.is_in_maintenance(&input.name),
         output_kind,
         &server_info,
         &input,

@@ -1,13 +1,11 @@
 //! What the maintenance card and dialog derive from the server state.
 
-use shared::model::{
-    InputMaintenance, InputMaintenanceEntries, InputMaintenanceStateDto, MAINTENANCE_REASON_MAX_CHARS,
-};
+use shared::model::{InputMaintenance, MaintenanceEntries, MaintenanceStateDto, MAINTENANCE_REASON_MAX_CHARS};
 
-pub fn is_alert(state: &InputMaintenanceStateDto) -> bool { !state.entries.is_empty() }
+pub fn is_alert(state: &MaintenanceStateDto) -> bool { !state.entries.is_empty() }
 
 /// The first `max` input names, with an ellipsis when there are more.
-pub fn preview_names(state: &InputMaintenanceStateDto, max: usize) -> String {
+pub fn preview_names(state: &MaintenanceStateDto, max: usize) -> String {
     let mut names: Vec<&str> = state.entries.keys().map(String::as_str).take(max).collect();
     if state.entries.len() > max {
         names.push("…");
@@ -17,13 +15,9 @@ pub fn preview_names(state: &InputMaintenanceStateDto, max: usize) -> String {
 
 /// Applies a loaded state. A load that raced with a newer change event keeps the event's
 /// entries and only takes the input list.
-pub fn merge_loaded(
-    current: &InputMaintenanceStateDto,
-    loaded: InputMaintenanceStateDto,
-    stale: bool,
-) -> InputMaintenanceStateDto {
+pub fn merge_loaded(current: &MaintenanceStateDto, loaded: MaintenanceStateDto, stale: bool) -> MaintenanceStateDto {
     if stale {
-        InputMaintenanceStateDto { entries: current.entries.clone(), inputs: loaded.inputs }
+        MaintenanceStateDto { entries: current.entries.clone(), inputs: loaded.inputs }
     } else {
         loaded
     }
@@ -38,7 +32,7 @@ fn normalized(reason: &str) -> Option<String> {
 }
 
 /// Puts `name` into the draft, or updates its remark; an existing entry keeps its `since`.
-pub fn add_to_draft(draft: &InputMaintenanceEntries, name: &str, reason: &str, now: i64) -> InputMaintenanceEntries {
+pub fn add_to_draft(draft: &MaintenanceEntries, name: &str, reason: &str, now: i64) -> MaintenanceEntries {
     let mut next = draft.clone();
     let reason = normalized(reason);
     next.entry(name.to_string())
@@ -48,12 +42,7 @@ pub fn add_to_draft(draft: &InputMaintenanceEntries, name: &str, reason: &str, n
 }
 
 /// Puts every known input that is not in the draft yet into it.
-pub fn add_all_to_draft(
-    draft: &InputMaintenanceEntries,
-    inputs: &[String],
-    reason: &str,
-    now: i64,
-) -> InputMaintenanceEntries {
+pub fn add_all_to_draft(draft: &MaintenanceEntries, inputs: &[String], reason: &str, now: i64) -> MaintenanceEntries {
     let mut next = draft.clone();
     let reason = normalized(reason);
     for name in inputs {
@@ -74,7 +63,7 @@ impl PendingChanges {
     pub fn is_empty(&self) -> bool { self.puts.is_empty() && self.deletes.is_empty() }
 }
 
-pub fn pending_changes(saved: &InputMaintenanceEntries, draft: &InputMaintenanceEntries) -> PendingChanges {
+pub fn pending_changes(saved: &MaintenanceEntries, draft: &MaintenanceEntries) -> PendingChanges {
     let puts = draft
         .iter()
         .filter(|(name, entry)| saved.get(*name).is_none_or(|current| current.reason != entry.reason))
@@ -99,10 +88,10 @@ pub fn relative_duration(since: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{InputMaintenance, InputMaintenanceEntries, InputMaintenanceStateDto};
+    use shared::model::{InputMaintenance, MaintenanceEntries, MaintenanceStateDto};
 
-    fn state(in_maintenance: &[&str], inputs: &[&str]) -> InputMaintenanceStateDto {
-        InputMaintenanceStateDto {
+    fn state(in_maintenance: &[&str], inputs: &[&str]) -> MaintenanceStateDto {
+        MaintenanceStateDto {
             entries: in_maintenance
                 .iter()
                 .map(|name| ((*name).to_string(), InputMaintenance { since: 1, reason: None }))
@@ -142,7 +131,7 @@ mod tests {
         assert!(!reason_too_long(&format!("  {}  ", "x".repeat(limit))), "surrounding whitespace is trimmed");
     }
 
-    fn entries(items: &[(&str, i64, Option<&str>)]) -> InputMaintenanceEntries {
+    fn entries(items: &[(&str, i64, Option<&str>)]) -> MaintenanceEntries {
         items
             .iter()
             .map(|(name, since, reason)| {

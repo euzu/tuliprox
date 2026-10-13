@@ -207,6 +207,6 @@ pub struct CustomStreamResponse {
     pub user_account_expired: Option<TransportStreamBuffer>,
     pub panel_api_provisioning: Option<TransportStreamBuffer>,
     pub hls_session_or_lease_expired: Option<TransportStreamBuffer>,
-    pub input_maintenance: Option<TransportStreamBuffer>, // input taken out of service by an operator
+    pub maintenance: Option<TransportStreamBuffer>, // input taken out of service by an operator
     pub panel_api_provisioning_hls_segments: Vec<TransportStreamBuffer>,
 }

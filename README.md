@@ -179,7 +179,7 @@ Upstream providers are not always reliable. Tuliprox is designed to preserve usa
 - Independent inputs can update in parallel while optional sequential groups protect providers that must not be refreshed concurrently
 - Automatic Xtream account-expiration refresh with throttling designed to reduce unnecessary provider requests
 - Stalker capability knowledge is reused during a running client session to avoid repeatedly probing known-failing endpoint variants
-- **Input maintenance mode** takes an input out of service from the dashboard or the REST API: new streams get a
+- **Maintenance mode** takes an input out of service from the dashboard or the REST API: new streams get a
   dedicated maintenance video, the last playlist and EPG keep being served, and no subsystem contacts the provider until
   maintenance ends; running streams and recordings continue
 

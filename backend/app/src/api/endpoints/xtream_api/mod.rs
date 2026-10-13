@@ -1398,7 +1398,7 @@ pub async fn xtream_get_stream_info_response(
 
     // handle upstream provider; an input in maintenance answers from the fallback below
     if pli.provider_id > 0 {
-        if let Some(input) = input.filter(|input| !app_state.input_maintenance.is_in_maintenance(&input.name)) {
+        if let Some(input) = input.filter(|input| !app_state.maintenance.is_in_maintenance(&input.name)) {
             if let Some(info_url) = xtream::get_xtream_player_api_info_url(&input, cluster, pli.provider_id) {
                 // redirect is only possible for live streams
                 if user.proxy == ProxyType::Redirect && cluster == XtreamCluster::Live {

@@ -11,7 +11,7 @@ use crate::{
     i18n::use_translation,
     model::EventMessage,
 };
-use shared::model::{InputMaintenanceStateDto, Permission};
+use shared::model::{MaintenanceStateDto, Permission};
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -29,10 +29,10 @@ pub fn MaintenanceActionCard() -> Html {
     let services = use_service_context();
     let translate = use_translation();
     let card_ctx = use_context::<CardContext>();
-    let state = use_state(|| Rc::new(InputMaintenanceStateDto::default()));
+    let state = use_state(|| Rc::new(MaintenanceStateDto::default()));
     // The latest state, readable from the subscription and from a load in flight without going
     // through a stale state handle.
-    let latest = use_mut_ref(|| Rc::new(InputMaintenanceStateDto::default()));
+    let latest = use_mut_ref(|| Rc::new(MaintenanceStateDto::default()));
     // Counts change events; a load that saw a newer event than the one it started after is stale.
     let event_generation = use_mut_ref(|| 0_u64);
     let dialog_open = use_state(|| false);
@@ -42,7 +42,7 @@ pub fn MaintenanceActionCard() -> Html {
     let apply_state = {
         let state = state.clone();
         let latest = latest.clone();
-        Callback::from(move |next: InputMaintenanceStateDto| {
+        Callback::from(move |next: MaintenanceStateDto| {
             let next = Rc::new(next);
             *latest.borrow_mut() = Rc::clone(&next);
             state.set(next);
@@ -85,10 +85,10 @@ pub fn MaintenanceActionCard() -> Html {
             let subscription = can_read.then(|| {
                 reload.emit(());
                 services.event.subscribe(move |message| match message {
-                    EventMessage::InputMaintenanceChanged(entries) => {
+                    EventMessage::MaintenanceChanged(entries) => {
                         *event_generation.borrow_mut() += 1;
                         let inputs = latest.borrow().inputs.clone();
-                        apply_state.emit(InputMaintenanceStateDto { entries: (*entries).clone(), inputs });
+                        apply_state.emit(MaintenanceStateDto { entries: (*entries).clone(), inputs });
                     }
                     // Events sent while the socket was down are lost, and a source reload can
                     // add inputs: read the state again.

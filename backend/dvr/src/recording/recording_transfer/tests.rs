@@ -3,8 +3,8 @@ use super::{
     ensure_recording_worker_running, finalize_http_transfer, finish_active_and_promote, http_transfer_path,
     recording_deadline_instant, refresh_recording_progress, requeue_active_download_for_capacity_wait,
     start_recording_scheduler, wait_for_provider_slot, DownloadExecutionResult, ProviderAcquireResult, QuotaGate,
-    RecordingNotificationPlan, DISK_GONE_BEFORE_START, DOWNLOAD_PREEMPTED_REASON, INPUT_MAINTENANCE_REASON,
-    LIVE_CAPACITY_WINDOW_CLOSED, QUOTA_EXCEEDED_DURING_TRANSFER,
+    RecordingNotificationPlan, DISK_GONE_BEFORE_START, DOWNLOAD_PREEMPTED_REASON, LIVE_CAPACITY_WINDOW_CLOSED,
+    MAINTENANCE_REASON, QUOTA_EXCEEDED_DURING_TRANSFER,
 };
 
 mod admission;
