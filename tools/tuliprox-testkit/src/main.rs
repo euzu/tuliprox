@@ -126,6 +126,9 @@ enum Command {
         account_limit: Option<usize>,
         #[arg(long, default_value = "observe_only")]
         limit_mode: String,
+        /// Delay before an accepted media connection is counted and served.
+        #[arg(long, default_value_t = 0)]
+        connect_latency_ms: u64,
         /// Refuse the first `create_link` the emulated Stalker portal receives.
         #[arg(long)]
         stalker_refuse_create_link_once: bool,
@@ -317,6 +320,14 @@ async fn main() -> ExitCode {
     }
 }
 
+fn parse_limit_mode(value: &str) -> OriginLimitMode {
+    match value {
+        "reject_new" => OriginLimitMode::RejectNew,
+        "evict_oldest" => OriginLimitMode::EvictOldest,
+        _ => OriginLimitMode::ObserveOnly,
+    }
+}
+
 fn parse_hls_profile(
     value: Option<&str>,
 ) -> Result<Option<Arc<tuliprox_testkit::hls_probe::HlsOriginProfile>>, TestkitError> {
@@ -342,6 +353,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
             hls_profile,
             account_limit,
             limit_mode,
+            connect_latency_ms,
             stalker_refuse_create_link_once,
             stalker_refuse_create_link_markers,
             stalker_separate_descriptor_command,
@@ -352,12 +364,7 @@ async fn run(cli: Cli) -> Result<RunExit, TestkitError> {
                 return Err(TestkitError::Configuration("origin requires at least one channel marker".to_owned()));
             }
             let hls_profile = parse_hls_profile(hls_profile.as_deref())?;
-            let mode = match limit_mode.as_str() {
-                "reject_new" => OriginLimitMode::RejectNew,
-                "evict_oldest" => OriginLimitMode::EvictOldest,
-                _ => OriginLimitMode::ObserveOnly,
-            };
-            let policy = OriginPolicy { account_limit, limit_mode: mode };
+            let policy = OriginPolicy { account_limit, limit_mode: parse_limit_mode(&limit_mode), connect_latency_ms };
             let tracker = OriginTracker::new(&run_id, policy);
             serve_origin(
                 listen,

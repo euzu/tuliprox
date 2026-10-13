@@ -197,6 +197,9 @@ pub struct OriginConfig {
     pub account_limit: Option<usize>,
     #[serde(default)]
     pub limit_mode: Option<crate::origin_transport::OriginLimitMode>,
+    /// See `OriginPolicy::connect_latency_ms`.
+    #[serde(default)]
+    pub connect_latency_ms: Option<u64>,
     #[serde(default)]
     pub hls_profile: Option<crate::hls_probe::HlsOriginProfile>,
 }
