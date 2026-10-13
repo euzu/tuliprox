@@ -1040,64 +1040,57 @@ pub async fn finish_hls_origin_account_io(
     refresh_reservation: bool,
 ) {
     let binding = guard.binding().clone();
-    let mut provider_resource_to_release = None;
+    let mut session = session.write().await;
+
+    let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
+    let confirmed_ttl_secs = session.activity.last_delivered_media_at_ms.map_or(0, |last| {
+        last.saturating_add(origin_io.reservation_ttl_secs.saturating_mul(1000)).saturating_sub(now_ms).div_ceil(1000)
+    });
+
+    // Decrement directly on guard.lease, not session.origin_account_io_lease.
+    // The session may have been rebound or replaced between I/O start and finish.
+    // Only clear the session reference if it still points to this exact lease instance.
+    guard.disarm();
     let mut should_refresh_reservation = false;
-    let confirmed_ttl_secs;
-    {
-        let mut session = session.write().await;
-
-        let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
-        confirmed_ttl_secs = session.activity.last_delivered_media_at_ms.map_or(0, |last| {
-            last.saturating_add(origin_io.reservation_ttl_secs.saturating_mul(1000))
-                .saturating_sub(now_ms)
-                .div_ceil(1000)
-        });
-
-        // Decrement directly on guard.lease, not session.origin_account_io_lease.
-        // The session may have been rebound or replaced between I/O start and finish.
-        // Only clear the session reference if it still points to this exact lease instance.
-        guard.disarm();
-        if guard.lease.active_io_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
-            provider_resource_to_release = guard.lease.take_resource();
-            if session
-                .origin_account_io_lease
-                .as_ref()
-                .is_some_and(|session_lease| std::sync::Arc::ptr_eq(session_lease, &guard.lease))
-            {
-                session.origin_account_io_lease = None;
-            }
-            if refresh_reservation && confirmed_ttl_secs > 0 {
-                should_refresh_reservation = true;
-            }
+    if guard.lease.active_io_count.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+        let provider_resource_to_release = guard.lease.take_resource();
+        if session
+            .origin_account_io_lease
+            .as_ref()
+            .is_some_and(|session_lease| std::sync::Arc::ptr_eq(session_lease, &guard.lease))
+        {
+            session.origin_account_io_lease = None;
         }
-
-        if let Some(current) = session.origin_account_binding.as_mut().filter(|current| {
-            current.is_active()
-                && current.account_name == binding.account_name
-                && current.session_owner == binding.session_owner
-                && current.generation == binding.generation
-        }) {
-            let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
-            current.last_origin_io_at_ms = Some(now_ms);
+        should_refresh_reservation = refresh_reservation && confirmed_ttl_secs > 0;
+        if let Some((provider_handle, cleanup_permit)) = provider_resource_to_release {
             if should_refresh_reservation {
-                current.last_reservation_refresh_at_ms = Some(now_ms);
+                if let Some(request_id) = binding.playback_request_id {
+                    origin_io.ctx.active_provider.refresh_playback_lease(
+                        &binding.account_name,
+                        &PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id },
+                        confirmed_ttl_secs,
+                    );
+                }
             }
+            // Released synchronously and still under the session lock: the next I/O of
+            // this session reserves its slot under the same lock, so it can never see the
+            // lease gone while the provider still counts the old connection. A deferred
+            // release lets it race for a new slot, which an account at its connection
+            // limit answers with `Exhausted`.
+            origin_io.ctx.connection_manager.release_provider_handle(Some(provider_handle));
+            drop(cleanup_permit);
         }
     }
 
-    if let Some((provider_handle, cleanup_permit)) = provider_resource_to_release {
-        let mut handle_guard = ManagedHandleGuard::new(provider_handle, cleanup_permit);
+    if let Some(current) = session.origin_account_binding.as_mut().filter(|current| {
+        current.is_active()
+            && current.account_name == binding.account_name
+            && current.session_owner == binding.session_owner
+            && current.generation == binding.generation
+    }) {
+        current.last_origin_io_at_ms = Some(now_ms);
         if should_refresh_reservation {
-            if let Some(request_id) = binding.playback_request_id {
-                origin_io.ctx.active_provider.refresh_playback_lease(
-                    &binding.account_name,
-                    &PlaybackLeaseRef { owner: &binding.session_owner, kind: PlaybackKind::LiveHls, request_id },
-                    confirmed_ttl_secs,
-                );
-            }
-        }
-        if let Some((handle, permit)) = handle_guard.take_resource() {
-            permit.send(CleanupEvent::ReleaseProviderHandle { handle: Some(handle) });
+            current.last_reservation_refresh_at_ms = Some(now_ms);
         }
     }
 }

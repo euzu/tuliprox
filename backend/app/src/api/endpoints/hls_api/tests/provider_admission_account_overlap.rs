@@ -89,6 +89,34 @@ async fn hls_origin_account_io_lease_blocks_other_hls_sessions_for_same_account(
 }
 
 #[tokio::test]
+async fn hls_origin_account_io_frees_its_slot_before_finish_returns() {
+    // The next origin I/O of the session (a manifest refresh right after a segment) or
+    // another session (a channel switch) must find the slot free at once. A deferred
+    // release makes it race for a slot the provider still counts, and an account at
+    // its connection limit answers that race with `Exhausted`.
+    let input = overlap_provider_input();
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app_state, &input, "12345", "account-a", 1_000).await;
+    let other_session = create_bound_hls_test_session(&app_state, &input, "67890", "account-a", 1_000).await;
+    let binding = session.read().await.origin_account_binding.clone().expect("binding exists");
+    let other_binding = other_session.read().await.origin_account_binding.clone().expect("binding exists");
+    let origin_io = test_hls_origin_io_context(&app_state);
+
+    let first = begin_hls_origin_account_io(&origin_io, &session, &binding).await.expect("first io acquires");
+    wait_for_provider_connection_count(&app_state, 1).await;
+    finish_hls_origin_account_io(&origin_io, &session, first, true).await;
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0, "released before finish returns");
+
+    let second = begin_hls_origin_account_io(&origin_io, &session, &binding).await.expect("next io acquires at once");
+    finish_hls_origin_account_io(&origin_io, &session, second, true).await;
+    let other = begin_hls_origin_account_io(&origin_io, &other_session, &other_binding)
+        .await
+        .expect("another session acquires at once");
+    finish_hls_origin_account_io(&origin_io, &other_session, other, true).await;
+    assert_eq!(app_state.active_provider.get_provider_connections_count(), 0);
+}
+
+#[tokio::test]
 async fn hls_account_overlap_selects_soft_candidate_but_not_hard_active() {
     let app_state = test_app_state();
     let input = ConfigInput { id: 1, name: Arc::from("overlap-input"), ..ConfigInput::default() };
