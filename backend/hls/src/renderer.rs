@@ -225,7 +225,10 @@ pub fn renderer_candidate_window_proxy_seqs(session: &HlsSession) -> Vec<u64> {
 fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
     if let Some(startup) = &session.startup {
         return entry.is_fast_start_eligible()
-            && startup.revisions.get(&entry.proxy_seq).is_some_and(|revision| revision.revision().is_publishable());
+            && startup
+                .revisions
+                .get(&entry.proxy_seq)
+                .is_some_and(|revision| revision.revision().is_window_publishable(startup.config.mode));
     }
     match entry.status {
         SegmentCacheStatus::Ready { .. } => {}
@@ -250,7 +253,11 @@ fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
 
 fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: RenderTailPolicy) -> Option<Vec<u64>> {
     let head_seq = session.publishable_origin_head_proxy_seq?;
-    if session.startup.is_some() {
+    if let Some(startup) = &session.startup {
+        // The head always needs body bytes; only optimistic successors may still be waiting for theirs.
+        if !startup.revisions.get(&head_seq).is_some_and(|revision| revision.revision().is_publishable()) {
+            return None;
+        }
         let planned_tail =
             session.publishable_origin_tail_proxy_seq?.checked_sub(u64::try_from(render_gap_segments).ok()?)?;
         let wanted = if session.published_live_origin_baseline.is_none() {
@@ -587,6 +594,68 @@ mod tests {
         normal_manifest(
             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:120\n#EXTINF:4.0,\norigin-name-120.ts\n#EXTINF:4.0,\norigin-name-121.ts\n#EXTINF:4.0,\norigin-name-122.ts\n#EXTINF:4.0,\norigin-name-123.ts\n#EXTINF:4.0,\norigin-name-124.ts\n#EXTINF:4.0,\norigin-name-125.ts\n",
         )
+    }
+
+    fn optimistic_startup_session(mode: shared::model::HlsStartupMode) -> std::io::Result<HlsSession> {
+        let mut session = session();
+        session
+            .apply_origin_manifest(&normal_manifest(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\n0.ts\n#EXTINF:2,\n1.ts\n#EXTINF:2,\n2.ts\n",
+            ))
+            .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        let config = tuliprox_core::model::HlsStartupConfig { mode, ..Default::default() };
+        let worker = std::sync::Arc::new(crate::HlsSegmentWorkerPool::default());
+        let store = std::sync::Arc::new(crate::SegmentRevisionStore::default());
+        let mut revisions = std::collections::BTreeMap::new();
+        for seq in session.segments.keys().copied().collect::<Vec<_>>() {
+            revisions
+                .insert(seq, store.create(session.proxy_session_id.clone(), seq, crate::SegmentRevisionKind::Raw)?);
+        }
+        session.startup = Some(crate::HlsSessionStartup {
+            config: config.clone(),
+            first_data_timeout_ms: 10_000,
+            worker: std::sync::Arc::downgrade(&worker),
+            access_leases: std::sync::Arc::new(tokio::sync::RwLock::new(crate::HlsAccessLeaseStore::default())),
+            revisions,
+            policy_fixed: true,
+            store,
+            budget: crate::ProgressiveBudgetManager::new(config),
+        });
+        Ok(session)
+    }
+
+    fn startup_revision(session: &HlsSession, offset: usize) -> std::io::Result<crate::SegmentRevisionGuard> {
+        session
+            .startup
+            .as_ref()
+            .and_then(|startup| startup.revisions.values().nth(offset).cloned())
+            .ok_or_else(|| std::io::Error::other("revision"))
+    }
+
+    #[test]
+    fn optimistic_startup_publishes_pending_successors_once_the_head_has_bytes() -> std::io::Result<()> {
+        for (mode, renders) in
+            [(shared::model::HlsStartupMode::Optimistic, true), (shared::model::HlsStartupMode::Progressive, false)]
+        {
+            let mut session = optimistic_startup_session(mode)?;
+            assert!(matches!(session.render_and_store_manifest(10), Err(RenderError::NoRenderableWindow)));
+            startup_revision(&session, 0)?.revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
+            let rendered = session.render_and_store_manifest(20);
+            assert_eq!(rendered.is_ok(), renders, "mode={mode}");
+            if let Ok(rendered) = rendered {
+                assert_eq!(rendered.segment_proxy_seqs.len(), 3);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn optimistic_startup_window_stops_before_a_failed_successor() -> std::io::Result<()> {
+        let mut session = optimistic_startup_session(shared::model::HlsStartupMode::Optimistic)?;
+        startup_revision(&session, 0)?.revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
+        startup_revision(&session, 1)?.revision().fail();
+        assert!(matches!(session.render_and_store_manifest(10), Err(RenderError::NoRenderableWindow)));
+        Ok(())
     }
 
     fn mark_all_segments_ready(session: &mut HlsSession) {

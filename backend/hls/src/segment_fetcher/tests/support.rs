@@ -481,6 +481,54 @@ pub(in crate::segment_fetcher::tests) async fn prefix_origin(
     Ok((TestSegmentServer { base_url, requests, task }, release))
 }
 
+/// Origin whose head (`/1.ts`) sends a body prefix at once, while every
+/// successor answers with headers only until `release` is set.
+pub(in crate::segment_fetcher::tests) async fn headers_only_successor_origin(
+) -> std::io::Result<(TestSegmentServer, tokio::sync::watch::Sender<bool>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let (release, released) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut children = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((socket, _)) = accepted else { break; };
+                    let recorded = Arc::clone(&recorded);
+                    let mut released = released.clone();
+                    children.spawn(async move {
+                        let mut reader = BufReader::new(socket);
+                        let mut request = String::new();
+                        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut request).await?;
+                        let head = request.starts_with("GET /1.ts ");
+                        recorded.lock().await.push(request);
+                        loop {
+                            let mut line = String::new();
+                            tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await?;
+                            if line == "\r\n" || line.is_empty() { break; }
+                        }
+                        let mut socket = reader.into_inner();
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n").await?;
+                        if head {
+                            socket.write_all(b"segment-").await?;
+                        }
+                        while !*released.borrow_and_update() {
+                            released.changed().await.map_err(std::io::Error::other)?;
+                        }
+                        socket.write_all(if head { b"body".as_slice() } else { b"segment-body".as_slice() }).await?;
+                        socket.shutdown().await?;
+                        Ok::<_, std::io::Error>(())
+                    });
+                }
+                _ = children.join_next(), if !children.is_empty() => {}
+            }
+        }
+    });
+    Ok((TestSegmentServer { base_url, requests, task }, release))
+}
+
 pub(in crate::segment_fetcher::tests) type StartupSoakResources<'a> = (
     &'a tempfile::TempDir,
     &'a Arc<crate::SegmentRevisionStore>,
@@ -581,7 +629,7 @@ pub(in crate::segment_fetcher::tests) async fn wait_for_cold_publication(
         let mut session = context.session.write().await;
         if let Ok(rendered) = session.render_and_store_manifest(current_time_millis()) {
             let head = session.startup.as_ref().and_then(|startup| startup.revisions.get(&1)).cloned();
-            if mode == shared::model::HlsStartupMode::Progressive
+            if mode.streams_raw_revisions()
                 || head.as_ref().is_some_and(|head| {
                     matches!(*head.revision().subscribe().borrow(), crate::SegmentRevisionState::Complete(_))
                 })

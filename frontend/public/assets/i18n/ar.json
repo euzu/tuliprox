@@ -920,6 +920,7 @@
     "HLS_STARTUP_MODE_CONSERVATIVE": "محافظ",
     "HLS_STARTUP_MODE_FIRST_READY": "أول جاهز",
     "HLS_STARTUP_MODE_PROGRESSIVE": "تدريجي",
+    "HLS_STARTUP_MODE_OPTIMISTIC": "متفائل",
     "BACK": "رجوع",
     "BOUQUETS": "الباقات",
     "ALL_TARGETS": "جميع الأهداف",

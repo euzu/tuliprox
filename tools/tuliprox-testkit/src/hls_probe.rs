@@ -15,6 +15,7 @@ pub enum StartupMode {
     Conservative,
     FirstReady,
     Progressive,
+    Optimistic,
 }
 
 impl fmt::Display for StartupMode {
@@ -23,6 +24,7 @@ impl fmt::Display for StartupMode {
             Self::Conservative => "conservative",
             Self::FirstReady => "first_ready",
             Self::Progressive => "progressive",
+            Self::Optimistic => "optimistic",
         })
     }
 }

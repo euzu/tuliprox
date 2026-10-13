@@ -138,15 +138,16 @@ impl ActiveUserManager {
             let existing_stream_info = connection_data
                 .streams
                 .iter()
-                .position(|stream_info| {
-                    !stream_channel.shared
-                        && match session_token {
-                            Some(token) => {
-                                stream_info.session_token.as_deref() == Some(token)
-                                    && Self::should_reuse_stream_for_session(stream_info, stream_channel)
-                            }
-                            None => stream_info.uid == uid && stream_info.session_token.is_none(),
-                        }
+                .position(|stream_info| match session_token {
+                    Some(token) if stream_channel.shared => {
+                        stream_info.session_token.as_deref() == Some(token)
+                            && Self::should_reuse_shared_stream_for_session(stream_info, stream_channel)
+                    }
+                    Some(token) => {
+                        stream_info.session_token.as_deref() == Some(token)
+                            && Self::should_reuse_stream_for_session(stream_info, stream_channel)
+                    }
+                    None => !stream_channel.shared && stream_info.uid == uid && stream_info.session_token.is_none(),
                 })
                 .map(|stream_idx| {
                     let session_started_at = session_token.and_then(|token| {

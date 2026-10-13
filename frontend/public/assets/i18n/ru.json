@@ -920,6 +920,7 @@
     "HLS_STARTUP_MODE_CONSERVATIVE": "Консервативный",
     "HLS_STARTUP_MODE_FIRST_READY": "Первый готовый",
     "HLS_STARTUP_MODE_PROGRESSIVE": "Прогрессивный",
+    "HLS_STARTUP_MODE_OPTIMISTIC": "Оптимистичный",
     "BACK": "Назад",
     "BOUQUETS": "Букеты",
     "ALL_TARGETS": "Все цели",

@@ -13,13 +13,23 @@ pub enum HlsStartupMode {
     Conservative,
     FirstReady,
     Progressive,
+    Optimistic,
 }
 
 crate::impl_str_enum!(HlsStartupMode, "HLS startup mode",
     Conservative => "conservative",
     FirstReady => "first_ready",
     Progressive => "progressive",
+    Optimistic => "optimistic",
 );
+
+impl HlsStartupMode {
+    /// Raw revisions stream to the first viewer before origin EOF.
+    pub const fn streams_raw_revisions(self) -> bool { matches!(self, Self::Progressive | Self::Optimistic) }
+
+    /// Startup successors are publishable once the origin accepted them, before body bytes arrive.
+    pub const fn publishes_pending_successors(self) -> bool { matches!(self, Self::Optimistic) }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]

@@ -559,7 +559,7 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
                 publication
                     .revisions
                     .get(&segment.proxy_seq)
-                    .is_some_and(|revision| revision.revision().is_publishable())
+                    .is_some_and(|revision| revision.revision().is_window_publishable(publication.mode))
             })
             && publication
                 .revisions
@@ -1005,6 +1005,47 @@ mod tests {
             HlsStartupAdmissionDecision::Admit
         );
         publication.revisions.get(&1).ok_or_else(|| std::io::Error::other("successor"))?.revision().fail();
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn optimistic_admission_needs_head_bytes_and_unfailed_successors() -> std::io::Result<()> {
+        let store = crate::SegmentRevisionStore::default();
+        let mut manifest = manifest();
+        let mut owners = std::collections::BTreeMap::new();
+        for seq in 0..3 {
+            owners.insert(
+                seq,
+                store.create(crate::ProxySessionId("admission".into()), seq, crate::SegmentRevisionKind::Raw)?,
+            );
+        }
+        manifest.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            mode: shared::model::HlsStartupMode::Optimistic,
+            retained_start_seq: 0,
+            revisions: owners,
+        }));
+        let timeline = HlsReadyTimelineSnapshot { units: Arc::from([]) };
+        assert!(matches!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Reject(_)
+        ));
+        let publication = manifest.startup_revisions.as_ref().ok_or_else(|| std::io::Error::other("publication"))?;
+        publication
+            .revisions
+            .get(&0)
+            .ok_or_else(|| std::io::Error::other("head"))?
+            .revision()
+            .prefix_available
+            .store(1, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+            HlsStartupAdmissionDecision::Admit
+        );
+        publication.revisions.get(&2).ok_or_else(|| std::io::Error::other("successor"))?.revision().fail();
         assert!(matches!(
             admission(&manifest, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
             HlsStartupAdmissionDecision::Reject(_)

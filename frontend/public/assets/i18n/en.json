@@ -920,6 +920,7 @@
     "HLS_STARTUP_MODE_CONSERVATIVE": "Conservative",
     "HLS_STARTUP_MODE_FIRST_READY": "First ready",
     "HLS_STARTUP_MODE_PROGRESSIVE": "Progressive",
+    "HLS_STARTUP_MODE_OPTIMISTIC": "Optimistic",
     "ALL_TARGETS": "All targets",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Accept Insecure SSL Certificates",
     "ACTIVE": "Active",

@@ -459,6 +459,18 @@ impl ActiveUserManager {
             || incoming_channel.item_type.requires_provider_affinity()
     }
 
+    /// Shared HLS delivers every segment on its own request. Requests of one
+    /// device session on the same shared stream belong to one playback row.
+    pub(super) fn should_reuse_shared_stream_for_session(
+        existing_stream: &StreamInfo,
+        incoming_channel: &StreamChannel,
+    ) -> bool {
+        existing_stream.channel.shared
+            && existing_stream.channel.shared_stream_id.is_some()
+            && existing_stream.channel.shared_stream_id == incoming_channel.shared_stream_id
+            && super::session_lifecycle::is_stable_session_stream(existing_stream)
+    }
+
     pub fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) { let _ = self.cleanup_tx.set(tx); }
 
     pub fn set_provider_manager(&self, provider_manager: Arc<ActiveProviderManager>) {

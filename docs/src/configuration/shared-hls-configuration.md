@@ -270,6 +270,13 @@ The complete session delivers immutable raw TS revisions, including subsequent r
 Repair and the corruption watchdog continue on the processed cache copy. Raw delivery does not correct source
 timestamp or transport-stream defects; prefer `first_ready` when a source needs repair.
 
+`optimistic` behaves like `progressive` and publishes the initial playlist earlier. The head segment needs a
+body prefix, while listed successors only need an accepted HTTP 200 origin response. Successor fetches start
+together with the head, within the configured per-session concurrency. A client request for a successor waits
+for its complete body. If the origin fails a successor after it was listed, only that segment fails for the
+client; already published media never changes. Replay or disk fallback switches the session to `first_ready`
+exactly like `progressive`.
+
 Fast startup is limited to live, clear MPEG-TS objects without MAP or origin byte ranges. Archive, encrypted,
 fragmented-MP4 and transient sessions use their existing path. Before publication an incompatible source can fall back to that path.
 After a Fast Start manifest is published, a refresh requiring transient delivery is rejected to preserve
@@ -284,17 +291,18 @@ disk cache limits. Conservative behavior remains the default; existing sessions 
 reload. Restart after changing to `conservative` when an immediate rollback of running sessions is required.
 
 Existing provider and fetch concurrency limits remain in effect. The initial playlist needs at least three
-publishable segments. With fewer than three concurrent fills, a cold session can still wait for an earlier
-origin EOF before that window is available. Raising the existing per-session concurrency limit to three is an
-operator choice and must fit the provider's connection allowance; startup mode never raises it automatically.
+publishable segments; `optimistic` counts successors the origin has accepted. With fewer than three concurrent
+fills, a cold session can still wait for an earlier origin EOF before that window is available. Raising the
+existing per-session concurrency limit to three is an operator choice and must fit the provider's connection
+allowance; startup mode never raises it automatically.
 
 Measure both first data and decoded-picture time before enabling progressive mode in production. Short successful
 response runs do not establish long-term player, origin-failure or resource stability.
 
 ## Reproducible startup checks
 
-The testkit has isolated shared-HLS scenarios for `conservative`, `first_ready` and `progressive`, plus missing-head
-scenarios for both fast modes. Existing scenarios retain their original origin behavior. The new
+The testkit has isolated shared-HLS scenarios for `conservative`, `first_ready`, `progressive` and `optimistic`, plus
+missing-head scenarios for every fast mode. Existing scenarios retain their original origin behavior. The new
 `origin.hls_profile` publishes six segments, sends a complete synthetic frame immediately, and delays the second
 frame by `prefix_delay_millis`. `missing_head_segments` returns alternating HTTP 404/410 at the head;
 `abort_segments` injects a body error after the prefix. `unknown_length` omits origin Content-Length.

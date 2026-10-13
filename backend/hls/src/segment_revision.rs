@@ -76,6 +76,11 @@ impl SegmentRevision {
     pub fn id(&self) -> SegmentRevisionId { self.key.id }
     #[cfg(test)]
     pub(crate) fn pin_count(&self) -> usize { self.pins.load(Ordering::Acquire) }
+
+    /// Finished or failed, and held by nothing but its session's startup map.
+    pub(crate) fn is_idle_session_owned(&self) -> bool {
+        self.pins.load(Ordering::Acquire) == 1 && !matches!(*self.state.borrow(), SegmentRevisionState::Pending)
+    }
     pub fn subscribe(&self) -> watch::Receiver<SegmentRevisionState> { self.state.subscribe() }
     pub fn complete(&self, metadata: CachedSegmentMetadata) -> bool {
         self.state.send_if_modified(|state| {
@@ -112,6 +117,15 @@ impl SegmentRevision {
         exposed
     }
 
+    /// An optimistic successor is listed before its body arrives. If it fails
+    /// before receiving any byte, a new attempt may take over its URI.
+    pub(crate) fn is_replaceable_in(&self, mode: HlsStartupMode) -> bool {
+        mode.publishes_pending_successors()
+            && matches!(*self.state.borrow(), SegmentRevisionState::Failed)
+            && !self.exposed.load(Ordering::Acquire)
+            && self.prefix_available.load(Ordering::Acquire) == 0
+    }
+
     pub(crate) fn replay_exhausted(&self) {
         self.state.send_if_modified(|state| {
             if !matches!(state, SegmentRevisionState::Pending) {
@@ -144,8 +158,19 @@ impl SegmentRevision {
     pub fn is_startup_head_ready(&self, mode: HlsStartupMode) -> bool {
         match mode {
             HlsStartupMode::FirstReady => self.is_complete(),
-            HlsStartupMode::Progressive => self.is_publishable(),
+            HlsStartupMode::Progressive | HlsStartupMode::Optimistic => self.is_publishable(),
             HlsStartupMode::Conservative => false,
+        }
+    }
+
+    /// Whether this revision may be listed in a startup window. Optimistic
+    /// startup lists a successor as soon as the origin accepted it; delivery
+    /// of a successor always waits for its complete body.
+    pub fn is_window_publishable(&self, mode: HlsStartupMode) -> bool {
+        if mode.publishes_pending_successors() {
+            !matches!(*self.state.borrow(), SegmentRevisionState::Failed)
+        } else {
+            self.is_publishable()
         }
     }
 
@@ -187,7 +212,13 @@ impl Clone for SegmentRevisionGuard {
     }
 }
 impl Drop for SegmentRevisionGuard {
-    fn drop(&mut self) { self.revision.pins.fetch_sub(1, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        // Without a guard nobody can serve this revision any more, so its file
+        // no longer needs to count as an active cache file.
+        if self.revision.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.revision.file_pin.lock_unpoisoned().take();
+        }
+    }
 }
 impl PartialEq for SegmentRevisionGuard {
     fn eq(&self, other: &Self) -> bool { self.revision.id() == other.revision.id() }
@@ -293,6 +324,21 @@ mod tests {
         assert_eq!(budget.usage(), (0, 0));
         assert!(owner.revision().complete(CachedSegmentMetadata { path: "raw.ts".into(), size: 6 }));
         assert!(owner.revision().expose());
+        Ok(())
+    }
+
+    #[test]
+    fn optimistic_window_accepts_pending_successors_but_never_failed_ones() -> io::Result<()> {
+        let store = SegmentRevisionStore::default();
+        let owner = store.create(ProxySessionId("window".into()), 1, SegmentRevisionKind::Raw)?;
+        let revision = owner.revision();
+        assert!(revision.is_window_publishable(HlsStartupMode::Optimistic));
+        assert!(!revision.is_window_publishable(HlsStartupMode::Progressive));
+        assert!(!revision.is_startup_head_ready(HlsStartupMode::Optimistic));
+        revision.prefix_available.store(1, Ordering::Release);
+        assert!(revision.is_startup_head_ready(HlsStartupMode::Optimistic));
+        revision.fail();
+        assert!(!revision.is_window_publishable(HlsStartupMode::Optimistic));
         Ok(())
     }
 

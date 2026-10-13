@@ -268,12 +268,13 @@ impl HlsProxyManager {
             return;
         };
         let session_idle_timeout_ms = self.session_idle_timeout_ms();
-        let (key, due_at_ms, can_remove) = {
+        let (key, due_at_ms, can_remove, idle_revisions) = {
             let session = session.read().await;
             (
                 session.key.clone(),
                 session.idle_expiry_due_at_ms(session_idle_timeout_ms),
                 session.can_expire_idle_session(now_ms, session_idle_timeout_ms),
+                session.idle_startup_revision_keys(),
             )
         };
         if !can_remove {
@@ -285,7 +286,7 @@ impl HlsProxyManager {
                 .await;
             return;
         }
-        if self.segment_cache.has_active_temp_files_for_session(proxy_session_id) {
+        if self.segment_cache.has_active_temp_files_for_session_except(proxy_session_id, &idle_revisions) {
             self.lifecycle
                 .schedule(
                     HlsLifecycleEventKey::SessionIdle { proxy_session_id: proxy_session_id.clone() },
@@ -307,6 +308,8 @@ impl HlsProxyManager {
             .await
             .is_some()
         {
+            // Dropping the startup guards releases the revision file pins.
+            drop(session.write().await.startup.take());
             self.cleanup_proxy_session_state(proxy_session_id, "lifecycle-session-expired").await;
             if let Err(err) = self.segment_cache.delete_session_dir(proxy_session_id).await {
                 error!(

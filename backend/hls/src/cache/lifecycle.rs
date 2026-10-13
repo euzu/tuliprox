@@ -320,6 +320,23 @@ impl HlsSegmentCache {
             .any(|path| path.starts_with(&session_path))
     }
 
+    /// Like [`Self::has_active_temp_files_for_session`], ignoring the files of
+    /// the given keys.
+    pub fn has_active_temp_files_for_session_except<K: HlsCacheObjectKey>(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        ignored: &[K],
+    ) -> bool {
+        let session_path = self.cache_path_snapshot().path.join(safe_session_path_component(proxy_session_id));
+        let ignored = ignored.iter().map(|key| self.path_for_key(key)).collect::<HashSet<_>>();
+        self.temp_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_files
+            .iter()
+            .any(|path| path.starts_with(&session_path) && !ignored.contains(path))
+    }
+
     pub fn has_active_temp_files(&self) -> bool {
         !self.temp_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active_files.is_empty()
     }

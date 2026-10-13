@@ -95,3 +95,66 @@ async fn hls_terminal_commit_exact_replay_stays_idempotent_after_asset_revision_
         HlsLeasePlaybackMode::TerminalTail(_)
     ));
 }
+
+#[tokio::test]
+async fn idle_session_with_a_bound_startup_revision_expires_without_restart() -> std::io::Result<()> {
+    for reader_holds_revision in [false, true] {
+        idle_startup_revision_round(reader_holds_revision).await?;
+    }
+    Ok(())
+}
+
+async fn idle_startup_revision_round(reader_holds_revision: bool) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let directory = tempfile::tempdir()?;
+    let mut dto =
+        HlsCacheConfigDto { cache_path: Some(directory.path().to_string_lossy().into_owned()), ..Default::default() };
+    dto.startup.mode = shared::model::HlsStartupMode::Optimistic;
+    let manager = HlsProxyManager::with_hls_cache_config(&HlsCacheConfig::from(&dto));
+    let (session, _) = manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "idle"), b"secret", 100).await;
+    let manifest = match tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\n0.ts\n",
+        "http://origin.example.com/live/index.m3u8",
+    ) {
+        tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(manifest) => manifest,
+        other @ tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::TransientPassthrough { .. } => {
+            return Err(std::io::Error::other(format!("unexpected manifest: {other:?}")))
+        }
+    };
+    let proxy_session_id = {
+        let mut guard = session.write().await;
+        guard.apply_origin_manifest(&manifest).map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        guard.proxy_session_id.clone()
+    };
+    let seq = *session.read().await.segments.keys().next().ok_or_else(|| std::io::Error::other("segment"))?;
+    // A finished raw startup revision, as left behind by a viewer that switched away.
+    let revision = manager.revision_store.create(proxy_session_id.clone(), seq, crate::SegmentRevisionKind::Raw)?;
+    let (mut file, pin) = manager.segment_cache.create_revision_spool(&revision.revision().key).await?;
+    file.write_all(b"segment-body").await?;
+    file.flush().await?;
+    drop(file);
+    *revision.revision().file_pin.lock().map_err(|_| std::io::Error::other("pin"))? = Some(pin);
+    let path = manager.segment_cache.object_path(&revision.revision().key);
+    revision.revision().complete(crate::CachedSegmentMetadata { path: path.clone(), size: 12 });
+    // A lease binding or an open response body holds its own guard.
+    let reader = reader_holds_revision.then(|| revision.clone());
+    session
+        .write()
+        .await
+        .startup
+        .as_mut()
+        .ok_or_else(|| std::io::Error::other("startup policy"))?
+        .revisions
+        .insert(seq, revision);
+    drop(session);
+
+    let idle_now_ms = 100 + 24 * 60 * 60 * 1000;
+    manager.run_garbage_collection_once(idle_now_ms).await?;
+
+    let retained = manager.sessions.get_by_proxy_session_id(&proxy_session_id).await.is_some();
+    assert_eq!(retained, reader_holds_revision);
+    assert_eq!(manager.segment_cache.has_active_temp_files_for_session(&proxy_session_id), reader_holds_revision);
+    assert_eq!(tokio::fs::try_exists(&path).await?, reader_holds_revision);
+    drop(reader);
+    Ok(())
+}

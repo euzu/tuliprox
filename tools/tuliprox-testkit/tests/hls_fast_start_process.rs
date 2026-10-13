@@ -68,7 +68,7 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
         let client = reqwest::Client::new();
         let playlist_url = format!("{}/m3u?username=testkit&password={}", fixture.base_url, fixture_password());
         let urls = discover_playlist(&client, &playlist_url).await?;
-        let progressive = matches!(mode, StartupMode::Progressive);
+        let progressive = matches!(mode, StartupMode::Progressive | StartupMode::Optimistic);
         let result = probe(
             urls.playback_url(17)?,
             &RunId::new(&run_id),
@@ -149,4 +149,14 @@ async fn progressive_known_length_drop_is_not_successful_eof() -> Result<(), Tes
 #[ignore = "requires built SUT via TULIPROX_TESTKIT_SUT_BINARY"]
 async fn progressive_chunked_drop_is_not_successful_eof() -> Result<(), TestkitError> {
     run(StartupMode::Progressive, 0, true, true).await
+}
+#[tokio::test]
+#[ignore = "requires built SUT via TULIPROX_TESTKIT_SUT_BINARY"]
+async fn optimistic_delivers_prefix_before_origin_eof() -> Result<(), TestkitError> {
+    run(StartupMode::Optimistic, 0, false, false).await
+}
+#[tokio::test]
+#[ignore = "requires built SUT via TULIPROX_TESTKIT_SUT_BINARY"]
+async fn optimistic_skips_404_and_410_head() -> Result<(), TestkitError> {
+    run(StartupMode::Optimistic, 2, false, false).await
 }
