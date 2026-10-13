@@ -286,6 +286,8 @@ pub struct HlsSession {
     pub origin_epoch_sequence_base: Option<u64>,
     pub origin_seq_highwater: Option<u64>,
     pub proxy_next_seq: Option<u64>,
+    /// End of all appended media, retained even when every old cache entry is collected.
+    pub next_media_start_ms: u64,
     pub origin_to_proxy: HashMap<OriginSegmentKey, u64>,
     pub published_resource_history: HlsPublishedResourceHistory,
     pub discontinuity_sequence: u64,
@@ -360,6 +362,7 @@ impl HlsSession {
             origin_epoch_sequence_base: None,
             origin_seq_highwater: None,
             proxy_next_seq: None,
+            next_media_start_ms: 0,
             origin_to_proxy: HashMap::new(),
             published_resource_history: HlsPublishedResourceHistory::default(),
             discontinuity_sequence: 0,
@@ -858,6 +861,7 @@ impl fmt::Debug for HlsSession {
             .field("origin_epoch_sequence_base", &self.origin_epoch_sequence_base)
             .field("origin_seq_highwater", &self.origin_seq_highwater)
             .field("proxy_next_seq", &self.proxy_next_seq)
+            .field("next_media_start_ms", &self.next_media_start_ms)
             .field("origin_to_proxy_len", &self.origin_to_proxy.len())
             .field("published_resource_history", &self.published_resource_history.generation())
             .field("discontinuity_sequence", &self.discontinuity_sequence)
@@ -934,6 +938,7 @@ mod tests {
                 host_local_index: u32::try_from(proxy_seq).unwrap_or(u32::MAX),
             },
             proxy_seq,
+            media_start_ms: proxy_seq * duration_ms,
             duration_ms,
             proxy_file_ext: "ts".to_string(),
             content_type: "video/mp2t".to_string(),

@@ -482,6 +482,7 @@ pub(in crate::api::endpoints::hls_api) fn shared_hls_provisioning_segment_plans(
 pub(in crate::api::endpoints::hls_api) fn shared_hls_provisioning_segment_entry(
     plan: SharedHlsProvisioningSegmentPlan,
     content_length: u64,
+    media_start_ms: u64,
     duration_ms: u64,
     now_ms: u64,
 ) -> SegmentEntry {
@@ -497,6 +498,7 @@ pub(in crate::api::endpoints::hls_api) fn shared_hls_provisioning_segment_entry(
             host_local_index: u32::try_from(plan.proxy_seq).unwrap_or(u32::MAX),
         },
         proxy_seq: plan.proxy_seq,
+        media_start_ms,
         duration_ms,
         proxy_file_ext: "ts".to_string(),
         content_type: "video/mp2t".to_string(),
@@ -602,10 +604,13 @@ pub(in crate::api::endpoints::hls_api) async fn ensure_shared_hls_provisioning_h
             session_guard.publishable_origin_head_proxy_seq = Some(plan.proxy_seq);
         }
         session_guard.publishable_origin_tail_proxy_seq = Some(plan.proxy_seq);
+        let media_start_ms = session_guard.next_media_start_ms;
+        session_guard.next_media_start_ms = media_start_ms.saturating_add(duration_ms);
         session_guard.proxy_next_seq = Some(plan.proxy_seq.saturating_add(1));
-        session_guard
-            .segments
-            .insert(plan.proxy_seq, shared_hls_provisioning_segment_entry(plan, content_length, duration_ms, now_ms));
+        session_guard.segments.insert(
+            plan.proxy_seq,
+            shared_hls_provisioning_segment_entry(plan, content_length, media_start_ms, duration_ms, now_ms),
+        );
         inserted = true;
     }
     if inserted {
@@ -648,10 +653,12 @@ pub(in crate::api::endpoints::hls_api) async fn hls_shared_provisioning_timeline
                 session_guard.publishable_origin_head_proxy_seq = Some(plan.proxy_seq);
             }
             session_guard.publishable_origin_tail_proxy_seq = Some(plan.proxy_seq);
+            let media_start_ms = session_guard.next_media_start_ms;
+            session_guard.next_media_start_ms = media_start_ms.saturating_add(duration_ms);
             session_guard.proxy_next_seq = Some(plan.proxy_seq.saturating_add(1));
             session_guard.segments.insert(
                 plan.proxy_seq,
-                shared_hls_provisioning_segment_entry(plan, content_length, duration_ms, now_ms),
+                shared_hls_provisioning_segment_entry(plan, content_length, media_start_ms, duration_ms, now_ms),
             );
         }
         session_guard.target_duration = Some(HLS_PROVISIONING_TARGET_DURATION_SECS);

@@ -778,6 +778,7 @@ pub(in crate::refresh::tests) async fn install_published_recovery_binding(
                         host_local_index: 0,
                     },
                     proxy_seq,
+                    media_start_ms: proxy_seq * 4_000,
                     duration_ms: 4_000,
                     proxy_file_ext: "ts".to_string(),
                     content_type: "video/mp2t".to_string(),

@@ -94,6 +94,8 @@ pub(in crate::api::endpoints::hls_api::tests) fn store_normal_manifest_body_rang
             SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: rendered_at_ms },
         );
         entry.duration_ms = 10_000;
+        entry.media_start_ms = proxy_seq * 10_000;
+        session.next_media_start_ms = session.next_media_start_ms.max(entry.media_start_ms + entry.duration_ms);
         session.segments.insert(proxy_seq, entry);
     }
     session.advance_media_readiness_generation();

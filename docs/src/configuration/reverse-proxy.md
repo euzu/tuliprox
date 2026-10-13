@@ -352,6 +352,8 @@ Important boundaries:
 * `reverse_proxy.hls_cache` only prepares the global cache engine. A target must also set
   `options.share_live_streams.hls: true` in `source.yml` before generated HLS live entries use the shared HLS path.
 * HLS cache retry behavior is fixed internally and is not user-configurable.
+* Playback reserve uses a stable session media clock and completed segment deliveries. Removing old cache entries
+  does not reset the playback position; missing segments, MAPs and keys still limit the usable reserve.
 * `reverse_proxy.rewrite_secret` must stay stable. It is used for future HLS `proxy_session_id` values and transient resource IDs.
 * `session_idle_timeout` controls HLS cache access-lease validity and idle cleanup. It is independent from
   `reverse_proxy.stream.hls_session_ttl_secs`, which belongs to the non-cache HLS request continuity path.

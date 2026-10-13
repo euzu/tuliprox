@@ -145,6 +145,7 @@ async fn hls_ready_cache_hit_does_not_require_origin_reacquire_when_binding_is_d
                     host_local_index: 123,
                 },
                 proxy_seq: 123,
+                media_start_ms: 0,
                 duration_ms: 4_000,
                 proxy_file_ext: "ts".to_string(),
                 content_type: "video/mp2t".to_string(),

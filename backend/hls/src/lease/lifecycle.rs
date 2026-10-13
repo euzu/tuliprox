@@ -370,6 +370,24 @@ impl HlsAccessLeaseStore {
         Some(token)
     }
 
+    pub(crate) fn record_timed_segment_request_started_if_identity_matches(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        expected: HlsMediaLeaseIdentity,
+        segment: &crate::SegmentEntry,
+        requested_at_ms: u64,
+    ) -> Option<HlsPlaybackRequestToken> {
+        let token = self.record_segment_request_started_if_identity_matches(
+            lease_id,
+            proxy_session_id,
+            expected,
+            segment.proxy_seq,
+            requested_at_ms,
+        )?;
+        Some(self.by_lease_id.get_mut(lease_id)?.playback_cursor.bind_request_timing(token, segment))
+    }
+
     pub fn record_segment_request_completed_if_identity_matches(
         &mut self,
         lease_id: &HlsAccessLeaseId,

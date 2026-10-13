@@ -148,6 +148,7 @@ pub(super) async fn install_terminal_pending_ready_base(
                 host_local_index: 0,
             },
             proxy_seq: 40,
+            media_start_ms: 0,
             duration_ms: asset.duration_ms(),
             proxy_file_ext: "ts".to_string(),
             content_type: "video/mp2t".to_string(),
@@ -340,6 +341,7 @@ pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_l
         let mut session = fixture.session.write().await;
         session.origin_control.path_condition = HlsOriginPathCondition::AcceptanceConflict;
         let origin_epoch = session.origin_control.origin_epoch;
+        let base_end_ms = session.segments[&40].media_start_ms + session.segments[&40].duration_ms;
         for proxy_seq in 41_u64..=44 {
             session.segments.insert(
                 proxy_seq,
@@ -351,6 +353,7 @@ pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_l
                         host_local_index: u32::try_from(proxy_seq.saturating_sub(40)).unwrap_or(u32::MAX),
                     },
                     proxy_seq,
+                    media_start_ms: base_end_ms + (proxy_seq - 41) * 20_000,
                     duration_ms: 20_000,
                     proxy_file_ext: "ts".to_string(),
                     content_type: "video/mp2t".to_string(),

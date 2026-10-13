@@ -16,6 +16,7 @@ fn repair_prewarm_candidates_include_only_ready_clear_origin_ts_media() {
                 host_local_index: 0,
             },
             proxy_seq,
+            media_start_ms: 0,
             duration_ms: 6_000,
             proxy_file_ext: "ts".to_string(),
             content_type: "video/mp2t".to_string(),
