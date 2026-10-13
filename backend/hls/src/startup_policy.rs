@@ -26,6 +26,19 @@ pub struct HlsManifestRevisions {
 }
 
 impl HlsSession {
+    /// Startup revisions whose files only this session still pins. They must
+    /// not keep an otherwise idle session alive.
+    pub(crate) fn idle_startup_revision_keys(&self) -> Vec<super::SegmentRevisionKey> {
+        self.startup.as_ref().map_or_else(Vec::new, |startup| {
+            startup
+                .revisions
+                .values()
+                .filter(|guard| guard.revision().is_idle_session_owned())
+                .map(|guard| guard.revision().key.clone())
+                .collect()
+        })
+    }
+
     pub fn startup_mode(&self) -> HlsStartupMode {
         self.startup.as_ref().map_or(HlsStartupMode::Conservative, |startup| startup.config.mode)
     }

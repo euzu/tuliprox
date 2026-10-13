@@ -192,16 +192,16 @@ impl HlsGarbageCollector {
         policy: &GarbageCollectionPolicy,
         report: &mut GarbageCollectionReport,
     ) {
-        let (key, proxy_session_id) = {
+        let (key, proxy_session_id, idle_revisions) = {
             let mut session = session.write().await;
             if !Self::should_remove_idle_session(&session, now_ms, policy) {
                 return;
             }
             session.mark_for_gc_removal();
-            (session.key.clone(), session.proxy_session_id.clone())
+            (session.key.clone(), session.proxy_session_id.clone(), session.idle_startup_revision_keys())
         };
 
-        if self.cache.has_active_temp_files_for_session(&proxy_session_id) {
+        if self.cache.has_active_temp_files_for_session_except(&proxy_session_id, &idle_revisions) {
             session.write().await.clear_gc_removal_mark();
             return;
         }
@@ -220,6 +220,8 @@ impl HlsGarbageCollector {
         {
             report.sessions_deleted = report.sessions_deleted.saturating_add(1);
             report.removed_session_ids.push(proxy_session_id.clone());
+            // Dropping the startup guards releases the revision file pins.
+            drop(session.write().await.startup.take());
             if let Err(error) = self.cache.delete_session_dir(&proxy_session_id).await {
                 warn!(
                     "HLS idle session cache directory cleanup deferred: session={} error_kind={:?}",

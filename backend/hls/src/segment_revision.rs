@@ -76,6 +76,11 @@ impl SegmentRevision {
     pub fn id(&self) -> SegmentRevisionId { self.key.id }
     #[cfg(test)]
     pub(crate) fn pin_count(&self) -> usize { self.pins.load(Ordering::Acquire) }
+
+    /// Finished or failed, and held by nothing but its session's startup map.
+    pub(crate) fn is_idle_session_owned(&self) -> bool {
+        self.pins.load(Ordering::Acquire) == 1 && !matches!(*self.state.borrow(), SegmentRevisionState::Pending)
+    }
     pub fn subscribe(&self) -> watch::Receiver<SegmentRevisionState> { self.state.subscribe() }
     pub fn complete(&self, metadata: CachedSegmentMetadata) -> bool {
         self.state.send_if_modified(|state| {
@@ -207,7 +212,13 @@ impl Clone for SegmentRevisionGuard {
     }
 }
 impl Drop for SegmentRevisionGuard {
-    fn drop(&mut self) { self.revision.pins.fetch_sub(1, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        // Without a guard nobody can serve this revision any more, so its file
+        // no longer needs to count as an active cache file.
+        if self.revision.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.revision.file_pin.lock_unpoisoned().take();
+        }
+    }
 }
 impl PartialEq for SegmentRevisionGuard {
     fn eq(&self, other: &Self) -> bool { self.revision.id() == other.revision.id() }
