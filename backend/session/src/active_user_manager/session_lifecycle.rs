@@ -84,6 +84,7 @@ impl Default for UserSession {
             permission: UserConnectionPermission::Allowed,
             connection_kind: None,
             lifecycle: PlaybackLifecycle::default(),
+            member_binding: None,
         }
     }
 }

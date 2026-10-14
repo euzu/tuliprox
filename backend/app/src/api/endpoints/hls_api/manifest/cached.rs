@@ -155,10 +155,16 @@ pub(in crate::api::endpoints::hls_api) fn spawn_hls_runtime_bandwidth_persistenc
     let app_config = Arc::clone(&app_state.app_config);
     let hls_proxy = Arc::clone(&app_state.hls.proxy);
     let session = Arc::clone(session);
+    let member_health = Arc::clone(&app_state.member_health);
 
     Some(tokio::spawn(async move {
         let outcome = match persist_input_live_bitrate_bps(&app_config, &input, &stream_ref, bitrate_bps).await {
-            Ok(repository_outcome) => hls_bandwidth_persistence_outcome(repository_outcome, &proxy_session_id),
+            Ok(repository_outcome) => {
+                let kbps = bitrate_bps / 1000;
+                let key = (Arc::clone(&input.name), Arc::from(stream_ref.as_ref()));
+                member_health.patch_probe(&key, None, kbps);
+                hls_bandwidth_persistence_outcome(repository_outcome, &proxy_session_id)
+            }
             Err(err) => {
                 error!(
                     "HLS runtime bandwidth persistence failed: proxy_session={} error={}",

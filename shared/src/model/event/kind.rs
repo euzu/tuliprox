@@ -62,6 +62,9 @@ pub enum EventKind {
     RecordingProgress,
     /// Appended last for the same reason.
     MaintenanceChanged,
+    ChannelGroupMemberSelected,
+    ChannelGroupExhausted,
+    ChannelGroupCircuitChanged,
 }
 
 impl EventKind {
@@ -69,7 +72,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 46] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -113,6 +116,9 @@ impl EventKind {
         Self::AuthPermissionDenied,
         Self::RecordingProgress,
         Self::MaintenanceChanged,
+        Self::ChannelGroupMemberSelected,
+        Self::ChannelGroupExhausted,
+        Self::ChannelGroupCircuitChanged,
     ];
 
     /// This kind's bit position.
@@ -177,7 +183,10 @@ impl EventKind {
             // Sits with the metadata-update events it is produced by.
             | Self::StreamProbeFailed
             | Self::NotificationDeadLettered
-            | Self::ScheduledTaskFailed => Permission::SystemRead,
+            | Self::ScheduledTaskFailed
+            | Self::ChannelGroupMemberSelected
+            | Self::ChannelGroupExhausted
+            | Self::ChannelGroupCircuitChanged => Permission::SystemRead,
             Self::MaintenanceChanged => Permission::MaintenanceRead,
         }
     }
@@ -278,6 +287,9 @@ impl EventKind {
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
             Self::AuthPermissionDenied => "auth.permission.denied",
             Self::MaintenanceChanged => "maintenance.changed",
+            Self::ChannelGroupMemberSelected => "channel_group.member_selected",
+            Self::ChannelGroupExhausted => "channel_group.exhausted",
+            Self::ChannelGroupCircuitChanged => "channel_group.circuit_changed",
         }
     }
 

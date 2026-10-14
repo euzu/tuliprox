@@ -7,8 +7,9 @@ use super::{
     resolve_streaming_strategy_with_provider_handle, session_reacquire_cleanup_addrs,
     should_defer_provider_open_for_grace_hold, should_refresh_stalker_playback, split_provider_stream_open,
     stalker_stream_kind, stream_admission_rejected_response, stream_response_with_provider_handle, try_unwrap_body,
-    ConnectFailedAttempt, CurrentSessionGuard, ForceStreamRequestContext, PlaybackRequestClass, RedirectParams,
-    ResourceFetchPolicy, StreamMeteringConfig, StreamOptions, StreamResponseMode, HLS_MEDIA_CAPACITY_WAIT,
+    ConnectFailedAttempt, CurrentSessionGuard, ForceStreamRequestContext, PlaybackRequestClass, PlaybackSource,
+    RedirectParams, ResourceFetchPolicy, StreamMeteringConfig, StreamOptions, StreamResponseMode,
+    HLS_MEDIA_CAPACITY_WAIT,
 };
 use crate::{
     api::{
@@ -608,6 +609,24 @@ pub(super) fn no_custom_video_fallback_status(app_config: &AppConfig) -> StatusC
     }
 }
 
+pub fn sticky_playback_context(
+    app_state: &Arc<AppState>,
+    session: &UserSession,
+    fallback_input: &Arc<ConfigInput>,
+    fallback_channel: StreamChannel,
+) -> (Arc<ConfigInput>, StreamChannel) {
+    if let Some(binding) = &session.member_binding {
+        if let Some(member_input) = app_state.app_config.get_input_by_name(&binding.input_name) {
+            let mut channel = fallback_channel;
+            channel.virtual_id = binding.member_vid;
+            channel.group_virtual_id = Some(binding.group_vid);
+            channel.input_name = Arc::clone(&binding.input_name);
+            return (member_input, channel);
+        }
+    }
+    (Arc::clone(fallback_input), fallback_channel)
+}
+
 pub async fn force_provider_stream_response(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
@@ -657,11 +676,13 @@ pub(super) async fn force_stream_response(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
     user_session: &UserSession,
-    mut stream_channel: StreamChannel,
+    stream_channel: StreamChannel,
     ctx: ForceStreamRequestContext<'_>,
     grace_mode: Option<crate::api::model::GraceMode>,
     response_mode: StreamResponseMode,
 ) -> axum::response::Response {
+    let (sticky_input, mut stream_channel) =
+        sticky_playback_context(app_state, user_session, ctx.input, stream_channel);
     let hls_resource = response_mode == StreamResponseMode::HlsResource;
     // Finite HLS resources stay pinned to the session account and never rebind or clean up
     // other sockets, so they skip the session transition gate. Holding it across the
@@ -739,7 +760,7 @@ pub(super) async fn force_stream_response(
         &ctx.user.username,
         fingerprint,
         ctx.req_headers,
-        ctx.input,
+        &sticky_input,
         &stream_channel,
         item_type,
         ctx.content_representation,
@@ -952,7 +973,7 @@ pub(super) async fn force_stream_response(
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
             sanitize_sensitive_info(
-                resolve_request_url_for_logging(ctx.input, user_session.stream_url.as_ref()).as_ref()
+                resolve_request_url_for_logging(&sticky_input, user_session.stream_url.as_ref()).as_ref()
             )
         );
         let mut response = try_unwrap_body!(response.body(body_stream));
@@ -990,10 +1011,9 @@ pub(crate) async fn stream_response(
     session_token: &str,
     request_class: Option<PlaybackRequestClass>,
     stream_channel: StreamChannel,
-    stream_url: &str,
+    source: PlaybackSource<'_>,
     pinned_provider: Option<&Arc<str>>,
     req_headers: &HeaderMap,
-    input: &Arc<ConfigInput>,
     target: &Arc<ConfigTarget>,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
@@ -1007,10 +1027,9 @@ pub(crate) async fn stream_response(
         session_token,
         request_class,
         stream_channel,
-        stream_url,
+        source,
         pinned_provider,
         req_headers,
-        input,
         target,
         user,
         connection_permission,

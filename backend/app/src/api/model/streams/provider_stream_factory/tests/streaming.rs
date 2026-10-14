@@ -102,6 +102,7 @@ fn test_provider_stream_factory_options_builds_connect_failed_stream_info_from_h
         stream_channel: Some(&StreamChannel {
             target_id: 1,
             virtual_id: 77,
+            group_virtual_id: None,
             provider_id: 3,
             input_name: "input-a".intern(),
             item_type: PlaylistItemType::Live,

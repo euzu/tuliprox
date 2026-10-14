@@ -9,7 +9,7 @@ use crate::{
             resolve_initial_stalker_playback_url, resource_proxy_response, resource_redirect_or_proxy,
             separate_number_and_remainder, should_allow_exhausted_shared_reconnect,
             stream_response_with_provider_handle, try_option_bad_request, try_result_bad_request, try_result_not_found,
-            try_unwrap_body, RedirectParams,
+            try_unwrap_body, PlaybackSource, RedirectParams,
         },
         endpoints::{
             hls_api::{
@@ -155,6 +155,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     stream_ext: Option<&str>,
     archive_discriminator: Option<&str>,
     provider_allocation_id: Option<u64>,
+    source: Option<PlaybackSource<'_>>,
 ) -> impl IntoResponse + Send {
     let target_name = &target.name;
     if !target.has_output(TargetType::M3u) {
@@ -183,7 +184,30 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
     let virtual_id = pli.virtual_id;
 
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
+    let resolved_target = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        &target,
+        virtual_id,
+    )
+    .await;
+    let is_group = source.as_ref().map_or_else(
+        || {
+            matches!(
+                resolved_target,
+                tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(_)
+                    | tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { .. }
+            )
+        },
+        |s| matches!(s, PlaybackSource::Group { .. }),
+    );
+
+    let check_vid = match &resolved_target {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group)
+        | tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, .. } => group.group_vid,
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => virtual_id,
+    };
+    if app_state.active_users.is_user_blocked_for_stream(&user.username, check_vid).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
@@ -249,23 +273,25 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
 
     let cluster = pli.item_type.cluster();
-    pli.url = match resolve_initial_stalker_playback_url(
-        app_state,
-        &input,
-        &user,
-        pli.get_provider_id().unwrap_or_default(),
-        cluster,
-        pli.item_type,
-        &pli.url,
-    )
-    .await
-    {
-        Ok(url) => url,
-        Err(err) => {
-            error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
-            return axum::http::StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
+    if !is_group {
+        pli.url = match resolve_initial_stalker_playback_url(
+            app_state,
+            &input,
+            &user,
+            pli.get_provider_id().unwrap_or_default(),
+            cluster,
+            pli.item_type,
+            &pli.url,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(err) => {
+                error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
+    }
 
     let stream_channel = || {
         let mut channel = pli.to_stream_channel(target.id);
@@ -355,11 +381,13 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         }
         if session.virtual_id == virtual_id.get() && is_seekable_media_request(cluster, req_headers, Some(extension)) {
             // partial request means we are in reverse proxy mode, seek happened
+            let (input, stream_channel) =
+                crate::api::api_utils::sticky_playback_context(app_state, session, &input, stream_channel());
             return force_provider_stream_response(
                 fingerprint,
                 app_state,
                 session,
-                stream_channel(),
+                stream_channel,
                 crate::api::api_utils::ForceStreamRequestContext {
                     req_headers,
                     input: &input,
@@ -527,16 +555,47 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         None
     };
 
+    let bound_prefer = user_session
+        .as_ref()
+        .and_then(|session| session.member_binding.as_ref())
+        .map(|b| (b.group_vid, b.member_index));
+
+    let mut source = source.unwrap_or_else(|| match resolved_target {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
+            let prefer = bound_prefer.filter(|(gvid, _)| *gvid == group.group_vid.get()).map(|(_, idx)| idx);
+            PlaybackSource::Group { group, mode: tuliprox_session::channel_group::SelectionMode::Live, prefer }
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
+            PlaybackSource::Group {
+                group,
+                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                prefer: Some(index),
+            }
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
+            PlaybackSource::Single { input: &input, stream_url: &session_url }
+        }
+    });
+
+    if let PlaybackSource::Group { group, prefer, .. } = &mut source {
+        if prefer.is_none() {
+            if let Some((gvid, idx)) = bound_prefer {
+                if gvid == group.group_vid.get() {
+                    *prefer = Some(idx);
+                }
+            }
+        }
+    }
+
     stream_response_with_provider_handle(
         fingerprint,
         app_state,
         &session_key,
         Some(request_class),
         stream_channel().with_epg_reference_ts(archive_reference),
-        &session_url,
+        source,
         pinned_provider,
         req_headers,
-        &input,
         &target,
         &user,
         connection_permission,
@@ -716,6 +775,7 @@ async fn m3u_api_stream(
             Some(archive.extension()),
             Some(&discriminator),
             None,
+            None,
         )
         .await
         .into_response();
@@ -723,10 +783,25 @@ async fn m3u_api_stream(
 
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli =
-        match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
-            Ok(pli) => pli,
-            Err(err) => {
+    let resolved_target = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        &target,
+        shared::model::VirtualId::new(req_virtual_id),
+    )
+    .await;
+    let pli_res =
+        m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await;
+    let pli = match pli_res {
+        Ok(pli) => pli,
+        Err(err) => match &resolved_target {
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
+                tuliprox_repository::target_stream_item::member_to_m3u_item(group, 0, &target)
+            }
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
+                tuliprox_repository::target_stream_item::member_to_m3u_item(group, *index, &target)
+            }
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
                 error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
                 if stream_ext == Some(HLS_EXT) {
                     return axum::http::StatusCode::NOT_FOUND.into_response();
@@ -738,7 +813,8 @@ async fn m3u_api_stream(
                 )
                 .into_response();
             }
-        };
+        },
+    };
 
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
@@ -756,6 +832,21 @@ async fn m3u_api_stream(
     } else {
         (pli, None)
     };
+    let source = match resolved_target {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => Some(PlaybackSource::Group {
+            group,
+            mode: tuliprox_session::channel_group::SelectionMode::Live,
+            prefer: None,
+        }),
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
+            Some(PlaybackSource::Group {
+                group,
+                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                prefer: Some(index),
+            })
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => None,
+    };
     m3u_api_stream_loaded(
         user,
         target,
@@ -767,6 +858,7 @@ async fn m3u_api_stream(
         stream_ext,
         archive_discriminator.as_deref(),
         None,
+        source,
     )
     .await
     .into_response()
@@ -843,6 +935,7 @@ async fn m3u_api_stream_nested(
         stream_ext,
         archive_discriminator.as_deref(),
         None,
+        None,
     )
     .await
     .into_response()
@@ -910,6 +1003,7 @@ async fn m3u_api_catchup(
         input,
         None,
         Some(&archive_discriminator),
+        None,
         None,
     )
     .await

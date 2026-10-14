@@ -1,6 +1,6 @@
 use super::{
     create_test_app_state_for_config, create_test_fingerprint, create_test_live_channel,
-    create_test_provider_app_config, create_test_provider_app_state, stream_response,
+    create_test_provider_app_config, create_test_provider_app_state, stream_response, PlaybackSource,
 };
 use crate::{
     api::{api_utils::blocks_new_playback, model::AppState},
@@ -172,10 +172,9 @@ async fn new_ts_stream_for_input_in_maintenance_gets_the_clip_without_provider_s
         "maintenance-session",
         None,
         create_test_live_channel(stream_url),
-        stream_url,
+        PlaybackSource::Single { input: &input, stream_url },
         None,
         &HeaderMap::default(),
-        &input,
         &maintenance_clip_target(),
         &viewer(),
         shared::model::UserConnectionPermission::Allowed,

@@ -63,6 +63,7 @@ pub struct AppState {
     pub playlist_updates: PlaylistUpdateControl,
     /// Inputs taken out of service; read on every new stream request.
     pub maintenance: Arc<MaintenanceRegistry>,
+    pub member_health: Arc<tuliprox_session::MemberHealthIndex>,
 }
 
 impl AppState {
@@ -120,4 +121,34 @@ pub struct HdHomerunAppState {
     pub app_state: Arc<AppState>,
     pub device: Arc<HdHomeRunDeviceConfig>,
     pub hd_scan_state: Arc<AtomicI8>,
+}
+
+pub struct AppQosAggregationListener {
+    pub member_health: Arc<tuliprox_session::MemberHealthIndex>,
+}
+
+impl tuliprox_session::qos_aggregation_manager::QosAggregationListener for AppQosAggregationListener {
+    fn on_snapshots(&self, snapshots: &[tuliprox_repository::QosSnapshotRecord]) {
+        let entries = snapshots.iter().map(|record| {
+            let key = if record.provider_id > 0 {
+                tuliprox_session::QosKey::Provider {
+                    input: Arc::clone(&record.input_name),
+                    provider_id: record.provider_id,
+                }
+            } else {
+                tuliprox_session::QosKey::TargetMember {
+                    target: Arc::clone(&record.target_name),
+                    member_vid: record.virtual_id,
+                }
+            };
+            let part = tuliprox_session::QosPart {
+                score_24h: record.window_24h.score,
+                score_7d: record.window_7d.score,
+                confidence: record.window_24h.confidence,
+                failure_streak: record.window_24h.successive_failure_streak,
+            };
+            (key, part)
+        });
+        self.member_health.replace_qos(entries);
+    }
 }

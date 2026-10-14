@@ -218,6 +218,7 @@ async fn check_divergence_detects_stream_without_counted_session() {
                 epg_channel_id: None,
                 epg_reference_ts: None,
                 upstream_user_agent: None,
+                group_virtual_id: None,
             },
             user_agent: "ua".to_string(),
             country_code: None,

@@ -220,7 +220,7 @@ fn legacy_messagepack_playlist_items_default_missing_input_stream_id() {
         },
     };
 
-    let header_bytes = serialize_without_trailing_fields(&source.header, &[0xc0, 0xa0]);
+    let header_bytes = serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xc0, 0xa0]);
     let decoded_header: PlaylistItemHeader =
         rmp_serde::from_slice(&header_bytes).expect("legacy header should deserialize");
     assert!(decoded_header.input_stream_id.is_empty());
@@ -259,8 +259,9 @@ fn previous_messagepack_playlist_items_default_missing_upstream_user_agent() {
         },
     };
 
-    let header: PlaylistItemHeader = rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0]))
-        .expect("previous header should deserialize");
+    let header: PlaylistItemHeader =
+        rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0, 0xc0, 0xc0]))
+            .expect("previous header should deserialize");
     let m3u: M3uPlaylistItem =
         rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xc0]))
             .expect("previous M3U item should deserialize");

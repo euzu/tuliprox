@@ -183,8 +183,10 @@ pub(super) async fn send_with_manual_redirects(
             provider.as_ref(),
             true,
             stream_options.should_retry_provider_request(),
-            RequestFetchOptions::default()
-                .with_http_error_responses(stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)),
+            RequestFetchOptions::default().with_http_error_responses(
+                stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)
+                    || stream_options.flags.contains(ProviderStreamFactoryFlags::GroupMember),
+            ),
             |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url), credential_state).0,
         )
         .await;
@@ -263,8 +265,10 @@ async fn provider_stream_request(
             provider.as_ref(),
             false,
             stream_options.should_retry_provider_request(),
-            RequestFetchOptions::default()
-                .with_http_error_responses(stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)),
+            RequestFetchOptions::default().with_http_error_responses(
+                stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource)
+                    || stream_options.flags.contains(ProviderStreamFactoryFlags::GroupMember),
+            ),
             |resolved_url| {
                 let (client, _partial_content) = prepare_client(
                     request_client,
@@ -436,6 +440,10 @@ pub(super) async fn get_provider_stream(
     debug_if_enabled!("stream provider {}", sanitize_sensitive_info(log_url.as_ref()));
     let start = Instant::now();
     let mut connect_err: u32 = 1;
+    let is_group_member = stream_options.flags.contains(ProviderStreamFactoryFlags::GroupMember);
+    let max_retry_count = if is_group_member { 1 } else { ERR_MAX_RETRY_COUNT };
+    let retry_seconds = if is_group_member { RETRY_SECONDS.min(3) } else { RETRY_SECONDS };
+    let mut last_failure: Option<ProviderStreamRequestFailure> = None;
 
     let handle_cancel = stream_options.get_cancel_token();
     while stream_options.should_continue() {
@@ -464,7 +472,7 @@ pub(super) async fn get_provider_stream(
                 return Ok(Some(stream_response));
             }
             Ok(None) => {
-                if connect_err > ERR_MAX_RETRY_COUNT {
+                if connect_err >= max_retry_count {
                     warn!(
                         "The stream could be unavailable. {}",
                         sanitize_sensitive_info(stream_options.get_log_url().as_ref())
@@ -495,26 +503,29 @@ pub(super) async fn get_provider_stream(
                         "The stream could be unavailable. ({status}) {}",
                         sanitize_sensitive_info(stream_options.get_log_url().as_ref())
                     );
+                    last_failure = Some(failure);
                     break;
                 }
-                if connect_err > ERR_MAX_RETRY_COUNT {
+                if connect_err >= max_retry_count {
                     warn!(
                         "The stream could be unavailable. ({status}) {}",
                         sanitize_sensitive_info(stream_options.get_log_url().as_ref())
                     );
+                    last_failure = Some(failure);
                     break;
                 }
+                last_failure = Some(failure);
             }
         }
-        if !stream_options.should_continue() || connect_err > ERR_MAX_RETRY_COUNT {
+        if !stream_options.should_continue() || connect_err >= max_retry_count {
             break;
         }
         if !stream_options.should_retry_initial_open_loop() {
             break;
         }
-        if start.elapsed().as_secs() > RETRY_SECONDS {
+        if start.elapsed().as_secs() > retry_seconds {
             warn!(
-                "The stream could be unavailable. Giving up after {RETRY_SECONDS} seconds. {}",
+                "The stream could be unavailable. Giving up after {retry_seconds} seconds. {}",
                 sanitize_sensitive_info(stream_options.get_log_url().as_ref())
             );
             break;
@@ -533,6 +544,9 @@ pub(super) async fn get_provider_stream(
     }
     debug_if_enabled!("Stopped reconnecting stream {}", sanitize_sensitive_info(stream_options.get_log_url().as_ref()));
     stream_options.cancel_reconnect();
+    if let Some(failure) = last_failure {
+        return Err(failure);
+    }
     Err(ProviderStreamRequestFailure::Status {
         status: StatusCode::SERVICE_UNAVAILABLE,
         provider_error_class: "service_unavailable",

@@ -44,7 +44,8 @@ create_bitset!(
     RangeRequested,
     PublicDestinationRequired,
     HlsResource,
-    FlussonicAudioTracks
+    FlussonicAudioTracks,
+    GroupMember
 );
 
 #[derive(Debug, Clone)]

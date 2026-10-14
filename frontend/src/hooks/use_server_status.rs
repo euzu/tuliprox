@@ -154,6 +154,7 @@ fn download_task_to_stream_with_ts(download: &RecordingTaskDto, ts: u64) -> Stre
         channel: StreamChannel {
             target_id: 0,
             virtual_id: uid,
+            group_virtual_id: None,
             provider_id: 0,
             input_name: "".intern(),
             item_type,
@@ -466,6 +467,7 @@ mod tests {
             channel: StreamChannel {
                 target_id: 1,
                 virtual_id: 1,
+                group_virtual_id: None,
                 provider_id: 1,
                 item_type,
                 cluster: XtreamCluster::Live,

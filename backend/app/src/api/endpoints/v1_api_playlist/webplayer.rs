@@ -87,7 +87,7 @@ pub(super) async fn playlist_webplayer_stream(
     );
     let user = Arc::new(create_api_proxy_user(&app_state));
 
-    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None, None)
+    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None, None, None)
         .await
         .into_response()
 }

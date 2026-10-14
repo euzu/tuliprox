@@ -5,15 +5,16 @@ use super::{
     hls_custom_video_manifest_response, hls_entry_user_session_token, hls_media_playlist_wrap_enabled,
     hls_panel_provisioning_or_status_response, hls_playback_kind, hls_response, m3u_archive_epg_reference_ts,
     m3u_catchup_epg_reference_from_session_token, normalize_xtream_live_hls_url, release_prepared_hls_manifest_session,
-    terminate_failed_hls_manifest_session, try_reserve_hls_entry_origin_account_for_redirect, wrap_media_playlist,
-    HlsEntryStreamContext, HlsMediaPlaylistWrap, HlsOriginEntryUrl, HlsRequestStage,
+    resolve_hls_origin_playlist_url, terminate_failed_hls_manifest_session,
+    try_reserve_hls_entry_origin_account_for_redirect, wrap_media_playlist, HlsEntryStreamContext,
+    HlsMediaPlaylistWrap, HlsOriginEntryUrl, HlsRequestStage,
 };
 use crate::{
     api::{
         api_utils::{
             acquire_exact_provider_handle, blocks_new_playback, connection_priority_for_kind,
-            get_hls_playback_ttl_secs, is_running_playback, select_provider_stream_url, ExactProviderAcquire,
-            HLS_MANIFEST_CAPACITY_WAIT,
+            get_hls_playback_ttl_secs, is_running_playback, resolve_hls_group_entry, select_provider_stream_url,
+            ExactProviderAcquire, GroupSelectionRequest, HLS_MANIFEST_CAPACITY_WAIT,
         },
         model::{AppState, CustomVideoStreamType, PlaybackLeaseRef, ProviderAllocation, UserSession},
     },
@@ -39,6 +40,10 @@ use std::sync::Arc;
 use tuliprox_hls::api::{
     build_hls_origin_session_owner, build_proxy_session_id, extract_hls_provider_session_headers, HlsOriginSource,
     HlsSessionKey,
+};
+use tuliprox_session::{
+    channel_group::{FailureClass, HalfOpenGuard, SelectionMode},
+    MemberBinding,
 };
 
 pub(in crate::api::endpoints::hls_api) struct HlsCacheManifestOrigin<'a> {
@@ -120,7 +125,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     };
     // The wrapper seals the normalized entry URL, not the provider-resolved one, so every
     // refresh can resolve it to whichever account is selected then.
-    let entry_url = url.clone();
+    let mut entry_url = url.clone();
     // Recover archive context when callers (esp. Xtream timeshift) pass None but the
     // resolved provider URL / catchup session still carries Flussonic archive markers.
     let archive_reference = archive_reference.or_else(|| m3u_archive_epg_reference_ts(&url)).or_else(|| {
@@ -175,8 +180,21 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 
     let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
+    let mut bound_member_info: Option<(u32, Arc<ConfigInput>, String, Option<HalfOpenGuard>)> = None;
+
     let (request_url, session_token, provider_handle, selected_provider_config) = if let Some(session) = user_session {
-        let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
+        let bound_inp_opt = session.member_binding.as_ref().and_then(|binding| {
+            app_state.app_config.get_input_by_name(&binding.input_name).map(|inp| (binding.member_vid, inp))
+        });
+        if let Some((member_vid, ref bound_inp)) = bound_inp_opt {
+            bound_member_info = Some((member_vid, Arc::clone(bound_inp), String::new(), None));
+        }
+        let effective_lookup_input = bound_inp_opt.as_ref().map_or(input, |(_, inp)| inp.as_ref());
+        let pinned_provider = if session.provider.is_empty() {
+            effective_lookup_input.name.clone()
+        } else {
+            Arc::clone(&session.provider)
+        };
         let pinned_kind = hls_playback_kind(archive_reference, &url, Some(session.token.as_str()));
         let session_kind =
             session.connection_kind.or(connection_kind).unwrap_or(crate::api::model::ConnectionKind::Normal);
@@ -185,7 +203,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         let acquired = acquire_exact_provider_handle(
             app_state,
             &ExactProviderAcquire {
-                provider: pinned_provider,
+                provider: &pinned_provider,
                 addr: &fingerprint.addr,
                 allow_grace: false,
                 priority: connection_priority_for_kind(user, session_kind),
@@ -200,7 +218,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         } else {
             debug_if_enabled!(
                 "HLS pinned provider {} unavailable for {}; aborting allocation to prevent mid-session migration",
-                sanitize_sensitive_info(pinned_provider),
+                sanitize_sensitive_info(&pinned_provider),
                 sanitize_sensitive_info(&fingerprint.addr.to_string())
             );
             None
@@ -216,7 +234,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             return hls_panel_provisioning_or_status_response(
                 app_state,
                 user,
-                input,
+                effective_lookup_input,
                 virtual_id,
                 original_hls_entry_path,
                 server_info.path.as_deref(),
@@ -250,7 +268,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 };
                 let Some((_provider_name, stream_url)) = select_provider_stream_url(
                     &url,
-                    input,
+                    effective_lookup_input,
                     &selected_provider_config,
                     accept_requested_stream_url,
                     &app_state.app_config,
@@ -277,7 +295,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     debug_if_enabled!(
                         "HLS session {} changed while waiting for pinned provider {}",
                         sanitize_sensitive_info(&session.token),
-                        sanitize_sensitive_info(pinned_provider)
+                        sanitize_sensitive_info(&pinned_provider)
                     );
                     return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
@@ -291,7 +309,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     .create_user_session(crate::api::model::CreateUserSessionParams {
                         user,
                         session_token: &session.token,
-                        virtual_id,
+                        virtual_id: session.virtual_id,
                         provider: &selected_provider_config.name,
                         stream_url: &stream_url,
                         addr: &fingerprint.addr,
@@ -312,67 +330,207 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None => (url, None, None, None),
         }
     } else {
-        // Append/shift catchup must keep an m3u-catchup session token even when shared HLS
-        // cache is off; otherwise rewritten segments register as LiveHls in the panel.
-        let user_session_token = hls_entry_user_session_token(
-            fingerprint,
-            &user.username,
-            virtual_id,
-            session_token_hint,
-            archive_reference,
-        );
-        let hls_session_owner = if hls_cache_enabled_for_user(app_state, target, user) {
-            let session_key = HlsSessionKey::new(input.id, stream_context.stream_ref());
-            let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
-            Some(build_hls_origin_session_owner(&proxy_session_id))
-        } else {
-            None
-        };
-        let session_owner = hls_session_owner.as_deref().unwrap_or(user_session_token.as_str());
-        // Archive playback keeps its own reconnect window semantics, so the lease must
-        // be classified as catchup rather than plain live HLS.
-        let playback_kind = hls_playback_kind(archive_reference, &url, Some(user_session_token.as_str()));
-        let hls_session_ttl_secs = get_hls_playback_ttl_secs(app_state, playback_kind);
-        let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
-            app_state,
-            fingerprint,
-            user,
-            input,
-            virtual_id,
-            &url,
-            &user_session_token,
-            session_owner,
-            playback_kind,
-            hls_session_ttl_secs,
-            connection_permission,
-            fallback_connection_kind,
-            true,
+        let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+            &app_state.app_config,
+            &app_state.playlists,
+            target,
+            VirtualId::new(virtual_id),
         )
-        .await
-        else {
-            return hls_panel_provisioning_or_status_response(
+        .await;
+
+        if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) = classified {
+            let user_session_token = hls_entry_user_session_token(
+                fingerprint,
+                &user.username,
+                virtual_id,
+                session_token_hint,
+                archive_reference,
+            );
+            let playback_kind = hls_playback_kind(archive_reference, &url, Some(user_session_token.as_str()));
+            let hls_session_ttl_secs = get_hls_playback_ttl_secs(app_state, playback_kind);
+
+            let (selection_cfg, allow_provider_grace) =
+                target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map_or_else(
+                    || (shared::model::ChannelGroupSelectionConfig::default(), true),
+                    |cg| (cg.selection, cg.allow_provider_grace),
+                );
+            let policy = group.policy;
+            let target_name: Arc<str> = Arc::from(target.name.as_str());
+
+            let req = GroupSelectionRequest {
+                target_name: &target_name,
+                group: &group,
+                policy,
+                mode: SelectionMode::Live,
+                selection: selection_cfg,
+                addr: &fingerprint.addr,
+                username: &user.username,
+                priority: connection_priority_for_kind(user, fallback_connection_kind),
+                kind: fallback_connection_kind,
+                lease: Some(PlaybackLeaseRef::new(user_session_token.as_str(), playback_kind)),
+                allow_provider_grace,
+                exclude: &[],
+                demoted_inputs: &[],
+                prefer: None,
+            };
+
+            let Ok(resolved) = resolve_hls_group_entry(app_state, target, Arc::clone(&group), req).await else {
+                return hls_panel_provisioning_or_status_response(
+                    app_state,
+                    user,
+                    input,
+                    virtual_id,
+                    original_hls_entry_path,
+                    server_info.path.as_deref(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await;
+            };
+
+            let mut acquired_handle = resolved.acquired.handle;
+            let provider_handle = acquired_handle.take();
+            let selected_provider_config =
+                provider_handle.as_ref().and_then(|handle| handle.allocation.get_provider_config());
+
+            let origin_member_url = resolve_hls_origin_playlist_url(
                 app_state,
+                target,
+                &resolved.input,
+                resolved.member.member_vid.get(),
+                resolved.stream_url.as_ref(),
+            )
+            .await
+            .unwrap_or_else(|_| resolved.stream_url.to_string());
+
+            let member_url = if let Some(cfg) = &selected_provider_config {
+                select_provider_stream_url(&origin_member_url, &resolved.input, cfg, false, &app_state.app_config)
+                    .await
+                    .map_or_else(|| origin_member_url.clone(), |(_, u)| u)
+            } else {
+                origin_member_url.clone()
+            };
+
+            let provider_name = selected_provider_config
+                .as_ref()
+                .map_or_else(|| Arc::clone(&resolved.input.name), |cfg| Arc::clone(&cfg.name));
+
+            let session_token = app_state
+                .active_users
+                .create_user_session(crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token: &user_session_token,
+                    virtual_id,
+                    provider: &provider_name,
+                    stream_url: &member_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: Some(fallback_connection_kind),
+                    socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
+                })
+                .await;
+
+            app_state
+                .active_users
+                .bind_member(
+                    &user.username,
+                    &session_token,
+                    MemberBinding {
+                        group_vid: group.group_vid.get(),
+                        member_vid: resolved.member.member_vid.get(),
+                        member_index: resolved.acquired.index,
+                        input_name: Arc::clone(&resolved.member.input_name),
+                    },
+                )
+                .await;
+
+            app_state.active_provider.refresh_adaptive_playback_lease(
+                &provider_name,
+                &user_session_token,
+                playback_kind,
+                hls_session_ttl_secs,
+            );
+
+            bound_member_info = Some((
+                resolved.member.member_vid.get(),
+                resolved.input,
+                resolved.member.input_stream_id.to_string(),
+                resolved.acquired.half_open,
+            ));
+
+            debug_if_enabled!(
+                "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} (group) member_vid={} provider={} stream_url={}",
+                sanitize_sensitive_info(&user.username),
+                resolved.member.member_vid.get(),
+                selected_provider_config.as_ref().map_or("<unknown>", |provider| provider.name.as_ref()),
+                sanitize_sensitive_info(&member_url)
+            );
+
+            entry_url = member_url.clone();
+
+            (member_url, Some(session_token), provider_handle, selected_provider_config)
+        } else {
+            // Append/shift catchup must keep an m3u-catchup session token even when shared HLS
+            // cache is off; otherwise rewritten segments register as LiveHls in the panel.
+            let user_session_token = hls_entry_user_session_token(
+                fingerprint,
+                &user.username,
+                virtual_id,
+                session_token_hint,
+                archive_reference,
+            );
+            let hls_session_owner = if hls_cache_enabled_for_user(app_state, target, user) {
+                let session_key = HlsSessionKey::new(input.id, stream_context.stream_ref());
+                let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
+                Some(build_hls_origin_session_owner(&proxy_session_id))
+            } else {
+                None
+            };
+            let session_owner = hls_session_owner.as_deref().unwrap_or(user_session_token.as_str());
+            // Archive playback keeps its own reconnect window semantics, so the lease must
+            // be classified as catchup rather than plain live HLS.
+            let playback_kind = hls_playback_kind(archive_reference, &url, Some(user_session_token.as_str()));
+            let hls_session_ttl_secs = get_hls_playback_ttl_secs(app_state, playback_kind);
+            let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
+                app_state,
+                fingerprint,
                 user,
                 input,
                 virtual_id,
-                original_hls_entry_path,
-                server_info.path.as_deref(),
-                StatusCode::SERVICE_UNAVAILABLE,
+                &url,
+                &user_session_token,
+                session_owner,
+                playback_kind,
+                hls_session_ttl_secs,
+                connection_permission,
+                fallback_connection_kind,
+                true,
             )
-            .await;
-        };
-        debug_if_enabled!(
-            "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
-            sanitize_sensitive_info(&user.username),
-            reservation.selected_provider_config.as_ref().map_or("<unknown>", |provider| provider.name.as_ref()),
-            sanitize_sensitive_info(&reservation.request_url)
-        );
-        (
-            reservation.request_url,
-            Some(reservation.session_token),
-            reservation.provider_handle,
-            reservation.selected_provider_config,
-        )
+            .await
+            else {
+                return hls_panel_provisioning_or_status_response(
+                    app_state,
+                    user,
+                    input,
+                    virtual_id,
+                    original_hls_entry_path,
+                    server_info.path.as_deref(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await;
+            };
+            debug_if_enabled!(
+                "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
+                sanitize_sensitive_info(&user.username),
+                reservation.selected_provider_config.as_ref().map_or("<unknown>", |provider| provider.name.as_ref()),
+                sanitize_sensitive_info(&reservation.request_url)
+            );
+            (
+                reservation.request_url,
+                Some(reservation.session_token),
+                reservation.provider_handle,
+                reservation.selected_provider_config,
+            )
+        }
     };
 
     // The session as created or reserved above; manifest response cookies may only enter this
@@ -403,9 +561,16 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
     }
 
+    let (effective_virtual_id, effective_input, effective_stream_ref, half_open_guard) =
+        if let Some((m_vid, ref m_input, ref m_sref, guard)) = bound_member_info {
+            (m_vid, m_input.as_ref(), if m_sref.is_empty() { stream_ref.as_str() } else { m_sref.as_str() }, guard)
+        } else {
+            (virtual_id, input, stream_ref.as_str(), None)
+        };
+
     let user_agent_stream_index = crate::api::api_utils::resolve_stream_user_agent_index(
         app_state,
-        input,
+        effective_input,
         provider_handle.is_some(),
         &user.username,
         session_token.as_deref(),
@@ -426,7 +591,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     // breaks forced same-account reuse on the next HLS/Catchup stream request.
     app_state.connection_manager.release_provider_handle(provider_handle);
 
-    let input_source = InputSource::from(input).with_url(request_url);
+    let input_source = InputSource::from(effective_input).with_url(request_url);
     let download_result = match download_legacy_hls_manifest(app_state, &input_source, &headers).await {
         Ok((content, response_url, response_headers)) => match classify_hls_playlist(&content) {
             // A refresh keeps its session on a malformed body; the player retries the playlist.
@@ -447,6 +612,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
     };
     match download_result {
         Ok((content, response_url, response_headers, playlist_kind)) => {
+            if let Some(guard) = half_open_guard {
+                app_state.member_health.record_success_with(guard);
+            }
             let encrypt_secret = app_state.get_encrypt_secret();
             let base_url = server_info.get_base_url();
             let rewrite_hls_props = RewriteHlsProps {
@@ -455,8 +623,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 content: &content,
                 hls_url: response_url,
                 target_id: target.id,
-                virtual_id,
-                input_id: input.id,
+                virtual_id: effective_virtual_id,
+                input_id: effective_input.id,
                 user_token: session_token.as_deref(),
                 origin_provider: selected_provider_name.as_deref(),
                 playlist_kind: Some(playlist_kind),
@@ -489,14 +657,14 @@ pub(in crate::api) async fn handle_hls_stream_request(
                             user,
                             base_url: &base_url,
                             target_id: target.id,
-                            input,
-                            virtual_id,
+                            input: effective_input,
+                            virtual_id: effective_virtual_id,
                             session_token,
                             sealed_url: &entry_url,
                             provider,
                             binding_tag: provider_binding_tag,
                             known_bitrate_bps: stream_context.known_bitrate_bps(),
-                            stream_ref: Some(&stream_ref),
+                            stream_ref: Some(effective_stream_ref),
                         },
                         hls_content,
                     )
@@ -507,6 +675,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
             hls_response(hls_content).into_response()
         }
         Err(err) => {
+            if let Some(guard) = half_open_guard {
+                app_state.member_health.record_classified_failure_with(
+                    guard,
+                    FailureClass::Stream,
+                    std::time::Instant::now(),
+                );
+            }
             error!("Failed to download m3u8: {}", request::text_response_error_log_label(&err));
             if let Some(session_token) = session_token.as_deref() {
                 terminate_failed_hls_manifest_session(
@@ -544,8 +719,28 @@ pub(in crate::api::endpoints::hls_api) async fn get_stream_channel(
         }
     }
     let target_id = target.id;
-    m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target)
-        .await
-        .ok()
-        .map(|pli| pli.to_stream_channel(target_id))
+    if let Ok(pli) = m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target).await {
+        return Some(pli.to_stream_channel(target_id));
+    }
+    let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        target,
+        VirtualId::new(virtual_id),
+    )
+    .await;
+    match classified {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
+            let mut channel = if target.has_output(TargetType::Xtream) {
+                tuliprox_repository::target_stream_item::member_to_xtream_item(&group, index, target)
+                    .to_stream_channel(target_id)
+            } else {
+                tuliprox_repository::target_stream_item::member_to_m3u_item(&group, index, target)
+                    .to_stream_channel(target_id)
+            };
+            channel.group_virtual_id = Some(group.group_vid.get());
+            Some(channel)
+        }
+        _ => None,
+    }
 }

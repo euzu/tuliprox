@@ -32,6 +32,10 @@ use tuliprox_core::{
 
 impl ProviderReleaseSnapshot {
     pub fn is_empty(&self) -> bool { self.single_allocations.is_empty() && self.shared_subscribers.is_empty() }
+
+    pub(crate) fn from_single_allocations(addr: SocketAddr, single_allocations: Vec<AllocationId>) -> Self {
+        Self { addr, single_allocations, shared_subscribers: Vec::new() }
+    }
 }
 
 /// Resolves a public live HLS session token to its stable provider playback owner.

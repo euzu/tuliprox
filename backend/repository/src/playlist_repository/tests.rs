@@ -388,6 +388,7 @@ fn make_media_server_episode(
     }
 }
 
+mod channel_groups;
 mod lifecycle;
 mod playlist;
 mod policy;

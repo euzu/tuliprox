@@ -37,6 +37,7 @@ use persist::persist_playlist_with_mode;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub use persist::{
     load_input_media_server_playlist, persist_input_media_server_playlist, persist_playlist, persist_playlist_views,
+    persist_playlist_views_with_groups,
 };
 #[cfg(test)]
 use publication::TargetCacheReloadStage;

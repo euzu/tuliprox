@@ -172,5 +172,6 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_state_with_man
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
         maintenance: crate::api::model::create_test_maintenance(""),
+        member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
     })
 }

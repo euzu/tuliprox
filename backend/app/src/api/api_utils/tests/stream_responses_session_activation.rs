@@ -2,7 +2,7 @@ use super::{
     activate_session_before_stream_open, create_test_app_config, create_test_app_state,
     create_test_app_state_for_config, create_test_app_state_with_stream_config, create_test_fingerprint,
     create_test_live_channel, create_test_provider_app_config, resolve_admission_with_strategies, stream_response,
-    AdmissionRequest, EvictionReentryGuard, PlaybackRequestClass, SessionActivationRequest,
+    AdmissionRequest, EvictionReentryGuard, PlaybackRequestClass, PlaybackSource, SessionActivationRequest,
 };
 use crate::model::{Config, ConfigTarget, ProxyUserCredentials};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -573,10 +573,9 @@ async fn stream_response_rolls_back_provisional_user_activation_when_provider_op
         "rollback-session",
         None,
         channel,
-        stream_url,
+        PlaybackSource::Single { input: &input, stream_url },
         None,
         &HeaderMap::default(),
-        &input,
         &target,
         &user,
         UserConnectionPermission::Allowed,

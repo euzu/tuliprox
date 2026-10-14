@@ -47,7 +47,19 @@ pub fn qos_aggregation_is_enabled(config: &Config) -> bool {
     })
 }
 
+pub trait QosAggregationListener: Send + Sync {
+    fn on_snapshots(&self, snapshots: &[QosSnapshotRecord]);
+}
+
 pub fn exec_qos_aggregation(app_config: &Arc<AppConfig>, cancel_token: &CancellationToken) {
+    exec_qos_aggregation_with_listener(app_config, cancel_token, None);
+}
+
+pub fn exec_qos_aggregation_with_listener(
+    app_config: &Arc<AppConfig>,
+    cancel_token: &CancellationToken,
+    listener: Option<Arc<dyn QosAggregationListener>>,
+) {
     let config = app_config.config.load();
     let Some(reverse_proxy) = config.reverse_proxy.as_ref() else {
         return;
@@ -81,8 +93,15 @@ pub fn exec_qos_aggregation(app_config: &Arc<AppConfig>, cancel_token: &Cancella
             let today = current_utc_day();
             let repo_clone = repo.clone();
             let history_dir_clone = history_dir.clone();
+            let listener_clone = listener.clone();
             if let Err(err) = tokio::task::spawn_blocking(move || {
-                run_aggregation_once(&repo_clone, &history_dir_clone, &today, compaction_interval_secs)
+                run_aggregation_once(&repo_clone, &history_dir_clone, &today, compaction_interval_secs)?;
+                if let Some(listener) = listener_clone {
+                    let mut snapshots = Vec::new();
+                    let _ = repo_clone.for_each_snapshot(|s| snapshots.push(s.clone()));
+                    listener.on_snapshots(&snapshots);
+                }
+                Ok::<(), std::io::Error>(())
             })
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))

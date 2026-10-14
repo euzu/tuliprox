@@ -243,6 +243,9 @@ impl ConfigTargetDto {
         if let Some(sort) = self.sort.as_mut() {
             sort.prepare(templates)?;
         }
+        if let Some(options) = &mut self.options {
+            options.prepare()?;
+        }
         Ok(())
     }
 }
@@ -250,9 +253,14 @@ impl ConfigTargetDto {
 #[cfg(test)]
 mod tests;
 
+mod channel_groups;
 mod filter;
 mod options;
 mod output;
+pub use channel_groups::{
+    ChannelGroupPolicy, ChannelGroupSelectionConfig, ChannelGroupsConfig, ChannelMatchBy, ChannelMatchNormalize,
+    EpgConflictMode, RuntimeAudioLanguage,
+};
 pub use filter::ConfigTargetFilterDto;
 pub use options::{
     ConfigTargetOptions, ConfigTargetShareLiveStreams, DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy,

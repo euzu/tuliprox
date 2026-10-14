@@ -273,6 +273,8 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             source_ordinal: item.source_ordinal,
             input_stream_id: input_stream_id.unwrap_or_else(|| "".intern()),
             upstream_user_agent: item.upstream_user_agent.clone(),
+            channel_group: None,
+            channel_group_uuid: None,
         };
 
         PlaylistItem { header }
@@ -305,6 +307,8 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             source_ordinal: item.source_ordinal,
             input_stream_id: item.get_input_stream_id().unwrap_or_else(|| "".intern()),
             upstream_user_agent: item.upstream_user_agent.clone(),
+            channel_group: None,
+            channel_group_uuid: None,
         };
 
         PlaylistItem { header }
@@ -375,6 +379,8 @@ impl PlaylistItem {
             source_ordinal: 0,
             input_stream_id: stream_id_str,
             upstream_user_agent: None,
+            channel_group: None,
+            channel_group_uuid: None,
         };
 
         PlaylistItem { header }

@@ -30,6 +30,7 @@ pub(in crate::active_user_manager::tests) fn test_channel(virtual_id: u32) -> St
         epg_channel_id: None,
         epg_reference_ts: None,
         upstream_user_agent: None,
+        group_virtual_id: None,
     }
 }
 
@@ -51,6 +52,7 @@ pub(in crate::active_user_manager::tests) fn test_adaptive_channel(virtual_id: u
         epg_channel_id: None,
         epg_reference_ts: None,
         upstream_user_agent: None,
+        group_virtual_id: None,
     }
 }
 

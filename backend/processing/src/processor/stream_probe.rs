@@ -289,11 +289,21 @@ async fn prepare_generic_stream_metadata<E: EventSink>(
     }
 
     let (raw_video, raw_audio, stats) = match probe_data {
-        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => (
-            raw_video.map(|value| Arc::<str>::from(value.to_string())),
-            raw_audio.map(|value| Arc::<str>::from(value.to_string())),
-            stats,
-        ),
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => {
+            let rv = raw_video.map(|value| Arc::<str>::from(value.to_string()));
+            let ra = raw_audio.map(|value| Arc::<str>::from(value.to_string()));
+            if item_type.is_live() {
+                let bitrate_kbps = stats.bitrate.map_or(0, |b| b / 1000);
+                events.observe_stream_probe(
+                    Arc::clone(&input.name),
+                    Arc::from(unique_id),
+                    rv.as_deref(),
+                    ra.as_deref(),
+                    bitrate_kbps,
+                );
+            }
+            (rv, ra, stats)
+        }
         // The three failure arms are the only place the *reason* survives:
         // both outcome enums above collapse to a single `ProbeFailed`, so a
         // caller cannot tell a dead provider from a cancelled shutdown. The

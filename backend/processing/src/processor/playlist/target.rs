@@ -414,13 +414,14 @@ fn finalization_step_label(view: &str, stage: &str) -> String {
 pub(crate) fn prepare_eligible_catalog(
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
+    group_uuids: &HashSet<UUIDType>,
     step: &mut StepMeasure,
 ) -> Vec<PlaylistGroup> {
     let mut playlist = flatten_groups(playlist);
     step.tick("playlist merge");
     log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
     if let Some(dedup_config) = target.execution_plan.post_merge_content_dedup.as_ref() {
-        let removed = crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut playlist);
+        let removed = crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut playlist, group_uuids);
         if removed > 0 {
             info!("Deduplicated {removed} eligible channels for target {}", target.name);
         }
@@ -506,6 +507,28 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 
+async fn process_target_channel_groups(
+    config: &tuliprox_core::model::AppConfig,
+    target: &ConfigTarget,
+    playlist: &mut Vec<PlaylistGroup>,
+    step: &mut StepMeasure,
+    errors: &mut Vec<TuliproxError>,
+) -> Vec<PendingChannelGroup> {
+    let Some(cg_cfg) = target.execution_plan.channel_groups.as_ref() else {
+        return Vec::new();
+    };
+    let overrides =
+        tuliprox_repository::load_channel_group_overrides(config, &target.name).await.unwrap_or_else(|err| {
+            errors.push(err);
+            None
+        });
+    step.broadcast("Processing channel groups for '{}' playlist", &target.name);
+    let groups = crate::processor::channel_group::group_playlist(cg_cfg, overrides.as_ref(), &target.name, playlist);
+    step.tick("channel grouping");
+    log_memory_snapshot(format!("target '{}' after_channel_grouping", target.name).as_str());
+    groups
+}
+
 pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
@@ -517,6 +540,10 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     let mut errors = Vec::new();
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
+
+    let pending_channel_groups =
+        process_target_channel_groups(&ctx.config, target, &mut new_playlist, &mut step, &mut errors).await;
+
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
         process_favourites(&mut new_playlist, target.favourites.as_deref());
@@ -531,8 +558,11 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         return (Ok(()), errors);
     }
 
-    let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &mut step);
-    let views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
+    let group_uuids: HashSet<UUIDType> = pending_channel_groups.iter().map(|p| p.group_uuid).collect();
+    let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &group_uuids, &mut step);
+    let mut views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
+    views.channel_groups = pending_channel_groups;
+
     if views.base.is_empty()
         && views.xtream.is_none()
         && views.publication_plan == PlaylistPublicationPlan::Ordinary
@@ -577,7 +607,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         flatten_tvguide(new_epg)
     };
     let library_empty = library_empty.for_filtered_playlist(&finalized_base);
-    let result = persist_playlist_views(
+    let result = persist_playlist_views_with_groups(
         &ctx.config,
         &mut finalized_base,
         finalized_xtream.as_deref_mut(),
@@ -589,6 +619,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
             library_empty,
             publication_plan: views.publication_plan,
         },
+        &mut views.channel_groups,
     )
     .await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
@@ -901,6 +932,7 @@ pub(crate) struct TargetPlaylistViews {
     pub(crate) base: Vec<PlaylistGroup>,
     pub(crate) xtream: Option<Vec<PlaylistGroup>>,
     pub(crate) publication_plan: PlaylistPublicationPlan,
+    pub(crate) channel_groups: Vec<PendingChannelGroup>,
 }
 
 pub(crate) fn build_curated_playlist_views(
@@ -926,6 +958,7 @@ pub(crate) fn build_curated_playlist_views(
             has_xtream_output && !config.include_xtream_base_categories,
             appearance_filter_configured,
         ),
+        channel_groups: Vec::new(),
     }
 }
 
@@ -940,6 +973,7 @@ pub(crate) async fn prepare_target_playlist_views(
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
+            channel_groups: Vec::new(),
         };
     };
 
@@ -954,13 +988,21 @@ pub(super) fn curation_playlist_views(
     outcome: CurationRunOutcome,
 ) -> TargetPlaylistViews {
     match outcome {
-        CurationRunOutcome::NotConfigured => {
-            TargetPlaylistViews { base: playlist, xtream: None, publication_plan: PlaylistPublicationPlan::Ordinary }
-        }
+        CurationRunOutcome::NotConfigured => TargetPlaylistViews {
+            base: playlist,
+            xtream: None,
+            publication_plan: PlaylistPublicationPlan::Ordinary,
+            channel_groups: Vec::new(),
+        },
         CurationRunOutcome::Failed(failure) => {
             warn_curation_failure(&target.name, &failure);
             // Discovery is optional; unavailable selections must not suppress the source catalog or EPG.
-            TargetPlaylistViews { base: playlist, xtream: None, publication_plan: PlaylistPublicationPlan::Ordinary }
+            TargetPlaylistViews {
+                base: playlist,
+                xtream: None,
+                publication_plan: PlaylistPublicationPlan::Ordinary,
+                channel_groups: Vec::new(),
+            }
         }
         CurationRunOutcome::Complete(evaluation) => {
             let views = build_curated_playlist_views(
@@ -1169,4 +1211,24 @@ pub(crate) async fn process_watch<E: EventSink>(
     }
 
     true
+}
+
+#[cfg(test)]
+pub(crate) async fn run_finalize_until_persist(
+    target: &ConfigTarget,
+    mut playlist: Vec<PlaylistGroup>,
+) -> (Vec<PlaylistGroup>, Vec<PendingChannelGroup>) {
+    let mut step = StepMeasure::new("test", |_, _| {});
+    let pending = if let Some(cg_cfg) = target.execution_plan.channel_groups.as_ref() {
+        crate::processor::channel_group::group_playlist(cg_cfg, None, &target.name, &mut playlist)
+    } else {
+        Vec::new()
+    };
+    if target.favourites.is_some() {
+        process_favourites(&mut playlist, target.favourites.as_deref());
+    }
+    let group_uuids: HashSet<UUIDType> = pending.iter().map(|p| p.group_uuid).collect();
+    let eligible = prepare_eligible_catalog(target, playlist, &group_uuids, &mut step);
+    let finalized = finalize_playlist_view(target, eligible, &mut step, "base");
+    (finalized, pending)
 }

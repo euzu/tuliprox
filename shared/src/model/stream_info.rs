@@ -38,10 +38,12 @@ impl StreamTechnicalInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct StreamChannel {
     pub target_id: u16,
     pub virtual_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_virtual_id: Option<u32>,
     pub provider_id: u32,
     #[serde(with = "arc_str_serde")]
     pub input_name: Arc<str>,
@@ -71,6 +73,9 @@ pub struct StreamChannel {
 }
 
 impl StreamChannel {
+    #[must_use]
+    pub fn client_virtual_id(&self) -> u32 { self.group_virtual_id.unwrap_or(self.virtual_id) }
+
     /// Returns a copy of this channel with the supplied EPG reference timestamp
     /// installed. Used by the M3U non-HLS path to thread an archive/catchup
     /// timestamp parsed from the request URL into the `StreamChannel` that the
@@ -99,6 +104,7 @@ impl XtreamPlaylistItem {
         StreamChannel {
             target_id,
             virtual_id: self.virtual_id.get(),
+            group_virtual_id: None,
             provider_id: self.provider_id,
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
@@ -123,6 +129,7 @@ impl M3uPlaylistItem {
         StreamChannel {
             target_id,
             virtual_id: self.virtual_id.get(),
+            group_virtual_id: None,
             provider_id: self.get_provider_id().unwrap_or_default(),
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,

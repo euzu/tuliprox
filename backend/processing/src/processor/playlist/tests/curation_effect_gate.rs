@@ -15,6 +15,7 @@ use tuliprox_core::{
     model::{ApiProxyConfig, CustomStreamResponse, HdHomeRunConfig, MediaToolCapabilities, SourcesConfig},
     utils::FileLockManager,
 };
+use tuliprox_repository::persist_playlist_views;
 
 pub(super) fn app_config(storage_dir: &Path) -> Arc<AppConfig> {
     Arc::new(AppConfig {

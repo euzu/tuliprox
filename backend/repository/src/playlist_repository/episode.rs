@@ -37,41 +37,47 @@ pub(super) fn normalize_target_playlist_epg_ids(
     }
 }
 
+pub(super) fn assign_item_identity(
+    header: &mut PlaylistItemHeader,
+    source_ordinal: &mut u32,
+    target_id_mapping: &mut TargetIdMapping,
+) {
+    *source_ordinal += 1;
+    header.source_ordinal = *source_ordinal;
+    let provider_id = header.get_provider_id().unwrap_or_default();
+    if provider_id == 0 {
+        header.item_type = match (is_hls_url(&header.url), header.item_type) {
+            (true, _) => PlaylistItemType::LiveHls,
+            (false, PlaylistItemType::Live) => {
+                if is_dash_url(&header.url) {
+                    PlaylistItemType::LiveDash
+                } else {
+                    PlaylistItemType::LiveUnknown
+                }
+            }
+            _ => header.item_type,
+        };
+    }
+
+    let uuid = header.get_uuid();
+    let item_type = header.item_type;
+    let parent_virtual_id = if item_type.is_series() {
+        target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
+    } else {
+        VirtualId::default()
+    };
+    header.virtual_id = target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, parent_virtual_id);
+}
+
 pub(super) fn prepare_target_playlist_for_persistence(
     playlist: &mut [PlaylistGroup],
     target: &ConfigTarget,
     target_id_mapping: &mut TargetIdMapping,
+    source_ordinal: &mut u32,
 ) {
-    let mut source_ordinal: u32 = 0;
     for group in playlist.iter_mut() {
         for channel in &mut group.channels {
-            let header = &mut channel.header;
-            source_ordinal += 1;
-            header.source_ordinal = source_ordinal;
-            let provider_id = header.get_provider_id().unwrap_or_default();
-            if provider_id == 0 {
-                header.item_type = match (is_hls_url(&header.url), header.item_type) {
-                    (true, _) => PlaylistItemType::LiveHls,
-                    (false, PlaylistItemType::Live) => {
-                        if is_dash_url(&header.url) {
-                            PlaylistItemType::LiveDash
-                        } else {
-                            PlaylistItemType::LiveUnknown
-                        }
-                    }
-                    _ => header.item_type,
-                };
-            }
-
-            let uuid = header.get_uuid();
-            let item_type = header.item_type;
-            let parent_virtual_id = if item_type.is_series() {
-                target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
-            } else {
-                VirtualId::default()
-            };
-            header.virtual_id =
-                target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, parent_virtual_id);
+            assign_item_identity(&mut channel.header, source_ordinal, target_id_mapping);
         }
     }
 

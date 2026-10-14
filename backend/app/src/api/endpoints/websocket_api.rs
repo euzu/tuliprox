@@ -540,7 +540,10 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // Auth decisions reach notification channels and plugins, not the
         // Web UI socket: there is no panel that renders them, and pushing
         // every sign-in to every connected admin is noise.
-        | EventMessage::AuthAudit(_) => return None,
+        | EventMessage::AuthAudit(_)
+        | EventMessage::ChannelGroupMemberSelected { .. }
+        | EventMessage::ChannelGroupExhausted { .. }
+        | EventMessage::ChannelGroupCircuitChanged { .. } => return None,
     })
 }
 
@@ -748,7 +751,7 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 28] = [
+        const NOT_ON_THE_WIRE: [EventKind; 31] = [
             EventKind::ConnectionDenied,
             EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
@@ -777,6 +780,9 @@ mod tests {
             EventKind::AuthSignInFailed,
             EventKind::AuthSignInThrottled,
             EventKind::AuthPermissionDenied,
+            EventKind::ChannelGroupMemberSelected,
+            EventKind::ChannelGroupExhausted,
+            EventKind::ChannelGroupCircuitChanged,
         ];
 
         for (event, kind) in sample_event_of_every_kind() {
@@ -941,6 +947,18 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
             EventMessage::MaintenanceChanged(Arc::default()),
+            EventMessage::ChannelGroupMemberSelected {
+                target_id: 1,
+                group_vid: 10,
+                member_vid: 11,
+                tier: shared::model::channel_group::CapacityTier::Free,
+            },
+            EventMessage::ChannelGroupExhausted { target_id: 1, group_vid: 10 },
+            EventMessage::ChannelGroupCircuitChanged {
+                input_name: "test".into(),
+                input_stream_id: "1".into(),
+                state: shared::model::channel_group::CircuitState::Closed,
+            },
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

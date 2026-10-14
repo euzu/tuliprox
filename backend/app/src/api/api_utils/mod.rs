@@ -233,11 +233,12 @@ pub enum ResourceFetchPolicy {
 const API_STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 mod activation;
 mod auth;
 mod catchup;
+pub(crate) mod channel_group;
 mod clock;
 mod local_files;
 mod maintenance;
@@ -318,12 +319,13 @@ pub use self::{
     strategy::redirect_response,
     streaming::{
         force_provider_stream_response, is_hls_stream_share_enabled, is_seek_request, is_seekable_media_request,
-        is_stream_share_enabled,
+        is_stream_share_enabled, sticky_playback_context,
     },
 };
 pub(crate) use self::{
     auth::{input_for_user, with_recording_headers},
     catchup::get_catchup_session_ttl_secs,
+    channel_group::{resolve_hls_group_entry, GroupSelectionRequest, PlaybackSource},
     local_files::local_stream_response,
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
     provider_acquire::{acquire_exact_provider_handle, stream_response_with_provider_handle},

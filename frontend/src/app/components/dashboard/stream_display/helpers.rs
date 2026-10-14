@@ -250,6 +250,7 @@ mod tests {
             channel: StreamChannel {
                 target_id: 1,
                 virtual_id: uid,
+                group_virtual_id: None,
                 provider_id: 1,
                 item_type,
                 cluster: item_type.cluster(),

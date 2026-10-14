@@ -91,6 +91,7 @@ fn create_test_stream_channel(url: &str) -> StreamChannel {
         epg_channel_id: None,
         epg_reference_ts: None,
         upstream_user_agent: None,
+        group_virtual_id: None,
     }
 }
 

@@ -1,14 +1,18 @@
 use super::{
     activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
+    channel_group::{
+        acquire_group_member, group_shared_key, GroupSelectionFailure, GroupSelectionRequest, PlaybackSource,
+    },
     cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
     detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
     is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
     no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering, probe_catchup_payload,
-    record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
-    resolve_xtream_vod_provider_url, select_provider_stream_url, should_pin_provider_for_session,
-    stream_admission_rejected_response, try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload,
-    ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass,
-    SessionActivationRequest, StreamResponseMode, StreamingAcquireOptions, LEASE_EXPIRY_RECHECK_FLOOR,
+    record_connect_failed_attempt, reentry_suppressed_response, resolve_initial_stalker_playback_url,
+    resolve_request_url_for_logging, resolve_xtream_vod_provider_url, select_provider_stream_url,
+    should_pin_provider_for_session, stream_admission_rejected_response, try_shared_stream_response_if_any,
+    try_unwrap_body, CatchupPayload, ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire,
+    PlaybackRequestClass, SessionActivationRequest, StreamResponseMode, StreamingAcquireOptions,
+    LEASE_EXPIRY_RECHECK_FLOOR,
 };
 use crate::{
     api::model::{
@@ -25,13 +29,21 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use futures::StreamExt;
 use log::{debug, error, log_enabled, trace};
 use shared::{
-    model::{ConnectFailureReason, FailureStage, PlaylistItemType, StreamChannel, UserConnectionPermission, VirtualId},
+    model::{
+        ConnectFailureReason, EventMessage, FailureStage, PlaylistItemType, StreamChannel, UserConnectionPermission,
+        VirtualId,
+    },
     utils::{extract_extension_from_url, sanitize_sensitive_info, Internable},
 };
 use std::{borrow::Cow, sync::Arc, time::Duration};
-use tuliprox_session::ProviderSessionHeaders;
+use tuliprox_session::{
+    channel_group::{member_key, FailureClass},
+    stream::StreamDetails,
+    ProviderSessionHeaders,
+};
 
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
@@ -293,10 +305,9 @@ pub(crate) async fn stream_response_with_provider_handle(
     session_token: &str,
     request_class: Option<PlaybackRequestClass>,
     mut stream_channel: StreamChannel,
-    stream_url: &str,
+    source: PlaybackSource<'_>,
     pinned_provider: Option<&Arc<str>>,
     req_headers: &HeaderMap,
-    input: &Arc<ConfigInput>,
     target: &Arc<ConfigTarget>,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
@@ -305,26 +316,45 @@ pub(crate) async fn stream_response_with_provider_handle(
     grace_mode: Option<crate::api::model::GraceMode>,
     preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
 ) -> impl IntoResponse + Send {
-    if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
-        return admission_failure_response(
-            app_state,
-            fingerprint,
-            user,
-            stream_channel,
-            Arc::clone(&input.name),
-            req_headers,
-            ConnectFailureReason::Maintenance,
-        );
+    if let PlaybackSource::Single { input, .. } = &source {
+        if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
+            return admission_failure_response(
+                app_state,
+                fingerprint,
+                user,
+                stream_channel,
+                Arc::clone(&input.name),
+                req_headers,
+                ConnectFailureReason::Maintenance,
+            );
+        }
     }
     let _transition_guard = app_state.active_users.acquire_playback_transition(&user.username, session_token).await;
-    let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
+
+    if let PlaybackSource::Group { group, .. } = &source {
+        stream_channel.group_virtual_id = Some(group.group_vid.get());
+    }
+
+    let (initial_input, initial_stream_url) = match &source {
+        PlaybackSource::Single { input, stream_url } => (Arc::clone(input), (*stream_url).to_string()),
+        PlaybackSource::Group { group, .. } => {
+            let first_member = &group.members[0];
+            let cand_input = app_state
+                .app_config
+                .get_input_by_name(&first_member.input_name)
+                .unwrap_or_else(|| Arc::new(ConfigInput::default()));
+            (cand_input, first_member.url.to_string())
+        }
+    };
+
+    let request_log_stream_url = resolve_request_url_for_logging(&initial_input, &initial_stream_url);
     if log_enabled!(log::Level::Trace) {
         trace!("Try to open stream {}", sanitize_sensitive_info(request_log_stream_url.as_ref()));
     }
 
-    let virtual_id = stream_channel.virtual_id;
+    let virtual_id = stream_channel.client_virtual_id();
     let item_type = stream_channel.item_type;
-    let playback_extension = extract_extension_from_url(stream_url);
+    let playback_extension = extract_extension_from_url(&initial_stream_url);
     let socket_bound = is_socket_bound_playback_session(item_type, playback_extension);
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
@@ -332,13 +362,13 @@ pub(crate) async fn stream_response_with_provider_handle(
         app_state,
         SessionActivationRequest {
             fingerprint,
-            input,
+            input: &initial_input,
             user,
             session_token,
             request_class,
             virtual_id: VirtualId::new(virtual_id),
             item_type,
-            stream_url,
+            stream_url: &initial_stream_url,
             connection_permission,
             connection_kind,
             granted_grace_mode: grace_mode,
@@ -353,14 +383,19 @@ pub(crate) async fn stream_response_with_provider_handle(
     let allow_shared_reuse =
         connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
+    let shared_lookup_key: Arc<str> = match &source {
+        PlaybackSource::Group { group, .. } => group_shared_key(target.id, group.group_vid.get()),
+        PlaybackSource::Single { stream_url, .. } => Arc::from(*stream_url),
+    };
+
     let share_stream = is_stream_share_enabled(item_type, target);
     let _shared_lock = if share_stream {
-        let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
+        let write_lock = app_state.app_config.file_locks.write_lock_str(shared_lookup_key.as_ref()).await;
 
         if allow_shared_reuse {
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
-                stream_url,
+                shared_lookup_key.as_ref(),
                 fingerprint,
                 user,
                 connection_permission,
@@ -382,7 +417,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         if item_type == PlaylistItemType::Live && allow_shared_reuse {
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
-                stream_url,
+                shared_lookup_key.as_ref(),
                 fingerprint,
                 user,
                 connection_permission,
@@ -394,7 +429,10 @@ pub(crate) async fn stream_response_with_provider_handle(
             )
             .await
             {
-                debug_if_enabled!("Opportunistic shared stream reuse for {}", sanitize_sensitive_info(stream_url));
+                debug_if_enabled!(
+                    "Opportunistic shared stream reuse for {}",
+                    sanitize_sensitive_info(shared_lookup_key.as_ref())
+                );
                 return value.into_response();
             }
         }
@@ -419,7 +457,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             fingerprint,
             user,
             stream_channel: stream_channel.clone(),
-            provider_name: input.name.clone(),
+            provider_name: initial_input.name.clone(),
             req_headers,
             reason: ConnectFailureReason::UserConnectionsExhausted,
             failure_stage: FailureStage::Admission,
@@ -432,53 +470,61 @@ pub(crate) async fn stream_response_with_provider_handle(
         .into_response();
     }
 
-    let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
-    let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-    let pinned_provider = pinned_provider.filter(|provider| {
-        item_type.is_live()
-            || session_state
-                .as_ref()
-                .is_some_and(|session| session.media_started.load(std::sync::atomic::Ordering::Acquire))
-            || app_state.active_provider.should_reuse_playback_provider(session_token, provider)
-    });
-    let provider_session_headers =
-        session_state.as_ref().and_then(|session| session.provider_session_headers_for(stream_url));
-    let mut stream_details = match create_stream_response_details(
-        app_state,
-        &stream_options,
-        stream_url,
-        &user.username,
-        fingerprint,
-        req_headers,
-        input,
-        &stream_channel,
-        item_type,
-        if item_type == PlaylistItemType::Catchup {
-            crate::api::model::ProviderContentRepresentationMode::Identity
-        } else {
-            crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
-        },
-        share_stream,
-        connection_permission,
-        pinned_provider,
-        pinned_provider.is_none() || allows_provider_pool_failover(item_type),
-        true,
-        VirtualId::new(stream_channel.virtual_id),
-        connection_priority_for_kind(user, connection_kind),
-        connection_kind,
-        false,
-        Some(session_token),
-        provider_session_headers.as_deref(),
-        pinned_provider.is_some(),
-        grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
-        activation.grace_context.clone(),
-        None,
-        preacquired_provider_handle,
-    )
-    .await
+    if matches!(&source, PlaybackSource::Group { .. })
+        && connection_permission == UserConnectionPermission::GracePeriod
+        && matches!(grace_mode, Some(crate::api::model::GraceMode::Hold))
     {
-        Ok(stream_details) => stream_details,
-        Err(err) => {
+        let grace_period = app_state.get_grace_options();
+        let hold_duration = Duration::from_millis(grace_period.period_millis);
+        let deadline = tokio::time::Instant::now() + hold_duration;
+        let mut passed = false;
+        loop {
+            if app_state.active_users.user_connections(&user.username).await < user.max_connections {
+                passed = true;
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        if !passed {
+            if let Some(ref ctx) = activation.grace_context {
+                let eviction_guard = if socket_bound {
+                    tuliprox_session::admission::EvictionReentryGuard::SocketPlayback {
+                        virtual_id: shared::model::VirtualId(virtual_id),
+                    }
+                } else {
+                    tuliprox_session::admission::EvictionReentryGuard::Session(session_token)
+                };
+                let remaining_result = tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
+                    &app_state.admission_ctx(),
+                    tuliprox_session::admission::AdmissionRequest {
+                        username: &user.username,
+                        max_connections: user.max_connections,
+                        soft_connections: user.soft_connections,
+                        client_ip: &fingerprint.client_ip,
+                        request_addr: &fingerprint.addr,
+                        use_session_admission: true,
+                        session_token: Some(session_token),
+                        activate_unbound_session: true,
+                        eviction_reentry_guard: eviction_guard,
+                    },
+                    ctx,
+                    activation.admission.kind(),
+                )
+                .await;
+                if matches!(
+                    remaining_result.admission.permission(),
+                    UserConnectionPermission::Allowed | UserConnectionPermission::GracePeriod
+                ) {
+                    passed = true;
+                }
+            }
+        }
+
+        if !passed {
             app_state
                 .active_users
                 .release_unbound_session_reservation(
@@ -488,8 +534,457 @@ pub(crate) async fn stream_response_with_provider_handle(
                     activation.placeholder_transition_version.is_some(),
                 )
                 .await;
-            error!("Failed to stream: {err}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            record_connect_failed_attempt(ConnectFailedAttempt {
+                app_state,
+                fingerprint,
+                user,
+                stream_channel: stream_channel.clone(),
+                provider_name: initial_input.name.clone(),
+                req_headers,
+                reason: ConnectFailureReason::UserConnectionsExhausted,
+                failure_stage: FailureStage::Admission,
+            });
+            return create_custom_video_stream_response(
+                &app_state.provider_stream_ctx(),
+                &fingerprint.addr,
+                CustomVideoStreamType::UserConnectionsExhausted,
+            )
+            .into_response();
+        }
+        connection_permission = UserConnectionPermission::Allowed;
+    }
+
+    let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
+
+    let (mut stream_details, input, stream_url, mut stream_channel) = match source {
+        PlaybackSource::Single { input, stream_url } => {
+            let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+            let pinned_provider = pinned_provider.filter(|provider| {
+                item_type.is_live()
+                    || session_state
+                        .as_ref()
+                        .is_some_and(|session| session.media_started.load(std::sync::atomic::Ordering::Acquire))
+                    || app_state.active_provider.should_reuse_playback_provider(session_token, provider)
+            });
+            let provider_session_headers =
+                session_state.as_ref().and_then(|session| session.provider_session_headers_for(stream_url));
+            let details = match create_stream_response_details(
+                app_state,
+                &stream_options,
+                stream_url,
+                &user.username,
+                fingerprint,
+                req_headers,
+                input,
+                &stream_channel,
+                item_type,
+                if item_type == PlaylistItemType::Catchup {
+                    crate::api::model::ProviderContentRepresentationMode::Identity
+                } else {
+                    crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
+                },
+                share_stream,
+                connection_permission,
+                pinned_provider,
+                pinned_provider.is_none() || allows_provider_pool_failover(item_type),
+                true,
+                VirtualId::new(stream_channel.virtual_id),
+                connection_priority_for_kind(user, connection_kind),
+                connection_kind,
+                false,
+                Some(session_token),
+                provider_session_headers.as_deref(),
+                pinned_provider.is_some(),
+                grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
+                activation.grace_context.clone(),
+                None,
+                preacquired_provider_handle,
+            )
+            .await
+            {
+                Ok(stream_details) => stream_details,
+                Err(err) => {
+                    app_state
+                        .active_users
+                        .release_unbound_session_reservation(
+                            &user.username,
+                            session_token,
+                            activation.placeholder_transition_version,
+                            activation.placeholder_transition_version.is_some(),
+                        )
+                        .await;
+                    error!("Failed to stream: {err}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
+            (details, Arc::clone(input), Arc::<str>::from(stream_url), stream_channel)
+        }
+        PlaybackSource::Group { group, mode, prefer } => {
+            let (selection_cfg, allow_provider_grace) =
+                target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map_or_else(
+                    || (shared::model::ChannelGroupSelectionConfig::default(), true),
+                    |cg| (cg.selection, cg.allow_provider_grace),
+                );
+            let policy = group.policy;
+
+            let target_name: Arc<str> = Arc::from(target.name.as_str());
+            let mut exclude: Vec<usize> = Vec::new();
+            let mut demoted_inputs: Vec<Arc<str>> = Vec::new();
+            let mut attempts: u32 = 0;
+            let max_attempts = u32::from(selection_cfg.max_start_attempts.max(1));
+            let start_time = std::time::Instant::now();
+            let budget = Duration::from_secs(selection_cfg.startup_budget_secs);
+
+            let mut final_details: Option<(StreamDetails, Arc<ConfigInput>, Arc<str>, StreamChannel)> = None;
+
+            while attempts < max_attempts && (selection_cfg.startup_budget_secs == 0 || start_time.elapsed() < budget) {
+                attempts += 1;
+
+                let req = GroupSelectionRequest {
+                    target_name: &target_name,
+                    group: &group,
+                    policy,
+                    mode: mode.clone(),
+                    selection: selection_cfg,
+                    addr: &fingerprint.addr,
+                    username: &user.username,
+                    priority: connection_priority_for_kind(user, connection_kind),
+                    kind: connection_kind,
+                    lease: None,
+                    allow_provider_grace,
+                    exclude: &exclude,
+                    demoted_inputs: &demoted_inputs,
+                    prefer: if attempts == 1 { prefer } else { None },
+                };
+
+                let acquired = match acquire_group_member(app_state, req).await {
+                    Ok(acq) => acq,
+                    Err(GroupSelectionFailure::Exhausted | GroupSelectionFailure::NoCandidate) => {
+                        break;
+                    }
+                };
+
+                let member = group.members[acquired.index].clone();
+                let Some(member_input) = app_state.app_config.get_input_by_name(&member.input_name) else {
+                    let key = member_key(&member);
+                    if let Some(guard) = acquired.half_open {
+                        app_state.member_health.record_classified_failure_with(
+                            guard,
+                            FailureClass::Stream,
+                            std::time::Instant::now(),
+                        );
+                    } else {
+                        app_state.member_health.record_classified_failure(
+                            &key,
+                            FailureClass::Stream,
+                            std::time::Instant::now(),
+                        );
+                    }
+                    drop(acquired.handle);
+                    exclude.push(acquired.index);
+                    continue;
+                };
+
+                let mut member_channel = stream_channel.clone();
+                member_channel.virtual_id = member.member_vid.get();
+                member_channel.group_virtual_id = Some(group.group_vid.get());
+                member_channel.input_name = Arc::clone(&member.input_name);
+                member_channel.item_type = member.item_type;
+                member_channel.cluster = member.cluster;
+                member_channel.title = Arc::clone(&member.title);
+                member_channel.url = Arc::clone(&member.url);
+                member_channel.provider_id = member.provider_id;
+
+                let member_url = if member_input.input_type.is_stalker() {
+                    let Ok(url) = resolve_initial_stalker_playback_url(
+                        app_state,
+                        &member_input,
+                        user,
+                        member.provider_id,
+                        member.cluster,
+                        member.item_type,
+                        &member.url,
+                    )
+                    .await
+                    else {
+                        let key = member_key(&member);
+                        if let Some(guard) = acquired.half_open {
+                            app_state.member_health.record_classified_failure_with(
+                                guard,
+                                FailureClass::Stream,
+                                std::time::Instant::now(),
+                            );
+                        } else {
+                            app_state.member_health.record_classified_failure(
+                                &key,
+                                FailureClass::Stream,
+                                std::time::Instant::now(),
+                            );
+                        }
+                        drop(acquired.handle);
+                        exclude.push(acquired.index);
+                        continue;
+                    };
+                    url
+                } else {
+                    Arc::clone(&member.url)
+                };
+
+                let details_result = create_stream_response_details(
+                    app_state,
+                    &stream_options,
+                    member_url.as_ref(),
+                    &user.username,
+                    fingerprint,
+                    req_headers,
+                    &member_input,
+                    &member_channel,
+                    member.item_type,
+                    if member.item_type == PlaylistItemType::Catchup {
+                        crate::api::model::ProviderContentRepresentationMode::Identity
+                    } else {
+                        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
+                    },
+                    share_stream,
+                    connection_permission,
+                    None,
+                    true,
+                    true,
+                    VirtualId::new(member.member_vid.get()),
+                    connection_priority_for_kind(user, connection_kind),
+                    connection_kind,
+                    false,
+                    Some(session_token),
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                    Some(acquired.handle),
+                )
+                .await;
+
+                let Ok(mut details) = details_result else {
+                    let key = member_key(&member);
+                    if let Some(guard) = acquired.half_open {
+                        app_state.member_health.record_classified_failure_with(
+                            guard,
+                            FailureClass::Stream,
+                            std::time::Instant::now(),
+                        );
+                    } else {
+                        app_state.member_health.record_classified_failure(
+                            &key,
+                            FailureClass::Stream,
+                            std::time::Instant::now(),
+                        );
+                    }
+                    exclude.push(acquired.index);
+                    continue;
+                };
+
+                if let Some(mut provider_stream) = details.stream.take() {
+                    if let Some((_, _, _, Some(_custom_type))) = details.stream_info {
+                        let failure_class =
+                            if details.custom_reason == Some(ProviderStreamCustomReason::ProviderExhausted) {
+                                FailureClass::Capacity
+                            } else {
+                                FailureClass::Stream
+                            };
+                        if matches!(failure_class, FailureClass::Auth | FailureClass::Capacity) {
+                            demoted_inputs.push(Arc::clone(&member.input_name));
+                        }
+                        let key = member_key(&member);
+                        if let Some(guard) = acquired.half_open {
+                            app_state.member_health.record_classified_failure_with(
+                                guard,
+                                failure_class,
+                                std::time::Instant::now(),
+                            );
+                        } else {
+                            app_state.member_health.record_classified_failure(
+                                &key,
+                                failure_class,
+                                std::time::Instant::now(),
+                            );
+                        }
+                        app_state.connection_manager.release_managed_provider_handle(details.provider_handle);
+                        exclude.push(acquired.index);
+                        continue;
+                    }
+
+                    let is_adaptive_or_playlist = {
+                        if member.item_type.is_live_adaptive() {
+                            true
+                        } else if let Some((headers, _, _, _)) = &details.stream_info {
+                            headers.iter().any(|(name, val)| {
+                                name.as_str().eq_ignore_ascii_case("content-type") && {
+                                    let lower = val.to_ascii_lowercase();
+                                    lower.contains("mpegurl") || lower.contains("dash+xml")
+                                }
+                            })
+                        } else {
+                            false
+                        }
+                    };
+
+                    let mut sync_ok = true;
+                    let mut buffered_chunks = Vec::new();
+
+                    if !is_adaptive_or_playlist {
+                        let mut total_bytes = 0;
+                        let mut read_failed = false;
+                        let first_byte_timeout = Duration::from_secs(3);
+
+                        while total_bytes < 564 {
+                            if let Ok(Some(Ok(chunk))) =
+                                tokio::time::timeout(first_byte_timeout, provider_stream.next()).await
+                            {
+                                if chunk.is_empty() {
+                                    continue;
+                                }
+                                total_bytes += chunk.len();
+                                buffered_chunks.push(chunk);
+                            } else {
+                                read_failed = true;
+                                break;
+                            }
+                        }
+
+                        sync_ok = if read_failed && buffered_chunks.is_empty() {
+                            false
+                        } else {
+                            let mut flat = Vec::with_capacity(total_bytes.min(564));
+                            for c in &buffered_chunks {
+                                let need = 564_usize.saturating_sub(flat.len());
+                                flat.extend_from_slice(&c[..c.len().min(need)]);
+                                if flat.len() >= 564 {
+                                    break;
+                                }
+                            }
+                            tuliprox_mpegts::ts_sync_offset(&flat).is_some()
+                        };
+                    }
+
+                    if !sync_ok {
+                        let key = member_key(&member);
+                        if let Some(guard) = acquired.half_open {
+                            app_state.member_health.record_classified_failure_with(
+                                guard,
+                                FailureClass::Stream,
+                                std::time::Instant::now(),
+                            );
+                        } else {
+                            app_state.member_health.record_classified_failure(
+                                &key,
+                                FailureClass::Stream,
+                                std::time::Instant::now(),
+                            );
+                        }
+                        app_state.connection_manager.release_managed_provider_handle(details.provider_handle);
+                        exclude.push(acquired.index);
+                        continue;
+                    }
+
+                    let key = member_key(&member);
+                    if let Some(guard) = acquired.half_open {
+                        app_state.member_health.record_success_with(guard);
+                    } else {
+                        app_state.member_health.record_success(&key);
+                    }
+
+                    app_state.event_manager.send_event(EventMessage::ChannelGroupMemberSelected {
+                        target_id: target.id,
+                        group_vid: group.group_vid.get(),
+                        member_vid: member.member_vid.get(),
+                        tier: acquired.tier,
+                    });
+
+                    app_state
+                        .active_users
+                        .bind_member(
+                            &user.username,
+                            session_token,
+                            tuliprox_session::MemberBinding {
+                                group_vid: group.group_vid.get(),
+                                member_vid: member.member_vid.get(),
+                                member_index: acquired.index,
+                                input_name: Arc::clone(&member.input_name),
+                            },
+                        )
+                        .await;
+
+                    if buffered_chunks.is_empty() {
+                        details.stream = Some(provider_stream);
+                    } else {
+                        let prepended =
+                            futures::stream::iter(buffered_chunks.into_iter().map(Ok)).chain(provider_stream);
+                        details.stream = Some(prepended.boxed());
+                    }
+
+                    final_details = Some((details, member_input, member_url, member_channel));
+                    break;
+                }
+
+                let failure_class = if let Some((_, status, _, _)) = &details.stream_info {
+                    FailureClass::from_status(*status)
+                } else if details.custom_reason == Some(ProviderStreamCustomReason::ProviderExhausted) {
+                    FailureClass::Capacity
+                } else {
+                    FailureClass::Stream
+                };
+
+                if matches!(failure_class, FailureClass::Auth | FailureClass::Capacity) {
+                    demoted_inputs.push(Arc::clone(&member.input_name));
+                }
+
+                let key = member_key(&member);
+                if let Some(guard) = acquired.half_open {
+                    app_state.member_health.record_classified_failure_with(
+                        guard,
+                        failure_class,
+                        std::time::Instant::now(),
+                    );
+                } else {
+                    app_state.member_health.record_classified_failure(&key, failure_class, std::time::Instant::now());
+                }
+
+                app_state.connection_manager.release_managed_provider_handle(details.provider_handle);
+                exclude.push(acquired.index);
+            }
+
+            let Some((details, inp, url, ch)) = final_details else {
+                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                    target_id: target.id,
+                    group_vid: group.group_vid.get(),
+                });
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(
+                        &user.username,
+                        session_token,
+                        activation.placeholder_transition_version,
+                        activation.placeholder_transition_version.is_some(),
+                    )
+                    .await;
+                record_connect_failed_attempt(ConnectFailedAttempt {
+                    app_state,
+                    fingerprint,
+                    user,
+                    stream_channel: stream_channel.clone(),
+                    provider_name: initial_input.name.clone(),
+                    req_headers,
+                    reason: ConnectFailureReason::ProviderConnectionsExhausted,
+                    failure_stage: FailureStage::ProviderOpen,
+                });
+                return create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::ProviderConnectionsExhausted,
+                )
+                .into_response();
+            };
+            (details, inp, url, ch)
         }
     };
 
@@ -505,13 +1000,13 @@ pub(crate) async fn stream_response_with_provider_handle(
                         manifest,
                         user,
                         target,
-                        input,
+                        input: &input,
                         fingerprint,
                         session_token,
                         virtual_id: VirtualId::new(virtual_id),
                         connection_permission,
                         connection_kind,
-                        fallback_stream_url: stream_url,
+                        fallback_stream_url: &stream_url,
                     })
                     .await;
                 }
@@ -539,8 +1034,9 @@ pub(crate) async fn stream_response_with_provider_handle(
             .as_ref()
             .map(|(h, sc, response_url, cvt)| (h.clone(), *sc, response_url.clone(), *cvt));
         let provider_name = stream_details.provider_name.clone();
-        let actual_request_url = stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url));
-        let log_actual_request_url = resolve_request_url_for_logging(input, actual_request_url.as_ref());
+        let actual_request_url =
+            stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url.as_ref()));
+        let log_actual_request_url = resolve_request_url_for_logging(&input, actual_request_url.as_ref());
 
         debug_if_enabled!(
             "Provider request mapping: allocated_provider={} actual_request_url={}",
@@ -603,7 +1099,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         };
         let mut metering = prepare_stream_metering(
             app_state,
-            stream_url,
+            if is_stream_shared { shared_lookup_key.as_ref() } else { stream_url.as_ref() },
             is_stream_shared,
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
@@ -722,7 +1218,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                         active_provider: &app_state.active_provider,
                         connection_manager: &app_state.connection_manager,
                     },
-                    stream_url,
+                    shared_lookup_key.as_ref(),
                     stream,
                     &fingerprint.addr,
                     shared_subscriber_id,
@@ -774,7 +1270,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                     .and_then(|(_, _, u, _)| u.as_ref())
                     .map_or_else(|| Cow::Owned(actual_request_url.to_string()), |url| Cow::Owned(url.to_string()))
             };
-            let log_session_url = resolve_request_url_for_logging(input, session_url.as_ref());
+            let log_session_url = resolve_request_url_for_logging(&input, session_url.as_ref());
             if log_enabled!(log::Level::Debug) {
                 if log_session_url.eq(log_actual_request_url.as_ref()) {
                     debug!(

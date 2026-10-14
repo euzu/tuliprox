@@ -430,6 +430,7 @@ mod tests {
         let channel = StreamChannel {
             target_id: 1,
             virtual_id: 70,
+            group_virtual_id: None,
             provider_id: 1,
             input_name: "input".intern(),
             item_type: PlaylistItemType::Series,

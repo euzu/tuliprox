@@ -181,6 +181,7 @@ pub(in crate::api::endpoints::hls_api) fn fallback_hls_cache_stream_channel(
     StreamChannel {
         target_id,
         virtual_id,
+        group_virtual_id: None,
         provider_id: 0,
         input_name: Arc::clone(&origin_source.input_name),
         item_type: PlaylistItemType::LiveHls,

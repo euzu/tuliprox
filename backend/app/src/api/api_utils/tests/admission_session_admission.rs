@@ -4,7 +4,7 @@ use super::{
     create_test_provider_app_config, create_test_shared_target, load_test_channel, load_test_user,
     resolve_admission_with_strategies, should_allow_exhausted_shared_reconnect,
     should_defer_provider_open_for_grace_hold, spawn_load_test_origin, stream_admission_rejected_response,
-    stream_response, AdmissionRequest, EvictionReentryGuard, SessionActivationRequest,
+    stream_response, AdmissionRequest, EvictionReentryGuard, PlaybackSource, SessionActivationRequest,
 };
 use crate::{
     api::model::{CustomVideoStreamType, UserSession},
@@ -99,10 +99,9 @@ async fn shared_admission_rejection_does_not_leak_meter_registration() {
         "shared-session-adm",
         None,
         channel,
-        &stream_url,
+        PlaybackSource::Single { input: &input, stream_url: &stream_url },
         None,
         &HeaderMap::default(),
-        &input,
         &target,
         &user,
         UserConnectionPermission::Allowed,

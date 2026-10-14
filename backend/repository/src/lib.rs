@@ -6,6 +6,7 @@ mod target_id_mapping;
 // `utils`, which must not depend on this layer.
 mod alias_repository;
 mod api_user_recovery;
+pub mod channel_group_repository;
 mod db_viewer;
 mod epg_group_index;
 mod epg_repository;
@@ -42,6 +43,7 @@ mod xtream_playlist_iterator;
 mod xtream_repository;
 
 pub use alias_repository::*;
+pub use channel_group_repository::*;
 pub use db_viewer::*;
 pub use epg_group_index::*;
 pub use epg_repository::*;
@@ -74,6 +76,8 @@ pub use stream_history::*;
 pub use strm_repository::*;
 pub use target_bouquet_repository::*;
 pub use target_id_mapping::*;
+pub mod target_stream_item;
+pub use target_stream_item::*;
 // The B+Tree storage engine is its own package. Aliased under its historical
 // module name so every `crate::bplustree::X` path keeps resolving.
 pub use tuliprox_btree as bplustree;

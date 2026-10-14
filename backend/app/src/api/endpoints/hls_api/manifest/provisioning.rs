@@ -113,7 +113,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
@@ -167,6 +167,49 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         (None, get_hls_session_ttl_secs(app_state))
     };
     let session_owner = shared_hls_session_owner.as_deref().unwrap_or(session_token.as_str());
+
+    let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        target,
+        VirtualId::new(virtual_id),
+    )
+    .await;
+    if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) = classified {
+        let (selection_cfg, allow_provider_grace) =
+            target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map_or_else(
+                || (shared::model::ChannelGroupSelectionConfig::default(), true),
+                |cg| (cg.selection, cg.allow_provider_grace),
+            );
+        let policy = group.policy;
+        let target_name: Arc<str> = Arc::from(target.name.as_str());
+
+        let req = crate::api::api_utils::GroupSelectionRequest {
+            target_name: &target_name,
+            group: &group,
+            policy,
+            mode: tuliprox_session::channel_group::SelectionMode::Live,
+            selection: selection_cfg,
+            addr: &fingerprint.addr,
+            username: &user.username,
+            priority: connection_priority_for_kind(user, connection_kind),
+            kind: connection_kind,
+            lease: Some(PlaybackLeaseRef::new(session_owner, PlaybackKind::LiveHls)),
+            allow_provider_grace,
+            exclude: &[],
+            demoted_inputs: &[],
+            prefer: None,
+        };
+        let Ok(resolved) =
+            crate::api::api_utils::resolve_hls_group_entry(app_state, target, Arc::clone(&group), req).await
+        else {
+            return false;
+        };
+        let mut acquired_handle = resolved.acquired.handle;
+        let provider_handle = acquired_handle.take();
+        app_state.connection_manager.release_provider_handle(provider_handle);
+        return true;
+    }
 
     let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
         app_state,

@@ -42,6 +42,41 @@ pub(crate) struct ProviderStreamFactoryParams<'a> {
     pub content_representation: ProviderContentRepresentationMode,
 }
 
+fn compute_flags(
+    stream_options: &StreamOptions,
+    item_type: PlaylistItemType,
+    share_stream: bool,
+    range_requested: bool,
+    is_group_member: bool,
+) -> ProviderStreamFactoryFlagsSet {
+    let mut flags = ProviderStreamFactoryFlagsSet::new();
+    if stream_options.stream_retry {
+        flags.set(ProviderStreamFactoryFlags::RetryEnabled);
+        if !item_type.is_live_adaptive() && stream_options.response_mode != StreamResponseMode::HlsResource {
+            flags.set(ProviderStreamFactoryFlags::InitialRetryLoopEnabled);
+        }
+    }
+    if stream_options.pipe_provider_stream {
+        flags.set(ProviderStreamFactoryFlags::PipeStream);
+    }
+    if stream_options.buffer_enabled {
+        flags.set(ProviderStreamFactoryFlags::BufferEnabled);
+    }
+    if stream_options.response_mode == StreamResponseMode::HlsResource {
+        flags.set(ProviderStreamFactoryFlags::HlsResource);
+    }
+    if share_stream {
+        flags.set(ProviderStreamFactoryFlags::ShareStream);
+    }
+    if range_requested {
+        flags.set(ProviderStreamFactoryFlags::RangeRequested);
+    }
+    if is_group_member {
+        flags.set(ProviderStreamFactoryFlags::GroupMember);
+    }
+    flags
+}
+
 impl ProviderStreamFactoryOptions {
     pub(crate) fn new(request: &ProviderStreamFactoryParams<'_>) -> Self {
         let ProviderStreamFactoryParams {
@@ -97,28 +132,13 @@ impl ProviderStreamFactoryOptions {
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
         let url = (*stream_url).clone();
-        let mut flags = ProviderStreamFactoryFlagsSet::new();
-        if stream_options.stream_retry {
-            flags.set(ProviderStreamFactoryFlags::RetryEnabled);
-            if !item_type.is_live_adaptive() && stream_options.response_mode != StreamResponseMode::HlsResource {
-                flags.set(ProviderStreamFactoryFlags::InitialRetryLoopEnabled);
-            }
-        }
-        if stream_options.pipe_provider_stream {
-            flags.set(ProviderStreamFactoryFlags::PipeStream);
-        }
-        if stream_options.buffer_enabled {
-            flags.set(ProviderStreamFactoryFlags::BufferEnabled);
-        }
-        if stream_options.response_mode == StreamResponseMode::HlsResource {
-            flags.set(ProviderStreamFactoryFlags::HlsResource);
-        }
-        if *share_stream {
-            flags.set(ProviderStreamFactoryFlags::ShareStream);
-        }
-        if requested_range.is_some() {
-            flags.set(ProviderStreamFactoryFlags::RangeRequested);
-        }
+        let flags = compute_flags(
+            stream_options,
+            *item_type,
+            *share_stream,
+            requested_range.is_some(),
+            stream_channel.as_ref().and_then(|ch| ch.group_virtual_id).is_some(),
+        );
 
         Self {
             item_type: *item_type,

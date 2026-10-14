@@ -1,6 +1,9 @@
 use super::{BPlusTree, VirtualIdRecord};
 use shared::model::{M3uPlaylistItem, PlaylistItem, VirtualId, XtreamCluster, XtreamPlaylistItem};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::RwLock;
 use tuliprox_core::model::ConfigTarget;
 
@@ -27,6 +30,8 @@ pub type TargetPlaylistStorageMap = HashMap<String, TargetPlaylistStorage>;
 
 pub struct PlaylistStorageState {
     pub data: RwLock<TargetPlaylistStorageMap>,
+    pub channel_group_generation: AtomicU64,
+    pub channel_groups: crate::ChannelGroupCache,
 }
 
 impl Default for PlaylistStorageState {
@@ -34,7 +39,20 @@ impl Default for PlaylistStorageState {
 }
 
 impl PlaylistStorageState {
-    pub fn new() -> Self { Self { data: RwLock::new(HashMap::new()) } }
+    pub fn new() -> Self {
+        Self {
+            data: RwLock::new(HashMap::new()),
+            channel_group_generation: AtomicU64::new(0),
+            channel_groups: crate::ChannelGroupCache::new(),
+        }
+    }
+
+    pub fn bump_channel_group_generation(&self) -> u64 {
+        self.channel_group_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    #[must_use]
+    pub fn channel_group_generation(&self) -> u64 { self.channel_group_generation.load(Ordering::SeqCst) }
 
     /// Replaces one target only after its complete persisted state has been loaded.
     pub(crate) async fn replace_target(&self, target_name: &str, storage: TargetPlaylistStorage) {

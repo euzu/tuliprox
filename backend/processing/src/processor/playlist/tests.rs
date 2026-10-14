@@ -24,6 +24,8 @@ mod curation_effect_gate;
 
 mod watch_contexts;
 
+mod channel_groups;
+
 #[cfg(test)]
 mod quality_rejection_fallback;
 

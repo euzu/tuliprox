@@ -26,3 +26,7 @@ pub const STALKER_EPISODE_FILE: &str = "stalker_episode";
 pub const STALKER_SEASONS_FILE: &str = "stalker_seasons";
 pub const STALKER_SERIES_ROOTS_FILE: &str = "stalker_series_roots";
 pub const STALKER_EPG_FILE: &str = "stalker_epg";
+
+pub const FILE_CHANNEL_GROUPS: &str = "channel_groups.db";
+pub const FILE_CHANNEL_GROUPS_MEMBER: &str = "channel_groups.member.db";
+pub const FILE_CHANNEL_GROUPS_ALIAS: &str = "channel_groups.alias.db";
