@@ -121,6 +121,7 @@ pub struct HlsTerminalCommitRequest<'a> {
 /// Media and compatibility evidence required for one terminal publication kind.
 pub enum HlsTerminalCommitPayload {
     Tail { plan: Arc<HlsTerminalTailPlan>, media_guard: HlsTerminalCommitMediaGuard },
+    CustomResponse(Arc<crate::late_custom_response::HlsLateCustomResponsePlan>),
     Unavailable(HlsTerminalTailCompatibility),
     UnavailableAfterOwnerFailure(HlsTerminalTailCompatibility),
 }

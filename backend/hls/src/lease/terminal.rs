@@ -85,9 +85,14 @@ fn terminal_commit_existing_outcome(
         {
             Some(HlsTerminalCommitOutcome::AlreadyCommitted)
         }
-        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
-            Some(HlsTerminalCommitOutcome::SupersededGeneration)
+        HlsLeasePlaybackMode::TerminalCustomResponse(current)
+            if current.generation.0 == preparation.decision_generation =>
+        {
+            Some(HlsTerminalCommitOutcome::AlreadyCommitted)
         }
+        HlsLeasePlaybackMode::TerminalTail(_)
+        | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+        | HlsLeasePlaybackMode::TerminalUnavailable { .. } => Some(HlsTerminalCommitOutcome::SupersededGeneration),
         HlsLeasePlaybackMode::Ended => Some(HlsTerminalCommitOutcome::LeaseNoLongerEligible),
     }
 }
@@ -156,6 +161,7 @@ impl HlsAccessLeaseStore {
             if !matches!(
                 lease.playback_mode,
                 HlsLeasePlaybackMode::TerminalTail(_)
+                    | HlsLeasePlaybackMode::TerminalCustomResponse(_)
                     | HlsLeasePlaybackMode::TerminalUnavailable { .. }
                     | HlsLeasePlaybackMode::Ended
             ) {
@@ -284,6 +290,109 @@ impl HlsAccessLeaseStore {
             return HlsTerminalCommitOutcome::SupersededGeneration;
         }
         HlsTerminalCommitOutcome::Committed
+    }
+
+    pub(crate) fn commit_terminal_custom_response_if_generation_matches(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        preparation: &HlsTerminalTailPreparation,
+        now_ms: u64,
+        plan: std::sync::Arc<crate::late_custom_response::HlsLateCustomResponsePlan>,
+    ) -> HlsTerminalCommitOutcome {
+        if !plan.matches_route(proxy_session_id, lease_id)
+            || plan.generation.0 != preparation.decision_generation
+            || plan.manifest_snapshot_generation != preparation.manifest_snapshot_generation
+            || preparation.trigger.is_runtime_policy()
+        {
+            return HlsTerminalCommitOutcome::SupersededGeneration;
+        }
+        if self.refresh_access_lease_validity(lease_id, now_ms).is_err() {
+            return HlsTerminalCommitOutcome::SupersededGeneration;
+        }
+        let Some(lease) = self.by_lease_id.get_mut(lease_id) else {
+            return HlsTerminalCommitOutcome::LeaseNoLongerEligible;
+        };
+        if let Some(outcome) = terminal_commit_existing_outcome(lease, proxy_session_id, preparation, now_ms) {
+            return outcome;
+        }
+        if let Err(outcome) = lease.terminal_decision_commit_preconditions_match(proxy_session_id, preparation, now_ms)
+        {
+            return outcome;
+        }
+        if self.availability_evidence_can_advance().is_err() {
+            return HlsTerminalCommitOutcome::SupersededGeneration;
+        }
+        let Some(lease) = self.by_lease_id.get_mut(lease_id) else {
+            return HlsTerminalCommitOutcome::LeaseNoLongerEligible;
+        };
+        lease.admission_generation = preparation.decision_generation;
+        lease.playback_mode = HlsLeasePlaybackMode::TerminalCustomResponse(plan);
+        if self.advance_availability_evidence(proxy_session_id).is_err() {
+            return HlsTerminalCommitOutcome::SupersededGeneration;
+        }
+        HlsTerminalCommitOutcome::Committed
+    }
+
+    pub(crate) fn late_custom_segment_access(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        fingerprint: &str,
+        index: u16,
+        now_ms: u64,
+    ) -> Option<
+        Result<
+            crate::runtime_custom_tail::HlsStandaloneCustomSegmentAccess,
+            crate::runtime_custom_tail::HlsStandaloneCustomSegmentError,
+        >,
+    > {
+        use crate::runtime_custom_tail::{HlsStandaloneCustomSegmentAccess, HlsStandaloneSharedLeaseBinding};
+        self.refresh_access_lease_validity(lease_id, now_ms).ok()?;
+        let lease = self.by_lease_id.get(lease_id)?;
+        let HlsLeasePlaybackMode::TerminalCustomResponse(plan) = &lease.playback_mode else {
+            return None;
+        };
+        if !lease_state_allows_use(lease.state) || now_ms >= lease.valid_until_ms {
+            return Some(Err(crate::runtime_custom_tail::HlsStandaloneCustomSegmentError::UnknownAccessLease));
+        }
+        Some(plan.segment_bytes(fingerprint, index).map(|bytes| HlsStandaloneCustomSegmentAccess {
+            terminal_generation: Some(plan.generation),
+            username: std::sync::Arc::from(lease.username.as_str()),
+            shared_lease: Some(HlsStandaloneSharedLeaseBinding {
+                proxy_session_id: lease.proxy_session_id.clone(),
+                lease_issued_at_ms: lease.issued_at_ms,
+            }),
+            bytes,
+        }))
+    }
+
+    pub(crate) fn activate_late_custom_segment_access(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        access: &crate::runtime_custom_tail::HlsStandaloneCustomSegmentAccess,
+        now_ms: u64,
+        timing: super::HlsAccessLeaseTiming,
+    ) -> Option<HlsAccessLease> {
+        let binding = access.shared_lease.as_ref()?;
+        let generation = access.terminal_generation?;
+        let lease = self.by_lease_id.get(lease_id)?;
+        let HlsLeasePlaybackMode::TerminalCustomResponse(plan) = &lease.playback_mode else {
+            return None;
+        };
+        if lease.issued_at_ms != binding.lease_issued_at_ms
+            || lease.username != access.username.as_ref()
+            || plan.generation != generation
+            || !plan.matches_route(&binding.proxy_session_id, lease_id)
+        {
+            return None;
+        }
+        if let super::HlsAccessLeaseActivation::Activated { lease, .. } =
+            self.activate_access_lease(lease_id, &binding.proxy_session_id, now_ms, timing)
+        {
+            Some(*lease)
+        } else {
+            None
+        }
     }
 
     pub fn terminal_tail_replay_outcome(

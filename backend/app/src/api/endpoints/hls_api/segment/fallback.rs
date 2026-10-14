@@ -94,7 +94,9 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_or_standalone_custom
         return fallback_status.into_response();
     };
     match &lease.playback_mode {
-        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
+        HlsLeasePlaybackMode::TerminalTail(_)
+        | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+        | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
             if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
                 return response;
             }

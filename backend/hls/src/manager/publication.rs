@@ -34,6 +34,7 @@ impl HlsTerminalCommitPayload {
     pub(super) fn into_parts(self) -> (HlsTerminalLeaseDecision, Option<HlsTerminalCommitMediaGuard>) {
         match self {
             Self::Tail { plan, media_guard } => (HlsTerminalLeaseDecision::Tail(plan), Some(media_guard)),
+            Self::CustomResponse(plan) => (HlsTerminalLeaseDecision::CustomResponse(plan), None),
             Self::Unavailable(reason) => (HlsTerminalLeaseDecision::Unavailable(reason), None),
             Self::UnavailableAfterOwnerFailure(reason) => {
                 (HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(reason), None)

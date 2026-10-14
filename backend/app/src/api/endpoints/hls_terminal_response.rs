@@ -44,6 +44,7 @@ pub(super) async fn hls_manifest_terminal_preflight(
 ) -> HlsManifestTerminalPreflight {
     match &lease.playback_mode {
         HlsLeasePlaybackMode::TerminalTail(_)
+        | HlsLeasePlaybackMode::TerminalCustomResponse(_)
         | HlsLeasePlaybackMode::TerminalUnavailable { .. }
         | HlsLeasePlaybackMode::Ended => return HlsManifestTerminalPreflight::ServeCommittedPlayback,
         HlsLeasePlaybackMode::Live => {}
@@ -182,6 +183,13 @@ pub(super) fn hls_terminal_playback_response(
                 return Some(StatusCode::NOT_FOUND.into_response());
             };
             Some(hls_response(body.to_owned()))
+        }
+        HlsLeasePlaybackMode::TerminalCustomResponse(plan) => {
+            Some(if plan.matches_route(proxy_session_id, access_lease_id) {
+                hls_response(plan.manifest_body().to_owned())
+            } else {
+                StatusCode::NOT_FOUND.into_response()
+            })
         }
         HlsLeasePlaybackMode::TerminalUnavailable { .. } => Some(StatusCode::SERVICE_UNAVAILABLE.into_response()),
         HlsLeasePlaybackMode::Live => None,

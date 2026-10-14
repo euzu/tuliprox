@@ -229,6 +229,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_terminal_segment(
                 }
                 HlsLeasePlaybackMode::Live
                 | HlsLeasePlaybackMode::TerminalTail(_)
+                | HlsLeasePlaybackMode::TerminalCustomResponse(_)
                 | HlsLeasePlaybackMode::TerminalUnavailable { .. }
                 | HlsLeasePlaybackMode::Ended => None,
             },

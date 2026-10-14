@@ -56,6 +56,8 @@ impl HlsAccessLease {
             revision_bindings: None,
             progressive_startup_claimed: false,
             last_manifest_snapshot: None,
+            published_media_sequence_highwater: None,
+            published_discontinuity_sequence_highwater: 0,
             published_transient_resource_ids: HlsPublishedTransientResourceIds::default(),
             published_finalized_manifest_generations: BTreeSet::new(),
             manifest_snapshot_generation: 0,

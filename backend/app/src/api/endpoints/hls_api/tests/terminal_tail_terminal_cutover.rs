@@ -86,7 +86,7 @@ async fn terminal_lease_manifest_is_inline_immutable_endlist_on_canonical_path()
 }
 
 #[tokio::test]
-async fn commits_prepared_terminal_tail_once_when_recovery_misses_deadline() {
+async fn commits_prepared_terminal_tail_once_before_splice_deadline_after_exhausted_recovery() {
     let fixture = prepared_terminal_cutover_fixture().await;
     let directive = terminal_cutover_acceptance_directive(&fixture).await;
     let pressured_lease = exhaust_terminal_cutover_recovery(&fixture, directive).await;
@@ -96,7 +96,7 @@ async fn commits_prepared_terminal_tail_once_when_recovery_misses_deadline() {
 }
 
 #[tokio::test]
-async fn warm_fmp4_map_cutover_without_ready_reserve_fails_closed_without_a_ts_splice() {
+async fn warm_fmp4_without_ready_reserve_uses_custom_response_after_missed_splice_deadline() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300)));
     enable_channel_unavailable_custom_response(&app_state);
@@ -147,25 +147,29 @@ async fn warm_fmp4_map_cutover_without_ready_reserve_fails_closed_without_a_ts_s
 
     let response = get_response(Arc::clone(&app_state), &manifest_uri, None).await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key(header::LOCATION));
-    assert!(response_body(response).await.is_empty());
+    let body = String::from_utf8(response_body(response).await.to_vec()).expect("late custom manifest");
+    assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+    assert!(body.contains("/cvs/hls/"));
+    assert!(!body.contains("#EXT-X-MAP"));
+    assert!(!body.contains("/hls/shared/live/"));
     let lease = app_state
         .hls
         .proxy
         .access_lease_response_snapshot(&lease_id, &proxy_session_id, super::super::current_time_millis())
         .await
-        .expect("failed-closed lease snapshot");
-    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
+        .expect("late custom lease snapshot");
+    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalCustomResponse(_)));
     let repeated = get_response(Arc::clone(&app_state), &manifest_uri, None).await;
-    assert_eq!(repeated.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(response_body(repeated).await.is_empty());
+    assert_eq!(repeated.status(), StatusCode::OK);
+    assert_eq!(response_body(repeated).await, body.as_bytes());
     let repeated_lease = app_state
         .hls
         .proxy
         .access_lease_response_snapshot(&lease_id, &proxy_session_id, super::super::current_time_millis())
         .await
-        .expect("stable terminal-unavailable lease");
+        .expect("stable terminal custom lease");
     assert_eq!(repeated_lease.playback_mode, lease.playback_mode);
     let terminal_uri = format!("/hls/shared/live/{}/{}/terminal/1/0.ts", proxy_session_id.0, lease_id.0);
     let terminal_response = get_response(app_state, &terminal_uri, None).await;

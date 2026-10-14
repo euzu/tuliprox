@@ -154,6 +154,17 @@ impl HlsAccessLeaseStore {
         }
         lease.manifest_snapshot_generation = next_generation;
         snapshot.snapshot_generation = next_generation;
+        lease.published_media_sequence_highwater = Some(
+            lease
+                .published_media_sequence_highwater
+                .map_or(snapshot.last_proxy_seq, |previous| previous.max(snapshot.last_proxy_seq)),
+        );
+        let last_discontinuity_sequence = snapshot.discontinuity_sequence.saturating_add(
+            u64::try_from(snapshot.visible_segments.iter().filter(|segment| segment.discontinuity_before).count())
+                .unwrap_or(u64::MAX),
+        );
+        lease.published_discontinuity_sequence_highwater =
+            lease.published_discontinuity_sequence_highwater.max(last_discontinuity_sequence);
         let finalized_manifest_generation = snapshot.finalized_transient_manifest_generation;
         lease.last_manifest_snapshot = Some(snapshot);
         lease.published_transient_resource_ids = published_transient_resource_ids;

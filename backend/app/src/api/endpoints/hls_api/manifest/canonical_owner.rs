@@ -217,7 +217,7 @@ pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_han
         return hls_canonical_owner_failed(HlsCanonicalOwnerFailureReason::LeaseUnavailable);
     }
     match &lease.playback_mode {
-        HlsLeasePlaybackMode::TerminalTail(_) => {
+        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalCustomResponse(_) => {
             let Some(response) =
                 hls_terminal_playback_response(&lease, context.proxy_session_id, context.access_lease_id)
             else {

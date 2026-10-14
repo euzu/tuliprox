@@ -154,6 +154,7 @@ pub(super) type HlsTerminalCommitAttemptFn =
 #[derive(Debug, Clone)]
 pub enum HlsTerminalLeaseDecision {
     Tail(Arc<HlsTerminalTailPlan>),
+    CustomResponse(Arc<crate::late_custom_response::HlsLateCustomResponsePlan>),
     Unavailable(HlsTerminalTailCompatibility),
     UnavailableAfterOwnerFailure(HlsTerminalTailCompatibility),
 }
@@ -304,8 +305,8 @@ impl HlsTerminalCommitCommand {
     }
 
     fn submission_deadline_ms(&self, now_ms: u64) -> u64 {
-        if self.is_unavailable_after_owner_failure() {
-            // No media is spliced by this decision. It gets one bounded CAS budget,
+        if self.has_independent_commit_deadline() {
+            // No live media is spliced by this decision. It gets one bounded CAS budget,
             // even when the media deadline has already elapsed; repeated submissions cannot renew it.
             now_ms.saturating_add(terminal_commit_retry_schedule_budget_ms())
         } else {
@@ -327,8 +328,11 @@ impl HlsTerminalCommitCommand {
         ]
     }
 
-    fn is_unavailable_after_owner_failure(&self) -> bool {
-        matches!(&self.decision, HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_))
+    fn has_independent_commit_deadline(&self) -> bool {
+        matches!(
+            &self.decision,
+            HlsTerminalLeaseDecision::CustomResponse(_) | HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_)
+        )
     }
 
     fn may_replace(&self, current: &Self) -> bool {
@@ -339,8 +343,8 @@ impl HlsTerminalCommitCommand {
             return self.session_incarnation > current.session_incarnation;
         }
         let evidence_order = self.evidence_version().cmp(&current.evidence_version());
-        if self.is_unavailable_after_owner_failure()
-            && !current.is_unavailable_after_owner_failure()
+        if self.has_independent_commit_deadline()
+            && !current.has_independent_commit_deadline()
             && evidence_order != std::cmp::Ordering::Less
         {
             return true;
@@ -369,6 +373,7 @@ impl std::fmt::Debug for HlsTerminalCommitCommand {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let decision_kind = match &self.decision {
             HlsTerminalLeaseDecision::Tail(_) => "tail",
+            HlsTerminalLeaseDecision::CustomResponse(_) => "custom-response",
             HlsTerminalLeaseDecision::Unavailable(_) => "unavailable",
             HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_) => "unavailable-after-owner-failure",
         };
@@ -684,9 +689,9 @@ impl HlsTerminalCommitRetryCoordinator {
     ) -> HlsTerminalCommitSubmissionDecision {
         let may_replace = command.may_replace(&existing.command);
         let changes_deadline_kind =
-            command.is_unavailable_after_owner_failure() != existing.command.is_unavailable_after_owner_failure();
-        let replaces_media_with_unavailable =
-            changes_deadline_kind && may_replace && command.is_unavailable_after_owner_failure();
+            command.has_independent_commit_deadline() != existing.command.has_independent_commit_deadline();
+        let replaces_splice_with_independent_commit =
+            changes_deadline_kind && may_replace && command.has_independent_commit_deadline();
         let effective_deadline_ms = if changes_deadline_kind {
             if may_replace {
                 incoming_deadline_ms
@@ -756,7 +761,7 @@ impl HlsTerminalCommitRetryCoordinator {
             owner.owner_token = owner_token;
             owner.command = Arc::clone(&command);
             owner.attempts_completed =
-                if replaces_media_with_unavailable { 1 } else { existing.attempts_completed.max(1) };
+                if replaces_splice_with_independent_commit { 1 } else { existing.attempts_completed.max(1) };
             owner.effective_deadline_ms = effective_deadline_ms;
             owner.scheduled_at_ms = now_ms;
             owner.scheduling_sequence = scheduling_sequence;

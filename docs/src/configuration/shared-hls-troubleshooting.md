@@ -90,7 +90,11 @@ Fix:
 
 For the warm Shared HLS path, this is a lease-local terminal decision rather than a failure-counter threshold. The
 canonical manifest stays on the same URL and returns an HTTP `200` finite playlist when a compatible terminal tail is
-ready. An incompatible MAP/key/container/track state fails closed with `503`; it never creates an unsafe TS splice.
+ready. Before the splice deadline, an incompatible MAP/key/container/track state can fail closed with `503`.
+After the deadline, a valid published lease can receive a finite Custom Response containing only prepared
+`channel_unavailable` media, even when its live cache suffix is gone. The playlist uses `/cvs/hls/` URLs and does not
+attempt a late TS splice. The player may stall before displaying it. Disabled, missing or invalid custom media,
+expired authorization, and exhausted commit capacity can still prevent a usable response.
 
 Possible causes:
 

@@ -37,7 +37,9 @@ impl HlsAccessLease {
             HlsLeasePlaybackMode::TerminalTail(plan) => {
                 HlsMediaLeasePlaybackIdentity::TerminalTail { generation: plan.generation }
             }
-            HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => return None,
+            HlsLeasePlaybackMode::TerminalCustomResponse(_)
+            | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+            | HlsLeasePlaybackMode::Ended => return None,
         };
         Some(HlsMediaLeaseIdentity { issued_at_ms: self.issued_at_ms, playback })
     }

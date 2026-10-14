@@ -48,6 +48,7 @@ mod gc;
 pub mod header_policy;
 mod headers;
 mod ids;
+mod late_custom_response;
 mod lease;
 mod lifecycle;
 mod manager;
@@ -128,6 +129,7 @@ pub mod api {
             scrub_hls_origin_headers, should_remove_hls_origin_header,
         },
         ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId, HLS_ACCESS_LEASE_ID_PLACEHOLDER},
+        late_custom_response::HlsLateCustomResponsePlan,
         lease::{
             new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId,
             HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsAccessLeaseTiming, HlsAccessLeaseTouch,

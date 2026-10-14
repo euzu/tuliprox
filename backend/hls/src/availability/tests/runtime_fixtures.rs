@@ -63,6 +63,7 @@ pub(super) async fn wait_for_runtime_custom_plan(fixture: &PostRefreshTerminalFi
     let playback = lease.as_ref().map_or("missing", |lease| match lease.playback_mode {
         HlsLeasePlaybackMode::Live => "live",
         HlsLeasePlaybackMode::TerminalTail(_) => "terminal-tail",
+        HlsLeasePlaybackMode::TerminalCustomResponse(_) => "terminal-custom-response",
         HlsLeasePlaybackMode::TerminalUnavailable { .. } => "terminal-unavailable",
         HlsLeasePlaybackMode::Ended => "ended",
     });

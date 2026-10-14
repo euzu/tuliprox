@@ -359,8 +359,12 @@ Important boundaries:
 * A retryable manifest failure marks the origin as degraded on the first failed attempt. A bounded background owner
   reevaluates the remaining reserve and schedules the terminal transition independently of origin retries and client
   playlist polling. New origin progress invalidates the pending transition.
-* A terminal video transition must commit before its safe splice deadline. If that deadline has already elapsed,
-  the lease becomes terminal-unavailable through a separate bounded state commit; it cannot publish a late video splice.
+* A terminal video splice must commit before its safe splice deadline. After that deadline, a valid published lease
+  receives an HTTP `200` finite `channel_unavailable` Custom Response on the same manifest URL, containing only prepared
+  custom segments. This fallback needs no old cache segments and has a separate bounded commit budget that playlist
+  polls cannot renew. Successful authorized custom-segment requests renew the lease and session activity independently
+  of manifest polling after `ENDLIST`. Disabled, missing or invalid custom media can still produce an error response;
+  concrete preparation failures such as `TargetDurationExceeded` retain their diagnostic reason.
 * `reverse_proxy.rewrite_secret` must stay stable. It is used for future HLS `proxy_session_id` values and transient resource IDs.
 * `session_idle_timeout` controls HLS cache access-lease validity and idle cleanup. It is independent from
   `reverse_proxy.stream.hls_session_ttl_secs`, which belongs to the non-cache HLS request continuity path.

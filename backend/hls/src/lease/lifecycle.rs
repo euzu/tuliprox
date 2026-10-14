@@ -93,7 +93,9 @@ impl HlsAccessLease {
             HlsLeasePlaybackMode::TerminalUnavailable { decision_generation, .. } => {
                 Some(HlsTerminalTailGeneration(decision_generation))
             }
-            HlsLeasePlaybackMode::Live | HlsLeasePlaybackMode::Ended => None,
+            HlsLeasePlaybackMode::Live
+            | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+            | HlsLeasePlaybackMode::Ended => None,
         };
         if self.pending_terminal_protection_release.is_none() {
             self.pending_terminal_protection_release = release_generation;

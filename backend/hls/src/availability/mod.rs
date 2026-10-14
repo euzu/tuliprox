@@ -24,7 +24,10 @@ mod terminal_cutover;
 mod terminal_pending_owner;
 pub(crate) use self::{
     manifest_failure::record_retryable_manifest_attempt_failure,
-    terminal_cutover::commit_terminal_tail_if_lease_reserve_requires_cutover_detailed,
+    terminal_cutover::{
+        commit_terminal_tail_if_lease_reserve_requires_cutover_detailed, terminal_bundle_failure_compatibility,
+        terminal_bundle_incompatibility,
+    },
 };
 use self::{
     recovery_pressure::{

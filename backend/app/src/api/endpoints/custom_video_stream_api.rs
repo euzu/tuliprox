@@ -21,7 +21,7 @@ use serde::Deserialize;
 use std::{str::FromStr, sync::Arc};
 use tuliprox_hls::api::{
     finite_hls_immutable_media_response, resolve_hls_standalone_custom_segment, HlsAccessLeaseId,
-    HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError,
+    HlsMediaActivityCommitOutcome, HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError,
 };
 use url::form_urlencoded;
 
@@ -286,7 +286,9 @@ async fn cvs_standalone_hls_segment_response(
         asset_fingerprint,
         index,
         now_ms,
-    ) {
+    )
+    .await
+    {
         Ok(access) => access,
         Err(
             HlsStandaloneCustomSegmentError::InvalidIndex
@@ -299,13 +301,28 @@ async fn cvs_standalone_hls_segment_response(
     {
         return *response;
     }
-    finite_hls_immutable_media_response(
-        access.bytes,
+    let response = finite_hls_immutable_media_response(
+        access.bytes.clone(),
         headers.get(header::RANGE),
         HLS_CVS_CONTENT_TYPE,
         HLS_CVS_IMMUTABLE_CACHE_CONTROL,
         method == Method::HEAD,
-    )
+    );
+    if response.status().is_success() {
+        match app_state
+            .hls
+            .proxy
+            .record_standalone_custom_segment_activity(&access_lease, &access, current_time_millis())
+            .await
+        {
+            HlsMediaActivityCommitOutcome::Committed => {}
+            HlsMediaActivityCommitOutcome::StaleLeaseIdentity => return StatusCode::NOT_FOUND.into_response(),
+            HlsMediaActivityCommitOutcome::DeferredLockContention => {
+                return super::hls_terminal_response::hls_temporary_resource_unavailable_response(1_000)
+            }
+        }
+    }
+    response
 }
 
 async fn validate_hls_standalone_custom_access(

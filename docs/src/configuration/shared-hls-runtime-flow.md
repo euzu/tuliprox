@@ -211,13 +211,13 @@ runs the parser or writer. The prepared-bundle key binds:
 One ready bundle contains twelve small immutable terminal blocks. For block index `x`, timestamp progression is:
 
 ```text
-offset_90khz(x) = x * target_duration_ms * 90
+offset_90khz(x) = x * asset_duration_ticks_90khz
 offset_pcr(x) = offset_90khz(x) * 300
 ```
 
-The target duration is intentionally the timestamp stride; the measured terminal asset duration is the `#EXTINF` value.
-When that asset is shorter than the target duration, the resulting bounded timestamp gap is intentional. There is no old
-`index * asset_duration_ticks` terminal calculation.
+The measured terminal asset duration determines the timestamp stride and the `#EXTINF` value. The target duration is
+retained as the playlist limit; a shorter asset does not introduce a timestamp gap between custom segments. Both the
+live-tail splice and the late Custom Response use this same prepared bundle.
 
 ## Warm terminal-tail response
 
@@ -234,7 +234,27 @@ the optional key reset, `#EXT-X-DISCONTINUITY`, twelve finite terminal segment r
 /hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/terminal/<generation>/<index>.ts
 ```
 
-Only that lease- and generation-bound route serves prepared terminal bytes and finite full/range responses. Existing
+If the safe splice deadline has already elapsed, a valid lease with a previously published manifest instead commits a
+finite Custom Response without a live suffix. Its canonical manifest returns HTTP `200` with no redirect, twelve
+prepared `channel_unavailable` segments under `/cvs/hls/<hls_access_lease_id>/<asset_fingerprint>/<index>.ts`, a clear-key
+reset, a discontinuity and `#EXT-X-ENDLIST`. The target duration is retained; media sequence starts after the highest
+segment number previously published to that lease, and discontinuity sequence does not decrease. No live cache base,
+origin request or timestamp rewrite is needed to serve these custom segments. Playback may stall before this late
+warning becomes visible: the fallback does not promise a seamless transition after the deadline.
+
+The late commit has one bounded retry budget independent of the expired splice deadline. Repeated playlist requests
+cannot extend it. Lease incarnation, publication/cursor generation, origin recovery and configured asset revision
+are revalidated at commit. The frozen manifest and media remain unchanged on replay and asset reload; access still
+requires the valid lease and existing user authorization. Successful authorized GET, HEAD and range requests for the
+late custom segments activate or renew that exact lease and refresh session activity using the configured
+`session_idle_timeout`; playback does not depend on further manifest polls after `#EXT-X-ENDLIST`. Invalid routes,
+unsatisfiable ranges and denied authorization do not renew the lease, and an expired lease cannot be reactivated.
+Disabled, missing or incompatible custom media can retain an error response. Preparation failures retain their typed
+compatibility reason, including `TargetDurationExceeded` with the measured asset and playlist target durations.
+The original compatible live-tail splice continues to apply before its deadline.
+
+Only the lease- and generation-bound terminal route serves the live-tail splice's prepared terminal bytes and finite
+full/range responses. Existing
 normal segment, MAP, and `/r` URLs retain their original meaning and never redirect to a manifest or substitute slate
 bytes. Terminal playback mode is sticky for the lease; later shared-session recovery can serve other or new leases but
 cannot reactivate the terminal lease.

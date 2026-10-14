@@ -8,9 +8,9 @@
 use super::{
     recovery_pressure::{hls_recovery_pressure_policy, recovery_trigger_budget},
     terminal_pending_owner::{
-        commit_prepared_terminal_unavailable_after_owner_failure, commit_terminal_unavailable,
-        register_ready_terminal_pending_owner, register_terminal_pending_owner, terminal_asset_revision_guard,
-        terminal_resolution_with_failed_closed_fallback,
+        commit_late_custom_response, commit_prepared_terminal_unavailable_after_owner_failure,
+        commit_terminal_unavailable, register_ready_terminal_pending_owner, register_terminal_pending_owner,
+        terminal_asset_revision_guard, terminal_resolution_with_failed_closed_fallback,
     },
     HlsDetailedTerminalResolution, HlsTerminalDecisionPurpose, HlsTerminalFailedClosedReason, HlsTerminalResolution,
     HLS_PLAYBACK_RATE_GUARD_MILLI,
@@ -184,6 +184,7 @@ async fn resolve_terminal_cutover_before_commit_window(
                 &context.lease.lease_id,
                 &preparation,
                 context.now_ms,
+                HlsTerminalTailCompatibility::TerminalMediaNotReady,
             ),
             context.evaluation.safe_deadline,
         );
@@ -363,13 +364,26 @@ async fn commit_prepared_terminal_decision(
     preparation: &HlsTerminalTailPreparation,
     now_ms: u64,
 ) -> HlsTerminalResolution {
+    if !preparation.trigger.is_runtime_policy()
+        && now_ms >= preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch()
+    {
+        return commit_late_custom_response(HlsTerminalCommitContext {
+            ctx,
+            session,
+            proxy_session_id,
+            lease_id,
+            preparation,
+            now_ms,
+        })
+        .await;
+    }
     let reason = preparation.trigger.reason();
     let asset = match snapshot_hls_runtime_custom_tail_asset(ctx, reason) {
         Ok(asset) => asset,
         Err(compatibility) => {
             let context = HlsTerminalCommitContext { ctx, session, proxy_session_id, lease_id, preparation, now_ms };
             let outcome = commit_terminal_unavailable(context, None, compatibility.terminal_compatibility());
-            return terminal_resolution_with_failed_closed_fallback(context, outcome);
+            return terminal_resolution_with_failed_closed_fallback(context, outcome).await;
         }
     };
     commit_prepared_runtime_custom_tail(ctx, session, proxy_session_id, lease_id, preparation, now_ms, asset).await
@@ -388,6 +402,11 @@ pub async fn commit_prepared_runtime_custom_tail(
     if preparation.trigger.reason() != asset.reason {
         return HlsTerminalResolution::Reevaluate;
     }
+    if !preparation.trigger.is_runtime_policy()
+        && now_ms >= preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch()
+    {
+        return commit_late_custom_response(context).await;
+    }
     let expected_asset = HlsRuntimeCustomTailAssetIdentity::from_asset(&asset);
     let media_asset = asset.asset;
     let static_incompatibility = if preparation.manifest_snapshot.delivery_mode
@@ -403,7 +422,7 @@ pub async fn commit_prepared_runtime_custom_tail(
     };
     if let Some(reason) = static_incompatibility {
         let outcome = commit_terminal_unavailable(context, Some(expected_asset), reason);
-        return terminal_resolution_with_failed_closed_fallback(context, outcome);
+        return terminal_resolution_with_failed_closed_fallback(context, outcome).await;
     }
     let bundle_key = prepared_terminal_bundle_key(
         &media_asset,
@@ -425,7 +444,7 @@ pub async fn commit_prepared_runtime_custom_tail(
                 Some(expected_asset),
                 HlsTerminalTailCompatibility::AssetRevisionMismatch,
             );
-            return terminal_resolution_with_failed_closed_fallback(context, outcome);
+            return terminal_resolution_with_failed_closed_fallback(context, outcome).await;
         }
         HlsPreparedTerminalBundleState::Preparing { .. } => {
             return register_terminal_pending_owner(context, media_asset, expected_asset, bundle_key).await;
@@ -433,12 +452,12 @@ pub async fn commit_prepared_runtime_custom_tail(
         HlsPreparedTerminalBundleState::Failed { key, reason } => {
             let compatibility = terminal_bundle_failure_compatibility(key, bundle_key, reason);
             let outcome = commit_terminal_unavailable(context, Some(expected_asset), compatibility);
-            return terminal_resolution_with_failed_closed_fallback(context, outcome);
+            return terminal_resolution_with_failed_closed_fallback(context, outcome).await;
         }
         HlsPreparedTerminalBundleState::Incompatible { reason, .. } => {
             let reason = terminal_bundle_incompatibility(reason);
             let outcome = commit_terminal_unavailable(context, Some(expected_asset), reason);
-            return terminal_resolution_with_failed_closed_fallback(context, outcome);
+            return terminal_resolution_with_failed_closed_fallback(context, outcome).await;
         }
     };
     if preparation.trigger.is_runtime_policy() {
@@ -448,10 +467,11 @@ pub async fn commit_prepared_runtime_custom_tail(
             expected_asset,
             bundle_key,
             prepared_bundle,
-        );
+        )
+        .await;
     }
     let outcome = commit_ready_terminal_bundle(context, media_asset, expected_asset, bundle_key, prepared_bundle).await;
-    terminal_resolution_with_failed_closed_fallback(context, outcome)
+    terminal_resolution_with_failed_closed_fallback(context, outcome).await
 }
 
 struct HlsReadyTerminalSplice {
@@ -646,7 +666,7 @@ pub(super) async fn commit_ready_terminal_bundle(
     }
 }
 
-pub(super) fn terminal_bundle_incompatibility(
+pub(crate) fn terminal_bundle_incompatibility(
     reason: HlsPreparedTerminalBundleIncompatibility,
 ) -> HlsTerminalTailCompatibility {
     match reason {
@@ -658,7 +678,7 @@ pub(super) fn terminal_bundle_incompatibility(
     }
 }
 
-pub(super) fn terminal_bundle_failure_compatibility(
+pub(crate) fn terminal_bundle_failure_compatibility(
     actual_key: HlsPreparedTerminalBundleKey,
     required_key: HlsPreparedTerminalBundleKey,
     reason: HlsPreparedTerminalBundleFailure,

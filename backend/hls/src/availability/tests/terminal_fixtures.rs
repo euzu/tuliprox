@@ -317,7 +317,8 @@ pub(super) async fn assert_terminal_pending_registration_failure_commits_unavail
         fixture.expected_asset,
         fixture.preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch(),
         failure,
-    );
+    )
+    .await;
 
     assert_eq!(resolution, HlsTerminalResolution::Committed);
     let lease = fixture

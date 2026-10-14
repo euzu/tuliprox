@@ -794,9 +794,13 @@ pub(in crate::api::endpoints::hls_api::tests) async fn apply_terminal_cutover_pr
     session.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
     let transition_buffer_seq = fixture.base_manifest.last_proxy_seq.saturating_add(1);
     let commit_guard_seq = transition_buffer_seq.saturating_add(1);
+    let base_tail = session.segments.get(&fixture.base_manifest.last_proxy_seq).expect("live base tail");
+    let mut media_start_ms = base_tail.media_start_ms.saturating_add(base_tail.duration_ms);
     for segment in
         session.segments.values_mut().filter(|segment| segment.proxy_seq > fixture.base_manifest.last_proxy_seq)
     {
+        // Shortened test buffers must remain contiguous on the session media clock.
+        segment.media_start_ms = media_start_ms;
         if segment.proxy_seq == transition_buffer_seq {
             segment.duration_ms = 1_000;
         } else if segment.proxy_seq == commit_guard_seq {
@@ -804,6 +808,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn apply_terminal_cutover_pr
         } else {
             segment.status = SegmentCacheStatus::Expired;
         }
+        media_start_ms = media_start_ms.saturating_add(segment.duration_ms);
     }
     session.advance_media_readiness_generation();
 }
@@ -915,7 +920,11 @@ pub(in crate::api::endpoints::hls_api::tests) async fn commit_prepared_terminal_
         .playback_cursor
         .first_segment_completed_at_ms
         .expect("measured lease playback start")
-        .saturating_add(fixture.base_manifest.playlist_duration_ms);
+        // Enter the acquisition window while the live base and its key are still usable.
+        .saturating_add(
+            fixture.base_manifest.playlist_duration_ms.saturating_sub(fixture.base_manifest.target_duration_ms),
+        );
+
     let first = commit_terminal_tail_if_lease_reserve_requires_cutover(
         &fixture.app_state.hls_ctx(),
         &fixture.session,
@@ -1308,6 +1317,13 @@ pub(in crate::api::endpoints::hls_api::tests) async fn assert_publication_late_t
             let body = String::from_utf8(response_body(response).await.to_vec()).expect("terminal manifest utf8");
             assert!(body.contains("#EXT-X-ENDLIST"));
             assert!(body.contains("/terminal/"));
+        }
+        HlsLeasePlaybackMode::TerminalCustomResponse(_) => {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = String::from_utf8(response_body(response).await.to_vec()).expect("late custom manifest utf8");
+            assert!(body.contains("#EXT-X-ENDLIST"));
+            assert!(body.contains("/cvs/hls/"));
+            assert!(!body.contains("/hls/shared/live/"));
         }
         HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

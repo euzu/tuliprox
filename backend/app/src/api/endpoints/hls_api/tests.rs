@@ -85,6 +85,7 @@ mod bandwidth;
 mod encrypted_media;
 mod entry_identity;
 mod headers;
+mod late_custom_response;
 mod lease_lifecycle;
 mod manifest_entry_freshness;
 mod manifest_startup;

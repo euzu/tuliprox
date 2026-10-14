@@ -1,7 +1,7 @@
 use super::{
     availability::{
         commit_prepared_runtime_custom_tail, commit_terminal_tail_if_lease_reserve_requires_cutover,
-        HlsTerminalResolution,
+        terminal_bundle_failure_compatibility, terminal_bundle_incompatibility, HlsTerminalResolution,
     },
     hls_ctx::HlsCtx,
     lease::{new_hls_access_lease_id, HlsRuntimePolicyRevocation, HlsRuntimePolicyRevocationOutcome},
@@ -12,7 +12,8 @@ use super::{
     session_store::HlsSessionHandle,
     terminal_tail::{
         snapshot_terminal_media_asset, terminal_media_asset_identity, HlsLeasePlaybackMode, HlsTerminalAssetIdentity,
-        HlsTerminalMediaAsset, HlsTerminalTailCompatibility, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
+        HlsTerminalMediaAsset, HlsTerminalTailCompatibility, HlsTerminalTailGeneration,
+        HLS_TERMINAL_TAIL_SEGMENT_COUNT,
     },
     HlsAccessLeaseId, ProxySessionId,
 };
@@ -359,7 +360,9 @@ async fn resolve_hls_runtime_custom_tail_after_revocation(
         return HlsRuntimeCustomTailOutcome::NoLiveLeaseContext;
     };
     match &lease.playback_mode {
-        HlsLeasePlaybackMode::TerminalTail(_) => return HlsRuntimeCustomTailOutcome::AlreadyCommitted,
+        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalCustomResponse(_) => {
+            return HlsRuntimeCustomTailOutcome::AlreadyCommitted
+        }
         HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => {
             return HlsRuntimeCustomTailOutcome::Superseded;
         }
@@ -580,6 +583,7 @@ impl HlsStandaloneCustomAccessStore {
             username: Arc::clone(&entry.access.username),
             shared_lease: entry.access.shared_lease.clone(),
             bytes,
+            terminal_generation: None,
         })
     }
 
@@ -605,6 +609,7 @@ pub struct HlsStandaloneCustomSegmentAccess {
     pub username: Arc<str>,
     pub shared_lease: Option<HlsStandaloneSharedLeaseBinding>,
     pub bytes: bytes::Bytes,
+    pub(crate) terminal_generation: Option<HlsTerminalTailGeneration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -620,50 +625,90 @@ pub fn standalone_custom_asset_fingerprint(identity: HlsTerminalAssetIdentity) -
 
 /// Resolves one immutable prepared standalone segment without scanning or
 /// rewriting MPEG-TS at the HTTP request boundary.
-pub fn resolve_hls_standalone_custom_segment(
+pub async fn resolve_hls_standalone_custom_segment(
     ctx: &HlsCtx,
     lease_id: &HlsAccessLeaseId,
     asset_fingerprint: &str,
     index: u16,
     now_ms: u64,
 ) -> Result<HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError> {
-    ctx.hls_proxy.resolve_standalone_custom_segment(lease_id, asset_fingerprint, index, now_ms)
+    ctx.hls_proxy.resolve_standalone_custom_segment(lease_id, asset_fingerprint, index, now_ms).await
 }
 
-async fn await_prepared_standalone_bundle(
+pub(crate) async fn await_prepared_standalone_bundle(
     ctx: &HlsCtx,
     asset: Arc<HlsTerminalMediaAsset>,
     key: HlsPreparedTerminalBundleKey,
-) -> Option<Arc<HlsPreparedTerminalBundle>> {
+) -> Result<Arc<HlsPreparedTerminalBundle>, HlsTerminalTailCompatibility> {
     let state = ctx.hls_proxy.prepared_terminal_bundle_state(key).unwrap_or_else(|| {
         ctx.hls_proxy.start_prepared_terminal_bundle(asset, key.target_duration_ms, key.segment_count)
     });
-    match state {
-        HlsPreparedTerminalBundleState::Ready { bundle } if bundle.matches_key_and_shape(key) => Some(bundle),
-        HlsPreparedTerminalBundleState::Preparing { .. } => {
-            let HlsPreparedTerminalBundleObservation::Flight(ticket) =
-                ctx.hls_proxy.observe_prepared_terminal_bundle(key)
-            else {
-                return None;
-            };
-            let timeout_ms = ctx.hls_proxy.origin_manifest_timeout_ms().max(1);
-            match tokio::time::timeout(Duration::from_millis(timeout_ms), ticket.wait()).await {
-                Ok(HlsPreparedTerminalBundleCompletion::Ready { bundle }) if bundle.matches_key_and_shape(key) => {
-                    Some(bundle)
+    let state = match state {
+        HlsPreparedTerminalBundleState::Preparing { key: preparing_key } if preparing_key == key => {
+            match ctx.hls_proxy.observe_prepared_terminal_bundle(key) {
+                HlsPreparedTerminalBundleObservation::Flight(ticket) => {
+                    let timeout_ms = ctx.hls_proxy.origin_manifest_timeout_ms().max(1);
+                    let completion = tokio::time::timeout(Duration::from_millis(timeout_ms), ticket.wait())
+                        .await
+                        .map_err(|_| HlsTerminalTailCompatibility::TerminalMediaNotReady)?;
+                    return prepared_standalone_completion_result(completion, key);
                 }
-                Ok(
-                    HlsPreparedTerminalBundleCompletion::Ready { .. }
-                    | HlsPreparedTerminalBundleCompletion::Failed { .. }
-                    | HlsPreparedTerminalBundleCompletion::Incompatible { .. }
-                    | HlsPreparedTerminalBundleCompletion::FlightReplaced { .. },
-                )
-                | Err(_) => None,
+                HlsPreparedTerminalBundleObservation::Settled(state) => state,
+                HlsPreparedTerminalBundleObservation::Missing => {
+                    return Err(HlsTerminalTailCompatibility::TerminalMediaNotReady)
+                }
             }
         }
-        HlsPreparedTerminalBundleState::Ready { .. }
-        | HlsPreparedTerminalBundleState::Failed { .. }
-        | HlsPreparedTerminalBundleState::Incompatible { .. } => None,
+        state => state,
+    };
+    prepared_standalone_bundle_result(state, key)
+}
+
+// Both cached states and completed flights retain the same key-bound compatibility diagnosis.
+fn prepared_standalone_bundle_result(
+    state: HlsPreparedTerminalBundleState,
+    key: HlsPreparedTerminalBundleKey,
+) -> Result<Arc<HlsPreparedTerminalBundle>, HlsTerminalTailCompatibility> {
+    match state {
+        HlsPreparedTerminalBundleState::Ready { bundle } if bundle.matches_key_and_shape(key) => Ok(bundle),
+        HlsPreparedTerminalBundleState::Ready { .. } => Err(HlsTerminalTailCompatibility::AssetRevisionMismatch),
+        HlsPreparedTerminalBundleState::Failed { key: actual_key, reason } => {
+            Err(terminal_bundle_failure_compatibility(actual_key, key, reason))
+        }
+        HlsPreparedTerminalBundleState::Incompatible { key: actual_key, reason } => Err(if actual_key == key {
+            terminal_bundle_incompatibility(reason)
+        } else {
+            HlsTerminalTailCompatibility::AssetRevisionMismatch
+        }),
+        HlsPreparedTerminalBundleState::Preparing { key: actual_key } => Err(if actual_key == key {
+            HlsTerminalTailCompatibility::TerminalMediaNotReady
+        } else {
+            HlsTerminalTailCompatibility::AssetRevisionMismatch
+        }),
     }
+}
+
+fn prepared_standalone_completion_result(
+    completion: HlsPreparedTerminalBundleCompletion,
+    key: HlsPreparedTerminalBundleKey,
+) -> Result<Arc<HlsPreparedTerminalBundle>, HlsTerminalTailCompatibility> {
+    let state = match completion {
+        HlsPreparedTerminalBundleCompletion::Ready { bundle } => HlsPreparedTerminalBundleState::Ready { bundle },
+        HlsPreparedTerminalBundleCompletion::Failed { key, reason } => {
+            HlsPreparedTerminalBundleState::Failed { key, reason }
+        }
+        HlsPreparedTerminalBundleCompletion::Incompatible { key, reason } => {
+            HlsPreparedTerminalBundleState::Incompatible { key, reason }
+        }
+        HlsPreparedTerminalBundleCompletion::FlightReplaced { key: actual_key, generation } => {
+            return Err(if actual_key == key && generation > 0 {
+                HlsTerminalTailCompatibility::TerminalMediaNotReady
+            } else {
+                HlsTerminalTailCompatibility::AssetRevisionMismatch
+            })
+        }
+    };
+    prepared_standalone_bundle_result(state, key)
 }
 
 pub async fn build_hls_standalone_custom_plan(
@@ -681,12 +726,9 @@ pub async fn build_hls_standalone_custom_plan(
         target_duration_ms,
         segment_count: HLS_TERMINAL_TAIL_SEGMENT_COUNT,
     };
-    let Some(prepared_bundle) = await_prepared_standalone_bundle(ctx, Arc::clone(&snapshot.asset), prepared_key).await
-    else {
-        return Err(HlsRuntimeCustomTailCompatibility::Incompatible(
-            HlsTerminalTailCompatibility::TerminalMediaNotReady,
-        ));
-    };
+    let prepared_bundle = await_prepared_standalone_bundle(ctx, Arc::clone(&snapshot.asset), prepared_key)
+        .await
+        .map_err(HlsRuntimeCustomTailCompatibility::Incompatible)?;
     let key = HlsStandaloneCustomPlanKey { reason, asset: media, segment_count: HLS_TERMINAL_TAIL_SEGMENT_COUNT };
     let asset_fingerprint = standalone_custom_asset_fingerprint(media);
     let extinf = format_hls_duration_ms(snapshot.asset.duration_ms());
@@ -870,5 +912,79 @@ mod tests {
             Err(HlsStandaloneCustomSegmentError::UnknownAccessLease)
         );
         assert!(store.resolve(&HlsAccessLeaseId("lease-1".to_string()), "0000000000000001", 0, 1,).is_ok());
+    }
+    #[test]
+    fn standalone_preparation_preserves_cached_and_completed_incompatibility() {
+        use crate::prepared_terminal_bundle::{
+            HlsPreparedTerminalBundleBuildError, HlsPreparedTerminalBundleFailure,
+            HlsPreparedTerminalBundleIncompatibility,
+        };
+        let key = standalone_access_entry("preparation-error", 7, 100).plan.prepared_bundle.key;
+        let reason =
+            HlsPreparedTerminalBundleIncompatibility::TargetDurationExceeded { asset_ms: 12_000, target_ms: 1_000 };
+        let expected = HlsTerminalTailCompatibility::TargetDurationExceeded { asset_ms: 12_000, target_ms: 1_000 };
+        for state in [
+            HlsPreparedTerminalBundleState::Incompatible { key, reason },
+            HlsPreparedTerminalBundleState::Failed {
+                key,
+                reason: HlsPreparedTerminalBundleFailure::Build(HlsPreparedTerminalBundleBuildError::Incompatible(
+                    reason,
+                )),
+            },
+        ] {
+            assert_eq!(prepared_standalone_bundle_result(state, key).unwrap_err(), expected);
+        }
+        for completion in [
+            HlsPreparedTerminalBundleCompletion::Incompatible { key, reason },
+            HlsPreparedTerminalBundleCompletion::Failed {
+                key,
+                reason: HlsPreparedTerminalBundleFailure::Build(HlsPreparedTerminalBundleBuildError::Incompatible(
+                    reason,
+                )),
+            },
+        ] {
+            assert_eq!(prepared_standalone_completion_result(completion, key).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn standalone_preparation_preserves_invalid_asset_and_rejects_stale_keys() {
+        use crate::prepared_terminal_bundle::{
+            HlsPreparedTerminalBundleBuildError, HlsPreparedTerminalBundleFailure,
+            HlsPreparedTerminalBundleIncompatibility,
+        };
+        let key = standalone_access_entry("invalid-preparation", 7, 100).plan.prepared_bundle.key;
+        let invalid =
+            HlsPreparedTerminalBundleFailure::Build(HlsPreparedTerminalBundleBuildError::PublishedBundleShapeMismatch);
+        assert_eq!(
+            prepared_standalone_completion_result(
+                HlsPreparedTerminalBundleCompletion::Failed { key, reason: invalid },
+                key
+            )
+            .unwrap_err(),
+            HlsTerminalTailCompatibility::InvalidAsset
+        );
+        let stale_key = HlsPreparedTerminalBundleKey { target_duration_ms: 2_000, ..key };
+        for completion in [
+            HlsPreparedTerminalBundleCompletion::Failed { key: stale_key, reason: invalid },
+            HlsPreparedTerminalBundleCompletion::Incompatible {
+                key: stale_key,
+                reason: HlsPreparedTerminalBundleIncompatibility::ZeroTargetDuration,
+            },
+            HlsPreparedTerminalBundleCompletion::FlightReplaced { key: stale_key, generation: 1 },
+        ] {
+            assert_eq!(
+                prepared_standalone_completion_result(completion, key).unwrap_err(),
+                HlsTerminalTailCompatibility::AssetRevisionMismatch
+            );
+        }
+        assert_eq!(
+            prepared_standalone_completion_result(
+                HlsPreparedTerminalBundleCompletion::FlightReplaced { key, generation: 1 },
+                key
+            )
+            .unwrap_err(),
+            HlsTerminalTailCompatibility::TerminalMediaNotReady
+        );
     }
 }

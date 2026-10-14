@@ -558,7 +558,7 @@ async fn recovered_origin_cancels_the_retained_reserve_cutover() {
 }
 
 #[tokio::test]
-async fn expired_splice_deadline_finishes_unavailable_once_instead_of_leaving_a_live_lease() {
+async fn expired_splice_deadline_finishes_custom_response_once_instead_of_leaving_a_live_lease() {
     let fixture = post_refresh_terminal_fixture_with_progress("expired-splice-unavailable", true, false).await;
     advance_post_refresh_fixture_playback(
         &fixture.ctx,
@@ -592,7 +592,7 @@ async fn expired_splice_deadline_finishes_unavailable_once_instead_of_leaving_a_
         .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
         .await
         .expect("terminal lease");
-    assert!(matches!(terminal.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
+    assert!(matches!(terminal.playback_mode, HlsLeasePlaybackMode::TerminalCustomResponse(_)));
     assert_eq!(
         commit_terminal_tail_if_lease_reserve_requires_cutover(
             &fixture.ctx,
@@ -633,7 +633,7 @@ async fn post_refresh_recovery_request_replaces_a_reserve_only_worker_without_lo
 }
 
 #[tokio::test]
-async fn publication_late_origin_can_finish_unavailable_after_the_splice_deadline() {
+async fn publication_late_origin_can_finish_custom_response_after_the_splice_deadline() {
     let fixture = post_refresh_terminal_fixture_with_progress("publication-late-unavailable", true, false).await;
     advance_post_refresh_fixture_playback(
         &fixture.ctx,
@@ -668,5 +668,5 @@ async fn publication_late_origin_can_finish_unavailable_after_the_splice_deadlin
         .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
         .await
         .expect("terminal lease");
-    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
+    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalCustomResponse(_)));
 }

@@ -145,9 +145,9 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_resource(
     match &lease.playback_mode {
         HlsLeasePlaybackMode::Live => serve_hls_live_transient_resource(context).await,
         HlsLeasePlaybackMode::TerminalTail(_) => serve_hls_terminal_key_resource(context, &lease.playback_mode).await,
-        HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => {
-            StatusCode::NOT_FOUND.into_response()
-        }
+        HlsLeasePlaybackMode::TerminalCustomResponse(_)
+        | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+        | HlsLeasePlaybackMode::Ended => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
