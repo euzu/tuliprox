@@ -282,12 +282,13 @@ impl IsolatedFixture {
         let mut last_error = None;
 
         for attempt in 1..=MAX_START_ATTEMPTS {
-            let attempt_run_id = if attempt == 1 { run_id.to_string() } else { format!("{run_id}-retry{attempt}") };
+            // Keep the scenario run id on every attempt: playback validation checks frames against
+            // it, and a failed attempt already stopped its origin, so no stale frames can leak in.
             match Self::start_attempt(
                 bootstrap,
                 working_directory,
                 testkit_binary,
-                &attempt_run_id,
+                run_id,
                 origin_config,
                 policy,
                 channels,
