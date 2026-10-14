@@ -48,5 +48,5 @@ tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 rand = "0.9.5"
 rcgen = "0.14.9"
 rmp-serde = "1.3.1"
-tokio-rustls = "0.26.4"
+tokio-rustls = "0.26.6"
 tokio = { workspace = true, features = ["test-util", "macros"] }

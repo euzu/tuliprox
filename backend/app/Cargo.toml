@@ -111,8 +111,8 @@ tuliprox-mpegts = { workspace = true, features = ["test-support"] }
 tuliprox-repository = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen = "0.14.9"
-rustls = "0.23.43"
-tokio-rustls = "0.26.4"
+rustls = "0.23.45"
+tokio-rustls = "0.26.6"
 
 
 [[bin]]
