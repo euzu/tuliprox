@@ -309,7 +309,7 @@ fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: 
     let current_origin_window_len = tail_seq.saturating_sub(head_seq).saturating_add(1);
     let target_window_len = current_origin_window_len.min(u64::try_from(TARGET_VISIBLE_SEGMENTS).ok()?);
     let start_seq = tail_seq.saturating_add(1).saturating_sub(target_window_len).max(head_seq);
-    let mut window = Vec::new();
+    let mut window = Vec::with_capacity(TARGET_VISIBLE_SEGMENTS);
     let mut not_ready_count = 0_usize;
 
     for current in start_seq..=tail_seq {
@@ -326,6 +326,7 @@ fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: 
         window.push(current);
     }
 
+    retain_published_predecessors(session, &mut window);
     if window.len() < MIN_VISIBLE_SEGMENTS {
         return None;
     }
@@ -333,6 +334,45 @@ fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: 
     // selects a structurally renderable window and must not duplicate that
     // policy from its already-selected duration.
     Some(window)
+}
+
+/// RFC 8216 section 6.2.2: removing segments must not shrink a live playlist below three target
+/// durations. After an idle gap one origin refresh can move the head several segments, so a client
+/// that started on the previous window would find its next segment gone and skip media. Keep the
+/// contiguous, still-cached predecessors instead, never reaching before the previously published head.
+fn retain_published_predecessors(session: &HlsSession, window: &mut Vec<u64>) {
+    let Some(previous_first_proxy_seq) =
+        session.last_rendered_manifest.as_ref().map(|rendered| rendered.first_proxy_seq)
+    else {
+        return;
+    };
+    let Some(&first_proxy_seq) = window.first() else {
+        return;
+    };
+    let min_duration_ms = u64::from(resolve_target_duration(session, window)).saturating_mul(3_000);
+    let mut duration_ms = playlist_duration_ms(session, window);
+    let mut start_proxy_seq = first_proxy_seq;
+    let mut visible_segments = window.len();
+    while duration_ms < min_duration_ms && visible_segments < TARGET_VISIBLE_SEGMENTS {
+        let Some(candidate) = start_proxy_seq.checked_sub(1).filter(|seq| *seq >= previous_first_proxy_seq) else {
+            break;
+        };
+        let Some(entry) = session.segments.get(&candidate) else {
+            break;
+        };
+        if !matches!(entry.status, SegmentCacheStatus::Ready { .. })
+            || is_local_provisioning_segment(entry)
+            || !is_renderable(entry, session)
+        {
+            break;
+        }
+        duration_ms = duration_ms.saturating_add(entry.duration_ms);
+        start_proxy_seq = candidate;
+        visible_segments += 1;
+    }
+    if start_proxy_seq < first_proxy_seq {
+        window.splice(0..0, start_proxy_seq..first_proxy_seq);
+    }
 }
 
 fn render_window(
@@ -1237,5 +1277,71 @@ mod tests {
             ),
             6_000
         );
+    }
+
+    fn reentry_manifest(
+        media_sequence: u64,
+        durations: &[&str],
+    ) -> tuliprox_parser::hls::origin_manifest::ParsedOriginManifest {
+        use std::fmt::Write as _;
+
+        let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:7\n#EXT-X-MEDIA-SEQUENCE:{media_sequence}\n");
+        for (media_seq, duration) in (media_sequence..).zip(durations) {
+            writeln!(body, "#EXTINF:{duration},\nsegment-{media_seq}.ts").expect("write to string");
+        }
+        normal_manifest(&body)
+    }
+
+    #[test]
+    fn origin_jump_after_idle_keeps_cached_predecessors_up_to_three_target_durations() {
+        // v3.3.151 validation: retained session served [1,2,3,4], the next refresh rendered [3,4,5]
+        // (18 s < 3 x 7 s) and the client that had fetched segment 1 skipped segment 2.
+        let mut session = session();
+        session.apply_origin_manifest(&reentry_manifest(100, &["6.0", "6.0", "6.0", "5.16"])).expect("map");
+        mark_all_segments_ready(&mut session);
+        session.render_and_store_manifest(10).expect("first window");
+        session.apply_origin_manifest(&reentry_manifest(101, &["6.0", "6.0", "5.16", "6.84"])).expect("map");
+        mark_all_segments_ready(&mut session);
+        let previous = session.render_and_store_manifest(20).expect("second window");
+        assert_eq!(previous.segment_proxy_seqs, vec![1, 2, 3, 4]);
+
+        session.apply_origin_manifest(&reentry_manifest(103, &["5.16", "6.84", "6.0"])).expect("map");
+        mark_all_segments_ready(&mut session);
+        let rendered = session.render_and_store_manifest(30).expect("window after origin jump");
+
+        assert_eq!(rendered.segment_proxy_seqs, vec![2, 3, 4, 5]);
+        assert!(rendered.body.contains("#EXT-X-MEDIA-SEQUENCE:2\n"));
+        assert!(rendered.playlist_duration_ms >= 21_000);
+    }
+
+    #[test]
+    fn origin_jump_never_republishes_segments_before_the_previous_window() {
+        let mut session = session();
+        session.apply_origin_manifest(&reentry_manifest(100, &["6.0", "6.0", "6.0", "5.16"])).expect("map");
+        mark_all_segments_ready(&mut session);
+        session.render_and_store_manifest(10).expect("first window");
+        session.apply_origin_manifest(&reentry_manifest(101, &["6.0", "6.0", "5.16", "6.84"])).expect("map");
+        mark_all_segments_ready(&mut session);
+        session.render_and_store_manifest(20).expect("second window");
+
+        session.apply_origin_manifest(&reentry_manifest(104, &["6.84", "6.0"])).expect("map");
+        mark_all_segments_ready(&mut session);
+        session.segments.get_mut(&2).expect("segment 2").status = SegmentCacheStatus::Expired;
+        let rendered = session.render_and_store_manifest(30).expect("window after origin jump");
+
+        // Segment 2 is gone, so the contiguous predecessor chain stops at 3; 0 is never revisited.
+        assert_eq!(rendered.segment_proxy_seqs, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn first_render_does_not_prepend_historical_segments() {
+        let mut session = session();
+        session.apply_origin_manifest(&reentry_manifest(100, &["6.0", "6.0", "6.0", "5.16"])).expect("map");
+        session.apply_origin_manifest(&reentry_manifest(103, &["5.16", "6.84", "6.0"])).expect("map");
+        mark_all_segments_ready(&mut session);
+
+        let rendered = session.render_and_store_manifest(10).expect("first window");
+
+        assert_eq!(rendered.segment_proxy_seqs, vec![3, 4, 5]);
     }
 }

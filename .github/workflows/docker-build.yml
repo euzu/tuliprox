@@ -138,6 +138,7 @@ jobs:
             "provider_connections_exhausted"
             "user_account_expired"
             "panel_api_provisioning"
+            "maintenance"
           )
           for resource in "${required_resources[@]}"; do
             if [[ ! -f "resources/${resource}.ts" ]]; then

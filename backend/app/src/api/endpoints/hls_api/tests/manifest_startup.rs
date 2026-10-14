@@ -287,7 +287,7 @@ async fn retained_session_with_valid_manifest(now_ms: u64, origin_confirmed_at_m
 #[tokio::test]
 async fn hls_new_playback_on_retained_session_requires_fresh_commit_for_stale_origin_window() {
     let now_ms = 100_000;
-    for origin_confirmed_at_ms in [None, Some(now_ms - 16_000), Some(now_ms - 4_001)] {
+    for origin_confirmed_at_ms in [None, Some(now_ms - 16_000), Some(now_ms - 1_001)] {
         let session = retained_session_with_valid_manifest(now_ms, origin_confirmed_at_ms).await;
         assert_eq!(
             super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
@@ -302,7 +302,7 @@ async fn hls_new_playback_on_retained_session_requires_fresh_commit_for_stale_or
 #[tokio::test]
 async fn hls_retained_session_serves_committed_manifest_for_fresh_window_or_active_lease() {
     let now_ms = 100_000;
-    let fresh = retained_session_with_valid_manifest(now_ms, Some(now_ms - 4_000)).await;
+    let fresh = retained_session_with_valid_manifest(now_ms, Some(now_ms - 1_000)).await;
     assert_eq!(
         super::hls_manifest_commit_requirement(&fresh, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
         HlsManifestCommitRequirement::CommittedManifestAllowed

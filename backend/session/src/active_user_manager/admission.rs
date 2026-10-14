@@ -7,7 +7,10 @@ use crate::active_provider_manager::{ConnectionKind, ProviderReleaseSnapshot};
 use jsonwebtoken::get_current_timestamp;
 use log::debug;
 use shared::model::{StreamInfo, UserConnectionPermission};
-use std::{collections::HashSet, sync::atomic::Ordering};
+use std::{collections::HashSet, net::SocketAddr, sync::atomic::Ordering};
+
+/// Panel identity of a removed stream row, as carried by `DisconnectedStream`.
+pub(super) type RemovedStreamKey = (SocketAddr, u32);
 
 impl PlaybackLifecycle {
     /// Returns true for lifecycle states that own a counted admission lease.
@@ -44,13 +47,23 @@ impl ConnectionAdmission {
 }
 
 impl UserConnectionData {
+    /// Removes one stream row together with its kind, priority and request-claim accounting.
+    /// Returns the row's panel identity and whether a counted connection kind was released.
+    pub(super) fn remove_stream_at(&mut self, stream_idx: usize) -> (RemovedStreamKey, bool) {
+        let uid = self.streams[stream_idx].uid;
+        let released_kind = self.stream_kinds.remove(&uid).inspect(|kind| self.decrement_kind(*kind)).is_some();
+        self.stream_normal_priorities.remove(&uid);
+        self.remove_stream_request_claims(uid);
+        let removed = self.streams.swap_remove(stream_idx);
+        ((removed.addr, removed.uid), released_kind)
+    }
+
     pub(super) fn remove_streams_for_session_and_release_counted(
         &mut self,
         session_token: &str,
         counted_kind: Option<ConnectionKind>,
-    ) -> (u32, bool) {
-        let mut removed_count = 0;
-        let mut connection_changed = false;
+    ) -> (Vec<RemovedStreamKey>, bool) {
+        let mut removed_streams = Vec::new();
         let mut released_stream_kind = false;
         let mut stream_idx = 0;
         while stream_idx < self.streams.len() {
@@ -58,25 +71,18 @@ impl UserConnectionData {
                 stream_idx += 1;
                 continue;
             }
-
-            let uid = self.streams[stream_idx].uid;
-            if let Some(kind) = self.stream_kinds.remove(&uid) {
-                self.decrement_kind(kind);
-                released_stream_kind = true;
-                connection_changed = true;
-            }
-            self.stream_normal_priorities.remove(&uid);
-            self.remove_stream_request_claims(uid);
-            self.streams.swap_remove(stream_idx);
-            removed_count += 1;
+            let (removed, released_kind) = self.remove_stream_at(stream_idx);
+            released_stream_kind |= released_kind;
+            removed_streams.push(removed);
         }
+        let mut connection_changed = released_stream_kind;
 
         if let Some(kind) = counted_kind.filter(|_| !released_stream_kind) {
             self.decrement_kind(kind);
             connection_changed = true;
         }
 
-        (removed_count, connection_changed)
+        (removed_streams, connection_changed)
     }
 
     pub(super) fn try_promote_soft_stream(&mut self) -> Option<PromotionAction> {
@@ -632,9 +638,9 @@ impl ActiveUserManager {
     }
 
     pub async fn release_session_streams_and_counted_reservation(&self, username: &str, session_token: &str) -> bool {
-        let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+        let (connection_changed, user_removed, promotions, divergence_snapshot, removed_streams) = {
             let mut user_connections = self.write_connections().await;
-            let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+            let (connection_changed, user_removed, promotions, divergence_snapshot, removed_streams) = {
                 let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                     return false;
                 };
@@ -644,7 +650,7 @@ impl ActiveUserManager {
                     .iter()
                     .find(|session| session.token == session_token && session.lifecycle.is_counted())
                     .and_then(|session| session.connection_kind);
-                let (_removed_streams, mut connection_changed) =
+                let (removed_streams, mut connection_changed) =
                     connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
                 Self::clear_session_counted_without_stream(connection_data, session_token);
 
@@ -660,17 +666,18 @@ impl ActiveUserManager {
                 let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
                 connection_changed |= !promotions.is_empty();
 
-                (connection_changed, user_removed, promotions, divergence_snapshot)
+                (connection_changed, user_removed, promotions, divergence_snapshot, removed_streams)
             };
 
             if user_removed {
                 user_connections.by_key.remove(username);
             }
 
-            (connection_changed, user_removed, promotions, divergence_snapshot)
+            (connection_changed, user_removed, promotions, divergence_snapshot, removed_streams)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
+        self.emit_removed_streams(&removed_streams);
 
         if connection_changed || user_removed {
             self.log_active_user().await;

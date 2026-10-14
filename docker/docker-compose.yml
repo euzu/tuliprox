@@ -8,7 +8,7 @@ services:
       - ./data:/app/data
       - ./config:/app/config
       - ./backup:/app/backup
-      - ./downloads:/app/downloads
+      - ./recordings:/app/recordings
     environment:
       - TZ=Europe/Paris
       # - TULIPROX_ENV_FILE=/path/to/.env

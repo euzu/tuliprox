@@ -98,6 +98,15 @@ impl ActiveUserManager {
         }
     }
 
+    /// Panel rows removed outside the socket release path must be announced individually;
+    /// a bare `Connections` update leaves the row visible in incremental `WebUI` state.
+    pub(super) fn emit_removed_streams(&self, removed_streams: &[super::admission::RemovedStreamKey]) {
+        for &(addr, uid) in removed_streams {
+            self.event_manager
+                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream { addr, uid }));
+        }
+    }
+
     pub(super) async fn emit_promotion_update(&self, username: &str, action: PromotionAction) {
         let maybe_stream = {
             let user_connections = self.connections.read().await;

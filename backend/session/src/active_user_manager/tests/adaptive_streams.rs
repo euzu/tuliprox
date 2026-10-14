@@ -6,7 +6,7 @@ use super::{
 use crate::{active_provider_manager::ConnectionKind, EventManager};
 use arc_swap::ArcSwapOption;
 use shared::{
-    model::{PlaylistItemType, StreamChannel, UserConnectionPermission},
+    model::{ActiveUserConnectionChange, EventMessage, PlaylistItemType, StreamChannel, UserConnectionPermission},
     utils::{current_time_secs, Internable},
 };
 use std::{borrow::Cow, net::SocketAddr, sync::Arc};
@@ -1021,4 +1021,202 @@ async fn connection_admission_treats_preserved_stream_as_reserved_capacity() {
         UserConnectionPermission::Exhausted,
         "a preserved stream should still reserve capacity against unrelated playback admissions"
     );
+}
+
+fn drain_disconnected_streams(events: &mut tokio::sync::broadcast::Receiver<EventMessage>) -> Vec<(SocketAddr, u32)> {
+    let mut disconnected = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream { addr, uid }) = event {
+            disconnected.push((addr, uid));
+        }
+    }
+    disconnected
+}
+
+async fn register_active_adaptive_stream(
+    manager: &ActiveUserManager,
+    user: &ProxyUserCredentials,
+    session_token: &str,
+    uid: u32,
+    addr: SocketAddr,
+) -> String {
+    let token = manager
+        .create_user_session(CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id: uid,
+            provider: "provider-removal-events",
+            stream_url: "http://localhost/test.m3u8",
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    register_session_stream(manager, user, &token, uid, addr, &test_adaptive_channel(uid)).await;
+    token
+}
+
+async fn register_session_stream(
+    manager: &ActiveUserManager,
+    user: &ProxyUserCredentials,
+    session_token: &str,
+    uid: u32,
+    addr: SocketAddr,
+    stream_channel: &StreamChannel,
+) {
+    let fingerprint = Fingerprint::new(format!("fp-{session_token}-{uid}"), "127.0.0.1".to_string(), addr);
+    manager.add_connection(&addr).await;
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid,
+            meter_uid: 0,
+            username: &user.username,
+            max_connections: user.max_connections,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-removal-events".intern(),
+            stream_channel,
+            user_agent: Cow::Borrowed("ua"),
+            session_token: Some(session_token),
+        })
+        .await
+        .expect("stream should be registered");
+}
+
+#[tokio::test]
+async fn release_session_streams_notifies_frontend_for_each_removed_row() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-lease-idle-removal-event", 2, 0);
+    let addr: SocketAddr = "127.0.0.1:55611".parse().unwrap();
+    let token = register_active_adaptive_stream(&manager, &user, "tok-lease-idle-removal", 9101, addr).await;
+    let mut events = event_manager.get_event_channel();
+
+    manager.release_session_streams_and_counted_reservation(&user.username, &token).await;
+
+    assert_eq!(
+        drain_disconnected_streams(&mut events),
+        vec![(addr, 9101)],
+        "lease-idle release removes the panel row and must tell the frontend"
+    );
+    assert!(manager.panel_streams().await.is_empty());
+}
+
+#[tokio::test]
+async fn terminate_session_notifies_frontend_for_each_removed_row() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-terminate-removal-event", 2, 0);
+    let addr: SocketAddr = "127.0.0.1:55612".parse().unwrap();
+    let token = register_active_adaptive_stream(&manager, &user, "tok-terminate-removal", 9102, addr).await;
+    let mut events = event_manager.get_event_channel();
+
+    assert!(manager.terminate_session(&user.username, &token).await);
+
+    assert_eq!(drain_disconnected_streams(&mut events), vec![(addr, 9102)]);
+}
+
+#[tokio::test]
+async fn terminate_sessions_for_addr_notifies_frontend_for_each_removed_row() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-kick-removal-event", 2, 0);
+    let addr: SocketAddr = "127.0.0.1:55613".parse().unwrap();
+    register_active_adaptive_stream(&manager, &user, "tok-kick-removal", 9103, addr).await;
+    let mut events = event_manager.get_event_channel();
+
+    manager.terminate_sessions_for_addr(&user.username, &addr).await;
+
+    assert_eq!(drain_disconnected_streams(&mut events), vec![(addr, 9103)]);
+}
+
+#[tokio::test]
+async fn expire_grace_active_notifies_frontend_for_each_removed_row() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-grace-expire-removal-event", 2, 0);
+    let addr: SocketAddr = "127.0.0.1:55614".parse().unwrap();
+    let token = register_active_adaptive_stream(&manager, &user, "tok-grace-expire-removal", 9104, addr).await;
+    manager.mark_grace_active(&user.username, &token).await;
+    let version = manager.grace_active_version(&user.username, &token).await.expect("grace-active session");
+    let mut events = event_manager.get_event_channel();
+
+    manager.expire_grace_active(&user.username, &token, version).await;
+
+    assert_eq!(drain_disconnected_streams(&mut events), vec![(addr, 9104)]);
+    assert!(manager.panel_streams().await.is_empty());
+}
+
+#[tokio::test]
+async fn expire_grace_active_keeps_other_session_on_shared_keep_alive_socket() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-grace-expire-shared-socket", 3, 0);
+    let addr: SocketAddr = "127.0.0.1:55615".parse().unwrap();
+    // Another playback already owns a row on the keep-alive socket when A's grace window fails;
+    // B's row sits first so an addr-only lookup would hit it instead of A's.
+    let token_b = register_active_adaptive_stream(&manager, &user, "tok-grace-zap-b", 9106, addr).await;
+    let token_a = register_active_adaptive_stream(&manager, &user, "tok-grace-zap-a", 9105, addr).await;
+    manager.mark_grace_active(&user.username, &token_a).await;
+    let version = manager.grace_active_version(&user.username, &token_a).await.expect("grace-active session");
+    assert_eq!(manager.panel_streams().await.len(), 2, "both playbacks are registered on the shared socket");
+    let mut events = event_manager.get_event_channel();
+
+    manager.expire_grace_active(&user.username, &token_a, version).await;
+
+    assert_eq!(drain_disconnected_streams(&mut events), vec![(addr, 9105)]);
+    let remaining = manager.panel_streams().await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].session_token.as_deref(), Some(token_b.as_str()));
+}
+
+#[tokio::test]
+async fn expire_grace_active_removes_every_row_of_the_expired_session() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-grace-expire-multi-row", 3, 0);
+    let addr: SocketAddr = "127.0.0.1:55616".parse().unwrap();
+    let second_addr: SocketAddr = "127.0.0.1:55617".parse().unwrap();
+    let token = manager
+        .create_user_session(CreateUserSessionParams {
+            user: &user,
+            session_token: "tok-grace-multi-row",
+            virtual_id: 9107,
+            provider: "provider-removal-events",
+            stream_url: "http://localhost/stream.ts",
+            addr: &addr,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            socket_bound: false,
+        })
+        .await;
+    register_session_stream(&manager, &user, &token, 9107, addr, &test_channel(9107)).await;
+    register_session_stream(&manager, &user, &token, 9108, second_addr, &test_channel(9108)).await;
+    assert_eq!(manager.panel_streams().await.len(), 2, "session owns two plain rows on two sockets");
+    manager.mark_grace_active(&user.username, &token).await;
+    let version = manager.grace_active_version(&user.username, &token).await.expect("grace-active session");
+    let mut events = event_manager.get_event_channel();
+
+    manager.expire_grace_active(&user.username, &token, version).await;
+
+    let mut removed = drain_disconnected_streams(&mut events);
+    removed.sort_unstable_by_key(|(_, uid)| *uid);
+    assert_eq!(removed, vec![(addr, 9107), (second_addr, 9108)]);
+    assert!(manager.panel_streams().await.is_empty());
 }

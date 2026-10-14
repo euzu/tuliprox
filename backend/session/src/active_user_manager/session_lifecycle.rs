@@ -578,7 +578,7 @@ impl ActiveUserManager {
     /// This corresponds to `GraceActive -> Expired` in the playback state machine.
     /// Releases the provisional counted lease.
     pub async fn expire_grace_active(&self, username: &str, token: &str, expected_version: u64) {
-        let (connection_changed, removed_count) = {
+        let (connection_changed, removed_streams) = {
             let mut user_connections = self.write_connections().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
@@ -623,19 +623,20 @@ impl ActiveUserManager {
                 }
             }
 
-            // Remove all streams for these addresses (never preserve on expire).
-            let mut removed_count = 0;
-            for addr in &addrs {
-                if let Some(stream_idx) =
-                    connection_data.streams.iter().position(|stream| stream.addr == *addr && !stream.preserved)
-                {
-                    if let Some(kind) = connection_data.stream_kinds.remove(&connection_data.streams[stream_idx].uid) {
-                        connection_data.decrement_kind(kind);
-                    }
-                    connection_data.stream_normal_priorities.remove(&connection_data.streams[stream_idx].uid);
-                    connection_data.remove_stream_request_claims(connection_data.streams[stream_idx].uid);
-                    connection_data.streams.swap_remove(stream_idx);
-                    removed_count += 1;
+            // Remove the session's own rows (never preserve on expire). Token-less socket rows are
+            // matched by address; rows of another session on a shared keep-alive socket stay.
+            let mut removed_streams = Vec::new();
+            let mut stream_idx = 0;
+            while stream_idx < connection_data.streams.len() {
+                let stream = &connection_data.streams[stream_idx];
+                let owned_by_session = match stream.session_token.as_deref() {
+                    Some(stream_token) => stream_token == token,
+                    None => !stream.preserved && addrs.contains(&stream.addr),
+                };
+                if owned_by_session {
+                    removed_streams.push(connection_data.remove_stream_at(stream_idx).0);
+                } else {
+                    stream_idx += 1;
                 }
             }
 
@@ -649,13 +650,14 @@ impl ActiveUserManager {
             drop(user_connections);
             self.log_divergence_snapshot(divergence_snapshot).await;
 
-            (connection_changed, removed_count)
+            (connection_changed, removed_streams)
         };
 
+        self.emit_removed_streams(&removed_streams);
         if connection_changed {
             self.log_active_user().await;
         }
-        debug!("GraceActive expired for session {token} in {username}, released {removed_count} streams");
+        debug!("GraceActive expired for session {token} in {username}, released {} streams", removed_streams.len());
     }
 
     /// Terminates the session and all associated streams for a playback.
@@ -670,7 +672,7 @@ impl ActiveUserManager {
     /// whether streams are currently active, and always removes associated streams.
     /// Returns `true` only when the session existed and was removed by this call.
     pub async fn terminate_session(&self, username: &str, session_token: &str) -> bool {
-        let (connection_changed, removed_count, promotions) = {
+        let (connection_changed, removed_streams, promotions) = {
             let mut user_connections = self.write_connections().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return false;
@@ -686,7 +688,7 @@ impl ActiveUserManager {
                 .lifecycle
                 .is_counted()
                 .then(|| connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal));
-            let (removed_count, connection_changed) =
+            let (removed_streams, connection_changed) =
                 connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
 
             // Expire and remove the session immediately. Unlike `release_unbound_session_reservation`
@@ -706,16 +708,17 @@ impl ActiveUserManager {
             drop(user_connections);
             self.log_divergence_snapshot(divergence_snapshot).await;
 
-            (connection_changed, removed_count, promotions)
+            (connection_changed, removed_streams, promotions)
         };
 
+        self.emit_removed_streams(&removed_streams);
         if connection_changed {
             self.log_active_user().await;
         }
         for action in promotions {
             self.emit_promotion_update(username, action).await;
         }
-        debug!("Terminated session {session_token} for user {username}, released {removed_count} streams");
+        debug!("Terminated session {session_token} for user {username}, released {} streams", removed_streams.len());
         true
     }
 
@@ -726,7 +729,7 @@ impl ActiveUserManager {
     ///
     /// Removes all sessions whose `addr` or `active_addrs` contains `kick_addr`.
     pub async fn terminate_sessions_for_addr(&self, username: &str, kick_addr: &SocketAddr) {
-        let (connection_changed, removed_count, promotions) = {
+        let (connection_changed, removed_count, promotions, removed_streams) = {
             let mut user_connections = self.write_connections().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
@@ -746,6 +749,7 @@ impl ActiveUserManager {
 
             let mut removed_count = 0;
             let mut connection_changed = false;
+            let mut removed_streams = Vec::new();
 
             for token in &tokens_to_remove {
                 let Some(session_index) = connection_data.sessions.iter().position(|s| s.token == *token) else {
@@ -757,9 +761,10 @@ impl ActiveUserManager {
                     .is_counted()
                     .then(|| connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal));
 
-                let (_, session_connection_changed) =
+                let (session_removed_streams, session_connection_changed) =
                     connection_data.remove_streams_for_session_and_release_counted(token, counted_kind);
                 connection_changed |= session_connection_changed;
+                removed_streams.extend(session_removed_streams);
 
                 // Expire and remove the session.
                 connection_data.sessions.swap_remove(session_index);
@@ -779,9 +784,10 @@ impl ActiveUserManager {
             drop(user_connections);
             self.log_divergence_snapshot(divergence_snapshot).await;
 
-            (connection_changed, removed_count, promotions)
+            (connection_changed, removed_count, promotions, removed_streams)
         };
 
+        self.emit_removed_streams(&removed_streams);
         if connection_changed {
             self.log_active_user().await;
         }

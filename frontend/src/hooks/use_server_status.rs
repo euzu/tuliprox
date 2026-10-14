@@ -3,6 +3,7 @@ use crate::{
     model::{EventMessage, BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
     utils::is_shared_hls_stream,
 };
+use gloo_timers::callback::Interval;
 use shared::{
     model::{
         permission::Permission, ActiveUserConnectionChange, PlaylistItemType, ProtocolMessage, RecordingKind,
@@ -18,6 +19,10 @@ use std::{
     rc::Rc,
 };
 use yew::{platform::spawn_local, prelude::*};
+
+/// Incremental `ActiveUser` events can miss a removal (dropped socket message, older backend);
+/// a periodic authoritative snapshot bounds how long a ghost row can survive.
+const STATUS_RESYNC_INTERVAL_MILLIS: u32 = 60_000;
 
 type ServerStatusState =
     (UseStateHandle<RefCell<Option<Rc<StatusCheck>>>>, UseStateHandle<RefCell<Option<Rc<SystemInfo>>>>);
@@ -299,8 +304,8 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
             server_status.active_users = user_count;
             server_status.active_user_connections = connections;
             // Connections(0) often arrives before Disconnected* between HLS segments. If we leave
-            // sticky rows as active (preserved=false), adaptive last_seen keeps refreshing and the
-            // Streams TTL never hides them — ghosts until page reload.
+            // sticky rows as active (preserved=false), the Streams TTL never applies to them — ghosts
+            // until the next status resync.
             if connections == 0 {
                 for stream in &mut server_status.active_user_streams {
                     mark_sticky_session_preserved(stream);
@@ -335,6 +340,7 @@ pub fn use_server_status(
 
         use_effect_with(enabled, move |enabled| {
             let mut subid: Option<usize> = None;
+            let mut resync: Option<Interval> = None;
 
             if *enabled {
                 let fetch_status: Rc<dyn Fn()> = Rc::new({
@@ -412,10 +418,17 @@ pub fn use_server_status(
                 }));
 
                 fetch_status();
+
+                let services_resync = services_ctx.clone();
+                resync = Some(Interval::new(STATUS_RESYNC_INTERVAL_MILLIS, move || {
+                    let services_resync = services_resync.clone();
+                    spawn_local(async move { services_resync.websocket.get_server_status().await });
+                }));
             }
 
             let services_clone = services_ctx.clone();
             move || {
+                drop(resync);
                 if let Some(subid) = subid {
                     services_clone.event.unsubscribe(subid);
                 }

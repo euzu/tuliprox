@@ -162,10 +162,12 @@ pub async fn hls_manifest_commit_requirement(
     }
 }
 
-/// Live origins advance one segment per target duration. A window last
-/// confirmed more than two target durations ago may already be behind the
-/// origin, so new playback must wait for a fresh commit instead of starting on
-/// historical media and later jumping forward.
+/// Live origins advance about one segment per target duration, sometimes in
+/// bursts. A new playback that starts on a window confirmed more than half a
+/// target duration ago can already be a slide behind the origin; the next
+/// refresh then drops the segments it was about to play and the player skips
+/// forward. New playback waits for a fresh commit instead (one origin playlist
+/// round trip).
 fn origin_window_is_fresh(session: &HlsSession, now_ms: u64) -> bool {
     let Some(target_duration_ms) = session
         .target_duration
@@ -174,7 +176,7 @@ fn origin_window_is_fresh(session: &HlsSession, now_ms: u64) -> bool {
     else {
         return false;
     };
-    let max_age_ms = target_duration_ms.saturating_mul(2);
+    let max_age_ms = target_duration_ms / 2;
     session
         .origin_refresh
         .last_success_at_ms
@@ -320,6 +322,36 @@ mod tests {
                 hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
                 expected,
                 "{body:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn new_playback_entry_requires_window_confirmed_within_half_a_target_duration() {
+        // v3.3.151 validation: re-entry 6.3 s after the last refresh (target duration 7 s) was
+        // served [1,2,3,4] while the origin had already moved to [3,4,5].
+        let now_ms = 100_000;
+        let body = "#EXTM3U\n#EXTINF:6,\n/r/resource.ts\n";
+        for (confirmed_age_ms, expected) in [
+            (
+                6_300,
+                HlsManifestCommitRequirement::FreshCommitRequired {
+                    reason: HlsFreshManifestRequiredReason::StaleEntryWindow,
+                },
+            ),
+            (3_000, HlsManifestCommitRequirement::CommittedManifestAllowed),
+        ] {
+            let mut session = transient_session(body);
+            session.transient.replace_manifest_with_semantics(body.to_string(), now_ms, Some(6_000));
+            session.target_duration = Some(7);
+            session.mark_authorized_media_access(now_ms);
+            session.origin_refresh.last_success_at_ms = Some(now_ms - confirmed_age_ms);
+            let session = Arc::new(RwLock::new(session));
+
+            assert_eq!(
+                hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, true, now_ms).await,
+                expected,
+                "confirmed_age_ms={confirmed_age_ms}"
             );
         }
     }
