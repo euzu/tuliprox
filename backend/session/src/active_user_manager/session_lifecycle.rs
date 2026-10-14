@@ -594,51 +594,21 @@ impl ActiveUserManager {
                 return;
             }
 
-            // Release the provisional counted lease using index-based access
-            // to avoid nested mutable borrows with connection_data methods.
-            let mut connection_changed = false;
-            let mut counted_kind: Option<ConnectionKind> = None;
-            if connection_data.sessions[session_index].lifecycle.is_counted() {
-                counted_kind = connection_data.sessions[session_index].connection_kind;
-                connection_changed = true;
-            }
-            if let Some(kind) = counted_kind {
-                connection_data.decrement_kind(kind);
-            }
+            let counted_kind = connection_data.sessions[session_index]
+                .lifecycle
+                .is_counted()
+                .then(|| connection_data.sessions[session_index].connection_kind)
+                .flatten();
 
             // Expire the session. Lifecycle change alone handles counted state (Expired is not counted).
             connection_data.sessions[session_index].expire();
             connection_data.sessions[session_index].set_permission(UserConnectionPermission::Exhausted);
             Self::bump_session_transition_version(&mut connection_data.sessions[session_index]);
 
-            // Collect addresses for stream cleanup.
-            let mut addrs = Vec::new();
-            let session_addr = connection_data.sessions[session_index].addr;
-            if !session_addr.ip().is_unspecified() {
-                addrs.push(session_addr);
-            }
-            for addr in &connection_data.sessions[session_index].active_addrs {
-                if *addr != session_addr && !addrs.contains(addr) {
-                    addrs.push(*addr);
-                }
-            }
-
-            // Remove the session's own rows (never preserve on expire). Token-less socket rows are
-            // matched by address; rows of another session on a shared keep-alive socket stay.
-            let mut removed_streams = Vec::new();
-            let mut stream_idx = 0;
-            while stream_idx < connection_data.streams.len() {
-                let stream = &connection_data.streams[stream_idx];
-                let owned_by_session = match stream.session_token.as_deref() {
-                    Some(stream_token) => stream_token == token,
-                    None => !stream.preserved && addrs.contains(&stream.addr),
-                };
-                if owned_by_session {
-                    removed_streams.push(connection_data.remove_stream_at(stream_idx).0);
-                } else {
-                    stream_idx += 1;
-                }
-            }
+            // Remove only rows owned by this session token (never preserve on expire). The counted
+            // lease is released once: through its stream row, or directly when no row holds it.
+            let (removed_streams, connection_changed) =
+                connection_data.remove_streams_for_session_and_release_counted(token, counted_kind);
 
             // Reset grace if no connections remain.
             if connection_data.connections == 0 && connection_data.streams.is_empty() {

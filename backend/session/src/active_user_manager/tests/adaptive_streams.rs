@@ -1220,3 +1220,61 @@ async fn expire_grace_active_removes_every_row_of_the_expired_session() {
     assert_eq!(removed, vec![(addr, 9107), (second_addr, 9108)]);
     assert!(manager.panel_streams().await.is_empty());
 }
+
+#[tokio::test]
+async fn expire_grace_active_releases_the_expired_session_slot_only_once() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-grace-expire-single-release", 3, 0);
+    let addr_a: SocketAddr = "127.0.0.1:55618".parse().unwrap();
+    let addr_b: SocketAddr = "127.0.0.1:55619".parse().unwrap();
+    register_active_adaptive_stream(&manager, &user, "tok-grace-release-b", 9109, addr_b).await;
+    let token_a = register_active_adaptive_stream(&manager, &user, "tok-grace-release-a", 9110, addr_a).await;
+    assert_eq!(manager.user_connections(&user.username).await, 2);
+    manager.mark_grace_active(&user.username, &token_a).await;
+    let version = manager.grace_active_version(&user.username, &token_a).await.expect("grace-active session");
+
+    manager.expire_grace_active(&user.username, &token_a, version).await;
+
+    assert_eq!(manager.user_connections(&user.username).await, 1, "B must keep its counted slot");
+}
+
+#[tokio::test]
+async fn expire_grace_active_leaves_tokenless_rows_on_the_session_socket() {
+    let config = Config::default();
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let event_manager = Arc::new(EventManager::new());
+    let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+    let user = test_user_credentials("user-grace-expire-tokenless", 3, 0);
+    let addr: SocketAddr = "127.0.0.1:55620".parse().unwrap();
+    let token = register_active_adaptive_stream(&manager, &user, "tok-grace-tokenless", 9111, addr).await;
+    let fingerprint = Fingerprint::new("fp-grace-tokenless".to_string(), "127.0.0.1".to_string(), addr);
+    manager
+        .update_connection(ActiveUserConnectionParams {
+            uid: 9112,
+            meter_uid: 0,
+            username: &user.username,
+            max_connections: user.max_connections,
+            soft_connections: 0,
+            connection_kind: ConnectionKind::Normal,
+            priority: 0,
+            soft_priority: 0,
+            fingerprint: &fingerprint,
+            provider: "provider-removal-events".intern(),
+            stream_channel: &test_channel(9112),
+            user_agent: Cow::Borrowed("ua"),
+            session_token: None,
+        })
+        .await
+        .expect("token-less row");
+    manager.mark_grace_active(&user.username, &token).await;
+    let version = manager.grace_active_version(&user.username, &token).await.expect("grace-active session");
+
+    manager.expire_grace_active(&user.username, &token, version).await;
+
+    let remaining = manager.panel_streams().await;
+    assert_eq!(remaining.len(), 1, "a socket match does not prove ownership of a token-less row");
+    assert_eq!(remaining[0].uid, 9112);
+}
