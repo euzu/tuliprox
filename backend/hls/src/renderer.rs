@@ -272,7 +272,12 @@ fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: 
             }
             window.push(seq);
         }
-        return (window.len() >= MIN_VISIBLE_SEGMENTS).then_some(window);
+        if window.len() < MIN_VISIBLE_SEGMENTS {
+            return None;
+        }
+        // Fast-start state lives as long as the session, so live slides render here too.
+        retain_published_predecessors(session, &mut window);
+        return Some(window);
     }
     let requested_tail_seq =
         session.publishable_origin_tail_proxy_seq?.checked_sub(u64::try_from(render_gap_segments).ok()?)?;
@@ -643,6 +648,11 @@ mod tests {
                 "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\n0.ts\n#EXTINF:2,\n1.ts\n#EXTINF:2,\n2.ts\n",
             ))
             .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        install_startup(&mut session, mode)?;
+        Ok(session)
+    }
+
+    fn install_startup(session: &mut HlsSession, mode: shared::model::HlsStartupMode) -> std::io::Result<()> {
         let config = tuliprox_core::model::HlsStartupConfig { mode, ..Default::default() };
         let worker = std::sync::Arc::new(crate::HlsSegmentWorkerPool::default());
         let store = std::sync::Arc::new(crate::SegmentRevisionStore::default());
@@ -661,7 +671,7 @@ mod tests {
             store,
             budget: crate::ProgressiveBudgetManager::new(config),
         });
-        Ok(session)
+        Ok(())
     }
 
     fn startup_revision(session: &HlsSession, offset: usize) -> std::io::Result<crate::SegmentRevisionGuard> {
@@ -1312,6 +1322,48 @@ mod tests {
         assert_eq!(rendered.segment_proxy_seqs, vec![2, 3, 4, 5]);
         assert!(rendered.body.contains("#EXT-X-MEDIA-SEQUENCE:2\n"));
         assert!(rendered.playlist_duration_ms >= 21_000);
+    }
+
+    fn publish_startup_revisions(session: &mut HlsSession) -> std::io::Result<()> {
+        let proxy_session_id = session.proxy_session_id.clone();
+        let seqs = session.segments.keys().copied().collect::<Vec<_>>();
+        let startup = session.startup.as_mut().ok_or_else(|| std::io::Error::other("startup"))?;
+        for seq in seqs {
+            if !startup.revisions.contains_key(&seq) {
+                let revision = startup.store.create(proxy_session_id.clone(), seq, crate::SegmentRevisionKind::Raw)?;
+                revision.revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
+                startup.revisions.insert(seq, revision);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn optimistic_startup_session_keeps_cached_predecessors_up_to_three_target_durations() -> std::io::Result<()> {
+        // v3.3.153 validation: optimistic sessions keep `startup` for their whole lifetime, so a
+        // 3-segment origin window was served as-is (17.96 s with target 7 s) on return entries.
+        let mut session = session();
+        install_startup(&mut session, shared::model::HlsStartupMode::Optimistic)?;
+        for (media_sequence, durations) in [
+            (100, &["6.0", "6.0", "6.0", "5.16"][..]),
+            (101, &["6.0", "6.0", "5.16", "6.84"][..]),
+            (103, &["5.16", "6.84", "6.0"][..]),
+        ] {
+            session
+                .apply_origin_manifest(&reentry_manifest(media_sequence, durations))
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+            mark_all_segments_ready(&mut session);
+            publish_startup_revisions(&mut session)?;
+            session
+                .render_and_store_manifest(media_sequence * 10)
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+        }
+
+        let rendered = session.last_rendered_manifest.as_ref().ok_or_else(|| std::io::Error::other("rendered"))?;
+        assert!(session.startup.is_some());
+        assert_eq!(rendered.segment_proxy_seqs, vec![2, 3, 4, 5]);
+        assert!(rendered.playlist_duration_ms >= 21_000);
+        Ok(())
     }
 
     #[test]
