@@ -30,6 +30,13 @@ impl HlsLeaseRevisionBindings {
 impl HlsAccessLeaseStore {
     pub fn prune_revision_bindings(&mut self, session: &ProxySessionId, first_retained_seq: u64) {
         for lease in self.by_lease_id.values_mut().filter(|lease| lease.proxy_session_id == *session) {
+            if let Some(publication) =
+                lease.last_manifest_snapshot.as_mut().and_then(|snapshot| snapshot.startup_revisions.as_mut())
+            {
+                if publication.revisions.first_key_value().is_some_and(|(seq, _)| *seq < first_retained_seq) {
+                    Arc::make_mut(publication).revisions.retain(|seq, _| *seq >= first_retained_seq);
+                }
+            }
             let Some(bindings) = &mut lease.revision_bindings else { continue };
             if bindings.revisions.first_key_value().is_some_and(|(seq, _)| *seq < first_retained_seq) {
                 Arc::make_mut(bindings).retire_while(|seq, _| seq < first_retained_seq);

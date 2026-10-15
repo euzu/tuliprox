@@ -41,7 +41,7 @@ pub(super) struct HlsObservedFill {
     pub(super) budget: Arc<super::super::ProgressiveBudgetManager>,
     pub(super) deadline: Instant,
     pub(super) repair_permit: Option<super::super::progressive_budget::DeferredRepairPermit>,
-    pub(super) additional_reservations: Vec<super::super::HlsRevisionDiskReservation>,
+    pub(super) reservation: Arc<super::super::HlsRevisionDiskReservation>,
 }
 
 impl Drop for HlsObservedFill {
@@ -56,8 +56,16 @@ impl HlsObservedFill {
             .checked_add(u64::try_from(chunk.len()).map_err(std::io::Error::other)?)
             .ok_or_else(|| std::io::Error::other("origin body length overflow"))?;
         if self.bytes > self.limit {
-            self.extend_disk_reservation().await?;
+            self.extend_diskreservation().await?;
         }
+        self.context
+            .segment_cache
+            .ensure_write_budget_available(
+                &self.revision.revision().key,
+                &self.reservation,
+                self.bytes.saturating_mul(revision_peak_factor(self.file.is_some())),
+            )
+            .await?;
         if let Some(file) = &mut self.file {
             file.write_all(chunk).await?;
         }
@@ -104,7 +112,7 @@ impl HlsObservedFill {
         Ok(())
     }
 
-    async fn extend_disk_reservation(&mut self) -> std::io::Result<()> {
+    async fn extend_diskreservation(&mut self) -> std::io::Result<()> {
         if self.expected.is_some() {
             return Err(std::io::Error::other("origin body exceeds decoded content length"));
         }
@@ -114,12 +122,10 @@ impl HlsObservedFill {
             .checked_sub(self.limit)
             .and_then(|bytes| bytes.checked_mul(factor))
             .ok_or_else(|| std::io::Error::other("revision disk reservation overflow"))?;
-        let mut reservation =
-            self.context.segment_cache.reserve_revision_peak(&self.revision.revision().key, additional_peak).await?;
-        if self.file.is_some() {
-            reservation.mark_unaccounted_writes();
-        }
-        self.additional_reservations.push(reservation);
+        self.context
+            .segment_cache
+            .grow_revision_peak(&self.revision.revision().key, &self.reservation, additional_peak)
+            .await?;
         self.limit = next_limit;
         Ok(())
     }
@@ -129,10 +135,10 @@ impl HlsObservedFill {
         if self.bytes == 0 || self.expected.is_some_and(|length| length != self.bytes) {
             return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete origin segment body"));
         }
-        if let Some(file) = self.file.take() {
-            let mut file = file;
+        if let Some(file) = &mut self.file {
             file.flush().await?;
-            drop(file);
+            self.file.take();
+            self.context.segment_cache.account_reserved_spool(&self.path, self.bytes, &self.reservation)?;
             self.revision.revision().complete(CachedSegmentMetadata { path: self.path.clone(), size: self.bytes });
             self.revision.revision().replay.lock_unpoisoned().take();
         }
@@ -141,6 +147,7 @@ impl HlsObservedFill {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "Keeps one startup write transaction and its failure closure together.")]
 pub(super) async fn commit_startup_response(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
@@ -149,6 +156,131 @@ pub(super) async fn commit_startup_response(
     mut repair_context: HlsSegmentRepairObjectContext,
 ) -> Result<CachedSegmentMetadata, SegmentFetchError> {
     use futures::StreamExt;
+    prepare_startup_repair_lease(context, &mut repair_context).await;
+    let expected = reliable_decoded_content_length(&response);
+    if response.status != axum::http::StatusCode::OK {
+        return Err(SegmentFetchError::cache_body(&std::io::Error::other(
+            "startup requires a complete HTTP 200 response",
+        )));
+    }
+    let prepared = prepare_startup_fill(context, snapshot, expected, deadline).await?;
+    let PreparedStartupFill { revision, observed, reservation, raw } = prepared;
+    let mut transaction =
+        super::startup_write::StartupWrite::new(context, snapshot, Arc::clone(&reservation), revision.clone());
+    transaction.track_fill(&observed);
+    let result = async {
+        let chunks_owner = Arc::clone(&observed);
+        let finish_owner = Arc::clone(&observed);
+        let stream = tokio_util::io::ReaderStream::new(response.body)
+            .then(move |chunk| {
+                let observed = Arc::clone(&chunks_owner);
+                async move {
+                    let chunk = chunk?;
+                    observed.lock().await.observe(&chunk).await?;
+                    Ok::<_, std::io::Error>(chunk)
+                }
+            })
+            .chain(futures::stream::once(async move {
+                finish_owner.lock().await.finish().await?;
+                Ok::<_, std::io::Error>(bytes::Bytes::new())
+            }));
+        let reader = Box::pin(tokio_util::io::StreamReader::new(stream.boxed()));
+        #[cfg(test)]
+        context
+            .segment_cache
+            .startup_write_checkpoint(crate::cache::StartupWritePhase::BeforeNormalCommit)
+            .await
+            .map_err(|error| SegmentFetchError::cache_body(&error))?;
+        let mut metadata = context
+            .segment_repair
+            .commit_origin_response_with_budget(
+                &context.segment_cache,
+                &snapshot.cache_key,
+                reader,
+                deadline,
+                repair_context.clone(),
+                Some(Arc::clone(&reservation)),
+            )
+            .await
+            .map_err(|error| SegmentFetchError::cache_body(&error))?;
+        #[cfg(test)]
+        context
+            .segment_cache
+            .startup_write_checkpoint(crate::cache::StartupWritePhase::AfterNormalCommit)
+            .await
+            .map_err(|error| SegmentFetchError::cache_body(&error))?;
+        if !raw {
+            context
+                .segment_repair
+                .repair_ready_cache_hit_with_budget(
+                    &context.segment_cache,
+                    &snapshot.cache_key,
+                    repair_context,
+                    Some(Arc::clone(&reservation)),
+                )
+                .await
+                .map_err(|error| SegmentFetchError::cache_body(&error))?;
+            let latest = context
+                .segment_cache
+                .metadata(&snapshot.cache_key)
+                .await
+                .map_err(|error| SegmentFetchError::cache_body(&error))?
+                .ok_or_else(|| {
+                    SegmentFetchError::cache_body(&std::io::Error::other("processed cache object disappeared"))
+                })?;
+            metadata = latest;
+            let processed = context
+                .segment_cache
+                .publish_processed_revision_with_budget(
+                    &revision.revision().key,
+                    &metadata.path,
+                    deadline,
+                    Some(Arc::clone(&reservation)),
+                )
+                .await
+                .map_err(|error| SegmentFetchError::cache_body(&error))?;
+            revision.revision().complete(processed);
+        }
+        #[cfg(test)]
+        context
+            .segment_cache
+            .startup_write_checkpoint(crate::cache::StartupWritePhase::AfterPublication)
+            .await
+            .map_err(|error| SegmentFetchError::cache_body(&error))?;
+        Ok(metadata)
+    }
+    .await;
+    if result.is_ok() {
+        transaction.finish();
+    } else {
+        transaction.abort().await;
+    }
+    // A new origin attempt needs its entire peak again, even when the failed
+    // operation was a smaller revision file or a budget extension.
+    let peak = {
+        let fill = observed.lock().await;
+        let retry_bound =
+            if fill.bytes > fill.limit { fill.limit.saturating_mul(2).max(fill.bytes) } else { fill.limit };
+        retry_bound.saturating_mul(revision_peak_factor(raw))
+    };
+    drop(observed);
+    result.map_err(|error| match error {
+        SegmentFetchError::LocalCacheCapacity { required_session_bytes, required_global_bytes, revision, .. } => {
+            SegmentFetchError::LocalCacheCapacity {
+                required_session_bytes,
+                required_global_bytes,
+                projected_write_bytes: peak,
+                revision,
+            }
+        }
+        other => other,
+    })
+}
+
+async fn prepare_startup_repair_lease(
+    context: &SegmentFetchContext,
+    repair_context: &mut HlsSegmentRepairObjectContext,
+) {
     if repair_context.hls_access_lease_id.is_none() {
         let leases = context.session.read().await.startup.as_ref().map(|startup| Arc::clone(&startup.access_leases));
         if let Some(leases) = leases {
@@ -161,65 +293,12 @@ pub(super) async fn commit_startup_response(
     if let Some(lease_id) = &repair_context.hls_access_lease_id {
         context.segment_repair.ensure_access_lease_window(lease_id.clone()).await;
     }
-    let expected = reliable_decoded_content_length(&response);
-    if response.status != axum::http::StatusCode::OK {
-        return Err(SegmentFetchError::cache_body(&std::io::Error::other(
-            "startup requires a complete HTTP 200 response",
-        )));
-    }
-    let prepared = prepare_startup_fill(context, snapshot, expected, deadline).await?;
-    let PreparedStartupFill { revision, observed, _reservation, raw } = prepared;
-    let chunks_owner = Arc::clone(&observed);
-    let finish_owner = Arc::clone(&observed);
-    let stream = tokio_util::io::ReaderStream::new(response.body)
-        .then(move |chunk| {
-            let observed = Arc::clone(&chunks_owner);
-            async move {
-                let chunk = chunk?;
-                observed.lock().await.observe(&chunk).await?;
-                Ok::<_, std::io::Error>(chunk)
-            }
-        })
-        .chain(futures::stream::once(async move {
-            finish_owner.lock().await.finish().await?;
-            Ok::<_, std::io::Error>(bytes::Bytes::new())
-        }));
-    let reader = Box::pin(tokio_util::io::StreamReader::new(stream.boxed()));
-    let mut metadata = context
-        .segment_repair
-        .commit_origin_response(&context.segment_cache, &snapshot.cache_key, reader, deadline, repair_context.clone())
-        .await
-        .map_err(|error| SegmentFetchError::cache_body(&error))?;
-    if !raw {
-        context
-            .segment_repair
-            .repair_ready_cache_hit(&context.segment_cache, &snapshot.cache_key, repair_context)
-            .await
-            .map_err(|error| SegmentFetchError::cache_body(&error))?;
-        let latest = context
-            .segment_cache
-            .metadata(&snapshot.cache_key)
-            .await
-            .map_err(|error| SegmentFetchError::cache_body(&error))?
-            .ok_or_else(|| {
-                SegmentFetchError::cache_body(&std::io::Error::other("processed cache object disappeared"))
-            })?;
-        metadata = latest;
-        let processed = context
-            .segment_cache
-            .publish_processed_revision(&revision.revision().key, &metadata.path, deadline)
-            .await
-            .map_err(|error| SegmentFetchError::cache_body(&error))?;
-        revision.revision().complete(processed);
-    }
-    drop(observed);
-    Ok(metadata)
 }
 
 pub(super) struct PreparedStartupFill {
     pub(super) revision: super::super::SegmentRevisionGuard,
     pub(super) observed: Arc<tokio::sync::Mutex<HlsObservedFill>>,
-    pub(super) _reservation: super::super::HlsRevisionDiskReservation,
+    pub(super) reservation: Arc<super::super::HlsRevisionDiskReservation>,
     pub(super) raw: bool,
 }
 
@@ -238,6 +317,7 @@ pub(super) async fn prepare_startup_fill(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn try_prepare_startup_fill(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
@@ -283,7 +363,8 @@ async fn try_prepare_startup_fill(
     let peak = body_bound
         .checked_mul(revision_peak_factor(raw))
         .ok_or_else(|| SegmentFetchError::cache_body(&std::io::Error::other("revision peak overflow")))?;
-    let mut reservation = match context.segment_cache.reserve_revision_peak(&revision.revision().key, peak).await {
+    let mut reservation = match context.segment_cache.reserve_revision_peak_reclaiming(&snapshot.cache_key, peak).await
+    {
         Ok(reservation) => reservation,
         Err(_) if raw && decides_policy && fallback_to_first_ready(&context.session).await => {
             debug!("HLS startup fallback: reason=disk_capacity effective_mode=first_ready");
@@ -291,24 +372,44 @@ async fn try_prepare_startup_fill(
         }
         Err(error) => return Err(SegmentFetchError::cache_body(&error)),
     };
-    let path = context.segment_cache.object_path(&revision.revision().key);
+    let path = reservation.object_path(&revision.revision().key);
+    if raw {
+        reservation.mark_unaccounted_writes();
+    }
+    let reservation = Arc::new(reservation);
+    let mut preparation =
+        super::startup_write::StartupWrite::new(context, snapshot, Arc::clone(&reservation), revision.clone());
     let file = if raw {
-        let (file, pin) = context
+        let (file, pin) = match context
             .segment_cache
-            .create_revision_spool(&revision.revision().key)
+            .create_revision_spool_with_budget(&revision.revision().key, Some(&reservation))
             .await
-            .map_err(|error| SegmentFetchError::cache_body(&error))?;
+        {
+            Ok(spool) => spool,
+            Err(error) => {
+                preparation.abort().await;
+                return Err(SegmentFetchError::cache_body(&error));
+            }
+        };
         *revision.revision().file_pin.lock_unpoisoned() = Some(pin);
         *revision.revision().replay.lock_unpoisoned() = replay.take();
-        reservation.mark_unaccounted_writes();
         Some(file)
     } else {
-        let pin =
-            context.segment_cache.pin_revision_file(&path).map_err(|error| SegmentFetchError::cache_body(&error))?;
+        let pin = match context.segment_cache.pin_revision_file(&path) {
+            Ok(pin) => pin,
+            Err(error) => {
+                preparation.abort().await;
+                return Err(SegmentFetchError::cache_body(&error));
+            }
+        };
         *revision.revision().file_pin.lock_unpoisoned() = Some(pin);
         None
     };
-    bind_startup_revision(context, snapshot, &revision).await?;
+    if let Err(error) = bind_startup_revision(context, snapshot, &revision).await {
+        preparation.abort().await;
+        return Err(error);
+    }
+    preparation.finish();
     debug!("HLS startup fill: mode={mode} proxy_seq={} representation={kind:?}", snapshot.proxy_seq);
     let observed = Arc::new(tokio::sync::Mutex::new(HlsObservedFill {
         revision: revision.clone(),
@@ -323,9 +424,9 @@ async fn try_prepare_startup_fill(
         budget,
         deadline,
         repair_permit: None,
-        additional_reservations: Vec::new(),
+        reservation: Arc::clone(&reservation),
     }));
-    Ok(Some(PreparedStartupFill { revision, observed, _reservation: reservation, raw }))
+    Ok(Some(PreparedStartupFill { revision, observed, reservation, raw }))
 }
 
 async fn bind_startup_revision(

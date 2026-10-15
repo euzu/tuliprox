@@ -27,9 +27,12 @@ impl HlsRevisionDiskReservation {
 impl Drop for HlsRevisionDiskReservation {
     fn drop(&mut self) {
         let mut capacity = self.capacity.lock_unpoisoned();
-        capacity.revision_reservations.remove(&self.id);
+        let released = capacity.revision_reservations.remove(&self.id).is_some();
+        capacity.reserved_spools.retain(|_, owner| *owner != self.id);
         if self.unaccounted_writes {
             capacity.initialized = false;
+        }
+        if released || self.unaccounted_writes {
             capacity.revision = Arc::new(CapacityRevision);
         }
         drop(capacity);
@@ -48,6 +51,14 @@ impl HlsSegmentCache {
         bytes: u64,
     ) -> io::Result<HlsRevisionDiskReservation> {
         let _admission = self.capacity_admission_gate.lock().await;
+        self.reserve_revision_peak_inner(key, bytes).await
+    }
+
+    pub(super) async fn reserve_revision_peak_inner<K: HlsCacheObjectKey>(
+        &self,
+        key: &K,
+        bytes: u64,
+    ) -> io::Result<HlsRevisionDiskReservation> {
         let root = self.cache_path_snapshot();
         self.ensure_capacity_initialized(&root.path).await?;
         let session = key.session_path_component();
@@ -77,19 +88,20 @@ impl HlsSegmentCache {
                 HlsCacheCapacityRevision(Arc::clone(&capacity.revision)),
             ));
         }
-        let id = loop {
-            let id = fastrand::u64(..);
-            if !capacity.revision_reservations.contains_key(&id) {
-                break id;
-            }
-        };
+        let id =
+            capacity.next_write_id.checked_add(1).ok_or_else(|| io::Error::other("cache write identity exhausted"))?;
+        capacity.next_write_id = id;
         capacity.revision_reservations.insert(id, (session, bytes));
         capacity.revision = Arc::new(CapacityRevision);
+        drop(capacity);
+        self.capacity_changed.notify_waiters();
         Ok(HlsRevisionDiskReservation {
             id,
             capacity: Arc::clone(&self.capacity),
             changed: Arc::clone(&self.capacity_changed),
             unaccounted_writes: false,
+            generation: root.generation,
+            cache_path: root.path,
         })
     }
 
@@ -101,18 +113,44 @@ impl HlsSegmentCache {
     }
 
     pub async fn create_revision_spool<K: HlsCacheObjectKey>(&self, key: &K) -> io::Result<(File, HlsRevisionFilePin)> {
+        self.create_revision_spool_with_budget(key, None).await
+    }
+
+    pub(crate) async fn create_revision_spool_with_budget<K: HlsCacheObjectKey>(
+        &self,
+        key: &K,
+        budget: Option<&HlsRevisionDiskReservation>,
+    ) -> io::Result<(File, HlsRevisionFilePin)> {
+        let commit_gate = Arc::clone(&self.cache_path_commit_gate).read_owned().await;
         let root = self.cache_path_snapshot();
+        if budget.is_some_and(|budget| !Arc::ptr_eq(&budget.generation, &root.generation)) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "revision reservation root retired"));
+        }
         self.ensure_cache_root_marker_for(&root.path).await?;
         let path = Self::path_for_key_in(&root.path, key);
         let pin = self.pin_revision_file(&path)?;
-        let parent = path.parent().ok_or_else(|| io::Error::other("revision path has no parent"))?;
-        fs::create_dir_all(parent).await?;
-        let file = OpenOptions::new().write(true).create_new(true).open(&path).await?;
-        Ok((file, pin))
+        let parent = path.parent().ok_or_else(|| io::Error::other("revision path has no parent"))?.to_path_buf();
+        let mut mutation = self.begin_capacity_mutation(&root.path, &path, key.session_path_component()).await;
+        if let Some(budget) = budget {
+            self.register_reserved_spool(path.clone(), budget);
+        }
+        super::staging::run_owned_cache_operation(
+            Arc::clone(&self.owned_operation_permits),
+            "revision-create",
+            async move {
+                fs::create_dir_all(parent).await?;
+                let file = OpenOptions::new().write(true).create_new(true).open(&path).await?;
+                mutation.finish_mutation(None);
+                drop(commit_gate);
+                Ok((file, pin))
+            },
+        )
+        .await
     }
 
     pub async fn delete_orphan_revision_files(&self, cutoff: SystemTime) -> io::Result<usize> {
         let root = self.cache_path_snapshot();
+        self.ensure_capacity_initialized(&root.path).await?;
         let Some(mut sessions) = skip_not_found(fs::read_dir(&root.path).await)? else { return Ok(0) };
         let mut deleted = 0usize;
         while let Some(session) = sessions.next_entry().await? {
@@ -155,22 +193,89 @@ impl HlsSegmentCache {
         source: &Path,
         deadline: Instant,
     ) -> io::Result<CachedSegmentMetadata> {
+        self.publish_processed_revision_with_budget(key, source, deadline, None).await
+    }
+
+    #[allow(clippy::too_many_lines, reason = "Keeps source ownership, peak admission and immutable linking together.")]
+    pub(crate) async fn publish_processed_revision_with_budget<K: HlsCacheObjectKey>(
+        &self,
+        key: &K,
+        source: &Path,
+        deadline: Instant,
+        budget: Option<Arc<HlsRevisionDiskReservation>>,
+    ) -> io::Result<CachedSegmentMetadata> {
         let root = self.cache_path_snapshot();
         let staged_path = Self::temp_path_for_key(key, &root.path);
+        let size = fs::metadata(source).await?.len();
+        let checks_source_owner = budget.is_some();
+        let budget = match budget {
+            Some(budget) => budget,
+            None => Arc::new(self.reserve_revision_peak_reclaiming(key, size).await?),
+        };
+        let (size, source_lease) = loop {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "revision publication timed out"));
+            }
+            self.ensure_write_budget_available(key, &budget, size).await?;
+            // Preserve admission -> path-mutation ordering. A replacement must
+            // not change the source between its size check and the hardlink.
+            let admission = self.capacity_admission_gate.lock().await;
+            let source_lease = self.begin_capacity_mutation(&root.path, source, key.session_path_component()).await;
+            let actual_size = fs::metadata(source).await?.len();
+            let remaining = {
+                let capacity = self.capacity.lock_unpoisoned();
+                if checks_source_owner && capacity.write_owners.get(source) != Some(&budget.id) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "revision source write replaced"));
+                }
+                capacity.revision_reservations.get(&budget.id).map_or(0, |(_, bytes)| *bytes)
+            };
+            drop(admission);
+            if actual_size <= remaining {
+                break (actual_size, source_lease);
+            }
+            drop(source_lease);
+            self.ensure_write_budget_available(key, &budget, actual_size).await?;
+        };
+        let budget = Some(budget);
         let registration = self.register_active_temp_path(&staged_path)?;
-        if fs::hard_link(source, &staged_path).await.is_ok() {
-            let size = fs::metadata(&staged_path).await?.len();
-            let staged = StagedCacheObject::registered(staged_path, size, Arc::clone(&root.generation), registration);
+        let staged =
+            StagedCacheObject::registered(staged_path.clone(), size, Arc::clone(&root.generation), registration)
+                .with_write_budget(budget.clone())?;
+        let source_path = source.to_path_buf();
+        #[cfg(test)]
+        let checkpoint = self.take_startup_write_checkpoint(super::StartupWritePhase::BeforeRevisionLink);
+        // A Tokio filesystem call can finish after its caller is cancelled.
+        // Retain staging and its budget until the link has a definite result.
+        let (staged, fallback_source) = super::staging::run_owned_cache_operation(
+            Arc::clone(&self.owned_operation_permits),
+            "revision-link",
+            async move {
+                #[cfg(test)]
+                if let Some(checkpoint) = checkpoint {
+                    checkpoint.wait().await?;
+                }
+                let fallback = if fs::hard_link(&source_path, &staged_path).await.is_ok() {
+                    None
+                } else {
+                    // Opening under the same source lease also freezes the
+                    // inode used by a copy fallback after replacement resumes.
+                    Some(File::open(source_path).await?)
+                };
+                drop(source_lease);
+                Ok((staged, fallback))
+            },
+        )
+        .await?;
+        if let Some(file) = fallback_source {
+            self.remove_staged(staged).await?;
+            let staged = self.stage_temp_with_budget(key, file, deadline, budget).await?;
             self.commit_staged(key, staged).await
         } else {
-            drop(registration);
-            let file = File::open(source).await?;
-            let staged = self.stage_temp_with_deadline(key, file, deadline).await?;
             self.commit_staged(key, staged).await
         }
     }
 
-    /// Revision file bytes as of the last completed capacity scan.
+    /// Current revision file bytes after completed accounting mutations.
     pub fn revision_disk_bytes(&self) -> u64 { self.capacity.lock_unpoisoned().revision_bytes }
 
     /// Walks the cache tree for the current revision file bytes.

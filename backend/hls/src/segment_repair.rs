@@ -38,6 +38,7 @@ struct HlsSelectedRepairCandidate<'a> {
     runtime: Arc<HlsSegmentRepairRuntime>,
     candidate: HlsRepairWindowCandidateKey,
     prewarm_guard: Option<&'a HlsRepairPrewarmGuard>,
+    write_budget: Option<Arc<crate::HlsRevisionDiskReservation>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -188,6 +189,8 @@ struct RepairRemuxDroppedStream {
 mod tests;
 
 mod diagnostics;
+mod disk_output;
+pub(crate) use disk_output::{run_reserved_remux, RepairDiskBudget};
 mod manager;
 mod probe;
 mod processing;

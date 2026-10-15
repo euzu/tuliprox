@@ -1,10 +1,7 @@
 use super::{
     diagnostics::{debug_repair_analysis, debug_repair_event, debug_repair_stream_dropped, decide_repair},
     ffmpeg_identity_version, parse_ffmpeg_warnings,
-    probe::{
-        adopt_repair_output, cleanup_repair_output, detect_video_codec, parse_probe, repair_output_path,
-        select_repair_remux_streams, validate_repair,
-    },
+    probe::{detect_video_codec, parse_probe, repair_output_path, select_repair_remux_streams, validate_repair},
     registry::repair_object_metadata_key,
     sha256_file,
     window::{RepairCandidateSelection, RepairStatus},
@@ -15,15 +12,19 @@ use super::{
 };
 use log::{debug, warn};
 use shared::model::{HlsSegmentRepairExecutionPlan, HlsSegmentRepairMode};
-use std::{
-    io,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Instant,
-};
+use std::{io, path::Path, sync::Arc, time::Instant};
 use tokio::{fs, process::Command, time::timeout};
 
+/// Files and peak ownership used for one postprocessing attempt.
+pub(super) struct RepairFileSource<'a> {
+    pub(super) cache: &'a HlsSegmentCache,
+    pub(super) path: &'a Path,
+    pub(super) size: u64,
+    pub(super) disk_budget: Option<super::RepairDiskBudget<'a>>,
+}
+
 impl HlsSegmentRepairManager {
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn process_staged_and_commit<K>(
         &self,
         segment_cache: &HlsSegmentCache,
@@ -91,14 +92,27 @@ impl HlsSegmentRepairManager {
                 Ok(committed)
             } else {
                 let raw_size = raw.size;
-                if let Some(fixed_path) =
-                    self.repair_file(&raw.path, raw.size, &identity, &context, runtime.clone(), &deadline).await?
+                if let Some(fixed) = self
+                    .repair_file(
+                        RepairFileSource {
+                            cache: segment_cache,
+                            path: &raw.path,
+                            size: raw.size,
+                            disk_budget: raw.write_budget.as_ref().map(|reservation| super::RepairDiskBudget {
+                                cache: segment_cache,
+                                reservation,
+                                session: &context.proxy_session_id,
+                                retained_staging_bytes: raw.size,
+                            }),
+                        },
+                        &identity,
+                        &context,
+                        runtime.clone(),
+                        &deadline,
+                    )
+                    .await?
                 {
-                    let fixed_size = fs::metadata(&fixed_path).await?.len();
-                    if let Err(error) = segment_cache.remove_staged(raw.clone()).await {
-                        warn!("HLS repair raw staging cleanup deferred: error_kind={:?}", error.kind());
-                    }
-                    let fixed = adopt_repair_output(segment_cache, fixed_path, fixed_size).await?;
+                    segment_cache.remove_staged(raw.clone()).await?;
                     let committed = segment_cache.commit_staged(key, fixed).await?;
                     self.record_metadata(identity.clone(), RepairStatus::Fixed, raw.size, committed.size, None).await;
                     let committed_hash = sha256_file(&committed.path).await?;
@@ -201,13 +215,13 @@ impl HlsSegmentRepairManager {
     #[allow(clippy::too_many_lines)]
     pub(super) async fn repair_file(
         &self,
-        raw_path: &Path,
-        raw_size: u64,
+        source: RepairFileSource<'_>,
         identity: &RepairIdentity,
         context: &HlsSegmentRepairObjectContext,
         runtime: Arc<HlsSegmentRepairRuntime>,
         deadline: &HlsPostProcessingDeadline,
-    ) -> io::Result<Option<PathBuf>> {
+    ) -> io::Result<Option<StagedCacheObject>> {
+        let RepairFileSource { cache: segment_cache, path: raw_path, size: raw_size, disk_budget } = source;
         let _permit = match &runtime.semaphore {
             Some(semaphore) => {
                 let Some(remaining) = deadline.remaining() else {
@@ -297,11 +311,30 @@ impl HlsSegmentRepairManager {
             identity.repair_mode.as_log_value(),
             executed_level.as_log_value()
         );
-        let remux = run_remux(raw_path, &fixed_path, executed_level, &stream_selection, deadline).await;
+        // A ready-cache prewarm has no startup owner. Give its output the same
+        // admission and cancellation guarantees as a downloaded staging file.
+        let owned_budget;
+        let disk_budget = if let Some(budget) = disk_budget {
+            budget
+        } else {
+            let key = crate::SegmentCacheKey::new(context.proxy_session_id.clone(), 0, "ts");
+            owned_budget = Arc::new(segment_cache.reserve_revision_peak_reclaiming(&key, raw_size).await?);
+            super::RepairDiskBudget {
+                cache: segment_cache,
+                reservation: &owned_budget,
+                session: &context.proxy_session_id,
+                retained_staging_bytes: 0,
+            }
+        };
+        let mut output = segment_cache
+            .adopt_staged_file(fixed_path.clone(), 0)?
+            .with_write_budget(Some(Arc::clone(disk_budget.reservation)))?;
+        let remux =
+            run_remux(raw_path, &fixed_path, executed_level, &stream_selection, deadline, disk_budget, &output).await;
         if let Err(reason) = remux {
             debug_repair_event(context, executed_level, "remux failed", Some(&reason));
             let status = if reason == "timeout" { RepairStatus::Timeout } else { RepairStatus::RemuxFailed };
-            cleanup_repair_output(&fixed_path).await;
+            segment_cache.remove_staged(output).await?;
             self.record_metadata(identity.clone(), status, raw_size, raw_size, Some(reason)).await;
             return Ok(None);
         }
@@ -309,7 +342,7 @@ impl HlsSegmentRepairManager {
             Ok(scan) => scan,
             Err(reason) => {
                 debug_repair_event(context, executed_level, "validation probe failed", Some(&reason));
-                cleanup_repair_output(&fixed_path).await;
+                segment_cache.remove_staged(output).await?;
                 self.record_metadata(
                     identity.clone(),
                     RepairStatus::ValidationFailed,
@@ -325,7 +358,7 @@ impl HlsSegmentRepairManager {
             validate_repair(&runtime.config, codec, &raw_scan, &fixed_scan, executed_level, &stream_selection);
         if let Err(reason) = validation {
             debug_repair_event(context, executed_level, "validation failed", Some(&reason));
-            cleanup_repair_output(&fixed_path).await;
+            segment_cache.remove_staged(output).await?;
             self.record_metadata(identity.clone(), RepairStatus::ValidationFailed, raw_size, raw_size, Some(reason))
                 .await;
             return Ok(None);
@@ -339,7 +372,8 @@ impl HlsSegmentRepairManager {
             executed_level.as_log_value(),
             started.elapsed().as_millis()
         );
-        Ok(Some(fixed_path))
+        output.size = fs::metadata(&fixed_path).await?.len();
+        Ok(Some(output))
     }
 }
 
@@ -390,6 +424,8 @@ async fn run_remux(
     mode: HlsSegmentRepairMode,
     stream_selection: &RepairRemuxStreamSelection,
     deadline: &HlsPostProcessingDeadline,
+    disk_budget: super::RepairDiskBudget<'_>,
+    staged: &StagedCacheObject,
 ) -> Result<(), String> {
     let input = input_path.to_str().ok_or_else(|| "invalid_input_path".to_string())?;
     let output = output_path.to_str().ok_or_else(|| "invalid_output_path".to_string())?;
@@ -417,7 +453,7 @@ async fn run_remux(
             .map(ToOwned::to_owned),
     );
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_command_with_deadline("ffmpeg", &args, deadline).await.map(|_| ())
+    super::run_reserved_remux(&args[..args.len() - 1], staged, disk_budget, deadline).await
 }
 
 pub(crate) async fn run_command_with_deadline(

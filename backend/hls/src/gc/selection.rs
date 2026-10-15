@@ -8,15 +8,6 @@ use super::{
 };
 use std::{collections::HashSet, sync::Arc};
 
-pub(super) async fn total_sessions_cache_size(sessions: &[HlsSessionHandle]) -> u64 {
-    let mut total_size = 0_u64;
-    for session in sessions {
-        let session = session.read().await;
-        total_size = total_size.saturating_add(session_cache_size(&session));
-    }
-    total_size
-}
-
 pub(super) fn collect_projected_session_reclamation(
     session: &mut HlsSession,
     cache: &HlsSegmentCache,
@@ -26,6 +17,7 @@ pub(super) fn collect_projected_session_reclamation(
     max_deletions: usize,
     deletions: &mut CacheDeletionBatch,
 ) {
+    remove_obsolete_deferred_heads(session, cache, Some(excluded_path), release_through, deletions);
     let mut planned_bytes = 0_u64;
     let mut planned_deletions = 0_usize;
     let mut transient_readiness_changed = false;
@@ -334,4 +326,28 @@ pub(super) fn remove_map_entry(session: &mut HlsSession, map_id: ProxyMapId) -> 
     }
     session.origin_map_to_proxy.retain(|_, mapped_map_id| *mapped_map_id != map_id);
     Some(MapEntryDeletion { key: map.cache_key, content_length })
+}
+
+/// Only retire an inactive deferred FIFO head once its origin binding is gone
+/// and every existing working-set protection has released it.
+pub(super) fn remove_obsolete_deferred_heads(
+    session: &mut HlsSession,
+    cache: &HlsSegmentCache,
+    excluded: Option<&std::path::Path>,
+    release_through: Option<u64>,
+    deletions: &mut CacheDeletionBatch,
+) {
+    while deletions.has_capacity() {
+        let Some((&seq, entry)) = session.segments.first_key_value() else { break };
+        let protected = protected_set_for_cache_reclamation(session, cache, excluded, release_through);
+        if entry.origin_fetch_ref.is_some()
+            || !matches!(entry.status, SegmentCacheStatus::CapacityDeferred { .. })
+            || protected.segment_proxy_seqs.contains(&seq)
+        {
+            break;
+        }
+        if let Some(key) = remove_segment_entry(session, seq) {
+            deletions.push(CacheObjectDeletion::Segment { key, reason: SegmentCacheDeletionReason::Duration });
+        }
+    }
 }

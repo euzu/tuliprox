@@ -4,8 +4,8 @@ use super::{
     selection::{
         capacity_reclamation_evidence, collect_projected_session_reclamation, duration_expired_head_segment,
         fifo_head_size_candidate, oldest_global_fifo_head_candidate, oldest_global_transient_object_candidate,
-        remove_map_entry, remove_segment_entry, remove_stale_queue_entries, session_cache_size,
-        take_expired_transient_objects, total_sessions_cache_size, unprotected_unreferenced_map_ids,
+        remove_map_entry, remove_obsolete_deferred_heads, remove_segment_entry, remove_stale_queue_entries,
+        session_cache_size, take_expired_transient_objects, unprotected_unreferenced_map_ids,
     },
     CacheDeletionBatch, GarbageCollectionPolicy, GarbageCollectionReport, HlsCacheCapacityReclaimOutcome,
     HlsCacheCapacityReclaimRequest, HlsGarbageCollector, HlsSegmentCache, HlsSession, HlsSessionHandle,
@@ -41,6 +41,8 @@ impl HlsGarbageCollector {
         self.retry_pending_cache_deletions(&mut report, &mut pending_attempt_budget).await;
         deletion_attempt_budget =
             deletion_attempt_budget.saturating_sub(pending_attempts_before.saturating_sub(pending_attempt_budget));
+        let sessions = self.sessions.list_sessions().await;
+        self.cleanup_revisions(&sessions, &mut report).await?;
         let after_pending = self.cache.capacity_usage(&request.proxy_session_id).await?;
         let required_session_bytes = request
             .required_session_bytes
@@ -73,6 +75,30 @@ impl HlsGarbageCollector {
                         Some(&request.target_path),
                         release_through,
                     );
+                    let head = session.segments.first_key_value();
+                    let reason = match head {
+                        None => "no-candidates",
+                        Some((seq, _)) if protected.segment_proxy_seqs.contains(seq) => "protected",
+                        Some((_, entry)) => match entry.status {
+                            super::SegmentCacheStatus::Ready { .. } => "reclaimable",
+                            super::SegmentCacheStatus::CapacityDeferred { .. } if entry.origin_fetch_ref.is_some() => {
+                                "deferred-origin-binding-retained"
+                            }
+                            super::SegmentCacheStatus::CapacityDeferred { .. } => "obsolete-deferred-head",
+                            super::SegmentCacheStatus::Discovered => "not-cached",
+                            super::SegmentCacheStatus::Queued { .. } => "queued",
+                            super::SegmentCacheStatus::Fetching { .. } => "active-fetch",
+                            super::SegmentCacheStatus::FailedRetryable { .. }
+                            | super::SegmentCacheStatus::FailedPermanent { .. } => "failed-retention",
+                            super::SegmentCacheStatus::Expired => "expired-retention",
+                        },
+                    };
+                    log::debug!(
+                        "HLS capacity FIFO: proxy_session={} head={:?} status={:?} blocker={reason}",
+                        crate::safe_proxy_session_id(&session.proxy_session_id),
+                        head.map(|(seq, _)| *seq),
+                        head.map(|(_, entry)| &entry.status)
+                    );
                     let evidence = capacity_reclamation_evidence(&session, &protected);
                     protected_working_set_bytes = evidence.protected_working_set_bytes;
                     reclaimable_bytes = evidence.reclaimable_bytes;
@@ -95,8 +121,8 @@ impl HlsGarbageCollector {
                         let _ = session.render_and_store_manifest(rendered_at_ms);
                     }
                 } else {
-                    protected_working_set_bytes = after_pending.session_bytes;
                     session_lock_busy = true;
+                    log::debug!("HLS capacity selection: proxy_session={} outcome=lock-conflict protected_working_set_known=false", crate::safe_proxy_session_id(&request.proxy_session_id));
                 }
                 drop(lease_guard);
                 if session_lock_busy {
@@ -112,22 +138,15 @@ impl HlsGarbageCollector {
             }
         }
 
+        self.cleanup_revisions(&sessions, &mut report).await?;
         let after_session = self.cache.capacity_usage(&request.proxy_session_id).await?;
         let remaining_session_bytes = request
             .required_session_bytes
             .saturating_sub(before.session_bytes.saturating_sub(after_session.session_bytes));
-        if remaining_session_bytes > 0 {
-            return Ok(HlsCacheCapacityReclaimOutcome {
-                reclaimed_session_bytes: before.session_bytes.saturating_sub(after_session.session_bytes),
-                reclaimed_global_bytes: before.global_bytes.saturating_sub(after_session.global_bytes),
-                protected_working_set_bytes,
-                reclaimable_bytes,
-            });
-        }
         let required_global_bytes = request
             .required_global_bytes
             .saturating_sub(before.global_bytes.saturating_sub(after_session.global_bytes));
-        if required_global_bytes > 0 {
+        if remaining_session_bytes == 0 && required_global_bytes > 0 {
             let sessions = self.sessions.list_sessions().await;
             let mut deletions = self.reserve_cache_deletion_batch();
             self.collect_projected_global_reclamation(
@@ -139,15 +158,38 @@ impl HlsGarbageCollector {
             )
             .await;
             deletions.execute_prioritized(&self.cache, &mut report, &mut deletion_attempt_budget).await;
+            self.cleanup_revisions(&sessions, &mut report).await?;
         }
 
         let after = self.cache.capacity_usage(&request.proxy_session_id).await?;
+        if log::log_enabled!(log::Level::Debug) {
+            self.log_capacity_inventory(&request.proxy_session_id, &report).await;
+        }
         Ok(HlsCacheCapacityReclaimOutcome {
             reclaimed_session_bytes: before.session_bytes.saturating_sub(after.session_bytes),
             reclaimed_global_bytes: before.global_bytes.saturating_sub(after.global_bytes),
             protected_working_set_bytes,
             reclaimable_bytes,
         })
+    }
+
+    /// Diagnostic I/O cannot change the result of capacity reclamation.
+    pub(super) async fn log_capacity_inventory(&self, id: &crate::ProxySessionId, report: &GarbageCollectionReport) {
+        let revision_bytes = match self.cache.session_revision_disk_bytes(id).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log::debug!(
+                    "HLS capacity inventory unavailable: proxy_session={} error_kind={:?}",
+                    crate::safe_proxy_session_id(id),
+                    error.kind()
+                );
+                return;
+            }
+        };
+        let reserved_bytes = self.cache.remaining_revision_bytes(id);
+        log::debug!("HLS capacity inventory: proxy_session={} revision_bytes={revision_bytes} remaining_reserved_bytes={reserved_bytes} revision_deletes_planned={} revision_deletes_succeeded={} revision_deletes_failed={} revision_reclaimed_bytes={}",
+            crate::safe_proxy_session_id(id), report.revision_deletions_planned,
+            report.revision_deletions_succeeded, report.revision_deletions_failed, report.revision_bytes_reclaimed);
     }
 
     pub(super) fn collect_session_deletions(
@@ -161,6 +203,7 @@ impl HlsGarbageCollector {
         report.stale_queue_entries_removed =
             report.stale_queue_entries_removed.saturating_add(remove_stale_queue_entries(session));
 
+        remove_obsolete_deferred_heads(session, cache, None, None, deletions);
         let transient_before = session.transient.resources.len();
         let protected = protected_set_for_cache_reclamation(session, cache, None, None);
         session.transient.prune_expired_except(now_ms, &protected.key_resource_ids);
@@ -195,7 +238,8 @@ impl HlsGarbageCollector {
             }
         }
 
-        let mut session_size = session_cache_size(session);
+        let mut session_size =
+            cache.accounted_session_bytes(&session.proxy_session_id).max(session_cache_size(session));
         while session_size > policy.cache_bytes_per_session && deletions.has_capacity() {
             let protected = protected_set_for_cache_reclamation(session, cache, None, None);
             let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.transient_object_ids)
@@ -247,7 +291,7 @@ impl HlsGarbageCollector {
         report: &mut GarbageCollectionReport,
         deletions: &mut CacheDeletionBatch,
     ) {
-        let mut total_size = total_sessions_cache_size(sessions).await;
+        let mut total_size = self.cache.accounted_global_bytes();
         let mut transient_readiness_advanced = HashSet::new();
         let mut skipped_transient_sessions = HashSet::new();
 

@@ -662,7 +662,7 @@ async fn unknown_body_reserves_more_disk_before_growing_its_raw_spool() -> std::
     let mut observed = prepared.observed.lock().await;
     observed.limit = 8;
     observed.observe(b"segment-body").await?;
-    assert_eq!(observed.additional_reservations.len(), 1);
+    assert_eq!(observed.limit, 16);
     observed.finish().await?;
     let metadata =
         prepared.revision.revision().wait_complete(tokio::time::Instant::now() + Duration::from_secs(1)).await?;

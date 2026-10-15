@@ -42,6 +42,8 @@ async fn abandoned_capacity_reservation_rolls_back_before_filesystem_mutation() 
         session_component: "session".to_string(),
         replacement: None,
         filesystem_mutation_started: false,
+        write_budget: None,
+        transferred_bytes: 0,
         capacity: Arc::clone(&cache.capacity),
         changed: Arc::clone(&cache.capacity_changed),
     };
@@ -79,6 +81,8 @@ async fn abandoned_started_filesystem_mutation_invalidates_capacity_snapshot() {
         session_component: "session".to_string(),
         replacement: None,
         filesystem_mutation_started: false,
+        write_budget: None,
+        transferred_bytes: 0,
         capacity: Arc::clone(&cache.capacity),
         changed: Arc::clone(&cache.capacity_changed),
     };
@@ -131,22 +135,6 @@ async fn concurrent_commit_cannot_consume_bytes_reclaimed_for_an_in_flight_write
     cache.write_bytes_and_commit(&second_resident, b"0123456789").await.expect("second resident commits");
     cache.update_cache_limits(25, 25);
 
-    let first_staged = cache
-        .stage_temp_with_deadline(
-            &first_target,
-            &b"abcdefghij"[..],
-            tokio::time::Instant::now() + Duration::from_secs(5),
-        )
-        .await
-        .expect("first target stages");
-    let second_staged = cache
-        .stage_temp_with_deadline(
-            &second_target,
-            &b"klmnopqrst"[..],
-            tokio::time::Instant::now() + Duration::from_secs(5),
-        )
-        .await
-        .expect("second target stages");
     let (first_reclaimed_tx, first_reclaimed_rx) = oneshot::channel();
     let (resume_first_tx, resume_first_rx) = oneshot::channel();
     let reclaimer = Arc::new(PausingCapacityReclaimer {
@@ -158,11 +146,13 @@ async fn concurrent_commit_cannot_consume_bytes_reclaimed_for_an_in_flight_write
     cache.install_capacity_reclaimer(&reclaimer);
 
     let first_cache = Arc::clone(&cache);
-    let first_task = tokio::spawn(async move { first_cache.commit_staged(&first_target, first_staged).await });
+    let first_task =
+        tokio::spawn(async move { first_cache.write_bytes_and_commit(&first_target, b"abcdefghij").await });
     first_reclaimed_rx.await.expect("first reclamation pauses after deleting one resident");
 
     let second_cache = Arc::clone(&cache);
-    let second_task = tokio::spawn(async move { second_cache.commit_staged(&second_target, second_staged).await });
+    let second_task =
+        tokio::spawn(async move { second_cache.write_bytes_and_commit(&second_target, b"klmnopqrst").await });
     for _ in 0..100 {
         tokio::task::yield_now().await;
     }

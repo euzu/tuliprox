@@ -290,6 +290,12 @@ For the configuration reference, see [Shared HLS Configuration](./shared-hls-con
 For the shared session, access lease, and transient delivery state machines, see
 [HLS Cache State Machines](./hls-cache-state-machine.md).
 
+The session and global byte limits cover committed objects, immutable revisions, and outstanding write reservations.
+Staging and postprocessing grow their budgets before writing additional bytes. Committing an object consumes its own
+reservation; capacity released by a completed or aborted write wakes deferred downloads. Both targeted reclamation
+and periodic GC retire obsolete, unpinned revisions. See
+[capacity diagnostics](./shared-hls-troubleshooting.md#symptom-downloads-wait-for-local-cache-capacity).
+
 ```yaml
 reverse_proxy:
   hls_cache:

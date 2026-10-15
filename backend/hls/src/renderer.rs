@@ -273,7 +273,7 @@ fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: 
             }
             window.push(seq);
         }
-        if window.len() < MIN_VISIBLE_SEGMENTS {
+        if window.len() < minimum_visible_segments {
             return None;
         }
         // Fast-start state lives as long as the session, so live slides render here too.

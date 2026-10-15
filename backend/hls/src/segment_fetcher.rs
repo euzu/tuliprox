@@ -104,6 +104,7 @@ mod origin;
 mod policy;
 mod scheduler;
 mod startup_fill;
+mod startup_write;
 mod switch_staging;
 
 #[cfg(test)]

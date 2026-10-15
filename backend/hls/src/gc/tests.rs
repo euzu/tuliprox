@@ -251,5 +251,6 @@ mod playlist;
 mod policy;
 mod publication;
 mod recovery;
+mod revisions;
 mod streaming;
 mod transport;

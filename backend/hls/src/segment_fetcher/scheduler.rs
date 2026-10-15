@@ -107,7 +107,7 @@ pub(super) enum SegmentRetryWake {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum CapacityRetryAdmission {
+pub(super) enum CapacityRetryAdmission {
     Ready,
     BindingExpired,
     LocalIoFailure,
@@ -463,7 +463,7 @@ impl HlsSegmentWorkerPool {
     }
 }
 
-async fn wait_for_capacity_retry_admission(
+pub(super) async fn wait_for_capacity_retry_admission(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
     mut revision: HlsCacheCapacityRevision,
@@ -486,7 +486,9 @@ async fn wait_for_capacity_retry_admission(
         if !binding_current {
             return CapacityRetryAdmission::BindingExpired;
         }
-        match context.segment_cache.ensure_projected_write_capacity(&snapshot.cache_key, projected_write_bytes).await {
+        let admission =
+            context.segment_cache.ensure_revision_peak_capacity(&snapshot.cache_key, projected_write_bytes).await;
+        match admission {
             Ok(()) => return CapacityRetryAdmission::Ready,
             Err(error) => {
                 let Some(capacity) = super::super::cache::hls_cache_capacity_from_io(&error) else {

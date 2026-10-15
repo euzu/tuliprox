@@ -1,11 +1,11 @@
 use super::{
-    ffmpeg_identity_version, probe::adopt_repair_output, registry::repair_object_metadata_key,
-    safe_hls_access_lease_id, safe_proxy_session_id, sha256_file, window::RepairStatus, CachedSegmentMetadata,
-    HlsAccessLeaseId, HlsCacheObjectKey, HlsCorruptSegmentWatchdogManager, HlsPostProcessingDeadline,
-    HlsRepairObjectMetadata, HlsRepairObjectMetadataKey, HlsRepairPrewarmGuard, HlsRepairRenderedObjectId,
-    HlsRepairWindowRegistry, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
-    HlsSegmentRepairRuntime, HlsSegmentRepairStats, HlsSelectedRepairCandidate, ProxySessionId, RepairIdentity,
-    SegmentRepairMetadata, COMMAND_VERSION, REPAIR_METADATA_MAX_ENTRIES, REPAIR_OBJECT_METADATA_MAX_ENTRIES,
+    ffmpeg_identity_version, registry::repair_object_metadata_key, safe_hls_access_lease_id, safe_proxy_session_id,
+    sha256_file, window::RepairStatus, CachedSegmentMetadata, HlsAccessLeaseId, HlsCacheObjectKey,
+    HlsCorruptSegmentWatchdogManager, HlsPostProcessingDeadline, HlsRepairObjectMetadata, HlsRepairObjectMetadataKey,
+    HlsRepairPrewarmGuard, HlsRepairRenderedObjectId, HlsRepairWindowRegistry, HlsSegmentCache,
+    HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairRuntime, HlsSegmentRepairStats,
+    HlsSelectedRepairCandidate, ProxySessionId, RepairIdentity, SegmentRepairMetadata, COMMAND_VERSION,
+    REPAIR_METADATA_MAX_ENTRIES, REPAIR_OBJECT_METADATA_MAX_ENTRIES,
 };
 use arc_swap::ArcSwap;
 use log::debug;
@@ -16,7 +16,6 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    fs,
     io::AsyncRead,
     sync::{Mutex, RwLock, Semaphore},
 };
@@ -157,7 +156,13 @@ impl HlsSegmentRepairManager {
             let segment_cache = Arc::clone(&segment_cache);
             let guard = guard.clone();
             tokio::spawn(async move {
-                let selection = HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard: guard.as_ref() };
+                let selection = HlsSelectedRepairCandidate {
+                    mode,
+                    runtime,
+                    candidate,
+                    prewarm_guard: guard.as_ref(),
+                    write_budget: None,
+                };
                 if let Err(err) =
                     manager.repair_ready_cache_hit_with_candidate(&segment_cache, &key, context, selection).await
                 {
@@ -210,7 +215,23 @@ impl HlsSegmentRepairManager {
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
-        let raw = segment_cache.stage_temp_with_deadline(key, reader, deadline).await?;
+        self.commit_origin_response_with_budget(segment_cache, key, reader, deadline, context, None).await
+    }
+
+    pub(crate) async fn commit_origin_response_with_budget<K, R>(
+        &self,
+        segment_cache: &HlsSegmentCache,
+        key: &K,
+        reader: R,
+        deadline: tokio::time::Instant,
+        context: HlsSegmentRepairObjectContext,
+        budget: Option<Arc<crate::HlsRevisionDiskReservation>>,
+    ) -> io::Result<CachedSegmentMetadata>
+    where
+        K: HlsCacheObjectKey,
+        R: AsyncRead + Unpin,
+    {
+        let raw = segment_cache.stage_temp_with_budget(key, reader, deadline, budget).await?;
         let runtime = self.runtime.load_full();
         if !runtime.postprocessing_enabled() {
             return segment_cache.commit_staged(key, raw).await;
@@ -229,6 +250,16 @@ impl HlsSegmentRepairManager {
     where
         K: HlsCacheObjectKey,
     {
+        self.repair_ready_cache_hit_with_budget(segment_cache, key, context, None).await
+    }
+
+    pub(crate) async fn repair_ready_cache_hit_with_budget<K: HlsCacheObjectKey>(
+        &self,
+        segment_cache: &HlsSegmentCache,
+        key: &K,
+        context: HlsSegmentRepairObjectContext,
+        write_budget: Option<Arc<crate::HlsRevisionDiskReservation>>,
+    ) -> io::Result<Option<CachedSegmentMetadata>> {
         let Some((mode, runtime, candidate)) = self.try_select_or_join_candidate(&context).await else {
             return Ok(None);
         };
@@ -236,7 +267,7 @@ impl HlsSegmentRepairManager {
             segment_cache,
             key,
             context,
-            HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard: None },
+            HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard: None, write_budget },
         )
         .await
     }
@@ -252,7 +283,7 @@ impl HlsSegmentRepairManager {
     where
         K: HlsCacheObjectKey,
     {
-        let HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard } = selection;
+        let HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard, write_budget } = selection;
         let Some(metadata) = segment_cache.metadata(key).await? else {
             return Ok(None);
         };
@@ -296,10 +327,19 @@ impl HlsSegmentRepairManager {
                     Ok(None)
                 } else {
                     let deadline = HlsPostProcessingDeadline::new(runtime.postprocess_timeout_ms());
-                    if let Some(fixed_path) = self
+                    if let Some(staged) = self
                         .repair_file(
-                            &current_metadata.path,
-                            current_metadata.size,
+                            super::processing::RepairFileSource {
+                                cache: segment_cache,
+                                path: &current_metadata.path,
+                                size: current_metadata.size,
+                                disk_budget: write_budget.as_ref().map(|reservation| super::RepairDiskBudget {
+                                    cache: segment_cache,
+                                    reservation,
+                                    session: &context.proxy_session_id,
+                                    retained_staging_bytes: 0,
+                                }),
+                            },
                             &identity,
                             &context,
                             runtime.clone(),
@@ -317,11 +357,9 @@ impl HlsSegmentRepairManager {
                             None => None,
                         };
                         if !candidate_current || latest_hash.as_deref() != Some(current_hash.as_str()) {
-                            let _ = fs::remove_file(&fixed_path).await;
+                            segment_cache.remove_staged(staged).await?;
                             Ok(None)
                         } else {
-                            let fixed_size = fs::metadata(&fixed_path).await?.len();
-                            let staged = adopt_repair_output(segment_cache, fixed_path, fixed_size).await?;
                             let committed = segment_cache.commit_staged(key, staged).await?;
                             self.record_metadata(
                                 identity.clone(),

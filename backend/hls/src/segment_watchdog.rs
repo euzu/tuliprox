@@ -275,8 +275,16 @@ impl HlsCorruptSegmentWatchdogManager {
             return segment_cache.commit_staged(key, raw).await;
         }
         let fixed_path = watchdog_output_path(&raw.path);
-        if let Err(reason) = sanitize_corrupt_segment(&raw.path, &fixed_path, deadline).await {
-            cleanup_watchdog_output(&fixed_path).await;
+        let mut fixed =
+            segment_cache.adopt_staged_file(fixed_path.clone(), 0)?.with_write_budget(raw.write_budget.clone())?;
+        let disk_budget = raw.write_budget.as_ref().map(|reservation| crate::segment_repair::RepairDiskBudget {
+            cache: segment_cache,
+            reservation,
+            session: &context.proxy_session_id,
+            retained_staging_bytes: raw.size,
+        });
+        if let Err(reason) = sanitize_corrupt_segment(&raw.path, &fixed_path, deadline, &fixed, disk_budget).await {
+            segment_cache.remove_staged(fixed).await?;
             let status = if reason == "timeout" {
                 HlsCorruptSegmentWatchdogStatus::Timeout
             } else {
@@ -289,7 +297,7 @@ impl HlsCorruptSegmentWatchdogManager {
             Ok(metadata) => metadata.len(),
             Err(err) => {
                 let reason = format!("metadata_failed:{err}");
-                cleanup_watchdog_output(&fixed_path).await;
+                segment_cache.remove_staged(fixed).await?;
                 self.record_metadata(
                     identity,
                     HlsCorruptSegmentWatchdogStatus::ValidationFailed { reason: reason.clone() },
@@ -304,7 +312,7 @@ impl HlsCorruptSegmentWatchdogManager {
         let fixed_detect = match detect_packet_corrupt(&fixed_path, deadline).await {
             Ok(count) => count,
             Err(reason) if reason == "timeout" => {
-                cleanup_watchdog_output(&fixed_path).await;
+                segment_cache.remove_staged(fixed).await?;
                 self.record_metadata(
                     identity,
                     HlsCorruptSegmentWatchdogStatus::Timeout,
@@ -316,7 +324,7 @@ impl HlsCorruptSegmentWatchdogManager {
                 return segment_cache.commit_staged(key, raw).await;
             }
             Err(reason) => {
-                cleanup_watchdog_output(&fixed_path).await;
+                segment_cache.remove_staged(fixed).await?;
                 self.record_metadata(
                     identity,
                     HlsCorruptSegmentWatchdogStatus::ValidationFailed { reason: reason.clone() },
@@ -339,7 +347,7 @@ impl HlsCorruptSegmentWatchdogManager {
         )
         .await;
         if let Err(reason) = validation {
-            cleanup_watchdog_output(&fixed_path).await;
+            segment_cache.remove_staged(fixed).await?;
             self.record_metadata(
                 identity,
                 HlsCorruptSegmentWatchdogStatus::ValidationFailed { reason: reason.clone() },
@@ -351,7 +359,8 @@ impl HlsCorruptSegmentWatchdogManager {
             return segment_cache.commit_staged(key, raw).await;
         }
         let raw_size = raw.size;
-        let committed = match commit_watchdog_output_or_raw(segment_cache, key, raw, fixed_path, fixed_size).await? {
+        fixed.size = fixed_size;
+        let committed = match commit_watchdog_staged_or_raw(segment_cache, key, raw, Ok(fixed)).await? {
             HlsWatchdogCommitOutcome::Sanitized(committed) => committed,
             HlsWatchdogCommitOutcome::RawFallback(committed) => return Ok(committed),
         };
@@ -485,40 +494,40 @@ async fn sanitize_corrupt_segment(
     input_path: &Path,
     output_path: &Path,
     deadline: &HlsPostProcessingDeadline,
+    staged: &StagedCacheObject,
+    disk_budget: Option<crate::segment_repair::RepairDiskBudget<'_>>,
 ) -> Result<(), String> {
     let input = input_path.to_str().ok_or_else(|| "invalid_input_path".to_string())?;
     let output = output_path.to_str().ok_or_else(|| "invalid_output_path".to_string())?;
-    run_command_with_deadline(
-        "ffmpeg",
-        &[
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-fflags",
-            "+discardcorrupt",
-            "-copyts",
-            "-i",
-            input,
-            "-map",
-            "0",
-            "-c",
-            "copy",
-            "-mpegts_flags",
-            "+resend_headers",
-            "-mpegts_copyts",
-            "1",
-            "-muxpreload",
-            "0",
-            "-muxdelay",
-            "0",
-            "-f",
-            "mpegts",
-            output,
-        ],
-        deadline,
-    )
-    .await
-    .map(|_| ())
+    let args = [
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-fflags",
+        "+discardcorrupt",
+        "-copyts",
+        "-i",
+        input,
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-mpegts_flags",
+        "+resend_headers",
+        "-mpegts_copyts",
+        "1",
+        "-muxpreload",
+        "0",
+        "-muxdelay",
+        "0",
+        "-f",
+        "mpegts",
+        output,
+    ];
+    if let Some(budget) = disk_budget {
+        return crate::segment_repair::run_reserved_remux(&args[..args.len() - 1], staged, budget, deadline).await;
+    }
+    run_command_with_deadline("ffmpeg", &args, deadline).await.map(|_| ())
 }
 
 async fn validate_sanitized_segment(
@@ -661,6 +670,7 @@ fn watchdog_output_path(input_path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+#[cfg(test)]
 async fn cleanup_watchdog_output(path: &Path) {
     match fs::remove_file(path).await {
         Ok(()) => {}
@@ -669,6 +679,7 @@ async fn cleanup_watchdog_output(path: &Path) {
     }
 }
 
+#[cfg(test)]
 async fn adopt_watchdog_output(
     segment_cache: &HlsSegmentCache,
     path: PathBuf,
@@ -683,6 +694,7 @@ async fn adopt_watchdog_output(
     }
 }
 
+#[cfg(test)]
 async fn commit_watchdog_output_or_raw<K>(
     segment_cache: &HlsSegmentCache,
     key: &K,
@@ -693,23 +705,33 @@ async fn commit_watchdog_output_or_raw<K>(
 where
     K: HlsCacheObjectKey,
 {
-    let fixed = match adopt_watchdog_output(segment_cache, fixed_path, fixed_size).await {
+    let fixed = adopt_watchdog_output(segment_cache, fixed_path, fixed_size).await;
+    commit_watchdog_staged_or_raw(segment_cache, key, raw, fixed).await
+}
+
+async fn commit_watchdog_staged_or_raw<K: HlsCacheObjectKey>(
+    segment_cache: &HlsSegmentCache,
+    key: &K,
+    raw: StagedCacheObject,
+    fixed: io::Result<StagedCacheObject>,
+) -> io::Result<HlsWatchdogCommitOutcome> {
+    let fixed = match fixed.and_then(|fixed| fixed.with_write_budget(raw.write_budget.clone())) {
         Ok(fixed) => fixed,
         Err(error) => {
             warn!("HLS watchdog fixed staging adoption failed; committing raw fallback: error_kind={:?}", error.kind());
             return segment_cache.commit_staged(key, raw).await.map(HlsWatchdogCommitOutcome::RawFallback);
         }
     };
+    let fixed_cleanup = fixed.clone();
     let committed = match segment_cache.commit_staged(key, fixed).await {
         Ok(committed) => committed,
         Err(error) => {
             warn!("HLS watchdog fixed staging commit failed; committing raw fallback: error_kind={:?}", error.kind());
+            segment_cache.remove_staged(fixed_cleanup).await?;
             return segment_cache.commit_staged(key, raw).await.map(HlsWatchdogCommitOutcome::RawFallback);
         }
     };
-    if let Err(error) = segment_cache.remove_staged(raw).await {
-        warn!("HLS watchdog raw staging cleanup deferred: error_kind={:?}", error.kind());
-    }
+    segment_cache.remove_staged(raw).await?;
     Ok(HlsWatchdogCommitOutcome::Sanitized(committed))
 }
 
@@ -763,8 +785,8 @@ fn debug_watchdog_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_watchdog_output_or_raw, count_packet_corrupt_events, parse_packet_corrupt_dts,
-        unsupported_sanitize_extension, HlsWatchdogCommitOutcome,
+        commit_watchdog_output_or_raw, commit_watchdog_staged_or_raw, count_packet_corrupt_events,
+        parse_packet_corrupt_dts, unsupported_sanitize_extension, HlsWatchdogCommitOutcome,
     };
     use crate::{HlsSegmentCache, ProxySessionId, SegmentCacheKey};
     use std::time::Duration;
@@ -848,5 +870,34 @@ Last message repeated 3 times
         };
         assert_eq!(tokio::fs::read(committed.path).await.expect("committed fallback reads"), b"raw");
         assert!(!fixed_path.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_raw_staging_cleanup_aborts_postprocessing_before_further_publication() -> std::io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let cache = HlsSegmentCache::with_cache_path(directory.path());
+        cache.update_cache_limits(40, 40);
+        let key = SegmentCacheKey::new(ProxySessionId("cleanup-failure".into()), 1, "ts");
+        let budget = std::sync::Arc::new(cache.reserve_revision_peak(&key, 30).await?);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let raw = cache.stage_temp_with_budget(&key, &[1; 10][..], deadline, Some(budget.clone())).await?;
+        let fixed = cache.stage_temp_with_budget(&key, &[2; 20][..], deadline, Some(budget.clone())).await?;
+        cache.fail_next_cache_deletes(raw.path.clone(), 1);
+
+        let error = commit_watchdog_staged_or_raw(&cache, &key, raw.clone(), Ok(fixed))
+            .await
+            .err()
+            .expect("failed temp removal must stop the owning startup transaction");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(tokio::fs::read(&raw.path).await?, [1; 10]);
+        assert_eq!(cache.capacity_usage(key.proxy_session_id()).await?.session_bytes, 20);
+        assert_eq!(cache.remaining_revision_bytes(key.proxy_session_id()), 10);
+        assert_eq!(tokio::fs::read(cache.object_path(&key)).await?, [2; 20]);
+        cache.remove_staged(raw).await?;
+        drop(budget);
+        assert_eq!(cache.remaining_revision_bytes(key.proxy_session_id()), 0);
+        assert!(!cache.has_active_temp_files());
+        Ok(())
     }
 }

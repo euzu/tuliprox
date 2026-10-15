@@ -107,6 +107,9 @@ impl HlsProxyManager {
         ));
         segment_cache.install_capacity_reclaimer(&gc);
         gc.install_access_leases(&access_leases);
+        let revision_store = Arc::new(super::super::SegmentRevisionStore::default());
+        gc.install_revision_store(&revision_store);
+        segment_cache.install_revision_metrics(&metrics);
         let availability_reevaluations = Arc::new(HlsAvailabilityReevaluationCoordinator::default());
         Self {
             sessions,
@@ -126,7 +129,7 @@ impl HlsProxyManager {
                 Some(Arc::clone(&availability_reevaluations)),
             )),
             progressive_budget: super::super::ProgressiveBudgetManager::new(runtime_config.startup.clone()),
-            revision_store: Arc::new(super::super::SegmentRevisionStore::default()),
+            revision_store,
             revision_reconciliation_pending: AtomicBool::new(true),
             runtime_config: ArcSwap::from_pointee(runtime_config),
             transient_resources: Arc::new(TransientResourceStore::new()),

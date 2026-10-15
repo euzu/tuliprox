@@ -1,9 +1,9 @@
 use super::{
     diagnostics::{decide_repair, SegmentProbeStreamType},
     window::{RepairStatus, RepairVideoCodec},
-    HlsSegmentCache, RepairRemuxDroppedStream, RepairRemuxStreamSelection, SegmentProbe, SegmentProbeStream,
-    StagedCacheObject, WarningCounters,
+    RepairRemuxDroppedStream, RepairRemuxStreamSelection, SegmentProbe, SegmentProbeStream, WarningCounters,
 };
+#[cfg(test)]
 use log::warn;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -12,7 +12,9 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
 };
-use tokio::{fs, fs::File, io::AsyncReadExt};
+#[cfg(test)]
+use tokio::fs;
+use tokio::{fs::File, io::AsyncReadExt};
 use tuliprox_core::model::HlsSegmentRepairConfig;
 
 pub(super) fn parse_probe(json: &str, warnings: WarningCounters) -> Result<SegmentProbe, String> {
@@ -240,25 +242,12 @@ pub(super) fn repair_output_path(raw_path: &Path) -> PathBuf {
     raw_path.with_file_name(format!("{file_name}.repair.tmp.{suffix:016x}"))
 }
 
+#[cfg(test)]
 pub(super) async fn cleanup_repair_output(path: &Path) {
     match fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => warn!("HLS repair fixed staging cleanup deferred: error_kind={:?}", error.kind()),
-    }
-}
-
-pub(super) async fn adopt_repair_output(
-    segment_cache: &HlsSegmentCache,
-    path: PathBuf,
-    size: u64,
-) -> io::Result<StagedCacheObject> {
-    match segment_cache.adopt_staged_file(path.clone(), size) {
-        Ok(staged) => Ok(staged),
-        Err(error) => {
-            cleanup_repair_output(&path).await;
-            Err(error)
-        }
     }
 }
 
@@ -272,6 +261,21 @@ impl fmt::Display for RepairStatus {
             Self::Timeout => f.write_str("timeout"),
             Self::RemuxFailed => f.write_str("remux_failed"),
             Self::ValidationFailed => f.write_str("validation_failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn adopt_repair_output(
+    segment_cache: &super::HlsSegmentCache,
+    path: PathBuf,
+    size: u64,
+) -> io::Result<super::StagedCacheObject> {
+    match segment_cache.adopt_staged_file(path.clone(), size) {
+        Ok(staged) => Ok(staged),
+        Err(error) => {
+            cleanup_repair_output(&path).await;
+            Err(error)
         }
     }
 }

@@ -34,7 +34,20 @@ impl StagedCacheObject {
         cache_path_generation: Arc<CachePathGeneration>,
         registration: Arc<ActiveTempFileRegistration>,
     ) -> Self {
-        Self { path, size, cache_path_generation, _registration: registration }
+        Self {
+            cleanup: Arc::new(super::StagedFileCleanup {
+                path: path.clone(),
+                registration: Arc::clone(&registration),
+                budget: None,
+                completed: std::sync::atomic::AtomicBool::new(false),
+                writer: std::sync::Mutex::new(None),
+            }),
+            path,
+            size,
+            cache_path_generation,
+            _registration: registration,
+            write_budget: None,
+        }
     }
 }
 
@@ -118,9 +131,10 @@ impl HlsSegmentCache {
         G: Send + 'static,
     {
         let staged_path = staged.path.clone();
+        let cleanup = Arc::clone(&staged.cleanup);
         let result = self.commit_staged_inner(key, staged, guard).await;
         if result.is_err() {
-            remove_temp_file_after_error(&staged_path, "commit").await;
+            cleanup.completed.store(remove_temp_file_after_error(&staged_path, "commit").await, Ordering::Release);
         }
         result
     }
@@ -164,13 +178,14 @@ impl HlsSegmentCache {
             };
             fs::create_dir_all(parent).await?;
             let reservation = self
-                .prepare_capacity_replacement(
+                .prepare_capacity_replacement_with_budget(
                     &cache_path.path,
                     &final_path,
                     key.session_path_component(),
                     staged.size,
                     self.max_cache_bytes.load(Ordering::Acquire),
                     self.max_session_bytes.load(Ordering::Acquire),
+                    staged.write_budget.clone(),
                 )
                 .await;
             let reservation = match reservation {
@@ -265,18 +280,25 @@ impl HlsSegmentCache {
             drop(admission_gate);
             let staged_path = staged.path.clone();
             let committed_size = staged.size;
+            #[cfg(test)]
+            let checkpoint = self.take_startup_write_checkpoint(super::StartupWritePhase::BeforeCacheRename);
             // Once spawned, the owned mutation deliberately outlives cancellation of the requesting future. This
             // keeps the path lease, temp registration, and accounting reservation alive until the atomic filesystem
             // operation has a definite result. A runtime shutdown may abort the task, but no cache work can follow
             // that shutdown; panic/abort drops the reservation and forces accounting rollback/invalidation.
             return run_owned_cache_operation(Arc::clone(&self.owned_operation_permits), "commit", async move {
                 let mut reservation = reservation;
+                #[cfg(test)]
+                if let Some(checkpoint) = checkpoint {
+                    checkpoint.wait().await?;
+                }
                 reservation.mark_filesystem_mutation_started();
                 if let Err(err) = fs::rename(&staged_path, &final_path).await {
                     remove_temp_file_after_error(&staged_path, "rename").await;
                     return Err(err);
                 }
                 reservation.finish_replacement();
+                staged.cleanup.completed.store(true, Ordering::Release);
                 drop(staged);
                 drop(commit_gate);
                 Ok((CachedSegmentMetadata { path: final_path, size: committed_size }, guard))
@@ -286,11 +308,17 @@ impl HlsSegmentCache {
     }
 
     pub async fn remove_staged(&self, staged: StagedCacheObject) -> io::Result<()> {
+        staged.finish_writer().await;
+        #[cfg(test)]
+        self.check_cache_delete_test_failure(&staged.path)?;
         let result = match fs::remove_file(&staged.path).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
         };
+        if result.is_ok() {
+            staged.cleanup.completed.store(true, Ordering::Release);
+        }
         drop(staged);
         result
     }
@@ -319,9 +347,27 @@ impl HlsSegmentCache {
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
+        self.stage_temp_inner_with_budget(key, reader, deadline, None).await
+    }
+
+    pub(super) async fn stage_temp_inner_with_budget<K, R>(
+        &self,
+        key: &K,
+        reader: &mut R,
+        deadline: Option<Instant>,
+        budget: Option<Arc<super::HlsRevisionDiskReservation>>,
+    ) -> io::Result<StagedCacheObject>
+    where
+        K: HlsCacheObjectKey,
+        R: AsyncRead + Unpin,
+    {
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "hls cache object write timed out"));
         }
+        let budget = match budget {
+            Some(budget) => budget,
+            None => Arc::new(self.reserve_revision_peak_reclaiming(key, 0).await?),
+        };
         let cache_path = self.cache_path_snapshot();
         self.ensure_cache_root_marker_for(&cache_path.path).await?;
         let final_path = Self::path_for_key_in(&cache_path.path, key);
@@ -330,28 +376,61 @@ impl HlsSegmentCache {
         };
         fs::create_dir_all(parent).await?;
 
-        let (temp_path, mut temp_file, registration) = self.create_temp_file(key, &cache_path).await?;
+        let (temp_path, temp_file, registration) = self.create_temp_file(key, &cache_path).await?;
+        let cleanup = StagedCacheObject::registered(
+            temp_path.clone(),
+            0,
+            Arc::clone(&cache_path.generation),
+            Arc::clone(&registration),
+        )
+        .with_write_budget(Some(Arc::clone(&budget)))?;
+        let writer = cleanup.track_writer(temp_file);
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-            drop(temp_file);
-            remove_temp_file_after_error(&temp_path, "expired-write").await;
+            cleanup.finish_writer().await;
+            cleanup
+                .cleanup
+                .completed
+                .store(remove_temp_file_after_error(&temp_path, "expired-write").await, Ordering::Release);
             return Err(io::Error::new(io::ErrorKind::TimedOut, "hls cache object write timed out"));
         }
         let copy = async {
+            let mut writer = writer.lock().await;
+            let temp_file = writer.as_mut().ok_or_else(|| io::Error::other("staging writer already closed"))?;
             let max_object_bytes = self.max_object_bytes.load(Ordering::Acquire);
             let mut limited = reader.take(max_object_bytes.saturating_add(1));
-            let size = tokio::io::copy(&mut limited, &mut temp_file).await?;
+            let mut size = 0u64;
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                let read = limited.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                let next_size = size.saturating_add(u64::try_from(read).map_err(io::Error::other)?);
+                if next_size > max_object_bytes {
+                    return Err(cache_object_limit_error(max_object_bytes));
+                }
+                // Admission precedes every filesystem write, including headerless
+                // bodies and standalone cache users without a startup transaction.
+                self.ensure_write_budget_available(key, &budget, next_size).await?;
+                temp_file.write_all(&buffer[..read]).await?;
+                size = next_size;
+            }
             if size > max_object_bytes {
                 return Err(cache_object_limit_error(max_object_bytes));
             }
             temp_file.flush().await?;
-            drop(temp_file);
+            writer.take();
             Ok::<u64, io::Error>(size)
         };
         let copy_result = if let Some(deadline) = deadline {
             if let Ok(result) = timeout_at(deadline, copy).await {
                 result
             } else {
-                remove_temp_file_after_error(&temp_path, "timed-out-write").await;
+                cleanup.finish_writer().await;
+                cleanup
+                    .cleanup
+                    .completed
+                    .store(remove_temp_file_after_error(&temp_path, "timed-out-write").await, Ordering::Release);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "hls cache object write timed out"));
             }
         } else {
@@ -359,10 +438,16 @@ impl HlsSegmentCache {
         };
         match copy_result {
             Ok(size) => {
-                Ok(StagedCacheObject::registered(temp_path, size, Arc::clone(&cache_path.generation), registration))
+                let mut staged = cleanup;
+                staged.size = size;
+                Ok(staged)
             }
             Err(err) => {
-                remove_temp_file_after_error(&temp_path, "failed-write").await;
+                cleanup.finish_writer().await;
+                cleanup
+                    .cleanup
+                    .completed
+                    .store(remove_temp_file_after_error(&temp_path, "failed-write").await, Ordering::Release);
                 Err(err)
             }
         }
@@ -411,12 +496,13 @@ impl HlsSegmentCache {
     }
 }
 
-async fn remove_temp_file_after_error(path: &Path, operation: &'static str) {
+async fn remove_temp_file_after_error(path: &Path, operation: &'static str) -> bool {
     match fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
         Err(error) => {
             warn!("HLS cache temporary file cleanup failed: operation={operation} error_kind={:?}", error.kind());
+            false
         }
     }
 }

@@ -1,9 +1,9 @@
 use super::{
-    revisions::is_revision_cache_path, staging::run_owned_cache_operation, ActiveTempFileRegistration,
-    CacheCapacityState, CacheInvalidationOutcome, CachePathDeletionReservation, CachePathGeneration, CachePathState,
-    CachedSegmentMetadata, CapacityMutationReservation, CapacityRevision, HlsCacheCapacityReclaimer,
-    HlsCacheCapacityRevision, HlsCacheCapacityUsage, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, TempFileState,
-    DEFAULT_HLS_CACHE_PATH, MAX_CONCURRENT_OWNED_CACHE_OPERATIONS, MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN,
+    staging::run_owned_cache_operation, ActiveTempFileRegistration, CacheCapacityState, CacheInvalidationOutcome,
+    CachePathDeletionReservation, CachePathGeneration, CachePathState, CachedSegmentMetadata,
+    CapacityMutationReservation, CapacityRevision, HlsCacheCapacityReclaimer, HlsCacheCapacityRevision,
+    HlsCacheCapacityUsage, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, TempFileState, DEFAULT_HLS_CACHE_PATH,
+    MAX_CONCURRENT_OWNED_CACHE_OPERATIONS, MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN,
 };
 use log::warn;
 use std::{
@@ -41,6 +41,10 @@ impl HlsSegmentCache {
             capacity_reclaimer: StdRwLock::new(None),
             capacity_admission_gate: AsyncMutex::new(()),
             owned_operation_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_OWNED_CACHE_OPERATIONS)),
+            #[cfg(test)]
+            startup_test_checkpoint: StdMutex::new(None),
+            #[cfg(test)]
+            delete_test_failures: StdMutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -123,6 +127,7 @@ impl HlsSegmentCache {
 
     pub async fn delete<K: HlsCacheObjectKey>(&self, key: &K) -> io::Result<()> {
         let cache_path = self.cache_path_snapshot();
+        self.ensure_capacity_initialized(&cache_path.path).await?;
         let path = Self::path_for_key_in(&cache_path.path, key);
         let reservation = self.begin_capacity_mutation(&cache_path.path, &path, key.session_path_component()).await;
         self.delete_with_reservation(path, reservation).await
@@ -130,6 +135,7 @@ impl HlsSegmentCache {
 
     pub async fn delete_if_inactive<K: HlsCacheObjectKey>(&self, key: &K) -> io::Result<()> {
         let cache_path = self.cache_path_snapshot();
+        self.ensure_capacity_initialized(&cache_path.path).await?;
         let path = Self::path_for_key_in(&cache_path.path, key);
         let reservation = self
             .try_begin_capacity_mutation(&cache_path.path, &path, key.session_path_component())
@@ -142,6 +148,8 @@ impl HlsSegmentCache {
         path: PathBuf,
         reservation: CapacityMutationReservation,
     ) -> io::Result<()> {
+        #[cfg(test)]
+        self.check_cache_delete_test_failure(&path)?;
         run_owned_cache_operation(Arc::clone(&self.owned_operation_permits), "delete", async move {
             let size = match fs::metadata(&path).await {
                 Ok(metadata) => metadata.len(),
@@ -190,9 +198,7 @@ impl HlsSegmentCache {
         let cache_path = self.cache_path_snapshot();
         let candidates = old_temp_files(&cache_path.path, cutoff, MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN).await?;
         let mut deleted = 0_usize;
-        let mut removed_revision = false;
         for path in candidates {
-            let revision = is_revision_cache_path(&path);
             let Some(deletion) = self.reserve_path_deletion(&path) else {
                 continue;
             };
@@ -209,14 +215,14 @@ impl HlsSegmentCache {
             match result {
                 Ok(()) => {
                     deleted = deleted.saturating_add(1);
-                    removed_revision |= revision;
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => warn!("HLS temporary cache file cleanup deferred: error_kind={:?}", error.kind()),
             }
         }
-        if removed_revision {
+        if deleted > 0 {
             drop(self.capacity_invalidation_guard());
+            self.ensure_capacity_initialized(&self.cache_path_snapshot().path).await?;
         }
         Ok(deleted)
     }
@@ -238,7 +244,8 @@ impl HlsSegmentCache {
             drop(deletion);
             result
         })
-        .await
+        .await?;
+        self.ensure_capacity_initialized(&self.cache_path_snapshot().path).await
     }
 
     pub async fn delete_orphan_session_dirs(
@@ -306,6 +313,9 @@ impl HlsSegmentCache {
                     warn!("HLS orphan session directory cleanup deferred: error_kind={:?}", err.kind());
                 }
             }
+        }
+        if removed > 0 {
+            self.ensure_capacity_initialized(&self.cache_path_snapshot().path).await?;
         }
         Ok(removed)
     }
@@ -389,7 +399,8 @@ impl HlsSegmentCache {
             drop(deletion);
             result
         })
-        .await
+        .await?;
+        self.ensure_capacity_initialized(&self.cache_path_snapshot().path).await
     }
 
     pub async fn read_rewrite_secret_fingerprint(&self) -> io::Result<Option<String>> {
@@ -422,7 +433,14 @@ impl HlsSegmentCache {
         if !state.active_files.insert(path.to_path_buf()) {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "hls cache temp path is already active"));
         }
-        Ok(Arc::new(ActiveTempFileRegistration { path: path.to_path_buf(), state: Arc::clone(&self.temp_files) }))
+        state.revision = Arc::new(CapacityRevision);
+        drop(state);
+        self.capacity_changed.notify_waiters();
+        Ok(Arc::new(ActiveTempFileRegistration {
+            path: path.to_path_buf(),
+            state: Arc::clone(&self.temp_files),
+            changed: Arc::clone(&self.capacity_changed),
+        }))
     }
 
     pub(super) fn reserve_path_deletion(&self, path: &Path) -> Option<CachePathDeletionReservation> {
