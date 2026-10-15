@@ -11,6 +11,7 @@ mod epg_group_index;
 mod epg_repository;
 mod geoip;
 mod library_repository;
+mod lineup_guide_index;
 mod live_stream_metadata_repository;
 mod m3u_playlist_iterator;
 mod m3u_repository;
@@ -47,6 +48,7 @@ pub use epg_group_index::*;
 pub use epg_repository::*;
 pub use geoip::*;
 pub use library_repository::*;
+pub use lineup_guide_index::*;
 pub use live_stream_metadata_repository::{
     load_input_live_bitrate_bps, persist_input_live_bitrate_bps, LiveBitratePersistenceOutcome,
 };

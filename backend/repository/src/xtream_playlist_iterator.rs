@@ -1,6 +1,6 @@
 use crate::{
     get_file_path_for_db_index, open_playlist_reader, user_get_bouquet_filter, xtream_get_file_path,
-    xtream_get_storage_path, LockedReceiverStream,
+    xtream_get_item_for_stream_id, xtream_get_storage_path, LockedReceiverStream, PlaylistStorageState,
 };
 use futures::{Stream, StreamExt};
 use log::error;
@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::{sync::mpsc, task};
 use tuliprox_core::{
-    model::{xtream_mapping_option_from_target_options, AppConfig, ConfigTarget, ProxyUserCredentials},
+    model::{xtream_mapping_option_from_target_options, AppConfig, Config, ConfigTarget, ProxyUserCredentials},
     utils::prepare_xtream_resource_hosts,
 };
 
@@ -26,6 +26,69 @@ pub struct XtreamPlaylistIterator {
 
 fn is_cluster_allowed_for_user(user: &ProxyUserCredentials, cluster: XtreamCluster) -> bool {
     user.allows_cluster(cluster)
+}
+
+/// Bouquet and content filter of one user for one Xtream cluster.
+///
+/// The playlist iterator and the single-item lookup below have to answer with the same item for
+/// the same user, so the per-item checks live here and both use them.
+struct XtreamItemFilter {
+    cluster: XtreamCluster,
+    filter_ids: Option<HashSet<u32>>,
+    user_filter: Option<Arc<shared::foundation::Filter>>,
+}
+
+impl XtreamItemFilter {
+    async fn new(
+        config: &Config,
+        cluster: XtreamCluster,
+        category_id: Option<u32>,
+        user: &ProxyUserCredentials,
+    ) -> Self {
+        let filter = user_get_bouquet_filter(config, &user.username, category_id, TargetType::Xtream, cluster).await;
+        // Parse bouquet filter (strings) once into u32 set to minimize per-item allocations
+        let filter_ids: Option<HashSet<u32>> = filter.as_ref().map(|set| {
+            set.iter()
+                .filter_map(|s| {
+                    s.parse::<u32>()
+                        .map_err(|e| {
+                            error!("Failed to parse bouquet filter id '{s}': {e}");
+                            e
+                        })
+                        .ok()
+                })
+                .collect()
+        });
+        Self { cluster, filter_ids, user_filter: user.t_filter.clone() }
+    }
+
+    #[inline]
+    fn matches(&self, item: &XtreamPlaylistItem) -> bool {
+        // We can't serve episodes within series
+        if self.cluster == XtreamCluster::Series
+            && !matches!(item.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
+        {
+            return false;
+        }
+
+        // category_id-Filter
+        if let Some(set) = &self.filter_ids {
+            if !set.contains(&item.category_id) {
+                return false;
+            }
+        }
+
+        // per-user content filter (plan AND user), applied post-cache
+        if let Some(filter) = &self.user_filter {
+            let pli = shared::model::PlaylistItem::from(item);
+            let provider = shared::foundation::ValueProvider { pli: &pli, match_as_ascii: false };
+            if !filter.filter(&provider) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 impl XtreamPlaylistIterator {
@@ -59,26 +122,11 @@ impl XtreamPlaylistIterator {
             let iter_lock = app_config.file_locks.read_lock(&xtream_path).await;
             let bg_lock = app_config.file_locks.read_lock(&xtream_path).await;
 
-            let filter =
-                user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
-            // Parse bouquet filter (strings) once into u32 set to minimize per-item allocations
-            let filter_ids: Option<HashSet<u32>> = filter.as_ref().map(|set| {
-                set.iter()
-                    .filter_map(|s| {
-                        s.parse::<u32>()
-                            .map_err(|e| {
-                                error!("Failed to parse bouquet filter id '{s}': {e}");
-                                e
-                            })
-                            .ok()
-                    })
-                    .collect()
-            });
+            let item_filter = XtreamItemFilter::new(&config, cluster, category_id, user).await;
 
             let xtream_path = xtream_path.clone();
             let index_path = get_file_path_for_db_index(&xtream_path);
             let (tx, rx) = mpsc::channel::<Result<(XtreamPlaylistItem, bool), TuliproxError>>(256);
-            let user_filter = user.t_filter.clone();
 
             let xtream_path_for_log = xtream_path.clone();
             let join_error_tx = tx.clone();
@@ -110,7 +158,7 @@ impl XtreamPlaylistIterator {
                         }
                     };
 
-                    if !Self::matches_filters(cluster, filter_ids.as_ref(), user_filter.as_ref(), &item) {
+                    if !item_filter.matches(&item) {
                         continue;
                     }
 
@@ -145,37 +193,53 @@ impl XtreamPlaylistIterator {
             Err(TuliproxError::Config(format!("Failed to find xtream storage for target {}", target.name)))
         }
     }
+}
 
-    fn matches_filters(
-        cluster: XtreamCluster,
-        filter_ids: Option<&HashSet<u32>>,
-        user_filter: Option<&Arc<shared::foundation::Filter>>,
-        item: &XtreamPlaylistItem,
-    ) -> bool {
-        // We can't serve episodes within series
-        if cluster == XtreamCluster::Series
-            && !matches!(item.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
+/// Single item lookup of one user's Xtream output.
+///
+/// The `HDHomeRun` tuner endpoints resolve the guide numbers they find in the target guide index
+/// with this instead of walking the playlists. It answers with the same item the iterators publish,
+/// and the bouquet and content filter of every cluster are prepared once for all the candidates of
+/// one request.
+pub struct XtreamUserItemLookup<'a> {
+    app_config: &'a Arc<AppConfig>,
+    playlists: &'a PlaylistStorageState,
+    target: &'a ConfigTarget,
+    /// Filters of the requested clusters this user may watch.
+    filters: Vec<XtreamItemFilter>,
+}
+
+impl<'a> XtreamUserItemLookup<'a> {
+    pub async fn new(
+        app_config: &'a Arc<AppConfig>,
+        playlists: &'a PlaylistStorageState,
+        target: &'a ConfigTarget,
+        user: &ProxyUserCredentials,
+        clusters: &[XtreamCluster],
+    ) -> Self {
+        let config = app_config.config.load();
+        let mut filters = Vec::with_capacity(clusters.len());
+        for &cluster in clusters {
+            if is_cluster_allowed_for_user(user, cluster) {
+                filters.push(XtreamItemFilter::new(&config, cluster, None, user).await);
+            }
+        }
+        Self { app_config, playlists, target, filters }
+    }
+
+    /// The item the output publishes for `stream_id` in `cluster`, or `None` when the cluster is
+    /// not served to this user, the playlist does not hold the id, or this user's filters exclude it.
+    pub async fn get(&self, stream_id: u32, cluster: XtreamCluster) -> Option<XtreamPlaylistItem> {
+        let filter = self.filters.iter().find(|filter| filter.cluster == cluster)?;
+        match xtream_get_item_for_stream_id(stream_id, self.app_config, self.playlists, self.target, Some(cluster))
+            .await
         {
-            return false;
-        }
-
-        // category_id-Filter
-        if let Some(set) = filter_ids {
-            if !set.contains(&item.category_id) {
-                return false;
+            Ok(item) => filter.matches(&item).then_some(item),
+            Err(err) => {
+                log::debug!("No xtream playlist item {stream_id} in {cluster} for target {}: {err}", self.target.name);
+                None
             }
         }
-
-        // per-user content filter (plan AND user), applied post-cache
-        if let Some(filter) = user_filter {
-            let pli = shared::model::PlaylistItem::from(item);
-            let provider = shared::foundation::ValueProvider { pli: &pli, match_as_ascii: false };
-            if !filter.filter(&provider) {
-                return false;
-            }
-        }
-
-        true
     }
 }
 
@@ -238,7 +302,7 @@ impl Stream for XtreamPlaylistJsonIterator {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cluster_allowed_for_user, XtreamPlaylistIterator};
+    use super::{is_cluster_allowed_for_user, XtreamItemFilter, XtreamPlaylistIterator};
     use crate::LockedReceiverStream;
     use futures::StreamExt;
     use shared::{
@@ -286,16 +350,15 @@ mod tests {
             shared::foundation::get_filter(r#"NOT Group ~ "^VIP.*""#, None).expect("filter parses"),
         );
 
+        let without_filter = XtreamItemFilter { cluster: XtreamCluster::Live, filter_ids: None, user_filter: None };
+        let with_filter =
+            XtreamItemFilter { cluster: XtreamCluster::Live, filter_ids: None, user_filter: Some(filter) };
+
         // no filter: everything passes
-        assert!(XtreamPlaylistIterator::matches_filters(XtreamCluster::Live, None, None, &make_item("VIP Sports")));
+        assert!(without_filter.matches(&make_item("VIP Sports")));
         // filter hides matching groups, keeps the rest
-        assert!(!XtreamPlaylistIterator::matches_filters(
-            XtreamCluster::Live,
-            None,
-            Some(&filter),
-            &make_item("VIP Sports")
-        ));
-        assert!(XtreamPlaylistIterator::matches_filters(XtreamCluster::Live, None, Some(&filter), &make_item("News")));
+        assert!(!with_filter.matches(&make_item("VIP Sports")));
+        assert!(with_filter.matches(&make_item("News")));
     }
 
     #[tokio::test]
