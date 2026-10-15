@@ -1081,7 +1081,7 @@ async fn compatible_aes_128_manifest_commits_normal_timeline_with_opaque_key_res
 
 #[tokio::test]
 async fn cold_recovery_directive_is_suppressed_until_baseline() {
-    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(0)))).await;
     let session = test_session();
     let mut request = test_origin_refresh_request(Arc::clone(&session));
     request.origin_entry =
@@ -1097,7 +1097,7 @@ async fn cold_recovery_directive_is_suppressed_until_baseline() {
     assert_eq!(manifest_requests, 1);
     assert_ne!(manifest_requests, plan.total_candidates());
     let session = session.read().await;
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(2));
     assert!(session.origin_control.manifest_origin_binding.is_some());
     assert!(session.origin_control.acceptance_episode.is_none());
 }
@@ -1269,7 +1269,7 @@ async fn shared_refresh_metrics_use_successful_manifest_attempt_count() {
         .filter(|request| request.lines().next().is_some_and(|line| line.contains(" /live/user/pass/12345.m3u8 ")))
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(manifest_requests.len(), 3);
+    assert_eq!(manifest_requests.len(), 4, "initial retries plus the configured single-candidate qualification");
     assert!(manifest_requests
         .iter()
         .all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
@@ -1403,7 +1403,7 @@ async fn recovery_unavailable_after_valid_response_preserves_response_evidence()
 #[tokio::test]
 async fn cold_start_uses_one_initial_fetch_and_commits_a_fresh_baseline_before_recovery() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
-    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(0)))).await;
     let session = test_session();
     {
         let mut session = session.write().await;
@@ -1424,7 +1424,7 @@ async fn cold_start_uses_one_initial_fetch_and_commits_a_fresh_baseline_before_r
     assert_eq!(manifest_requests, 1);
     assert_ne!(manifest_requests, plan.total_candidates());
     let session = session.read().await;
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(2));
     assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));
     assert!(session.origin_control.acceptance_episode.is_none());
 }

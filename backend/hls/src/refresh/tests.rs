@@ -67,6 +67,7 @@ mod headers_redirects;
 mod origin_binding;
 mod ownership;
 mod retry_policy;
+mod short_manifest;
 mod startup_representation;
 mod support;
 mod switch_staging;

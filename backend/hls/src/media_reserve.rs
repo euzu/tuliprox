@@ -737,6 +737,31 @@ mod tests {
     }
 
     #[test]
+    fn one_and_two_segment_playlists_admit_only_actual_ready_duration_and_claim_no_hidden_reserve() {
+        for count in [1, 2] {
+            let mut short = manifest();
+            short.visible_segments = Arc::from(&short.visible_segments[..count]);
+            short.last_proxy_seq = u64::try_from(count - 1).unwrap();
+            short.playlist_duration_ms = short.visible_segments.iter().map(|segment| segment.duration_ms).sum();
+            short.last_visible_media_end_ms = short.playlist_duration_ms;
+            let ready = ready_timeline();
+            let mut timeline = HlsReadyTimelineSnapshot { units: Arc::from(&ready.units[..count]) };
+            let admitted = admission(&short, &timeline, HlsStartupAdmissionOriginState::Healthy, 0);
+            assert_eq!(admitted.decision, HlsStartupAdmissionDecision::Admit);
+            assert_eq!(admitted.visible_contiguous_ready_duration_ms, short.playlist_duration_ms);
+            assert_eq!(admitted.prospective_lease_reserve_ms, 0);
+            let reserve = reserve(&short, &HlsLeasePlaybackCursor::default(), &timeline, 0);
+            assert_eq!(reserve.initial_hidden_ready_duration_ms, 0);
+            assert_eq!(reserve.guaranteed_media_horizon_ms, short.playlist_duration_ms);
+            Arc::make_mut(&mut timeline.units)[count - 1].state = HlsReadyMediaState::NotReady;
+            assert_eq!(
+                admission(&short, &timeline, HlsStartupAdmissionOriginState::Healthy, 0).decision,
+                HlsStartupAdmissionDecision::Reject(HlsStartupAdmissionRejection::InsufficientVisibleReadyMedia)
+            );
+        }
+    }
+
+    #[test]
     fn strip_reserve_is_sum_of_actual_hidden_ready_durations() {
         let reserve = reserve(&manifest(), &HlsLeasePlaybackCursor::default(), &ready_timeline(), 0);
 

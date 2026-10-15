@@ -316,6 +316,15 @@ reverse_proxy:
         max_parallel_jobs: 1
 ```
 
+Short rolling origin playlists (one or two segments) are permitted only after the session evaluates its complete
+configured manifest recovery burst. A suitable window with at least three segments takes priority. The resulting
+permission belongs to the session's validated origin binding and epoch, and survives subsequent short manifests
+and new access leases. Freshness refreshes share the existing singleflight; they do not themselves renew the burst.
+Failed qualification also shares its retry receipt and backoff. A genuine origin revalidation requires a new
+qualification. One warning per short-window qualification cites RFC 8216 section 6.2.2; larger available cache
+windows, media readiness, lease validity, and resource retention rules still apply. See
+[Shared HLS configuration](shared-hls-configuration.md#unstable-manifests).
+
 ### HLS Cache Parameter Details
 
 | Parameter | Type | Default | Technical Impact |

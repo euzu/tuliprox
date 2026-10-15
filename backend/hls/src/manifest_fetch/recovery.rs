@@ -93,10 +93,11 @@ where
     }
     let attempts = context.retry_policy.attempt_count();
     let mut last_error = OriginManifestFetchError::RetryExhausted;
-    let mut next_attempt_is_full_plan = true;
+    let resume = context.session.read().await.origin_qualification_retry_target().is_some();
+    let mut next_attempt_is_full_plan = !resume;
     let mut requalifications = 0_u8;
-    let mut attempt_index = 0_usize;
-    let mut attempt_limit = attempts;
+    let mut attempt_index = usize::from(resume);
+    let mut attempt_limit = if resume { 2 } else { attempts };
     let mut completed_candidate_requests = 0_usize;
     while attempt_index < attempt_limit {
         // A materially changed landscape is requalified immediately. Once
@@ -109,12 +110,14 @@ where
             context.retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
         };
         let acceptance_deadline = current_acceptance_deadline(context).await;
-        if !acceptance_attempt_may_start(
-            next_attempt_is_full_plan,
-            current_time_millis(),
-            delay_ms,
-            acceptance_deadline,
-        ) {
+        if !resume
+            && !acceptance_attempt_may_start(
+                next_attempt_is_full_plan,
+                current_time_millis(),
+                delay_ms,
+                acceptance_deadline,
+            )
+        {
             return Err(last_error);
         }
         if delay_ms > 0 {
@@ -131,7 +134,11 @@ where
             trigger,
             current_burst_is_full_plan: next_attempt_is_full_plan,
             may_requalify: requalifications < HLS_MANIFEST_ACCEPTANCE_MAX_REQUALIFICATIONS_PER_REFRESH,
-            acceptance_deadline,
+            requalification_window: if resume && attempt_index == 1 {
+                HlsManifestRequalificationWindow::ResumedAfterSharedBackoff
+            } else {
+                HlsManifestRequalificationWindow::CurrentEpisode(acceptance_deadline)
+            },
             completed_candidate_requests,
         };
         let candidate_requests_in_attempt = recovery_burst_plan(context, next_attempt_is_full_plan).total_candidates();
@@ -212,6 +219,12 @@ pub(super) fn attempt_limit_for_started_requalification(attempt_limit: usize, at
     attempt_limit.max(attempt_index.saturating_add(2))
 }
 
+/// A due session retry can open a fresh episode only after changed origin evidence.
+pub(super) enum HlsManifestRequalificationWindow {
+    CurrentEpisode(HlsAcceptanceDeadlineMs),
+    ResumedAfterSharedBackoff,
+}
+
 pub(super) struct HlsManifestRecoveryAttemptPlan<'a> {
     pub(super) binding: &'a HlsManifestOriginBinding,
     pub(super) attempt_index: usize,
@@ -222,7 +235,7 @@ pub(super) struct HlsManifestRecoveryAttemptPlan<'a> {
     pub(super) trigger: HlsManifestAcceptanceTrigger,
     current_burst_is_full_plan: bool,
     may_requalify: bool,
-    acceptance_deadline: HlsAcceptanceDeadlineMs,
+    requalification_window: HlsManifestRequalificationWindow,
     completed_candidate_requests: usize,
 }
 
@@ -250,6 +263,11 @@ where
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
     let episode_generation = begin_manifest_acceptance_episode(context, &plan, burst_plan).await;
+    if episode_generation.is_none() {
+        return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::RecoveryUnavailable {
+            reason: super::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+        });
+    }
     let HlsManifestRecoveryBurstCollection {
         fetched_candidates,
         completed_candidates,
@@ -408,7 +426,7 @@ async fn evaluate_manifest_recovery_burst(
                 context,
                 episode_generation,
                 plan.trigger,
-                plan.acceptance_deadline,
+                &plan.requalification_window,
             )
             .await
         {

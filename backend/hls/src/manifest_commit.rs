@@ -183,6 +183,10 @@ fn origin_window_is_fresh(session: &HlsSession, now_ms: u64) -> bool {
         .is_some_and(|confirmed_at_ms| now_ms.saturating_sub(confirmed_at_ms) <= max_age_ms)
 }
 
+pub(crate) fn has_servable_committed_manifest(session: &HlsSession, now_ms: u64) -> bool {
+    hls_committed_manifest_for_request(session, now_ms).is_some()
+}
+
 fn hls_committed_manifest_for_request(session: &HlsSession, now_ms: u64) -> Option<HlsCommittedManifestCandidate> {
     let protection = session.account_binding_protection(now_ms);
     hls_committed_manifest_candidate(session).filter(|candidate| {

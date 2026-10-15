@@ -120,6 +120,7 @@ pub struct HlsSessionOriginControl {
     host_local_highwater_observation_order: u64,
     pub acceptance_episode: Option<HlsManifestAcceptanceEpisode>,
     pub recovery_samples: HlsBoundedRecoverySamples,
+    pub(crate) qualification: crate::short_manifest::HlsOriginQualification,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +147,7 @@ impl Default for HlsSessionOriginControl {
             host_local_highwater_observation_order: 0,
             acceptance_episode: None,
             recovery_samples: HlsBoundedRecoverySamples::default(),
+            qualification: crate::short_manifest::HlsOriginQualification::default(),
         }
     }
 }

@@ -88,6 +88,7 @@ mod headers;
 mod late_custom_response;
 mod lease_lifecycle;
 mod manifest_entry_freshness;
+mod manifest_short_window;
 mod manifest_startup;
 mod observability;
 mod owner_handoff;

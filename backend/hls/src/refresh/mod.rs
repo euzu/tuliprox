@@ -50,6 +50,7 @@ use tuliprox_core::model::{AppConfig, HlsManifestRecoveryBurstConfig, ReversePro
 
 mod commit;
 mod failure;
+mod short_manifest;
 mod switch_staging;
 mod timing;
 
@@ -383,7 +384,8 @@ fn mark_origin_refresh_started_in_session(
         return HlsOriginRefreshTriggerOutcome::InFlight;
     }
     if fetch_started_at_ms < session.origin_refresh.next_fetch_allowed_at_ms
-        && request.manifest_commit_requirement.fresh_reason().is_none()
+        && (request.manifest_commit_requirement.fresh_reason().is_none()
+            || session.origin_refresh.consecutive_failures > 0)
     {
         metrics.record_refresh_skipped();
         let wait_ms = session.origin_refresh.next_fetch_allowed_at_ms.saturating_sub(fetch_started_at_ms);
@@ -397,6 +399,7 @@ fn mark_origin_refresh_started_in_session(
             retry_at_ms: session.origin_refresh.next_fetch_allowed_at_ms,
         };
     }
+    short_manifest::prepare_qualification_refresh(request, session, fetch_started_at_ms);
     if let Some(origin_io) = request.origin_io.as_mut() {
         origin_io.started_generation = Some(session.start_origin_work());
     }
@@ -576,6 +579,7 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                 (false, false, None, None, HlsPostRefreshAvailabilityAction::None, None)
             }
             Err(err) => {
+                session.origin_control.qualification.record_failure();
                 session.origin_refresh.mark_failure(fetch_finished_at_ms);
                 metrics.record_refresh_failed();
                 let post_refresh_action = apply_manifest_fetch_failure_signal(&mut session, &err, fetch_finished_at_ms);
@@ -901,6 +905,9 @@ async fn fetch_and_commit_manifest_with_policy(
         (session.established_manifest_recovery_binding(), trigger)
     };
     let fetch_context = manifest_fetch_context(request);
+    if let Some(result) = short_manifest::resume_qualification(request, &fetch_context).await {
+        return result;
+    }
     let mut recovery_suppression_logged = false;
     if prefetch_trigger.starts_episode() {
         if let Some(binding) = established_recovery_binding.clone() {
@@ -1060,6 +1067,9 @@ async fn commit_initial_fetched_manifest(
     established_recovery_binding: Option<HlsManifestOriginBinding>,
     recovery_suppression_logged: bool,
 ) -> Result<CommittedOriginManifest, OriginManifestFetchError> {
+    if let Some(result) = short_manifest::qualify_short_manifest_if_needed(request, fetch_context, &fetched).await {
+        return result;
+    }
     let acceptance_mode = request.manifest_commit_requirement.acceptance_mode();
     let selected_report =
         score_hls_manifest_candidate_for_selection_log(fetch_context, &fetched, acceptance_mode).await;

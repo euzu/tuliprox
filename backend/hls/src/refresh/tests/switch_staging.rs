@@ -208,7 +208,7 @@ async fn established_recovery_burst_uses_one_fixed_provider_url_for_every_candid
 #[tokio::test]
 async fn provisioning_handoff_without_established_origin_baseline_uses_one_initial_fetch() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
-    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(0)))).await;
     let session = test_session();
     let mut request = test_origin_refresh_request(Arc::clone(&session));
     request.origin_entry =
@@ -226,7 +226,7 @@ async fn provisioning_handoff_without_established_origin_baseline_uses_one_initi
     assert_eq!(manifest_requests, 1);
     assert_ne!(manifest_requests, plan.total_candidates());
     let session = session.read().await;
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(2));
     assert!(session.origin_control.manifest_origin_binding.is_some());
     assert!(session.origin_control.acceptance_episode.is_none());
 }

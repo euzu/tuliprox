@@ -134,6 +134,18 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
     staged_switch: Option<&HlsStagedSwitchCommit>,
 ) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
     ensure_refresh_origin_work_generation_is_current(session, request)?;
+    if !session
+        .origin_control
+        .qualification
+        .pending_is_current(&crate::short_manifest::HlsOriginQualificationBasis::capture(session))
+        || (matches!(
+            session.origin_control.qualification,
+            crate::short_manifest::HlsOriginQualification::Checking { .. }
+        ) && session.origin_control.qualification.generation()
+            != Some(session.origin_control.acceptance_generation))
+    {
+        return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
+    }
     let existing_transient_reason = match &session.mode {
         HlsSessionMode::TransientPassthrough { reason } => Some(reason.clone()),
         HlsSessionMode::NormalCacheTimeline => None,
@@ -178,6 +190,7 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
     if result.is_ok() {
         if matches!(session.mode, HlsSessionMode::TransientPassthrough { .. }) {
             session.startup = None;
+            session.origin_control.qualification = crate::short_manifest::HlsOriginQualification::Unchecked;
         }
         clear_satisfied_fresh_manifest_requirement(session, request);
     }
@@ -254,6 +267,8 @@ fn commit_normal_fetched_manifest(
     )?;
     update_origin_provider_session_headers(session, fetched);
     mark_manifest_acceptance_success(session, fetched, &quality, fetch_finished_at_ms);
+    super::short_manifest::record_origin_qualification(session, manifest.segments.len());
+    queue_and_render_normal_manifest(session, request, fetch_finished_at_ms);
     Ok((HlsManifestCommitProgressEvidence::CacheTimeline(refresh_timing), true, true))
 }
 
@@ -431,9 +446,23 @@ fn evaluate_manifest_acceptance_for_commit(
     match evaluate_manifest_acceptance(session, fetched, timeline, &fetch_context, now_ms, mode) {
         HlsManifestAcceptanceDecision::Accept { quality }
         | HlsManifestAcceptanceDecision::AcceptHostSwitch { quality } => Ok(quality),
-        HlsManifestAcceptanceDecision::RetryCurrentTarget { .. } => Err(HlsManifestCommitError::RetryCurrentTarget),
+        HlsManifestAcceptanceDecision::RetryCurrentTarget { .. } => {
+            if matches!(
+                session.origin_control.qualification,
+                crate::short_manifest::HlsOriginQualification::Qualified { .. }
+            ) {
+                session.origin_control.qualification = crate::short_manifest::HlsOriginQualification::Unchecked;
+            }
+            Err(HlsManifestCommitError::RetryCurrentTarget)
+        }
         HlsManifestAcceptanceDecision::Reject { reason, .. } => {
             session.origin_control.path_condition = crate::origin_progress::HlsOriginPathCondition::AcceptanceConflict;
+            if matches!(
+                session.origin_control.qualification,
+                crate::short_manifest::HlsOriginQualification::Qualified { .. }
+            ) {
+                session.origin_control.qualification = crate::short_manifest::HlsOriginQualification::Unchecked;
+            }
             let log_reason = HlsManifestRejectLogReason::from(reason.clone());
             warn!(
                 "HLS origin manifest rejected: session={} proxy_session={} reason={} media_sequence={} segments={}",
@@ -871,8 +900,6 @@ fn commit_normal_manifest(
     if provisioning_handoff {
         limit_publishable_normal_provisioning_handoff_tail(session, &request.strip, manifest.segments.len());
     }
-    queue_and_render_normal_manifest(session, request, rendered_at_ms);
-
     let last_segment_duration_ms = manifest.segments.last().map(|segment| segment.duration_ms);
     let target_duration_ms = manifest.target_duration.map(|duration| u64::from(duration) * 1_000);
     let progress = if staged_switch.is_some() {

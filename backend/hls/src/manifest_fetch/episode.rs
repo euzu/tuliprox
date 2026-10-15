@@ -8,7 +8,10 @@
 use super::{
     current_time_millis,
     fingerprint::build_manifest_timeline_fingerprint,
-    recovery::{acceptance_attempt_may_start, HlsManifestRecoveryAttemptPlan, HlsManifestRecoveryCandidate},
+    recovery::{
+        acceptance_attempt_may_start, HlsManifestRecoveryAttemptPlan, HlsManifestRecoveryCandidate,
+        HlsManifestRequalificationWindow,
+    },
     HlsManifestOriginRelation, HlsManifestSequenceRelation, HlsOriginManifestFetchContext,
     HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT,
 };
@@ -23,9 +26,8 @@ use crate::{
         HlsSwitchSegmentReadiness,
     },
     recovery_timing::{
-        HlsAcceptanceDeadlineMs, HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput,
-        HlsAcceptanceEpisodeTimingSeed, HlsRecoveryWorkloadEnvelope, HlsTerminalMediaPreparationState,
-        HlsTransitionMarginMs,
+        HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput, HlsAcceptanceEpisodeTimingSeed,
+        HlsRecoveryWorkloadEnvelope, HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
     },
     resource_identity::HlsMediaResourceIdentity,
 };
@@ -38,17 +40,26 @@ pub(super) async fn begin_manifest_acceptance_episode(
     burst_plan: HlsManifestRecoveryBurstPlan,
 ) -> Option<HlsManifestAcceptanceGeneration> {
     let mut session = context.session.write().await;
+    let basis = crate::short_manifest::HlsOriginQualificationBasis::capture(&session);
+    if !session.origin_control.qualification.pending_is_current(&basis) {
+        return None;
+    }
     if plan.attempt_index != 0 {
         let episode = session.origin_control.acceptance_episode.as_mut()?;
         if episode.trigger() != plan.trigger || episode.state == HlsManifestAcceptanceState::Completed {
             return None;
         }
         episode.state = HlsManifestAcceptanceState::Collecting;
-        return Some(episode.generation);
+        let generation = episode.generation;
+        session.origin_control.qualification =
+            crate::short_manifest::HlsOriginQualification::Checking { basis, generation, target: plan.binding.clone() };
+        return Some(generation);
     }
     let started_at_ms = current_time_millis();
     let timing = acceptance_episode_timing(context, &session, started_at_ms, burst_plan);
     let generation = session.origin_control.begin_acceptance_episode(started_at_ms, burst_plan, plan.trigger, &timing);
+    session.origin_control.qualification =
+        crate::short_manifest::HlsOriginQualification::Checking { basis, generation, target: plan.binding.clone() };
     if let Some(episode) = session.origin_control.acceptance_episode.as_mut() {
         episode.state = HlsManifestAcceptanceState::Collecting;
         debug!(
@@ -145,14 +156,28 @@ pub(super) async fn begin_requalified_manifest_acceptance_episode(
     context: &HlsOriginManifestFetchContext,
     generation: Option<HlsManifestAcceptanceGeneration>,
     trigger: HlsManifestAcceptanceTrigger,
-    acceptance_deadline: HlsAcceptanceDeadlineMs,
+    window: &HlsManifestRequalificationWindow,
 ) -> bool {
     let Some(generation) = generation else {
         return false;
     };
     let mut session = context.session.write().await;
     let now_ms = current_time_millis();
-    if !acceptance_attempt_may_start(false, now_ms, 0, acceptance_deadline) {
+    match window {
+        HlsManifestRequalificationWindow::CurrentEpisode(deadline)
+            if !acceptance_attempt_may_start(false, now_ms, 0, *deadline) =>
+        {
+            return false
+        }
+        HlsManifestRequalificationWindow::CurrentEpisode(_)
+        | HlsManifestRequalificationWindow::ResumedAfterSharedBackoff => {}
+    }
+    let basis = crate::short_manifest::HlsOriginQualificationBasis::capture(&session);
+    if !matches!(
+        &session.origin_control.qualification,
+        crate::short_manifest::HlsOriginQualification::Checking { basis: current, generation: current_generation, .. }
+            if current == &basis && *current_generation == generation
+    ) {
         return false;
     }
     let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
@@ -168,6 +193,11 @@ pub(super) async fn begin_requalified_manifest_acceptance_episode(
     let configured_plan = context.manifest_recovery_burst.level.plan();
     let timing = acceptance_episode_timing(context, &session, now_ms, configured_plan);
     let next_generation = session.origin_control.begin_acceptance_episode(now_ms, configured_plan, trigger, &timing);
+    if let crate::short_manifest::HlsOriginQualification::Checking { generation, .. } =
+        &mut session.origin_control.qualification
+    {
+        *generation = next_generation;
+    }
     debug!(
         "HLS manifest acceptance landscape changed: previous_generation={} next_generation={} candidates={} decision=full-requalification",
         generation.0,

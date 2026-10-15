@@ -253,6 +253,7 @@ fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
 
 fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: RenderTailPolicy) -> Option<Vec<u64>> {
     let head_seq = session.publishable_origin_head_proxy_seq?;
+    let minimum_visible_segments = if session.allows_short_origin_windows() { 1 } else { MIN_VISIBLE_SEGMENTS };
     if let Some(startup) = &session.startup {
         // The head always needs body bytes; only optimistic successors may still be waiting for theirs.
         if !startup.revisions.get(&head_seq).is_some_and(|revision| revision.revision().is_publishable()) {
@@ -332,7 +333,7 @@ fn select_window(session: &HlsSession, render_gap_segments: usize, tail_policy: 
     }
 
     retain_published_predecessors(session, &mut window);
-    if window.len() < MIN_VISIBLE_SEGMENTS {
+    if window.len() < minimum_visible_segments {
         return None;
     }
     // Lease admission enforces the READY-duration reserve. The renderer only

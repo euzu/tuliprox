@@ -85,6 +85,7 @@ mod segment_revision;
 mod segment_watchdog;
 mod session;
 mod session_store;
+mod short_manifest;
 mod startup_observability;
 mod startup_policy;
 mod sync_ext;
