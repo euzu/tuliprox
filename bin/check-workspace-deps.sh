@@ -139,6 +139,7 @@ dev tuliprox -> tuliprox-hls
 dev tuliprox -> tuliprox-mpegts
 dev tuliprox -> tuliprox-processing
 dev tuliprox -> tuliprox-repository
+dev tuliprox -> tuliprox-session
 dev tuliprox-hls -> tuliprox-mpegts
 dev tuliprox-repository -> tuliprox-btree
 ALLOWLIST
