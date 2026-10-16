@@ -1,4 +1,4 @@
-use super::WatchEntriesEditor;
+use super::{channel_groups_form::TargetChannelGroupsView, WatchEntriesEditor};
 use crate::{
     app::components::{
         build_options, config::HasFormData, dto_field_id, select::Select, selection_parse_first, AppIcon, BlockId,
@@ -14,9 +14,9 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{
-        permission::Permission, ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto, ConfigTargetOptions,
-        ConfigWatchDto, CurationCatalogSelection, CurationConfigDto, ProcessingOrder, TargetBouquetMode,
-        TargetBouquetStatusDto,
+        permission::Permission, ChannelGroupsTargetConfig, ClusterFlags, ConfigTargetDto, ConfigTargetFilterDto,
+        ConfigTargetOptions, ConfigWatchDto, CurationCatalogSelection, CurationConfigDto, ProcessingOrder,
+        TargetBouquetMode, TargetBouquetStatusDto,
     },
     utils::Internable,
 };
@@ -49,6 +49,7 @@ const LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES: &str = "LABEL.LOWERCASE_XMLTV_DISPLAY
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 const LABEL_BOUQUETS: &str = "LABEL.BOUQUETS";
+const LABEL_CHANNEL_GROUPS: &str = "LABEL.CHANNEL_GROUPS";
 const LABEL_CURATION_CATALOG_SELECTION_FULL: &str = "LABEL.TRAKT_CATALOG_SELECTION_FULL";
 const LABEL_CURATION_CATALOG_SELECTION_CURATED: &str = "LABEL.TRAKT_CATALOG_SELECTION_CURATED";
 
@@ -78,6 +79,7 @@ fn curation_summary(curation: &CurationConfigDto, catalog_selection: &str) -> St
 enum TargetFormPage {
     Main,
     Options,
+    ChannelGroups,
     Mapping,
     Watch,
 }
@@ -85,6 +87,7 @@ enum TargetFormPage {
 impl TargetFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
+    const CHANNEL_GROUPS: &str = "ChannelGroups";
     const MAPPING: &str = "Mapping";
     const WATCH: &str = "Watch";
 }
@@ -96,6 +99,7 @@ impl FromStr for TargetFormPage {
         match s {
             Self::MAIN => Ok(TargetFormPage::Main),
             Self::OPTIONS => Ok(TargetFormPage::Options),
+            Self::CHANNEL_GROUPS => Ok(TargetFormPage::ChannelGroups),
             Self::MAPPING => Ok(TargetFormPage::Mapping),
             Self::WATCH => Ok(TargetFormPage::Watch),
             _ => Err(TuliproxError::Config(format!("Unknown target form page: {s}"))),
@@ -108,6 +112,7 @@ impl Display for TargetFormPage {
         match *self {
             TargetFormPage::Main => write!(f, "{}", TargetFormPage::MAIN),
             TargetFormPage::Options => write!(f, "{}", TargetFormPage::OPTIONS),
+            TargetFormPage::ChannelGroups => write!(f, "{}", TargetFormPage::CHANNEL_GROUPS),
             TargetFormPage::Mapping => write!(f, "{}", TargetFormPage::MAPPING),
             TargetFormPage::Watch => write!(f, "{}", TargetFormPage::WATCH),
         }
@@ -119,6 +124,7 @@ impl Internable for TargetFormPage {
         match self {
             Self::Main => TargetFormPage::MAIN,
             Self::Options => TargetFormPage::OPTIONS,
+            Self::ChannelGroups => TargetFormPage::CHANNEL_GROUPS,
             Self::Mapping => TargetFormPage::MAPPING,
             Self::Watch => TargetFormPage::WATCH,
         }
@@ -156,6 +162,7 @@ pub enum ConfigTargetOptionsFormAction {
     LowercaseEpgIds(bool),
     LowercaseXmltvDisplayNames(bool),
     ForceRedirect(Option<ClusterFlags>),
+    ChannelGroups(Option<ChannelGroupsTargetConfig>),
     SetAll(ConfigTargetOptions),
 }
 
@@ -201,6 +208,10 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
             }
             ConfigTargetOptionsFormAction::ForceRedirect(value) => {
                 form.force_redirect = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::ChannelGroups(value) => {
+                form.channel_groups = value;
                 modified = true;
             }
             ConfigTargetOptionsFormAction::SetAll(value) => {
@@ -615,6 +626,24 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         }
     };
 
+    let render_channel_groups = || {
+        let on_change = {
+            let target_options_state = target_options_state.clone();
+            Callback::from(move |value| {
+                target_options_state.dispatch(ConfigTargetOptionsFormAction::ChannelGroups(value));
+            })
+        };
+        html! {
+            <Card class="tp__config-view__card">
+                <TargetChannelGroupsView
+                    config={target_options_state.form.channel_groups}
+                    readonly={!props.allow_write}
+                    on_change={on_change}
+                />
+            </Card>
+        }
+    };
+
     let render_mapping = || {
         if props.allow_write {
             html! {
@@ -678,6 +707,9 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <Panel value={TargetFormPage::Options.intern()} active={view_visible.intern()}>
                 {render_options()}
                 </Panel>
+                <Panel value={TargetFormPage::ChannelGroups.intern()} active={view_visible.intern()}>
+                {render_channel_groups()}
+                </Panel>
                 <Panel value={TargetFormPage::Mapping.intern()} active={view_visible.intern()}>
                 {render_mapping()}
                 </Panel>
@@ -694,6 +726,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             <div class="tp__source-editor-form__sidebar">
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Main, if *view_visible == TargetFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={TargetFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Options, if *view_visible == TargetFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={TargetFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::ChannelGroups, if *view_visible == TargetFormPage::ChannelGroups { " active" } else {""})}  icon="Nodes" hint={translate.t(LABEL_CHANNEL_GROUPS)} name={TargetFormPage::ChannelGroups.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Mapping, if *view_visible == TargetFormPage::Mapping { " active" } else {""})}  icon="Mapping" hint={translate.t(LABEL_MAPPING)} name={TargetFormPage::Mapping.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", TargetFormPage::Watch, if *view_visible == TargetFormPage::Watch { " active" } else {""})}  icon="Visibility" hint={translate.t(LABEL_WATCH)} name={TargetFormPage::Watch.to_string()} onclick={&handle_menu_click}></IconButton>
           </div>

@@ -313,6 +313,7 @@ pub(super) async fn playlist_recording_stream(
         None,
         None,
         query.provider_allocation_id,
+        None,
     )
     .await
     .into_response()

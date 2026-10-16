@@ -912,6 +912,7 @@ async fn occupy_the_only_connection(app_state: &Arc<AppState>, user: &ProxyUserC
     let channel = shared::model::StreamChannel {
         target_id: 1,
         virtual_id: 7,
+        group_virtual_id: None,
         provider_id: 7,
         input_name: "provider-b".intern(),
         item_type: PlaylistItemType::Live,

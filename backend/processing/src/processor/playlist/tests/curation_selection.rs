@@ -69,7 +69,7 @@ fn curation_eligible_catalog_is_merged_and_deduplicated_before_matching() {
     ];
     let mut step = StepMeasure::new("test", |_, _| {});
 
-    let eligible = prepare_eligible_catalog(&target, playlist, &mut step);
+    let eligible = prepare_eligible_catalog(&target, playlist, &std::collections::HashSet::new(), &mut step);
 
     assert_eq!(eligible.len(), 1);
     assert_eq!(eligible[0].channels.len(), 1);

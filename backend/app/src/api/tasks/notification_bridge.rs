@@ -287,7 +287,11 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         // which is the single place that decision is made.
         EventMessage::PlaylistUpdateProgress(_)
         | EventMessage::SystemInfoUpdate(_)
-        | EventMessage::RecordingProgress => None,
+        | EventMessage::RecordingProgress
+        | EventMessage::ChannelGroupMemberSelected { .. }
+        | EventMessage::ChannelGroupExhausted { .. }
+        | EventMessage::ChannelGroupCircuitChanged { .. }
+        | EventMessage::ChannelGroupMemberSwitched { .. } => None,
     }
 }
 
@@ -631,6 +635,25 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInFailed),
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
+            EventMessage::ChannelGroupMemberSelected {
+                target_id: 1,
+                group_vid: 10,
+                member_vid: 11,
+                tier: shared::model::channel_group::CapacityTier::Free,
+            },
+            EventMessage::ChannelGroupExhausted { target_id: 1, group_vid: 10 },
+            EventMessage::ChannelGroupMemberSwitched {
+                target_id: 1,
+                group_vid: 10,
+                from_member_vid: 11,
+                to_member_vid: 12,
+                reason: shared::model::channel_group::SwitchReason::UpstreamEof,
+            },
+            EventMessage::ChannelGroupCircuitChanged {
+                input_name: "test".into(),
+                input_stream_id: "1".into(),
+                state: shared::model::channel_group::CircuitState::Closed,
+            },
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

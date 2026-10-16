@@ -5,9 +5,12 @@ use super::{
     GraceProvisioningInfo, StreamAdmissionError, StreamMode, TimedStreamContext,
 };
 use crate::{
-    api::model::{
-        connection_manager::PROVIDER_END_NOT_SET, AppState, BoxedProviderStream, ConnectionManager, EventManager,
-        MeteringStream, StreamDetails, StreamMeterHandle,
+    api::{
+        api_utils::channel_group_failover::GroupSwitcher,
+        model::{
+            connection_manager::PROVIDER_END_NOT_SET, AppState, BoxedProviderStream, ConnectionManager, EventManager,
+            MeteringStream, StreamDetails, StreamMeterHandle,
+        },
     },
     auth::Fingerprint,
     model::ProxyUserCredentials,
@@ -107,6 +110,11 @@ pub(super) struct ActiveClientStreamState {
     /// finishes it exactly once with the real provider outcome, so a full cleanup queue can
     /// never leak the user request or provider lease.
     pub(super) request_cleanup: Option<tuliprox_session::OwnedRequestCleanup>,
+    /// Runtime member failover of a direct group playback. Boxed: most streams are not group
+    /// streams and should not carry it inline.
+    pub(super) group_switcher: Option<Box<GroupSwitcher>>,
+    /// Lease owner re-armed for the confirmation of every member a switch opens.
+    pub(super) group_lease_owner: Option<Arc<str>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -126,6 +134,7 @@ pub(crate) async fn create_active_client_stream(
         req_headers,
         meter_uid,
         meter_stream,
+        group_failover,
     } = request;
     if connection_permission == UserConnectionPermission::Exhausted {
         error!("Something is wrong this should not happen");
@@ -341,13 +350,19 @@ pub(crate) async fn create_active_client_stream(
             } else {
                 stream
             };
-            Some(wrap_timed_client_stream_if_needed(
-                app_state,
-                stream,
-                fingerprint.addr,
-                VirtualId::new(virtual_id),
-                display_stream_uid,
-            ))
+            // A group stream replaces its member body on failure, so the sleep timer goes around
+            // the whole response instead; its end would otherwise count as a member failure.
+            if group_failover.is_some() {
+                Some(stream)
+            } else {
+                Some(wrap_timed_client_stream_if_needed(
+                    app_state,
+                    stream,
+                    fingerprint.addr,
+                    VirtualId::new(virtual_id),
+                    display_stream_uid,
+                ))
+            }
         }
     };
 
@@ -392,6 +407,8 @@ pub(crate) async fn create_active_client_stream(
         provider_error_class: None,
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
+        group_lease_owner: group_failover.as_ref().and(lease_owner.clone()),
+        group_switcher: group_failover.map(|driver| Box::new(GroupSwitcher::new(driver))),
         lease_owner,
         media_started,
         lease_confirmed: false,
@@ -399,5 +416,16 @@ pub(crate) async fn create_active_client_stream(
         request_cleanup: registered_request.into_body_cleanup(),
     };
 
-    Ok(ActiveClientStream { state }.boxed())
+    let timed_whole_response = state.group_switcher.is_some();
+    let stream = ActiveClientStream { state }.boxed();
+    if timed_whole_response {
+        return Ok(wrap_timed_client_stream_if_needed(
+            app_state,
+            stream,
+            fingerprint.addr,
+            VirtualId::new(virtual_id),
+            display_stream_uid,
+        ));
+    }
+    Ok(stream)
 }

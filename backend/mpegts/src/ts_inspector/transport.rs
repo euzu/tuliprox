@@ -1,6 +1,6 @@
 use super::{
     HlsTsCompatibleSpliceEvidence, HlsTsPidBoundaryEvidence, HlsTsPidContinuityState, HlsTsSpliceEvidence,
-    HlsTsSpliceIncompatibility, HlsTsTrackSignature, HlsTsTransportStreamInspector, TS_PACKET_BYTES,
+    HlsTsSpliceIncompatibility, HlsTsTrackSignature, HlsTsTransportStreamInspector, TS_PACKET_SIZE,
 };
 use mpeg2ts_reader::packet::Packet;
 
@@ -38,7 +38,7 @@ impl HlsTsTransportStreamInspector {
         if self.incompatible.is_some() {
             return;
         }
-        if bytes.len() != TS_PACKET_BYTES {
+        if bytes.len() != TS_PACKET_SIZE {
             self.incompatible = Some(HlsTsSpliceIncompatibility::InvalidPacket { packet_index });
             return;
         }

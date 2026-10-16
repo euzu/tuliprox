@@ -104,14 +104,27 @@ pub(in crate::api::api_utils::tests) async fn spawn_range_aware_test_origin(
 
 #[allow(dead_code)]
 #[derive(Clone)]
-pub(in crate::api::api_utils::tests) enum FakeOriginMode {
+pub(crate) enum FakeOriginMode {
     EmptyBody,
     BlockFirstChunk(Arc<tokio::sync::Notify>),
     ErrorBeforeFirstChunk,
     ErrorAfterFirstChunk(Vec<u8>),
     FixedBytes(Vec<u8>),
+    Status(u16),
+    Body {
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+    Hls,
+    /// MPEG-TS bytes, then an open connection without data.
+    TsThenStall(Vec<u8>),
+    /// The bytes repeated every 50 ms until the client disconnects.
+    TsStream(Vec<u8>),
+    /// Accepts the request and never answers.
+    Silent,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(in crate::api::api_utils::tests) async fn spawn_controlled_fake_origin(
     mode: FakeOriginMode,
     max_requests: usize,
@@ -176,6 +189,44 @@ pub(in crate::api::api_utils::tests) async fn spawn_controlled_fake_origin(
                     );
                     let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.write_all(bytes).await;
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::TsThenStall(bytes) => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(bytes).await;
+                    // Keeps the connection open without data until the client goes away.
+                    let mut probe = [0_u8; 1];
+                    let _ = socket.read(&mut probe).await;
+                }
+                FakeOriginMode::TsStream(bytes) => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    while socket.write_all(bytes).await.is_ok() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+                FakeOriginMode::Silent => {
+                    let mut probe = [0_u8; 1];
+                    let _ = socket.read(&mut probe).await;
+                }
+                FakeOriginMode::Status(status) => {
+                    let head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::Body { content_type, bytes } => {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(bytes).await;
+                    let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::Hls => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.shutdown().await;
                 }
             }
@@ -470,6 +521,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
     })
 }
 
@@ -507,6 +559,7 @@ pub(in crate::api::api_utils::tests) fn create_test_local_channel(url: &str) -> 
     StreamChannel {
         target_id: 1,
         virtual_id: 41,
+        group_virtual_id: None,
         provider_id: 0,
         input_name: "library".intern(),
         item_type: PlaylistItemType::LocalVideo,
@@ -528,6 +581,7 @@ pub(in crate::api::api_utils::tests) fn create_test_live_channel(url: &str) -> S
     StreamChannel {
         target_id: 1,
         virtual_id: 42,
+        group_virtual_id: None,
         provider_id: 1,
         input_name: "provider_1".intern(),
         item_type: PlaylistItemType::Live,

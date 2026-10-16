@@ -2,18 +2,18 @@ use super::{
     clock::{
         append_finite_discontinuity_packet, decode_pcr, decode_pcr_at_location, decode_timestamp,
         decode_timestamp_at_location, encode_pcr, encode_timestamp, forward_clock_distance_90khz,
-        gather_timestamp_bytes, pcr_offset_27mhz, ts_packet_pid, ADAPTATION_FIELD_FLAG_PCR,
-        HLS_TS_SPLICE_MIN_GAP_TICKS_90KHZ, MAX_PTS_DTS, NULL_PID, SYNC_BYTE, TS_PACKET_SIZE,
+        gather_timestamp_bytes, pcr_offset_27mhz, HLS_TS_SPLICE_MIN_GAP_TICKS_90KHZ, MAX_PTS_DTS,
     },
     layout::build_hls_finite_ts_layout,
     pes::inspect_hls_ts_packet,
     *,
 };
+use crate::packet::{ts_packet_pid, ADAPTATION_FIELD_FLAG_PCR, NULL_PID, TS_PACKET_SIZE, TS_SYNC_BYTE};
 use bytes::BytesMut;
 
 fn build_pts_dts_payload_packet(pid: u16, cc: u8, pts: u64, dts: u64) -> [u8; TS_PACKET_SIZE] {
     let mut packet = [0xFF_u8; TS_PACKET_SIZE];
-    packet[0] = SYNC_BYTE;
+    packet[0] = TS_SYNC_BYTE;
     packet[1] = 0x40 | ((pid >> 8) as u8 & 0x1F); // PUSI + PID high bits
     packet[2] = (pid & 0xFF) as u8;
     packet[3] = 0x10 | (cc & 0x0F); // payload only
@@ -42,7 +42,7 @@ fn build_pts_dts_payload_packet(pid: u16, cc: u8, pts: u64, dts: u64) -> [u8; TS
 
 fn build_pts_only_payload_packet(pid: u16, cc: u8, pts: u64) -> [u8; TS_PACKET_SIZE] {
     let mut packet = [0xFF_u8; TS_PACKET_SIZE];
-    packet[0] = SYNC_BYTE;
+    packet[0] = TS_SYNC_BYTE;
     packet[1] = 0x40 | ((pid >> 8) as u8 & 0x1F);
     packet[2] = (pid & 0xFF) as u8;
     packet[3] = 0x10 | (cc & 0x0F);
@@ -86,7 +86,7 @@ fn build_split_pes_header_packets(
             assert!((1..=184).contains(&payload_length));
             let mut packet = [0xFF_u8; TS_PACKET_SIZE];
             let packet_index = u8::try_from(packet_index).expect("test packet index fits");
-            packet[0] = SYNC_BYTE;
+            packet[0] = TS_SYNC_BYTE;
             packet[1] = ((pid >> 8) as u8 & 0x1F) | (u8::from(packet_index == 0) * 0x40);
             packet[2] = (pid & 0xFF) as u8;
             packet[3] = if payload_length == 184 {
@@ -114,7 +114,7 @@ fn build_split_pes_header_packets(
 
 fn build_pts_dts_pcr_packet(pid: u16, cc: u8, pts: u64, dts: u64, pcr_90khz: u64) -> [u8; TS_PACKET_SIZE] {
     let mut packet = [0xFF_u8; TS_PACKET_SIZE];
-    packet[0] = SYNC_BYTE;
+    packet[0] = TS_SYNC_BYTE;
     packet[1] = 0x40 | ((pid >> 8) as u8 & 0x1F);
     packet[2] = (pid & 0xFF) as u8;
     packet[3] = 0x30 | (cc & 0x0F);
@@ -170,7 +170,7 @@ fn packet_timestamps(packet: &[u8]) -> (u64, u64, u64) {
 
 fn build_adaptation_only_packet(pid: u16, cc: u8) -> [u8; TS_PACKET_SIZE] {
     let mut packet = [0xFF_u8; TS_PACKET_SIZE];
-    packet[0] = SYNC_BYTE;
+    packet[0] = TS_SYNC_BYTE;
     packet[1] = (pid >> 8) as u8 & 0x1F;
     packet[2] = (pid & 0xFF) as u8;
     packet[3] = 0x20 | (cc & 0x0F); // adaptation only
@@ -188,7 +188,7 @@ fn build_pcr_only_packet(pid: u16, cc: u8, pcr_90khz: u64) -> [u8; TS_PACKET_SIZ
 
 fn build_payload_packet(pid: u16, cc: u8) -> [u8; TS_PACKET_SIZE] {
     let mut packet = [0xFF_u8; TS_PACKET_SIZE];
-    packet[0] = SYNC_BYTE;
+    packet[0] = TS_SYNC_BYTE;
     packet[1] = (pid >> 8) as u8 & 0x1F;
     packet[2] = (pid & 0xFF) as u8;
     packet[3] = 0x10 | (cc & 0x0F);

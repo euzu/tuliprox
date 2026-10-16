@@ -1,5 +1,6 @@
 mod alias_item_form;
 mod block_view;
+mod channel_groups_form;
 mod editor_form;
 mod editor_model;
 mod editor_view;

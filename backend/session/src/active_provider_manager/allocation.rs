@@ -32,6 +32,11 @@ use tuliprox_core::{
 
 impl ProviderReleaseSnapshot {
     pub fn is_empty(&self) -> bool { self.single_allocations.is_empty() && self.shared_subscribers.is_empty() }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn from_single_allocations(addr: SocketAddr, single_allocations: Vec<AllocationId>) -> Self {
+        Self { addr, single_allocations, shared_subscribers: Vec::new() }
+    }
 }
 
 /// Resolves a public live HLS session token to its stable provider playback owner.
@@ -205,7 +210,7 @@ impl std::ops::Deref for ActiveProviderManager {
 }
 
 impl ActiveProviderManager {
-    fn index_owner(connections: &mut Connections, allocation_id: AllocationId, owner: Option<&Arc<str>>) {
+    pub(super) fn index_owner(connections: &mut Connections, allocation_id: AllocationId, owner: Option<&Arc<str>>) {
         if let Some(owner) = owner {
             connections.by_owner.entry(Arc::clone(owner)).or_default().insert(allocation_id);
         }

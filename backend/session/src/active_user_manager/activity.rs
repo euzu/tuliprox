@@ -1,7 +1,7 @@
 use super::{
     next_session_incarnation, remember_session_addr, url_host_key, ActiveUserManager, CreateUserSessionParams,
-    PlaybackLifecycle, SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData, UserSession,
-    UserSessionParams,
+    MemberBinding, PlaybackLifecycle, SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData,
+    UserSession, UserSessionParams,
 };
 use shared::{
     model::UserConnectionPermission,
@@ -40,6 +40,7 @@ impl ActiveUserManager {
             permission: params.connection_permission,
             connection_kind: params.connection_kind,
             lifecycle: PlaybackLifecycle::Prepared,
+            member_binding: None,
         }
     }
 
@@ -303,5 +304,15 @@ impl ActiveUserManager {
         }
 
         Some(connection_data.sessions[session_index].clone())
+    }
+
+    pub async fn bind_member(&self, username: &str, token: &str, binding: MemberBinding) {
+        let mut user_connections = self.write_connections().await;
+        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+            return;
+        };
+        if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+            session.member_binding = Some(binding);
+        }
     }
 }

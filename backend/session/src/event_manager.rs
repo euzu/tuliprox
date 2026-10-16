@@ -157,6 +157,7 @@ struct LatchedEvents {
 pub struct EventManager {
     pub(crate) account_provider:
         std::sync::OnceLock<std::sync::Weak<crate::active_provider_manager::ActiveProviderManagerCore>>,
+    pub(crate) member_health: std::sync::OnceLock<std::sync::Weak<crate::channel_group::health::MemberHealthIndex>>,
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
     stats: Arc<EventBusStats>,
@@ -199,6 +200,7 @@ impl EventManager {
         Self {
             channel_tx,
             account_provider: std::sync::OnceLock::new(),
+            member_health: std::sync::OnceLock::new(),
             meters: StreamMeterRegistry::new(),
             stats: Arc::new(EventBusStats::default()),
             last_nudge: Mutex::new(HashMap::new()),
@@ -391,6 +393,10 @@ impl FilteredEventReceiver {
 }
 
 impl EventManager {
+    pub fn bind_member_health(&self, health: &Arc<crate::channel_group::health::MemberHealthIndex>) {
+        let _ = self.member_health.set(Arc::downgrade(health));
+    }
+
     /// Stop background work, flushing what is pending.
     ///
     /// The event channel needs nothing: closing the sender is what tells
@@ -415,6 +421,24 @@ impl EventSink for EventManager {
                 status,
                 exp_date,
             });
+        }
+    }
+    fn observe_stream_probe(
+        &self,
+        input_name: Arc<str>,
+        input_stream_id: Arc<str>,
+        video: Option<&str>,
+        audio: Option<&str>,
+        bitrate_kbps: u32,
+    ) {
+        if let Some(health) = self.member_health.get().and_then(std::sync::Weak::upgrade) {
+            let key = (input_name, input_stream_id);
+            if video.is_some() || bitrate_kbps > 0 {
+                health.patch_probe(&key, video, bitrate_kbps);
+            }
+            if audio.is_some() {
+                health.patch_probe_audio(&key, audio);
+            }
         }
     }
 }

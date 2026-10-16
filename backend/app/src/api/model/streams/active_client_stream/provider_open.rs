@@ -71,6 +71,8 @@ impl ActiveClientStreamState {
             self.terminate_quietly();
             return false;
         }
+        // A preempted slot belongs to another playback now: no failover to another member.
+        self.group_switcher = None;
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
@@ -134,53 +136,60 @@ impl ActiveClientStreamState {
         self.provider_stopped = true;
         self.preempt_cancelled = None;
         self.stop_grace_task();
+        // A member switch in flight is abandoned with the provider stream; while it runs no
+        // provider handle is held, but the stop is still published.
+        let switch_abandoned = self.group_switcher.take().is_some_and(|switcher| switcher.is_switching());
 
         if self.provider_handle.is_some() {
             // Synchronous provider-slot release; the custom-video detail update is a
             // separate, best-effort UI effect.
             self.release_provider_handle_and_detach_body();
+            self.publish_provider_stop(mode);
+        } else if switch_abandoned {
+            self.publish_provider_stop(mode);
+        }
+    }
 
-            if mode == StreamMode::ChannelUnavailable {
-                if let Some(flag) = &self.send_custom_stream_flag {
-                    let _ = flag.compare_exchange(
-                        StreamMode::Inner as u8,
-                        StreamMode::ChannelUnavailable as u8,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    );
-                }
+    /// Publishes the end of the provider stream: custom-video mode, waker, panel detail or the
+    /// release of the stream claim.
+    pub(super) fn publish_provider_stop(&mut self, mode: StreamMode) {
+        if mode == StreamMode::ChannelUnavailable {
+            if let Some(flag) = &self.send_custom_stream_flag {
+                let _ = flag.compare_exchange(
+                    StreamMode::Inner as u8,
+                    StreamMode::ChannelUnavailable as u8,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                );
             }
+        }
 
-            if let Some(waker) = &self.waker {
-                waker.wake();
-            }
+        if let Some(waker) = &self.waker {
+            waker.wake();
+        }
 
-            let addr = self.fingerprint.addr;
-            let reason = match mode {
-                StreamMode::ChannelUnavailable => "unavailable provider channel",
-                StreamMode::UserExhausted => "user grace period exhaustion",
-                StreamMode::ProviderExhausted => "provider grace period exhaustion",
-                StreamMode::Provisioning => "provider grace period provisioning",
-                StreamMode::LowPriorityPreempted => "low-priority preemption",
-                StreamMode::ReentrySuppressed => "reentry suppression",
-                StreamMode::Inner | StreamMode::GracePending => "stream mode transition",
-            };
-            debug_if_enabled!(
-                "Provider stream stopped due to {reason} for {}",
-                sanitize_sensitive_info(&addr.to_string())
-            );
-            if let Some(video_type) = Self::custom_video_type_for_mode(mode) {
-                self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
-                    addr,
-                    stream_uid: self.stream_uid,
-                    video_type,
-                    handle: None,
-                });
-            } else {
-                // No custom video for this mode: release the request without publishing
-                // a detail update so no error clip is shown.
-                self.release_user_stream();
-            }
+        let addr = self.fingerprint.addr;
+        let reason = match mode {
+            StreamMode::ChannelUnavailable => "unavailable provider channel",
+            StreamMode::UserExhausted => "user grace period exhaustion",
+            StreamMode::ProviderExhausted => "provider grace period exhaustion",
+            StreamMode::Provisioning => "provider grace period provisioning",
+            StreamMode::LowPriorityPreempted => "low-priority preemption",
+            StreamMode::ReentrySuppressed => "reentry suppression",
+            StreamMode::Inner | StreamMode::GracePending => "stream mode transition",
+        };
+        debug_if_enabled!("Provider stream stopped due to {reason} for {}", sanitize_sensitive_info(&addr.to_string()));
+        if let Some(video_type) = Self::custom_video_type_for_mode(mode) {
+            self.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProvider {
+                addr,
+                stream_uid: self.stream_uid,
+                video_type,
+                handle: None,
+            });
+        } else {
+            // No custom video for this mode: release the request without publishing
+            // a detail update so no error clip is shown.
+            self.release_user_stream();
         }
     }
 }

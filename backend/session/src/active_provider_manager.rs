@@ -22,8 +22,8 @@ const EVICTED_PROVIDER_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(1
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProviderReleaseSnapshot {
     pub addr: SocketAddr,
-    single_allocations: Vec<AllocationId>,
-    shared_subscribers: Vec<SharedSubscriberId>,
+    pub(crate) single_allocations: Vec<AllocationId>,
+    pub(crate) shared_subscribers: Vec<SharedSubscriberId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +97,7 @@ mod tests;
 mod account_health;
 mod allocation;
 mod capacity;
+mod capacity_probe;
 mod leases;
 mod preemption;
 mod release;
@@ -109,3 +110,4 @@ use self::{
     release::{ProviderAllocationGuard, ReleaseAction},
     shared::{SharedConnectionId, SharedConnections},
 };
+pub use capacity_probe::*;

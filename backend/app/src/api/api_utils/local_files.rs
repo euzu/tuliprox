@@ -345,6 +345,7 @@ pub(crate) async fn local_stream_response(
         req_headers,
         meter_uid: metering.meter_uid,
         meter_stream: metering.meter_stream,
+        group_failover: None,
     })
     .await
     {

@@ -301,7 +301,11 @@ impl crate::model::FieldGet for M3uPlaylistItem {
             // M3U resource endpoint resolves a URL path segment through
             // `get_field`, so making these resolvable would turn a 404 into a
             // response. Preserved from the string-keyed accessor this replaces.
-            HeaderField::Id | HeaderField::Input | HeaderField::Type | HeaderField::Genre => None,
+            HeaderField::Id
+            | HeaderField::Input
+            | HeaderField::Type
+            | HeaderField::Genre
+            | HeaderField::ChannelGroup => None,
         }
     }
 }

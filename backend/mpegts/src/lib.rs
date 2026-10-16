@@ -10,5 +10,7 @@
 //! layers parse live ones. Nothing here may name `api`, `AppState` or a
 //! repository.
 
+pub mod packet;
+pub mod splice;
 pub mod transport_stream_buffer;
 pub mod ts_inspector;

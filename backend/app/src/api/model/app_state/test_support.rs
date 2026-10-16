@@ -88,6 +88,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         auth: AuthState::for_tests(),
         playlist_updates: PlaylistUpdateControl::for_tests(),
         maintenance,
+        member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
     })
 }
 

@@ -138,6 +138,7 @@ Tuliprox is not just a metadata processor — it actively manages stream deliver
 - **Redirect Mode** — avoid proxy overhead where direct delivery is preferred
 - **Shared MPEG-TS Streams** — several viewers can reuse one upstream provider stream
 - **Shared HLS Sessions** — reuse one server-side HLS session while retaining individual user leases and accounting
+- **Channel Groups** — one channel per live program across inputs, with source selection and runtime failover
 - **HLS Segment Cache & Prefetch** — fetch manifests, initialization maps, and segments once and serve them locally
 - **HLS Recovery** — optional manifest recovery, bounded segment repair, stale-origin recovery, and diagnostics for difficult upstream streams
 - **Universal Catchup** — expose provider archive/catchup through regular M3U-compatible `.ts` URLs
@@ -166,6 +167,9 @@ reconnects, probes, and background jobs.
 Upstream providers are not always reliable. Tuliprox is designed to preserve usable service when they fail partially or temporarily.
 
 - Automatic provider URL failover on timeouts and server errors
+- **Channel groups with stream failover** collapse the same live channel from several providers or accounts into one
+  channel; playback starts on the best reachable source and, for MPEG-TS, switches to another source while the client
+  keeps watching
 - Choose whether a provider resumes from the last working URL or restarts from the first URL on future requests
 - `provider://` references resolve to the currently active provider URL
 - Asynchronous DNS resolution and caching

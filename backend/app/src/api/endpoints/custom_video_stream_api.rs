@@ -711,6 +711,7 @@ mod tests {
             qos_aggregation: CancellationToken::new(),
             recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
+            channel_groups: tokio_util::sync::CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
@@ -738,6 +739,7 @@ mod tests {
             auth: crate::api::model::AuthState::for_tests(),
             playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
             maintenance: crate::api::model::create_test_maintenance(""),
+            member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
         })
     }
 

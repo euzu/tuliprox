@@ -79,6 +79,7 @@ pub enum HeaderField {
     EpgChannelId,
     Chno,
     Genre,
+    ChannelGroup,
 }
 
 impl HeaderField {
@@ -110,6 +111,7 @@ impl HeaderField {
             ("epg_id", HeaderField::EpgChannelId),
             ("chno", HeaderField::Chno),
             ("genre", HeaderField::Genre),
+            ("channel_group", HeaderField::ChannelGroup),
         ];
         TABLE.iter().find(|(key, _)| name.eq_ignore_ascii_case(key)).map(|(_, field)| *field)
     }
@@ -135,6 +137,7 @@ impl HeaderField {
             Self::EpgChannelId => "epg_channel_id",
             Self::Chno => "chno",
             Self::Genre => "genre",
+            Self::ChannelGroup => "channel_group",
         }
     }
 }

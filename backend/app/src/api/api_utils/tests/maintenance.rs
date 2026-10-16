@@ -1,6 +1,6 @@
 use super::{
     create_test_app_state_for_config, create_test_fingerprint, create_test_live_channel,
-    create_test_provider_app_config, create_test_provider_app_state, stream_response,
+    create_test_provider_app_config, create_test_provider_app_state, stream_response, PlaybackSource,
 };
 use crate::{
     api::{api_utils::blocks_new_playback, model::AppState},
@@ -102,7 +102,7 @@ fn gate_runs_before_shared_stream_join() {
 #[test]
 fn redirect_defers_maintenance_inputs_to_the_gated_proxy_path() {
     // Redirect mode would send the client straight to the provider; for an input in
-    // maintenance it must fall through to the proxied path, where gate 1 answers.
+    // maintenance it must fall through to the proxied path, where the maintenance check answers.
     let body = function_body(include_str!("../strategy.rs"), "pub async fn redirect_response<");
     let gate = body.find("if blocks_new_playback(").expect("gate present");
     let redirect = body.find("Some(redirect(").expect("redirect response present");
@@ -172,10 +172,9 @@ async fn new_ts_stream_for_input_in_maintenance_gets_the_clip_without_provider_s
         "maintenance-session",
         None,
         create_test_live_channel(stream_url),
-        stream_url,
+        PlaybackSource::Single { input: &input, stream_url },
         None,
         &HeaderMap::default(),
-        &input,
         &maintenance_clip_target(),
         &viewer(),
         shared::model::UserConnectionPermission::Allowed,

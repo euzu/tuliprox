@@ -1,5 +1,11 @@
 use super::{
     activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
+    channel_group::{
+        acquire_group_member, group_playback_settings, group_representative, group_shared_key, open_group_member,
+        wait_for_user_capacity, GroupOpenRequest, GroupSelectionFailure, GroupSelectionRequest, OpenedGroupMember,
+        PlaybackSource, ProbedPayload,
+    },
+    channel_group_failover::{GroupFailoverContext, GroupFailoverDriver, GroupFailoverStream},
     cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
     detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
     is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
@@ -25,13 +31,17 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use futures::StreamExt;
 use log::{debug, error, log_enabled, trace};
 use shared::{
-    model::{ConnectFailureReason, FailureStage, PlaylistItemType, StreamChannel, UserConnectionPermission, VirtualId},
+    model::{
+        ConnectFailureReason, EventMessage, FailureStage, PlaylistItemType, StreamChannel, UserConnectionPermission,
+        VirtualId,
+    },
     utils::{extract_extension_from_url, sanitize_sensitive_info, Internable},
 };
 use std::{borrow::Cow, sync::Arc, time::Duration};
-use tuliprox_session::ProviderSessionHeaders;
+use tuliprox_session::{channel_group::FailureClass, ProviderSessionHeaders};
 
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
@@ -293,10 +303,9 @@ pub(crate) async fn stream_response_with_provider_handle(
     session_token: &str,
     request_class: Option<PlaybackRequestClass>,
     mut stream_channel: StreamChannel,
-    stream_url: &str,
+    source: PlaybackSource<'_>,
     pinned_provider: Option<&Arc<str>>,
     req_headers: &HeaderMap,
-    input: &Arc<ConfigInput>,
     target: &Arc<ConfigTarget>,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
@@ -305,26 +314,53 @@ pub(crate) async fn stream_response_with_provider_handle(
     grace_mode: Option<crate::api::model::GraceMode>,
     preacquired_provider_handle: Option<tuliprox_session::ManagedProviderHandle>,
 ) -> impl IntoResponse + Send {
-    if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
-        return admission_failure_response(
-            app_state,
-            fingerprint,
-            user,
-            stream_channel,
-            Arc::clone(&input.name),
-            req_headers,
-            ConnectFailureReason::Maintenance,
-        );
+    if let PlaybackSource::Single { input, .. } = &source {
+        if blocks_new_playback(app_state, input, user, preacquired_provider_handle.is_some()) {
+            return admission_failure_response(
+                app_state,
+                fingerprint,
+                user,
+                stream_channel,
+                Arc::clone(&input.name),
+                req_headers,
+                ConnectFailureReason::Maintenance,
+            );
+        }
     }
     let _transition_guard = app_state.active_users.acquire_playback_transition(&user.username, session_token).await;
-    let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
+
+    if let PlaybackSource::Group { group, .. } = &source {
+        stream_channel.group_virtual_id = Some(group.group_vid.get());
+    }
+
+    // A group stands in with its first resolvable member until the selection below picks one.
+    let (initial_input, initial_stream_url): (Arc<ConfigInput>, Cow<'_, str>) = match &source {
+        PlaybackSource::Single { input, stream_url } => (Arc::clone(input), Cow::Borrowed(*stream_url)),
+        PlaybackSource::Group { group, .. } => {
+            let Some((input, url)) = group_representative(app_state, group) else {
+                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                    target_id: target.id,
+                    group_vid: group.group_vid.get(),
+                });
+                return create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::ChannelUnavailable,
+                )
+                .into_response();
+            };
+            (input, Cow::Owned(url.to_string()))
+        }
+    };
+
+    let request_log_stream_url = resolve_request_url_for_logging(&initial_input, &initial_stream_url);
     if log_enabled!(log::Level::Trace) {
         trace!("Try to open stream {}", sanitize_sensitive_info(request_log_stream_url.as_ref()));
     }
 
-    let virtual_id = stream_channel.virtual_id;
+    let virtual_id = stream_channel.client_virtual_id();
     let item_type = stream_channel.item_type;
-    let playback_extension = extract_extension_from_url(stream_url);
+    let playback_extension = extract_extension_from_url(&initial_stream_url);
     let socket_bound = is_socket_bound_playback_session(item_type, playback_extension);
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
@@ -332,13 +368,13 @@ pub(crate) async fn stream_response_with_provider_handle(
         app_state,
         SessionActivationRequest {
             fingerprint,
-            input,
+            input: &initial_input,
             user,
             session_token,
             request_class,
             virtual_id: VirtualId::new(virtual_id),
             item_type,
-            stream_url,
+            stream_url: &initial_stream_url,
             connection_permission,
             connection_kind,
             granted_grace_mode: grace_mode,
@@ -353,14 +389,19 @@ pub(crate) async fn stream_response_with_provider_handle(
     let allow_shared_reuse =
         connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
+    let shared_lookup_key: Cow<'_, str> = match &source {
+        PlaybackSource::Group { group, .. } => Cow::Owned(group_shared_key(target.id, group.group_vid.get())),
+        PlaybackSource::Single { stream_url, .. } => Cow::Borrowed(*stream_url),
+    };
+
     let share_stream = is_stream_share_enabled(item_type, target);
-    let _shared_lock = if share_stream {
-        let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
+    let mut shared_lock = if share_stream {
+        let write_lock = app_state.app_config.file_locks.write_lock_str(shared_lookup_key.as_ref()).await;
 
         if allow_shared_reuse {
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
-                stream_url,
+                shared_lookup_key.as_ref(),
                 fingerprint,
                 user,
                 connection_permission,
@@ -382,7 +423,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         if item_type == PlaylistItemType::Live && allow_shared_reuse {
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
-                stream_url,
+                shared_lookup_key.as_ref(),
                 fingerprint,
                 user,
                 connection_permission,
@@ -394,7 +435,10 @@ pub(crate) async fn stream_response_with_provider_handle(
             )
             .await
             {
-                debug_if_enabled!("Opportunistic shared stream reuse for {}", sanitize_sensitive_info(stream_url));
+                debug_if_enabled!(
+                    "Opportunistic shared stream reuse for {}",
+                    sanitize_sensitive_info(shared_lookup_key.as_ref())
+                );
                 return value.into_response();
             }
         }
@@ -419,7 +463,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             fingerprint,
             user,
             stream_channel: stream_channel.clone(),
-            provider_name: input.name.clone(),
+            provider_name: initial_input.name.clone(),
             req_headers,
             reason: ConnectFailureReason::UserConnectionsExhausted,
             failure_stage: FailureStage::Admission,
@@ -432,53 +476,52 @@ pub(crate) async fn stream_response_with_provider_handle(
         .into_response();
     }
 
-    let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
-    let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
-    let pinned_provider = pinned_provider.filter(|provider| {
-        item_type.is_live()
-            || session_state
-                .as_ref()
-                .is_some_and(|session| session.media_started.load(std::sync::atomic::Ordering::Acquire))
-            || app_state.active_provider.should_reuse_playback_provider(session_token, provider)
-    });
-    let provider_session_headers =
-        session_state.as_ref().and_then(|session| session.provider_session_headers_for(stream_url));
-    let mut stream_details = match create_stream_response_details(
-        app_state,
-        &stream_options,
-        stream_url,
-        &user.username,
-        fingerprint,
-        req_headers,
-        input,
-        &stream_channel,
-        item_type,
-        if item_type == PlaylistItemType::Catchup {
-            crate::api::model::ProviderContentRepresentationMode::Identity
-        } else {
-            crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
-        },
-        share_stream,
-        connection_permission,
-        pinned_provider,
-        pinned_provider.is_none() || allows_provider_pool_failover(item_type),
-        true,
-        VirtualId::new(stream_channel.virtual_id),
-        connection_priority_for_kind(user, connection_kind),
-        connection_kind,
-        false,
-        Some(session_token),
-        provider_session_headers.as_deref(),
-        pinned_provider.is_some(),
-        grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
-        activation.grace_context.clone(),
-        None,
-        preacquired_provider_handle,
-    )
-    .await
+    if matches!(&source, PlaybackSource::Group { .. })
+        && connection_permission == UserConnectionPermission::GracePeriod
+        && matches!(grace_mode, Some(crate::api::model::GraceMode::Hold))
     {
-        Ok(stream_details) => stream_details,
-        Err(err) => {
+        // A hold can last the whole grace period: viewers joining this group's shared stream
+        // must not wait behind it, so the share lock is given up while holding.
+        drop(shared_lock.take());
+        let hold_duration = Duration::from_millis(app_state.get_grace_options().period_millis);
+        let mut passed = wait_for_user_capacity(app_state, user, tokio::time::Instant::now() + hold_duration).await;
+
+        if !passed {
+            if let Some(ref ctx) = activation.grace_context {
+                let eviction_guard = if socket_bound {
+                    tuliprox_session::admission::EvictionReentryGuard::SocketPlayback {
+                        virtual_id: shared::model::VirtualId(virtual_id),
+                    }
+                } else {
+                    tuliprox_session::admission::EvictionReentryGuard::Session(session_token)
+                };
+                let remaining_result = tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
+                    &app_state.admission_ctx(),
+                    tuliprox_session::admission::AdmissionRequest {
+                        username: &user.username,
+                        max_connections: user.max_connections,
+                        soft_connections: user.soft_connections,
+                        client_ip: &fingerprint.client_ip,
+                        request_addr: &fingerprint.addr,
+                        use_session_admission: true,
+                        session_token: Some(session_token),
+                        activate_unbound_session: true,
+                        eviction_reentry_guard: eviction_guard,
+                    },
+                    ctx,
+                    activation.admission.kind(),
+                )
+                .await;
+                if matches!(
+                    remaining_result.admission.permission(),
+                    UserConnectionPermission::Allowed | UserConnectionPermission::GracePeriod
+                ) {
+                    passed = true;
+                }
+            }
+        }
+
+        if !passed {
             app_state
                 .active_users
                 .release_unbound_session_reservation(
@@ -488,8 +531,262 @@ pub(crate) async fn stream_response_with_provider_handle(
                     activation.placeholder_transition_version.is_some(),
                 )
                 .await;
-            error!("Failed to stream: {err}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            record_connect_failed_attempt(ConnectFailedAttempt {
+                app_state,
+                fingerprint,
+                user,
+                stream_channel: stream_channel.clone(),
+                provider_name: initial_input.name.clone(),
+                req_headers,
+                reason: ConnectFailureReason::UserConnectionsExhausted,
+                failure_stage: FailureStage::Admission,
+            });
+            return create_custom_video_stream_response(
+                &app_state.provider_stream_ctx(),
+                &fingerprint.addr,
+                CustomVideoStreamType::UserConnectionsExhausted,
+            )
+            .into_response();
+        }
+        connection_permission = UserConnectionPermission::Allowed;
+        if share_stream {
+            let write_lock = app_state.app_config.file_locks.write_lock_str(shared_lookup_key.as_ref()).await;
+            if let Some(value) = try_shared_stream_response_if_any(
+                app_state,
+                shared_lookup_key.as_ref(),
+                fingerprint,
+                user,
+                connection_permission,
+                connection_kind,
+                stream_channel.clone(),
+                session_token,
+                req_headers,
+                activation.placeholder_transition_version,
+            )
+            .await
+            {
+                return value.into_response();
+            }
+            let _ = shared_lock.insert(write_lock);
+        }
+    }
+
+    let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
+
+    // A group started on an MPEG-TS member can fail over at runtime.
+    let (mut stream_details, input, stream_url, mut stream_channel, group_runtime) = match source {
+        PlaybackSource::Single { input, stream_url } => {
+            let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+            let pinned_provider = pinned_provider.filter(|provider| {
+                item_type.is_live()
+                    || session_state
+                        .as_ref()
+                        .is_some_and(|session| session.media_started.load(std::sync::atomic::Ordering::Acquire))
+                    || app_state.active_provider.should_reuse_playback_provider(session_token, provider)
+            });
+            let provider_session_headers =
+                session_state.as_ref().and_then(|session| session.provider_session_headers_for(stream_url));
+            let details = match create_stream_response_details(
+                app_state,
+                &stream_options,
+                stream_url,
+                &user.username,
+                fingerprint,
+                req_headers,
+                input,
+                &stream_channel,
+                item_type,
+                if item_type == PlaylistItemType::Catchup {
+                    crate::api::model::ProviderContentRepresentationMode::Identity
+                } else {
+                    crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
+                },
+                share_stream,
+                connection_permission,
+                pinned_provider,
+                pinned_provider.is_none() || allows_provider_pool_failover(item_type),
+                true,
+                VirtualId::new(stream_channel.virtual_id),
+                connection_priority_for_kind(user, connection_kind),
+                connection_kind,
+                false,
+                Some(session_token),
+                provider_session_headers.as_deref(),
+                pinned_provider.is_some(),
+                grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
+                activation.grace_context.clone(),
+                None,
+                preacquired_provider_handle,
+            )
+            .await
+            {
+                Ok(stream_details) => stream_details,
+                Err(err) => {
+                    app_state
+                        .active_users
+                        .release_unbound_session_reservation(
+                            &user.username,
+                            session_token,
+                            activation.placeholder_transition_version,
+                            activation.placeholder_transition_version.is_some(),
+                        )
+                        .await;
+                    error!("Failed to stream: {err}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            };
+            (details, Arc::clone(input), Arc::<str>::from(stream_url), stream_channel, None)
+        }
+        PlaybackSource::Group { group, mode, prefer } => {
+            let playback = group_playback_settings(app_state, target);
+            let target_name: Arc<str> = Arc::from(target.name.as_str());
+            let priority = connection_priority_for_kind(user, connection_kind);
+            // The start budget bounds selection, provider open and payload probe of all attempts.
+            let budget_secs = if playback.start.timeout_secs == 0 { 86_400 } else { playback.start.timeout_secs };
+            let start_deadline = tokio::time::Instant::now() + Duration::from_secs(budget_secs);
+            let open_req = GroupOpenRequest {
+                app_state,
+                user,
+                fingerprint,
+                req_headers,
+                group: &group,
+                base_channel: &stream_channel,
+                stream_options: &stream_options,
+                share_stream,
+                connection_permission,
+                connection_kind,
+                priority,
+                session_token,
+                is_reopen: false,
+                deadline: start_deadline,
+            };
+            let mut exclude: Vec<usize> = Vec::new();
+            let mut demoted_inputs: Vec<Arc<str>> = Vec::new();
+            let mut opened: Option<OpenedGroupMember> = None;
+            let mut maintenance_only = false;
+            for attempt in 0..playback.start.max_attempts.max(1) {
+                let remaining = start_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let req = GroupSelectionRequest {
+                    mode: mode.clone(),
+                    allow_provider_grace: playback.allow_provider_grace,
+                    exclude: &exclude,
+                    demoted_inputs: &demoted_inputs,
+                    prefer: if attempt == 0 { prefer } else { None },
+                    bypass_maintenance: user.is_recording_proxy_user(),
+                    ..GroupSelectionRequest::new(
+                        &target_name,
+                        &group,
+                        playback.start,
+                        &fingerprint.addr,
+                        &user.username,
+                        priority,
+                        connection_kind,
+                    )
+                };
+                let acquired = match tokio::time::timeout(remaining, acquire_group_member(app_state, req)).await {
+                    Ok(Ok(acquired)) => acquired,
+                    Ok(Err(GroupSelectionFailure::Maintenance)) => {
+                        maintenance_only = exclude.is_empty();
+                        break;
+                    }
+                    Ok(Err(GroupSelectionFailure::Exhausted | GroupSelectionFailure::NoCandidate)) | Err(_) => break,
+                };
+                match open_group_member(&open_req, acquired).await {
+                    Ok(member) => {
+                        opened = Some(member);
+                        break;
+                    }
+                    Err(failure) => {
+                        if matches!(failure.class, FailureClass::Auth | FailureClass::Capacity) {
+                            demoted_inputs.push(failure.input_name);
+                        }
+                        exclude.push(failure.index);
+                    }
+                }
+            }
+
+            let Some(opened) = opened else {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(
+                        &user.username,
+                        session_token,
+                        activation.placeholder_transition_version,
+                        activation.placeholder_transition_version.is_some(),
+                    )
+                    .await;
+                if maintenance_only {
+                    return admission_failure_response(
+                        app_state,
+                        fingerprint,
+                        user,
+                        stream_channel,
+                        Arc::clone(&initial_input.name),
+                        req_headers,
+                        ConnectFailureReason::Maintenance,
+                    );
+                }
+                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                    target_id: target.id,
+                    group_vid: group.group_vid.get(),
+                });
+                record_connect_failed_attempt(ConnectFailedAttempt {
+                    app_state,
+                    fingerprint,
+                    user,
+                    stream_channel: stream_channel.clone(),
+                    provider_name: initial_input.name.clone(),
+                    req_headers,
+                    reason: ConnectFailureReason::ProviderConnectionsExhausted,
+                    failure_stage: FailureStage::ProviderOpen,
+                });
+                return create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::ProviderConnectionsExhausted,
+                )
+                .into_response();
+            };
+
+            app_state.event_manager.send_event(EventMessage::ChannelGroupMemberSelected {
+                target_id: target.id,
+                group_vid: group.group_vid.get(),
+                member_vid: opened.member.member_vid.get(),
+                tier: opened.tier,
+            });
+            app_state
+                .active_users
+                .bind_member(
+                    &user.username,
+                    session_token,
+                    tuliprox_session::MemberBinding {
+                        group_vid: group.group_vid.get(),
+                        member_vid: opened.member.member_vid.get(),
+                        member_index: opened.index,
+                        input_name: Arc::clone(&opened.member.input_name),
+                    },
+                )
+                .await;
+            // The session plays the member's provider now, not the representative's.
+            let member_provider =
+                opened.details.provider_name.clone().unwrap_or_else(|| Arc::clone(&opened.member.input_name));
+            app_state
+                .active_users
+                .update_session_provider_binding(
+                    &user.username,
+                    session_token,
+                    member_provider,
+                    Arc::clone(&opened.url),
+                )
+                .await;
+            let OpenedGroupMember { index, details, input, url, channel, payload, .. } = opened;
+            let runtime =
+                (playback.failover.enabled && payload == ProbedPayload::Ts && item_type == PlaylistItemType::Live)
+                    .then(|| (Arc::clone(&group), index, playback));
+            (details, input, url, channel, runtime)
         }
     };
 
@@ -505,13 +802,13 @@ pub(crate) async fn stream_response_with_provider_handle(
                         manifest,
                         user,
                         target,
-                        input,
+                        input: &input,
                         fingerprint,
                         session_token,
                         virtual_id: VirtualId::new(virtual_id),
                         connection_permission,
                         connection_kind,
-                        fallback_stream_url: stream_url,
+                        fallback_stream_url: &stream_url,
                     })
                     .await;
                 }
@@ -539,8 +836,9 @@ pub(crate) async fn stream_response_with_provider_handle(
             .as_ref()
             .map(|(h, sc, response_url, cvt)| (h.clone(), *sc, response_url.clone(), *cvt));
         let provider_name = stream_details.provider_name.clone();
-        let actual_request_url = stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url));
-        let log_actual_request_url = resolve_request_url_for_logging(input, actual_request_url.as_ref());
+        let actual_request_url =
+            stream_details.request_url.clone().unwrap_or_else(|| Arc::<str>::from(stream_url.as_ref()));
+        let log_actual_request_url = resolve_request_url_for_logging(&input, actual_request_url.as_ref());
 
         debug_if_enabled!(
             "Provider request mapping: allocated_provider={} actual_request_url={}",
@@ -603,7 +901,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         };
         let mut metering = prepare_stream_metering(
             app_state,
-            stream_url,
+            if is_stream_shared { shared_lookup_key.as_ref() } else { stream_url.as_ref() },
             is_stream_shared,
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
@@ -670,6 +968,40 @@ pub(crate) async fn stream_response_with_provider_handle(
         } else {
             false
         };
+        let has_provider_stream = stream_details.stream.is_some() && stream_details.custom_reason.is_none();
+        let group_driver = group_runtime.filter(|_| has_provider_stream).map(|(group, index, playback)| {
+            GroupFailoverDriver::new(
+                Arc::new(GroupFailoverContext {
+                    app_state: Arc::clone(app_state),
+                    target: Arc::clone(target),
+                    target_name: target.name.as_str().into(),
+                    group,
+                    playback,
+                    user: user.clone(),
+                    fingerprint: fingerprint.clone(),
+                    req_headers: req_headers.clone(),
+                    session_token: Arc::from(session_token),
+                    connection_kind,
+                    connection_permission,
+                    share_stream,
+                    base_channel: stream_channel.clone(),
+                    shared_key: is_stream_shared.then(|| Arc::from(shared_lookup_key.as_ref())),
+                }),
+                index,
+            )
+        });
+        // A shared producer fails over inside the stream it feeds; a direct response through its
+        // client stream, which owns the provider slot.
+        let group_failover = match group_driver {
+            Some(driver) if is_stream_shared => {
+                // The shared stream takes over this handle below.
+                let slot = provider_handle.as_ref();
+                stream_details.stream =
+                    stream_details.stream.take().map(|stream| GroupFailoverStream::new(driver, stream, slot).boxed());
+                None
+            }
+            driver => driver,
+        };
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -683,6 +1015,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             req_headers,
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
+            group_failover,
         })
         .await
         {
@@ -722,7 +1055,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                         active_provider: &app_state.active_provider,
                         connection_manager: &app_state.connection_manager,
                     },
-                    stream_url,
+                    shared_lookup_key.as_ref(),
                     stream,
                     &fingerprint.addr,
                     shared_subscriber_id,
@@ -774,7 +1107,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                     .and_then(|(_, _, u, _)| u.as_ref())
                     .map_or_else(|| Cow::Owned(actual_request_url.to_string()), |url| Cow::Owned(url.to_string()))
             };
-            let log_session_url = resolve_request_url_for_logging(input, session_url.as_ref());
+            let log_session_url = resolve_request_url_for_logging(&input, session_url.as_ref());
             if log_enabled!(log::Level::Debug) {
                 if log_session_url.eq(log_actual_request_url.as_ref()) {
                     debug!(

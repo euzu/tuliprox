@@ -17,7 +17,9 @@ use shared::{error::TuliproxError, model::WebAuthConfigDto};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tuliprox_dvr::recording::recording_transfer::{resume_recording_worker_if_needed, spawn_recording_services};
-use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
+use tuliprox_session::{
+    provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation_with_listener,
+};
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
@@ -131,6 +133,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         qos_aggregation,
         recordings,
         hls_cache: cancel_tokens.hls_cache.clone(),
+        channel_groups: cancel_tokens.channel_groups.clone(),
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -166,7 +169,11 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         exec_provider_dns(&app_state.app_config, &app_state.cancel_tokens.load().provider_dns);
     }
     if changes.flags.contains(UpdateChangesFlags::QosAggregation) {
-        exec_qos_aggregation(&app_state.app_config, &app_state.cancel_tokens.load().qos_aggregation);
+        exec_qos_aggregation_with_listener(
+            &app_state.app_config,
+            &app_state.cancel_tokens.load().qos_aggregation,
+            Some(Arc::new(super::AppQosAggregationListener { member_health: Arc::clone(&app_state.member_health) })),
+        );
         let history_cfg =
             app_state.app_config.config.load().reverse_proxy.as_ref().and_then(|rp| rp.stream_history.clone());
         let connection_manager = Arc::clone(&app_state.connection_manager);
@@ -214,6 +221,8 @@ impl AppState {
         let storage_dir = config.storage_dir.clone();
 
         self.active_users.update_config(&config);
+        self.member_health
+            .set_policy(tuliprox_session::channel_group::CircuitPolicy::from(&config.channel_groups.circuit));
         self.app_config.set_config(config)?;
         reload_logger(config_log_level.as_deref());
         self.active_provider.update_config(&self.app_config);

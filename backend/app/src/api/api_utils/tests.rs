@@ -37,3 +37,10 @@ mod stream_responses_provider_capacity;
 mod stream_responses_provider_fallback;
 mod stream_responses_response_headers;
 mod stream_responses_session_activation;
+
+mod channel_group_playback;
+mod channel_group_probe;
+mod channel_group_runtime;
+mod channel_group_selection;
+mod channel_group_sticky;
+pub(crate) mod group_playback_support;

@@ -1,11 +1,9 @@
 use super::{
-    clock::{
-        ts_packet_pid, ADAPTATION_FIELD_FLAG_PCR, HLS_TS_MAX_PENDING_PES_HEADERS, HLS_TS_TIMESTAMP_HEADER_BYTES,
-        PES_DTS_OFFSET, PES_PTS_OFFSET, SYNC_BYTE, TS_PACKET_SIZE,
-    },
+    clock::{HLS_TS_MAX_PENDING_PES_HEADERS, HLS_TS_TIMESTAMP_HEADER_BYTES, PES_DTS_OFFSET, PES_PTS_OFFSET},
     HlsCompletedPesTimestamps, HlsCompletedTimestampField, HlsPendingPesHeader, HlsPesHeaderAssembler,
     HlsTsPacketEvidence,
 };
+use crate::packet::{ts_packet_pid, ADAPTATION_FIELD_FLAG_PCR, TS_PACKET_SIZE, TS_SYNC_BYTE};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,11 +75,11 @@ pub(super) fn inspect_hls_ts_packet(
     packet: &[u8],
     packet_start: usize,
 ) -> Result<HlsTsPacketEvidence, HlsFiniteTsLayoutError> {
-    if packet.len() != TS_PACKET_SIZE || packet[0] != SYNC_BYTE || packet[1] & 0x80 != 0 || packet[3] & 0xC0 != 0 {
+    if packet.len() != TS_PACKET_SIZE || packet[0] != TS_SYNC_BYTE || packet[1] & 0x80 != 0 || packet[3] & 0xC0 != 0 {
         return Err(HlsFiniteTsLayoutError::InvalidTransportPacket);
     }
     let pid = ts_packet_pid(packet);
-    let adaptation_field_control = (packet[3] >> 4) & 0b11;
+    let adaptation_field_control = crate::packet::TsPacket(packet).adaptation_field_control();
     let continuity_counter = packet[3] & 0x0F;
     let (payload_offset, adaptation_length) = match adaptation_field_control {
         0b01 => (Some(4), None),

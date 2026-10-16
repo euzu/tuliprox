@@ -195,6 +195,9 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::Proxy(_, proxy_cfg) => config.proxy = Some(proxy_cfg),
             ConfigForm::IpCheck(_, ipcheck_cfg) => config.ipcheck = Some(ipcheck_cfg),
             ConfigForm::Library(_, library_cfg) => apply_setup_library_form(config, library_cfg),
+            ConfigForm::ChannelGroups(_, channel_groups_cfg) => {
+                config.channel_groups = (!channel_groups_cfg.is_default()).then_some(channel_groups_cfg);
+            }
             ConfigForm::Panel(_, _) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }

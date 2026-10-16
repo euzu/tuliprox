@@ -59,8 +59,8 @@ use tuliprox_curation::{
     SelectorOutcome,
 };
 use tuliprox_repository::{
-    persist_playlist_views, CategoryKey, MemoryPlaylistSource, PlaylistPublicationPlan, PlaylistSource,
-    PlaylistStorageState, TargetPlaylistPersistOptions,
+    persist_playlist_views_with_groups, CategoryKey, MemoryPlaylistSource, PendingChannelGroup,
+    PlaylistPublicationPlan, PlaylistSource, PlaylistStorageState, TargetPlaylistPersistOptions,
 };
 use tuliprox_session::ActiveProviderManager;
 

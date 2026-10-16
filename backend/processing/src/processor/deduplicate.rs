@@ -1,45 +1,20 @@
+use super::match_key::{dedup_match_by, extract_normalized_match_key, raw_match_value};
 use shared::{
-    model::{DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy, PlaylistGroup, PlaylistItem, XtreamCluster},
-    utils::{deunicode_string, quality_rank, quality_tokens, token_quality},
+    model::{DeduplicateConfig, DeduplicateKeep, PlaylistGroup, PlaylistItem, UUIDType, XtreamCluster},
+    utils::quality_rank,
 };
-use std::collections::HashMap;
-
-/// Lowercased token join with quality tokens removed, so "News HD" and
-/// "NEWS [FHD]" produce the same key.
-fn normalized_dedup_key(value: &str, match_as_ascii: bool) -> String {
-    let value = if match_as_ascii { deunicode_string(value) } else { std::borrow::Cow::Borrowed(value) };
-    let mut key = String::with_capacity(value.len());
-    for token in quality_tokens(&value) {
-        if token_quality(token).is_some() {
-            continue;
-        }
-        if !key.is_empty() {
-            key.push(' ');
-        }
-        for ch in token.chars() {
-            key.extend(ch.to_lowercase());
-        }
-    }
-    key
-}
+use std::collections::{HashMap, HashSet};
 
 fn match_value(config: DeduplicateConfig, item: &PlaylistItem) -> String {
-    normalized_dedup_key(raw_match_value(config, item), config.match_as_ascii)
+    extract_normalized_match_key(&item.header, dedup_match_by(config.match_by), config.match_as_ascii, None)
 }
 
-fn raw_match_value(config: DeduplicateConfig, item: &PlaylistItem) -> &str {
-    let header = &item.header;
-    match config.match_by {
-        DeduplicateMatchBy::Caption => {
-            if header.title.is_empty() {
-                header.name.as_ref()
-            } else {
-                header.title.as_ref()
-            }
-        }
-        DeduplicateMatchBy::Name => header.name.as_ref(),
-        DeduplicateMatchBy::Title => header.title.as_ref(),
-    }
+fn item_raw_match_value(config: DeduplicateConfig, item: &PlaylistItem) -> &str {
+    raw_match_value(&item.header, dedup_match_by(config.match_by))
+}
+
+fn should_skip(channel: &PlaylistItem, skip: &HashSet<UUIDType>) -> bool {
+    skip.contains(&channel.header.uuid) || channel.header.channel_group_uuid.is_some()
 }
 
 /// Collapse duplicate channels across the whole target playlist (per cluster).
@@ -48,16 +23,20 @@ fn raw_match_value(config: DeduplicateConfig, item: &PlaylistItem) -> &str {
 pub(in crate::processor) fn deduplicate_playlist(
     config: DeduplicateConfig,
     playlist: &mut Vec<PlaylistGroup>,
+    skip: &HashSet<UUIDType>,
 ) -> usize {
     // winner per key: (quality rank, group index, channel index)
     let mut winners: HashMap<(XtreamCluster, String), (u8, usize, usize)> = HashMap::new();
     for (group_idx, group) in playlist.iter().enumerate() {
         for (channel_idx, channel) in group.channels.iter().enumerate() {
+            if should_skip(channel, skip) {
+                continue;
+            }
             let key_value = match_value(config, channel);
             if key_value.is_empty() {
                 continue;
             }
-            let rank = quality_rank(raw_match_value(config, channel));
+            let rank = quality_rank(item_raw_match_value(config, channel));
             match winners.entry((group.xtream_cluster, key_value)) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert((rank, group_idx, channel_idx));
@@ -81,6 +60,9 @@ pub(in crate::processor) fn deduplicate_playlist(
         group.channels.retain(|channel| {
             let idx = channel_idx;
             channel_idx += 1;
+            if should_skip(channel, skip) {
+                return true;
+            }
             let key_value = match_value(config, channel);
             if key_value.is_empty() {
                 return true;
@@ -104,7 +86,10 @@ pub(in crate::processor) fn deduplicate_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{model::PlaylistItemHeader, utils::Internable};
+    use shared::{
+        model::{DeduplicateMatchBy, PlaylistItemHeader},
+        utils::Internable,
+    };
 
     fn make_item(title: &str) -> PlaylistItem {
         PlaylistItem { header: PlaylistItemHeader { title: title.intern(), ..Default::default() } }
@@ -134,7 +119,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: false,
         };
-        let removed = deduplicate_playlist(config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist, &HashSet::new());
         assert_eq!(removed, 2);
         let titles: Vec<_> = playlist[0].channels.iter().map(|c| c.header.title.to_string()).collect();
         assert_eq!(titles, vec!["News [FHD]", "Sports HD"]);
@@ -150,7 +135,7 @@ mod tests {
             match_as_ascii: false,
         };
 
-        let removed = deduplicate_playlist(config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist, &HashSet::new());
 
         // Target-wide curation evaluates only this surviving winner.
         assert_eq!(removed, 1);
@@ -167,7 +152,7 @@ mod tests {
             keep: DeduplicateKeep::First,
             match_as_ascii: false,
         };
-        let removed = deduplicate_playlist(config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist, &HashSet::new());
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "News HD");
     }
@@ -184,7 +169,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: false,
         };
-        let removed = deduplicate_playlist(config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist, &HashSet::new());
         assert_eq!(removed, 1);
         // "A" was emptied by dedup and dropped, the already-empty group survives
         assert_eq!(playlist.len(), 2);
@@ -203,7 +188,7 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: true,
         };
-        let removed = deduplicate_playlist(config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist, &HashSet::new());
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Cafe FHD");
 
@@ -214,6 +199,17 @@ mod tests {
             keep: DeduplicateKeep::BestQuality,
             match_as_ascii: false,
         };
-        assert_eq!(deduplicate_playlist(config, &mut playlist), 0);
+        assert_eq!(deduplicate_playlist(config, &mut playlist, &HashSet::new()), 0);
+    }
+
+    #[test]
+    fn dedup_never_drops_group_item() {
+        let group_item = make_item("ZDF HD");
+        let excluded = make_item("ZDF UHD");
+        let skip: HashSet<UUIDType> = [group_item.header.uuid].into_iter().collect();
+        let mut playlist = vec![make_group("News", vec![group_item, excluded])];
+        let removed = deduplicate_playlist(DeduplicateConfig::default(), &mut playlist, &skip);
+        assert_eq!(removed, 0);
+        assert_eq!(playlist[0].channels.len(), 2);
     }
 }

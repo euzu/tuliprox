@@ -122,6 +122,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
     })
 }
 
@@ -147,6 +148,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_s
     StreamChannel {
         target_id: 1,
         virtual_id,
+        group_virtual_id: None,
         provider_id: 1,
         input_name: "input".intern(),
         item_type: PlaylistItemType::Live,
@@ -232,6 +234,8 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn custom_video_
         provider_error_class: None,
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
+        group_switcher: None,
+        group_lease_owner: None,
         lease_owner: None,
         media_started: None,
         lease_confirmed: false,

@@ -8,6 +8,10 @@ description = "Provider allocation and streaming-session runtime: admission, con
 [lints]
 workspace = true
 
+[features]
+# Exposes test-only helpers to dependent crates' tests.
+test-support = []
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
@@ -24,6 +28,8 @@ jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_
 log.workspace = true
 rand = "0.9.5"
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 lru = "0.16.4"
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync"] }

@@ -4,7 +4,7 @@ use super::{
     is_media_server_playback_url, is_media_server_stream_ref_url, is_seek_request, is_seekable_media_request,
     mark_response_as_uncompressed, resolve_request_url_for_logging, resolve_stream_config_u64, resource_proxy_response,
     spawn_legacy_hls_test_origin, stream_response, stream_responses::forced_legacy_hls_test_response,
-    user_with_network_access, NetworkAccessDecision,
+    user_with_network_access, NetworkAccessDecision, PlaybackSource,
 };
 use crate::{
     api::model::{SharedStreamCtx, SharedStreamManager},
@@ -365,10 +365,9 @@ async fn stream_response_preserves_soft_kind_for_shared_reuse() {
         "soft-session",
         None,
         create_test_live_channel(stream_url),
-        stream_url,
+        PlaybackSource::Single { input: &input, stream_url },
         None,
         &HeaderMap::default(),
-        &input,
         &target,
         &user,
         admission.permission(),

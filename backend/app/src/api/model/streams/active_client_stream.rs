@@ -24,6 +24,8 @@ pub(crate) struct ActiveClientStreamParams<'a> {
     pub req_headers: &'a HeaderMap,
     pub meter_uid: u32,
     pub meter_stream: bool,
+    /// Replaces a failing member of a direct group playback underneath this response.
+    pub group_failover: Option<crate::api::api_utils::channel_group_failover::GroupFailoverDriver>,
 }
 
 pub(in crate::api) struct ActiveClientStream {

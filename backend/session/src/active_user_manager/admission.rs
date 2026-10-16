@@ -8,6 +8,7 @@ use jsonwebtoken::get_current_timestamp;
 use log::debug;
 use shared::model::{StreamInfo, UserConnectionPermission};
 use std::{collections::HashSet, net::SocketAddr, sync::atomic::Ordering};
+use tuliprox_core::model::AllocationId;
 
 /// Panel identity of a removed stream row, as carried by `DisconnectedStream`.
 pub(super) type RemovedStreamKey = (SocketAddr, u32);
@@ -185,6 +186,22 @@ impl UserConnectionData {
 }
 
 impl ActiveUserManager {
+    pub async fn pending_release_allocations(&self, username: &str) -> Vec<AllocationId> {
+        self.pending_provider_release(username).await.map_or_else(Vec::new, |snapshot| snapshot.single_allocations)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_pending_release_for_test(&self, username: &str, allocations: &[AllocationId]) {
+        self.set_pending_provider_release(
+            username,
+            crate::active_provider_manager::ProviderReleaseSnapshot::from_single_allocations(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                allocations.to_vec(),
+            ),
+        )
+        .await;
+    }
+
     pub(crate) async fn pending_provider_release(&self, username: &str) -> Option<ProviderReleaseSnapshot> {
         self.pending_provider_releases.lock().await.get(username).cloned()
     }

@@ -185,9 +185,33 @@ async fn hls_recreate_content_allowed(
             return Some(user_allows_entry_content(user, scope, &item));
         }
     }
-    let item =
-        m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target).await.ok()?;
-    Some(user_allows_entry_content(user, HlsEntryOutputScope::ItemType(item.item_type), &item))
+    if let Ok(item) = m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target).await
+    {
+        return Some(user_allows_entry_content(user, HlsEntryOutputScope::ItemType(item.item_type), &item));
+    }
+    let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        target,
+        shared::model::VirtualId::new(virtual_id),
+    )
+    .await;
+    if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } = classified {
+        if target.has_output(TargetType::Xtream) {
+            let item = tuliprox_repository::target_stream_item::member_to_xtream_item(&group, index, target);
+            let scope = if is_catchup {
+                HlsEntryOutputScope::LiveCluster
+            } else {
+                HlsEntryOutputScope::ItemType(item.item_type)
+            };
+            return Some(user_allows_entry_content(user, scope, &item));
+        }
+        let item = tuliprox_repository::target_stream_item::member_to_m3u_item(&group, index, target);
+        let scope =
+            if is_catchup { HlsEntryOutputScope::LiveCluster } else { HlsEntryOutputScope::ItemType(item.item_type) };
+        return Some(user_allows_entry_content(user, scope, &item));
+    }
+    None
 }
 
 /// Recreates a missing user session from a sealed `Manifest(Entry)` token.
@@ -195,7 +219,7 @@ async fn hls_recreate_content_allowed(
 /// With the wrapper the player refreshes only the variant URI, so after a session expiry the
 /// token route has to do what an entry refresh did before: identity, access, admission, source,
 /// session, fetch. The session keeps the sealed session token and therefore its playback owner.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn recreate_hls_session_from_token(
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
@@ -211,9 +235,21 @@ pub(super) async fn recreate_hls_session_from_token(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if hls_cache_enabled_for_user(app_state, target, user)
-        || !hls_session_hint_matches_requester(fingerprint, &user.username, virtual_id, hint)
-    {
+    let classified = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        target,
+        shared::model::VirtualId::new(virtual_id),
+    )
+    .await;
+    let hint_matches = hls_session_hint_matches_requester(fingerprint, &user.username, virtual_id, hint)
+        || match &classified {
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, .. } => {
+                hls_session_hint_matches_requester(fingerprint, &user.username, group.group_vid.get(), hint)
+            }
+            _ => false,
+        };
+    if hls_cache_enabled_for_user(app_state, target, user) || !hint_matches {
         return StatusCode::BAD_REQUEST.into_response();
     }
     // Only an expired session comes back; an evicted, kicked or terminated one stays ended,

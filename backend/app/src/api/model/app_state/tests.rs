@@ -276,3 +276,19 @@ async fn contactable_input_hides_inputs_in_maintenance() {
     app_state.maintenance.add("provider_a", None, 1).await.unwrap();
     assert!(app_state.contactable_input(&name).is_none(), "an input in maintenance is not contacted");
 }
+
+#[tokio::test]
+async fn config_reload_applies_channel_group_circuit_settings() {
+    let state = super::create_test_app_state(Config::default());
+    let circuit = shared::model::ChannelGroupCircuitConfig {
+        source_failures: 5,
+        ..shared::model::ChannelGroupCircuitConfig::default()
+    };
+    let config = Config {
+        channel_groups: shared::model::ChannelGroupsConfig { circuit, ..shared::model::ChannelGroupsConfig::default() },
+        ..Config::default()
+    };
+
+    assert!(state.set_config(config).await.is_ok());
+    assert_eq!(*state.member_health.policy(), tuliprox_session::channel_group::CircuitPolicy::from(&circuit));
+}

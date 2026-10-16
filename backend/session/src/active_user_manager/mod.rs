@@ -111,6 +111,14 @@ pub enum SessionProviderHeaders {
     Headers(HashMap<String, String>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberBinding {
+    pub group_vid: u32,
+    pub member_vid: u32,
+    pub member_index: usize,
+    pub input_name: Arc<str>,
+}
+
 #[derive(Clone, Debug)]
 pub struct UserSession {
     pub token: String,
@@ -140,6 +148,7 @@ pub struct UserSession {
     pub permission: UserConnectionPermission,
     pub connection_kind: Option<ConnectionKind>,
     pub lifecycle: PlaybackLifecycle,
+    pub member_binding: Option<MemberBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

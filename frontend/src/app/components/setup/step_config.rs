@@ -76,6 +76,7 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
                 ConfigForm::IpCheck(_, _) => setup_ctx.config_forms.slots.ipcheck.as_ref(),
                 ConfigForm::Panel(_, _) => setup_ctx.config_forms.slots.panel.as_ref(),
                 ConfigForm::Library(_, _) => setup_ctx.config_forms.slots.library.as_ref(),
+                ConfigForm::ChannelGroups(_, _) => setup_ctx.config_forms.slots.channel_groups.as_ref(),
             };
             if current_slot == Some(&form_data) {
                 return;

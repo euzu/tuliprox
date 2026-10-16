@@ -14,7 +14,7 @@ use crate::{
             redirect, redirect_response, reentry_suppressed_response, resolve_initial_stalker_playback_url,
             resource_proxy_response, resource_redirect_or_proxy, separate_number_and_remainder,
             should_allow_exhausted_shared_reconnect, stream_response, stream_response_with_provider_handle,
-            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
+            try_option_bad_request, try_result_bad_request, try_unwrap_body, PlaybackSource, RedirectParams,
         },
         endpoints::{
             hls_api::{
@@ -295,27 +295,53 @@ async fn xtream_player_api_stream(
     }
 
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let Ok(mut pli) =
-        xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await
-    else {
-        error!("Failed to read xtream item for stream id {req_virtual_id}");
-        if is_hls_manifest_request {
-            return hls_custom_video_manifest_response(
-                app_state,
-                &user,
-                CustomVideoStreamType::ChannelUnavailable,
-                axum::http::StatusCode::NOT_FOUND,
-            )
-            .await;
-        }
-        return create_custom_video_stream_response(
-            &app_state.provider_stream_ctx(),
-            &fingerprint.addr,
-            CustomVideoStreamType::ChannelUnavailable,
-        )
-        .into_response();
+    let resolved_target = tuliprox_repository::target_stream_item::classify_virtual_id(
+        &app_state.app_config,
+        &app_state.playlists,
+        &target,
+        VirtualId::new(req_virtual_id),
+    )
+    .await;
+
+    let is_group = matches!(
+        resolved_target,
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(_)
+            | tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { .. }
+    );
+
+    let pli_res =
+        xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await;
+    let mut pli = match pli_res {
+        Ok(pli) => pli,
+        Err(err) => match &resolved_target {
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
+                tuliprox_repository::target_stream_item::member_to_xtream_item(group, 0, &target)
+            }
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
+                tuliprox_repository::target_stream_item::member_to_xtream_item(group, *index, &target)
+            }
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
+                error!("Failed to read xtream item for stream id {req_virtual_id}: {err}");
+                if is_hls_manifest_request {
+                    return hls_custom_video_manifest_response(
+                        app_state,
+                        &user,
+                        CustomVideoStreamType::ChannelUnavailable,
+                        axum::http::StatusCode::NOT_FOUND,
+                    )
+                    .await;
+                }
+                return create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::ChannelUnavailable,
+                )
+                .into_response();
+            }
+        },
     };
 
+    let virtual_id = pli.virtual_id;
     let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
     let stream_ext = input_option
         .as_deref()
@@ -346,8 +372,12 @@ async fn xtream_player_api_stream(
         .into_response();
     }
 
-    let virtual_id = pli.virtual_id;
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
+    let check_vid = match &resolved_target {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group)
+        | tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, .. } => group.group_vid,
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => virtual_id,
+    };
+    if app_state.active_users.is_user_blocked_for_stream(&user.username, check_vid).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
@@ -441,23 +471,25 @@ async fn xtream_player_api_stream(
         (pli.xtream_cluster, pli.item_type)
     };
 
-    pli.url = match resolve_initial_stalker_playback_url(
-        app_state,
-        &input,
-        &user,
-        pli.provider_id,
-        pli.xtream_cluster,
-        item_type,
-        &pli.url,
-    )
-    .await
-    {
-        Ok(url) => url,
-        Err(err) => {
-            error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
-            return axum::http::StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
+    if !is_group {
+        pli.url = match resolve_initial_stalker_playback_url(
+            app_state,
+            &input,
+            &user,
+            pli.provider_id,
+            pli.xtream_cluster,
+            item_type,
+            &pli.url,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(err) => {
+                error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
+    }
 
     let requested_extension = if m3u_timeshift.is_some() {
         extract_extension_from_url(&pli.url).map(|ext| concat_string!(".", ext))
@@ -555,6 +587,8 @@ async fn xtream_player_api_stream(
         if session.virtual_id == virtual_id.get() && is_seekable_media_request(cluster, req_headers, Some(playback_ext))
         {
             // partial request means we are in reverse proxy mode, seek happened
+            let (input, stream_channel) =
+                crate::api::api_utils::sticky_playback_context(app_state, session, &input, stream_channel);
             return force_provider_stream_response(
                 fingerprint,
                 app_state,
@@ -579,7 +613,9 @@ async fn xtream_player_api_stream(
         pli.url.clone()
     };
 
-    if !is_running_playback(user_session.as_ref()) && blocks_new_playback(app_state, &input, &user, false) {
+    // A group checks maintenance per member during selection; its representative input says nothing.
+    if !is_group && !is_running_playback(user_session.as_ref()) && blocks_new_playback(app_state, &input, &user, false)
+    {
         let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
         return maintenance_rejection_response(
             app_state,
@@ -715,16 +751,40 @@ async fn xtream_player_api_stream(
     let pinned_provider =
         user_session.as_ref().filter(|_| item_type.requires_provider_affinity()).map(|session| &session.provider);
 
+    let source = match resolved_target {
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
+            let bound_prefer = user_session
+                .as_ref()
+                .and_then(|session| session.member_binding.as_ref())
+                .filter(|b| b.group_vid == group.group_vid.get())
+                .map(|b| b.member_index);
+            PlaybackSource::Group {
+                group,
+                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                prefer: bound_prefer,
+            }
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
+            PlaybackSource::Group {
+                group,
+                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                prefer: Some(index),
+            }
+        }
+        tuliprox_repository::target_stream_item::ResolvedStreamTarget::Item => {
+            PlaybackSource::Single { input: &input, stream_url: &stream_url }
+        }
+    };
+
     stream_response(
         fingerprint,
         app_state,
         session_key.as_str(),
         Some(request_class),
         stream_channel,
-        &stream_url,
+        source,
         pinned_provider,
         req_headers,
-        &input,
         &target,
         &user,
         connection_permission,
@@ -1077,10 +1137,9 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             session_key.as_str(),
             None,
             pli.to_stream_channel(target.id),
-            &stream_url,
+            PlaybackSource::Single { input: &input, stream_url: &stream_url },
             None,
             req_headers,
-            &input,
             &target,
             &user,
             UserConnectionPermission::Allowed,

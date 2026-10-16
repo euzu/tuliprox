@@ -538,6 +538,8 @@ impl InputWorker {
 
                         Self::apply_pending_generic_probe_base(collector, cluster, provider_id, &mut item);
 
+                        let raw_video = metadata.raw_video.clone();
+                        let raw_audio = metadata.raw_audio.clone();
                         update_properties(
                             &mut item.additional_properties,
                             *item_type,
@@ -549,7 +551,17 @@ impl InputWorker {
                         );
 
                         match item.additional_properties {
-                            Some(StreamProperties::Live(props)) => collector.add_live(provider_id.into(), *props),
+                            Some(StreamProperties::Live(props)) => {
+                                let bitrate_kbps = props.bitrate / 1000;
+                                ctx.events.observe_stream_probe(
+                                    Arc::clone(&input.name),
+                                    Arc::from(provider_id.to_string()),
+                                    raw_video.as_deref(),
+                                    raw_audio.as_deref(),
+                                    bitrate_kbps,
+                                );
+                                collector.add_live(provider_id.into(), *props);
+                            }
                             Some(StreamProperties::Video(props)) => collector.add_vod(provider_id.into(), *props),
                             _ => {}
                         }

@@ -2,21 +2,31 @@ use super::{
     ActiveClientStream, ActiveClientStreamState, DeferredProviderOpenOutcome, DeferredProviderOpenState, StreamMode,
     TimedStreamContext,
 };
-use crate::api::model::{
-    connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
-    open_provider_stream_with_lifecycle, AppState, BoxedProviderStream, ProviderStreamOpen,
-    ProviderStreamOpenLifecycle, StreamError, TimedClientStream,
+use crate::api::{
+    api_utils::channel_group_failover::{GroupEnd, GroupPoll, MemberHost, RuntimeMember},
+    model::{
+        connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
+        open_provider_stream_with_lifecycle, AppState, BoxedProviderStream, ProviderStreamOpen,
+        ProviderStreamOpenLifecycle, StreamError, TimedClientStream,
+    },
 };
 use bytes::Bytes;
 use futures::{Future, Stream, StreamExt};
 use log::{error, info};
-use shared::{model::VirtualId, utils::sanitize_sensitive_info};
+use shared::{
+    model::{SwitchReason, VirtualId},
+    utils::sanitize_sensitive_info,
+};
 use std::{
     net::SocketAddr,
     pin::Pin,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
+use tuliprox_session::stream_options::StreamResponseMode;
 
 impl ActiveClientStreamState {
     /// Drops the provider handle at most once (releasing the provider slot
@@ -74,6 +84,30 @@ impl ActiveClientStreamState {
         }
     }
 
+    /// No member could take over within the budget: the response ends like a provider stream
+    /// that ended without failover.
+    /// Returns true when the channel-unavailable video follows instead of the end of the body.
+    pub(super) fn end_failed_group_switch(&mut self, reason: SwitchReason) -> bool {
+        // The provider ended cleanly only when its body ended; otherwise it failed.
+        let end_reason = if reason == SwitchReason::UpstreamEof { PROVIDER_END_CLOSED } else { PROVIDER_END_ERROR };
+        let _ = self.provider_end_reason.compare_exchange(
+            PROVIDER_END_NOT_SET,
+            end_reason,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        self.preempt_cancelled = None;
+        self.stop_grace_task();
+        self.provider_stopped = true;
+        let shows_video = self.response_mode == StreamResponseMode::Stream && self.custom_video.unavailable.is_some();
+        if shows_video {
+            // The mode flag only exists for streams admitted with grace or preemption video.
+            self.send_custom_stream_flag.get_or_insert_with(|| Arc::new(AtomicU8::new(StreamMode::Inner as u8)));
+        }
+        self.publish_provider_stop(StreamMode::ChannelUnavailable);
+        shows_video
+    }
+
     pub(super) fn release_stream_and_provider_handle_once(&mut self) {
         self.stop_grace_task();
         self.release_provider_handle_and_detach_body();
@@ -95,6 +129,40 @@ impl ActiveClientStreamState {
         self.stop_grace_task();
         self.release_provider_handle_and_detach_body();
         self.release_user_stream();
+    }
+}
+
+impl MemberHost for ActiveClientStreamState {
+    fn member_body(&mut self) -> Option<&mut BoxedProviderStream> { self.inner.as_mut() }
+
+    fn member_preempted(&self) -> bool {
+        self.provider_handle
+            .as_ref()
+            .and_then(|managed| managed.handle())
+            .and_then(|handle| handle.cancel_token.as_ref())
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+    }
+
+    fn release_member(&mut self) {
+        self.preempt_cancelled = None;
+        self.release_provider_handle_and_detach_body();
+    }
+
+    fn install_member(&mut self, member: RuntimeMember) {
+        self.preempt_cancelled = member
+            .handle
+            .as_ref()
+            .and_then(|managed| managed.handle())
+            .and_then(|handle| handle.cancel_token.as_ref())
+            .map(|token| Box::pin(token.clone().cancelled_owned()));
+        self.provider_handle = member.handle;
+        self.provider_handle_released = false;
+        self.inner = Some(self.wrap_provider_stream(member.stream));
+        self.provider_reconnect_count.fetch_add(1, Ordering::Relaxed);
+        if self.group_lease_owner.is_some() {
+            self.lease_owner.clone_from(&self.group_lease_owner);
+            self.lease_confirmed = false;
+        }
     }
 }
 
@@ -185,100 +253,125 @@ impl Stream for ActiveClientStream {
                 StreamMode::Inner => {
                     self.state.reset_custom_video_timeout();
 
-                    if self.state.inner.is_none() {
-                        if let Some(deferred_provider_open) = self.state.deferred_provider_open.take() {
-                            match deferred_provider_open {
-                                DeferredProviderOpenState::Pending(context) => {
-                                    let app_state = Arc::clone(&context.app_state);
-                                    let client = {
-                                        let http_client = app_state.http_clients.default.load();
-                                        http_client.as_ref().clone()
-                                    };
-                                    let lifecycle = self
-                                        .state
-                                        .provider_handle
-                                        .as_ref()
-                                        .and_then(ProviderStreamOpenLifecycle::from_managed);
-                                    let future = Box::pin(async move {
-                                        match open_provider_stream_with_lifecycle(
-                                            &app_state.provider_stream_ctx(),
-                                            &client,
-                                            context.provider_stream_factory_options,
-                                            lifecycle,
-                                        )
-                                        .await
-                                        {
-                                            Some(ProviderStreamOpen::Stream(response))
-                                                if matches!(response.info, Some((_, _, _, Some(_)))) =>
+                    let polled = if let Some(mut switcher) = self.state.group_switcher.take() {
+                        let polled = switcher.poll_member(&mut self.state, cx);
+                        if !matches!(polled, GroupPoll::Ended(_)) {
+                            self.state.group_switcher = Some(switcher);
+                        }
+                        polled
+                    } else {
+                        if self.state.inner.is_none() {
+                            if let Some(deferred_provider_open) = self.state.deferred_provider_open.take() {
+                                match deferred_provider_open {
+                                    DeferredProviderOpenState::Pending(context) => {
+                                        let app_state = Arc::clone(&context.app_state);
+                                        let client = {
+                                            let http_client = app_state.http_clients.default.load();
+                                            http_client.as_ref().clone()
+                                        };
+                                        let lifecycle = self
+                                            .state
+                                            .provider_handle
+                                            .as_ref()
+                                            .and_then(ProviderStreamOpenLifecycle::from_managed);
+                                        let future = Box::pin(async move {
+                                            match open_provider_stream_with_lifecycle(
+                                                &app_state.provider_stream_ctx(),
+                                                &client,
+                                                context.provider_stream_factory_options,
+                                                lifecycle,
+                                            )
+                                            .await
                                             {
-                                                let Some((_headers, _status, _response_url, Some(custom_video_type))) =
-                                                    response.info
-                                                else {
-                                                    return DeferredProviderOpenOutcome::Failed;
-                                                };
-                                                ActiveClientStreamState::mode_for_custom_video_type(custom_video_type)
+                                                Some(ProviderStreamOpen::Stream(response))
+                                                    if matches!(response.info, Some((_, _, _, Some(_)))) =>
+                                                {
+                                                    let Some((
+                                                        _headers,
+                                                        _status,
+                                                        _response_url,
+                                                        Some(custom_video_type),
+                                                    )) = response.info
+                                                    else {
+                                                        return DeferredProviderOpenOutcome::Failed;
+                                                    };
+                                                    ActiveClientStreamState::mode_for_custom_video_type(
+                                                        custom_video_type,
+                                                    )
                                                     .map_or(
                                                         DeferredProviderOpenOutcome::Failed,
                                                         DeferredProviderOpenOutcome::Mode,
                                                     )
+                                                }
+                                                Some(ProviderStreamOpen::Stream(response)) => {
+                                                    DeferredProviderOpenOutcome::Stream(response.stream)
+                                                }
+                                                Some(ProviderStreamOpen::UpstreamStatus { .. }) | None => {
+                                                    DeferredProviderOpenOutcome::Failed
+                                                }
                                             }
-                                            Some(ProviderStreamOpen::Stream(response)) => {
-                                                DeferredProviderOpenOutcome::Stream(response.stream)
-                                            }
-                                            Some(ProviderStreamOpen::UpstreamStatus { .. }) | None => {
-                                                DeferredProviderOpenOutcome::Failed
-                                            }
-                                        }
-                                    });
-                                    self.state.deferred_provider_open =
-                                        Some(DeferredProviderOpenState::Opening(future));
-                                    continue;
-                                }
-                                DeferredProviderOpenState::Opening(mut future) => match future.as_mut().poll(cx) {
-                                    Poll::Pending => {
+                                        });
                                         self.state.deferred_provider_open =
                                             Some(DeferredProviderOpenState::Opening(future));
-                                        return Poll::Pending;
-                                    }
-                                    Poll::Ready(DeferredProviderOpenOutcome::Stream(stream)) => {
-                                        self.state.provider_reconnect_count.fetch_add(1, Ordering::Relaxed);
-                                        self.state.inner = Some(self.state.wrap_provider_stream(stream));
-                                        self.state.mark_direct_body_progress();
                                         continue;
                                     }
-                                    Poll::Ready(DeferredProviderOpenOutcome::Mode(mode)) => {
-                                        if !self.state.enter_custom_mode(mode) {
-                                            return Poll::Ready(None);
+                                    DeferredProviderOpenState::Opening(mut future) => match future.as_mut().poll(cx) {
+                                        Poll::Pending => {
+                                            self.state.deferred_provider_open =
+                                                Some(DeferredProviderOpenState::Opening(future));
+                                            return Poll::Pending;
                                         }
-                                        continue;
-                                    }
-                                    Poll::Ready(DeferredProviderOpenOutcome::Failed) => {
-                                        if !self.state.enter_custom_mode(StreamMode::ChannelUnavailable) {
-                                            return Poll::Ready(None);
+                                        Poll::Ready(DeferredProviderOpenOutcome::Stream(stream)) => {
+                                            self.state.provider_reconnect_count.fetch_add(1, Ordering::Relaxed);
+                                            self.state.inner = Some(self.state.wrap_provider_stream(stream));
+                                            self.state.mark_direct_body_progress();
+                                            continue;
                                         }
-                                        continue;
-                                    }
-                                },
+                                        Poll::Ready(DeferredProviderOpenOutcome::Mode(mode)) => {
+                                            if !self.state.enter_custom_mode(mode) {
+                                                return Poll::Ready(None);
+                                            }
+                                            continue;
+                                        }
+                                        Poll::Ready(DeferredProviderOpenOutcome::Failed) => {
+                                            if !self.state.enter_custom_mode(StreamMode::ChannelUnavailable) {
+                                                return Poll::Ready(None);
+                                            }
+                                            continue;
+                                        }
+                                    },
+                                }
                             }
+
+                            if self.state.grace_task_handle.is_none() {
+                                self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
+                                return Poll::Ready(None);
+                            }
+
+                            return Poll::Pending;
                         }
 
-                        if self.state.grace_task_handle.is_none() {
-                            self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
-                            return Poll::Ready(None);
+                        match self.state.inner.as_mut().map(|inner| Pin::new(inner).poll_next(cx)) {
+                            Some(Poll::Ready(Some(Ok(bytes)))) => GroupPoll::Data(bytes),
+                            Some(Poll::Ready(Some(Err(e)))) => GroupPoll::Ended(GroupEnd::Error(e)),
+                            Some(Poll::Ready(None)) | None => GroupPoll::Ended(GroupEnd::Eof),
+                            Some(Poll::Pending) => GroupPoll::Pending,
                         }
+                    };
 
-                        return Poll::Pending;
-                    }
-
-                    match self.state.inner.as_mut().map(|inner| Pin::new(inner).poll_next(cx)) {
-                        Some(Poll::Ready(Some(Ok(bytes)))) => {
+                    match polled {
+                        GroupPoll::Keepalive(packets) => {
+                            self.state.mark_direct_body_progress();
+                            return Poll::Ready(Some(Ok(packets)));
+                        }
+                        GroupPoll::Data(bytes) => {
                             if !bytes.is_empty() {
                                 self.state.confirm_lease_once();
                             }
                             self.state.mark_direct_body_progress();
                             return Poll::Ready(Some(Ok(bytes)));
                         }
-                        Some(Poll::Ready(Some(Err(e)))) => {
+                        GroupPoll::Ended(GroupEnd::Error(e)) => {
                             error!("Inner stream error: {e:?}");
                             self.state.provider_error_class = Some(e.provider_error_class());
                             self.state.provider_http_status = e.provider_http_status();
@@ -295,7 +388,7 @@ impl Stream for ActiveClientStream {
 
                             return Poll::Pending;
                         }
-                        Some(Poll::Ready(None)) | None => {
+                        GroupPoll::Ended(GroupEnd::Eof) => {
                             let _ = self.state.provider_end_reason.compare_exchange(
                                 PROVIDER_END_NOT_SET,
                                 PROVIDER_END_CLOSED,
@@ -309,7 +402,24 @@ impl Stream for ActiveClientStream {
 
                             return Poll::Pending;
                         }
-                        Some(Poll::Pending) => {
+                        // A stalled group member that no other member could replace.
+                        GroupPoll::Ended(GroupEnd::Stalled) => {
+                            let _ = self.state.provider_end_reason.compare_exchange(
+                                PROVIDER_END_NOT_SET,
+                                PROVIDER_END_ERROR,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            );
+                            self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
+                            return Poll::Ready(None);
+                        }
+                        GroupPoll::Ended(GroupEnd::SwitchFailed { reason }) => {
+                            if self.state.end_failed_group_switch(reason) {
+                                continue;
+                            }
+                            return Poll::Ready(None);
+                        }
+                        GroupPoll::Pending => {
                             if self.state.direct_body_idle_timeout.poll_expired(cx) {
                                 self.state.stop_direct_body_idle_timeout();
                                 return Poll::Ready(None);

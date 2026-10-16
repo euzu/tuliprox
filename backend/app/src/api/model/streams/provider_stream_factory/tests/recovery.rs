@@ -74,3 +74,17 @@ async fn legacy_hls_stream_decoder_failure_aborts_without_retry() {
     assert!(matches!(error, StreamError::ContentDecoding(_)));
     assert_eq!(requests.load(Ordering::SeqCst), 1, "a body-stream failure cannot trigger a new request");
 }
+
+#[test]
+fn non_group_open_retries_until_retry_limit() {
+    // The attempt counter starts at 1, so a single source gets ERR_MAX_RETRY_COUNT + 1 attempts.
+    for attempt in 1..=ERR_MAX_RETRY_COUNT {
+        assert!(!initial_open_retry_exhausted(false, attempt), "attempt {attempt} must allow a retry");
+    }
+    assert!(initial_open_retry_exhausted(false, ERR_MAX_RETRY_COUNT + 1));
+}
+
+#[test]
+fn group_member_open_does_not_retry() {
+    assert!(initial_open_retry_exhausted(true, 1));
+}

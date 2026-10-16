@@ -138,3 +138,5 @@ mod terminal_tail_recovery_before_cutover;
 mod terminal_tail_terminal_cutover;
 mod terminal_tail_terminal_fallback;
 mod terminal_tail_terminal_preflight;
+
+mod channel_group;

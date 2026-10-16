@@ -2,6 +2,7 @@ mod macros;
 
 mod admission_strategies;
 mod api_config_view;
+mod channel_groups_config_view;
 mod config_page;
 mod config_update;
 mod config_view;
@@ -26,6 +27,7 @@ mod webui_config_view;
 
 pub(crate) use admission_strategies::*;
 pub use api_config_view::*;
+pub use channel_groups_config_view::*;
 pub use config_page::*;
 pub use config_view::*;
 pub use config_view_context::*;
