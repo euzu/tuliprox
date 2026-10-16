@@ -13,8 +13,8 @@ use crate::{
     api::{
         api_utils::{
             acquire_exact_provider_handle, blocks_new_playback, connection_priority_for_kind,
-            get_hls_playback_ttl_secs, is_running_playback, resolve_hls_group_entry, select_provider_stream_url,
-            ExactProviderAcquire, GroupSelectionRequest, HLS_MANIFEST_CAPACITY_WAIT,
+            get_hls_playback_ttl_secs, group_playback_settings, is_running_playback, resolve_hls_group_entry,
+            select_provider_stream_url, ExactProviderAcquire, GroupSelectionRequest, HLS_MANIFEST_CAPACITY_WAIT,
         },
         model::{AppState, CustomVideoStreamType, PlaybackLeaseRef, ProviderAllocation, UserSession},
     },
@@ -42,7 +42,7 @@ use tuliprox_hls::api::{
     HlsSessionKey,
 };
 use tuliprox_session::{
-    channel_group::{FailureClass, HalfOpenGuard, SelectionMode},
+    channel_group::{FailureClass, HalfOpenGuard},
     MemberBinding,
 };
 
@@ -93,9 +93,26 @@ pub(in crate::api) async fn handle_hls_stream_request(
     if app_state.active_users.is_user_blocked_for_stream(&user.username, VirtualId::new(virtual_id)).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
+    let entry_group = if matches!(stage, HlsRequestStage::Entry) {
+        match tuliprox_repository::target_stream_item::classify_virtual_id(
+            &app_state.app_config,
+            &app_state.playlists,
+            target,
+            VirtualId::new(virtual_id),
+        )
+        .await
+        {
+            tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => Some(group),
+            _ => None,
+        }
+    } else {
+        None
+    };
     // Only a fresh entry is gated. Variant refreshes, segments and entry re-polls of a running
-    // session (unwrapped media playlists) belong to a running playback.
+    // session (unwrapped media playlists) belong to a running playback. A group checks
+    // maintenance per member during selection.
     if matches!(stage, HlsRequestStage::Entry)
+        && entry_group.is_none()
         && !is_running_playback(user_session)
         && blocks_new_playback(app_state, input, user, false)
     {
@@ -154,6 +171,79 @@ pub(in crate::api) async fn handle_hls_stream_request(
     );
 
     if hls_cache_enabled_for_user(app_state, target, user) {
+        if let Some(group) = entry_group {
+            // The shared origin belongs to the selected member, so viewers of the same member share
+            // it. The cache path reserves its own provider account; the selection only picks.
+            let playback = group_playback_settings(app_state, target);
+            let target_name: Arc<str> = Arc::from(target.name.as_str());
+            let kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
+            let req = GroupSelectionRequest {
+                allow_provider_grace: playback.allow_provider_grace,
+                bypass_maintenance: user.is_recording_proxy_user(),
+                allow_preempt: false,
+                ..GroupSelectionRequest::new(
+                    &target_name,
+                    &group,
+                    playback.start,
+                    &fingerprint.addr,
+                    &user.username,
+                    connection_priority_for_kind(user, kind),
+                    kind,
+                )
+            };
+            let Ok(resolved) = resolve_hls_group_entry(app_state, Arc::clone(&group), req).await else {
+                return hls_panel_provisioning_or_status_response(
+                    app_state,
+                    user,
+                    input,
+                    virtual_id,
+                    original_hls_entry_path,
+                    server_info.path.as_deref(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await;
+            };
+            let mut selection_handle = resolved.acquired.handle;
+            app_state.connection_manager.release_provider_handle(selection_handle.take());
+            let member_url = resolve_hls_origin_playlist_url(
+                app_state,
+                target,
+                &resolved.input,
+                resolved.member.member_vid.get(),
+                resolved.stream_url.as_ref(),
+            )
+            .await
+            .unwrap_or_else(|_| resolved.stream_url.to_string());
+            let member_url =
+                ensure_hls_manifest_extension(&normalize_xtream_live_hls_url(&member_url, &resolved.input));
+            let member_origin = build_hls_origin_resolution(&resolved.input, &member_url);
+            let member_source = build_hls_origin_source_for_playback(
+                &resolved.input,
+                resolved.member.input_stream_id.to_string(),
+                archive_reference,
+                Some(member_url.as_str()),
+            );
+            return create_hls_cache_entry_master_playlist_response(
+                app_state,
+                fingerprint,
+                user,
+                member_source,
+                virtual_id,
+                user_session,
+                stream_context.known_bitrate_bps(),
+                session_token_hint,
+                if archive_reference.is_some() {
+                    member_url.as_str()
+                } else {
+                    member_origin.as_ref().map_or(member_url.as_str(), |origin| origin.session_entry_url.as_str())
+                },
+                &resolved.input,
+                connection_permission,
+                connection_kind,
+                server_info.path.as_deref(),
+            )
+            .await;
+        }
         let Some(origin_source) = hls_origin_source.clone() else {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
@@ -349,32 +439,24 @@ pub(in crate::api) async fn handle_hls_stream_request(
             let playback_kind = hls_playback_kind(archive_reference, &url, Some(user_session_token.as_str()));
             let hls_session_ttl_secs = get_hls_playback_ttl_secs(app_state, playback_kind);
 
-            let (selection_cfg, allow_provider_grace) =
-                target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map_or_else(
-                    || (shared::model::ChannelGroupSelectionConfig::default(), true),
-                    |cg| (cg.selection, cg.allow_provider_grace),
-                );
-            let policy = group.policy;
+            let playback = group_playback_settings(app_state, target);
             let target_name: Arc<str> = Arc::from(target.name.as_str());
-
             let req = GroupSelectionRequest {
-                target_name: &target_name,
-                group: &group,
-                policy,
-                mode: SelectionMode::Live,
-                selection: selection_cfg,
-                addr: &fingerprint.addr,
-                username: &user.username,
-                priority: connection_priority_for_kind(user, fallback_connection_kind),
-                kind: fallback_connection_kind,
                 lease: Some(PlaybackLeaseRef::new(user_session_token.as_str(), playback_kind)),
-                allow_provider_grace,
-                exclude: &[],
-                demoted_inputs: &[],
-                prefer: None,
+                allow_provider_grace: playback.allow_provider_grace,
+                bypass_maintenance: user.is_recording_proxy_user(),
+                ..GroupSelectionRequest::new(
+                    &target_name,
+                    &group,
+                    playback.start,
+                    &fingerprint.addr,
+                    &user.username,
+                    connection_priority_for_kind(user, fallback_connection_kind),
+                    fallback_connection_kind,
+                )
             };
 
-            let Ok(resolved) = resolve_hls_group_entry(app_state, target, Arc::clone(&group), req).await else {
+            let Ok(resolved) = resolve_hls_group_entry(app_state, Arc::clone(&group), req).await else {
                 return hls_panel_provisioning_or_status_response(
                     app_state,
                     user,

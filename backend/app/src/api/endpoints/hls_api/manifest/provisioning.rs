@@ -176,32 +176,23 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
     )
     .await;
     if let tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) = classified {
-        let (selection_cfg, allow_provider_grace) =
-            target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map_or_else(
-                || (shared::model::ChannelGroupSelectionConfig::default(), true),
-                |cg| (cg.selection, cg.allow_provider_grace),
-            );
-        let policy = group.policy;
+        let playback = crate::api::api_utils::group_playback_settings(app_state, target);
         let target_name: Arc<str> = Arc::from(target.name.as_str());
-
         let req = crate::api::api_utils::GroupSelectionRequest {
-            target_name: &target_name,
-            group: &group,
-            policy,
-            mode: tuliprox_session::channel_group::SelectionMode::Live,
-            selection: selection_cfg,
-            addr: &fingerprint.addr,
-            username: &user.username,
-            priority: connection_priority_for_kind(user, connection_kind),
-            kind: connection_kind,
             lease: Some(PlaybackLeaseRef::new(session_owner, PlaybackKind::LiveHls)),
-            allow_provider_grace,
-            exclude: &[],
-            demoted_inputs: &[],
-            prefer: None,
+            allow_provider_grace: playback.allow_provider_grace,
+            bypass_maintenance: user.is_recording_proxy_user(),
+            ..crate::api::api_utils::GroupSelectionRequest::new(
+                &target_name,
+                &group,
+                playback.start,
+                &fingerprint.addr,
+                &user.username,
+                connection_priority_for_kind(user, connection_kind),
+                connection_kind,
+            )
         };
-        let Ok(resolved) =
-            crate::api::api_utils::resolve_hls_group_entry(app_state, target, Arc::clone(&group), req).await
+        let Ok(resolved) = crate::api::api_utils::resolve_hls_group_entry(app_state, Arc::clone(&group), req).await
         else {
             return false;
         };

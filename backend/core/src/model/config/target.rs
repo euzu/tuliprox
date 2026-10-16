@@ -9,7 +9,7 @@ use shared::{
     apply_flags, create_bitset,
     foundation::{Filter, ValueProvider},
     model::{
-        ChannelGroupsConfig, ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, HdHomeRunTargetOutputDto,
+        ChannelGroupsTargetConfig, ConfigTargetDto, ConfigTargetOptions, DeduplicateConfig, HdHomeRunTargetOutputDto,
         M3uTargetOutputDto, MappingStage, PlaylistItemType, ProcessingOrder, StrmExportStyle, StrmTargetOutputDto,
         TargetOutputDto, TargetType, TraktConfigDto, WatchContext, WatchContextSet, XtreamTargetOutputDto,
     },
@@ -31,7 +31,8 @@ pub struct TargetExecutionPlan {
     pub transform_stages: Vec<TransformStage>,
     pub pre_transform_identity_dedup: bool,
     pub post_merge_content_dedup: Option<DeduplicateConfig>,
-    pub channel_groups: Option<ChannelGroupsConfig>,
+    /// The target's channel group switch and overrides; resolved against `config.yml` when used.
+    pub channel_groups: Option<ChannelGroupsTargetConfig>,
 }
 
 impl Default for TargetExecutionPlan {
@@ -59,11 +60,7 @@ impl TargetExecutionPlan {
             transform_stages,
             pre_transform_identity_dedup: dto.options.as_ref().is_some_and(|options| options.remove_duplicates),
             post_merge_content_dedup: dto.options.as_ref().and_then(|options| options.deduplicate),
-            channel_groups: dto
-                .options
-                .as_ref()
-                .and_then(|options| options.channel_groups.clone())
-                .filter(|cfg| cfg.enabled),
+            channel_groups: dto.options.as_ref().and_then(|options| options.channel_groups).filter(|cfg| cfg.enabled),
         }
     }
 }

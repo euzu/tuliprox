@@ -1,18 +1,20 @@
 use super::{
     activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
     channel_group::{
-        acquire_group_member, group_shared_key, GroupSelectionFailure, GroupSelectionRequest, PlaybackSource,
+        acquire_group_member, group_playback_settings, group_representative, group_shared_key, open_group_member,
+        wait_for_user_capacity, GroupOpenRequest, GroupSelectionFailure, GroupSelectionRequest, OpenedGroupMember,
+        PlaybackSource, ProbedPayload,
     },
+    channel_group_failover::{GroupFailoverContext, GroupFailoverDriver, GroupFailoverStream},
     cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
     detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
     is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
     no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering, probe_catchup_payload,
-    record_connect_failed_attempt, reentry_suppressed_response, resolve_initial_stalker_playback_url,
-    resolve_request_url_for_logging, resolve_xtream_vod_provider_url, select_provider_stream_url,
-    should_pin_provider_for_session, stream_admission_rejected_response, try_shared_stream_response_if_any,
-    try_unwrap_body, CatchupPayload, ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire,
-    PlaybackRequestClass, SessionActivationRequest, StreamResponseMode, StreamingAcquireOptions,
-    LEASE_EXPIRY_RECHECK_FLOOR,
+    record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
+    resolve_xtream_vod_provider_url, select_provider_stream_url, should_pin_provider_for_session,
+    stream_admission_rejected_response, try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload,
+    ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass,
+    SessionActivationRequest, StreamResponseMode, StreamingAcquireOptions, LEASE_EXPIRY_RECHECK_FLOOR,
 };
 use crate::{
     api::model::{
@@ -39,11 +41,7 @@ use shared::{
     utils::{extract_extension_from_url, sanitize_sensitive_info, Internable},
 };
 use std::{borrow::Cow, sync::Arc, time::Duration};
-use tuliprox_session::{
-    channel_group::{member_key, FailureClass},
-    stream::StreamDetails,
-    ProviderSessionHeaders,
-};
+use tuliprox_session::{channel_group::FailureClass, ProviderSessionHeaders};
 
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
@@ -335,15 +333,23 @@ pub(crate) async fn stream_response_with_provider_handle(
         stream_channel.group_virtual_id = Some(group.group_vid.get());
     }
 
-    let (initial_input, initial_stream_url) = match &source {
-        PlaybackSource::Single { input, stream_url } => (Arc::clone(input), (*stream_url).to_string()),
+    // A group stands in with its first resolvable member until the selection below picks one.
+    let (initial_input, initial_stream_url): (Arc<ConfigInput>, Cow<'_, str>) = match &source {
+        PlaybackSource::Single { input, stream_url } => (Arc::clone(input), Cow::Borrowed(*stream_url)),
         PlaybackSource::Group { group, .. } => {
-            let first_member = &group.members[0];
-            let cand_input = app_state
-                .app_config
-                .get_input_by_name(&first_member.input_name)
-                .unwrap_or_else(|| Arc::new(ConfigInput::default()));
-            (cand_input, first_member.url.to_string())
+            let Some((input, url)) = group_representative(app_state, group) else {
+                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                    target_id: target.id,
+                    group_vid: group.group_vid.get(),
+                });
+                return create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    CustomVideoStreamType::ChannelUnavailable,
+                )
+                .into_response();
+            };
+            (input, Cow::Owned(url.to_string()))
         }
     };
 
@@ -383,13 +389,13 @@ pub(crate) async fn stream_response_with_provider_handle(
     let allow_shared_reuse =
         connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
-    let shared_lookup_key: Arc<str> = match &source {
-        PlaybackSource::Group { group, .. } => group_shared_key(target.id, group.group_vid.get()),
-        PlaybackSource::Single { stream_url, .. } => Arc::from(*stream_url),
+    let shared_lookup_key: Cow<'_, str> = match &source {
+        PlaybackSource::Group { group, .. } => Cow::Owned(group_shared_key(target.id, group.group_vid.get())),
+        PlaybackSource::Single { stream_url, .. } => Cow::Borrowed(*stream_url),
     };
 
     let share_stream = is_stream_share_enabled(item_type, target);
-    let _shared_lock = if share_stream {
+    let mut shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(shared_lookup_key.as_ref()).await;
 
         if allow_shared_reuse {
@@ -474,20 +480,11 @@ pub(crate) async fn stream_response_with_provider_handle(
         && connection_permission == UserConnectionPermission::GracePeriod
         && matches!(grace_mode, Some(crate::api::model::GraceMode::Hold))
     {
-        let grace_period = app_state.get_grace_options();
-        let hold_duration = Duration::from_millis(grace_period.period_millis);
-        let deadline = tokio::time::Instant::now() + hold_duration;
-        let mut passed = false;
-        loop {
-            if app_state.active_users.user_connections(&user.username).await < user.max_connections {
-                passed = true;
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // A hold can last the whole grace period: viewers joining this group's shared stream
+        // must not wait behind it, so the share lock is given up while holding.
+        drop(shared_lock.take());
+        let hold_duration = Duration::from_millis(app_state.get_grace_options().period_millis);
+        let mut passed = wait_for_user_capacity(app_state, user, tokio::time::Instant::now() + hold_duration).await;
 
         if !passed {
             if let Some(ref ctx) = activation.grace_context {
@@ -552,11 +549,32 @@ pub(crate) async fn stream_response_with_provider_handle(
             .into_response();
         }
         connection_permission = UserConnectionPermission::Allowed;
+        if share_stream {
+            let write_lock = app_state.app_config.file_locks.write_lock_str(shared_lookup_key.as_ref()).await;
+            if let Some(value) = try_shared_stream_response_if_any(
+                app_state,
+                shared_lookup_key.as_ref(),
+                fingerprint,
+                user,
+                connection_permission,
+                connection_kind,
+                stream_channel.clone(),
+                session_token,
+                req_headers,
+                activation.placeholder_transition_version,
+            )
+            .await
+            {
+                return value.into_response();
+            }
+            let _ = shared_lock.insert(write_lock);
+        }
     }
 
     let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
 
-    let (mut stream_details, input, stream_url, mut stream_channel) = match source {
+    // A group started on an MPEG-TS member can fail over at runtime.
+    let (mut stream_details, input, stream_url, mut stream_channel, group_runtime) = match source {
         PlaybackSource::Single { input, stream_url } => {
             let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
             let pinned_provider = pinned_provider.filter(|provider| {
@@ -617,347 +635,80 @@ pub(crate) async fn stream_response_with_provider_handle(
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
             };
-            (details, Arc::clone(input), Arc::<str>::from(stream_url), stream_channel)
+            (details, Arc::clone(input), Arc::<str>::from(stream_url), stream_channel, None)
         }
         PlaybackSource::Group { group, mode, prefer } => {
-            let (selection_cfg, allow_provider_grace) =
-                target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map_or_else(
-                    || (shared::model::ChannelGroupSelectionConfig::default(), true),
-                    |cg| (cg.selection, cg.allow_provider_grace),
-                );
-            let policy = group.policy;
-
+            let playback = group_playback_settings(app_state, target);
             let target_name: Arc<str> = Arc::from(target.name.as_str());
+            let priority = connection_priority_for_kind(user, connection_kind);
+            // The start budget bounds selection, provider open and payload probe of all attempts.
+            let budget_secs = if playback.start.timeout_secs == 0 { 86_400 } else { playback.start.timeout_secs };
+            let start_deadline = tokio::time::Instant::now() + Duration::from_secs(budget_secs);
+            let open_req = GroupOpenRequest {
+                app_state,
+                user,
+                fingerprint,
+                req_headers,
+                group: &group,
+                base_channel: &stream_channel,
+                stream_options: &stream_options,
+                share_stream,
+                connection_permission,
+                connection_kind,
+                priority,
+                session_token,
+                is_reopen: false,
+                deadline: start_deadline,
+            };
             let mut exclude: Vec<usize> = Vec::new();
             let mut demoted_inputs: Vec<Arc<str>> = Vec::new();
-            let mut attempts: u32 = 0;
-            let max_attempts = u32::from(selection_cfg.max_start_attempts.max(1));
-            let start_time = std::time::Instant::now();
-            let budget = Duration::from_secs(selection_cfg.startup_budget_secs);
-
-            let mut final_details: Option<(StreamDetails, Arc<ConfigInput>, Arc<str>, StreamChannel)> = None;
-
-            while attempts < max_attempts && (selection_cfg.startup_budget_secs == 0 || start_time.elapsed() < budget) {
-                attempts += 1;
-
-                let req = GroupSelectionRequest {
-                    target_name: &target_name,
-                    group: &group,
-                    policy,
-                    mode: mode.clone(),
-                    selection: selection_cfg,
-                    addr: &fingerprint.addr,
-                    username: &user.username,
-                    priority: connection_priority_for_kind(user, connection_kind),
-                    kind: connection_kind,
-                    lease: None,
-                    allow_provider_grace,
-                    exclude: &exclude,
-                    demoted_inputs: &demoted_inputs,
-                    prefer: if attempts == 1 { prefer } else { None },
-                };
-
-                let acquired = match acquire_group_member(app_state, req).await {
-                    Ok(acq) => acq,
-                    Err(GroupSelectionFailure::Exhausted | GroupSelectionFailure::NoCandidate) => {
-                        break;
-                    }
-                };
-
-                let member = group.members[acquired.index].clone();
-                let Some(member_input) = app_state.app_config.get_input_by_name(&member.input_name) else {
-                    let key = member_key(&member);
-                    if let Some(guard) = acquired.half_open {
-                        app_state.member_health.record_classified_failure_with(
-                            guard,
-                            FailureClass::Stream,
-                            std::time::Instant::now(),
-                        );
-                    } else {
-                        app_state.member_health.record_classified_failure(
-                            &key,
-                            FailureClass::Stream,
-                            std::time::Instant::now(),
-                        );
-                    }
-                    drop(acquired.handle);
-                    exclude.push(acquired.index);
-                    continue;
-                };
-
-                let mut member_channel = stream_channel.clone();
-                member_channel.virtual_id = member.member_vid.get();
-                member_channel.group_virtual_id = Some(group.group_vid.get());
-                member_channel.input_name = Arc::clone(&member.input_name);
-                member_channel.item_type = member.item_type;
-                member_channel.cluster = member.cluster;
-                member_channel.title = Arc::clone(&member.title);
-                member_channel.url = Arc::clone(&member.url);
-                member_channel.provider_id = member.provider_id;
-
-                let member_url = if member_input.input_type.is_stalker() {
-                    let Ok(url) = resolve_initial_stalker_playback_url(
-                        app_state,
-                        &member_input,
-                        user,
-                        member.provider_id,
-                        member.cluster,
-                        member.item_type,
-                        &member.url,
-                    )
-                    .await
-                    else {
-                        let key = member_key(&member);
-                        if let Some(guard) = acquired.half_open {
-                            app_state.member_health.record_classified_failure_with(
-                                guard,
-                                FailureClass::Stream,
-                                std::time::Instant::now(),
-                            );
-                        } else {
-                            app_state.member_health.record_classified_failure(
-                                &key,
-                                FailureClass::Stream,
-                                std::time::Instant::now(),
-                            );
-                        }
-                        drop(acquired.handle);
-                        exclude.push(acquired.index);
-                        continue;
-                    };
-                    url
-                } else {
-                    Arc::clone(&member.url)
-                };
-
-                let details_result = create_stream_response_details(
-                    app_state,
-                    &stream_options,
-                    member_url.as_ref(),
-                    &user.username,
-                    fingerprint,
-                    req_headers,
-                    &member_input,
-                    &member_channel,
-                    member.item_type,
-                    if member.item_type == PlaylistItemType::Catchup {
-                        crate::api::model::ProviderContentRepresentationMode::Identity
-                    } else {
-                        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
-                    },
-                    share_stream,
-                    connection_permission,
-                    None,
-                    true,
-                    true,
-                    VirtualId::new(member.member_vid.get()),
-                    connection_priority_for_kind(user, connection_kind),
-                    connection_kind,
-                    false,
-                    Some(session_token),
-                    None,
-                    true,
-                    None,
-                    None,
-                    None,
-                    Some(acquired.handle),
-                )
-                .await;
-
-                let Ok(mut details) = details_result else {
-                    let key = member_key(&member);
-                    if let Some(guard) = acquired.half_open {
-                        app_state.member_health.record_classified_failure_with(
-                            guard,
-                            FailureClass::Stream,
-                            std::time::Instant::now(),
-                        );
-                    } else {
-                        app_state.member_health.record_classified_failure(
-                            &key,
-                            FailureClass::Stream,
-                            std::time::Instant::now(),
-                        );
-                    }
-                    exclude.push(acquired.index);
-                    continue;
-                };
-
-                if let Some(mut provider_stream) = details.stream.take() {
-                    if let Some((_, _, _, Some(_custom_type))) = details.stream_info {
-                        let failure_class =
-                            if details.custom_reason == Some(ProviderStreamCustomReason::ProviderExhausted) {
-                                FailureClass::Capacity
-                            } else {
-                                FailureClass::Stream
-                            };
-                        if matches!(failure_class, FailureClass::Auth | FailureClass::Capacity) {
-                            demoted_inputs.push(Arc::clone(&member.input_name));
-                        }
-                        let key = member_key(&member);
-                        if let Some(guard) = acquired.half_open {
-                            app_state.member_health.record_classified_failure_with(
-                                guard,
-                                failure_class,
-                                std::time::Instant::now(),
-                            );
-                        } else {
-                            app_state.member_health.record_classified_failure(
-                                &key,
-                                failure_class,
-                                std::time::Instant::now(),
-                            );
-                        }
-                        app_state.connection_manager.release_managed_provider_handle(details.provider_handle);
-                        exclude.push(acquired.index);
-                        continue;
-                    }
-
-                    let is_adaptive_or_playlist = {
-                        if member.item_type.is_live_adaptive() {
-                            true
-                        } else if let Some((headers, _, _, _)) = &details.stream_info {
-                            headers.iter().any(|(name, val)| {
-                                name.as_str().eq_ignore_ascii_case("content-type") && {
-                                    let lower = val.to_ascii_lowercase();
-                                    lower.contains("mpegurl") || lower.contains("dash+xml")
-                                }
-                            })
-                        } else {
-                            false
-                        }
-                    };
-
-                    let mut sync_ok = true;
-                    let mut buffered_chunks = Vec::new();
-
-                    if !is_adaptive_or_playlist {
-                        let mut total_bytes = 0;
-                        let mut read_failed = false;
-                        let first_byte_timeout = Duration::from_secs(3);
-
-                        while total_bytes < 564 {
-                            if let Ok(Some(Ok(chunk))) =
-                                tokio::time::timeout(first_byte_timeout, provider_stream.next()).await
-                            {
-                                if chunk.is_empty() {
-                                    continue;
-                                }
-                                total_bytes += chunk.len();
-                                buffered_chunks.push(chunk);
-                            } else {
-                                read_failed = true;
-                                break;
-                            }
-                        }
-
-                        sync_ok = if read_failed && buffered_chunks.is_empty() {
-                            false
-                        } else {
-                            let mut flat = Vec::with_capacity(total_bytes.min(564));
-                            for c in &buffered_chunks {
-                                let need = 564_usize.saturating_sub(flat.len());
-                                flat.extend_from_slice(&c[..c.len().min(need)]);
-                                if flat.len() >= 564 {
-                                    break;
-                                }
-                            }
-                            tuliprox_mpegts::ts_sync_offset(&flat).is_some()
-                        };
-                    }
-
-                    if !sync_ok {
-                        let key = member_key(&member);
-                        if let Some(guard) = acquired.half_open {
-                            app_state.member_health.record_classified_failure_with(
-                                guard,
-                                FailureClass::Stream,
-                                std::time::Instant::now(),
-                            );
-                        } else {
-                            app_state.member_health.record_classified_failure(
-                                &key,
-                                FailureClass::Stream,
-                                std::time::Instant::now(),
-                            );
-                        }
-                        app_state.connection_manager.release_managed_provider_handle(details.provider_handle);
-                        exclude.push(acquired.index);
-                        continue;
-                    }
-
-                    let key = member_key(&member);
-                    if let Some(guard) = acquired.half_open {
-                        app_state.member_health.record_success_with(guard);
-                    } else {
-                        app_state.member_health.record_success(&key);
-                    }
-
-                    app_state.event_manager.send_event(EventMessage::ChannelGroupMemberSelected {
-                        target_id: target.id,
-                        group_vid: group.group_vid.get(),
-                        member_vid: member.member_vid.get(),
-                        tier: acquired.tier,
-                    });
-
-                    app_state
-                        .active_users
-                        .bind_member(
-                            &user.username,
-                            session_token,
-                            tuliprox_session::MemberBinding {
-                                group_vid: group.group_vid.get(),
-                                member_vid: member.member_vid.get(),
-                                member_index: acquired.index,
-                                input_name: Arc::clone(&member.input_name),
-                            },
-                        )
-                        .await;
-
-                    if buffered_chunks.is_empty() {
-                        details.stream = Some(provider_stream);
-                    } else {
-                        let prepended =
-                            futures::stream::iter(buffered_chunks.into_iter().map(Ok)).chain(provider_stream);
-                        details.stream = Some(prepended.boxed());
-                    }
-
-                    final_details = Some((details, member_input, member_url, member_channel));
+            let mut opened: Option<OpenedGroupMember> = None;
+            let mut maintenance_only = false;
+            for attempt in 0..playback.start.max_attempts.max(1) {
+                let remaining = start_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
                     break;
                 }
-
-                let failure_class = if let Some((_, status, _, _)) = &details.stream_info {
-                    FailureClass::from_status(*status)
-                } else if details.custom_reason == Some(ProviderStreamCustomReason::ProviderExhausted) {
-                    FailureClass::Capacity
-                } else {
-                    FailureClass::Stream
+                let req = GroupSelectionRequest {
+                    mode: mode.clone(),
+                    allow_provider_grace: playback.allow_provider_grace,
+                    exclude: &exclude,
+                    demoted_inputs: &demoted_inputs,
+                    prefer: if attempt == 0 { prefer } else { None },
+                    bypass_maintenance: user.is_recording_proxy_user(),
+                    ..GroupSelectionRequest::new(
+                        &target_name,
+                        &group,
+                        playback.start,
+                        &fingerprint.addr,
+                        &user.username,
+                        priority,
+                        connection_kind,
+                    )
                 };
-
-                if matches!(failure_class, FailureClass::Auth | FailureClass::Capacity) {
-                    demoted_inputs.push(Arc::clone(&member.input_name));
+                let acquired = match tokio::time::timeout(remaining, acquire_group_member(app_state, req)).await {
+                    Ok(Ok(acquired)) => acquired,
+                    Ok(Err(GroupSelectionFailure::Maintenance)) => {
+                        maintenance_only = exclude.is_empty();
+                        break;
+                    }
+                    Ok(Err(GroupSelectionFailure::Exhausted | GroupSelectionFailure::NoCandidate)) | Err(_) => break,
+                };
+                match open_group_member(&open_req, acquired).await {
+                    Ok(member) => {
+                        opened = Some(member);
+                        break;
+                    }
+                    Err(failure) => {
+                        if matches!(failure.class, FailureClass::Auth | FailureClass::Capacity) {
+                            demoted_inputs.push(failure.input_name);
+                        }
+                        exclude.push(failure.index);
+                    }
                 }
-
-                let key = member_key(&member);
-                if let Some(guard) = acquired.half_open {
-                    app_state.member_health.record_classified_failure_with(
-                        guard,
-                        failure_class,
-                        std::time::Instant::now(),
-                    );
-                } else {
-                    app_state.member_health.record_classified_failure(&key, failure_class, std::time::Instant::now());
-                }
-
-                app_state.connection_manager.release_managed_provider_handle(details.provider_handle);
-                exclude.push(acquired.index);
             }
 
-            let Some((details, inp, url, ch)) = final_details else {
-                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
-                    target_id: target.id,
-                    group_vid: group.group_vid.get(),
-                });
+            let Some(opened) = opened else {
                 app_state
                     .active_users
                     .release_unbound_session_reservation(
@@ -967,6 +718,21 @@ pub(crate) async fn stream_response_with_provider_handle(
                         activation.placeholder_transition_version.is_some(),
                     )
                     .await;
+                if maintenance_only {
+                    return admission_failure_response(
+                        app_state,
+                        fingerprint,
+                        user,
+                        stream_channel,
+                        Arc::clone(&initial_input.name),
+                        req_headers,
+                        ConnectFailureReason::Maintenance,
+                    );
+                }
+                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                    target_id: target.id,
+                    group_vid: group.group_vid.get(),
+                });
                 record_connect_failed_attempt(ConnectFailedAttempt {
                     app_state,
                     fingerprint,
@@ -984,7 +750,43 @@ pub(crate) async fn stream_response_with_provider_handle(
                 )
                 .into_response();
             };
-            (details, inp, url, ch)
+
+            app_state.event_manager.send_event(EventMessage::ChannelGroupMemberSelected {
+                target_id: target.id,
+                group_vid: group.group_vid.get(),
+                member_vid: opened.member.member_vid.get(),
+                tier: opened.tier,
+            });
+            app_state
+                .active_users
+                .bind_member(
+                    &user.username,
+                    session_token,
+                    tuliprox_session::MemberBinding {
+                        group_vid: group.group_vid.get(),
+                        member_vid: opened.member.member_vid.get(),
+                        member_index: opened.index,
+                        input_name: Arc::clone(&opened.member.input_name),
+                    },
+                )
+                .await;
+            // The session plays the member's provider now, not the representative's.
+            let member_provider =
+                opened.details.provider_name.clone().unwrap_or_else(|| Arc::clone(&opened.member.input_name));
+            app_state
+                .active_users
+                .update_session_provider_binding(
+                    &user.username,
+                    session_token,
+                    member_provider,
+                    Arc::clone(&opened.url),
+                )
+                .await;
+            let OpenedGroupMember { index, details, input, url, channel, payload, .. } = opened;
+            let runtime =
+                (playback.failover.enabled && payload == ProbedPayload::Ts && item_type == PlaylistItemType::Live)
+                    .then(|| (Arc::clone(&group), index, playback));
+            (details, input, url, channel, runtime)
         }
     };
 
@@ -1166,6 +968,40 @@ pub(crate) async fn stream_response_with_provider_handle(
         } else {
             false
         };
+        let has_provider_stream = stream_details.stream.is_some() && stream_details.custom_reason.is_none();
+        let group_driver = group_runtime.filter(|_| has_provider_stream).map(|(group, index, playback)| {
+            GroupFailoverDriver::new(
+                Arc::new(GroupFailoverContext {
+                    app_state: Arc::clone(app_state),
+                    target: Arc::clone(target),
+                    target_name: target.name.as_str().into(),
+                    group,
+                    playback,
+                    user: user.clone(),
+                    fingerprint: fingerprint.clone(),
+                    req_headers: req_headers.clone(),
+                    session_token: Arc::from(session_token),
+                    connection_kind,
+                    connection_permission,
+                    share_stream,
+                    base_channel: stream_channel.clone(),
+                    shared_key: is_stream_shared.then(|| Arc::from(shared_lookup_key.as_ref())),
+                }),
+                index,
+            )
+        });
+        // A shared producer fails over inside the stream it feeds; a direct response through its
+        // client stream, which owns the provider slot.
+        let group_failover = match group_driver {
+            Some(driver) if is_stream_shared => {
+                // The shared stream takes over this handle below.
+                let slot = provider_handle.as_ref();
+                stream_details.stream =
+                    stream_details.stream.take().map(|stream| GroupFailoverStream::new(driver, stream, slot).boxed());
+                None
+            }
+            driver => driver,
+        };
         let stream = match create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -1179,6 +1015,7 @@ pub(crate) async fn stream_response_with_provider_handle(
             req_headers,
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
+            group_failover,
         })
         .await
         {

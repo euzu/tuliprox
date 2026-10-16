@@ -123,7 +123,7 @@ pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_redirect: Option<ClusterFlags>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_groups: Option<super::channel_groups::ChannelGroupsConfig>,
+    pub channel_groups: Option<super::channel_groups::ChannelGroupsTargetConfig>,
 }
 
 impl ConfigTargetOptions {
@@ -137,12 +137,7 @@ impl ConfigTargetOptions {
             && self.channel_groups.is_none()
     }
 
-    pub fn prepare(&mut self) -> Result<(), crate::error::TuliproxError> {
-        if let Some(channel_groups) = &mut self.channel_groups {
-            channel_groups.prepare()?;
-        }
-        Ok(())
-    }
+    pub fn prepare(&mut self) -> Result<(), crate::error::TuliproxError> { Ok(()) }
 
     pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
 

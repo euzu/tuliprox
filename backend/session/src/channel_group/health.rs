@@ -2,10 +2,11 @@ use super::circuit::{
     compute_cooldown, record_input_failure_in_shared, CircuitAdmission, CircuitPolicy, CircuitSharedState,
     CircuitState, CircuitView, FailureClass, HalfOpenGuard, MemberKey,
 };
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
+use dashmap::DashMap;
 use shared::model::{AudioChannels, AudioCodec, MediaQuality, VideoCodec, VideoResolution};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -56,7 +57,11 @@ pub struct MemberHealth {
 
 pub struct MemberHealthIndex {
     qos: ArcSwap<HashMap<QosKey, QosPart>>,
-    probe: ArcSwap<HashMap<MemberKey, ProbePart>>,
+    /// Patched per probe result; a map clone per patch would cost O(n) for every probed stream.
+    probe: DashMap<MemberKey, ProbePart>,
+    /// Keys of all channel group members. Probe results of other streams are not kept;
+    /// `None` until the members are known.
+    member_keys: ArcSwapOption<HashSet<MemberKey>>,
     shared: Arc<CircuitSharedState>,
     policy: ArcSwap<CircuitPolicy>,
     event_sink: ArcSwap<Option<Arc<dyn shared::model::EventSink>>>,
@@ -70,7 +75,8 @@ impl MemberHealthIndex {
     pub fn new(policy: CircuitPolicy) -> Self {
         Self {
             qos: ArcSwap::from_pointee(HashMap::new()),
-            probe: ArcSwap::from_pointee(HashMap::new()),
+            probe: DashMap::new(),
+            member_keys: ArcSwapOption::empty(),
             shared: Arc::new(CircuitSharedState::default()),
             policy: ArcSwap::from_pointee(policy),
             event_sink: ArcSwap::from_pointee(None),
@@ -91,7 +97,7 @@ impl MemberHealthIndex {
         let q_key = qos_key(target_name, member);
         let qos = self.qos.load().get(&q_key).copied();
         let m_key = member_key(member);
-        let probe = self.probe.load().get(&m_key).cloned();
+        let probe = self.probe.get(&m_key).map(|entry| entry.value().clone());
         let circuit = self.circuit_view(&m_key, now);
         MemberHealth { qos, probe, circuit }
     }
@@ -130,33 +136,45 @@ impl MemberHealthIndex {
         self.qos.store(Arc::new(map));
     }
 
+    /// Restricts probe data to `keys` and drops what is stored for other streams.
+    pub fn set_member_keys(&self, keys: HashSet<MemberKey>) {
+        self.probe.retain(|key, _| keys.contains(key));
+        self.member_keys.store(Some(Arc::new(keys)));
+    }
+
+    fn tracks_probe(&self, key: &MemberKey) -> bool {
+        self.member_keys.load().as_ref().is_none_or(|keys| keys.contains(key))
+    }
+
     pub fn patch_probe(&self, key: &MemberKey, video_json: Option<&str>, bitrate_kbps: u32) {
+        if !self.tracks_probe(key) {
+            return;
+        }
         let quality = MediaQuality::from_ffprobe_info(None, video_json);
         let (resolution, codec) =
             quality.map_or((VideoResolution::default(), VideoCodec::default()), |q| (q.resolution, q.video_codec));
 
-        self.probe.rcu(|current| {
-            let mut map = (**current).clone();
-            let (audio_codec, audio_channels, audio_language) =
-                map.get(key).map_or((AudioCodec::default(), AudioChannels::default(), None), |p| {
-                    (p.audio_codec.clone(), p.audio_channels.clone(), p.audio_language.clone())
-                });
-            map.insert(
-                key.clone(),
-                ProbePart {
-                    resolution: resolution.clone(),
-                    codec: codec.clone(),
-                    bitrate_kbps,
-                    audio_codec,
-                    audio_channels,
-                    audio_language,
-                },
-            );
-            Arc::new(map)
-        });
+        self.probe
+            .entry(key.clone())
+            .and_modify(|part| {
+                part.resolution.clone_from(&resolution);
+                part.codec.clone_from(&codec);
+                part.bitrate_kbps = bitrate_kbps;
+            })
+            .or_insert_with(|| ProbePart {
+                resolution: resolution.clone(),
+                codec: codec.clone(),
+                bitrate_kbps,
+                audio_codec: AudioCodec::default(),
+                audio_channels: AudioChannels::default(),
+                audio_language: None,
+            });
     }
 
     pub fn patch_probe_audio(&self, key: &MemberKey, audio_json: Option<&str>) {
+        if !self.tracks_probe(key) {
+            return;
+        }
         let quality = MediaQuality::from_ffprobe_info(audio_json, None);
         let (audio_codec, audio_channels) =
             quality.map_or((AudioCodec::default(), AudioChannels::default()), |q| (q.audio_codec, q.audio_channels));
@@ -181,25 +199,21 @@ impl MemberHealthIndex {
             }
         });
 
-        self.probe.rcu(|current| {
-            let mut map = (**current).clone();
-            let (resolution, codec, bitrate_kbps) =
-                map.get(key).map_or((VideoResolution::default(), VideoCodec::default(), 0), |p| {
-                    (p.resolution.clone(), p.codec.clone(), p.bitrate_kbps)
-                });
-            map.insert(
-                key.clone(),
-                ProbePart {
-                    resolution,
-                    codec,
-                    bitrate_kbps,
-                    audio_codec: audio_codec.clone(),
-                    audio_channels: audio_channels.clone(),
-                    audio_language: audio_language.clone(),
-                },
-            );
-            Arc::new(map)
-        });
+        self.probe
+            .entry(key.clone())
+            .and_modify(|part| {
+                part.audio_codec.clone_from(&audio_codec);
+                part.audio_channels.clone_from(&audio_channels);
+                part.audio_language.clone_from(&audio_language);
+            })
+            .or_insert_with(|| ProbePart {
+                resolution: VideoResolution::default(),
+                codec: VideoCodec::default(),
+                bitrate_kbps: 0,
+                audio_codec: audio_codec.clone(),
+                audio_channels: audio_channels.clone(),
+                audio_language: audio_language.clone(),
+            });
     }
 
     pub fn admit(&self, key: &MemberKey, now: Instant) -> CircuitAdmission {
@@ -448,6 +462,8 @@ impl MemberHealthIndex {
     }
 
     pub fn set_policy(&self, policy: CircuitPolicy) { self.policy.store(Arc::new(policy)); }
+
+    pub fn policy(&self) -> Arc<CircuitPolicy> { self.policy.load_full() }
 }
 
 #[cfg(test)]
@@ -521,5 +537,34 @@ mod tests {
         assert_eq!(probe.audio_codec, AudioCodec::AC3);
         assert_eq!(probe.audio_channels, AudioChannels::Surround51);
         assert_eq!(probe.audio_language.as_deref(), Some("deu"));
+    }
+
+    #[test]
+    fn patch_probe_ignores_non_member_keys() {
+        let index = MemberHealthIndex::new(CircuitPolicy::default());
+        let target: Arc<str> = "Main".into();
+        let member = test_member("solis", "1", 1, 101);
+        let stranger = test_member("solis", "2", 2, 102);
+        index.set_member_keys(std::iter::once(member_key(&member)).collect());
+        index.patch_probe(&member_key(&stranger), Some(r#"{"codec_name":"h264","width":1920,"height":1080}"#), 5_000);
+        index.patch_probe_audio(&member_key(&stranger), Some(r#"[{"codec_name":"aac","channels":2}]"#));
+        assert!(index.health(&target, &stranger, Instant::now()).probe.is_none());
+        index.patch_probe(&member_key(&member), Some(r#"{"codec_name":"h264","width":1920,"height":1080}"#), 5_000);
+        assert!(index.health(&target, &member, Instant::now()).probe.is_some());
+    }
+
+    #[test]
+    fn set_member_keys_prunes_probe_entries() {
+        let index = MemberHealthIndex::new(CircuitPolicy::default());
+        let target: Arc<str> = "Main".into();
+        let kept = test_member("solis", "1", 1, 101);
+        let dropped = test_member("korath", "1", 1, 102);
+        for member in [&kept, &dropped] {
+            index.patch_probe(&member_key(member), Some(r#"{"codec_name":"h264","width":1280,"height":720}"#), 3_000);
+        }
+        index.set_member_keys(std::iter::once(member_key(&kept)).collect());
+        let now = Instant::now();
+        assert!(index.health(&target, &kept, now).probe.is_some());
+        assert!(index.health(&target, &dropped, now).probe.is_none());
     }
 }

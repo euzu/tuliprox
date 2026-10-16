@@ -146,6 +146,9 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::Proxy(_, mut proxy_cfg) => set_config_field!(config, proxy_cfg, proxy),
             ConfigForm::IpCheck(_, mut ipcheck_cfg) => set_config_field!(config, ipcheck_cfg, ipcheck),
             ConfigForm::Library(_, library_cfg) => update_library_field(config, library_cfg),
+            ConfigForm::ChannelGroups(_, channel_groups_cfg) => {
+                config.channel_groups = (!channel_groups_cfg.is_default()).then_some(channel_groups_cfg);
+            }
             ConfigForm::Panel(_, _) => {}
             ConfigForm::ApiProxy(_, _) => {}
         }

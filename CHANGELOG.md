@@ -186,6 +186,16 @@
 
 ## 🌟 New Features
 
+- **Channel groups with stream failover.** A target with `options.channel_groups.enabled` collapses equal live
+  channels from several inputs (matched by caption, name, title or EPG id) into one channel. A start picks the best
+  member by QoS history, probed quality and free provider capacity and moves on to the next member when one fails.
+  While a client watches an MPEG-TS stream, a member that ends, fails, stops sending data or is too slow is replaced
+  underneath the open response, spliced at PAT/PMT and a keyframe; this works for direct and shared streams. Failing
+  members and inputs are paused for a while, and an outage limit and a switch limit bound the switching. The settings
+  live once in `config.yml` (`channel_groups`, Web UI: Settings → Channel groups); a target turns the feature on and
+  can override matching, source order, grace and failover on its own Channel groups page. Off by default. See
+  [Channel Groups & Stream Failover](docs/src/configuration/channel-groups.md).
+
 - **Maintenance mode.** Inputs can be put into maintenance from the new dashboard card or through
   `/api/v1/maintenance` (`*` addresses all inputs). New streams of an input in maintenance get the new
   `maintenance.ts` custom video; playlist and EPG updates keep the last persisted state, and probes, metadata
@@ -1598,6 +1608,18 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **config.yml (`channel_groups`)**:
+  - Added the global channel group settings: `match_by`, `match_as_ascii`, `match_normalize`, `epg_conflict`,
+    `name_strip_quality`, `policy`, `allow_provider_grace`, `start` (`timeout_secs`, `max_attempts`), `failover`
+    (`enabled`, `no_data_timeout_secs`, `slow_source_pct`, `slow_source_secs`, `max_outage_secs`,
+    `same_source_retries`, `stable_after_secs`, `max_switches`, `max_switches_window_secs`, `audio_language`) and
+    `circuit` (`source_failures`, `cooldown_secs`, `cooldown_max_secs`, `input_failures`, `input_window_secs`). See
+    [Channel Groups & Stream Failover](docs/src/configuration/channel-groups.md).
+
+- **source.yml (target `options`)**:
+  - Added `channel_groups` (default off): `enabled` plus the optional overrides `match_by`, `match_as_ascii`,
+    `epg_conflict`, `name_strip_quality`, `policy`, `allow_provider_grace` and `failover`.
 
 - **config.yml (`reverse_proxy.stream`)**:
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media

@@ -873,6 +873,45 @@
     "MAINTENANCE": {
       "INPUT": "المدخل الذي يتم إيقافه عن الخدمة. أثناء الصيانة تحصل البثوث الجديدة على فيديو الصيانة ولا يتصل Tuliprox بمزوده؛ تستمر البثوث والتسجيلات الجارية.",
       "REASON": "ملاحظة اختيارية تظهر في قائمة الصيانة، مثل سبب تعطل المزود. 500 حرف كحد أقصى."
+    },
+    "CHANNEL_GROUPS_TARGET_CONFIG": {
+      "ENABLED": "يجمع القنوات المباشرة المتطابقة في هذا الهدف في قناة واحدة. يبدأ التشغيل بأفضل مصدر متاح وينتقل إلى مصدر آخر عند تعطله."
+    },
+    "CHANNEL_GROUPS_CONFIG": {
+      "MATCH_BY": "الحقل الذي يحدد أن قناتين متطابقتان: caption أو name أو title أو معرّف قناة EPG. يتم تجاهل كلمات الجودة مثل HD أو FHD.",
+      "MATCH_AS_ASCII": "يقارن الأسماء بعد تحويل الحروف المشكّلة والخاصة إلى حروف بسيطة، فتتطابق \"Télé\" و\"Tele\".",
+      "EPG_CONFLICT": "split: القنوات ذات الاسم نفسه ومعرّفات EPG مختلفة تبقى في مجموعات منفصلة (برامج مختلفة). ignore: تُجمع رغم ذلك.",
+      "NAME_STRIP_QUALITY": "يزيل كلمات الجودة مثل HD أو FHD أو 4K من اسم القناة المجمّعة.",
+      "POLICY": "auto: يُشغَّل أولًا المصدر ذو السجل وجودة الصورة الأفضل. priority: تُستخدم المصادر بترتيب القائمة.",
+      "ALLOW_PROVIDER_GRACE": "إذا لم يكن لدى المزود اتصال حر، يمكن للبدء استخدام اتصال السماح. التبديل أثناء المشاهدة لا يفعل ذلك أبدًا."
+    },
+    "CHANNEL_MATCH_NORMALIZE": {
+      "STRIP_REGEX": "تعبير نمطي يُزال من الأسماء قبل المقارنة، مثل \"^[A-Z]{2}:\\s*\" لبادئات الدول مثل \"DE: \".",
+      "IGNORE_TOKENS": "كلمات يتم تجاهلها عند مقارنة الأسماء، مثل \"backup\" أو \"hevc\".",
+      "ALIASES": "أسماء للقناة نفسها: يُقارن الاسم الأيسر كالاسم الأيمن، مثل \"das erste\" كـ \"ard\"."
+    },
+    "CHANNEL_GROUP_START_CONFIG": {
+      "TIMEOUT_SECS": "أطول مدة يجرب فيها البدء المصادر قبل أن يتلقى العميل فيديو عدم التوفر. 0 تعني بلا حد.",
+      "MAX_ATTEMPTS": "أقصى عدد من المصادر يجربها البدء."
+    },
+    "CHANNEL_GROUP_FAILOVER_CONFIG": {
+      "ENABLED": "عند تعطل المصدر، يفتح Tuliprox مصدرًا آخر من المجموعة ويكمل البث نفسه، ويحتفظ المشغل باتصاله. لـ MPEG-TS فقط؛ HLS يغيّر المصدر فقط عند بدء بث جديد.",
+      "NO_DATA_TIMEOUT_SECS": "يُستبدل المصدر الذي لا يرسل صورة ولا صوتًا لهذه المدة. اجعلها أكبر من فاصل الإطارات الرئيسية (بضع ثوانٍ). 0 يعطّل الفحص.",
+      "SLOW_SOURCE_PCT": "يجب أن يقدّم المصدر هذه النسبة على الأقل من السرعة الفعلية. 90 تعني: خلال 10 ثوانٍ يجب أن يقدّم 9 ثوانٍ من الفيديو، وإلا يفرغ مخزن المشغل وتتقطع الصورة. 0 يعطّل الفحص.",
+      "SLOW_SOURCE_SECS": "المدة التي يمكن أن يبقى فيها المصدر دون الحد الأدنى للسرعة قبل استبداله.",
+      "MAX_OUTAGE_SECS": "أطول مدة دون صورة أثناء البحث عن بديل. بعدها ينتهي البث.",
+      "SAME_SOURCE_RETRIES": "يُعاد تجربة المصدر الذي كان يعمل جيدًا هذا العدد من المرات قبل استخدام مصدر آخر.",
+      "STABLE_AFTER_SECS": "بعد هذا القدر من التشغيل السلس يُعد المصدر مستقرًا ويبدأ العطل محاولة جديدة.",
+      "MAX_SWITCHES": "أقصى عدد من تبديلات المصدر ضمن النافذة. بعدها ينتهي البث بدل التنقل بين مصادر معطلة. 0 يعطّل الحد.",
+      "MAX_SWITCHES_WINDOW_SECS": "النافذة الزمنية لأقصى عدد تبديلات.",
+      "AUDIO_LANGUAGE": "prefer: يفضّل التبديل مصدرًا بلغة الصوت نفسها. require: تُستخدم فقط المصادر بلغة الصوت نفسها."
+    },
+    "CHANNEL_GROUP_CIRCUIT_CONFIG": {
+      "SOURCE_FAILURES": "أعطال متتالية يُوقف بعدها المصدر مؤقتًا وتُجرّب مصادر أخرى أولًا.",
+      "COOLDOWN_SECS": "أول إيقاف للمصدر المتعطل. يتضاعف ما دام المصدر يتعطل.",
+      "COOLDOWN_MAX_SECS": "أطول إيقاف للمصدر المتعطل.",
+      "INPUT_FAILURES": "أعطال قنوات مختلفة لمدخل واحد ضمن النافذة يُجرَّب بعدها المدخل كله أخيرًا (المزود متوقف).",
+      "INPUT_WINDOW_SECS": "النافذة الزمنية لأعطال المدخل."
     }
   },
   "HINT": {
@@ -907,7 +946,9 @@
     "PROCESS_PARALLEL": "المعالجة المتوازية: إذا كان لديك عدة مزودين، يمكنك تفعيلها. الوصول إلى مزودك بالتوازي يمكن أن يسبب حظرًا.",
     "RESTART_TO_APPLY_CHANGES": "تحتاج إلى إعادة التشغيل لتطبيق التغييرات.",
     "SCHEDULE_EXAMPLE": "مثال على الجدول",
-    "WEB_ROOT": "Web-Root: يحتوي على ملفات واجهة الويب. عادة ما يتم وضعها في نفس الدليل تحت ./web"
+    "WEB_ROOT": "Web-Root: يحتوي على ملفات واجهة الويب. عادة ما يتم وضعها في نفس الدليل تحت ./web",
+    "CHANNEL_GROUPS_CONFIG": "تجمع مجموعات القنوات القناة المباشرة نفسها من عدة مدخلات في قناة واحدة. تنطبق هذه الإعدادات على كل هدف يفعّل مجموعات القنوات، ويمكن للهدف تجاوز بعضها في صفحة مجموعات القنوات الخاصة به.",
+    "CHANNEL_GROUPS_TARGET": "يفعّل مجموعات القنوات لهذا الهدف. الإعدادات المتروكة على \"عام\" تستخدم الإعدادات > مجموعات القنوات."
   },
   "LABEL": {
     "HLS_STARTUP_LIMITS": "حدود البدء السريع",
@@ -1934,7 +1975,42 @@
     "RECORDING_RULE_DELETE_RETAIN": "حذف القاعدة والإبقاء على التسجيلات القادمة",
     "RECORDING_RULE_DELETE_CANCEL": "حذف القاعدة وإلغاء التسجيلات القادمة",
     "RECORDING_RULE_ACTION_ENABLE": "تمكين",
-    "RECORDING_RULE_ACTION_DISABLE": "تعطيل"
+    "RECORDING_RULE_ACTION_DISABLE": "تعطيل",
+    "CHANNEL_GROUPS": "مجموعات القنوات",
+    "CHANNEL_GROUPS_MATCH_BY": "المطابقة حسب",
+    "CHANNEL_GROUPS_ALLOW_PROVIDER_GRACE": "السماح باتصال السماح لدى المزود",
+    "CHANNEL_GROUPS_CONFIG": "مجموعات القنوات",
+    "CHANNEL_GROUPS_GLOBAL": "عام",
+    "CHANNEL_GROUPS_MATCH_AS_ASCII": "المقارنة كـ ASCII",
+    "CHANNEL_GROUPS_STRIP_REGEX": "إزالة من الاسم (regex)",
+    "CHANNEL_GROUPS_IGNORE_TOKENS": "كلمات متجاهلة",
+    "CHANNEL_GROUPS_ALIASES": "أسماء بديلة",
+    "CHANNEL_GROUPS_EPG_CONFLICT": "معرّفات EPG مختلفة",
+    "CHANNEL_GROUPS_NAME_STRIP_QUALITY": "إزالة كلمات الجودة من الاسم",
+    "CHANNEL_GROUPS_POLICY": "ترتيب المصادر",
+    "CHANNEL_GROUPS_FAILOVER": "تبديل المصدر أثناء المشاهدة",
+    "CHANNEL_GROUPS_GROUPING": "التجميع",
+    "CHANNEL_GROUPS_START": "البدء",
+    "CHANNEL_GROUPS_CIRCUIT": "إيقاف المصادر المتعطلة مؤقتًا",
+    "CHANNEL_GROUPS_START_TIMEOUT_SECS": "مهلة البدء (ث)",
+    "CHANNEL_GROUPS_START_MAX_ATTEMPTS": "المصادر المجرّبة عند البدء",
+    "CHANNEL_GROUPS_NO_DATA_TIMEOUT_SECS": "مهلة انعدام البيانات (ث)",
+    "CHANNEL_GROUPS_SLOW_SOURCE_PCT": "الحد الأدنى للسرعة (%)",
+    "CHANNEL_GROUPS_SLOW_SOURCE_SECS": "بطيء جدًا لمدة (ث)",
+    "CHANNEL_GROUPS_MAX_OUTAGE_SECS": "أقصى انقطاع (ث)",
+    "CHANNEL_GROUPS_SAME_SOURCE_RETRIES": "إعادة محاولات المصدر نفسه",
+    "CHANNEL_GROUPS_STABLE_AFTER_SECS": "مستقر بعد (ث)",
+    "CHANNEL_GROUPS_MAX_SWITCHES": "أقصى عدد تبديلات",
+    "CHANNEL_GROUPS_MAX_SWITCHES_WINDOW_SECS": "نافذة التبديلات (ث)",
+    "CHANNEL_GROUPS_AUDIO_LANGUAGE": "لغة الصوت",
+    "CHANNEL_GROUPS_SOURCE_FAILURES": "الأعطال حتى الإيقاف",
+    "CHANNEL_GROUPS_COOLDOWN_SECS": "الإيقاف (ث)",
+    "CHANNEL_GROUPS_COOLDOWN_MAX_SECS": "أقصى إيقاف (ث)",
+    "CHANNEL_GROUPS_INPUT_FAILURES": "أعطال المدخل حتى الإيقاف",
+    "CHANNEL_GROUPS_INPUT_WINDOW_SECS": "نافذة أعطال المدخل (ث)",
+    "CHANNEL_GROUPS_IGNORE_TOKEN": "مثال: backup",
+    "CHANNEL_GROUPS_ALIAS_NAME": "الاسم",
+    "CHANNEL_GROUPS_ALIAS_TARGET": "يُقارن كـ"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "الحافظة غير مدعومة.\nمتصفحك أو السياق الحالي لا يسمح بالوصول إلى الحافظة.\nيرجى استخدام HTTPS أو localhost.",

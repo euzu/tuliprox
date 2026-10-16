@@ -430,6 +430,16 @@ fn request_provider_account_probe(ctx: &ProviderStreamCtx, options: &ProviderStr
     }
 }
 
+/// `connect_err` counts the attempt that just ran. A group member never retries itself: the
+/// group selection moves on to the next member instead.
+pub(super) fn initial_open_retry_exhausted(is_group_member: bool, connect_err: u32) -> bool {
+    if is_group_member {
+        connect_err >= 1
+    } else {
+        connect_err > ERR_MAX_RETRY_COUNT
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn get_provider_stream(
     ctx: &ProviderStreamCtx,
@@ -441,8 +451,6 @@ pub(super) async fn get_provider_stream(
     let start = Instant::now();
     let mut connect_err: u32 = 1;
     let is_group_member = stream_options.flags.contains(ProviderStreamFactoryFlags::GroupMember);
-    let max_retry_count = if is_group_member { 1 } else { ERR_MAX_RETRY_COUNT };
-    let retry_seconds = if is_group_member { RETRY_SECONDS.min(3) } else { RETRY_SECONDS };
     let mut last_failure: Option<ProviderStreamRequestFailure> = None;
 
     let handle_cancel = stream_options.get_cancel_token();
@@ -472,7 +480,7 @@ pub(super) async fn get_provider_stream(
                 return Ok(Some(stream_response));
             }
             Ok(None) => {
-                if connect_err >= max_retry_count {
+                if initial_open_retry_exhausted(is_group_member, connect_err) {
                     warn!(
                         "The stream could be unavailable. {}",
                         sanitize_sensitive_info(stream_options.get_log_url().as_ref())
@@ -506,7 +514,7 @@ pub(super) async fn get_provider_stream(
                     last_failure = Some(failure);
                     break;
                 }
-                if connect_err >= max_retry_count {
+                if initial_open_retry_exhausted(is_group_member, connect_err) {
                     warn!(
                         "The stream could be unavailable. ({status}) {}",
                         sanitize_sensitive_info(stream_options.get_log_url().as_ref())
@@ -517,15 +525,15 @@ pub(super) async fn get_provider_stream(
                 last_failure = Some(failure);
             }
         }
-        if !stream_options.should_continue() || connect_err >= max_retry_count {
+        if !stream_options.should_continue() || initial_open_retry_exhausted(is_group_member, connect_err) {
             break;
         }
         if !stream_options.should_retry_initial_open_loop() {
             break;
         }
-        if start.elapsed().as_secs() > retry_seconds {
+        if start.elapsed().as_secs() > RETRY_SECONDS {
             warn!(
-                "The stream could be unavailable. Giving up after {retry_seconds} seconds. {}",
+                "The stream could be unavailable. Giving up after {RETRY_SECONDS} seconds. {}",
                 sanitize_sensitive_info(stream_options.get_log_url().as_ref())
             );
             break;

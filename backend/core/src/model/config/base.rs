@@ -15,7 +15,7 @@ use shared::{
         DEFAULT_RECORDING_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR,
     },
     error::TuliproxError,
-    model::{ConfigDto, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview},
+    model::{ChannelGroupsConfig, ConfigDto, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview},
     utils::set_sanitize_sensitive_info,
 };
 use std::{
@@ -115,6 +115,7 @@ pub struct Config {
     pub proxy: Option<ProxyConfig>,
     pub ipcheck: Option<IpCheckConfig>,
     pub library: Option<LibraryConfig>,
+    pub channel_groups: ChannelGroupsConfig,
 }
 
 /// Resolve a configured recording directory the way `Config::prepare` does:
@@ -367,6 +368,7 @@ impl From<&ConfigDto> for Config {
             proxy: dto.proxy.as_ref().map(Into::into),
             ipcheck: dto.ipcheck.as_ref().map(Into::into),
             library: dto.library.as_ref().map(Into::into),
+            channel_groups: dto.channel_groups.clone().unwrap_or_default(),
         }
     }
 }

@@ -338,6 +338,7 @@ mod tests {
             req_headers: &HeaderMap::new(),
             meter_uid: 0,
             meter_stream: false,
+            group_failover: None,
         })
         .await
         .expect("test stream admission should succeed");

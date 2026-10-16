@@ -8,8 +8,8 @@ use crate::model::{
     NotificationDeadLetter, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
     PlaylistUpdateState, ProviderAccountEvent, ProviderAccountState, ProviderFetchFailure, ProviderPoolExhausted,
     ProviderPriorityFallback, RecordingLifecycleMessage, ScheduledTaskFailure, ServerLifecycleEvent,
-    ServerLifecycleState, StreamProbeFailure, SystemInfo, UserLifecycleEvent, UserLifecycleState, WatchChanges,
-    WatchDisabled, WatchUnmatched,
+    ServerLifecycleState, StreamProbeFailure, SwitchReason, SystemInfo, UserLifecycleEvent, UserLifecycleState,
+    WatchChanges, WatchDisabled, WatchUnmatched,
 };
 use std::sync::Arc;
 
@@ -117,6 +117,14 @@ pub enum EventMessage {
         input_stream_id: Arc<str>,
         state: CircuitState,
     },
+    /// A running group stream continued on another member.
+    ChannelGroupMemberSwitched {
+        target_id: u16,
+        group_vid: u32,
+        from_member_vid: u32,
+        to_member_vid: u32,
+        reason: SwitchReason,
+    },
 }
 
 impl EventMessage {
@@ -190,6 +198,7 @@ impl EventMessage {
             Self::ChannelGroupMemberSelected { .. } => EventKind::ChannelGroupMemberSelected,
             Self::ChannelGroupExhausted { .. } => EventKind::ChannelGroupExhausted,
             Self::ChannelGroupCircuitChanged { .. } => EventKind::ChannelGroupCircuitChanged,
+            Self::ChannelGroupMemberSwitched { .. } => EventKind::ChannelGroupMemberSwitched,
         }
     }
 
@@ -292,7 +301,8 @@ impl EventMessage {
             | Self::RecordingProgress
             | Self::ChannelGroupMemberSelected { .. }
             | Self::ChannelGroupExhausted { .. }
-            | Self::ChannelGroupCircuitChanged { .. } => return None,
+            | Self::ChannelGroupCircuitChanged { .. }
+            | Self::ChannelGroupMemberSwitched { .. } => return None,
         })
     }
 
@@ -360,6 +370,15 @@ impl EventMessage {
                 serde_json::json!({
                     "target_id": target_id,
                     "group_vid": group_vid,
+                })
+            }
+            Self::ChannelGroupMemberSwitched { target_id, group_vid, from_member_vid, to_member_vid, reason } => {
+                serde_json::json!({
+                    "target_id": target_id,
+                    "group_vid": group_vid,
+                    "from_member_vid": from_member_vid,
+                    "to_member_vid": to_member_vid,
+                    "reason": reason,
                 })
             }
             Self::ChannelGroupCircuitChanged { input_name, input_stream_id, state } => {

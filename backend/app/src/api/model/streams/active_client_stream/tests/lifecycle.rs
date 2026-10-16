@@ -141,6 +141,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) async fn create_
         req_headers: &HeaderMap::default(),
         meter_uid: 0,
         meter_stream: false,
+        group_failover: None,
     })
     .await
     .expect("direct test stream admission should succeed");

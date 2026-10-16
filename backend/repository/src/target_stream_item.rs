@@ -13,12 +13,21 @@ pub enum ResolvedStreamTarget {
     Member { group: Arc<ChannelGroupRecord>, index: usize },
 }
 
+/// Whether `target` resolves channel groups at all. Targets without them skip every group lookup.
+#[must_use]
+pub fn channel_groups_enabled(target: &ConfigTarget) -> bool {
+    target.options.as_ref().and_then(|options| options.channel_groups.as_ref()).is_some_and(|groups| groups.enabled)
+}
+
 pub async fn classify_virtual_id(
     app_config: &Arc<AppConfig>,
     playlists: &PlaylistStorageState,
     target: &ConfigTarget,
     vid: VirtualId,
 ) -> ResolvedStreamTarget {
+    if !channel_groups_enabled(target) {
+        return ResolvedStreamTarget::Item;
+    }
     let target_data = playlists.channel_groups.get_or_load(app_config, playlists, target).await;
     if let Some(group) = target_data.groups.get(&vid) {
         return ResolvedStreamTarget::Group(Arc::clone(group));
@@ -294,13 +303,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let app_config = test_app_config(dir.path());
         let playlists = Arc::new(PlaylistStorageState::new());
-        let target = ConfigTarget::from(&ConfigTargetDto {
+        let mut target = ConfigTarget::from(&ConfigTargetDto {
             name: "target-group-env".to_string(),
             output: vec![TargetOutputDto::M3u(M3uTargetOutputDto {
                 filename: Some("playlist.m3u".to_string()),
                 ..M3uTargetOutputDto::default()
             })],
             ..ConfigTargetDto::default()
+        });
+        target.options = Some(shared::model::ConfigTargetOptions {
+            channel_groups: Some(shared::model::ChannelGroupsTargetConfig { enabled: true, ..Default::default() }),
+            ..Default::default()
         });
         let (mut playlist, mut pending) = grouped_fixture();
         persist_playlist_views_with_groups(
@@ -336,13 +349,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let app_config = test_app_config(dir.path());
         let playlists = Arc::new(PlaylistStorageState::new());
-        let target = ConfigTarget::from(&ConfigTargetDto {
+        let mut target = ConfigTarget::from(&ConfigTargetDto {
             name: "target-fav-env".to_string(),
             output: vec![TargetOutputDto::M3u(M3uTargetOutputDto {
                 filename: Some("playlist.m3u".to_string()),
                 ..M3uTargetOutputDto::default()
             })],
             ..ConfigTargetDto::default()
+        });
+        target.options = Some(shared::model::ConfigTargetOptions {
+            channel_groups: Some(shared::model::ChannelGroupsTargetConfig { enabled: true, ..Default::default() }),
+            ..Default::default()
         });
         let (mut playlist, mut pending) = grouped_fixture_with_favourite_copy();
         persist_playlist_views_with_groups(

@@ -2,10 +2,10 @@ use super::{
     protection::HlsTsSourceDecoder, HlsTsDemuxContext, HlsTsInspector, HlsTsMalformedReason, HlsTsMediaEvidence,
     HlsTsMediaStreamInspector, HlsTsProbeBudget, HlsTsProbeError, HlsTsProbeOutcome, HlsTsProbeProtection,
     HlsTsProtectionReason, HlsTsSpliceEvidence, HlsTsSpliceIncompatibility, HlsTsTrackSignature,
-    HlsTsTransportStreamInspector, AES_128_BLOCK_BYTES, TS_ALIGNMENT_CONFIRMATION_PACKETS, TS_PACKET_BYTES,
+    HlsTsTransportStreamInspector, AES_128_BLOCK_BYTES, TS_ALIGNMENT_CONFIRMATION_PACKETS, TS_PACKET_SIZE,
 };
 use crate::transport_stream_buffer::{HlsTsTimestampProfile, HlsTsTimestampProfileScanner};
-use mpeg2ts_reader::{demultiplex, packet::Packet};
+use mpeg2ts_reader::demultiplex;
 use std::io::Read;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zeroize::Zeroizing;
@@ -22,7 +22,7 @@ impl HlsTsMediaStreamInspector {
             budget,
             timestamp_scanner: HlsTsTimestampProfileScanner::new(expected_duration_ticks_90khz),
             transport_scanner: HlsTsTransportStreamInspector::new(),
-            pending: Vec::with_capacity(budget.bounded_read_chunk_bytes().saturating_add(TS_PACKET_BYTES)),
+            pending: Vec::with_capacity(budget.bounded_read_chunk_bytes().saturating_add(TS_PACKET_SIZE)),
             aligned: false,
             packets_examined: 0,
             invalid: false,
@@ -35,17 +35,14 @@ impl HlsTsMediaStreamInspector {
         }
         self.pending.extend_from_slice(bytes);
         if !self.aligned {
-            let confirmation_bytes = TS_PACKET_BYTES.saturating_mul(TS_ALIGNMENT_CONFIRMATION_PACKETS);
+            let confirmation_bytes = TS_PACKET_SIZE.saturating_mul(TS_ALIGNMENT_CONFIRMATION_PACKETS);
             if self.pending.len() < confirmation_bytes {
                 return;
             }
             let available_search = self.pending.len().saturating_sub(confirmation_bytes);
             let search_end = available_search.min(self.budget.max_resync_bytes);
-            let alignment = (0..=search_end).find(|offset| {
-                (0..TS_ALIGNMENT_CONFIRMATION_PACKETS).all(|index| {
-                    self.pending[offset.saturating_add(index.saturating_mul(TS_PACKET_BYTES))] == Packet::SYNC_BYTE
-                })
-            });
+            let alignment =
+                crate::packet::find_sync(&self.pending, 0..=search_end, TS_ALIGNMENT_CONFIRMATION_PACKETS, false);
             let Some(alignment) = alignment else {
                 if available_search >= self.budget.max_resync_bytes {
                     self.invalid = true;
@@ -57,12 +54,12 @@ impl HlsTsMediaStreamInspector {
         }
 
         let mut consumed = 0usize;
-        while self.pending.len().saturating_sub(consumed) >= TS_PACKET_BYTES {
+        while self.pending.len().saturating_sub(consumed) >= TS_PACKET_SIZE {
             if self.packets_examined >= self.budget.max_packets {
                 self.invalid = true;
                 break;
             }
-            let packet_end = consumed.saturating_add(TS_PACKET_BYTES);
+            let packet_end = consumed.saturating_add(TS_PACKET_SIZE);
             let packet = &self.pending[consumed..packet_end];
             self.timestamp_scanner.push_aligned_packet(packet);
             self.transport_scanner.push_packet(packet, self.packets_examined);
@@ -122,7 +119,7 @@ impl HlsTsInspector {
             budget,
             demux,
             context,
-            pending: Vec::with_capacity(budget.bounded_read_chunk_bytes().saturating_add(TS_PACKET_BYTES)),
+            pending: Vec::with_capacity(budget.bounded_read_chunk_bytes().saturating_add(TS_PACKET_SIZE)),
             aligned: false,
             source_bytes_examined: 0,
             packets_examined: 0,
@@ -156,17 +153,14 @@ impl HlsTsInspector {
     ) -> Option<HlsTsProbeOutcome> {
         self.pending.extend_from_slice(bytes);
         if !self.aligned {
-            let confirmation_bytes = TS_PACKET_BYTES.saturating_mul(TS_ALIGNMENT_CONFIRMATION_PACKETS);
+            let confirmation_bytes = TS_PACKET_SIZE.saturating_mul(TS_ALIGNMENT_CONFIRMATION_PACKETS);
             if self.pending.len() < confirmation_bytes {
                 return None;
             }
             let available_search = self.pending.len().saturating_sub(confirmation_bytes);
             let search_end = available_search.min(self.budget.max_resync_bytes);
-            let alignment = (0..=search_end).find(|offset| {
-                (0..TS_ALIGNMENT_CONFIRMATION_PACKETS).all(|index| {
-                    self.pending[offset.saturating_add(index.saturating_mul(TS_PACKET_BYTES))] == Packet::SYNC_BYTE
-                })
-            });
+            let alignment =
+                crate::packet::find_sync(&self.pending, 0..=search_end, TS_ALIGNMENT_CONFIRMATION_PACKETS, false);
             let Some(alignment) = alignment else {
                 if available_search >= self.budget.max_resync_bytes {
                     return Some(HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidSynchronization));
@@ -178,14 +172,14 @@ impl HlsTsInspector {
         }
 
         let mut consumed = 0usize;
-        while self.pending.len().saturating_sub(consumed) >= TS_PACKET_BYTES {
+        while self.pending.len().saturating_sub(consumed) >= TS_PACKET_SIZE {
             if self.packets_examined >= self.budget.max_packets {
                 self.pending.drain(..consumed);
                 return Some(self.budget_exhausted());
             }
-            let mut packet_bytes = [0_u8; TS_PACKET_BYTES];
-            packet_bytes.copy_from_slice(&self.pending[consumed..consumed.saturating_add(TS_PACKET_BYTES)]);
-            consumed = consumed.saturating_add(TS_PACKET_BYTES);
+            let mut packet_bytes = [0_u8; TS_PACKET_SIZE];
+            packet_bytes.copy_from_slice(&self.pending[consumed..consumed.saturating_add(TS_PACKET_SIZE)]);
+            consumed = consumed.saturating_add(TS_PACKET_SIZE);
             self.packets_examined = self.packets_examined.saturating_add(1);
             if let Some(outcome) = self.validate_packet(&packet_bytes) {
                 self.pending.drain(..consumed);
@@ -207,8 +201,8 @@ impl HlsTsInspector {
         None
     }
 
-    pub(super) fn validate_packet(&self, bytes: &[u8; TS_PACKET_BYTES]) -> Option<HlsTsProbeOutcome> {
-        if bytes[0] != Packet::SYNC_BYTE {
+    pub(super) fn validate_packet(&self, bytes: &[u8; TS_PACKET_SIZE]) -> Option<HlsTsProbeOutcome> {
+        if bytes[0] != crate::packet::TS_SYNC_BYTE {
             return Some(HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidSynchronization));
         }
         if bytes[1] & 0x80 != 0 {
@@ -217,17 +211,17 @@ impl HlsTsInspector {
         if bytes[3] & 0xC0 != 0 {
             return Some(HlsTsProbeOutcome::UnsupportedProtection(HlsTsProtectionReason::TransportScrambling));
         }
-        let adaptation_control = (bytes[3] >> 4) & 0b11;
+        let adaptation_control = crate::packet::TsPacket(bytes).adaptation_field_control();
         let payload_offset = match adaptation_control {
             0b01 => 4,
-            0b10 if bytes[4] == 183 => TS_PACKET_BYTES,
+            0b10 if bytes[4] == 183 => TS_PACKET_SIZE,
             0b11 if bytes[4] <= 182 => 5usize.saturating_add(usize::from(bytes[4])),
             0b00 | 0b10 | 0b11 => {
                 return Some(HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPacketHeader));
             }
             _ => return Some(HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPacketHeader)),
         };
-        let pid = (u16::from(bytes[1] & 0x1F) << 8) | u16::from(bytes[2]);
+        let pid = crate::packet::ts_packet_pid(bytes);
         if self.context.is_psi_pid(pid) && bytes[1] & 0x40 != 0 {
             let Some(payload) = bytes.get(payload_offset..) else {
                 return Some(HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPsiPointer));

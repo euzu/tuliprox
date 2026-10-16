@@ -711,6 +711,7 @@ mod tests {
             qos_aggregation: CancellationToken::new(),
             recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
+            channel_groups: tokio_util::sync::CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 

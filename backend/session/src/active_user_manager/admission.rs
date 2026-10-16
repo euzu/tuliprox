@@ -190,6 +190,7 @@ impl ActiveUserManager {
         self.pending_provider_release(username).await.map_or_else(Vec::new, |snapshot| snapshot.single_allocations)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn set_pending_release_for_test(&self, username: &str, allocations: &[AllocationId]) {
         self.set_pending_provider_release(
             username,

@@ -507,23 +507,24 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 
-async fn process_target_channel_groups(
+pub(super) async fn process_target_channel_groups(
     config: &tuliprox_core::model::AppConfig,
     target: &ConfigTarget,
     playlist: &mut Vec<PlaylistGroup>,
     step: &mut StepMeasure,
     errors: &mut Vec<TuliproxError>,
 ) -> Vec<PendingChannelGroup> {
-    let Some(cg_cfg) = target.execution_plan.channel_groups.as_ref() else {
+    let Some(target_cfg) = target.execution_plan.channel_groups.as_ref() else {
         return Vec::new();
     };
+    let cg_cfg = config.config.load().channel_groups.for_target(target_cfg);
     let overrides =
         tuliprox_repository::load_channel_group_overrides(config, &target.name).await.unwrap_or_else(|err| {
             errors.push(err);
             None
         });
     step.broadcast("Processing channel groups for '{}' playlist", &target.name);
-    let groups = crate::processor::channel_group::group_playlist(cg_cfg, overrides.as_ref(), &target.name, playlist);
+    let groups = crate::processor::channel_group::group_playlist(&cg_cfg, overrides.as_ref(), &target.name, playlist);
     step.tick("channel grouping");
     log_memory_snapshot(format!("target '{}' after_channel_grouping", target.name).as_str());
     groups
@@ -1219,8 +1220,9 @@ pub(crate) async fn run_finalize_until_persist(
     mut playlist: Vec<PlaylistGroup>,
 ) -> (Vec<PlaylistGroup>, Vec<PendingChannelGroup>) {
     let mut step = StepMeasure::new("test", |_, _| {});
-    let pending = if let Some(cg_cfg) = target.execution_plan.channel_groups.as_ref() {
-        crate::processor::channel_group::group_playlist(cg_cfg, None, &target.name, &mut playlist)
+    let pending = if let Some(target_cfg) = target.execution_plan.channel_groups.as_ref() {
+        let cg_cfg = shared::model::ChannelGroupsConfig::default().for_target(target_cfg);
+        crate::processor::channel_group::group_playlist(&cg_cfg, None, &target.name, &mut playlist)
     } else {
         Vec::new()
     };

@@ -1,5 +1,9 @@
-use super::group_playback_support::{ts_fixture, GroupPlaybackEnv};
+use super::{
+    group_playback_support::{ts_fixture, GroupPlaybackEnv},
+    support::FakeOriginMode,
+};
 use shared::model::AdmissionStrategy;
+use std::sync::Arc;
 use tuliprox_session::channel_group::CircuitView;
 
 #[tokio::test]
@@ -124,4 +128,51 @@ async fn grace_hold_selects_member_only_after_hold_passes() {
     let rejected = env.get_xtream_live(env.group_vid).await; // first stream still active → hold fails
     assert_ne!(rejected.status(), 200);
     assert_eq!(env.slots_in_use(), slots_before); // no member slot was taken during the hold
+}
+
+#[tokio::test]
+async fn group_skips_member_in_maintenance() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).with_qos("solis", 1, 95).build().await;
+    env.app_state.maintenance.add("solis", None, 1).await.expect("maintenance");
+    assert_eq!(env.get_xtream_live(env.group_vid).await.status(), 200);
+    assert_eq!((env.origin_hits("solis"), env.origin_hits("korath")), (0, 1));
+}
+
+#[tokio::test]
+async fn group_with_all_members_in_maintenance_returns_maintenance() {
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"]).build().await;
+    env.app_state.maintenance.add("solis", None, 1).await.expect("maintenance");
+    env.app_state.maintenance.add("korath", None, 1).await.expect("maintenance");
+    let response = env.get_xtream_live(env.group_vid).await;
+    assert_ne!(response.status(), 200);
+    assert_eq!((env.origin_hits("solis"), env.origin_hits("korath")), (0, 0));
+    assert_eq!(env.slots_in_use(), 0);
+}
+
+#[tokio::test]
+async fn start_budget_bounds_all_attempts() {
+    let blocked = Arc::new(tokio::sync::Notify::new());
+    let channel_groups = shared::model::ChannelGroupsConfig {
+        start: shared::model::ChannelGroupStartConfig { timeout_secs: 2, ..Default::default() },
+        ..Default::default()
+    };
+    let env = GroupPlaybackEnv::builder(&["solis", "korath"])
+        .origin_mode("solis", FakeOriginMode::BlockFirstChunk(Arc::clone(&blocked)))
+        .origin_mode("korath", FakeOriginMode::BlockFirstChunk(Arc::clone(&blocked)))
+        .with_channel_groups(channel_groups)
+        .build()
+        .await;
+    let started = std::time::Instant::now();
+    let response = env.get_xtream_live(env.group_vid).await;
+    let elapsed = started.elapsed();
+    blocked.notify_waiters();
+    assert!(elapsed < std::time::Duration::from_millis(2_500), "start took {elapsed:?}");
+    drop(response);
+    // A failed open releases its slot once the dropped provider body completes.
+    let released = async {
+        while env.slots_in_use() != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(2), released).await.is_ok());
 }

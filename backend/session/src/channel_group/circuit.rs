@@ -1,6 +1,6 @@
 use axum::http::StatusCode;
 use dashmap::DashMap;
-use shared::model::ChannelGroupSelectionConfig;
+use shared::model::ChannelGroupCircuitConfig;
 use std::{
     collections::{HashSet, VecDeque},
     sync::Arc,
@@ -61,17 +61,17 @@ impl CircuitPolicy {
 }
 
 impl Default for CircuitPolicy {
-    fn default() -> Self { Self::new(3, Duration::from_secs(60), Duration::from_mins(15)) }
+    fn default() -> Self { Self::from(&ChannelGroupCircuitConfig::default()) }
 }
 
-impl From<&ChannelGroupSelectionConfig> for CircuitPolicy {
-    fn from(cfg: &ChannelGroupSelectionConfig) -> Self {
+impl From<&ChannelGroupCircuitConfig> for CircuitPolicy {
+    fn from(cfg: &ChannelGroupCircuitConfig) -> Self {
         Self {
-            failures: cfg.circuit_failures,
-            cooldown: Duration::from_secs(cfg.circuit_cooldown_secs),
-            cooldown_max: Duration::from_secs(cfg.circuit_cooldown_max_secs),
-            input_failures: cfg.input_circuit_failures,
-            input_window: Duration::from_secs(cfg.input_failure_window_secs),
+            failures: cfg.source_failures,
+            cooldown: Duration::from_secs(cfg.cooldown_secs),
+            cooldown_max: Duration::from_secs(cfg.cooldown_max_secs),
+            input_failures: cfg.input_failures,
+            input_window: Duration::from_secs(cfg.input_window_secs),
         }
     }
 }

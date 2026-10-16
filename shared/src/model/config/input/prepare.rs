@@ -184,7 +184,6 @@ impl ConfigInputDto {
                     )));
                 }
             }
-            // R7
             if self.media_server.is_some() {
                 return Err(TuliproxError::ConfigInput(format!(
                     "staged input does not support media_server configuration (input: {})",

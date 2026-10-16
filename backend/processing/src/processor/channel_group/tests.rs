@@ -29,7 +29,7 @@ fn group(title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
     PlaylistGroup { id: 1, title: title.intern(), channels, xtream_cluster: XtreamCluster::Live }
 }
 
-fn cfg() -> ChannelGroupsConfig { serde_json::from_str(r#"{"enabled":true}"#).unwrap() }
+fn cfg() -> ChannelGroupsConfig { ChannelGroupsConfig::default() }
 
 fn with_epg(mut item: PlaylistItem, epg: &str) -> PlaylistItem {
     item.header.epg_channel_id = Some(epg.intern());
@@ -109,7 +109,7 @@ fn manual_group_wins_over_auto_and_keeps_order() {
     let manual = pending.iter().find(|p| p.origin == ChannelGroupOrigin::Manual).expect("manual");
     let inputs: Vec<_> = manual.members.iter().map(|m| m.header.input_name.to_string()).collect();
     assert_eq!(inputs, vec!["korath", "solis"]);
-    // veyra alone is below min_members and stays a normal channel
+    // veyra alone is a single member and stays a normal channel
     assert!(playlist[0].channels.iter().any(|c| c.header.input_name.as_ref() == "veyra"));
 }
 
@@ -146,7 +146,7 @@ fn orphaned_manual_member_is_skipped() {
 }
 
 #[test]
-fn manual_group_below_min_members_dissolves() {
+fn manual_group_with_one_member_dissolves() {
     let overrides = overrides_with_manual("zdf", &[("solis", "1"), ("gone", "99")]);
     let mut playlist = vec![group("News", vec![live("solis", "1", "ZDF HD"), live("veyra", "2", "ARD")])];
     assert!(group_playlist(&cfg(), Some(&overrides), "T", &mut playlist).is_empty());

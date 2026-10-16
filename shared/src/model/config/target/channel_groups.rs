@@ -2,92 +2,65 @@ use crate::error::TuliproxError;
 use regex::Regex;
 use std::{collections::BTreeMap, sync::Arc};
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelMatchBy {
-    #[default]
-    Caption,
-    Name,
-    Title,
-    EpgChannelId,
-}
-
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelGroupPolicy {
-    #[default]
-    Auto,
-    Priority,
-}
-
-const fn default_true() -> bool { true }
-const fn default_min_members() -> u16 { 2 }
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct ChannelGroupSelectionConfig {
-    pub circuit_failures: u8,
-    pub circuit_cooldown_secs: u64,
-    pub circuit_cooldown_max_secs: u64,
-    pub input_circuit_failures: u8,
-    pub input_failure_window_secs: u64,
-    pub startup_budget_secs: u64,
-    pub max_start_attempts: u8,
-    pub same_member_retries: u8,
-    pub stall_timeout_secs: u64,
-    /// 0 disables the underrun trigger.
-    pub underrun_ratio_pct: u8,
-    pub underrun_window_secs: u64,
-    pub runtime_switch_budget_secs: u64,
-    pub stable_reset_secs: u64,
-    pub flap_window_secs: u64,
-    /// 0 disables the flap guard.
-    pub flap_max_switches: u8,
-    pub runtime_audio_language: RuntimeAudioLanguage,
-    pub early_start_response: bool,
-}
-
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeAudioLanguage {
-    #[default]
-    Prefer,
-    Require,
-}
-
-impl Default for ChannelGroupSelectionConfig {
-    fn default() -> Self {
-        Self {
-            circuit_failures: 2,
-            circuit_cooldown_secs: 60,
-            circuit_cooldown_max_secs: 900,
-            input_circuit_failures: 3,
-            input_failure_window_secs: 120,
-            startup_budget_secs: 15,
-            max_start_attempts: 4,
-            same_member_retries: 1,
-            stall_timeout_secs: 8,
-            underrun_ratio_pct: 90,
-            underrun_window_secs: 15,
-            runtime_switch_budget_secs: 20,
-            stable_reset_secs: 30,
-            flap_window_secs: 600,
-            flap_max_switches: 6,
-            runtime_audio_language: RuntimeAudioLanguage::Prefer,
-            early_start_response: false,
+/// A unit-variant config enum with its YAML names, `ALL`, `Display` and `FromStr`.
+macro_rules! config_enum {
+    ($(#[$meta:meta])* $name:ident, $key:literal { $default:ident => $default_str:literal $(, $variant:ident => $str:literal)* $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub enum $name {
+            #[default]
+            #[serde(rename = $default_str)]
+            $default,
+            $(#[serde(rename = $str)] $variant,)*
         }
-    }
+
+        impl $name {
+            pub const ALL: &'static [Self] = &[Self::$default $(, Self::$variant)*];
+
+            /// The name used in the configuration.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    Self::$default => $default_str,
+                    $(Self::$variant => $str,)*
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = TuliproxError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|variant| variant.as_str() == value)
+                    .ok_or_else(|| TuliproxError::ConfigBase(format!("unknown channel_groups.{}: {value}", $key)))
+            }
+        }
+    };
 }
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EpgConflictMode {
-    #[default]
-    Split,
-    Ignore,
-}
+config_enum!(ChannelMatchBy, "match_by" {
+    Caption => "caption",
+    Name => "name",
+    Title => "title",
+    EpgChannelId => "epg_channel_id",
+});
 
-/// Grouping-only match key extensions (design §4.1); `deduplicate` never uses them.
+config_enum!(
+    /// Member order of a group: `auto` ranks by health and quality, `priority` keeps the list order.
+    ChannelGroupPolicy, "policy" { Auto => "auto", Priority => "priority" }
+);
+
+config_enum!(RuntimeAudioLanguage, "failover.audio_language" { Prefer => "prefer", Require => "require" });
+
+config_enum!(EpgConflictMode, "epg_conflict" { Split => "split", Ignore => "ignore" });
+
+/// Grouping-only match key extensions; `deduplicate` never uses them.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ChannelMatchNormalize {
@@ -130,73 +103,214 @@ impl ChannelMatchNormalize {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChannelGroupsConfig {
-    #[serde(default)]
+/// A group always has at least this many members; a single channel stays a normal channel.
+pub const MIN_GROUP_MEMBERS: usize = 2;
+
+const fn default_true() -> bool { true }
+
+/// How a client start picks a member.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChannelGroupStartConfig {
+    /// Longest time a start may try members; 0 means no limit.
+    pub timeout_secs: u64,
+    /// Most members tried at start.
+    pub max_attempts: u8,
+}
+
+impl Default for ChannelGroupStartConfig {
+    fn default() -> Self { Self { timeout_secs: 15, max_attempts: 4 } }
+}
+
+/// Switching to another member while a client watches an MPEG-TS stream.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChannelGroupFailoverConfig {
     pub enabled: bool,
-    #[serde(default)]
+    /// Seconds without media before the member is replaced; 0 disables the check.
+    pub no_data_timeout_secs: u64,
+    /// A member delivering less than this percentage of real-time speed is too slow; 0 disables it.
+    pub slow_source_pct: u8,
+    /// How long a member must stay too slow before it is replaced.
+    pub slow_source_secs: u64,
+    /// Longest time without playback while looking for a replacement.
+    pub max_outage_secs: u64,
+    /// Retries of a member that played stably before others are tried.
+    pub same_source_retries: u8,
+    /// Playback after which a member counts as stable and an incident is over.
+    pub stable_after_secs: u64,
+    /// Most switches within `max_switches_window_secs`; 0 disables the limit.
+    pub max_switches: u8,
+    pub max_switches_window_secs: u64,
+    pub audio_language: RuntimeAudioLanguage,
+}
+
+impl Default for ChannelGroupFailoverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            no_data_timeout_secs: 8,
+            slow_source_pct: 90,
+            slow_source_secs: 15,
+            max_outage_secs: 20,
+            same_source_retries: 1,
+            stable_after_secs: 30,
+            max_switches: 6,
+            max_switches_window_secs: 600,
+            audio_language: RuntimeAudioLanguage::Prefer,
+        }
+    }
+}
+
+/// When failing members and inputs are skipped for a while.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChannelGroupCircuitConfig {
+    /// Consecutive failures that put a member on hold.
+    pub source_failures: u8,
+    /// First hold time; doubles while the member keeps failing.
+    pub cooldown_secs: u64,
+    pub cooldown_max_secs: u64,
+    /// Failures of one input (from at least two members) within `input_window_secs` that put
+    /// the whole input back.
+    pub input_failures: u8,
+    pub input_window_secs: u64,
+}
+
+impl Default for ChannelGroupCircuitConfig {
+    fn default() -> Self {
+        Self {
+            source_failures: 2,
+            cooldown_secs: 60,
+            cooldown_max_secs: 900,
+            input_failures: 3,
+            input_window_secs: 120,
+        }
+    }
+}
+
+/// `config.yml` `channel_groups`: the settings every target with channel groups uses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChannelGroupsConfig {
     pub match_by: ChannelMatchBy,
-    #[serde(default)]
     pub match_as_ascii: bool,
-    #[serde(default, skip_serializing_if = "ChannelMatchNormalize::is_empty")]
+    #[serde(skip_serializing_if = "ChannelMatchNormalize::is_empty")]
     pub match_normalize: ChannelMatchNormalize,
-    #[serde(default)]
     pub epg_conflict: EpgConflictMode,
-    #[serde(default)]
     pub name_strip_quality: bool,
-    #[serde(default = "default_min_members")]
-    pub min_members: u16,
-    #[serde(default)]
-    pub policy_default: ChannelGroupPolicy,
+    pub policy: ChannelGroupPolicy,
     #[serde(default = "default_true")]
     pub allow_provider_grace: bool,
-    #[serde(default)]
-    pub selection: ChannelGroupSelectionConfig,
+    pub start: ChannelGroupStartConfig,
+    pub failover: ChannelGroupFailoverConfig,
+    pub circuit: ChannelGroupCircuitConfig,
 }
 
 impl Default for ChannelGroupsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             match_by: ChannelMatchBy::default(),
             match_as_ascii: false,
             match_normalize: ChannelMatchNormalize::default(),
             epg_conflict: EpgConflictMode::default(),
             name_strip_quality: false,
-            min_members: default_min_members(),
-            policy_default: ChannelGroupPolicy::default(),
-            allow_provider_grace: default_true(),
-            selection: ChannelGroupSelectionConfig::default(),
+            policy: ChannelGroupPolicy::default(),
+            allow_provider_grace: true,
+            start: ChannelGroupStartConfig::default(),
+            failover: ChannelGroupFailoverConfig::default(),
+            circuit: ChannelGroupCircuitConfig::default(),
         }
     }
 }
 
+/// The settings a group playback of one target uses.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ChannelGroupPlayback {
+    pub start: ChannelGroupStartConfig,
+    pub failover: ChannelGroupFailoverConfig,
+    pub allow_provider_grace: bool,
+}
+
 impl ChannelGroupsConfig {
+    pub fn is_default(&self) -> bool { *self == Self::default() }
+
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        if self.min_members < 2 {
-            return Err(TuliproxError::ConfigTarget("`channel_groups.min_members` must be at least 2".to_string()));
+        let invalid = |msg: &str| Err(TuliproxError::ConfigBase(format!("`channel_groups.{msg}")));
+        if self.start.max_attempts == 0 {
+            return invalid("start.max_attempts` must be > 0");
         }
-        if self.selection.max_start_attempts == 0 || self.selection.circuit_failures == 0 {
-            return Err(TuliproxError::ConfigTarget(
-                "`channel_groups.selection` attempts and failure thresholds must be > 0".to_string(),
-            ));
+        if self.circuit.source_failures == 0 {
+            return invalid("circuit.source_failures` must be > 0");
         }
-        if self.selection.input_circuit_failures < 2 {
-            return Err(TuliproxError::ConfigTarget(
-                "`channel_groups.selection.input_circuit_failures` must be at least 2".to_string(),
-            ));
+        if self.circuit.input_failures < 2 {
+            return invalid("circuit.input_failures` must be at least 2");
         }
-        if self.selection.underrun_ratio_pct > 100 {
-            return Err(TuliproxError::ConfigTarget(
-                "`channel_groups.selection.underrun_ratio_pct` must be between 0 and 100".to_string(),
-            ));
+        if self.failover.slow_source_pct > 100 {
+            return invalid("failover.slow_source_pct` must be between 0 and 100");
         }
-        if self.selection.circuit_cooldown_max_secs < self.selection.circuit_cooldown_secs {
-            self.selection.circuit_cooldown_max_secs = self.selection.circuit_cooldown_secs;
+        if self.failover.max_outage_secs == 0 {
+            return invalid("failover.max_outage_secs` must be > 0");
+        }
+        if self.circuit.cooldown_max_secs < self.circuit.cooldown_secs {
+            self.circuit.cooldown_max_secs = self.circuit.cooldown_secs;
         }
         self.match_normalize.prepare()
     }
+
+    /// The grouping settings of `target`: these settings with the target's overrides applied.
+    #[must_use]
+    pub fn for_target(&self, target: &ChannelGroupsTargetConfig) -> Self {
+        let mut config = self.clone();
+        config.match_by = target.match_by.unwrap_or(config.match_by);
+        config.match_as_ascii = target.match_as_ascii.unwrap_or(config.match_as_ascii);
+        config.epg_conflict = target.epg_conflict.unwrap_or(config.epg_conflict);
+        config.name_strip_quality = target.name_strip_quality.unwrap_or(config.name_strip_quality);
+        config.policy = target.policy.unwrap_or(config.policy);
+        config.allow_provider_grace = target.allow_provider_grace.unwrap_or(config.allow_provider_grace);
+        config.failover.enabled = target.failover.unwrap_or(config.failover.enabled);
+        config
+    }
+
+    /// The playback settings of a target, without copying the grouping settings.
+    pub fn playback(&self, target: Option<&ChannelGroupsTargetConfig>) -> ChannelGroupPlayback {
+        let mut failover = self.failover;
+        failover.enabled = target.and_then(|target| target.failover).unwrap_or(failover.enabled);
+        ChannelGroupPlayback {
+            start: self.start,
+            failover,
+            allow_provider_grace: target
+                .and_then(|target| target.allow_provider_grace)
+                .unwrap_or(self.allow_provider_grace),
+        }
+    }
+}
+
+/// `source.yml` `targets[].options.channel_groups`: turns channel groups on for a target and
+/// overrides the global settings where a target needs it. Unset fields use `config.yml`.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ChannelGroupsTargetConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_by: Option<ChannelMatchBy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_as_ascii: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epg_conflict: Option<EpgConflictMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_strip_quality: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ChannelGroupPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_provider_grace: Option<bool>,
+    /// Switching members while watching; `None` uses `failover.enabled` of `config.yml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failover: Option<bool>,
+}
+
+impl ChannelGroupsTargetConfig {
+    pub fn is_default(&self) -> bool { *self == Self::default() }
 }
 
 #[cfg(test)]
@@ -204,73 +318,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn match_by_round_trips_through_its_config_name() {
+        for &match_by in ChannelMatchBy::ALL {
+            let name = match_by.to_string();
+            assert_eq!(name.parse::<ChannelMatchBy>().expect("known name"), match_by);
+            assert_eq!(serde_json::to_string(&match_by).expect("serializes"), format!("\"{name}\""));
+        }
+        assert!("unknown".parse::<ChannelMatchBy>().is_err());
+    }
+
+    #[test]
     fn defaults_match_design() {
-        let cfg: ChannelGroupsConfig = serde_json::from_str(r#"{"enabled":true}"#).expect("parses");
-        assert!(cfg.enabled);
+        let cfg: ChannelGroupsConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(cfg, ChannelGroupsConfig::default());
         assert_eq!(cfg.match_by, ChannelMatchBy::Caption);
-        assert!(!cfg.match_as_ascii);
-        assert_eq!(cfg.min_members, 2);
-        assert_eq!(cfg.policy_default, ChannelGroupPolicy::Auto);
+        assert_eq!(cfg.policy, ChannelGroupPolicy::Auto);
         assert!(cfg.allow_provider_grace);
-        assert_eq!(cfg.selection, ChannelGroupSelectionConfig::default());
-        assert_eq!(cfg.selection.circuit_failures, 2);
-        assert_eq!(cfg.selection.circuit_cooldown_secs, 60);
-        assert_eq!(cfg.selection.circuit_cooldown_max_secs, 900);
-        assert_eq!(cfg.selection.startup_budget_secs, 15);
-        assert_eq!(cfg.selection.max_start_attempts, 4);
-        assert_eq!(cfg.selection.same_member_retries, 1);
-        assert_eq!(cfg.selection.stall_timeout_secs, 8);
-        assert_eq!(cfg.selection.runtime_switch_budget_secs, 20);
-        assert_eq!(cfg.selection.input_circuit_failures, 3);
-        assert_eq!(cfg.selection.input_failure_window_secs, 120);
-        assert_eq!(cfg.selection.underrun_ratio_pct, 90);
-        assert_eq!(cfg.selection.underrun_window_secs, 15);
-        assert_eq!(cfg.selection.stable_reset_secs, 30);
-        assert_eq!(cfg.selection.flap_window_secs, 600);
-        assert_eq!(cfg.selection.flap_max_switches, 6);
-        assert_eq!(cfg.match_normalize, ChannelMatchNormalize::default());
+        assert_eq!(cfg.start, ChannelGroupStartConfig { timeout_secs: 15, max_attempts: 4 });
+        assert!(cfg.failover.enabled);
+        assert_eq!(cfg.failover.no_data_timeout_secs, 8);
+        assert_eq!(cfg.failover.slow_source_pct, 90);
+        assert_eq!(cfg.failover.slow_source_secs, 15);
+        assert_eq!(cfg.failover.max_outage_secs, 20);
+        assert_eq!(cfg.failover.same_source_retries, 1);
+        assert_eq!(cfg.failover.stable_after_secs, 30);
+        assert_eq!(cfg.failover.max_switches, 6);
+        assert_eq!(cfg.failover.max_switches_window_secs, 600);
+        assert_eq!(cfg.failover.audio_language, RuntimeAudioLanguage::Prefer);
+        assert_eq!(
+            cfg.circuit,
+            ChannelGroupCircuitConfig {
+                source_failures: 2,
+                cooldown_secs: 60,
+                cooldown_max_secs: 900,
+                input_failures: 3,
+                input_window_secs: 120
+            }
+        );
         assert_eq!(cfg.epg_conflict, EpgConflictMode::Split);
         assert!(!cfg.name_strip_quality);
-        assert_eq!(cfg.selection.runtime_audio_language, RuntimeAudioLanguage::Prefer);
-        assert!(!cfg.selection.early_start_response);
     }
 
     #[test]
     fn match_normalize_compiles_regex_on_prepare() {
         let mut cfg: ChannelGroupsConfig = serde_json::from_str(
-            r#"{"enabled":true,"match_normalize":{"strip_regex":"^[A-Z]{2}:\\s*","ignore_tokens":["hevc"],"aliases":{"das erste":"ard"}}}"#,
+            r#"{"match_normalize":{"strip_regex":"^[A-Z]{2}:\\s*","ignore_tokens":["hevc"],"aliases":{"das erste":"ard"}}}"#,
         )
         .expect("parses");
         cfg.prepare().expect("valid");
         assert!(cfg.match_normalize.t_strip_regex.is_some());
         let mut bad: ChannelGroupsConfig =
-            serde_json::from_str(r#"{"enabled":true,"match_normalize":{"strip_regex":"("}}"#).expect("parses");
+            serde_json::from_str(r#"{"match_normalize":{"strip_regex":"("}}"#).expect("parses");
         assert!(bad.prepare().is_err());
     }
 
     #[test]
-    fn rejects_out_of_range_selection_values() {
-        let mut ratio: ChannelGroupsConfig =
-            serde_json::from_str(r#"{"enabled":true,"selection":{"underrun_ratio_pct":101}}"#).expect("parses");
-        assert!(ratio.prepare().is_err());
-        let mut input: ChannelGroupsConfig =
-            serde_json::from_str(r#"{"enabled":true,"selection":{"input_circuit_failures":1}}"#).expect("parses");
-        assert!(input.prepare().is_err());
+    fn rejects_out_of_range_values() {
+        for json in [
+            r#"{"failover":{"slow_source_pct":101}}"#,
+            r#"{"failover":{"max_outage_secs":0}}"#,
+            r#"{"circuit":{"input_failures":1}}"#,
+            r#"{"circuit":{"source_failures":0}}"#,
+            r#"{"start":{"max_attempts":0}}"#,
+        ] {
+            let mut cfg: ChannelGroupsConfig = serde_json::from_str(json).expect("parses");
+            assert!(cfg.prepare().is_err(), "{json}");
+        }
     }
 
     #[test]
-    fn rejects_unknown_fields_and_min_members_below_two() {
-        assert!(serde_json::from_str::<ChannelGroupsConfig>(r#"{"enabled":true,"weight_qos":5}"#).is_err());
-        let mut cfg: ChannelGroupsConfig = serde_json::from_str(r#"{"enabled":true,"min_members":1}"#).expect("parses");
-        assert!(cfg.prepare().is_err());
+    fn rejects_unknown_and_removed_fields() {
+        assert!(serde_json::from_str::<ChannelGroupsConfig>(r#"{"min_members":2}"#).is_err());
+        assert!(serde_json::from_str::<ChannelGroupsConfig>(r#"{"selection":{}}"#).is_err());
+        assert!(serde_json::from_str::<ChannelGroupsTargetConfig>(r#"{"enabled":true,"min_members":2}"#).is_err());
+        assert!(serde_json::from_str::<ChannelGroupsTargetConfig>(r#"{"enabled":true,"match_normalize":{}}"#).is_err());
     }
 
     #[test]
-    fn epg_channel_id_match_by_parses() {
-        let cfg: ChannelGroupsConfig =
-            serde_json::from_str(r#"{"enabled":true,"match_by":"epg_channel_id","policy_default":"priority"}"#)
-                .expect("parses");
-        assert_eq!(cfg.match_by, ChannelMatchBy::EpgChannelId);
-        assert_eq!(cfg.policy_default, ChannelGroupPolicy::Priority);
+    fn cooldown_max_is_raised_to_cooldown() {
+        let mut cfg: ChannelGroupsConfig =
+            serde_json::from_str(r#"{"circuit":{"cooldown_secs":120,"cooldown_max_secs":60}}"#).expect("parses");
+        cfg.prepare().expect("valid");
+        assert_eq!(cfg.circuit.cooldown_max_secs, 120);
+    }
+
+    #[test]
+    fn target_overrides_replace_only_set_fields() {
+        let global = ChannelGroupsConfig {
+            match_by: ChannelMatchBy::Name,
+            name_strip_quality: true,
+            failover: ChannelGroupFailoverConfig { no_data_timeout_secs: 12, ..ChannelGroupFailoverConfig::default() },
+            ..ChannelGroupsConfig::default()
+        };
+        let unset = ChannelGroupsTargetConfig { enabled: true, ..ChannelGroupsTargetConfig::default() };
+        assert_eq!(global.for_target(&unset), global);
+
+        let target: ChannelGroupsTargetConfig = serde_json::from_str(
+            r#"{"enabled":true,"match_by":"epg_channel_id","name_strip_quality":false,"policy":"priority","allow_provider_grace":false,"failover":false}"#,
+        )
+        .expect("parses");
+        let effective = global.for_target(&target);
+        assert_eq!(effective.match_by, ChannelMatchBy::EpgChannelId);
+        assert!(!effective.name_strip_quality);
+        assert_eq!(effective.policy, ChannelGroupPolicy::Priority);
+        assert!(!effective.allow_provider_grace);
+        assert!(!effective.failover.enabled);
+        assert_eq!(effective.failover.no_data_timeout_secs, 12);
+        assert_eq!(effective.match_as_ascii, global.match_as_ascii);
+    }
+
+    #[test]
+    fn playback_applies_target_failover_and_grace() {
+        let global = ChannelGroupsConfig::default();
+        let target = ChannelGroupsTargetConfig {
+            enabled: true,
+            allow_provider_grace: Some(false),
+            failover: Some(false),
+            ..ChannelGroupsTargetConfig::default()
+        };
+        let playback = global.playback(Some(&target));
+        assert!(!playback.allow_provider_grace);
+        assert!(!playback.failover.enabled);
+        assert_eq!(playback.start, global.start);
+        let defaults = global.playback(None);
+        assert!(defaults.allow_provider_grace);
+        assert!(defaults.failover.enabled);
+    }
+
+    #[test]
+    fn target_serializes_only_overrides() {
+        let target = ChannelGroupsTargetConfig { enabled: true, failover: Some(false), ..Default::default() };
+        assert_eq!(serde_json::to_string(&target).expect("serializes"), r#"{"enabled":true,"failover":false}"#);
     }
 }

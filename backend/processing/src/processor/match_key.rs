@@ -159,12 +159,14 @@ mod tests {
     }
 
     fn normalize(strip: Option<&str>, ignore: &[&str], aliases: &[(&str, &str)]) -> ChannelMatchNormalize {
-        let mut cfg: ChannelGroupsConfig = serde_json::from_str(r#"{"enabled":true}"#).expect("parses");
-        cfg.match_normalize = ChannelMatchNormalize {
-            strip_regex: strip.map(str::to_string),
-            ignore_tokens: ignore.iter().map(|t| (*t).to_string()).collect(),
-            aliases: aliases.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
-            ..Default::default()
+        let mut cfg = ChannelGroupsConfig {
+            match_normalize: ChannelMatchNormalize {
+                strip_regex: strip.map(str::to_string),
+                ignore_tokens: ignore.iter().map(|t| (*t).to_string()).collect(),
+                aliases: aliases.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+                ..Default::default()
+            },
+            ..ChannelGroupsConfig::default()
         };
         cfg.prepare().expect("valid");
         cfg.match_normalize

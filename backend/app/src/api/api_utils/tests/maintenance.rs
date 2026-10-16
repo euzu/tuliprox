@@ -102,7 +102,7 @@ fn gate_runs_before_shared_stream_join() {
 #[test]
 fn redirect_defers_maintenance_inputs_to_the_gated_proxy_path() {
     // Redirect mode would send the client straight to the provider; for an input in
-    // maintenance it must fall through to the proxied path, where gate 1 answers.
+    // maintenance it must fall through to the proxied path, where the maintenance check answers.
     let body = function_body(include_str!("../strategy.rs"), "pub async fn redirect_response<");
     let gate = body.find("if blocks_new_playback(").expect("gate present");
     let redirect = body.find("Some(redirect(").expect("redirect response present");

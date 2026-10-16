@@ -258,8 +258,9 @@ mod filter;
 mod options;
 mod output;
 pub use channel_groups::{
-    ChannelGroupPolicy, ChannelGroupSelectionConfig, ChannelGroupsConfig, ChannelMatchBy, ChannelMatchNormalize,
-    EpgConflictMode, RuntimeAudioLanguage,
+    ChannelGroupCircuitConfig, ChannelGroupFailoverConfig, ChannelGroupPlayback, ChannelGroupPolicy,
+    ChannelGroupStartConfig, ChannelGroupsConfig, ChannelGroupsTargetConfig, ChannelMatchBy, ChannelMatchNormalize,
+    EpgConflictMode, RuntimeAudioLanguage, MIN_GROUP_MEMBERS,
 };
 pub use filter::ConfigTargetFilterDto;
 pub use options::{

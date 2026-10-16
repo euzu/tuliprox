@@ -112,7 +112,8 @@ struct BudgetedChunk {
 pub struct SharedStreamState {
     headers: Vec<(String, String)>,
     buf_size: usize,
-    provider_guard: Option<ProviderHandle>,
+    /// The provider allocation feeding this stream; a group stream replaces it on a member switch.
+    provider_guard: std::sync::Mutex<Option<ProviderHandle>>,
     low_priority_preempted: Option<tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer>,
     preempted_token: CancellationToken,
     subscribers: RwLock<HashMap<SubscriberId, SharedSubscriber>>,

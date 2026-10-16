@@ -162,6 +162,11 @@ $form-width: 520px;
       display: flex;
       min-width: 0;
     }
+
+    &__hint {
+      color: var(--modest-text-color);
+      line-height: 1.35;
+    }
   }
 
   &__sidebar {

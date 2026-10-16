@@ -11,7 +11,7 @@ use tuliprox_core::{
     utils::FileLockManager,
 };
 
-fn addr(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }
+pub(super) fn addr(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }
 
 fn app_config_with_sources_and_grace(sources: SourcesConfig, grace_period_millis: u64) -> AppConfig {
     let mut config = Config::default();
@@ -47,7 +47,7 @@ fn app_config_with_sources_and_grace(sources: SourcesConfig, grace_period_millis
     }
 }
 
-fn manager_with_inputs(inputs: &[(&str, u16)]) -> ActiveProviderManager {
+pub(super) fn manager_with_inputs(inputs: &[(&str, u16)]) -> ActiveProviderManager {
     let sources = SourcesConfig {
         inputs: inputs
             .iter()

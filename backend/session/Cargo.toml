@@ -8,6 +8,10 @@ description = "Provider allocation and streaming-session runtime: admission, con
 [lints]
 workspace = true
 
+[features]
+# Exposes test-only helpers to dependent crates' tests.
+test-support = []
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }

@@ -311,8 +311,22 @@ pub struct ChannelGroupTargetData {
     pub aliases: HashMap<VirtualId, VirtualId>,
 }
 
+impl ChannelGroupTargetData {
+    /// `(input_name, input_stream_id)` of every member of every group.
+    pub fn member_keys(&self) -> impl Iterator<Item = (Arc<str>, Arc<str>)> + '_ {
+        self.groups.values().flat_map(|group| {
+            group.members.iter().map(|member| (Arc::clone(&member.input_name), Arc::clone(&member.input_stream_id)))
+        })
+    }
+}
+
 pub struct ChannelGroupCache {
     targets: tokio::sync::RwLock<HashMap<String, Arc<ChannelGroupTargetData>>>,
+    /// Per target: serializes store reads so concurrent requests after a generation bump load
+    /// once, without making other targets wait.
+    load_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    loads: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for ChannelGroupCache {
@@ -321,7 +335,29 @@ impl Default for ChannelGroupCache {
 
 impl ChannelGroupCache {
     #[must_use]
-    pub fn new() -> Self { Self { targets: tokio::sync::RwLock::new(HashMap::new()) } }
+    pub fn new() -> Self {
+        Self {
+            targets: tokio::sync::RwLock::new(HashMap::new()),
+            load_locks: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            loads: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn load_lock(&self, target_name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.load_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(target_name.to_string()).or_default())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn hold_load_lock_for_test(&self, target_name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.load_lock(target_name).lock_owned().await
+    }
+
+    async fn cached(&self, target_name: &str, generation: u64) -> Option<Arc<ChannelGroupTargetData>> {
+        let guard = self.targets.read().await;
+        guard.get(target_name).filter(|cached| cached.generation == generation).map(Arc::clone)
+    }
 
     pub async fn get_or_load(
         &self,
@@ -329,52 +365,45 @@ impl ChannelGroupCache {
         playlists: &crate::PlaylistStorageState,
         target: &ConfigTarget,
     ) -> Arc<ChannelGroupTargetData> {
-        let current_generation = playlists.channel_group_generation();
-        {
-            let guard = self.targets.read().await;
-            if let Some(cached) = guard.get(&target.name) {
-                if cached.generation == current_generation {
-                    return Arc::clone(cached);
-                }
-            }
+        let current_generation = playlists.channel_group_generation(&target.name);
+        if let Some(cached) = self.cached(&target.name, current_generation).await {
+            return cached;
         }
 
+        let _load_guard = self.load_lock(&target.name).lock_owned().await;
+        if let Some(cached) = self.cached(&target.name, current_generation).await {
+            return cached;
+        }
+
+        let empty = || ChannelGroupTargetData { generation: current_generation, ..ChannelGroupTargetData::default() };
         let config = app_config.config.load();
         let Some(target_path) = crate::get_target_storage_path(&config, &target.name) else {
-            return Arc::new(ChannelGroupTargetData {
-                generation: current_generation,
-                groups: HashMap::new(),
-                members: HashMap::new(),
-                aliases: HashMap::new(),
-            });
+            return Arc::new(empty());
         };
 
+        #[cfg(any(test, feature = "test-support"))]
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file_lock = app_config.file_locks.read_lock(&target_path).await;
         let loaded = tokio::task::spawn_blocking(move || {
             let _guard = file_lock;
             ChannelGroupStore::load_target_data(&target_path, current_generation)
         })
         .await
-        .unwrap_or_else(|_| {
-            Ok(ChannelGroupTargetData {
-                generation: current_generation,
-                groups: HashMap::new(),
-                members: HashMap::new(),
-                aliases: HashMap::new(),
-            })
-        })
-        .unwrap_or_else(|_| ChannelGroupTargetData {
-            generation: current_generation,
-            groups: HashMap::new(),
-            members: HashMap::new(),
-            aliases: HashMap::new(),
-        });
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_else(empty);
 
         let arc_data = Arc::new(loaded);
         let mut guard = self.targets.write().await;
         guard.insert(target.name.clone(), Arc::clone(&arc_data));
         arc_data
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn loaded_target_count(&self) -> usize { self.targets.read().await.len() }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn load_count(&self) -> usize { self.loads.load(std::sync::atomic::Ordering::Relaxed) }
 }
 
 #[derive(Debug)]

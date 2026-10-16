@@ -410,7 +410,9 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         pli.url.clone()
     };
 
-    if !is_running_playback(user_session.as_ref()) && blocks_new_playback(app_state, &input, &user, false) {
+    // A group checks maintenance per member during selection; its representative input says nothing.
+    if !is_group && !is_running_playback(user_session.as_ref()) && blocks_new_playback(app_state, &input, &user, false)
+    {
         return maintenance_rejection_response(
             app_state,
             fingerprint,

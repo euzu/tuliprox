@@ -30,7 +30,8 @@ use crate::{
         serve::serve,
         sys_usage::exec_system_usage,
         tasks::{
-            exec_config_watch, exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync, spawn_ssdp_discover_task,
+            exec_channel_group_member_keys, exec_config_watch, exec_interner_prune, exec_scheduler,
+            exec_xtream_expiry_sync, spawn_ssdp_discover_task,
         },
     },
     model::{
@@ -411,7 +412,9 @@ async fn create_shared_data(
     })?;
 
     let maintenance = load_maintenance(app_config).await;
-    let member_health = Arc::new(tuliprox_session::MemberHealthIndex::default());
+    let member_health = Arc::new(tuliprox_session::MemberHealthIndex::new(
+        tuliprox_session::channel_group::CircuitPolicy::from(&config.channel_groups.circuit),
+    ));
     event_manager.bind_member_health(&member_health);
     member_health.set_event_sink(Arc::clone(&event_manager) as Arc<dyn shared::model::EventSink>);
     populate_initial_member_health(std::path::Path::new(&config.storage_dir), &member_health);
@@ -497,6 +500,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.qos_aggregation.cancel();
     cancel_tokens.recordings.cancel();
     cancel_tokens.hls_cache.cancel();
+    cancel_tokens.channel_groups.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
@@ -752,6 +756,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         &cancel_token_qos_aggregation,
         Some(Arc::new(AppQosAggregationListener { member_health: Arc::clone(&app_state.member_health) })),
     );
+    exec_channel_group_member_keys(&app_state, &app_state.cancel_tokens.load().channel_groups);
     exec_hls_lifecycle(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
     exec_hls_cache_gc(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
 
@@ -1194,6 +1199,7 @@ mod tests {
                 qos_aggregation: CancellationToken::new(),
                 recordings: CancellationToken::new(),
                 hls_cache: CancellationToken::new(),
+                channel_groups: tokio_util::sync::CancellationToken::new(),
             };
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
             Arc::new(AppState {

@@ -40,6 +40,7 @@ hdhomerun:
 library:
 reverse_proxy:
 metadata_update:
+channel_groups:
 ```
 
 ### Global System & Storage Settings (Flat Keys)
@@ -87,20 +88,21 @@ instead of your mount point.
 
 ### Subsections (Object Keys)
 
-| Block             | Description                                                                       | Link                                            |
-|:------------------|:----------------------------------------------------------------------------------|:------------------------------------------------|
-| `api`             | Internal web server binding settings.                                             | [See section](#1-api-server-api)                |
-| `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
-| `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
-| `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (Telegram, Discord, etc.).                          | [See section](#5-messaging-messaging)           |
-| `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
-| `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
-| `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
-| `hdhomerun`       | Virtual DVB-C/T network tuner emulation.                                          | [See section](#9-hdhomerun-emulation-hdhomerun) |
-| `library`         | Local Media Library integration.                                                  | [See Local Library](./local-library.md)         |
-| `reverse_proxy`   | Streaming buffers, rate limits, caching.                                          | [See Reverse Proxy](./reverse-proxy.md)         |
-| `metadata_update` | TMDB matching, FFprobe processing, Job Queues.                                    | [See Metadata Update](./metadata-update.md)     |
+| Block             | Description                                                                       | Link                                               |
+|:------------------|:----------------------------------------------------------------------------------|:---------------------------------------------------|
+| `api`             | Internal web server binding settings.                                             | [See section](#1-api-server-api)                   |
+| `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui)    |
+| `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                      |
+| `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)              |
+| `messaging`       | Webhooks & Push-Notifications (Telegram, Discord, etc.).                          | [See section](#5-messaging-messaging)              |
+| `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)          |
+| `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)             |
+| `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)                 |
+| `hdhomerun`       | Virtual DVB-C/T network tuner emulation.                                          | [See section](#9-hdhomerun-emulation-hdhomerun)    |
+| `library`         | Local Media Library integration.                                                  | [See Local Library](./local-library.md)            |
+| `reverse_proxy`   | Streaming buffers, rate limits, caching.                                          | [See Reverse Proxy](./reverse-proxy.md)            |
+| `metadata_update` | TMDB matching, FFprobe processing, Job Queues.                                    | [See Metadata Update](./metadata-update.md)        |
+| `channel_groups`  | Matching, source selection and failover of channel groups.                        | [See Channel Groups](./channel-groups-settings.md) |
 
 *(Note: The advanced topics **Local Library**, **Reverse Proxy** and **Metadata Update** are extremely extensive and
 have their own

@@ -873,6 +873,45 @@
     "MAINTENANCE": {
       "INPUT": "Input to take out of service. While it is in maintenance, new streams get the maintenance video and Tuliprox does not contact its provider; running streams and recordings continue.",
       "REASON": "Optional remark shown in the maintenance list, for example why the provider is down. At most 500 characters."
+    },
+    "CHANNEL_GROUPS_TARGET_CONFIG": {
+      "ENABLED": "Joins equal live channels of this target into one channel. Playback starts on the best reachable source and switches to another one when it fails."
+    },
+    "CHANNEL_GROUPS_CONFIG": {
+      "MATCH_BY": "Which channel field decides that two channels are the same: caption, name, title or EPG channel id. Quality words like HD or FHD are ignored.",
+      "MATCH_AS_ASCII": "Compares names after turning accents and special letters into plain letters, so \"Télé\" and \"Tele\" match.",
+      "EPG_CONFLICT": "split: channels with the same name but different EPG ids stay separate groups (different programmes). ignore: they are joined anyway.",
+      "NAME_STRIP_QUALITY": "Removes quality words such as HD, FHD or 4K from the name of the joined channel.",
+      "POLICY": "auto: the source with the best history and picture quality plays first. priority: sources play in the order of the list.",
+      "ALLOW_PROVIDER_GRACE": "When a provider has no free connection, a start may use its grace connection. A switch while watching never does."
+    },
+    "CHANNEL_MATCH_NORMALIZE": {
+      "STRIP_REGEX": "Regular expression removed from names before comparing, for example \"^[A-Z]{2}:\\s*\" for country prefixes like \"DE: \".",
+      "IGNORE_TOKENS": "Words ignored when comparing names, for example \"backup\" or \"hevc\".",
+      "ALIASES": "Names that mean the same channel: the left name is compared as the right one, for example \"das erste\" as \"ard\"."
+    },
+    "CHANNEL_GROUP_START_CONFIG": {
+      "TIMEOUT_SECS": "Longest time a start may try sources before the client gets the unavailable video. 0 means no limit.",
+      "MAX_ATTEMPTS": "How many sources a start tries at most."
+    },
+    "CHANNEL_GROUP_FAILOVER_CONFIG": {
+      "ENABLED": "When the playing source fails, Tuliprox opens another source of the group and continues the same stream, the player keeps its connection. Only for MPEG-TS; HLS changes the source only when a new stream starts.",
+      "NO_DATA_TIMEOUT_SECS": "A source that sends no picture or sound for this long is replaced. Keep it above the keyframe interval of your channels (a few seconds). 0 turns the check off.",
+      "SLOW_SOURCE_PCT": "A source must deliver at least this share of real-time speed. 90 means: in 10 seconds it must deliver 9 seconds of video, otherwise the player buffer runs empty and the picture stutters. 0 turns the check off.",
+      "SLOW_SOURCE_SECS": "How long a source may stay below the minimum speed before it is replaced.",
+      "MAX_OUTAGE_SECS": "Longest time without picture while looking for a replacement. Then the stream ends.",
+      "SAME_SOURCE_RETRIES": "A source that played well before is tried again this many times before another source is used.",
+      "STABLE_AFTER_SECS": "After this much smooth playback a source counts as stable and a failure starts a new attempt.",
+      "MAX_SWITCHES": "Most source switches within the switch window. Then the stream ends instead of jumping between broken sources. 0 turns the limit off.",
+      "MAX_SWITCHES_WINDOW_SECS": "Time window for the maximum number of switches.",
+      "AUDIO_LANGUAGE": "prefer: a switch prefers a source with the same audio language. require: only sources with the same audio language are used."
+    },
+    "CHANNEL_GROUP_CIRCUIT_CONFIG": {
+      "SOURCE_FAILURES": "Failures in a row after which a source is paused and other sources are tried first.",
+      "COOLDOWN_SECS": "First pause of a failing source. It doubles while the source keeps failing.",
+      "COOLDOWN_MAX_SECS": "Longest pause of a failing source.",
+      "INPUT_FAILURES": "Failures of different channels of one input within the window after which the whole input is tried last (provider down).",
+      "INPUT_WINDOW_SECS": "Time window for the input failures."
     }
   },
   "HINT": {
@@ -907,7 +946,9 @@
     "PROCESS_PARALLEL": "Process Parallel: If you have multiple providers, you can enable it. Accessing your provider in parallel can cause a ban.",
     "RESTART_TO_APPLY_CHANGES": "You need to restart to apply changes.",
     "SCHEDULE_EXAMPLE": "Schedule example",
-    "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web"
+    "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web",
+    "CHANNEL_GROUPS_CONFIG": "Channel groups join the same live channel from several inputs into one channel. These settings apply to every target that turns channel groups on; a target can override some of them on its own Channel groups page.",
+    "CHANNEL_GROUPS_TARGET": "Turns channel groups on for this target. Settings left on \"Global\" use Settings > Channel groups."
   },
   "LABEL": {
     "HLS_STARTUP_LIMITS": "Fast start limits",
@@ -1934,7 +1975,42 @@
     "RECORDING_RULE_DELETE_RETAIN": "Delete rule, keep upcoming recordings",
     "RECORDING_RULE_DELETE_CANCEL": "Delete rule and cancel upcoming recordings",
     "RECORDING_RULE_ACTION_ENABLE": "Enable",
-    "RECORDING_RULE_ACTION_DISABLE": "Disable"
+    "RECORDING_RULE_ACTION_DISABLE": "Disable",
+    "CHANNEL_GROUPS": "Channel groups",
+    "CHANNEL_GROUPS_MATCH_BY": "Match by",
+    "CHANNEL_GROUPS_ALLOW_PROVIDER_GRACE": "Allow provider grace",
+    "CHANNEL_GROUPS_CONFIG": "Channel groups",
+    "CHANNEL_GROUPS_GLOBAL": "Global",
+    "CHANNEL_GROUPS_MATCH_AS_ASCII": "Compare as ASCII",
+    "CHANNEL_GROUPS_STRIP_REGEX": "Remove from name (regex)",
+    "CHANNEL_GROUPS_IGNORE_TOKENS": "Ignored words",
+    "CHANNEL_GROUPS_ALIASES": "Aliases",
+    "CHANNEL_GROUPS_EPG_CONFLICT": "Different EPG ids",
+    "CHANNEL_GROUPS_NAME_STRIP_QUALITY": "Remove quality words from name",
+    "CHANNEL_GROUPS_POLICY": "Source order",
+    "CHANNEL_GROUPS_FAILOVER": "Switch source while watching",
+    "CHANNEL_GROUPS_GROUPING": "Grouping",
+    "CHANNEL_GROUPS_START": "Start",
+    "CHANNEL_GROUPS_CIRCUIT": "Pause failing sources",
+    "CHANNEL_GROUPS_START_TIMEOUT_SECS": "Start timeout (s)",
+    "CHANNEL_GROUPS_START_MAX_ATTEMPTS": "Sources tried at start",
+    "CHANNEL_GROUPS_NO_DATA_TIMEOUT_SECS": "No data timeout (s)",
+    "CHANNEL_GROUPS_SLOW_SOURCE_PCT": "Minimum speed (%)",
+    "CHANNEL_GROUPS_SLOW_SOURCE_SECS": "Too slow for (s)",
+    "CHANNEL_GROUPS_MAX_OUTAGE_SECS": "Max. outage (s)",
+    "CHANNEL_GROUPS_SAME_SOURCE_RETRIES": "Retries of the same source",
+    "CHANNEL_GROUPS_STABLE_AFTER_SECS": "Stable after (s)",
+    "CHANNEL_GROUPS_MAX_SWITCHES": "Max. switches",
+    "CHANNEL_GROUPS_MAX_SWITCHES_WINDOW_SECS": "Switch window (s)",
+    "CHANNEL_GROUPS_AUDIO_LANGUAGE": "Audio language",
+    "CHANNEL_GROUPS_SOURCE_FAILURES": "Failures until pause",
+    "CHANNEL_GROUPS_COOLDOWN_SECS": "Pause (s)",
+    "CHANNEL_GROUPS_COOLDOWN_MAX_SECS": "Max. pause (s)",
+    "CHANNEL_GROUPS_INPUT_FAILURES": "Input failures until pause",
+    "CHANNEL_GROUPS_INPUT_WINDOW_SECS": "Input failure window (s)",
+    "CHANNEL_GROUPS_IGNORE_TOKEN": "Example: backup",
+    "CHANNEL_GROUPS_ALIAS_NAME": "Name",
+    "CHANNEL_GROUPS_ALIAS_TARGET": "Compared as"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

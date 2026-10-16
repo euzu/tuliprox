@@ -873,6 +873,45 @@
     "MAINTENANCE": {
       "INPUT": "Entrada que se retira del servicio. Mientras está en mantenimiento, las nuevas reproducciones reciben el vídeo de mantenimiento y Tuliprox no contacta con su proveedor; las reproducciones y grabaciones en curso continúan.",
       "REASON": "Observación opcional que se muestra en la lista de mantenimiento, por ejemplo por qué el proveedor no está disponible. Máximo 500 caracteres."
+    },
+    "CHANNEL_GROUPS_TARGET_CONFIG": {
+      "ENABLED": "Une los canales en vivo iguales de este target en un solo canal. La reproducción empieza con la mejor fuente disponible y cambia a otra cuando falla."
+    },
+    "CHANNEL_GROUPS_CONFIG": {
+      "MATCH_BY": "Qué campo decide que dos canales son el mismo: caption, name, title o ID de canal EPG. Palabras de calidad como HD o FHD se ignoran.",
+      "MATCH_AS_ASCII": "Compara los nombres tras convertir acentos y letras especiales en letras simples, así \"Télé\" y \"Tele\" coinciden.",
+      "EPG_CONFLICT": "split: canales con el mismo nombre pero IDs de EPG distintos quedan en grupos separados (programas distintos). ignore: se unen igualmente.",
+      "NAME_STRIP_QUALITY": "Quita palabras de calidad como HD, FHD o 4K del nombre del canal unido.",
+      "POLICY": "auto: primero la fuente con mejor historial y calidad de imagen. priority: las fuentes se usan en el orden de la lista.",
+      "ALLOW_PROVIDER_GRACE": "Si un proveedor no tiene conexión libre, un inicio puede usar su conexión de gracia. Un cambio durante la reproducción nunca lo hace."
+    },
+    "CHANNEL_MATCH_NORMALIZE": {
+      "STRIP_REGEX": "Expresión regular que se quita de los nombres antes de comparar, por ejemplo \"^[A-Z]{2}:\\s*\" para prefijos de país como \"DE: \".",
+      "IGNORE_TOKENS": "Palabras que se ignoran al comparar nombres, por ejemplo \"backup\" o \"hevc\".",
+      "ALIASES": "Nombres del mismo canal: el nombre de la izquierda se compara como el de la derecha, por ejemplo \"das erste\" como \"ard\"."
+    },
+    "CHANNEL_GROUP_START_CONFIG": {
+      "TIMEOUT_SECS": "Tiempo máximo que un inicio prueba fuentes antes de mostrar el vídeo de no disponible. 0 significa sin límite.",
+      "MAX_ATTEMPTS": "Cuántas fuentes prueba un inicio como máximo."
+    },
+    "CHANNEL_GROUP_FAILOVER_CONFIG": {
+      "ENABLED": "Si la fuente falla, Tuliprox abre otra fuente del grupo y sigue el mismo stream; el reproductor mantiene su conexión. Solo para MPEG-TS; HLS cambia la fuente solo al iniciar un nuevo stream.",
+      "NO_DATA_TIMEOUT_SECS": "Una fuente que no envía imagen ni sonido durante este tiempo se reemplaza. Mantenlo por encima del intervalo de keyframes (unos segundos). 0 desactiva la comprobación.",
+      "SLOW_SOURCE_PCT": "Una fuente debe entregar al menos esta parte de la velocidad real. 90 significa: en 10 segundos debe entregar 9 segundos de vídeo; si no, el búfer del reproductor se vacía y la imagen se corta. 0 desactiva la comprobación.",
+      "SLOW_SOURCE_SECS": "Cuánto tiempo puede estar una fuente por debajo de la velocidad mínima antes de reemplazarla.",
+      "MAX_OUTAGE_SECS": "Tiempo máximo sin imagen mientras se busca un reemplazo. Después el stream termina.",
+      "SAME_SOURCE_RETRIES": "Una fuente que funcionaba bien se reintenta estas veces antes de usar otra.",
+      "STABLE_AFTER_SECS": "Tras esta reproducción sin problemas una fuente cuenta como estable y un fallo empieza un nuevo intento.",
+      "MAX_SWITCHES": "Máximo de cambios de fuente dentro de la ventana. Después el stream termina en vez de saltar entre fuentes rotas. 0 desactiva el límite.",
+      "MAX_SWITCHES_WINDOW_SECS": "Ventana de tiempo para el máximo de cambios.",
+      "AUDIO_LANGUAGE": "prefer: un cambio prefiere una fuente con el mismo idioma de audio. require: solo se usan fuentes con el mismo idioma de audio."
+    },
+    "CHANNEL_GROUP_CIRCUIT_CONFIG": {
+      "SOURCE_FAILURES": "Fallos seguidos tras los que una fuente se pausa y se prueban antes otras fuentes.",
+      "COOLDOWN_SECS": "Primera pausa de una fuente con fallos. Se duplica mientras siga fallando.",
+      "COOLDOWN_MAX_SECS": "Pausa más larga de una fuente con fallos.",
+      "INPUT_FAILURES": "Fallos de distintos canales de una entrada dentro de la ventana tras los que toda la entrada se prueba al final (proveedor caído).",
+      "INPUT_WINDOW_SECS": "Ventana de tiempo para los fallos de entrada."
     }
   },
   "HINT": {
@@ -907,7 +946,9 @@
     "PROCESS_PARALLEL": "Proceso Paralelo: si tiene varios proveedores, puede habilitarlo. Acceder a su proveedor en paralelo puede causar un baneo.",
     "RESTART_TO_APPLY_CHANGES": "Debe reiniciar para aplicar los cambios.",
     "SCHEDULE_EXAMPLE": "Ejemplo de programación",
-    "WEB_ROOT": "Web-Root: contiene los archivos de la interfaz web. Normalmente se colocan en el mismo directorio bajo ./web"
+    "WEB_ROOT": "Web-Root: contiene los archivos de la interfaz web. Normalmente se colocan en el mismo directorio bajo ./web",
+    "CHANNEL_GROUPS_CONFIG": "Los grupos de canales unen el mismo canal en vivo de varias entradas en un solo canal. Estos ajustes valen para todos los targets que activan los grupos de canales; un target puede sobrescribir algunos en su propia página de grupos de canales.",
+    "CHANNEL_GROUPS_TARGET": "Activa los grupos de canales para este target. Los ajustes en \"Global\" usan Ajustes > Grupos de canales."
   },
   "LABEL": {
     "HLS_STARTUP_LIMITS": "Límites de inicio rápido",
@@ -1934,7 +1975,42 @@
     "RECORDING_RULE_DELETE_RETAIN": "Eliminar regla, conservar próximas grabaciones",
     "RECORDING_RULE_DELETE_CANCEL": "Eliminar regla y cancelar próximas grabaciones",
     "RECORDING_RULE_ACTION_ENABLE": "Habilitar",
-    "RECORDING_RULE_ACTION_DISABLE": "Deshabilitar"
+    "RECORDING_RULE_ACTION_DISABLE": "Deshabilitar",
+    "CHANNEL_GROUPS": "Grupos de canales",
+    "CHANNEL_GROUPS_MATCH_BY": "Comparar por",
+    "CHANNEL_GROUPS_ALLOW_PROVIDER_GRACE": "Permitir gracia del proveedor",
+    "CHANNEL_GROUPS_CONFIG": "Grupos de canales",
+    "CHANNEL_GROUPS_GLOBAL": "Global",
+    "CHANNEL_GROUPS_MATCH_AS_ASCII": "Comparar como ASCII",
+    "CHANNEL_GROUPS_STRIP_REGEX": "Quitar del nombre (regex)",
+    "CHANNEL_GROUPS_IGNORE_TOKENS": "Palabras ignoradas",
+    "CHANNEL_GROUPS_ALIASES": "Alias",
+    "CHANNEL_GROUPS_EPG_CONFLICT": "IDs de EPG distintos",
+    "CHANNEL_GROUPS_NAME_STRIP_QUALITY": "Quitar palabras de calidad del nombre",
+    "CHANNEL_GROUPS_POLICY": "Orden de fuentes",
+    "CHANNEL_GROUPS_FAILOVER": "Cambiar de fuente durante la reproducción",
+    "CHANNEL_GROUPS_GROUPING": "Agrupación",
+    "CHANNEL_GROUPS_START": "Inicio",
+    "CHANNEL_GROUPS_CIRCUIT": "Pausar fuentes con fallos",
+    "CHANNEL_GROUPS_START_TIMEOUT_SECS": "Tiempo de inicio (s)",
+    "CHANNEL_GROUPS_START_MAX_ATTEMPTS": "Fuentes probadas al inicio",
+    "CHANNEL_GROUPS_NO_DATA_TIMEOUT_SECS": "Tiempo sin datos (s)",
+    "CHANNEL_GROUPS_SLOW_SOURCE_PCT": "Velocidad mínima (%)",
+    "CHANNEL_GROUPS_SLOW_SOURCE_SECS": "Demasiado lenta durante (s)",
+    "CHANNEL_GROUPS_MAX_OUTAGE_SECS": "Corte máximo (s)",
+    "CHANNEL_GROUPS_SAME_SOURCE_RETRIES": "Reintentos de la misma fuente",
+    "CHANNEL_GROUPS_STABLE_AFTER_SECS": "Estable tras (s)",
+    "CHANNEL_GROUPS_MAX_SWITCHES": "Máx. cambios",
+    "CHANNEL_GROUPS_MAX_SWITCHES_WINDOW_SECS": "Ventana de cambios (s)",
+    "CHANNEL_GROUPS_AUDIO_LANGUAGE": "Idioma de audio",
+    "CHANNEL_GROUPS_SOURCE_FAILURES": "Fallos hasta la pausa",
+    "CHANNEL_GROUPS_COOLDOWN_SECS": "Pausa (s)",
+    "CHANNEL_GROUPS_COOLDOWN_MAX_SECS": "Pausa máx. (s)",
+    "CHANNEL_GROUPS_INPUT_FAILURES": "Fallos de entrada hasta la pausa",
+    "CHANNEL_GROUPS_INPUT_WINDOW_SECS": "Ventana de fallos de entrada (s)",
+    "CHANNEL_GROUPS_IGNORE_TOKEN": "Ejemplo: backup",
+    "CHANNEL_GROUPS_ALIAS_NAME": "Nombre",
+    "CHANNEL_GROUPS_ALIAS_TARGET": "Se compara como"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Portapapeles no compatible.\nSu navegador o el contexto actual no permite el acceso al portapapeles.\nUtilice HTTPS o localhost.",

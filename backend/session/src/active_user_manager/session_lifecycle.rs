@@ -404,6 +404,29 @@ impl ActiveUserManager {
         }
     }
 
+    /// After a shared channel group stream switched member: every viewer's stream and session
+    /// of the group on `target_id` shows `provider`.
+    pub async fn update_shared_group_provider(&self, target_id: u16, group_vid: u32, provider: Arc<str>) {
+        let now = current_time_secs();
+        let mut user_connections = self.write_connections().await;
+        for connection_data in user_connections.by_key.values_mut() {
+            let mut tokens = Vec::new();
+            for stream in &mut connection_data.streams {
+                let channel = &stream.channel;
+                if channel.shared && channel.target_id == target_id && channel.client_virtual_id() == group_vid {
+                    stream.provider = Arc::clone(&provider);
+                    stream.ts = now;
+                    tokens.extend(stream.session_token.clone());
+                }
+            }
+            for session in connection_data.sessions.iter_mut().filter(|session| tokens.contains(&session.token)) {
+                if session.provider != provider {
+                    session.switch_provider(Arc::clone(&provider));
+                }
+            }
+        }
+    }
+
     pub async fn clear_unbound_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
         let now = current_time_secs();
         let mut user_connections = self.write_connections().await;

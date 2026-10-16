@@ -133,6 +133,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         qos_aggregation,
         recordings,
         hls_cache: cancel_tokens.hls_cache.clone(),
+        channel_groups: cancel_tokens.channel_groups.clone(),
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -220,6 +221,8 @@ impl AppState {
         let storage_dir = config.storage_dir.clone();
 
         self.active_users.update_config(&config);
+        self.member_health
+            .set_policy(tuliprox_session::channel_group::CircuitPolicy::from(&config.channel_groups.circuit));
         self.app_config.set_config(config)?;
         reload_logger(config_log_level.as_deref());
         self.active_provider.update_config(&self.app_config);

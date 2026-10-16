@@ -87,3 +87,36 @@ async fn grouping_runs_before_deduplicate_and_dedup_ignores_group_members() {
     assert_eq!(pending.len(), 2);
     assert_eq!(finalized[0].channels.len(), 2);
 }
+
+#[tokio::test]
+async fn grouping_uses_global_config_with_target_overrides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app_config = super::curation_effect_gate::app_config(dir.path());
+    let mut global: shared::model::ChannelGroupsConfig =
+        serde_json::from_str(r#"{"match_normalize":{"ignore_tokens":["backup"]},"name_strip_quality":true}"#)
+            .expect("global config");
+    global.prepare().expect("prepared");
+    app_config.config.store(std::sync::Arc::new(tuliprox_core::model::Config {
+        storage_dir: dir.path().to_string_lossy().into_owned(),
+        channel_groups: global,
+        ..tuliprox_core::model::Config::default()
+    }));
+    let target = target_with_options(r#"{"channel_groups":{"enabled":true,"name_strip_quality":false}}"#);
+    let mut playlist = vec![group("News", vec![live("a", "1", "ZDF HD"), live("b", "2", "ZDF HD backup")])];
+    let mut step = tuliprox_core::utils::StepMeasure::new("test", |_, _| {});
+    let mut errors = Vec::new();
+
+    let pending = crate::processor::playlist::target::process_target_channel_groups(
+        &app_config,
+        &target,
+        &mut playlist,
+        &mut step,
+        &mut errors,
+    )
+    .await;
+
+    assert!(errors.is_empty());
+    assert_eq!(pending.len(), 1, "the global ignore token joins both channels");
+    let names: Vec<&str> = playlist[0].channels.iter().map(|item| item.header.name.as_ref()).collect();
+    assert_eq!(names, ["ZDF HD"], "the target keeps quality words");
+}

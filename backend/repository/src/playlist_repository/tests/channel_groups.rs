@@ -339,3 +339,84 @@ async fn target_without_groups_removes_stale_group_store() {
     .unwrap();
     assert!(!target_path(&app_config, &target).join("channel_groups.db").exists());
 }
+
+fn enable_groups(target: &mut ConfigTarget) {
+    target.options = Some(shared::model::ConfigTargetOptions {
+        channel_groups: Some(shared::model::ChannelGroupsTargetConfig { enabled: true, ..Default::default() }),
+        ..Default::default()
+    });
+}
+
+async fn persist_grouped(app_config: &Arc<AppConfig>, target: &ConfigTarget, state: &Arc<PlaylistStorageState>) {
+    let (mut playlist, mut pending) = grouped_fixture();
+    persist_playlist_views_with_groups(
+        app_config,
+        &mut playlist,
+        None,
+        None,
+        target,
+        Some(state),
+        TargetPlaylistPersistOptions::default(),
+        &mut pending,
+    )
+    .await
+    .expect("persists");
+}
+
+#[tokio::test]
+async fn classify_without_channel_groups_returns_item_without_loading() {
+    let (app_config, target, _dir) = persist_test_env("");
+    let state = PlaylistStorageState::new();
+    let resolved =
+        crate::target_stream_item::classify_virtual_id(&app_config, &state, &target, VirtualId::new(1)).await;
+    assert_eq!(resolved, crate::target_stream_item::ResolvedStreamTarget::Item);
+    assert_eq!(state.channel_groups.loaded_target_count().await, 0);
+}
+
+#[tokio::test]
+async fn bumping_one_target_keeps_other_target_cache() {
+    let (app_config, mut target_a, _dir) = persist_test_env("");
+    enable_groups(&mut target_a);
+    let mut target_b = target_a.clone();
+    target_b.name = "target-groups-other".to_string();
+    let state = Arc::new(PlaylistStorageState::new());
+    let a_before = state.channel_groups.get_or_load(&app_config, &state, &target_a).await;
+    let b_before = state.channel_groups.get_or_load(&app_config, &state, &target_b).await;
+    state.bump_channel_group_generation(&target_a.name);
+    let a_after = state.channel_groups.get_or_load(&app_config, &state, &target_a).await;
+    let b_after = state.channel_groups.get_or_load(&app_config, &state, &target_b).await;
+    assert!(!Arc::ptr_eq(&a_before, &a_after));
+    assert!(Arc::ptr_eq(&b_before, &b_after));
+}
+
+#[tokio::test]
+async fn concurrent_loads_read_store_once() {
+    let (app_config, mut target, _dir) = persist_test_env("");
+    enable_groups(&mut target);
+    let state = Arc::new(PlaylistStorageState::new());
+    persist_grouped(&app_config, &target, &state).await;
+    let loads_before = state.channel_groups.load_count();
+    let (first, second) = tokio::join!(
+        state.channel_groups.get_or_load(&app_config, &state, &target),
+        state.channel_groups.get_or_load(&app_config, &state, &target)
+    );
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(state.channel_groups.load_count() - loads_before, 1);
+    assert_eq!(first.groups.len(), 1);
+}
+
+#[tokio::test]
+async fn loads_of_different_targets_do_not_wait_on_each_other() {
+    let (app_config, mut target_a, _dir) = persist_test_env("");
+    enable_groups(&mut target_a);
+    let mut target_b = target_a.clone();
+    target_b.name = "target-groups-other".to_string();
+    let state = Arc::new(PlaylistStorageState::new());
+    let _loading_a = state.channel_groups.hold_load_lock_for_test(&target_a.name).await;
+    let loaded_b = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        state.channel_groups.get_or_load(&app_config, &state, &target_b),
+    )
+    .await;
+    assert!(loaded_b.is_ok(), "target B loads while target A is loading");
+}

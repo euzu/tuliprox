@@ -4,6 +4,7 @@ use shared::{
     model::{
         ChannelGroupOverridesDto, ChannelGroupPolicy, ChannelGroupsConfig, ChannelMemberRefDto, EpgConflictMode,
         LiveStreamProperties, PlaylistGroup, PlaylistItem, StreamProperties, UUIDType, XtreamCluster,
+        MIN_GROUP_MEMBERS,
     },
     utils::{hash_string, token_quality, Internable},
 };
@@ -117,14 +118,14 @@ fn resolve_manual_groups(
             orphaned.push(mref.clone());
         }
 
-        if matched_positions.len() < usize::from(config.min_members) {
+        if matched_positions.len() < MIN_GROUP_MEMBERS {
             continue;
         }
 
         candidates.push(GroupCandidate {
             key: mg.id.clone(),
             origin: ChannelGroupOrigin::Manual,
-            policy: mg.policy.unwrap_or(config.policy_default),
+            policy: mg.policy.unwrap_or(config.policy),
             positions: matched_positions,
             orphaned,
             epg_split: false,
@@ -406,7 +407,7 @@ fn collect_group_candidates(
             apply_auto_override(&mut bucket, ao, playlist, &member_pos_map, &taken_positions, &excluded_set);
         }
 
-        if bucket.positions.len() < usize::from(config.min_members) {
+        if bucket.positions.len() < MIN_GROUP_MEMBERS {
             continue;
         }
 
@@ -417,7 +418,7 @@ fn collect_group_candidates(
         candidates.push(GroupCandidate {
             key: key.clone(),
             origin,
-            policy: auto_override.and_then(|ao| ao.policy).unwrap_or(config.policy_default),
+            policy: auto_override.and_then(|ao| ao.policy).unwrap_or(config.policy),
             positions: bucket.positions,
             orphaned: Vec::new(),
             epg_split: bucket.epg_split,
@@ -519,7 +520,7 @@ pub(in crate::processor) fn group_playlist(
     target_name: &str,
     playlist: &mut Vec<PlaylistGroup>,
 ) -> Vec<PendingChannelGroup> {
-    if !config.enabled || config.min_members < 2 || playlist.is_empty() {
+    if playlist.is_empty() {
         return Vec::new();
     }
 

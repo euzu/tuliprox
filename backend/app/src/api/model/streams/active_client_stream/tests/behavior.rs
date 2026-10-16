@@ -185,6 +185,8 @@ async fn test_active_client_stream_deferred_provider_open_applies_sleep_timer_ti
         provider_error_class: None,
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
+        group_switcher: None,
+        group_lease_owner: None,
         lease_owner: None,
         media_started: None,
         lease_confirmed: false,
@@ -238,6 +240,7 @@ async fn test_active_client_stream_immediate_provider_stream_emits_meter_batches
         req_headers: &HeaderMap::default(),
         meter_uid: 55,
         meter_stream: true,
+        group_failover: None,
     })
     .await
     .expect("metered test stream admission should succeed");

@@ -234,6 +234,8 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn custom_video_
         provider_error_class: None,
         provider_http_status: None,
         provider_reconnect_count: AtomicU8::new(0),
+        group_switcher: None,
+        group_lease_owner: None,
         lease_owner: None,
         media_started: None,
         lease_confirmed: false,

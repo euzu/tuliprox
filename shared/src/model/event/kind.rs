@@ -65,6 +65,7 @@ pub enum EventKind {
     ChannelGroupMemberSelected,
     ChannelGroupExhausted,
     ChannelGroupCircuitChanged,
+    ChannelGroupMemberSwitched,
 }
 
 impl EventKind {
@@ -72,7 +73,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 47] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -119,6 +120,7 @@ impl EventKind {
         Self::ChannelGroupMemberSelected,
         Self::ChannelGroupExhausted,
         Self::ChannelGroupCircuitChanged,
+        Self::ChannelGroupMemberSwitched,
     ];
 
     /// This kind's bit position.
@@ -186,7 +188,8 @@ impl EventKind {
             | Self::ScheduledTaskFailed
             | Self::ChannelGroupMemberSelected
             | Self::ChannelGroupExhausted
-            | Self::ChannelGroupCircuitChanged => Permission::SystemRead,
+            | Self::ChannelGroupCircuitChanged
+            | Self::ChannelGroupMemberSwitched => Permission::SystemRead,
             Self::MaintenanceChanged => Permission::MaintenanceRead,
         }
     }
@@ -290,6 +293,7 @@ impl EventKind {
             Self::ChannelGroupMemberSelected => "channel_group.member_selected",
             Self::ChannelGroupExhausted => "channel_group.exhausted",
             Self::ChannelGroupCircuitChanged => "channel_group.circuit_changed",
+            Self::ChannelGroupMemberSwitched => "channel_group.member_switched",
         }
     }
 

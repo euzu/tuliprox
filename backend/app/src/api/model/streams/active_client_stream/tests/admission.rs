@@ -423,6 +423,7 @@ async fn test_active_client_stream_deferred_provider_grace_retains_provider_hand
         req_headers: &HeaderMap::default(),
         meter_uid: 0,
         meter_stream: false,
+        group_failover: None,
     })
     .await
     .expect("deferred test stream admission should succeed");
@@ -500,6 +501,7 @@ async fn test_active_client_stream_shared_deferred_provider_grace_retains_provid
         req_headers: &HeaderMap::default(),
         meter_uid: 0,
         meter_stream: false,
+        group_failover: None,
     })
     .await
     .expect("shared deferred test stream admission should succeed");

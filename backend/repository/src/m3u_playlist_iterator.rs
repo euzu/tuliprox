@@ -1,6 +1,6 @@
 use crate::{
-    ensure_target_storage_path, get_file_path_for_db_index, m3u_get_file_path_for_db, open_playlist_reader,
-    storage_const, user_get_bouquet_filter, LockedReceiverStream,
+    ensure_target_storage_path, get_file_path_for_db_index, m3u_get_file_path_for_db, m3u_get_item_for_stream_id,
+    open_playlist_reader, storage_const, user_get_bouquet_filter, LockedReceiverStream, PlaylistStorageState,
 };
 use futures::{Stream, StreamExt};
 use log::error;
@@ -8,14 +8,14 @@ use shared::{
     create_bitset,
     error::TuliproxError,
     model::{
-        ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, ResourceOutputPolicy, StreamProperties,
-        TargetType, XtreamCluster,
+        ClusterFlags, ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, ResourceOutputPolicy,
+        StreamProperties, TargetType, XtreamCluster,
     },
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -283,25 +283,31 @@ async fn rewrite_player_resources_for_output(item: &mut M3uPlaylistItem, ctx: &U
     }
 }
 
-#[allow(clippy::too_many_lines)]
-impl M3uPlaylistIterator {
-    pub async fn new(
-        cfg: &AppConfig,
-        target: &ConfigTarget,
-        user: &ProxyUserCredentials,
-    ) -> Result<Self, TuliproxError> {
-        // TODO use playlist memory cache, but be aware of sorting !
+/// Everything the M3U output pipeline needs for one item of one user.
+///
+/// The playlist iterators and the single-item lookup below have to answer with the same item for
+/// the same user, so the per-item checks and the URL rewrite live here and both use them.
+struct M3uItemPipeline {
+    filter: Option<HashSet<String>>,
+    user_filter: Option<Arc<shared::foundation::Filter>>,
+    output_clusters: ClusterFlags,
+    base_url: String,
+    username: String,
+    password: String,
+    target_id: u16,
+    proxy_type: ProxyType,
+    target_options: Option<ConfigTargetOptions>,
+    encrypt_secret: [u8; 16],
+    input_by_name: HashMap<Arc<str>, Arc<tuliprox_core::model::ConfigInput>>,
+    flags: M3uPlaylistIteratorFlagsSet,
+}
 
+impl M3uItemPipeline {
+    async fn new(cfg: &AppConfig, target: &ConfigTarget, user: &ProxyUserCredentials) -> Result<Self, TuliproxError> {
         let m3u_output = target.get_m3u_output().ok_or_else(|| {
             TuliproxError::Config(format!("Unexpected failure, missing m3u target output for target {}", target.name))
         })?;
         let config = cfg.config.load();
-        let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
-        let m3u_path = m3u_get_file_path_for_db(&target_path);
-
-        let iter_lock = cfg.file_locks.read_lock(&m3u_path).await;
-        let bg_lock = cfg.file_locks.read_lock(&m3u_path).await;
-
         let filter = user_get_bouquet_filter(&config, &user.username, None, TargetType::M3u, XtreamCluster::Live).await;
         let mut flags = M3uPlaylistIteratorFlagsSet::new();
         if m3u_output.include_type_in_url {
@@ -313,18 +319,115 @@ impl M3uPlaylistIterator {
         if cfg.is_reverse_proxy_resource_rewrite_enabled() {
             flags.set(M3uPlaylistIteratorFlags::RewriteResource);
         }
-
         let base_url = cfg.get_user_server_info(user).map(|si| si.get_base_url()).unwrap_or_default();
         let encrypt_secret = cfg.get_reverse_proxy_rewrite_secret().unwrap_or(cfg.encrypt_secret);
-        let username = user.username.clone();
-        let password = user.password.clone();
-        let target_id = target.id;
-        let proxy_type = user.proxy;
-        let output_clusters = user.output_clusters;
-        let user_filter = user.t_filter.clone();
-        let target_options = target.options.clone();
         let input_by_name: HashMap<Arc<str>, Arc<tuliprox_core::model::ConfigInput>> =
             cfg.sources.load().inputs.iter().map(|input| (Arc::clone(&input.name), Arc::clone(input))).collect();
+
+        Ok(Self {
+            filter,
+            user_filter: user.t_filter.clone(),
+            output_clusters: user.output_clusters,
+            base_url,
+            username: user.username.clone(),
+            password: user.password.clone(),
+            target_id: target.id,
+            proxy_type: user.proxy,
+            target_options: target.options.clone(),
+            encrypt_secret,
+            input_by_name,
+            flags,
+        })
+    }
+
+    /// The item the M3U output publishes for this user, or `None` when it is not part of it.
+    #[inline]
+    fn apply(&self, item: M3uPlaylistItem) -> Option<M3uPlaylistItem> {
+        if !self.output_clusters.has_cluster(item.item_type) {
+            return None;
+        }
+
+        if let Some(set) = &self.filter {
+            if !set.contains(item.group.as_ref()) {
+                return None;
+            }
+        }
+
+        // per-user content filter (plan AND user), applied post-cache
+        if let Some(user_filter) = &self.user_filter {
+            let pli = shared::model::PlaylistItem::from(&item);
+            let provider = shared::foundation::ValueProvider { pli: &pli, match_as_ascii: false };
+            if !user_filter.filter(&provider) {
+                return None;
+            }
+        }
+
+        let rewrite_ctx =
+            UrlRewriteContext { base_url: &self.base_url, username: &self.username, password: &self.password };
+        Some(apply_rewrite(
+            item,
+            &rewrite_ctx,
+            self.target_id,
+            &self.encrypt_secret,
+            &self.input_by_name,
+            self.target_options.as_ref(),
+            self.flags,
+            self.proxy_type,
+        ))
+    }
+}
+
+/// Single item lookup of one user's M3U output.
+///
+/// The `HDHomeRun` tuner endpoints resolve the guide numbers they find in the target guide index
+/// with this instead of walking the playlist. It answers with the same item the iterators publish,
+/// and the per-user pipeline (bouquet, content filter, url rewrite) is prepared once for all the
+/// candidates of one request.
+pub struct M3uUserItemLookup<'a> {
+    pipeline: M3uItemPipeline,
+    cfg: &'a AppConfig,
+    playlists: &'a PlaylistStorageState,
+    target: &'a ConfigTarget,
+}
+
+impl<'a> M3uUserItemLookup<'a> {
+    pub async fn new(
+        cfg: &'a AppConfig,
+        playlists: &'a PlaylistStorageState,
+        target: &'a ConfigTarget,
+        user: &ProxyUserCredentials,
+    ) -> Result<Self, TuliproxError> {
+        Ok(Self { pipeline: M3uItemPipeline::new(cfg, target, user).await?, cfg, playlists, target })
+    }
+
+    /// The item the output publishes for `stream_id`, or `None` when the playlist does not hold it
+    /// or this user's filters exclude it.
+    pub async fn get(&self, stream_id: u32) -> Option<M3uPlaylistItem> {
+        match m3u_get_item_for_stream_id(stream_id, self.cfg, self.playlists, self.target).await {
+            Ok(item) => self.pipeline.apply(item),
+            Err(err) => {
+                log::debug!("No m3u playlist item {stream_id} for target {}: {err}", self.target.name);
+                None
+            }
+        }
+    }
+}
+
+impl M3uPlaylistIterator {
+    pub async fn new(
+        cfg: &AppConfig,
+        target: &ConfigTarget,
+        user: &ProxyUserCredentials,
+    ) -> Result<Self, TuliproxError> {
+        // TODO use playlist memory cache, but be aware of sorting !
+
+        let pipeline = M3uItemPipeline::new(cfg, target, user).await?;
+        let config = cfg.config.load();
+        let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
+        let m3u_path = m3u_get_file_path_for_db(&target_path);
+
+        let iter_lock = cfg.file_locks.read_lock(&m3u_path).await;
+        let bg_lock = cfg.file_locks.read_lock(&m3u_path).await;
 
         let m3u_path = m3u_path.clone();
         let index_path = get_file_path_for_db_index(&m3u_path);
@@ -358,37 +461,9 @@ impl M3uPlaylistIterator {
                     }
                 };
 
-                if !output_clusters.has_cluster(item.item_type) {
+                let Some(item) = pipeline.apply(item) else {
                     continue;
-                }
-
-                if let Some(set) = &filter {
-                    if !set.contains(item.group.as_ref()) {
-                        continue;
-                    }
-                }
-
-                // per-user content filter (plan AND user), applied post-cache
-                if let Some(user_filter) = &user_filter {
-                    let pli = shared::model::PlaylistItem::from(&item);
-                    let provider = shared::foundation::ValueProvider { pli: &pli, match_as_ascii: false };
-                    if !user_filter.filter(&provider) {
-                        continue;
-                    }
-                }
-
-                let rewrite_ctx = UrlRewriteContext { base_url: &base_url, username: &username, password: &password };
-
-                let item = apply_rewrite(
-                    item,
-                    &rewrite_ctx,
-                    target_id,
-                    &encrypt_secret,
-                    &input_by_name,
-                    target_options.as_ref(),
-                    flags,
-                    proxy_type,
-                );
+                };
 
                 if let Some(prev) = pending.replace(item) {
                     if tx.blocking_send(Ok((prev, true))).is_err() {

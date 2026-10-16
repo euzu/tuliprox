@@ -103,6 +103,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         proxy: config.proxy.as_ref().map(shared::model::ProxyConfigDto::from),
         ipcheck: config.ipcheck.as_ref().map(shared::model::IpCheckConfigDto::from),
         library: config.library.as_ref().map(library_config_to_dto),
+        channel_groups: (!config.channel_groups.is_default()).then(|| config.channel_groups.clone()),
     }
 }
 

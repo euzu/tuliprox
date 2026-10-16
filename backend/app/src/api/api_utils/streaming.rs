@@ -919,6 +919,7 @@ pub(super) async fn force_stream_response(
             req_headers: ctx.req_headers,
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
+            group_failover: None,
         })
         .await
         {
@@ -1158,6 +1159,7 @@ pub(super) async fn try_shared_stream_response_if_any(
             req_headers,
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
+            group_failover: None,
         })
         .await
         {

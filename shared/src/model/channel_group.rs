@@ -12,6 +12,16 @@ pub enum CapacityTier {
     Exhausted,
 }
 
+/// Why a running group stream replaced its member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchReason {
+    UpstreamError,
+    UpstreamEof,
+    Stall,
+    Underrun,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
     Closed,

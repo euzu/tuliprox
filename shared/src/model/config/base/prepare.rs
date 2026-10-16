@@ -78,6 +78,9 @@ impl ConfigDto {
         if let Some(library) = &mut self.library {
             library.playlist.prepare();
         }
+        if let Some(channel_groups) = &mut self.channel_groups {
+            channel_groups.prepare()?;
+        }
 
         Ok(())
     }

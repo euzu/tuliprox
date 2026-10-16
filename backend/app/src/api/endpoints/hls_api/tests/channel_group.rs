@@ -36,3 +36,15 @@ async fn manifest_refresh_never_reselects_even_with_open_circuit() {
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(env.bound_member_input("viewer").await, bound);
 }
+
+#[tokio::test]
+async fn hls_cache_entry_uses_selected_member_input() {
+    let env = GroupPlaybackEnv::new(&["solis", "korath"]).hls_cache().with_qos("korath", 2, 95).build().await;
+    let manifest = env.get_hls_manifest(env.group_vid).await;
+    assert!(manifest.status().is_success() || manifest.status().is_redirection(), "status {}", manifest.status());
+    let body = axum::body::to_bytes(manifest.into_body(), 1024 * 1024).await.expect("body");
+    // The variant request makes the shared origin fetch its upstream playlist.
+    let _variant = env.get(&first_segment_url(&String::from_utf8_lossy(&body))).await;
+    assert_eq!(env.origin_hits("solis"), 0);
+    assert!(env.origin_hits("korath") > 0);
+}

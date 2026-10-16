@@ -26,7 +26,7 @@ use axum::{
 use shared::{
     foundation::Filter,
     model::{
-        AdmissionStrategy, ChannelGroupPolicy, ChannelGroupSelectionConfig, ChannelGroupsConfig, ClusterFlags,
+        AdmissionStrategy, ChannelGroupPolicy, ChannelGroupsConfig, ChannelGroupsTargetConfig, ClusterFlags,
         ConfigPaths, ConfigTargetOptions, HdHomeRunTargetOutputDto, InputType, LiveStreamProperties,
         M3uTargetOutputDto, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder, ProxyUserStatus,
         StreamProperties, TargetType, UUIDType, VirtualId, XtreamCluster, XtreamTargetOutputDto,
@@ -55,6 +55,99 @@ pub(super) fn ts_fixture() -> Vec<u8> {
         data[i * 188 + 3] = 0x10;
     }
     data
+}
+
+/// A short MPEG-TS program: PAT, PMT with one H.264 stream on `video_pid`, a keyframe PES start,
+/// then `continuation` payload packets on `video_pid`. The video PID tells members apart.
+pub(crate) fn member_ts(video_pid: u16, continuation: usize) -> Vec<u8> {
+    fn packet(pid: u16, pusi: bool, adaptation: Option<u8>, payload: &[u8]) -> Vec<u8> {
+        let pid_bytes = pid.to_be_bytes();
+        let mut packet = vec![0x47, (if pusi { 0x40 } else { 0 }) | (pid_bytes[0] & 0x1F), pid_bytes[1]];
+        if let Some(flags) = adaptation {
+            let adaptation_len = 183 - payload.len();
+            packet.extend([0x30, u8::try_from(adaptation_len).expect("adaptation"), flags]);
+            packet.extend(std::iter::repeat_n(0xFF, adaptation_len - 1));
+        } else {
+            packet.push(0x10);
+        }
+        packet.extend_from_slice(payload);
+        packet.resize(188, 0xFF);
+        packet
+    }
+    fn section(mut body: Vec<u8>) -> Vec<u8> {
+        let length = u8::try_from(body.len() - 3 + 4).expect("section length");
+        body[1] = 0xB0;
+        body[2] = length;
+        let crc = tuliprox_mpegts::packet::mpeg2_crc32(&body);
+        body.extend_from_slice(&crc.to_be_bytes());
+        let mut payload = vec![0x00];
+        payload.extend(body);
+        payload
+    }
+    let pid = video_pid.to_be_bytes();
+    let pat = section(vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0x00, 0x01, 0xF0, 0x00]);
+    let pmt = section(vec![
+        0x02,
+        0,
+        0,
+        0x00,
+        0x01,
+        0xC1,
+        0x00,
+        0x00,
+        0xE0 | pid[0],
+        pid[1],
+        0xF0,
+        0x00,
+        0x1B,
+        0xE0 | pid[0],
+        pid[1],
+        0xF0,
+        0x00,
+    ]);
+    let keyframe = [
+        0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x65,
+    ];
+    let mut ts = packet(0, true, None, &pat);
+    ts.extend(packet(0x1000, true, None, &pmt));
+    ts.extend(packet(video_pid, true, Some(0x40), &keyframe));
+    for _ in 0..continuation {
+        ts.extend(packet(video_pid, false, None, &[0x11; 184]));
+    }
+    ts
+}
+
+/// Whether `bytes` holds a TS packet on `pid` at a packet boundary.
+pub(crate) fn has_pid(bytes: &[u8], pid: u16) -> bool {
+    bytes
+        .as_chunks::<188>()
+        .0
+        .iter()
+        .any(|packet| packet[0] == 0x47 && ((u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2])) == pid)
+}
+
+/// Reads the response body until `done` holds for what was read, the body ends, or `timeout`
+/// passes. Returns the bytes read and whether the body ended.
+pub(crate) async fn read_body_until(
+    response: Response,
+    timeout: std::time::Duration,
+    done: impl Fn(&[u8]) -> bool,
+) -> (Vec<u8>, bool) {
+    use futures::StreamExt;
+    let mut body = response.into_body().into_data_stream();
+    let mut read = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if done(&read) {
+            return (read, false);
+        }
+        match tokio::time::timeout_at(deadline, body.next()).await {
+            Ok(Some(Ok(chunk))) => read.extend_from_slice(&chunk),
+            Ok(Some(Err(_)) | None) => return (read, true),
+            Err(_) => return (read, false),
+        }
+    }
 }
 
 pub(crate) struct TrackedOrigin {
@@ -127,6 +220,25 @@ async fn spawn_tracked_origin(mode: FakeOriginMode) -> TrackedOrigin {
                     let _ = socket.write_all(head.as_bytes()).await;
                     let _ = socket.write_all(bytes).await;
                     let _ = socket.shutdown().await;
+                }
+                FakeOriginMode::TsThenStall(bytes) => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(bytes).await;
+                    // Keeps the connection open without data until the client goes away.
+                    let mut probe = [0_u8; 1];
+                    let _ = socket.read(&mut probe).await;
+                }
+                FakeOriginMode::TsStream(bytes) => {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    while socket.write_all(bytes).await.is_ok() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+                FakeOriginMode::Silent => {
+                    let mut probe = [0_u8; 1];
+                    let _ = socket.read(&mut probe).await;
                 }
                 FakeOriginMode::Status(status) => {
                     let head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -214,6 +326,12 @@ impl GroupPlaybackEnv {
             epg: None,
             epg_channel_id: None,
             hdhomerun: false,
+            channel_groups: None,
+            hls_cache: false,
+            share_ts: false,
+            sleep_timer_mins: None,
+            max_connections: HashMap::new(),
+            channel_unavailable_video: false,
         }
     }
 
@@ -256,6 +374,16 @@ impl GroupPlaybackEnv {
     pub async fn response_text(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("read body");
         String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+    }
+
+    /// Like `get_xtream_live`, from another client socket of the same user.
+    pub async fn get_xtream_live_from(&self, vid: u32, port: u16) -> Response {
+        let mut req = Request::builder()
+            .uri(format!("/live/viewer/secret/{vid}.ts"))
+            .body(Body::empty())
+            .expect("request builder");
+        req.extensions_mut().insert(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], port))));
+        self.router.clone().oneshot(req).await.expect("endpoint response")
     }
 
     pub async fn get_xtream_live(&self, vid: u32) -> Response {
@@ -462,10 +590,60 @@ pub(crate) struct GroupPlaybackEnvBuilder {
     epg: Option<Epg>,
     epg_channel_id: Option<String>,
     hdhomerun: bool,
+    channel_groups: Option<ChannelGroupsConfig>,
+    hls_cache: bool,
+    share_ts: bool,
+    sleep_timer_mins: Option<u32>,
+    max_connections: HashMap<String, u16>,
+    channel_unavailable_video: bool,
 }
 
 #[allow(dead_code)]
 impl GroupPlaybackEnvBuilder {
+    pub fn hls_cache(mut self) -> Self {
+        self.hls_cache = true;
+        self.hls = true;
+        self
+    }
+
+    /// Serves the channel-unavailable custom video (test fixture, PIDs 0x100/0x101).
+    pub fn channel_unavailable_video(mut self) -> Self {
+        self.channel_unavailable_video = true;
+        self
+    }
+
+    pub fn sleep_timer_mins(mut self, mins: u32) -> Self {
+        self.sleep_timer_mins = Some(mins);
+        self
+    }
+
+    pub fn max_connections(mut self, input: &str, max: u16) -> Self {
+        self.max_connections.insert(input.to_string(), max);
+        self
+    }
+
+    pub fn share_ts(mut self) -> Self {
+        self.share_ts = true;
+        self
+    }
+
+    /// The `config.yml` channel group settings.
+    pub fn with_channel_groups(mut self, channel_groups: ChannelGroupsConfig) -> Self {
+        self.channel_groups = Some(channel_groups);
+        self
+    }
+
+    /// The `config.yml` failover settings.
+    pub fn with_failover(self, failover: shared::model::ChannelGroupFailoverConfig) -> Self {
+        let channel_groups = ChannelGroupsConfig { failover, ..self.channel_groups.clone().unwrap_or_default() };
+        self.with_channel_groups(channel_groups)
+    }
+
+    pub fn origin_mode(mut self, input: &str, mode: FakeOriginMode) -> Self {
+        self.origin_modes.insert(input.to_string(), mode);
+        self
+    }
+
     pub fn origin_status(mut self, input: &str, status: u16) -> Self {
         self.origin_modes.insert(input.to_string(), FakeOriginMode::Status(status));
         self
@@ -565,7 +743,7 @@ impl GroupPlaybackEnvBuilder {
                 username: Some("viewer".to_string()),
                 password: Some("secret".to_string()),
                 priority: 1,
-                max_connections: 10,
+                max_connections: self.max_connections.get(input_name).copied().unwrap_or(10),
                 enabled: true,
                 provider_configs: Some(vec![Arc::new(provider)]),
                 stalker: if is_stalker {
@@ -597,8 +775,11 @@ impl GroupPlaybackEnvBuilder {
 
         let storage_dir = dir.path().to_string_lossy().into_owned();
         let config = Config {
+            custom_stream_response_enabled: self.channel_unavailable_video,
+            sleep_timer_mins: self.sleep_timer_mins,
             storage_dir: storage_dir.clone(),
             user_access_control: true,
+            channel_groups: self.channel_groups.clone().unwrap_or_default(),
             reverse_proxy: Some(crate::model::ReverseProxyConfig {
                 resource_rewrite_disabled: false,
                 rewrite_secret: [0; 16],
@@ -610,7 +791,9 @@ impl GroupPlaybackEnvBuilder {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
-                hls_cache: None,
+                hls_cache: self
+                    .hls_cache
+                    .then(|| crate::model::HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default())),
             }),
             ..Config::default()
         };
@@ -650,11 +833,14 @@ impl GroupPlaybackEnvBuilder {
             enabled: true,
             name: "test_target".to_string(),
             options: Some(ConfigTargetOptions {
-                channel_groups: Some(ChannelGroupsConfig {
+                channel_groups: Some(ChannelGroupsTargetConfig {
                     enabled: true,
-                    selection: ChannelGroupSelectionConfig::default(),
-                    ..ChannelGroupsConfig::default()
+                    ..ChannelGroupsTargetConfig::default()
                 }),
+                share_live_streams: shared::model::ConfigTargetShareLiveStreams {
+                    hls: self.hls_cache,
+                    mpeg_ts: self.share_ts,
+                },
                 ..ConfigTargetOptions::default()
             }),
             output: target_outputs,
@@ -866,8 +1052,20 @@ impl GroupPlaybackEnvBuilder {
         let group_record = Arc::new(record);
 
         let app_state = crate::api::api_utils::tests::support::create_test_app_state_for_config(Arc::clone(&app_cfg));
-        if let Some(cfg) = target.options.as_ref().and_then(|o| o.channel_groups.as_ref()).map(|cg| &cg.selection) {
-            app_state.member_health.set_policy(tuliprox_session::channel_group::CircuitPolicy::from(cfg));
+        if self.channel_unavailable_video {
+            let fixture =
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/channel_unavailable.ts"));
+            app_state.app_config.custom_stream_response.store(Some(Arc::new(crate::model::CustomStreamResponse {
+                channel_unavailable: Some(crate::api::model::TransportStreamBuffer::new(fixture.to_vec())),
+                user_connections_exhausted: None,
+                provider_connections_exhausted: None,
+                low_priority_preempted: None,
+                user_account_expired: None,
+                panel_api_provisioning: None,
+                hls_session_or_lease_expired: None,
+                maintenance: None,
+                panel_api_provisioning_hls_segments: Vec::new(),
+            })));
         }
         app_state
             .member_health

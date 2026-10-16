@@ -44,7 +44,7 @@ impl SharedStreamState {
         Self {
             headers,
             buf_size: base_channel_capacity,
-            provider_guard,
+            provider_guard: std::sync::Mutex::new(provider_guard),
             low_priority_preempted,
             preempted_token: CancellationToken::new(),
             subscribers: RwLock::new(HashMap::new()),
@@ -70,6 +70,14 @@ impl SharedStreamState {
     pub(super) fn decrement_pending_joins(&self) { self.pending_joins.fetch_sub(1, Ordering::AcqRel); }
 
     pub(super) fn has_pending_joins(&self) -> bool { self.pending_joins.load(Ordering::Acquire) > 0 }
+
+    pub(super) fn lock_provider_guard(&self) -> std::sync::MutexGuard<'_, Option<ProviderHandle>> {
+        self.provider_guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn provider_allocation_id(&self) -> Option<tuliprox_core::model::AllocationId> {
+        self.lock_provider_guard().as_ref().map(|handle| handle.allocation_id)
+    }
 
     pub(super) fn lock_task_handles(&self) -> std::sync::MutexGuard<'_, Vec<tokio::task::JoinHandle<()>>> {
         self.task_handles.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -341,7 +349,7 @@ impl SharedStreamState {
 
         self.lock_task_handles().push(handle);
 
-        let provider = self.provider_guard.as_ref().and_then(|h| h.allocation.get_provider_name());
+        let provider = self.lock_provider_guard().as_ref().and_then(|h| h.allocation.get_provider_name());
         let (permit, request_id, owner) = pending_cleanup.take_cleanup();
         (
             ReceiverStreamWrapper {

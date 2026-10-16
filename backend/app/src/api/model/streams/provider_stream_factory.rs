@@ -102,7 +102,9 @@ mod response;
 pub use opening::{create_provider_stream, open_provider_stream_with_lifecycle, ProviderStreamOpen};
 pub(crate) use options::ProviderStreamFactoryParams;
 #[cfg(test)]
-use request::{prepare_client, provider_headers_require_manual_redirects, send_with_manual_redirects};
+use request::{
+    initial_open_retry_exhausted, prepare_client, provider_headers_require_manual_redirects, send_with_manual_redirects,
+};
 #[cfg(test)]
 use response::normalize_hls_resource_content_type;
 #[cfg(test)]

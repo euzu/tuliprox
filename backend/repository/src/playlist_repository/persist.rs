@@ -9,16 +9,22 @@ use super::{
     PlaylistStorageState, TargetPlaylistPersistOptions,
 };
 use crate::{
-    ensure_target_storage_path, epg_write_for_target, load_input_local_library_playlist, m3u_write_playlist,
-    persist_input_library_playlist, write_strm_playlist, ChannelGroupRecord, ChannelGroupStore, GroupMember,
-    MemberArchive, PendingChannelGroup, TargetIdMapping,
+    ensure_target_storage_path, epg_write_for_target, lineup_guide_index_carry_over, lineup_guide_index_remove,
+    lineup_guide_index_view, lineup_guide_index_write, load_input_local_library_playlist, m3u_lineup_guide_index_path,
+    m3u_write_playlist, persist_input_library_playlist, write_strm_playlist, xtream_get_file_path,
+    xtream_get_storage_path, xtream_lineup_guide_index_path, ChannelGroupRecord, ChannelGroupStore, GroupMember,
+    LineupGuideCarryOver, LineupGuideView, MemberArchive, PendingChannelGroup, TargetIdMapping,
 };
+use log::warn;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistGroup, StreamProperties, VirtualId},
+    model::{ClusterFlags, PlaylistGroup, StreamProperties, VirtualId, XtreamCluster},
 };
-use std::{path::Path, sync::Arc};
-use tuliprox_core::model::{AppConfig, ConfigTarget, Epg, TargetOutput};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tuliprox_core::model::{AppConfig, Config, ConfigTarget, Epg, TargetOutput};
 
 pub async fn persist_playlist(
     app_config: &Arc<AppConfig>,
@@ -245,6 +251,22 @@ async fn persist_playlist_views_with_mode(
         }
     };
 
+    // Only the view `lineup.json` is published from keeps a guide index. Any other index would
+    // describe a playlist the reader no longer asks, and a later re-configuration could mistake it
+    // for a current one.
+    //
+    // The guide index is a sidecar: none of its failures may fail the playlist publication or skip
+    // the memory cache reload below. A missing index only makes the tuners scan the playlist.
+    let lineup_view = lineup_guide_index_view(target);
+    let outdated_indexes: Vec<PathBuf> = [LineupGuideView::M3u, LineupGuideView::Xtream]
+        .into_iter()
+        .filter(|view| lineup_view != Some(*view))
+        .filter_map(|view| lineup_guide_index_path(config, target, view, &target_path))
+        .collect();
+    if let Err(err) = lineup_guide_index_remove(&app_config.file_locks, &outdated_indexes).await {
+        warn!("Outdated HDHomeRun guide index of target {} not removed: {err}", target.name);
+    }
+
     for (output, prepared_output) in target.output.iter().zip(&mut prepared_outputs) {
         let output_publication_plan = options.publication_plan.with_output_filter(output.filter().is_some());
         let source_playlist = match output {
@@ -261,16 +283,51 @@ async fn persist_playlist_views_with_mode(
         let allows_empty_base =
             library_empty.replaces_empty_target() || output_publication_plan.allows_empty_base_output();
 
+        let replace_empty_clusters =
+            options.accepted_empty_clusters | library_empty.replacement_clusters() | curation_empty_clusters;
+
+        // Guide index of the HDHomeRun lineup. It describes the playlist db of this output, so it
+        // follows what the writer below does with that db:
+        // - rewritten: the old index goes before the db and the new one after it. A reader that
+        //   loses the index falls back to its playlist scan, while one that kept an index of another
+        //   playlist would resolve guide numbers to channels this target no longer serves.
+        // - kept (an empty update that may not replace it): the old index still describes it.
+        // - partly rewritten (one Xtream cluster kept): the entries of the kept cluster are carried
+        //   over from the old index, read before it goes. Without an old index to read them from,
+        //   the index goes and readers scan until a full update brings it back.
+        let mut guide_index = match (lineup_view, output) {
+            (Some(view @ LineupGuideView::M3u), TargetOutput::M3u(_)) => {
+                // `m3u_write_playlist` keeps the db of an empty playlist it may not publish.
+                let action = if pl.is_empty() && !allows_empty_base {
+                    GuideIndexAction::Keep
+                } else {
+                    GuideIndexAction::Rebuild(None)
+                };
+                lineup_guide_index_path(config, target, view, &target_path).map(|path| (view, path, action))
+            }
+            (Some(view @ LineupGuideView::Xtream), TargetOutput::Xtream(_)) => {
+                match lineup_guide_index_path(config, target, view, &target_path) {
+                    Some(path) => {
+                        let action =
+                            xtream_guide_index_action(app_config, target, pl, replace_empty_clusters, &path).await;
+                        Some((view, path, action))
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((_, path, GuideIndexAction::Rebuild(_) | GuideIndexAction::Remove)) = &guide_index {
+            if let Err(err) = lineup_guide_index_remove(&app_config.file_locks, std::slice::from_ref(path)).await {
+                // The rebuild below still replaces it. Only if that fails too does the old index
+                // stay, which is why both failures are logged.
+                warn!("HDHomeRun guide index of target {} not removed: {err}", target.name);
+            }
+        }
+
         let result = match output {
             TargetOutput::Xtream(_xtream_output) => {
-                persist_xtream_target_playlist(
-                    app_config,
-                    target,
-                    pl,
-                    options.accepted_empty_clusters | library_empty.replacement_clusters() | curation_empty_clusters,
-                    persistence_mode,
-                )
-                .await
+                persist_xtream_target_playlist(app_config, target, pl, replace_empty_clusters, persistence_mode).await
             }
             TargetOutput::M3u(m3u_output) => {
                 m3u_write_playlist(app_config, target, m3u_output, &target_path, pl, allows_empty_base).await
@@ -283,6 +340,16 @@ async fn persist_playlist_views_with_mode(
 
         match result {
             Ok(()) => {
+                if let Some((view, path, GuideIndexAction::Rebuild(carry_over))) = &mut guide_index {
+                    if let Err(err) =
+                        lineup_guide_index_write(&app_config.file_locks, pl, *view, path, carry_over.take()).await
+                    {
+                        warn!(
+                            "HDHomeRun guide index of target {} not written, tuners scan the playlist: {err}",
+                            target.name
+                        );
+                    }
+                }
                 let allows_empty_output = match output {
                     TargetOutput::Xtream(_) => {
                         !curation_empty_clusters.is_empty()
@@ -320,7 +387,7 @@ async fn persist_playlist_views_with_mode(
                 target.name
             )));
         } else if let Some(playlist_storage) = playlist_state {
-            playlist_storage.bump_channel_group_generation();
+            playlist_storage.bump_channel_group_generation(&target.name);
         }
     } else {
         staged_groups.discard();
@@ -361,4 +428,84 @@ pub async fn load_input_media_server_playlist(
     file_path: &Path,
 ) -> Result<Vec<PlaylistGroup>, TuliproxError> {
     load_input_local_library_playlist(app_config, file_path).await
+}
+
+/// What a persistence step does with the guide index of the output it writes.
+#[derive(Debug)]
+enum GuideIndexAction {
+    /// The playlist db is rewritten from `pl`, so is the index, plus the entries of the clusters the
+    /// db keeps.
+    Rebuild(Option<LineupGuideCarryOver>),
+    /// The playlist db stays as it is, and so does the index describing it.
+    Keep,
+    /// Only part of the db is rewritten and no old index describes the rest.
+    Remove,
+}
+
+/// Guide index action of the Xtream view, from what `xtream_write_playlist` does per cluster: a
+/// cluster without items keeps its db unless it may be replaced by an empty one. A cluster that has
+/// no db yet keeps nothing, so `pl` still describes it. The entries of a kept cluster are read from
+/// the index at `index_path` now, before that index is removed for the rewrite.
+async fn xtream_guide_index_action(
+    app_config: &AppConfig,
+    target: &ConfigTarget,
+    pl: &[PlaylistGroup],
+    replace_empty_clusters: ClusterFlags,
+    index_path: &Path,
+) -> GuideIndexAction {
+    // The writer sorts items into clusters by their own cluster, not by their group's, so the items
+    // are checked. One pass answers both clusters and stops once both are seen.
+    let (mut has_live, mut has_video) = (false, false);
+    for item in pl.iter().flat_map(|group| &group.channels) {
+        match item.header.xtream_cluster {
+            XtreamCluster::Live => has_live = true,
+            XtreamCluster::Video => has_video = true,
+            XtreamCluster::Series => {}
+        }
+        if has_live && has_video {
+            break;
+        }
+    }
+
+    let storage_path = xtream_get_storage_path(&app_config.config.load(), &target.name);
+    let mut rewritten = false;
+    let mut kept = Vec::new();
+    for (cluster, flag, has_items) in
+        [(XtreamCluster::Live, ClusterFlags::Live, has_live), (XtreamCluster::Video, ClusterFlags::Vod, has_video)]
+    {
+        if has_items || replace_empty_clusters.contains(flag) {
+            rewritten = true;
+            continue;
+        }
+        let has_db = match &storage_path {
+            Some(path) => tokio::fs::try_exists(xtream_get_file_path(path, cluster)).await.unwrap_or(true),
+            None => false,
+        };
+        if has_db {
+            kept.push(cluster);
+        }
+    }
+    if kept.is_empty() {
+        GuideIndexAction::Rebuild(None)
+    } else if !rewritten {
+        GuideIndexAction::Keep
+    } else {
+        match lineup_guide_index_carry_over(&app_config.file_locks, index_path, &kept).await {
+            Some(carry_over) => GuideIndexAction::Rebuild(Some(carry_over)),
+            None => GuideIndexAction::Remove,
+        }
+    }
+}
+
+/// Guide index file of `view` for `target`.
+fn lineup_guide_index_path(
+    config: &Config,
+    target: &ConfigTarget,
+    view: LineupGuideView,
+    target_path: &Path,
+) -> Option<PathBuf> {
+    match view {
+        LineupGuideView::M3u => Some(m3u_lineup_guide_index_path(target_path)),
+        LineupGuideView::Xtream => xtream_lineup_guide_index_path(config, &target.name),
+    }
 }

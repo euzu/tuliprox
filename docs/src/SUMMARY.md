@@ -23,6 +23,8 @@
     - [Metadata Updater & FFprobe](./configuration/metadata-update.md)
     - [Local Media Library](./configuration/local-library.md)
   - [source.yml (Inputs, Panel API & Targets)](./configuration/source.md)
+    - [Channel Groups & Stream Failover](./configuration/channel-groups.md)
+      - [Channel Groups: Settings Reference](./configuration/channel-groups-settings.md)
   - [api-proxy.yml (Server, Users & RBAC)](./configuration/api-proxy.md)
   - [template.yml (Macros & Regex)](./configuration/template.md)
   - [mapping.yml (Mapper DSL & Logic)](./configuration/mapping-dsl.md)

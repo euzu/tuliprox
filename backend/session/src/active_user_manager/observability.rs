@@ -99,6 +99,22 @@ impl ActiveUserManager {
         data.sessions.iter().find_map(|s| s.member_binding.as_ref().map(|b| Arc::clone(&b.input_name)))
     }
 
+    /// Providers of the user's active streams.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn stream_providers(&self, username: &str) -> Vec<Arc<str>> {
+        let connections = self.connections.read().await;
+        connections.by_key.get(username).map_or_else(Vec::new, |data| {
+            data.streams.iter().filter(|s| !s.preserved).map(|s| Arc::clone(&s.provider)).collect()
+        })
+    }
+
+    /// Provider of the session bound to a channel group member.
+    pub async fn bound_member_session_provider(&self, username: &str) -> Option<Arc<str>> {
+        let connections = self.connections.read().await;
+        let data = connections.by_key.get(username)?;
+        data.sessions.iter().find(|s| s.member_binding.is_some()).map(|s| Arc::clone(&s.provider))
+    }
+
     pub(super) async fn log_active_user(&self) {
         let is_log_user_enabled = self.is_log_user_enabled();
         let (user_count, user_connection_count) = { self.active_users_and_connections().await };

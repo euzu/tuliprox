@@ -1,6 +1,7 @@
 use super::{
     super::channel_group::{
-        acquire_group_member, acquire_group_member_with_race, GroupSelectionFailure, GroupSelectionRequest,
+        acquire_group_member, acquire_group_member_with_race, group_playback_settings, group_representative,
+        member_stream_channel, GroupSelectionFailure, GroupSelectionRequest,
     },
     support::{create_test_app_config, create_test_app_state_for_config},
 };
@@ -60,7 +61,10 @@ fn group_member(input: &str, stream_id: &str, provider_id: u32, member_vid: u32)
 }
 
 fn app_config_with_sources(sources: SourcesConfig) -> tuliprox_core::model::AppConfig {
-    let mut config = Config::default();
+    app_config_with_sources_and_config(sources, Config::default())
+}
+
+fn app_config_with_sources_and_config(sources: SourcesConfig, mut config: Config) -> tuliprox_core::model::AppConfig {
     let dto = ReverseProxyConfigDto {
         stream: Some(StreamConfigDto { grace_period_millis: 2_000, ..StreamConfigDto::default() }),
         ..ReverseProxyConfigDto::default()
@@ -109,12 +113,7 @@ impl SelectionEnv {
                 })
                 .collect(),
         };
-        Self {
-            app_state,
-            group,
-            config: serde_json::from_str(r#"{"enabled":true}"#).expect("config"),
-            target: "Main".into(),
-        }
+        Self { app_state, group, config: ChannelGroupsConfig::default(), target: "Main".into() }
     }
 
     fn hold(&self, input: &str, priority: i8) -> ProviderHandle {
@@ -126,20 +125,17 @@ impl SelectionEnv {
 
     fn request<'a>(&'a self, exclude: &'a [usize], allow_grace: bool) -> GroupSelectionRequest<'a> {
         GroupSelectionRequest {
-            target_name: &self.target,
-            group: &self.group,
-            policy: self.group.policy,
-            mode: SelectionMode::Live,
-            selection: self.config.selection,
-            addr: &CLIENT_ADDR,
-            username: "viewer",
-            priority: 0,
-            kind: ConnectionKind::Normal,
-            lease: None,
             allow_provider_grace: allow_grace,
             exclude,
-            demoted_inputs: &[],
-            prefer: None,
+            ..GroupSelectionRequest::new(
+                &self.target,
+                &self.group,
+                self.config.start,
+                &CLIENT_ADDR,
+                "viewer",
+                0,
+                ConnectionKind::Normal,
+            )
         }
     }
 
@@ -210,7 +206,7 @@ async fn grace_tier_skipped_when_disabled() {
 #[tokio::test]
 async fn all_members_exhausted_returns_exhausted_within_budget() {
     let mut env = SelectionEnv::new(&[("korath", 1), ("solis", 1)]);
-    env.config.selection.startup_budget_secs = 1;
+    env.config.start.timeout_secs = 1;
     let _a = env.hold("korath", 10);
     let _a_grace = env
         .app_state
@@ -231,4 +227,103 @@ async fn all_members_exhausted_returns_exhausted_within_budget() {
     assert!(matches!(result, Err(GroupSelectionFailure::Exhausted)));
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(env.slots_in_use(), before);
+}
+
+#[tokio::test]
+async fn representative_skips_member_without_configured_input() {
+    let mut env = SelectionEnv::new(&[("korath", 1)]);
+    env.group.members.insert(0, group_member("orun", "9", 9, 99));
+    let (input, url) = group_representative(&env.app_state, &env.group).expect("representative");
+    assert_eq!(input.name.as_ref(), "korath");
+    assert_eq!(url.as_ref(), env.group.members[1].url.as_ref());
+}
+
+#[tokio::test]
+async fn representative_of_group_without_resolvable_member_is_none() {
+    let mut env = SelectionEnv::new(&[("korath", 1)]);
+    env.group.members.clear();
+    assert!(group_representative(&env.app_state, &env.group).is_none());
+}
+
+#[test]
+fn member_stream_channel_carries_member_identity() {
+    let env_group = ChannelGroupRecord {
+        group_vid: VirtualId::new(7),
+        key: "zdf".into(),
+        origin: ChannelGroupOrigin::Auto,
+        policy: ChannelGroupPolicy::Priority,
+        orphaned: Vec::new(),
+        members: vec![group_member("korath", "42", 42, 300)],
+    };
+    let base = shared::model::StreamChannel {
+        target_id: 3,
+        virtual_id: 7,
+        input_name: "solis".intern(),
+        ..shared::model::StreamChannel::default()
+    };
+    let channel = member_stream_channel(&base, &env_group, &env_group.members[0]);
+    assert_eq!((channel.target_id, channel.virtual_id, channel.group_virtual_id), (3, 300, Some(7)));
+    assert_eq!((channel.input_name.as_ref(), channel.provider_id), ("korath", 42));
+    assert_eq!(channel.url.as_ref(), env_group.members[0].url.as_ref());
+}
+
+#[tokio::test]
+async fn group_playback_settings_apply_target_overrides_to_global_config() {
+    let global = ChannelGroupsConfig {
+        start: shared::model::ChannelGroupStartConfig { timeout_secs: 7, max_attempts: 2 },
+        ..ChannelGroupsConfig::default()
+    };
+    let config = Config { channel_groups: global.clone(), ..Config::default() };
+    let app_state = create_test_app_state_for_config(Arc::new(app_config_with_sources_and_config(
+        SourcesConfig::default(),
+        config,
+    )));
+    let plain = tuliprox_core::model::ConfigTarget::from(&shared::model::ConfigTargetDto::default());
+    assert_eq!(group_playback_settings(&app_state, &plain), global.playback(None));
+
+    let dto = shared::model::ConfigTargetDto {
+        options: Some(shared::model::ConfigTargetOptions {
+            channel_groups: Some(shared::model::ChannelGroupsTargetConfig {
+                enabled: true,
+                allow_provider_grace: Some(false),
+                failover: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let target = tuliprox_core::model::ConfigTarget::from(&dto);
+    let playback = group_playback_settings(&app_state, &target);
+    assert_eq!(playback.start, global.start);
+    assert!(!playback.allow_provider_grace);
+    assert!(!playback.failover.enabled);
+}
+
+#[tokio::test]
+async fn own_release_tier_respects_disabled_grace() {
+    let env = SelectionEnv::new(&[("korath", 1), ("solis", 1)]);
+    let own = env.hold("korath", 0);
+    env.app_state.active_users.set_pending_release_for_test("viewer", &[own.allocation_id]).await;
+    let acquired = acquire_group_member(&env.app_state, env.request(&[], false)).await.expect("acquired");
+    assert_eq!((acquired.index, acquired.tier), (1, CapacityTier::Free));
+}
+
+#[tokio::test]
+async fn selection_request_defaults_match_start_path() {
+    let env = SelectionEnv::new(&[("korath", 1)]);
+    let req = GroupSelectionRequest::new(
+        &env.target,
+        &env.group,
+        env.config.start,
+        &CLIENT_ADDR,
+        "viewer",
+        3,
+        ConnectionKind::Normal,
+    );
+    assert_eq!(req.policy, env.group.policy);
+    assert_eq!(req.mode, SelectionMode::Live);
+    assert!(req.lease.is_none() && req.exclude.is_empty() && req.demoted_inputs.is_empty() && req.prefer.is_none());
+    assert!(req.allow_provider_grace && req.allow_preempt && !req.bypass_maintenance);
+    assert_eq!((req.priority, req.username), (3, "viewer"));
 }
