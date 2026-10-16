@@ -6,7 +6,7 @@ use super::{
 use crate::{uses_direct_body_idle_timeout, ActiveUserConnectionParams};
 use log::warn;
 use shared::{
-    model::{ActiveUserConnectionChange, CustomVideoStreamType, EventMessage, StreamInfo},
+    model::{CustomVideoStreamType, StreamInfo},
     utils::sanitize_sensitive_info,
 };
 use std::{net::SocketAddr, sync::Arc};
@@ -170,8 +170,7 @@ impl ConnectionManager {
                 );
                 self.touch_direct_body_activity(&fingerprint.addr);
             }
-            self.event_manager
-                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info.clone())));
+            self.user_manager.emit_current_stream_update(&stream_info).await;
             RegisteredPlaybackRequest::with_cleanup(uid, Some(stream_info), Some(cleanup))
         } else {
             // Registration failed: nothing was inserted, so the cleanup must not fire.
@@ -187,13 +186,13 @@ impl ConnectionManager {
 
     pub async fn update_stream_detail(&self, addr: &SocketAddr, video_type: CustomVideoStreamType) {
         if let Some(stream_info) = self.user_manager.update_stream_detail(addr, video_type).await {
-            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+            self.user_manager.emit_current_stream_update(&stream_info).await;
         }
     }
 
     pub async fn update_stream_detail_by_uid(&self, uid: u32, video_type: CustomVideoStreamType) {
         if let Some(stream_info) = self.user_manager.update_stream_detail_by_uid(uid, video_type).await {
-            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+            self.user_manager.emit_current_stream_update(&stream_info).await;
         }
     }
 }

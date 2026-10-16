@@ -27,6 +27,10 @@ pub(in crate::api::endpoints::hls_api) async fn ensure_hls_cache_stream_register
     access: &HlsAccessContext,
     session: &HlsSessionHandle,
 ) -> Option<StreamInfo> {
+    // Share the existing origin-publication gate: a registration cannot retain an old
+    // account snapshot across a handover and then overwrite its projected provider.
+    let prepare_lock = Arc::clone(&session.read().await.origin_account_prepare_lock);
+    let _prepare_guard = prepare_lock.lock().await;
     let (proxy_session_id, origin_source, origin_account_binding) = {
         let session = session.read().await;
         if session.is_gc_marked_for_removal() {

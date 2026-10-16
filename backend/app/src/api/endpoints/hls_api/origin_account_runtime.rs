@@ -112,32 +112,57 @@ pub(super) async fn prepare_hls_origin_runtime(
         now_ms,
     )
     .await?;
-    let mut current = session.write().await;
-    let snapshot = if let Some(snapshot) = prepared.prepared_snapshot.take() {
-        if current.is_gc_marked_for_removal() || !snapshot.matches_session(&current) {
-            return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-        }
-        snapshot
-    } else {
-        if current.is_gc_marked_for_removal() || !observed.matches_session(&current) {
-            return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-        }
-        if let Some(mut binding) = prepared.binding_to_publish.take() {
-            binding.generation = previous.as_ref().map_or(0, |previous| previous.generation.saturating_add(1));
-            binding.provider_binding_tag = prepared
-                .preacquired_origin_account_handle
-                .as_ref()
-                .and_then(tuliprox_session::ManagedProviderHandle::handle)
-                .and_then(|handle| handle.binding_tag);
-            if previous.as_ref().is_some_and(|previous| previous.account_name != binding.account_name) {
-                current.handoff_origin_account(binding);
-            } else {
-                current.replace_origin_account_binding(Some(binding));
+    let snapshot = publish_hls_origin_account_with_status(app_state, session, |current| {
+        let snapshot = if let Some(snapshot) = prepared.prepared_snapshot.take() {
+            if current.is_gc_marked_for_removal() || !snapshot.matches_session(current) {
+                return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
             }
-        }
-        HlsOriginAccountSnapshot::from_session(&current)
-    };
+            snapshot
+        } else {
+            if current.is_gc_marked_for_removal() || !observed.matches_session(current) {
+                return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+            }
+            if let Some(mut binding) = prepared.binding_to_publish.take() {
+                binding.generation = previous.as_ref().map_or(0, |previous| previous.generation.saturating_add(1));
+                binding.provider_binding_tag = prepared
+                    .preacquired_origin_account_handle
+                    .as_ref()
+                    .and_then(tuliprox_session::ManagedProviderHandle::handle)
+                    .and_then(|handle| handle.binding_tag);
+                if previous.as_ref().is_some_and(|previous| previous.account_name != binding.account_name) {
+                    current.handoff_origin_account(binding);
+                } else {
+                    current.replace_origin_account_binding(Some(binding));
+                }
+            }
+            HlsOriginAccountSnapshot::from_session(current)
+        };
+        Ok(snapshot)
+    })
+    .await?;
     Ok(PreparedHlsOriginRuntime::published(prepared, snapshot))
+}
+
+// Lock order: viewer rows, then HLS state. Publication and projection are synchronous once
+// both locks are acquired: cancellation cannot publish an account without publishing its UI rows.
+pub(super) async fn publish_hls_origin_account_with_status(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    publish: impl FnOnce(
+        &mut tuliprox_hls::api::HlsSession,
+    ) -> Result<HlsOriginAccountSnapshot, HlsOriginRuntimeAcquireError>,
+) -> Result<HlsOriginAccountSnapshot, HlsOriginRuntimeAcquireError> {
+    let shared_stream_id = hls_cache_shared_stream_id(&session.read().await.proxy_session_id);
+    let mut projection = app_state.active_users.lock_shared_stream_provider_projection(shared_stream_id).await;
+    let mut current = session.write().await;
+    let snapshot = publish(&mut current)?;
+    if !snapshot.matches_session(&current) {
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    }
+    if let Some(binding) = snapshot.binding.as_ref().filter(|binding| binding.is_active()) {
+        projection.update_provider(&binding.account_name);
+    }
+    Ok(snapshot)
 }
 
 async fn advance_hls_origin_account_lifecycle(app_state: &Arc<AppState>, session: &HlsSessionHandle, now_ms: u64) {
@@ -444,18 +469,18 @@ pub(super) async fn rebind_hls_origin_account(
         now_ms,
     );
     new_binding.provider_binding_tag = managed_handle.handle().and_then(|handle| handle.binding_tag);
-    let prepared_snapshot = {
-        let mut session_guard = session.write().await;
+    let prepared_snapshot = publish_hls_origin_account_with_status(app_state, session, |session_guard| {
         if !publish_hls_origin_account_rebind(
-            &mut session_guard,
+            session_guard,
             stale_binding,
             expected_work_generation,
             new_binding.clone(),
         ) {
             return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
         }
-        HlsOriginAccountSnapshot::from_session(&session_guard)
-    };
+        Ok(HlsOriginAccountSnapshot::from_session(session_guard))
+    })
+    .await?;
     debug!(
         "HLS origin account rebound: old_account={} new_account={}",
         sanitize_sensitive_info(stale_binding.account_name.as_ref()),

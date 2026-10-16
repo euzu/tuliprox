@@ -249,7 +249,7 @@ pub(super) async fn handle_update_detail_and_release_provider(
                 )
                 .await;
         }
-        deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+        deps.user_manager.emit_current_stream_update(&stream_info).await;
     }
     if let Some(handle) = handle {
         deps.provider_manager.release_handle(&handle);

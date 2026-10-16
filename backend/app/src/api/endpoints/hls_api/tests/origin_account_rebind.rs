@@ -71,6 +71,62 @@ fn invalidate_account(
 }
 
 #[tokio::test]
+async fn handover_updates_all_viewers_without_followup_media_requests() {
+    let mut input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let now = current_time_millis();
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, now).await;
+    let proxy_id = session.read().await.proxy_session_id.clone();
+    for (port, token) in [(12101, "viewer-a"), (12102, "viewer-b")] {
+        super::observability::register_hls_cache_stream_for_stats_test(
+            &app,
+            &session,
+            &proxy_id,
+            token,
+            &test_fingerprint_with_addr(test_addr_with_port(port)),
+            token,
+        )
+        .await;
+    }
+    let mut events = app.event_manager.get_event_channel();
+    input.account_disabled = true;
+    reload_inputs(&app, vec![Arc::new(input.clone())]);
+    let prepared = prepare_hls_origin_runtime(
+        &app,
+        &session,
+        &input,
+        "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+        "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+        &proxy_id,
+        &test_fingerprint(),
+        ConnectionKind::Normal,
+        0,
+        HlsOriginWorkKind::Manifest,
+        HlsOriginWorkClass::ManifestInteractive,
+        now,
+    )
+    .await
+    .expect("replacement account publishes");
+    assert_eq!(session.read().await.origin_account_binding.as_ref().unwrap().account_name.as_ref(), "account-a");
+    let rows = app.active_users.panel_streams().await;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().all(|row| row.provider.as_ref() == "account-a"),
+        "all viewer rows must change immediately: {rows:?}"
+    );
+    let mut updated = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let shared::model::EventMessage::ActiveUser(shared::model::ActiveUserConnectionChange::Updated(row)) = event
+        {
+            updated.push(row);
+        }
+    }
+    assert_eq!(updated.len(), 2);
+    assert!(updated.iter().all(|row| row.provider.as_ref() == "account-a"));
+    app.connection_manager.release_managed_provider_handle(prepared.preacquired_origin_account_handle);
+}
+
+#[tokio::test]
 async fn invalid_root_alias_matrix_rebinds_within_input_and_preserves_session() {
     for invalid in [
         InvalidAccount::ExpiredRoot,
@@ -91,6 +147,15 @@ async fn invalid_root_alias_matrix_rebinds_within_input_and_preserves_session() 
             (session.key.clone(), session.proxy_session_id.clone())
         };
         let old_binding = session.read().await.origin_account_binding.clone().unwrap();
+        super::observability::register_hls_cache_stream_for_stats_test(
+            &app,
+            &session,
+            &proxy_id,
+            "matrix-viewer",
+            &test_fingerprint(),
+            "matrix-viewer",
+        )
+        .await;
         assert_eq!(hls_origin_account_status(&app.hls_ctx(), &old_binding), expected_status, "{invalid:?}");
         let prepared = prepare_hls_origin_runtime(
             &app,
@@ -122,6 +187,12 @@ async fn invalid_root_alias_matrix_rebinds_within_input_and_preserves_session() 
         assert!(session.origin_control.manifest_origin_binding.is_none());
         assert!(session.origin_provider_session_headers.is_empty());
         assert!(!prepared.fetch_url.contains(if old == "account-a" { "account-user" } else { "root-user" }));
+        let expected_provider = binding.account_name.clone();
+        drop(session);
+        assert!(
+            app.active_users.panel_streams().await.iter().all(|row| row.provider == expected_provider),
+            "{invalid:?}"
+        );
         app.connection_manager.release_managed_provider_handle(prepared.preacquired_origin_account_handle);
         assert_eq!(app.active_provider.get_provider_connections_count(), 0);
     }
@@ -1291,4 +1362,285 @@ async fn runtime_prepare_result_superseded_before_refresh_start_cannot_authorize
     assert_eq!(refresh.await.unwrap(), tuliprox_hls::api::HlsOriginRefreshTriggerOutcome::SessionUnavailable);
     assert!(origin.requests.lock().await.is_empty(), "superseded runtime result sends no origin request");
     assert!(!session.read().await.origin_refresh.in_flight);
+}
+
+#[tokio::test]
+async fn failed_rebind_does_not_publish_replacement_provider() {
+    let mut input = overlap_provider_input();
+    input.aliases = None;
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let now = current_time_millis();
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, now).await;
+    let id = session.read().await.proxy_session_id.clone();
+    super::observability::register_hls_cache_stream_for_stats_test(
+        &app,
+        &session,
+        &id,
+        "viewer",
+        &test_fingerprint(),
+        "viewer",
+    )
+    .await;
+    let before = app.active_users.panel_streams().await;
+    let mut events = app.event_manager.get_event_channel();
+    input.account_disabled = true;
+    reload_inputs(&app, vec![Arc::new(input.clone())]);
+    assert!(prepare_hls_origin_runtime(
+        &app,
+        &session,
+        &input,
+        "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+        "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+        &id,
+        &test_fingerprint(),
+        ConnectionKind::Normal,
+        0,
+        HlsOriginWorkKind::Manifest,
+        HlsOriginWorkClass::ManifestInteractive,
+        now
+    )
+    .await
+    .is_err());
+    assert_eq!(app.active_users.panel_streams().await, before);
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(
+            event,
+            shared::model::EventMessage::ActiveUser(shared::model::ActiveUserConnectionChange::Updated(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn older_handover_cannot_overwrite_newer_provider() {
+    use super::super::origin_account_runtime::publish_hls_origin_account_with_status;
+    use tuliprox_hls::api::HlsOriginAccountSnapshot;
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let now = current_time_millis();
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, now).await;
+    let id = session.read().await.proxy_session_id.clone();
+    super::observability::register_hls_cache_stream_for_stats_test(
+        &app,
+        &session,
+        &id,
+        "viewer",
+        &test_fingerprint(),
+        "viewer",
+    )
+    .await;
+    let original = session.read().await.origin_account_binding.clone().unwrap();
+    let publish = |name: &'static str, generation| {
+        HlsOriginAccountBinding::rebound(
+            input.name.clone(),
+            Arc::from(name),
+            original.session_owner.clone(),
+            generation,
+            now,
+        )
+    };
+    let binding_b = publish("account-b", 1);
+    let snapshot_b = publish_hls_origin_account_with_status(&app, &session, |current| {
+        current.handoff_origin_account(binding_b);
+        Ok(HlsOriginAccountSnapshot::from_session(current))
+    })
+    .await
+    .unwrap();
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let old = {
+        let app = app.clone();
+        let session = session.clone();
+        let ready = ready.clone();
+        let resume = resume.clone();
+        tokio::spawn(async move {
+            ready.notify_one();
+            resume.notified().await;
+            publish_hls_origin_account_with_status(&app, &session, |_| Ok(snapshot_b)).await
+        })
+    };
+    ready.notified().await;
+    let binding_c = publish("account-c", 2);
+    publish_hls_origin_account_with_status(&app, &session, |current| {
+        current.handoff_origin_account(binding_c);
+        Ok(HlsOriginAccountSnapshot::from_session(current))
+    })
+    .await
+    .unwrap();
+    let mut events = app.event_manager.get_event_channel();
+    resume.notify_one();
+    assert!(old.await.unwrap().is_err());
+    assert_eq!(app.active_users.panel_streams().await[0].provider.as_ref(), "account-c");
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn stale_media_registration_cannot_restore_previous_provider() {
+    use super::super::origin_account_runtime::publish_hls_origin_account_with_status;
+    use tuliprox_hls::api::HlsOriginAccountSnapshot;
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, current_time_millis()).await;
+    let id = session.read().await.proxy_session_id.clone();
+    super::observability::register_hls_cache_stream_for_stats_test(
+        &app,
+        &session,
+        &id,
+        "viewer",
+        &test_fingerprint(),
+        "viewer",
+    )
+    .await;
+    let gate = session.read().await.origin_account_prepare_lock.clone();
+    let held = gate.lock().await;
+    let fp = test_fingerprint();
+    let headers = HeaderMap::new();
+    let access = test_hls_access_context_with(id.clone(), HlsAccessLeaseId("viewer".into()), "viewer", fp.key.clone());
+    let mut registration =
+        Box::pin(super::super::ensure_hls_cache_stream_registered(&app, &fp, &headers, &access, &session));
+    assert!(futures::poll!(registration.as_mut()).is_pending());
+    publish_hls_origin_account_with_status(&app, &session, |current| {
+        let old = current.origin_account_binding.as_ref().unwrap();
+        let next = HlsOriginAccountBinding::rebound(
+            input.name.clone(),
+            Arc::from("account-b"),
+            old.session_owner.clone(),
+            old.generation + 1,
+            current_time_millis(),
+        );
+        current.handoff_origin_account(next);
+        Ok(HlsOriginAccountSnapshot::from_session(current))
+    })
+    .await
+    .unwrap();
+    drop(held);
+    assert_eq!(registration.await.unwrap().provider.as_ref(), "account-b");
+    assert_eq!(app.active_users.panel_streams().await[0].provider.as_ref(), "account-b");
+}
+
+#[tokio::test]
+async fn initiating_viewer_cancellation_does_not_lose_handover_updates() {
+    let mut input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let now = current_time_millis();
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, now).await;
+    let id = session.read().await.proxy_session_id.clone();
+    for (port, token) in [(12201, "initiator"), (12202, "remaining")] {
+        super::observability::register_hls_cache_stream_for_stats_test(
+            &app,
+            &session,
+            &id,
+            token,
+            &test_fingerprint_with_addr(test_addr_with_port(port)),
+            token,
+        )
+        .await;
+    }
+    input.account_disabled = true;
+    reload_inputs(&app, vec![Arc::new(input.clone())]);
+    let published = Arc::new(tokio::sync::Notify::new());
+    let request = {
+        let app = app.clone();
+        let session = session.clone();
+        let id = id.clone();
+        let published = published.clone();
+        tokio::spawn(async move {
+            let _prepared = prepare_hls_origin_runtime(
+                &app,
+                &session,
+                &input,
+                "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+                "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+                &id,
+                &test_fingerprint(),
+                ConnectionKind::Normal,
+                0,
+                HlsOriginWorkKind::Manifest,
+                HlsOriginWorkClass::ManifestInteractive,
+                now,
+            )
+            .await
+            .unwrap();
+            published.notify_one();
+            std::future::pending::<()>().await;
+        })
+    };
+    published.notified().await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(app.active_users.panel_streams().await.iter().all(|row| row.provider.as_ref() == "account-a"));
+    super::observability::register_hls_cache_stream_for_stats_test(
+        &app,
+        &session,
+        &id,
+        "late-viewer",
+        &test_fingerprint_with_addr(test_addr_with_port(12203)),
+        "late-viewer",
+    )
+    .await;
+    let rows = app.active_users.panel_streams().await;
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.provider.as_ref() == "account-a"));
+}
+
+#[tokio::test]
+async fn late_join_and_status_snapshot_use_current_origin_account() {
+    use super::super::origin_account_runtime::publish_hls_origin_account_with_status;
+    use tuliprox_hls::api::HlsOriginAccountSnapshot;
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, current_time_millis()).await;
+    let id = session.read().await.proxy_session_id.clone();
+    super::observability::register_hls_cache_stream_for_stats_test(
+        &app,
+        &session,
+        &id,
+        "existing",
+        &test_fingerprint(),
+        "existing",
+    )
+    .await;
+    publish_hls_origin_account_with_status(&app, &session, |current| {
+        let previous = current.origin_account_binding.as_ref().unwrap();
+        let next = HlsOriginAccountBinding::rebound(
+            input.name.clone(),
+            Arc::from("account-b"),
+            previous.session_owner.clone(),
+            previous.generation + 1,
+            current_time_millis(),
+        );
+        current.handoff_origin_account(next);
+        Ok(HlsOriginAccountSnapshot::from_session(current))
+    })
+    .await
+    .unwrap();
+    super::observability::register_hls_cache_stream_for_stats_test(
+        &app,
+        &session,
+        &id,
+        "late",
+        &test_fingerprint_with_addr(test_addr_with_port(12301)),
+        "late",
+    )
+    .await;
+    let rows = app.active_users.panel_streams().await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.provider.as_ref() == "account-b"));
+}
+
+#[tokio::test]
+async fn handover_waits_for_viewer_projection_without_holding_hls_write_lock() {
+    use super::super::origin_account_runtime::publish_hls_origin_account_with_status;
+    use tuliprox_hls::api::HlsOriginAccountSnapshot;
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", &input.name, current_time_millis()).await;
+    let shared_id = super::super::hls_cache_shared_stream_id(&session.read().await.proxy_session_id);
+    let held = app.active_users.lock_shared_stream_provider_projection(shared_id).await;
+    let mut publish = Box::pin(publish_hls_origin_account_with_status(&app, &session, |current| {
+        Ok(HlsOriginAccountSnapshot::from_session(current))
+    }));
+    assert!(futures::poll!(publish.as_mut()).is_pending());
+    assert!(session.try_write().is_ok(), "manager wait must never retain an HLS lock");
+    drop(held);
+    publish.await.unwrap();
 }

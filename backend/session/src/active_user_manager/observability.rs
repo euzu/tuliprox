@@ -13,6 +13,34 @@ use std::{
 };
 use tuliprox_core::utils::debug_if_enabled;
 
+/// Locks viewer rows before an origin publication, so publication and its UI events have no cancellation gap.
+pub struct SharedStreamProviderProjection<'a> {
+    connections: super::UserConnectionsWriteGuard<'a>,
+    events: &'a EventManager,
+    shared_stream_id: u64,
+}
+
+impl SharedStreamProviderProjection<'_> {
+    /// Changes only display metadata and publishes each full changed row while updates are ordered by the lock.
+    pub fn update_provider(&mut self, provider: &Arc<str>) -> usize {
+        let mut changed = 0;
+        for data in self.connections.by_key.values_mut() {
+            for stream in &mut data.streams {
+                if stream.channel.shared
+                    && stream.channel.shared_stream_id == Some(self.shared_stream_id)
+                    && stream.provider != *provider
+                {
+                    stream.provider.clone_from(provider);
+                    self.events
+                        .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream.clone())));
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+}
+
 pub(super) struct DivergenceEntry {
     pub(super) last_logged: Instant,
     pub(super) count_since_last_log: u32,
@@ -44,6 +72,18 @@ pub(super) struct DivergenceSnapshot {
 }
 
 impl ActiveUserManager {
+    /// Acquire before the HLS session write lock; do not call other manager methods while this guard is held.
+    pub async fn lock_shared_stream_provider_projection(
+        &self,
+        shared_stream_id: u64,
+    ) -> SharedStreamProviderProjection<'_> {
+        SharedStreamProviderProjection {
+            connections: self.write_connections().await,
+            events: &self.event_manager,
+            shared_stream_id,
+        }
+    }
+
     pub(super) fn custom_stream_technical_info() -> StreamTechnicalInfo {
         StreamTechnicalInfo {
             container: String::from("mpegts"),
@@ -107,6 +147,23 @@ impl ActiveUserManager {
         }
     }
 
+    /// Re-read an existing playback row and keep the connection lock through its synchronous event send.
+    /// A delayed producer must neither restore an older projection nor recreate a removed playback.
+    pub(crate) async fn emit_current_stream_update(&self, snapshot: &StreamInfo) {
+        let connections = self.connections.read().await;
+        let current = connections.by_key.get(&snapshot.username).and_then(|data| {
+            data.streams.iter().find(|stream| {
+                stream.uid == snapshot.uid
+                    && stream.session_token == snapshot.session_token
+                    && stream.channel.shared_stream_id == snapshot.channel.shared_stream_id
+            })
+        });
+        if let Some(current) = current {
+            self.event_manager
+                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(current.clone())));
+        }
+    }
+
     pub(super) async fn emit_promotion_update(&self, username: &str, action: PromotionAction) {
         let maybe_stream = {
             let user_connections = self.connections.read().await;
@@ -131,7 +188,7 @@ impl ActiveUserManager {
                     );
                 }
             }
-            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+            self.emit_current_stream_update(&stream_info).await;
         }
     }
 

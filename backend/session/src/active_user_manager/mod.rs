@@ -256,7 +256,6 @@ mod session_lifecycle;
 use self::observability::divergence_key;
 #[cfg(test)]
 use self::observability::DivergenceKind;
-pub use self::session_lifecycle::next_session_incarnation;
 use self::{
     connections::{
         create_socket_reentry_guard_key, decide_connection_kind, url_host_key, PromotionAction, RecentWinnerProtection,
@@ -270,3 +269,4 @@ use self::{
         uses_session_reentry_guard, UserSessionParams,
     },
 };
+pub use self::{observability::SharedStreamProviderProjection, session_lifecycle::next_session_incarnation};
