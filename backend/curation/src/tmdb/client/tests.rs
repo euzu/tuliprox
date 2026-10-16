@@ -136,7 +136,7 @@ async fn tmdb_empty_is_valid_only_at_the_start_with_coherent_totals() {
     for pages in [0, 1] {
         let body = json!({"page":1,"total_pages":pages,"total_results":0,"results":[]}).to_string();
         let server = TestServer::new(http_response(200, &body)).await;
-        assert!(client(&server).fetch(&selector(100)).await.unwrap().is_empty());
+        assert_eq!(client(&server).fetch(&selector(100)).await.unwrap().len(), 0);
         assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
     for body in [
@@ -222,7 +222,7 @@ async fn tmdb_all_routes_preserve_headers_with_no_query_token_or_details() {
             let mut selector = selector(100);
             selector.kind = kind;
             selector.time_window = window;
-            assert!(client.fetch(&selector).await.unwrap().is_empty());
+            assert_eq!(client.fetch(&selector).await.unwrap().len(), 0);
             let requests = server.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
             assert!(
@@ -285,7 +285,7 @@ async fn tmdb_identity_chunked_and_gzip_exact_and_plus_one_count_decoded_bytes()
             let mut budget = client.batch_budget();
             let result = client.trending(&selector(100), &mut budget).await;
             if length == BODY_LIMIT {
-                assert!(result.unwrap().is_empty());
+                assert_eq!(result.unwrap().len(), 0);
             } else {
                 assert_eq!(result.unwrap_err(), TmdbFailure::BodyLimit);
             }

@@ -52,7 +52,7 @@ fn include_computed_false_skips_resolution() {
     let mut cfg =
         EpgConfigDto { sources: Some(vec![xmltv_source("provider://myprovider/xmltv.php")]), ..Default::default() };
     cfg.prepare(|| Err("no auto".to_owned()), false).expect("prepare with include_computed=false should succeed");
-    assert!(cfg.t_sources.is_empty());
+    assert_eq!(cfg.t_sources.len(), 0);
 }
 
 #[test]

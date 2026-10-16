@@ -188,8 +188,8 @@ mod tests {
         let decoded =
             serde_json::from_str::<PlaylistUpdateStatusDto>(r#"{"inputs":[{"input_id":7,"last_update":1725000000}]}"#)?;
 
-        assert!(decoded.inputs[0].clusters.is_empty());
-        assert!(decoded.active_updates.is_empty());
+        assert_eq!(decoded.inputs[0].clusters.len(), 0);
+        assert_eq!(decoded.active_updates.len(), 0);
         Ok(())
     }
 

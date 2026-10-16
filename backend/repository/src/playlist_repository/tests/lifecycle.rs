@@ -54,5 +54,5 @@ async fn intentional_empty_strm_cleanup_false_removes_indexed_files_but_keeps_un
         get_target_storage_path(&config, &target.name).expect("target storage")
     };
     let index = strm_get_file_paths(&hash_string_as_hex(&normalize_string_path("strm-retained")), &target_storage);
-    assert!(std::fs::read_to_string(index).expect("empty STRM index").is_empty());
+    assert_eq!(std::fs::read_to_string(index).expect("empty STRM index").len(), 0);
 }

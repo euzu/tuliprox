@@ -286,7 +286,7 @@ fn session_follow_up_shortens_pending_lease_once() {
         3_000,
         HlsAccessLeasePendingDeadline::FollowUp { deadline_ms: 30_000 },
     );
-    assert!(unchanged.is_empty());
+    assert_eq!(unchanged.len(), 0);
     let lease = store.by_lease_id.get(&lease_id).expect("lease should remain stored");
     assert_eq!(lease.pending_deadline, Some(HlsAccessLeasePendingDeadline::FollowUp { deadline_ms: 12_000 }));
     assert_eq!(lease.valid_until_ms, 12_000);
@@ -514,7 +514,7 @@ fn bulk_lease_removal_advances_and_preserves_session_evidence_generation() {
     assert_eq!(store.remove_access_leases_for_session(&proxy_session_id).len(), 2);
     let after_removal = store.availability_evidence_generation(&proxy_session_id);
     assert!(after_removal > before_removal);
-    assert!(store.remove_access_leases_for_session(&proxy_session_id).is_empty());
+    assert_eq!(store.remove_access_leases_for_session(&proxy_session_id).len(), 0);
     assert_eq!(store.availability_evidence_generation(&proxy_session_id), after_removal);
 }
 

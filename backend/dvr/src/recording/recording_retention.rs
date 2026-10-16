@@ -355,7 +355,7 @@ mod tests {
         let mut t = completed("a", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1);
         t.recording.completed_at = None;
         let out = compute_candidates(&[t], &config, 1_000_000_000);
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -593,6 +593,6 @@ mod tests {
         let config = RetentionConfig::default();
         let tasks = vec![completed("a", RecordingOwner::User(UserId::from("web:alice")), Some("c1"), Some("Alpha"), 1)];
         let out = compute_candidates(&tasks, &config, 0);
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 }

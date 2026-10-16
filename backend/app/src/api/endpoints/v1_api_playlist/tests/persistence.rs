@@ -50,7 +50,7 @@ async fn playlist_update_status_reload_returns_active_bus_facts_without_persisti
         PlaylistUpdateState::Failure,
     )));
     let Json(status) = super::super::playlist_update_status(State(app)).await.unwrap();
-    assert!(status.active_updates.is_empty());
+    assert_eq!(status.active_updates.len(), 0);
     assert_eq!(
         std::fs::read(path.join("status.json")).unwrap(),
         before,

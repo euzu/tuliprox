@@ -1812,7 +1812,7 @@ mod tests {
             TargetSelectionState::All
         );
         let cleared = reduce(individually_restored, InputUpdateCardAction::ToggleAll(targets.clone()));
-        assert!(cleared.controls.selected_target_ids.is_empty());
+        assert_eq!(cleared.controls.selected_target_ids.len(), 0);
         assert_eq!(
             target_selection_state(&cleared.controls.selected_target_ids, &targets),
             TargetSelectionState::Empty
@@ -2260,9 +2260,9 @@ mod tests {
         let replacement = card(7, &[4]);
         let targetless = card(7, &[]);
 
-        assert!(selected_current_target_ids(&replacement, &state.controls.selected_target_ids).is_empty());
+        assert_eq!(selected_current_target_ids(&replacement, &state.controls.selected_target_ids).len(), 0);
         assert!(!can_start_update(&state, &replacement, true));
-        assert!(selected_current_target_ids(&targetless, &state.controls.selected_target_ids).is_empty());
+        assert_eq!(selected_current_target_ids(&targetless, &state.controls.selected_target_ids).len(), 0);
         assert!(!can_start_update(&state, &targetless, true));
     }
 

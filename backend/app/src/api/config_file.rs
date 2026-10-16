@@ -471,7 +471,7 @@ mod tests {
         let refreshed = refresh_forced_targets(Arc::clone(&current), &sources_with(vec![target(1, "my-target")]));
 
         assert!(!refreshed.enabled, "a reload must not enable a filter the operator never asked for");
-        assert!(refreshed.target_names.is_empty());
+        assert_eq!(refreshed.target_names.len(), 0);
     }
 
     /// Target ids are positional, so a surviving name must come back with
@@ -502,6 +502,6 @@ mod tests {
         let refreshed = refresh_forced_targets(forced(&["gone"]), &sources_with(vec![target(1, "other")]));
 
         assert!(!refreshed.enabled, "an empty filter must not be left enabled: it would process nothing");
-        assert!(refreshed.target_names.is_empty());
+        assert_eq!(refreshed.target_names.len(), 0);
     }
 }

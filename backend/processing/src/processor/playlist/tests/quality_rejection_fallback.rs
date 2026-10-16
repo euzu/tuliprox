@@ -313,8 +313,8 @@ async fn playlist_update_run_manual_and_automatic_execution_order_is_generated_a
     };
     let manual_progress = progress_for(&manual_run_id);
     let automatic_progress = progress_for(&automatic_run_id);
-    assert!(!manual_progress.is_empty());
-    assert!(!automatic_progress.is_empty());
+    assert_ne!(manual_progress.len(), 0);
+    assert_ne!(automatic_progress.len(), 0);
     assert!(manual_progress.iter().all(|progress| progress.execution_order == Some(manual_order)));
     assert!(automatic_progress.iter().all(|progress| progress.execution_order == Some(automatic_order)));
 }
@@ -687,11 +687,11 @@ async fn coderabbit_stalker_global_failures_mark_only_requested_non_skipped_clus
             assert_eq!(fetch.errors.len(), 1, "{failure:?}");
             assert!(!fetch.is_ok());
             assert!(fetch.quality_acceptances.is_empty() && fetch.quality_rejections.is_empty());
-            assert!(fetch.force_updates.is_empty());
+            assert_eq!(fetch.force_updates.len(), 0);
             let requests = server.finish();
             match failure {
-                FailurePoint::Handshake => assert!(!requests.is_empty()),
-                FailurePoint::Portal | FailurePoint::Client | FailurePoint::Storage => assert!(requests.is_empty()),
+                FailurePoint::Handshake => assert_ne!(requests.len(), 0),
+                FailurePoint::Portal | FailurePoint::Client | FailurePoint::Storage => assert_eq!(requests.len(), 0),
             }
         }
     }
@@ -725,7 +725,7 @@ async fn coderabbit_xtream_http_failure_preserves_successful_disk_clusters() {
         assert_eq!(fetch.failed_clusters, vec![XtreamCluster::Video]);
         assert!(!fetch.is_ok(), "the failed cluster must remain a technical failure");
         assert!(fetch.persisted);
-        assert!(fetch.quality_rejections.is_empty());
+        assert_eq!(fetch.quality_rejections.len(), 0);
         let accepted: Vec<_> = match quality {
             UpdateQualityPolicy::Enforce => fetch.quality_acceptances.iter().map(|value| value.cluster).collect(),
             UpdateQualityPolicy::Bypass => fetch.force_updates.iter().map(|value| value.cluster).collect(),
@@ -805,7 +805,7 @@ async fn pipeline_transparency_normal_policy_reuses_a_valid_cluster_cache() {
 
     assert!(result.errors.is_empty());
     assert!(result.storage_error.is_none());
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     assert_eq!(result.job_state(), InputJobState::Ready);
     assert_baseline(&result.source.take_groups());
     assert!(requests.is_empty(), "valid cache should avoid provider requests: {requests:?}");
@@ -1215,7 +1215,7 @@ async fn force_policy_retains_a_cluster_after_a_technical_parse_failure() {
 
     assert!(!result.errors.is_empty(), "malformed VOD response must remain a technical error");
     assert!(result.storage_error.is_none());
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     let groups = result.source.take_groups();
     let vod = groups.iter().find(|group| group.xtream_cluster == XtreamCluster::Video).expect("retained VOD");
     assert_eq!(vod.title.as_ref(), "old-vod");
@@ -1278,7 +1278,7 @@ async fn in_memory_series_quality_compares_catalog_rows_with_an_enriched_baselin
     let requests = server.finish();
 
     assert!(result.errors.is_empty(), "Series update failed: {:?}", result.errors);
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     let groups = result.source.take_groups();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].title.as_ref(), "candidate-series");
@@ -1388,7 +1388,7 @@ async fn in_memory_quality_accepts_unique_population_and_persists_the_last_dupli
 
     assert!(result.errors.is_empty(), "deduplicated acceptance failed: {:?}", result.errors);
     assert!(result.storage_error.is_none());
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     let groups = result.source.take_groups();
     assert_eq!(groups.iter().map(|group| group.channels.len()).sum::<usize>(), 100);
     let winner_group = groups.iter().find(|group| group.id == 2).expect("winning category");
@@ -1443,7 +1443,7 @@ async fn m3u_update_quality_enforces_the_existing_cluster_threshold() {
     let mut initial = download_input(&initial_ctx, &input, false).await;
 
     assert!(initial.errors.is_empty(), "initial M3U download failed: {:?}", initial.errors);
-    assert!(initial.quality_rejections.is_empty());
+    assert_eq!(initial.quality_rejections.len(), 0);
     assert_eq!(initial.source.get_channel_count(), 2);
 
     tokio::fs::write(&playlist_path, "#EXTM3U\n#EXTINF:-1,New\nhttp://new.example/1\n")

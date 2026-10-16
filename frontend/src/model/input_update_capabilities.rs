@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn input_update_capabilities_rescan_is_not_a_provider_policy_and_uses_targets() {
         let capability = InputUpdateCapabilities::Rescan;
-        assert!(capability.policies().is_empty());
+        assert_eq!(capability.policies().len(), 0);
         assert!(capability.rebuilds_targets());
         assert_eq!(capability.selected_action(InputRefreshPolicy::NORMAL), InputUpdateAction::Rescan);
         for unavailable in [

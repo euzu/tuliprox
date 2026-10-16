@@ -156,7 +156,7 @@ async fn empty_and_no_match_are_complete_but_disabled_sources_are_not_configured
         let CurationRunOutcome::Complete(result) = run(&config(None), &catalog(), &server).await else {
             panic!("valid empty or no-match is complete")
         };
-        assert!(result.memberships.is_empty());
+        assert_eq!(result.memberships.len(), 0);
         assert_eq!(result.selectors.len(), 2);
     }
     let server = TestServer::new(http_response(200, PAGE)).await;

@@ -164,7 +164,7 @@ pub enum StreamRequestDetach {
 }
 
 /// How long an ended session token blocks its recreation from a sealed playlist token.
-const ENDED_SESSION_RECREATE_BLOCK: Duration = Duration::from_secs(600);
+const ENDED_SESSION_RECREATE_BLOCK: Duration = Duration::from_mins(10);
 
 pub struct ReleasedConnection {
     pub addr_removed: bool,

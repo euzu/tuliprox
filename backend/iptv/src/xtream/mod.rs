@@ -1038,14 +1038,14 @@ mod tests {
         let sink = RecordingSink::default();
         // One second before the window opens.
         super::notify_account_expire_at(EXPIRY - super::THREE_DAYS_IN_SECS - 1, Some(EXPIRY), &sink, "u", "p");
-        assert!(sink.states().is_empty());
+        assert_eq!(sink.states().len(), 0);
     }
 
     #[test]
     fn no_expiry_date_emits_nothing() {
         let sink = RecordingSink::default();
         super::notify_account_expire_at(EXPIRY, None, &sink, "user", "provider");
-        assert!(sink.states().is_empty());
+        assert_eq!(sink.states().len(), 0);
     }
 
     fn options_with_flags(flags: &[ConfigInputFlags]) -> ConfigInputOptions {
@@ -1173,7 +1173,7 @@ mod tests {
         assert_eq!(baseline_reads.load(Ordering::SeqCst), 0);
         assert_eq!(direct_fetch.groups.len(), 1);
         assert_eq!(direct_fetch.groups[0].channels.len(), 89);
-        assert!(direct_fetch.quality_rejections.is_empty());
+        assert_eq!(direct_fetch.quality_rejections.len(), 0);
 
         let mut update_fetch = PlaylistFetch::default();
         apply_in_memory_cluster_download(
@@ -1241,7 +1241,7 @@ mod tests {
         .expect("deduplicated candidate should be accepted");
 
         assert_eq!(baseline_reads.load(Ordering::SeqCst), 1);
-        assert!(fetch.quality_rejections.is_empty());
+        assert_eq!(fetch.quality_rejections.len(), 0);
         assert_eq!(
             fetch.quality_acceptances,
             vec![ClusterUpdateAcceptance {
@@ -1319,8 +1319,8 @@ mod tests {
         assert_eq!(baseline_reads.load(Ordering::SeqCst), 0);
         assert_eq!(direct_fetch.groups.iter().map(|group| group.channels.len()).sum::<usize>(), 2);
         assert_eq!(disabled_fetch.groups.iter().map(|group| group.channels.len()).sum::<usize>(), 2);
-        assert!(direct_fetch.quality_rejections.is_empty());
-        assert!(disabled_fetch.quality_rejections.is_empty());
+        assert_eq!(direct_fetch.quality_rejections.len(), 0);
+        assert_eq!(disabled_fetch.quality_rejections.len(), 0);
     }
 
     #[tokio::test]
@@ -1359,7 +1359,7 @@ mod tests {
         .expect("forced candidate should be accepted");
 
         assert_eq!(baseline_reads.load(Ordering::SeqCst), 0);
-        assert!(fetch.quality_rejections.is_empty());
+        assert_eq!(fetch.quality_rejections.len(), 0);
         assert_eq!(fetch.groups.len(), 1);
         assert_eq!(fetch.groups[0].channels.len(), 2);
         assert_eq!(fetch.groups[0].channels[0].header.name.as_ref(), "winning-duplicate");
@@ -1409,7 +1409,7 @@ mod tests {
             vec![candidate_group(XtreamCluster::Live, 1, 1)],
         );
         assert_eq!(disabled.groups[0].channels.len(), 1);
-        assert!(disabled.quality_rejections.is_empty());
+        assert_eq!(disabled.quality_rejections.len(), 0);
 
         let mut bootstrap = PlaylistFetch::default();
         apply_cluster_update_quality(
@@ -1420,7 +1420,7 @@ mod tests {
             vec![candidate_group(XtreamCluster::Video, 2, 3)],
         );
         assert_eq!(bootstrap.groups[0].channels.len(), 3);
-        assert!(bootstrap.quality_rejections.is_empty());
+        assert_eq!(bootstrap.quality_rejections.len(), 0);
 
         let mut empty_bootstrap = PlaylistFetch::default();
         apply_cluster_update_quality(&mut empty_bootstrap, XtreamCluster::Series, None, 90, Vec::new());

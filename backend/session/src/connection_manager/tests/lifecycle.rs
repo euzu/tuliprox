@@ -531,7 +531,7 @@ async fn shutdown_releases_active_streams() {
         })
         .await;
     assert!(stream_info.is_some(), "registration must succeed");
-    assert!(!manager.user_manager.active_streams().await.is_empty());
+    assert_ne!(manager.user_manager.active_streams().await.len(), 0);
 
     manager.shutdown().await;
     assert!(manager.user_manager.active_streams().await.is_empty(), "shutdown must release active streams");

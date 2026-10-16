@@ -284,13 +284,13 @@ async fn kicked_release_removes_preserved_adaptive_stream_without_socket_registr
 
     let released = manager.release_connection(&addr).await;
     assert!(released.addr_removed);
-    assert!(released.removed_streams.is_empty());
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(released.removed_streams.len(), 0);
+    assert_eq!(manager.active_streams().await.len(), 0);
 
     let kicked = manager.release_connection_as_kicked(&addr).await;
     assert!(kicked.addr_removed);
     assert_eq!(kicked.removed_streams.len(), 1);
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn release_stream_by_uid_finds_original_user_after_shared_addr_owner_chang
 
     assert!(manager.release_stream_by_uid(&addr, 44).await.is_some());
     assert_eq!(manager.active_users_and_connections().await, (0, 0));
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -619,7 +619,7 @@ async fn release_connection_cleans_every_user_stream_for_reused_addr_only() {
 
     manager.release_connection(&unrelated_addr).await;
     assert_eq!(manager.active_users_and_connections().await, (0, 0));
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -1188,7 +1188,7 @@ async fn vod_session_survives_overlapping_and_seek_sockets() {
     assert!(manager.release_stream(&range_addr).await.is_none());
     let released = manager.release_connection(&range_addr).await;
     assert!(released.addr_removed);
-    assert!(released.removed_streams.is_empty());
+    assert_eq!(released.removed_streams.len(), 0);
 
     {
         let connections = manager.connections.read().await;
@@ -1217,7 +1217,7 @@ async fn vod_session_survives_overlapping_and_seek_sockets() {
     assert!(manager.release_stream(&seek_addr).await.is_none());
     let released = manager.release_connection(&seek_addr).await;
     assert!(released.addr_removed);
-    assert!(released.removed_streams.is_empty());
+    assert_eq!(released.removed_streams.len(), 0);
 
     let connections = manager.connections.read().await;
     let connection_data = connections.by_key.get("user1").expect("user connection data");

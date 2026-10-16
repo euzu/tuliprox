@@ -34,7 +34,7 @@ fn numeric_id_with_trailing_slash() {
 fn non_numeric_last_segment_returns_hash() {
     let result = extract_id_from_url("http://server.com/live/user/pass/hello.ts");
     assert!(!result.chars().all(|c| c.is_ascii_digit()), "should be a hash, not a numeric id");
-    assert!(!result.is_empty());
+    assert_ne!(result.len(), 0);
 }
 
 #[test]
@@ -52,13 +52,13 @@ fn no_slash_returns_hash() {
 #[test]
 fn empty_url_returns_hash() {
     let result = extract_id_from_url("");
-    assert!(!result.is_empty());
+    assert_ne!(result.len(), 0);
 }
 
 #[test]
 fn only_slashes_returns_hash() {
     let result = extract_id_from_url("///");
-    assert!(!result.is_empty());
+    assert_ne!(result.len(), 0);
 }
 
 #[test]

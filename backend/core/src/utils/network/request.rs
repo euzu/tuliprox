@@ -52,11 +52,11 @@ pub enum ResourceDestination {
 }
 
 /// How long a verdict that allows a URL to be handed to a client is remembered.
-const RESOURCE_DESTINATION_PUBLIC_TTL: Duration = Duration::from_secs(60);
+const RESOURCE_DESTINATION_PUBLIC_TTL: Duration = Duration::from_mins(1);
 
 /// How long a verdict that keeps a destination away from clients is remembered. Both classes fail
 /// closed, so they can be cached longer than the one that decides exposure.
-const RESOURCE_DESTINATION_PRIVATE_TTL: Duration = Duration::from_secs(300);
+const RESOURCE_DESTINATION_PRIVATE_TTL: Duration = Duration::from_mins(5);
 
 /// How long a name that produced no answer within the resolution budget is remembered.
 ///

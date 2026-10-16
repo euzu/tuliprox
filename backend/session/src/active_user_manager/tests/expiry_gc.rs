@@ -145,7 +145,7 @@ async fn test_preserved_adaptive_stream_is_pruned_after_session_ttl() {
     manager
         .process_due_adaptive_expiry_entries(current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1))
         .await;
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -389,7 +389,7 @@ async fn test_due_adaptive_expiry_reschedules_when_session_timestamp_changes() {
         *expiry_index.get(&key).unwrap()
     };
     assert!(new_expires_at > old_expires_at);
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -533,7 +533,7 @@ async fn test_due_adaptive_expiry_does_not_block_on_full_cleanup_channel() {
 
     let queued_event = cleanup_rx.try_recv().expect("prefilled cleanup event should remain queued");
     assert!(matches!(queued_event, CleanupEvent::ReleaseConnection { .. }));
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]

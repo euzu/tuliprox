@@ -442,7 +442,7 @@ mod tests {
         let key = occurrence_key("r1", &source(), "ch-1", 1_000, "t:my show");
         let tasks = vec![task("r1", &key)];
         let out = plan_materializations(&rules, &programmes, &tasks, &TombstoneSet::default(), 0, Some(10_000));
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         let rules = vec![new_episode_rule()];
         let programmes = vec![epg_programme("My Show", -1, 100)];
         let out = plan_materializations(&rules, &programmes, &[], &TombstoneSet::default(), 0, Some(10_000));
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
         let rules = vec![new_episode_rule()];
         let programmes = vec![epg_programme("My Show", 5_000, 6_000)];
         let out = plan_materializations(&rules, &programmes, &[], &TombstoneSet::default(), 0, Some(2_000));
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
         p.previously_shown = true;
         let programmes = vec![p];
         let out = plan_materializations(&rules, &programmes, &[], &TombstoneSet::default(), 0, Some(10_000));
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -478,7 +478,7 @@ mod tests {
         let rules = vec![r];
         let programmes = vec![epg_programme("My Show", 1_000, 2_000)];
         let out = plan_materializations(&rules, &programmes, &[], &TombstoneSet::default(), 0, Some(10_000));
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -502,7 +502,7 @@ mod tests {
         // Set the EPG horizon to 1 hour — the next Sunday is
         // days away.
         let out = plan_materializations(&rules, &[], &[], &TombstoneSet::default(), now, Some(3_600));
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
@@ -514,6 +514,6 @@ mod tests {
 
         let out = plan_materializations(&[rule], &[], &[], &TombstoneSet::default(), 0, None);
 
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 0);
     }
 }

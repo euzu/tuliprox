@@ -95,7 +95,7 @@ async fn hls_access_lease_idle_releases_user_but_keeps_origin_binding_and_queues
         assert!(matches!(session.maps.get(&ProxyMapId(1)).expect("map remains").status, MapCacheStatus::Queued { .. }));
     }
     assert!(app_state.active_provider.is_provider_reserved_for_other_session(&account_name, Some("other-owner")));
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]

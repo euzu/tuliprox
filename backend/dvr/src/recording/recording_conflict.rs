@@ -320,7 +320,7 @@ mod tests {
             None,
         );
         assert_eq!(preview.severity, ConflictSeverity::NoKnownConflict);
-        assert!(preview.overlap_segments.is_empty());
+        assert_eq!(preview.overlap_segments.len(), 0);
     }
 
     #[test]

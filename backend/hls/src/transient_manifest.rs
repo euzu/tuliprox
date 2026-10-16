@@ -91,6 +91,7 @@ impl TransientManifestRewriter {
     /// `final_manifest_url` must be the concrete URL of the manifest that was actually fetched. For provider-url
     /// failover and HTTP redirects this can be the selected mirror or final CDN/origin host. Relative segment, MAP and
     /// key URIs are resolved against this URL so transient resource fetches keep working after redirects.
+    #[cfg(test)]
     pub fn rewrite(
         body: &str,
         final_manifest_url: &str,

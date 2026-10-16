@@ -333,7 +333,7 @@ pub(super) async fn assert_multi_lease_fallback_handles_pending_and_unavailable(
     assert_eq!(aggregate.total, 2);
     assert_eq!(aggregate.pending_owned, 1);
     assert_eq!(aggregate.terminal_committed, 1, "{aggregate:?}");
-    assert!(aggregate.unresolved.is_empty());
+    assert_eq!(aggregate.unresolved.len(), 0);
     assert_eq!(fixture.ctx.hls_proxy.terminal_pending().owner_count(), 1);
     let unavailable = fixture
         .ctx

@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(request.target_ids, Some(vec![20, 21]));
         assert_eq!(request.input_action, Some(action));
         assert_eq!(request.input_refresh, None);
-        assert!(request.targets.is_empty());
+        assert_eq!(request.targets.len(), 0);
         assert_eq!(build_playlist_update_bulk_request().input_action, None);
     }
 
@@ -334,7 +334,7 @@ mod tests {
             for &policy in InputUpdateCapabilities::for_input(&input).policies() {
                 let request =
                     build_input_playlist_update_request(&[30, 20], InputRefreshOverride { input_id: input.id, policy });
-                assert!(request.targets.is_empty());
+                assert_eq!(request.targets.len(), 0);
                 assert_eq!(request.target_ids, Some(vec![30, 20]));
                 assert_eq!(request.input_refresh, Some(InputRefreshOverride { input_id: 7, policy }));
             }
@@ -406,7 +406,7 @@ mod tests {
             InputRefreshOverride { input_id: 7, policy: InputRefreshPolicy::FORCE },
         );
 
-        assert!(request.targets.is_empty());
+        assert_eq!(request.targets.len(), 0);
         assert_eq!(request.target_ids, Some(vec![30, 20]));
         assert_eq!(
             request.input_refresh,
@@ -422,7 +422,7 @@ mod tests {
                 InputRefreshOverride { input_id: 7, policy: InputRefreshPolicy::NORMAL },
             );
 
-            assert!(request.targets.is_empty());
+            assert_eq!(request.targets.len(), 0);
             assert_eq!(request.target_ids, Some(expected_ids));
         }
     }
@@ -440,7 +440,7 @@ mod tests {
     fn playlist_update_bulk_request_uses_normal_policy_and_complete_server_target_selection() {
         let request = build_playlist_update_bulk_request();
 
-        assert!(request.targets.is_empty());
+        assert_eq!(request.targets.len(), 0);
         assert_eq!(request.target_ids, None);
         assert_eq!(request.input_refresh, None);
     }

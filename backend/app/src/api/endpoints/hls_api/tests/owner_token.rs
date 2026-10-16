@@ -491,7 +491,7 @@ async fn tokens_without_entry_kind_keep_bad_request_without_session() {
         let response = fixture.token_request(&client("10.0.0.1", 50_121), &token, HeaderMap::new()).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
-    assert!(fixture.origin.requests().is_empty());
+    assert_eq!(fixture.origin.requests().len(), 0);
 }
 
 #[tokio::test]
@@ -507,7 +507,7 @@ async fn shared_hls_cache_on_never_recreates_from_token() {
     );
     let response = fixture.token_request(&client("10.0.0.1", 50_131), &token, HeaderMap::new()).await;
     assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(fixture.origin.requests().is_empty());
+    assert_eq!(fixture.origin.requests().len(), 0);
     assert!(fixture.app_state.active_users.get_and_update_user_session("hls-user", hint).await.is_none());
 }
 

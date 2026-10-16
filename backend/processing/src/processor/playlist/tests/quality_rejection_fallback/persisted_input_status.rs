@@ -93,7 +93,7 @@ async fn m3u_update_quality_playlist_update_status_staged_completion_is_independ
         let telemetry = completions[0].input_telemetry.as_ref().unwrap();
         assert_eq!(telemetry.source, None);
         assert!(telemetry.clusters.iter().all(|cluster| cluster.source == Some(PlaylistUpdateDataSource::Provider)));
-        assert!(staged_completion::input_completions(&events, parent.id).is_empty());
+        assert_eq!(staged_completion::input_completions(&events, parent.id).len(), 0);
     }
 }
 
@@ -243,7 +243,7 @@ async fn playlist_update_status_parent_download_persists_staged_own_per_cluster_
         let skipped = download_input(&ctx, &staged, false).await;
         assert!(skipped.input_telemetry.is_none());
         assert!(input_cache::load_input_status(&staged_path).last_input_update.is_none());
-        assert!(staged_completion::input_completions(&events, staged.id).is_empty());
+        assert_eq!(staged_completion::input_completions(&events, staged.id).len(), 0);
 
         let result = download_input(&ctx, &parent, false).await;
         let status = input_cache::load_input_status(&staged_path);

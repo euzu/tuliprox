@@ -423,7 +423,7 @@ fn conflicting_reduced_follow_up_cannot_reuse_previous_full_burst() {
     let mut conflict = observation(0, "origin-c", HlsCandidateHostRelation::OtherHost);
     conflict.timeline_fingerprint = fingerprint(20);
 
-    assert!(alternative_cohorts_with_history(&[conflict], Some(&first), false).is_empty());
+    assert_eq!(alternative_cohorts_with_history(&[conflict], Some(&first), false).len(), 0);
 }
 
 #[test]

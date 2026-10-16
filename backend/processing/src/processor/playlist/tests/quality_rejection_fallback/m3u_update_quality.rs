@@ -105,7 +105,7 @@ async fn m3u_update_quality_all_clusters_accepted() {
     let temp = tempfile::tempdir().unwrap();
     let (ctx, input) = fixture(temp.path(), Some([10, 10, 10]), [90, 90, 90]).await;
     let mut result = run(&ctx, &input, [9, 11, 10]).await;
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     assert_eq!(result.update_state(), PlaylistUpdateState::Success);
     verify_effective(&ctx, &input, &mut result, [9, 11, 10]).await;
 }
@@ -257,7 +257,7 @@ async fn m3u_update_quality_disabled() {
     let temp = tempfile::tempdir().unwrap();
     let (ctx, input) = fixture(temp.path(), Some([10, 10, 10]), [0, 0, 0]).await;
     let mut result = run(&ctx, &input, [1, 1, 0]).await;
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     assert!(result
         .input_telemetry
         .as_ref()
@@ -273,7 +273,7 @@ async fn m3u_update_quality_first_import() {
     let temp = tempfile::tempdir().unwrap();
     let (ctx, input) = fixture(temp.path(), None, [90, 90, 90]).await;
     let mut result = run(&ctx, &input, [1, 1, 1]).await;
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     assert!(result.input_telemetry.as_ref().unwrap().clusters.iter().all(|c| c.quality.is_none()
         && c.baseline_count.is_none()
         && c.decision == Some(PlaylistUpdateClusterDecision::Accepted)));
@@ -292,7 +292,7 @@ async fn m3u_update_quality_download_or_parse_failure() {
         }
         let mut result = download_input(&ctx, &input, false).await;
         assert!(!result.errors.is_empty());
-        assert!(result.quality_rejections.is_empty());
+        assert_eq!(result.quality_rejections.len(), 0);
         assert_eq!(result.update_state(), PlaylistUpdateState::Failure);
         let mut saved = load_input_playlist(&ctx.config, &input, None).await.unwrap();
         assert_eq!(counts(&saved.take_groups()), [10, 10, 10]);
@@ -324,7 +324,7 @@ async fn m3u_update_quality_skip_preserves_previous_and_reuse_emits_no_new_facts
     Arc::make_mut(&mut input).options.as_mut().unwrap().flags.set(ConfigInputFlags::SkipSeries);
     let mut result = run(&ctx, &input, [10, 10, 0]).await;
     assert_eq!(result.update_state(), PlaylistUpdateState::Success);
-    assert!(result.quality_rejections.is_empty());
+    assert_eq!(result.quality_rejections.len(), 0);
     let mut saved = load_input_playlist(&ctx.config, &input, None).await.unwrap();
     assert_eq!(counts(&result.source.take_groups()), [10, 10, 0]);
     assert_eq!(counts(&saved.take_groups()), [10, 10, 10]);
@@ -388,7 +388,7 @@ async fn m3u_update_quality_force_keeps_parse_and_empty_publication_errors() {
         tokio::fs::write(&input.url, body).await.unwrap();
         let mut result = download_input(&ctx, &input, false).await;
         assert_eq!(result.update_state(), PlaylistUpdateState::Failure);
-        assert!(result.quality_rejections.is_empty());
+        assert_eq!(result.quality_rejections.len(), 0);
         let mut saved = load_input_playlist(&ctx.config, &input, None).await.unwrap();
         assert_eq!(counts(&saved.take_groups()), [10; 3]);
     }

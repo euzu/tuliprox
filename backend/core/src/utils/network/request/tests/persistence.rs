@@ -37,5 +37,5 @@ async fn file_url_epg_source_is_copied_to_persist_path() {
         tokio::fs::read_to_string(&persist).await.expect("persisted content"),
         "BEGIN:VCALENDAR\nEND:VCALENDAR\n"
     );
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }

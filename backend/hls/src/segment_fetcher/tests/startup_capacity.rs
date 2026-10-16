@@ -64,7 +64,7 @@ async fn startup_transition_round(phase: StartupWritePhase, cancel: bool) -> std
     let bytes = context.segment_cache.capacity_usage(id).await?.session_bytes;
     assert_eq!(bytes, if phase == StartupWritePhase::AfterPublication { 10 } else { 0 });
     assert_eq!(context.segment_cache.revision_disk_bytes(), context.segment_cache.scan_revision_disk_bytes().await?);
-    assert!(temp_cache_files(directory.path()).is_empty());
+    assert_eq!(temp_cache_files(directory.path()).len(), 0);
     if phase == StartupWritePhase::AfterPublication {
         for _ in 0..2 {
             let metadata = revision.revision().wait_complete(tokio::time::Instant::now()).await?;
@@ -387,7 +387,7 @@ async fn unknown_and_growing_bodies_abort_before_writing_unreserved_bytes() -> s
                 0
             );
             assert_eq!(context.segment_cache.remaining_revision_bytes(snapshot.cache_key.proxy_session_id()), 0);
-            assert!(temp_cache_files(directory.path()).is_empty());
+            assert_eq!(temp_cache_files(directory.path()).len(), 0);
         }
     }
     Ok(())

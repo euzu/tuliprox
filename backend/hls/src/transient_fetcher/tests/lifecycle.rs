@@ -149,7 +149,7 @@ async fn dropping_direct_segment_body_is_client_abort_without_state_transition()
     assert_eq!(fixture.segment_failure_count().await, 1);
     assert_eq!(fixture.resource.access.active_readers(), 0);
     assert_eq!(origin.requests.lock().await.len(), 1);
-    assert!(take_body_failure_log_attempts().is_empty());
+    assert_eq!(take_body_failure_log_attempts().len(), 0);
 }
 
 #[tokio::test]
