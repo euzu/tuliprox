@@ -198,7 +198,9 @@ pub(in crate::api::endpoints::hls_api) fn hls_origin_runtime_resource_failure_re
     err: HlsOriginRuntimeAcquireError,
 ) -> axum::response::Response {
     match err {
-        HlsOriginRuntimeAcquireError::NoAccountAvailable { .. } => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        HlsOriginRuntimeAcquireError::NoAccountAvailable { .. } => {
+            hls_canonical_status_response(StatusCode::SERVICE_UNAVAILABLE)
+        }
         HlsOriginRuntimeAcquireError::Fatal(status) => hls_canonical_status_response(status),
     }
 }

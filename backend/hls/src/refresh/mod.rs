@@ -85,6 +85,8 @@ pub struct OriginRefreshState {
     pub last_success_at_ms: Option<u64>,
     pub last_error_at_ms: Option<u64>,
     pub in_flight: bool,
+    /// Ownership token for the currently running refresh, independent of work generations and timestamps.
+    pub refresh_identity: Option<Arc<()>>,
 }
 
 impl OriginRefreshState {
@@ -93,6 +95,7 @@ impl OriginRefreshState {
     pub fn mark_started(&mut self, now_ms: u64) {
         self.last_fetch_started_at_ms = Some(now_ms);
         self.in_flight = true;
+        self.refresh_identity = Some(Arc::new(()));
     }
 
     fn mark_success_with_timing(
@@ -116,6 +119,7 @@ impl OriginRefreshState {
         self.last_error_at_ms = None;
         self.consecutive_failures = 0;
         self.in_flight = false;
+        self.refresh_identity = None;
         self.next_fetch_allowed_at_ms = fetch_started_at_ms.saturating_add(refresh_interval_ms);
         refresh_interval_ms
     }
@@ -126,12 +130,14 @@ impl OriginRefreshState {
         let next_retry_delay_ms = self.next_failure_backoff_ms();
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.in_flight = false;
+        self.refresh_identity = None;
         self.next_fetch_allowed_at_ms = failed_at_ms.saturating_add(next_retry_delay_ms);
     }
 
     fn mark_invalidated(&mut self, finished_at_ms: u64) {
         self.last_fetch_finished_at_ms = Some(finished_at_ms);
         self.in_flight = false;
+        self.refresh_identity = None;
     }
 
     fn next_failure_backoff_ms(&self) -> u64 {
@@ -168,6 +174,8 @@ pub struct OriginRefreshRequest {
     pub transient_resource_ttl_ms: u64,
     pub manifest_commit_requirement: HlsManifestCommitRequirement,
     pub fresh_manifest_requirement_generation: Option<u64>,
+    /// Filled at refresh start; a completion may only change the state owned by this token.
+    pub refresh_identity: Option<Arc<()>>,
     pub acceptance_directive: HlsManifestAcceptanceDirective,
     pub access_lease_id: Option<HlsAccessLeaseId>,
     pub now_ms: u64,
@@ -329,6 +337,34 @@ async fn mark_origin_refresh_started_with_outcome(
     request: &mut OriginRefreshRequest,
     fetch_started_at_ms: u64,
 ) -> HlsOriginRefreshTriggerOutcome {
+    if let Some(io) = request.origin_io.as_ref() {
+        let needs_prepare = {
+            let session = request.session.read().await;
+            io.prepared_account.as_ref().is_none_or(|snapshot| !snapshot.matches_session(&session))
+                || session.origin_account_binding.as_ref().is_some_and(|binding| {
+                    binding.is_detached()
+                        || crate::origin::hls_origin_account_status(&io.ctx, binding)
+                            != crate::origin::HlsOriginAccountStatus::Known
+                })
+        };
+        if let Some(runtime) = io.account_runtime.as_ref().filter(|_| needs_prepare) {
+            // A replacement result must not inherit an allocation prepared for the old entry.
+            drop(io.take_preacquired_provider_handle());
+            let class =
+                if io.allow_grace { HlsOriginWorkClass::ManifestInteractive } else { HlsOriginWorkClass::Background };
+            let Ok(prepared) = runtime
+                .prepare(&request.session, crate::origin_account_runtime::HlsOriginAccountWork::Manifest, class)
+                .await
+            else {
+                return HlsOriginRefreshTriggerOutcome::SessionUnavailable;
+            };
+            request.origin_provider_session_headers = prepared.snapshot.provider_session_headers.clone();
+            if let Some(io) = request.origin_io.as_mut() {
+                io.prepared_account = Some(prepared.snapshot);
+            }
+            request.origin_entry = prepared.entry;
+        }
+    }
     let metrics = Arc::clone(request.segment_worker_pool.metrics());
     if let Some(guard) = request.acceptance_directive.recovery_pressure_guard.clone() {
         let hls_proxy = Arc::clone(&request.hls_proxy);
@@ -361,7 +397,13 @@ fn mark_origin_refresh_started_in_session(
     fetch_started_at_ms: u64,
     metrics: &super::HlsCacheMetrics,
 ) -> HlsOriginRefreshTriggerOutcome {
-    if session.is_gc_marked_for_removal() {
+    if session.is_gc_marked_for_removal()
+        || request
+            .origin_io
+            .as_ref()
+            .and_then(|io| io.prepared_account.as_ref())
+            .is_some_and(|snapshot| !snapshot.matches_session(session))
+    {
         return HlsOriginRefreshTriggerOutcome::SessionUnavailable;
     }
     if session.origin_refresh.in_flight {
@@ -408,6 +450,7 @@ fn mark_origin_refresh_started_in_session(
         .fresh_reason()
         .and_then(|reason| session.fresh_manifest_commit_requirement_generation(reason));
     session.origin_refresh.mark_started(fetch_started_at_ms);
+    request.refresh_identity = session.origin_refresh.refresh_identity.clone();
     metrics.record_refresh_started();
     info!(
         "HLS origin manifest refresh started: session={} proxy_session={}",
@@ -501,7 +544,26 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
         committed_evidence_session,
     ) = {
         let mut session = request.session.write().await;
+        let owns_refresh = match (&request.refresh_identity, &session.origin_refresh.refresh_identity) {
+            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
         match result {
+            // A handoff can reset refresh state and start a successor in the same millisecond.
+            Ok(_) | Err(_) if !owns_refresh => {
+                metrics.record_refresh_skipped();
+                (false, false, None, None, HlsPostRefreshAvailabilityAction::None, None)
+            }
+            // Invalidated work must release its own singleflight flag even when no successor was published.
+            Ok(_) | Err(_)
+                if !origin_work_state.generation_valid
+                    || !refresh_origin_work_generation_is_current(&session, &request) =>
+            {
+                session.origin_refresh.mark_invalidated(fetch_finished_at_ms);
+                metrics.record_refresh_skipped();
+                (false, false, None, None, HlsPostRefreshAvailabilityAction::None, None)
+            }
             Ok(CommittedOriginManifest { fetched, progress_evidence, wake_segment_scheduler, wake_map_scheduler }) => {
                 let pending_manifest_follow_up = Some((session.proxy_session_id.clone(), session.target_duration));
                 let prepared_terminal_target_duration_ms = if early_prepared_terminal_target_duration_ms.is_none() {
@@ -562,20 +624,6 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                 reason: HlsManifestRecoveryUnavailableReason::BindingSuperseded,
             }) => {
                 record_superseded_manifest_recovery_completion(&mut session, metrics.as_ref(), fetch_finished_at_ms);
-                (false, false, None, None, HlsPostRefreshAvailabilityAction::None, None)
-            }
-            Err(err)
-                if !origin_work_state.generation_valid
-                    || !refresh_origin_work_generation_is_current(&session, &request) =>
-            {
-                session.origin_refresh.mark_invalidated(fetch_finished_at_ms);
-                metrics.record_refresh_skipped();
-                debug!(
-                    "HLS origin manifest refresh completion discarded: session={} proxy_session={} reason=origin-work-generation-invalidated error={}",
-                    safe_session_key(&session.key),
-                    safe_proxy_session_id(&session.proxy_session_id),
-                    err.log_label()
-                );
                 (false, false, None, None, HlsPostRefreshAvailabilityAction::None, None)
             }
             Err(err) => {
@@ -887,7 +935,7 @@ fn manifest_fetch_context(request: &OriginRefreshRequest) -> HlsOriginManifestFe
 async fn fetch_and_commit_manifest_with_policy(
     request: &mut OriginRefreshRequest,
 ) -> Result<CommittedOriginManifest, OriginManifestFetchError> {
-    let (established_recovery_binding, prefetch_trigger) = {
+    let (mut established_recovery_binding, prefetch_trigger) = {
         let session = request.session.read().await;
         if !refresh_origin_work_generation_is_current(&session, request) {
             return Err(OriginManifestFetchError::RetryExhausted);
@@ -954,6 +1002,20 @@ async fn fetch_and_commit_manifest_with_policy(
             }
             Err(initial_error) => return Err(initial_error),
         };
+    // A handoff first resolves the new entry. Recovery may use only that concrete target,
+    // while acceptance still compares against the retained timeline and pinned host.
+    {
+        let mut session = request.session.write().await;
+        if session.origin_account_manifest_pending.is_some() {
+            if !refresh_origin_work_generation_is_current(&session, request) {
+                return Err(OriginManifestFetchError::RetryExhausted);
+            }
+            session.origin_control.manifest_origin_binding = url::Url::parse(&fetched.resolved_request_url)
+                .ok()
+                .and_then(|url| HlsManifestOriginBinding::new(url, fetched.provider_url_index).ok());
+            established_recovery_binding = session.established_manifest_recovery_binding();
+        }
+    }
     Box::pin(commit_initial_fetched_manifest(
         request,
         &fetch_context,

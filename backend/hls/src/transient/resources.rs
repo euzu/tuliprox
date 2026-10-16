@@ -6,11 +6,29 @@ use super::{
 use std::{collections::HashSet, sync::Arc};
 
 impl TransientPassthroughState {
+    pub(crate) fn invalidate_origin_resources(&mut self) {
+        self.invalid_origin_resources.extend(self.resources.keys().cloned());
+        self.origin_account_generation = self.origin_account_generation.saturating_add(1);
+        self.rolling_event_rewrite_seed = None;
+    }
+
+    pub(crate) fn origin_account_generation(&self) -> u64 { self.origin_account_generation }
+
+    /// Whether this mapping may initiate origin work for the current account.
+    pub fn origin_resource_is_fetchable(&self, resource: &TransientResourceRef, now_ms: u64) -> bool {
+        resource.origin_account_generation == self.origin_account_generation
+            && !self.invalid_origin_resources.contains(&resource.id)
+            && self.resource_matches_current(resource, now_ms)
+    }
+
     pub fn upsert_resources<I>(&mut self, resources: I)
     where
         I: IntoIterator<Item = TransientResourceRef>,
     {
         for mut resource in resources {
+            if resource.origin_account_generation == self.origin_account_generation {
+                self.invalid_origin_resources.remove(&resource.id);
+            }
             let preserve_revision = self
                 .resources
                 .get(&resource.id)
@@ -123,6 +141,7 @@ impl TransientPassthroughState {
             .map(|(id, _)| id.clone())
             .collect::<HashSet<_>>();
         self.resources.retain(|id, _| !expired_resource_ids.contains(id));
+        self.invalid_origin_resources.retain(|id| !expired_resource_ids.contains(id));
     }
 
     pub fn active_resource_readers(&self) -> u32 {

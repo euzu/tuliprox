@@ -865,6 +865,13 @@ impl TimelineDraft {
         effective_host_id: u64,
         handoff_discontinuity_before: bool,
     ) -> Result<u64, TimelineMapError> {
+        let map_ref = parsed
+            .map_ref
+            .map(|map_id| {
+                let parsed_map = manifest.maps.get(map_id).ok_or(TimelineMapError::UnsupportedMapExtension)?;
+                self.map_origin_map(parsed_map)
+            })
+            .transpose()?;
         let current_epoch_key = self.origin_segment_key(effective_host_id, parsed.origin_seq);
         if let Some(proxy_seq) = self.origin_to_proxy.get(&current_epoch_key).copied() {
             if let Some(entry) = self.segments.get_mut(&proxy_seq) {
@@ -875,6 +882,7 @@ impl TimelineDraft {
                     valid_until_ms: None,
                 });
                 entry.encryption = map_segment_encryption(parsed)?;
+                entry.map_ref = map_ref;
             }
             return Ok(proxy_seq);
         }
@@ -887,13 +895,6 @@ impl TimelineDraft {
         let proxy_seq = self.proxy_next_seq.unwrap_or_default();
         self.proxy_next_seq = Some(proxy_seq.checked_add(1).ok_or(TimelineMapError::ProxySequenceOverflow)?);
 
-        let map_ref = parsed
-            .map_ref
-            .map(|map_id| {
-                let parsed_map = manifest.maps.get(map_id).ok_or(TimelineMapError::UnsupportedMapExtension)?;
-                self.map_origin_map(parsed_map)
-            })
-            .transpose()?;
         let proxy_file_ext = proxy_extension_from_url(&parsed.resolved_origin_url, SEGMENT_EXTENSIONS)
             .ok_or(TimelineMapError::UnsupportedSegmentExtension)?;
         let entry = SegmentEntry {

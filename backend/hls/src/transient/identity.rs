@@ -282,6 +282,15 @@ impl TransientResourceRef {
             expires_at_ms: now_ms.saturating_add(ttl_ms),
             access: Arc::new(CacheAccessState::new()),
             revision: TransientResourceRevision::default(),
+            origin_account_generation: 0,
+        }
+    }
+
+    pub(crate) fn scope_to_origin_account(&mut self, generation: u64, rewrite_secret: &[u8]) {
+        self.origin_account_generation = generation;
+        if generation != 0 {
+            let identity = format!("account-generation:{generation}\0{}", self.resolved_origin_uri);
+            self.id = build_transient_resource_id(&identity, rewrite_secret);
         }
     }
 
@@ -301,6 +310,7 @@ impl TransientResourceRef {
 
     pub(super) fn has_same_cache_identity(&self, other: &Self) -> bool {
         self.id == other.id
+            && self.origin_account_generation == other.origin_account_generation
             && self.kind == other.kind
             && self.encrypted_media == (self.encrypted_media || other.encrypted_media)
             && self.resolved_origin_uri == other.resolved_origin_uri
@@ -324,6 +334,7 @@ impl fmt::Debug for TransientResourceRef {
             .field("expires_at_ms", &self.expires_at_ms)
             .field("active_readers", &self.access.active_readers())
             .field("revision", &self.revision)
+            .field("origin_account_generation", &self.origin_account_generation)
             .finish()
     }
 }

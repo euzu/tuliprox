@@ -217,6 +217,21 @@ impl HlsSegmentWorkerPool {
     }
 
     pub async fn wake_scheduler(self: &Arc<Self>, context: SegmentFetchContext, now_ms: u64) {
+        let (proxy_id, has_work) = {
+            let session = context.session.read().await;
+            (
+                session.proxy_session_id.clone(),
+                !session.is_gc_marked_for_removal() && !session.segment_prefetch_queue.is_empty(),
+            )
+        };
+        if has_work
+            && self.access_leases.write().await.has_usable_access_lease_for_session(&proxy_id, now_ms)
+            && crate::origin_account_runtime::prepare_media_origin(context.origin_io.as_ref(), &context.session)
+                .await
+                .is_err()
+        {
+            return;
+        }
         loop {
             let runtime = self.runtime.load_full();
             let Ok(permit) = Arc::clone(&runtime.global_semaphore).try_acquire_owned() else {
@@ -392,7 +407,9 @@ impl HlsSegmentWorkerPool {
             self.schedule_segment_retry(context, snapshot, retry);
             return;
         }
-        if completion.generation_valid {
+        if completion.generation_valid
+            || context.session.read().await.origin_handoff_ready_after(snapshot.origin_work_generation)
+        {
             self.schedule_wake(context, finished_at_ms);
         }
     }

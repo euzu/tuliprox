@@ -64,6 +64,8 @@ mod master_playlist;
 mod media_reserve;
 mod observability;
 mod origin;
+mod origin_account_runtime;
+mod origin_attempt;
 mod origin_progress;
 mod paths;
 mod post_refresh_availability;
@@ -149,6 +151,7 @@ pub mod api {
             derive_hls_lease_manifest_snapshot, HlsLeaseManifestSnapshotInput, HlsTransientManifestTemplate,
         },
         map::{MapCacheStatus, MapEntry, OriginMapKey, ProxyMapId},
+        map_fetcher::MapFetchContext,
         master_playlist::{
             HlsBandwidthPersistenceOutcome, HlsMasterBandwidth, HlsMasterBandwidthSelection,
             HlsSingleVariantMasterPlaylist,
@@ -165,6 +168,9 @@ pub mod api {
             HlsEffectiveOriginAcquirePolicy, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
             HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginSource,
             HlsOriginSourceKind, HlsOriginWorkClass,
+        },
+        origin_account_runtime::{
+            HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
         },
         origin_progress::publication_late_after_ms,
         paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},

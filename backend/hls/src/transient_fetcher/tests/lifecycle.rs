@@ -285,6 +285,9 @@ async fn transient_origin_io_guard_finish_clean_decrements_work_once() {
         reservation_ttl_secs: 60,
         preacquired_provider_handle: None,
         started_generation: Some(started_gen),
+        prepared_account: None,
+        playback_kind: tuliprox_core::model::PlaybackKind::LiveHls,
+        account_runtime: None,
     };
 
     let guard = HlsTransientOriginIoGuard::new(
@@ -328,6 +331,9 @@ async fn transient_origin_io_guard_drop_under_lock_contention_decrements_work() 
         reservation_ttl_secs: 60,
         preacquired_provider_handle: None,
         started_generation: Some(started_gen),
+        prepared_account: None,
+        playback_kind: tuliprox_core::model::PlaybackKind::LiveHls,
+        account_runtime: None,
     };
 
     let guard = HlsTransientOriginIoGuard::new(

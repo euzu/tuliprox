@@ -618,6 +618,24 @@ reverse_proxy:
 
 ## Additional Information
 
+### Shared HLS account replacement
+
+A shared HLS session checks its bound account when it needs origin work. Removed, expired, disabled and runtime-blocked
+accounts are replaced using available accounts from the same input pool. Manifest refreshes, segment and MAP cache misses,
+key/transient fetches and existing background workers use the same preparation path. Cached media needs no new allocation.
+There is no additional monitoring service or configuration setting.
+
+Replacement retains the shared session identity, valid access leases, published timeline and cached media. Tuliprox drops
+old provider cookies and recovery targets, resolves the entry URL with the replacement account, and qualifies its manifest
+against the existing timeline and content/host checks before scheduling new media. Catchup retains its archive identity.
+Account replacement assigns new resource IDs even when the concrete key URI is unchanged. Cached AES keys for previously
+published media retain their old IDs, so the replacement manifest cannot reuse a key cached for the previous account.
+
+If no suitable account is available, requests receive the existing temporary response with `Retry-After`; background work
+uses its existing retry budgets. Failed replacement attempts are separated by at least two seconds. Full capacity, foreign
+reservations, timeouts and isolated HTTP errors do not invalidate an otherwise healthy account. Replacement never borrows
+an account from another source or guarantees uninterrupted playback.
+
 ### Session TTLs for HLS (`.m3u8`) & Catchup
 
 HLS streams do not consist of an endless TCP pipe. Instead, the player downloads small `.ts` segments every few seconds (e.g., `seg1.ts`, `seg2.ts`).

@@ -1373,6 +1373,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn regression_origin_refresh_reque
         transient_resource_ttl_ms: app_state.hls.proxy.transient_resource_ttl_ms(),
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id,
         disabled_headers: None,

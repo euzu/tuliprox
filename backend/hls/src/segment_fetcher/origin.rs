@@ -1,16 +1,15 @@
 use super::{
-    begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, commit_startup_response,
-    ensure_segment_key_dependency_ready, finish_hls_origin_account_io, hls_object_body_deadline,
-    reliable_decoded_content_length, run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata,
-    HlsBoundAccountAcquireErrorKind, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext,
-    HlsOriginResourceBodyDeadline, HlsOriginResourceClients, HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId,
-    HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
-    SegmentFetchCommit, SegmentFetchContext, SegmentFetchError, SegmentFetchPolicy, SegmentFetchSnapshot,
-    SegmentOriginWorkFinish,
+    build_hls_origin_resource_headers, commit_startup_response, ensure_segment_key_dependency_ready,
+    hls_object_body_deadline, reliable_decoded_content_length, run_hls_origin_resource_retry_loop_with_attempt_prepare,
+    CachedSegmentMetadata, HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+    HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId, HlsResourceFetchKind, HlsResourceFetchSource,
+    HlsSegmentRepairObjectContext, HlsSegmentRepairSource, SegmentFetchCommit, SegmentFetchContext, SegmentFetchError,
+    SegmentFetchPolicy, SegmentFetchSnapshot, SegmentOriginWorkFinish,
 };
+use crate::origin_attempt::{prepare_media_origin_attempt, HlsMediaOriginAttemptGuard as SegmentOriginAttemptGuard};
 use axum::http::HeaderMap;
 use futures::FutureExt;
-use tuliprox_core::utils::{content_coding::DecodedHttpResponse, current_time_millis};
+use tuliprox_core::utils::content_coding::DecodedHttpResponse;
 use tuliprox_parser::hls::origin_manifest::ParsedByteRange;
 
 pub(super) async fn fetch_segment_into_cache(
@@ -22,101 +21,26 @@ pub(super) async fn fetch_segment_into_cache(
     fetch_segment_with_retries_into_cache(context, snapshot, policy).await
 }
 
-pub(super) struct SegmentOriginAttemptGuard {
-    started_generation: Option<u64>,
-    provider_lease: Option<(HlsOriginIoContext, HlsOriginAccountIoLeaseGuard)>,
-}
-
 pub(super) async fn prepare_segment_origin_attempt(
     context: SegmentFetchContext,
     policy: SegmentFetchPolicy,
+    expected_generation: u64,
 ) -> Result<SegmentOriginAttemptGuard, SegmentFetchError> {
-    let started_generation = start_segment_origin_work(&context).await;
-    let binding =
-        if context.origin_io.is_some() { context.session.read().await.origin_account_binding.clone() } else { None };
-    let provider_lease = if let (Some(origin_io), Some(binding)) = (context.origin_io.as_ref(), binding.as_ref()) {
-        if binding.is_detached() {
-            finish_segment_origin_work(&context, started_generation).await;
-            touch_segment_origin_account_binding(&context, false).await;
-            return Err(SegmentFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Detached));
-        }
-        let guard = match begin_hls_origin_account_io_bounded(
-            origin_io,
-            &context.session,
-            binding,
-            hls_object_body_deadline(policy.origin_segment_timeout_ms),
-        )
-        .await
-        {
-            Ok(guard) => guard,
-            Err(err) => {
-                finish_segment_origin_work(&context, started_generation).await;
-                touch_segment_origin_account_binding(&context, false).await;
-                return Err(SegmentFetchError::ProviderUnavailable(err));
-            }
-        };
-        Some((origin_io.clone(), guard))
-    } else {
-        None
-    };
-    Ok(SegmentOriginAttemptGuard { started_generation, provider_lease })
+    prepare_media_origin_attempt(
+        context.origin_io.as_ref(),
+        &context.session,
+        expected_generation,
+        hls_object_body_deadline(policy.origin_segment_timeout_ms),
+    )
+    .await
+    .map_err(SegmentFetchError::ProviderUnavailable)
 }
 
 pub(super) async fn finish_segment_origin_attempt(
     context: SegmentFetchContext,
     guard: SegmentOriginAttemptGuard,
 ) -> SegmentOriginWorkFinish {
-    finish_segment_origin_io(&context, guard.started_generation, guard.provider_lease).await
-}
-
-async fn finish_segment_origin_io(
-    context: &SegmentFetchContext,
-    started_generation: Option<u64>,
-    provider_lease: Option<(HlsOriginIoContext, HlsOriginAccountIoLeaseGuard)>,
-) -> SegmentOriginWorkFinish {
-    let origin_work = finish_segment_origin_work(context, started_generation).await;
-    if let Some((origin_io, guard)) = provider_lease {
-        finish_hls_origin_account_io(
-            &origin_io,
-            &context.session,
-            guard,
-            origin_work.generation_valid && origin_work.refresh_reservation,
-        )
-        .await;
-        touch_segment_origin_account_binding(context, origin_work.generation_valid && origin_work.refresh_reservation)
-            .await;
-    }
-    origin_work
-}
-
-async fn start_segment_origin_work(context: &SegmentFetchContext) -> Option<u64> {
-    context.origin_io.as_ref()?;
-    let mut session = context.session.write().await;
-    Some(session.start_origin_work())
-}
-
-async fn finish_segment_origin_work(
-    context: &SegmentFetchContext,
-    started_generation: Option<u64>,
-) -> SegmentOriginWorkFinish {
-    let Some(started_generation) = started_generation else {
-        return SegmentOriginWorkFinish { generation_valid: true, refresh_reservation: false };
-    };
-    let mut session = context.session.write().await;
-    let generation_valid = session.finish_origin_work(started_generation);
-    let refresh_reservation = session.should_refresh_origin_reservation(current_time_millis());
-    SegmentOriginWorkFinish { generation_valid, refresh_reservation }
-}
-
-async fn touch_segment_origin_account_binding(context: &SegmentFetchContext, reservation_refreshed: bool) {
-    let mut session = context.session.write().await;
-    if let Some(binding) = session.origin_account_binding.as_mut() {
-        let now_ms = current_time_millis();
-        binding.last_origin_io_at_ms = Some(now_ms);
-        if reservation_refreshed {
-            binding.last_reservation_refresh_at_ms = Some(now_ms);
-        }
-    }
+    guard.finish(&context.session).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -125,11 +49,8 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
 ) -> Result<SegmentFetchCommit, SegmentFetchError> {
-    let headers = build_segment_origin_headers(
-        &context.headers,
-        &context.origin_provider_session_headers,
-        snapshot.fetch_ref.byte_range,
-    )?;
+    let provider_headers = context.session.read().await.origin_provider_session_headers.clone();
+    let headers = build_segment_origin_headers(&context.headers, &provider_headers, snapshot.fetch_ref.byte_range)?;
     let target = HlsOriginResourceFetchTarget {
         kind: HlsResourceFetchKind::Segment,
         source: HlsResourceFetchSource::Normal,
@@ -151,6 +72,7 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
         let session = context.session.read().await;
         super::super::HlsLogIdentity::from_session(&session)
     };
+    let expected_generation = snapshot.origin_work_generation;
     let context = context.clone();
     let snapshot = snapshot.clone();
     let policy_for_prepare = policy.clone();
@@ -164,7 +86,7 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
         move |_attempt| {
             let context = prepare_context.clone();
             let policy = policy_for_prepare.clone();
-            async move { prepare_segment_origin_attempt(context, policy).await }.boxed()
+            async move { prepare_segment_origin_attempt(context, policy, expected_generation).await }.boxed()
         },
         move |guard| {
             let context = cleanup_context.clone();

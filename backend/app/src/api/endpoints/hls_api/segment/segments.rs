@@ -319,6 +319,8 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_segment_fetch_context(
     fingerprint: &Fingerprint,
     preacquired_provider_handle: Option<ProviderHandle>,
 ) -> SegmentFetchContext {
+    let preacquired_provider_handle = preacquired_provider_handle
+        .map(|handle| tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle));
     let (headers, origin_provider_session_headers, origin_policy, reservation_ttl_secs) = {
         let session = session.read().await;
         (
@@ -337,9 +339,12 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_segment_fetch_context(
         reservation_ttl_secs,
         preacquired_provider_handle: None,
         started_generation: None,
+        prepared_account: None,
+        playback_kind: session.read().await.origin_playback_kind(),
+        account_runtime: session.read().await.origin_account_runtime.clone(),
     };
     if let Some(provider_handle) = preacquired_provider_handle {
-        origin_io = origin_io.with_preacquired_provider_handle(provider_handle);
+        origin_io = origin_io.with_managed_provider_handle(provider_handle);
     }
     SegmentFetchContext {
         session: Arc::clone(session),

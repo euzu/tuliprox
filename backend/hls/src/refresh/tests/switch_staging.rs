@@ -281,6 +281,7 @@ async fn different_host_single_candidate_retries_do_not_prove_acceptance() {
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -480,6 +481,7 @@ async fn host_switch_conflict_runs_one_full_plan_then_only_bounded_follow_ups() 
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -742,7 +744,7 @@ async fn staged_cross_host_aes_candidate_with_generation_local_ready_key_commits
         else {
             panic!("AES switch manifest parses as a normal timeline");
         };
-        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 300_000)
+        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 300_000, 0)
             .into_iter()
             .next()
             .expect("AES switch candidate has one key resource")
@@ -1037,6 +1039,9 @@ async fn provider_preflight_failure_real_refresh_path_has_zero_candidates() {
         reservation_ttl_secs: 60,
         preacquired_provider_handle: None,
         started_generation: None,
+        prepared_account: None,
+        playback_kind: tuliprox_core::model::PlaybackKind::LiveHls,
+        account_runtime: None,
     });
     let metrics = Arc::clone(request.segment_worker_pool.metrics());
     let error = super::super::provider_preflight_manifest_error(HlsBoundAccountAcquireErrorKind::Missing);

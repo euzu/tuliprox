@@ -380,11 +380,35 @@ pub(super) fn hls_url_failover_provider_for_origin_context(
 pub(super) struct PreparedHlsOriginRuntime {
     pub(super) fetch_url: String,
     pub(super) runtime_provider_config: Option<Arc<RuntimeProviderConfig>>,
+    pub(super) url_failover_provider: Option<Arc<ConfigProvider>>,
+    pub(super) snapshot: tuliprox_hls::api::HlsOriginAccountSnapshot,
+    pub(super) preacquired_origin_account_handle: Option<tuliprox_session::ManagedProviderHandle>,
+}
+
+impl PreparedHlsOriginRuntime {
+    pub(super) fn published(
+        allocation: HlsOriginRuntimeAllocation,
+        snapshot: tuliprox_hls::api::HlsOriginAccountSnapshot,
+    ) -> Self {
+        Self {
+            fetch_url: allocation.fetch_url,
+            runtime_provider_config: allocation.runtime_provider_config,
+            url_failover_provider: allocation.url_failover_provider,
+            snapshot,
+            preacquired_origin_account_handle: allocation.preacquired_origin_account_handle,
+        }
+    }
+}
+
+pub(super) struct HlsOriginRuntimeAllocation {
+    pub(super) fetch_url: String,
+    pub(super) runtime_provider_config: Option<Arc<RuntimeProviderConfig>>,
     // URL failover comes from source.yml provider:// resolution. Origin-account
     // binding/handles are runtime account reservations and must stay separate.
     pub(super) url_failover_provider: Option<Arc<ConfigProvider>>,
-    pub(super) origin_account_binding_to_store: Option<HlsOriginAccountBinding>,
-    pub(super) preacquired_origin_account_handle: Option<ProviderHandle>,
+    pub(super) binding_to_publish: Option<HlsOriginAccountBinding>,
+    pub(super) prepared_snapshot: Option<tuliprox_hls::api::HlsOriginAccountSnapshot>,
+    pub(super) preacquired_origin_account_handle: Option<tuliprox_session::ManagedProviderHandle>,
 }
 
 pub(super) fn effective_hls_url_failover_provider_for_fetch_url(
@@ -626,194 +650,8 @@ pub(super) fn hls_soft_overlap_delay_ms(
 ///
 /// Archive-backed sessions must keep catchup semantics instead of plain live HLS;
 /// live sessions keep the live HLS kind.
-async fn hls_session_origin_playback_kind(session: &HlsSessionHandle) -> PlaybackKind {
-    if session.read().await.key.archive_reference.is_some() {
-        PlaybackKind::Catchup
-    } else {
-        PlaybackKind::LiveHls
-    }
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) async fn prepare_hls_origin_runtime(
-    app_state: &Arc<AppState>,
-    session: &HlsSessionHandle,
-    input: &ConfigInput,
-    raw_request_url: &str,
-    session_entry_url: &str,
-    proxy_session_id: &ProxySessionId,
-    fingerprint: &Fingerprint,
-    connection_kind: crate::api::model::ConnectionKind,
-    priority: i8,
-    work_kind: HlsOriginWorkKind,
-    work_class: HlsOriginWorkClass,
-    now_ms: u64,
-) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
-    let playback_kind = hls_session_origin_playback_kind(session).await;
-    promote_elapsed_hls_account_overlaps(app_state, now_ms).await;
-    detach_unprotected_hls_origin_account_bindings(app_state, now_ms).await;
-    reclaim_hls_account_overlap_if_needed(app_state, session, now_ms).await;
-    let existing_binding = session.read().await.origin_account_binding.clone();
-    let reacquire_detached_binding = existing_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_detached);
-    let final_no_account_reason = hls_no_account_reason_for_binding(existing_binding.as_ref());
-    if reacquire_detached_binding {
-        log_hls_origin_binding_reacquire_started(session, work_kind).await;
-    }
-    if let Some(binding) = existing_binding {
-        if binding.is_active() {
-            match hls_origin_account_status(&app_state.hls_ctx(), &binding) {
-                stale_status @ (HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired) => {
-                    return rebind_hls_origin_account(
-                        app_state,
-                        session,
-                        input,
-                        raw_request_url,
-                        session_entry_url,
-                        &binding,
-                        stale_status,
-                        fingerprint,
-                        connection_kind,
-                        priority,
-                        playback_kind,
-                        now_ms,
-                    )
-                    .await;
-                }
-                HlsOriginAccountStatus::Known => {
-                    return Ok(prepared_hls_origin_runtime_for_known_binding(
-                        app_state,
-                        input,
-                        raw_request_url,
-                        session_entry_url,
-                        &binding,
-                    )
-                    .await);
-                }
-            }
-        }
-    }
-
-    match prepare_hls_origin_runtime_with_new_account(
-        app_state,
-        input,
-        raw_request_url,
-        session_entry_url,
-        proxy_session_id,
-        fingerprint,
-        connection_kind,
-        priority,
-        false,
-        work_kind,
-        work_class,
-        playback_kind,
-        now_ms,
-    )
-    .await
-    {
-        Ok(prepared) => {
-            if reacquire_detached_binding {
-                if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
-                    log_hls_origin_binding_reacquired(session, binding).await;
-                }
-            }
-            return Ok(prepared);
-        }
-        Err(HlsOriginRuntimeAcquireError::Fatal(status)) => return Err(HlsOriginRuntimeAcquireError::Fatal(status)),
-        Err(HlsOriginRuntimeAcquireError::NoAccountAvailable { .. }) => {}
-    }
-
-    if work_class.allows_speculative_overlap() {
-        if let Ok(prepared) = prepare_hls_origin_policy_preempt_runtime(
-            app_state,
-            session,
-            input,
-            raw_request_url,
-            session_entry_url,
-            proxy_session_id,
-            fingerprint,
-            connection_kind,
-            priority,
-            playback_kind,
-            now_ms,
-        )
-        .await
-        {
-            if reacquire_detached_binding {
-                if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
-                    log_hls_origin_binding_reacquired(session, binding).await;
-                }
-            }
-            return Ok(prepared);
-        }
-
-        if let Ok(prepared) = prepare_hls_speculative_origin_runtime(
-            app_state,
-            session,
-            input,
-            raw_request_url,
-            session_entry_url,
-            proxy_session_id,
-            fingerprint,
-            connection_kind,
-            priority,
-            playback_kind,
-            now_ms,
-        )
-        .await
-        {
-            if reacquire_detached_binding {
-                if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
-                    log_hls_origin_binding_reacquired(session, binding).await;
-                }
-            }
-            return Ok(prepared);
-        }
-    } else {
-        debug!("HLS account overlap skipped: work_class={} reason=background-origin-work", work_class.as_log_value());
-    }
-
-    if work_class.allows_grace() {
-        match prepare_hls_origin_runtime_with_new_account(
-            app_state,
-            input,
-            raw_request_url,
-            session_entry_url,
-            proxy_session_id,
-            fingerprint,
-            connection_kind,
-            priority,
-            true,
-            work_kind,
-            work_class,
-            playback_kind,
-            now_ms,
-        )
-        .await
-        {
-            Ok(prepared) => {
-                if reacquire_detached_binding {
-                    if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
-                        log_hls_origin_binding_reacquired(session, binding).await;
-                    }
-                }
-                return Ok(prepared);
-            }
-            Err(HlsOriginRuntimeAcquireError::Fatal(status)) => {
-                return Err(HlsOriginRuntimeAcquireError::Fatal(status))
-            }
-            Err(HlsOriginRuntimeAcquireError::NoAccountAvailable { .. }) => {}
-        }
-    } else {
-        debug!(
-            "HLS origin account grace skipped: work_class={} reason=background-origin-work",
-            work_class.as_log_value()
-        );
-    }
-
-    if reacquire_detached_binding {
-        log_hls_origin_binding_reacquire_failed(session, "no-account-available").await;
-    }
-    Err(HlsOriginRuntimeAcquireError::NoAccountAvailable { reason: final_no_account_reason })
+pub(super) async fn hls_session_origin_playback_kind(session: &HlsSessionHandle) -> PlaybackKind {
+    session.read().await.origin_playback_kind()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -831,7 +669,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     work_class: HlsOriginWorkClass,
     playback_kind: PlaybackKind,
     now_ms: u64,
-) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
+) -> Result<HlsOriginRuntimeAllocation, HlsOriginRuntimeAcquireError> {
     let session_owner = build_hls_origin_session_owner(proxy_session_id);
     let Some(provider_handle) = app_state.active_provider.acquire_connection_with_lease_for_session(
         &input.name,
@@ -852,8 +690,13 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         });
     };
 
+    let managed_handle =
+        tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), provider_handle);
+    let Some(provider_handle) = managed_handle.handle() else {
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
@@ -866,7 +709,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
@@ -876,7 +719,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         &provider_handle.allocation,
         now_ms,
     ) else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
 
@@ -896,7 +739,7 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         grace_state
     );
 
-    Ok(PreparedHlsOriginRuntime {
+    Ok(HlsOriginRuntimeAllocation {
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
             raw_request_url,
@@ -905,8 +748,9 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
         ),
         runtime_provider_config: Some(provider_config),
         fetch_url,
-        origin_account_binding_to_store: Some(binding),
-        preacquired_origin_account_handle: Some(provider_handle),
+        binding_to_publish: Some(binding),
+        prepared_snapshot: None,
+        preacquired_origin_account_handle: Some(managed_handle),
     })
 }
 
@@ -916,7 +760,7 @@ pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
     raw_request_url: &str,
     session_entry_url: &str,
     binding: &HlsOriginAccountBinding,
-) -> PreparedHlsOriginRuntime {
+) -> HlsOriginRuntimeAllocation {
     let runtime_provider_config = app_state.active_provider.find_provider_config(&binding.account_name);
     let fetch_url = resolve_hls_origin_fetch_url(
         &app_state.app_config,
@@ -928,7 +772,7 @@ pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
     .await
     .unwrap_or_else(|| session_entry_url.to_string());
 
-    PreparedHlsOriginRuntime {
+    HlsOriginRuntimeAllocation {
         runtime_provider_config,
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
@@ -937,7 +781,8 @@ pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
             &fetch_url,
         ),
         fetch_url,
-        origin_account_binding_to_store: None,
+        binding_to_publish: None,
+        prepared_snapshot: None,
         preacquired_origin_account_handle: None,
     }
 }
@@ -1033,7 +878,6 @@ pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &A
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     app_state: &Arc<AppState>,
-    new_session: &HlsSessionHandle,
     input: &ConfigInput,
     raw_request_url: &str,
     session_entry_url: &str,
@@ -1043,7 +887,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     priority: i8,
     playback_kind: PlaybackKind,
     now_ms: u64,
-) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
+) -> Result<HlsOriginRuntimeAllocation, HlsOriginRuntimeAcquireError> {
     let request_policy = HlsEffectiveOriginAcquirePolicy::new(connection_kind, priority, now_ms);
     let Some(candidate) =
         find_hls_origin_policy_preempt_candidate(app_state, input, proxy_session_id, request_policy, now_ms).await
@@ -1087,8 +931,13 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         debug!("HLS origin policy preemption denied: reason=exact-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
+    let managed_handle =
+        tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), provider_handle);
+    let Some(provider_handle) = managed_handle.handle() else {
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -1102,7 +951,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -1113,7 +962,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         &provider_handle.allocation,
         now_ms,
     ) else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=invalid-allocation");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -1140,16 +989,12 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         }
     }
     if !detached_victim {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS origin policy preemption denied: reason=stale-candidate");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     }
 
-    {
-        let mut session_guard = new_session.write().await;
-        session_guard.replace_origin_account_binding(Some(binding.clone()));
-    }
     debug!(
         "HLS origin policy preempted: account={} victim_proxy_session={} winner_proxy_session={} victim_kind={:?} victim_priority={} request_kind={:?} request_priority={}",
         sanitize_sensitive_info(candidate.account_name.as_ref()),
@@ -1167,7 +1012,7 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         HlsOriginAccountDetachedReason::PreemptedByHigherPriority.as_log_reason()
     );
 
-    Ok(PreparedHlsOriginRuntime {
+    Ok(HlsOriginRuntimeAllocation {
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
             raw_request_url,
@@ -1176,8 +1021,9 @@ pub(super) async fn prepare_hls_origin_policy_preempt_runtime(
         ),
         runtime_provider_config: Some(provider_config),
         fetch_url,
-        origin_account_binding_to_store: Some(binding),
-        preacquired_origin_account_handle: Some(provider_handle),
+        binding_to_publish: Some(binding),
+        prepared_snapshot: None,
+        preacquired_origin_account_handle: Some(managed_handle),
     })
 }
 
@@ -1283,7 +1129,6 @@ pub(super) fn hls_origin_policy_preempt_candidate_is_better(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_hls_speculative_origin_runtime(
     app_state: &Arc<AppState>,
-    new_session: &HlsSessionHandle,
     input: &ConfigInput,
     raw_request_url: &str,
     session_entry_url: &str,
@@ -1293,7 +1138,7 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
     priority: i8,
     playback_kind: PlaybackKind,
     now_ms: u64,
-) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
+) -> Result<HlsOriginRuntimeAllocation, HlsOriginRuntimeAcquireError> {
     let Some(candidate) = find_hls_account_overlap_candidate(app_state, input, proxy_session_id, now_ms).await else {
         debug!("HLS account overlap denied: reason=no-soft-active-candidate");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -1316,8 +1161,13 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         debug!("HLS account overlap denied: reason=speculative-acquire-failed");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
+    let managed_handle =
+        tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), provider_handle);
+    let Some(provider_handle) = managed_handle.handle() else {
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS account overlap denied: reason=missing-provider-config");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -1331,7 +1181,7 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
     )
     .await
     else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+        drop(managed_handle);
         restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate, playback_kind).await;
         debug!("HLS account overlap denied: reason=invalid-origin-url");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
@@ -1344,10 +1194,6 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         candidate.reclaim_until_ms,
         now_ms,
     );
-    {
-        let mut session_guard = new_session.write().await;
-        session_guard.replace_origin_account_binding(Some(binding.clone()));
-    }
     debug!(
         "HLS account overlap granted: account={} victim_proxy_session={} winner_proxy_session={} reclaim_until_ms={} eligible_after_ms={} delay_ms={} tuliprox_target_user_connections={} origin_input_account_connections={}",
         sanitize_sensitive_info(candidate.account_name.as_ref()),
@@ -1359,7 +1205,7 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         candidate.tuliprox_target_user_connection_capacity,
         candidate.origin_input_account_connection_capacity
     );
-    Ok(PreparedHlsOriginRuntime {
+    Ok(HlsOriginRuntimeAllocation {
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
             raw_request_url,
@@ -1368,8 +1214,9 @@ pub(super) async fn prepare_hls_speculative_origin_runtime(
         ),
         runtime_provider_config: Some(provider_config),
         fetch_url,
-        origin_account_binding_to_store: Some(binding),
-        preacquired_origin_account_handle: Some(provider_handle),
+        binding_to_publish: Some(binding),
+        prepared_snapshot: None,
+        preacquired_origin_account_handle: Some(managed_handle),
     })
 }
 
@@ -1651,154 +1498,6 @@ pub(super) async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppStat
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
-pub(super) async fn rebind_hls_origin_account(
-    app_state: &Arc<AppState>,
-    session: &HlsSessionHandle,
-    input: &ConfigInput,
-    raw_request_url: &str,
-    session_entry_url: &str,
-    stale_binding: &HlsOriginAccountBinding,
-    stale_status: HlsOriginAccountStatus,
-    fingerprint: &Fingerprint,
-    connection_kind: crate::api::model::ConnectionKind,
-    priority: i8,
-    playback_kind: PlaybackKind,
-    now_ms: u64,
-) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
-    {
-        let mut session_guard = session.write().await;
-        if !session_guard.origin_account_rebind.is_allowed_now(now_ms) {
-            debug!(
-                "HLS origin account rebind skipped by backoff: proxy_session={} old_account={} retry_after_ms=2000",
-                safe_proxy_session_id(&session_guard.proxy_session_id),
-                sanitize_sensitive_info(stale_binding.account_name.as_ref())
-            );
-            return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-        }
-        session_guard.origin_account_rebind.mark_attempt_started(Arc::clone(&stale_binding.account_name), now_ms);
-    }
-
-    let safe_proxy_session = {
-        let session_guard = session.read().await;
-        safe_proxy_session_id(&session_guard.proxy_session_id)
-    };
-    debug!(
-        "HLS origin account rebind started: proxy_session={} old_account={} reason={stale_status:?}",
-        safe_proxy_session,
-        sanitize_sensitive_info(stale_binding.account_name.as_ref())
-    );
-    app_state.active_provider.clear_identified_provider_reservation(
-        &stale_binding.session_owner,
-        &stale_binding.account_name,
-        stale_binding.provider_binding_tag,
-    );
-    {
-        let mut session_guard = session.write().await;
-        if let Some(binding) = session_guard.origin_account_binding.as_mut().filter(|binding| {
-            binding.account_name == stale_binding.account_name
-                && binding.session_owner == stale_binding.session_owner
-                && binding.provider_binding_tag == stale_binding.provider_binding_tag
-        }) {
-            binding.detach(HlsOriginAccountDetachedReason::AccountMissingOrExpired, now_ms);
-            debug!(
-                "HLS origin binding detached: proxy_session={} account={} reason={}",
-                safe_proxy_session_id(&session_guard.proxy_session_id),
-                sanitize_sensitive_info(stale_binding.account_name.as_ref()),
-                HlsOriginAccountDetachedReason::AccountMissingOrExpired.as_log_reason()
-            );
-        }
-        session_guard.invalidate_queued_origin_work();
-    }
-
-    let Some(provider_handle) = app_state.active_provider.acquire_connection_with_lease_for_session(
-        &input.name,
-        &fingerprint.addr,
-        false,
-        priority,
-        connection_kind,
-        Some(PlaybackLeaseRef::new(&stale_binding.session_owner, playback_kind)),
-    ) else {
-        mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "no_account_available").await;
-        return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
-            reason: hls_no_account_reason_for_binding(Some(stale_binding)),
-        });
-    };
-
-    let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "no_provider_config").await;
-        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-    };
-
-    let Some(fetch_url) = resolve_hls_origin_fetch_url(
-        &app_state.app_config,
-        input,
-        raw_request_url,
-        session_entry_url,
-        Some(&provider_config),
-    )
-    .await
-    else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "invalid_origin_url").await;
-        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-    };
-
-    let Some(new_account_name) = provider_handle.allocation.get_provider_name() else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
-        mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "missing_account_name").await;
-        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-    };
-
-    let new_binding = HlsOriginAccountBinding::rebound(
-        Arc::clone(&input.name),
-        new_account_name,
-        stale_binding.session_owner.clone(),
-        stale_binding.generation.saturating_add(1),
-        now_ms,
-    );
-    {
-        let mut session_guard = session.write().await;
-        session_guard.replace_origin_account_binding(Some(new_binding.clone()));
-        session_guard.origin_account_rebind.mark_success();
-    }
-    debug!(
-        "HLS origin account rebound: old_account={} new_account={}",
-        sanitize_sensitive_info(stale_binding.account_name.as_ref()),
-        sanitize_sensitive_info(new_binding.account_name.as_ref())
-    );
-
-    Ok(PreparedHlsOriginRuntime {
-        url_failover_provider: hls_url_failover_provider_for_origin_context(
-            input,
-            raw_request_url,
-            session_entry_url,
-            &fetch_url,
-        ),
-        runtime_provider_config: Some(provider_config),
-        fetch_url,
-        origin_account_binding_to_store: None,
-        preacquired_origin_account_handle: Some(provider_handle),
-    })
-}
-
-pub(super) async fn mark_hls_origin_rebind_failed(
-    session: &HlsSessionHandle,
-    stale_binding: &HlsOriginAccountBinding,
-    now_ms: u64,
-    reason: &str,
-) {
-    let mut session_guard = session.write().await;
-    session_guard.origin_account_rebind.mark_failed(now_ms);
-    debug!(
-        "HLS origin account rebind failed: proxy_session={} old_account={} reason={reason} retry_after_ms=2000",
-        safe_proxy_session_id(&session_guard.proxy_session_id),
-        sanitize_sensitive_info(stale_binding.account_name.as_ref())
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_hls_cache_user_session(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
@@ -1995,6 +1694,7 @@ pub(super) async fn hls_segment_request_requires_origin_work(
         && entry.origin_fetch_ref.is_some()
 }
 
+#[cfg(test)]
 pub(super) async fn hls_origin_binding_needs_reacquire(session: &HlsSessionHandle) -> bool {
     let session = session.read().await;
     session.origin_account_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_detached)
@@ -2008,7 +1708,7 @@ pub(super) fn hls_transient_origin_binding_requires_runtime_prepare(
         || (binding.is_active()
             && matches!(
                 hls_origin_account_status(hls_ctx, binding),
-                HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired
+                HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired | HlsOriginAccountStatus::Blocked
             ))
 }
 
@@ -2021,11 +1721,22 @@ pub(super) async fn prepare_hls_origin_binding_for_authorized_resource_work(
     work_kind: HlsOriginWorkKind,
     now_ms: u64,
 ) -> Result<Option<ProviderHandle>, HlsOriginRuntimeAcquireError> {
-    if !hls_origin_binding_needs_reacquire(session).await {
+    let runtime = session.read().await.origin_account_runtime.clone();
+    if let Some(runtime) = runtime {
+        runtime
+            .prepare(session, tuliprox_hls::api::HlsOriginAccountWork::Media, HlsOriginWorkClass::Demand)
+            .await
+            .map_err(|_| HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE))?;
         return Ok(None);
     }
-    if session.read().await.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    if !session
+        .read()
+        .await
+        .origin_account_binding
+        .as_ref()
+        .is_some_and(|binding| hls_transient_origin_binding_requires_runtime_prepare(&app_state.hls_ctx(), binding))
+    {
+        return Ok(None);
     }
     let request_context = resolve_hls_playback_manifest_request_context(app_state, access_context, req_headers)
         .await
@@ -2047,13 +1758,17 @@ pub(super) async fn prepare_hls_origin_binding_for_authorized_resource_work(
         now_ms,
     )
     .await?;
-    if let Some(binding) = prepared_origin.origin_account_binding_to_store {
-        session.write().await.replace_origin_account_binding(Some(binding));
+    drop(prepared_origin);
+    let runtime = session.read().await.origin_account_runtime.clone();
+    if let Some(runtime) = runtime {
+        runtime
+            .prepare(session, tuliprox_hls::api::HlsOriginAccountWork::Media, HlsOriginWorkClass::Demand)
+            .await
+            .map_err(|_| HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE))?;
     }
-    Ok(prepared_origin.preacquired_origin_account_handle)
+    Ok(None)
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
@@ -2062,120 +1777,55 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
     req_headers: &HeaderMap,
     now_ms: u64,
 ) -> Result<Option<HlsTransientOriginIoGuard>, HlsOriginRuntimeAcquireError> {
-    let hls_ctx = app_state.hls_ctx();
-    let existing_binding = session.read().await.origin_account_binding.clone();
-    let origin_policy = hls_effective_origin_acquire_policy(session).await;
-    let reservation_ttl_secs = hls_origin_account_reservation_ttl_secs_for_session(session).await;
-    if let Some(binding) = existing_binding.as_ref().filter(|binding| binding.is_active()) {
-        match hls_origin_account_status(&hls_ctx, binding) {
-            HlsOriginAccountStatus::Known => {
-                let origin_io = HlsOriginIoContext {
-                    ctx: hls_ctx.clone(),
-                    client_addr: fingerprint.addr,
-                    allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
-                    priority: origin_policy.priority,
-                    connection_kind: origin_policy.connection_kind,
-                    reservation_ttl_secs,
-                    preacquired_provider_handle: None,
-                    started_generation: None,
-                };
-                if let Ok(lease_guard) = begin_hls_origin_account_io_bounded(
-                    &origin_io,
-                    session,
-                    binding,
-                    hls_object_body_deadline(app_state.hls.proxy.segment_fetch_policy().origin_segment_timeout_ms),
-                )
-                .await
-                {
-                    let (started_generation, active_origin_work_count) = {
-                        let mut session = session.write().await;
-                        let count = Arc::clone(&session.activity.active_origin_work_count);
-                        (session.start_origin_work(), count)
-                    };
-                    return Ok(Some(HlsTransientOriginIoGuard::new(
-                        Arc::clone(session),
-                        active_origin_work_count,
-                        origin_io,
-                        lease_guard,
-                        started_generation,
-                    )));
-                }
-                return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-            }
-            HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired => {}
-        }
-    }
-
-    if !existing_binding
-        .as_ref()
-        .is_some_and(|binding| hls_transient_origin_binding_requires_runtime_prepare(&hls_ctx, binding))
-    {
-        return Ok(None);
-    }
-    if session.read().await.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-    }
-    let request_context = resolve_hls_playback_manifest_request_context(app_state, access_context, req_headers)
-        .await
-        .map_err(HlsOriginRuntimeAcquireError::Fatal)?;
-    let proxy_session_id = session.read().await.proxy_session_id.clone();
-    let prepared_origin = prepare_hls_origin_runtime(
+    prepare_hls_origin_binding_for_authorized_resource_work(
         app_state,
         session,
-        &request_context.input,
-        &request_context.hls_url,
-        request_context.session_entry_url.as_str(),
-        &proxy_session_id,
+        access_context,
         fingerprint,
-        origin_policy.connection_kind,
-        origin_policy.priority,
+        req_headers,
         HlsOriginWorkKind::Resource,
-        HlsOriginWorkClass::Demand,
         now_ms,
     )
     .await?;
-    if let Some(binding) = prepared_origin.origin_account_binding_to_store {
-        session.write().await.replace_origin_account_binding(Some(binding));
-    }
-    let Some(provider_handle) = prepared_origin.preacquired_origin_account_handle else {
+    let Some(binding) = session.read().await.origin_account_binding.clone() else {
         return Ok(None);
     };
-    let Some(binding) = session.read().await.origin_account_binding.clone().filter(HlsOriginAccountBinding::is_active)
-    else {
-        app_state.connection_manager.release_provider_handle(Some(provider_handle));
+    if binding.is_detached() {
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-    };
+    }
+    let policy = hls_effective_origin_acquire_policy(session).await;
     let origin_io = HlsOriginIoContext {
-        ctx: hls_ctx,
+        ctx: app_state.hls_ctx(),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
-        priority: origin_policy.priority,
-        connection_kind: origin_policy.connection_kind,
-        reservation_ttl_secs,
+        priority: policy.priority,
+        connection_kind: policy.connection_kind,
+        reservation_ttl_secs: hls_origin_account_reservation_ttl_secs_for_session(session).await,
         preacquired_provider_handle: None,
         started_generation: None,
-    }
-    .with_preacquired_provider_handle(provider_handle);
-    let Ok(lease_guard) = begin_hls_origin_account_io_bounded(
+        prepared_account: None,
+        playback_kind: session.read().await.origin_playback_kind(),
+        account_runtime: session.read().await.origin_account_runtime.clone(),
+    };
+    let lease_guard = begin_hls_origin_account_io_bounded(
         &origin_io,
         session,
         &binding,
         hls_object_body_deadline(app_state.hls.proxy.segment_fetch_policy().origin_segment_timeout_ms),
     )
     .await
-    else {
-        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
-    };
-    let (started_generation, active_origin_work_count) = {
+    .map_err(|_| HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE))?;
+    let (generation, active_count) = {
         let mut session = session.write().await;
+        if !session.origin_account_binding.as_ref().is_some_and(|current| {
+            current.generation == binding.generation
+                && current.account_name == binding.account_name
+                && current.is_active()
+        }) {
+            return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+        }
         let count = Arc::clone(&session.activity.active_origin_work_count);
         (session.start_origin_work(), count)
     };
-    Ok(Some(HlsTransientOriginIoGuard::new(
-        Arc::clone(session),
-        active_origin_work_count,
-        origin_io,
-        lease_guard,
-        started_generation,
-    )))
+    Ok(Some(HlsTransientOriginIoGuard::new(Arc::clone(session), active_count, origin_io, lease_guard, generation)))
 }

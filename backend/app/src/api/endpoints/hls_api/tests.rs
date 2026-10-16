@@ -78,6 +78,7 @@ use tuliprox_hls::api::{
     HlsCachedManifestOptions, HlsLeaseManifestSnapshotInput, LiveHlsOriginEntry,
 };
 
+mod origin_account_rebind;
 mod owner_token;
 
 mod archive;

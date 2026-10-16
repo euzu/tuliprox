@@ -1,4 +1,5 @@
 use super::{
+    super::origin_refresh_request::{hls_origin_refresh_request, HlsOriginRefreshOptions},
     clear_hls_provisioning_handoff_consumer, duration_to_millis_saturating,
     effective_hls_url_failover_provider_for_fetch_url, hls_access_lease_timing_for_session, hls_access_lease_ttl_ms,
     hls_availability_reevaluation_registration_failure_response, hls_cache_configured,
@@ -29,8 +30,7 @@ use tuliprox_hls::api::{
     safe_proxy_session_id, safe_session_key, HlsAccessContext, HlsAccessLeaseId, HlsAccessLeasePendingDeadline,
     HlsAccessLeaseState, HlsAccessLeaseTouch, HlsAccountBindingProtection, HlsManifestAcceptanceDirective,
     HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitRequirement, HlsOriginIoContext, HlsOriginWorkClass,
-    HlsPostRefreshRuntime, HlsRuntimeCustomTailReason, HlsSessionHandle, HlsSessionStoreOutcome, LiveHlsOriginEntry,
-    OriginRefreshRequest, ProxySessionId, RetryPolicy,
+    HlsRuntimeCustomTailReason, HlsSessionHandle, HlsSessionStoreOutcome, LiveHlsOriginEntry, ProxySessionId,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -251,12 +251,9 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
         prepared_origin.runtime_provider_config.clone(),
     )?;
     {
-        let mut session_guard = session.write().await;
+        let session_guard = session.read().await;
         if session_guard.is_gc_marked_for_removal() {
             return Some(hls_canonical_retry_after_response());
-        }
-        if prepared_origin.origin_account_binding_to_store.is_some() {
-            session_guard.replace_origin_account_binding(prepared_origin.origin_account_binding_to_store);
         }
     }
     mark_hls_authorized_manifest_access(app_state, &session, now_ms).await;
@@ -298,7 +295,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
             (HlsManifestAcceptanceDirective::none(), Some(owner_key))
         }
         HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded => {
-            app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+            drop(prepared_origin.preacquired_origin_account_handle);
             return Some(hls_canonical_retry_after_response());
         }
     };
@@ -317,7 +314,6 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
     };
 
     let origin_policy = hls_effective_origin_acquire_policy(&session).await;
-    let origin_provider_session_headers = session.read().await.origin_provider_session_headers.clone();
     let mut preacquired_provider_handle = prepared_origin.preacquired_origin_account_handle;
     let mut origin_io = HlsOriginIoContext {
         ctx: hls_ctx.clone(),
@@ -328,49 +324,37 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cache_canonical_manifest
         reservation_ttl_secs,
         preacquired_provider_handle: None,
         started_generation: None,
+        prepared_account: None,
+        playback_kind: session.read().await.origin_playback_kind(),
+        account_runtime: session.read().await.origin_account_runtime.clone(),
     };
     if availability_reevaluation_owner_key.is_none() {
         if let Some(provider_handle) = preacquired_provider_handle.take() {
-            origin_io = origin_io.with_preacquired_provider_handle(provider_handle);
+            origin_io = origin_io.with_managed_provider_handle(provider_handle);
         }
     }
 
-    let refresh_request = OriginRefreshRequest {
-        app_config: Arc::clone(&app_state.app_config),
-        session: Arc::clone(&session),
-        origin_entry,
-        headers,
-        origin_provider_session_headers,
-        client: app_state.http_clients.default.load().as_ref().clone(),
-        no_redirect_client: app_state.http_clients.no_redirect.load().as_ref().clone(),
-        use_manual_redirects: app_state.should_use_manual_redirects(),
-        segment_cache: Arc::clone(app_state.hls.proxy.segment_cache()),
-        hls_proxy: Arc::clone(&app_state.hls.proxy),
-        segment_repair: Arc::clone(app_state.hls.proxy.segment_repair()),
-        segment_worker_pool: Arc::clone(app_state.hls.proxy.segment_worker_pool()),
-        map_worker_pool: Arc::clone(app_state.hls.proxy.map_worker_pool()),
-        origin_manifest_timeout_ms: app_state.hls.proxy.origin_manifest_timeout_ms(),
-        manifest_recovery_burst: app_state.hls.proxy.manifest_recovery_burst(),
-        strip: app_state.hls.proxy.strip().clone(),
-        retry_policy: RetryPolicy::default(),
-        reverse_proxy_rewrite_secret: rewrite_secret.to_vec(),
-        transient_resource_ttl_ms: app_state.hls.proxy.transient_resource_ttl_ms(),
-        manifest_commit_requirement,
-        fresh_manifest_requirement_generation: None,
-        acceptance_directive,
-        access_lease_id: Some(access_lease_id.clone()),
-        disabled_headers: app_state.get_disabled_headers(),
-        now_ms,
-        origin_io: Some(origin_io),
-        post_refresh_runtime: Some(HlsPostRefreshRuntime { ctx: hls_ctx.downgrade() }),
-    };
+    let refresh_request = hls_origin_refresh_request(
+        app_state,
+        &session,
+        tuliprox_hls::api::HlsPreparedOriginAccount { entry: origin_entry, snapshot: prepared_origin.snapshot },
+        HlsOriginRefreshOptions {
+            headers,
+            origin_io,
+            manifest_commit_requirement,
+            acceptance_directive,
+            access_lease_id: Some(access_lease_id.clone()),
+            rewrite_secret: rewrite_secret.to_vec(),
+            now_ms,
+        },
+    );
     let refresh_ordering = if session_outcome == HlsSessionStoreOutcome::Reused {
         refresh_ordering
     } else {
         HlsManifestRefreshOrdering::Background
     };
     if let Some(owner_key) = availability_reevaluation_owner_key {
-        app_state.connection_manager.release_provider_handle(preacquired_provider_handle);
+        drop(preacquired_provider_handle);
         touch_initial_manifest_access_lease_window(
             app_state,
             access_lease_id,

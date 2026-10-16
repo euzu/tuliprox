@@ -31,6 +31,7 @@ pub(super) fn post_refresh_owner_request(fixture: &PostRefreshTerminalFixture) -
         manifest_commit_requirement:
             super::super::super::refresh::HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         now_ms: fixture.now_ms,

@@ -72,11 +72,14 @@ pub struct TransientRewriteResult {
 #[derive(Debug, Clone, Default)]
 pub struct TransientRewriteCheckpoint {
     encryption_state: TransientEncryptionState,
+    origin_account_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct TransientRewriteOptions {
     pub handoff_discontinuity_sequence: Option<u64>,
+    /// Separates account-dependent resources without changing their concrete origin URL.
+    pub origin_account_generation: u64,
 }
 
 /// Rewrites only HLS URI surfaces to transient live-HLS proxy resources.
@@ -127,7 +130,10 @@ impl TransientManifestRewriter {
             reverse_proxy_rewrite_secret,
             now_ms,
             ttl_ms,
-            TransientRewriteCheckpoint::default(),
+            TransientRewriteCheckpoint {
+                origin_account_generation: options.origin_account_generation,
+                ..TransientRewriteCheckpoint::default()
+            },
         );
         if let Some(discontinuity_sequence) = options.handoff_discontinuity_sequence {
             result.body = apply_handoff_discontinuity_boundary(&result.body, discontinuity_sequence);
@@ -178,6 +184,7 @@ fn rewrite_transient_fragment(
             now_ms,
             ttl_ms,
             resources: &mut resources,
+            origin_account_generation: checkpoint.origin_account_generation,
         };
         for part in body.split_inclusive('\n') {
             processed_line_count = processed_line_count.saturating_add(1);
@@ -340,6 +347,7 @@ struct TransientResourceRewriteContext<'a> {
     now_ms: u64,
     ttl_ms: u64,
     resources: &'a mut HashMap<TransientResourceId, TransientResourceRef>,
+    origin_account_generation: u64,
 }
 
 impl TransientResourceRewriteContext<'_> {
@@ -396,6 +404,7 @@ impl TransientResourceRewriteContext<'_> {
             self.ttl_ms,
             Some(extension.clone()),
         );
+        resource.scope_to_origin_account(self.origin_account_generation, self.reverse_proxy_rewrite_secret);
         resource.encrypted_media = encrypted_media;
         let resource_id = resource.id.clone();
         self.resources
@@ -780,7 +789,7 @@ mod tests {
             b"secret",
             100,
             1_000,
-            TransientRewriteOptions { handoff_discontinuity_sequence: Some(0) },
+            TransientRewriteOptions { handoff_discontinuity_sequence: Some(0), ..TransientRewriteOptions::default() },
         )
     }
 

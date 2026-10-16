@@ -167,6 +167,7 @@ pub(in crate::refresh::tests) async fn refresh_session_with_origin_body(body: &'
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -349,6 +350,7 @@ pub(in crate::refresh::tests) fn test_origin_refresh_request(session: Arc<RwLock
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -968,7 +970,7 @@ pub(in crate::refresh::tests) fn candidate_handoff_preview(
         panic!("candidate fixture must parse as a normal manifest");
     };
     let key_resources =
-        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 60_000);
+        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 60_000, 0);
     let preview = session
         .preview_origin_handoff_manifest(&manifest, crate::timeline::effective_origin_host_id("candidate.example"), 0)
         .expect("candidate handoff preview");

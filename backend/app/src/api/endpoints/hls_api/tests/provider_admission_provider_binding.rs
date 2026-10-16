@@ -22,6 +22,33 @@ use shared::model::{HlsStripMode, InputType, PlaylistItemType, UserConnectionPer
 use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
+async fn origin_resource_no_account_available_includes_retry_after() {
+    let app_state = test_app_state();
+    let access_context = test_hls_access_context(
+        ProxySessionId("shared-hls-session".to_string()),
+        HlsAccessLeaseId("access-lease".to_string()),
+    );
+
+    for reason in [
+        super::super::HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted,
+        super::super::HlsOriginRuntimeNoAccountReason::OriginBindingPreempted,
+    ] {
+        let response = super::super::hls_origin_runtime_resource_failure_response(
+            &app_state,
+            &access_context,
+            super::super::HlsOriginRuntimeAcquireError::NoAccountAvailable { reason },
+        );
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{reason:?}");
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),
+            Some("2"),
+            "{reason:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn transient_origin_binding_requires_runtime_prepare_for_missing_or_detached_account() {
     let input = single_hls_provider_input("known-account");
     let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
@@ -82,12 +109,11 @@ async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_autho
     .await
     .expect("authorized origin work can reacquire a detached binding");
 
-    let binding =
-        prepared_origin.origin_account_binding_to_store.as_ref().expect("new binding should be stored by caller");
+    let binding = session.read().await.origin_account_binding.clone().expect("new binding is published atomically");
     assert_eq!(binding.account_name.as_ref(), "account-a");
     assert!(matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active));
     assert_eq!(prepared_origin.fetch_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+    app_state.connection_manager.release_managed_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]

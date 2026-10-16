@@ -264,6 +264,36 @@ cannot reactivate the terminal lease.
 The shared session can hold an origin account binding. That binding represents the provider account or provider connection
 Tuliprox uses for origin work.
 
+Before necessary origin I/O, a session advances overlap promotion, detachment and reclaim, then re-reads the current input
+configuration and binding. Account replacement is serialized per session. Missing, expired and blocked accounts share one replacement path;
+blocked includes disabled accounts and runtime
+health observations before persistence. Allocation stays inside the original input and follows existing capacity and
+priority rules. An absent input cannot migrate to another source. A failed attempt retains its two-second backoff even
+when the binding has become detached.
+
+The HLS worker boundary uses a typed future-returning prepare callback. Its app adapter holds a weak application-state
+reference. Manifest, segment, MAP, key/transient and existing background work prepare before capturing a fetch generation
+or snapshot. Only authorized live work may prepare; terminal/expired leases and cache hits do not allocate.
+Preparation returns the resolved entry together with its account identity, work generation and provider headers. Refresh
+initialization carries that result intact; a changed binding or generation requires preparation again or rejects the start.
+An unused allocation for the previous entry is released before preparing its replacement.
+
+An account handoff advances account/work generations, invalidates waiting origin work, old cookies, recovery targets and
+unfetched resource bindings, and keeps session identity, access leases, archive identity, timeline and cached objects.
+Media work first requests manifest qualification through the existing refresh flow. The first request resolves the new
+entry, including `provider://` entries; any subsequent recovery is bound exclusively to that new concrete HTTP(S) target.
+Continuity, content-anchor and cross-host checks still apply. Old in-flight results and tagged cleanup cannot publish over
+or release a successor binding. After releasing an old worker permit, the existing scheduler resumes qualified successor
+work, including when only one global fetch permit exists. Allocation handles own their release responsibility across
+asynchronous preparation.
+Each refresh also owns a separate singleflight token. An invalidated refresh releases its own flag even after a failed
+replacement, while a late completion cannot clear a successor token, including one started in the same millisecond.
+
+Account handoff gives newly published transient resources and normal AES key references a separate resource-ID namespace.
+Identical origin key URLs therefore cannot inherit cached keys from the previous account. Old published references keep
+their original mappings and cached bytes; existing resource TTLs and metadata limits still govern retention. Rolling EVENT
+rewrites restart at handoff and preserve the new namespace when appending subsequent manifest lines.
+
 Origin account protection is based on successful media access:
 
 | Protection state | Meaning |

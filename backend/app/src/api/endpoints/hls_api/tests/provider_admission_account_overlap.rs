@@ -156,8 +156,8 @@ fn hls_soft_overlap_delay_scales_with_tuliprox_target_pressure() {
 
 #[tokio::test]
 async fn hls_account_overlap_reclaim_preempts_speculative_session() {
-    let app_state = test_app_state();
-    let input = ConfigInput { id: 1, name: Arc::from("overlap-input"), ..ConfigInput::default() };
+    let input = overlap_provider_input();
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
     let winner = create_bound_hls_test_session(&app_state, &input, "winner", "account-a", 1_000).await;
     let loser = create_bound_hls_test_session(&app_state, &input, "loser", "account-a", 1_000).await;
     let winner_proxy_session_id = winner.read().await.proxy_session_id.clone();
@@ -175,7 +175,9 @@ async fn hls_account_overlap_reclaim_preempts_speculative_session() {
     }
     let loser_generation = loser.read().await.activity.origin_work_generation;
 
-    super::super::reclaim_hls_account_overlap_if_needed(&app_state, &winner, 10_000).await;
+    winner.write().await.mark_authorized_media_access(10_000);
+    winner.write().await.activity.last_delivered_media_at_ms = Some(10_000);
+    drop(prepare_overlap_origin(&app_state, &input, &winner, 10_000).await);
 
     assert!(app_state.hls.proxy.is_account_overlap_cooling_down(&input.name, &Arc::from("account-a"), 10_000).await);
     assert!(!app_state.hls.proxy.is_account_overlap_cooling_down(&input.name, &Arc::from("account-a"), 25_000).await);
@@ -191,8 +193,8 @@ async fn hls_account_overlap_reclaim_preempts_speculative_session() {
 
 #[tokio::test]
 async fn hls_account_overlap_promotes_speculative_session_after_soft_window() {
-    let app_state = test_app_state();
-    let input = ConfigInput { id: 1, name: Arc::from("overlap-input"), ..ConfigInput::default() };
+    let input = overlap_provider_input();
+    let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
     let displaced = create_bound_hls_test_session(&app_state, &input, "displaced", "account-a", 1_000).await;
     let promoted = create_bound_hls_test_session(&app_state, &input, "promoted", "account-a", 1_000).await;
     let displaced_proxy_session_id = displaced.read().await.proxy_session_id.clone();
@@ -210,7 +212,9 @@ async fn hls_account_overlap_promotes_speculative_session_after_soft_window() {
     }
     let displaced_generation = displaced.read().await.activity.origin_work_generation;
 
-    super::super::promote_elapsed_hls_account_overlaps(&app_state, 20_001).await;
+    promoted.write().await.mark_authorized_media_access(20_001);
+    promoted.write().await.activity.last_delivered_media_at_ms = Some(20_001);
+    drop(prepare_overlap_origin(&app_state, &input, &promoted, 20_001).await);
 
     let displaced_binding_mode = displaced.read().await.origin_account_binding.as_ref().unwrap().binding_mode.clone();
     assert!(matches!(
@@ -262,8 +266,7 @@ async fn hls_origin_runtime_uses_soft_overlap_before_grace_for_interactive_work(
     .await
     .expect("interactive work should use soft-active overlap before grace");
 
-    let binding =
-        prepared_origin.origin_account_binding_to_store.as_ref().expect("speculative binding should be prepared");
+    let binding = new_session.read().await.origin_account_binding.clone().expect("speculative binding is published");
     assert_eq!(binding.account_name, input.name);
     assert!(matches!(
         &binding.binding_mode,
@@ -273,11 +276,15 @@ async fn hls_origin_runtime_uses_soft_overlap_before_grace_for_interactive_work(
         } if displaced_proxy_session_id == &old_proxy_session_id
     ));
     assert!(matches!(
-        prepared_origin.preacquired_origin_account_handle.as_ref().map(|handle| &handle.allocation),
+        prepared_origin
+            .preacquired_origin_account_handle
+            .as_ref()
+            .and_then(tuliprox_session::ManagedProviderHandle::handle)
+            .map(|handle| &handle.allocation),
         Some(super::super::ProviderAllocation::Available(_))
     ));
 
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+    app_state.connection_manager.release_managed_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]
@@ -324,14 +331,16 @@ async fn hls_origin_runtime_normal_policy_preempts_active_soft_hls_binding() {
     .await
     .expect("normal HLS policy should preempt active soft HLS binding");
 
-    let new_binding = prepared_origin
-        .origin_account_binding_to_store
-        .as_ref()
-        .expect("preempting session should receive active binding");
+    let new_binding =
+        normal_session.read().await.origin_account_binding.clone().expect("preempting session receives active binding");
     assert_eq!(new_binding.account_name, input.name);
     assert!(matches!(new_binding.binding_mode, HlsOriginAccountBindingMode::Active));
     assert!(matches!(
-        prepared_origin.preacquired_origin_account_handle.as_ref().map(|handle| &handle.allocation),
+        prepared_origin
+            .preacquired_origin_account_handle
+            .as_ref()
+            .and_then(tuliprox_session::ManagedProviderHandle::handle)
+            .map(|handle| &handle.allocation),
         Some(super::super::ProviderAllocation::Available(_))
     ));
     let soft_session = soft_session.read().await;
@@ -345,7 +354,7 @@ async fn hls_origin_runtime_normal_policy_preempts_active_soft_hls_binding() {
     ));
     drop(soft_session);
 
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+    app_state.connection_manager.release_managed_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]
@@ -437,7 +446,6 @@ async fn hls_origin_policy_preemption_rejects_soft_request_against_active_normal
 
     let result = super::super::prepare_hls_origin_policy_preempt_runtime(
         &app_state,
-        &soft_session,
         &input,
         "http://account.example.com/live/account-user/account-pass/soft.m3u8",
         "http://account.example.com/live/account-user/account-pass/soft.m3u8",
@@ -496,12 +504,18 @@ async fn hls_origin_runtime_uses_grace_as_interactive_fallback_after_overlap_fai
     .expect("interactive work can use grace when normal acquire and overlap fail");
 
     assert!(matches!(
-        prepared_origin.preacquired_origin_account_handle.as_ref().map(|handle| &handle.allocation),
+        prepared_origin
+            .preacquired_origin_account_handle
+            .as_ref()
+            .and_then(tuliprox_session::ManagedProviderHandle::handle)
+            .map(|handle| &handle.allocation),
         Some(super::super::ProviderAllocation::GracePeriod(_))
     ));
     assert_eq!(
-        prepared_origin
-            .origin_account_binding_to_store
+        session
+            .read()
+            .await
+            .origin_account_binding
             .as_ref()
             .expect("grace binding should still bind the selected account")
             .account_name
@@ -509,7 +523,7 @@ async fn hls_origin_runtime_uses_grace_as_interactive_fallback_after_overlap_fai
         input.name.as_ref()
     );
 
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+    app_state.connection_manager.release_managed_provider_handle(prepared_origin.preacquired_origin_account_handle);
     app_state.connection_manager.release_provider_handle(Some(occupied));
 }
 
@@ -714,4 +728,41 @@ fn hls_detached_origin_binding_soft_window_elapsed_maps_to_exhausted_no_account_
         super::super::hls_no_account_reason_for_binding(Some(&binding)),
         super::super::HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted
     );
+}
+
+async fn prepare_overlap_origin(
+    app: &Arc<crate::api::model::AppState>,
+    input: &ConfigInput,
+    session: &tuliprox_hls::api::HlsSessionHandle,
+    now_ms: u64,
+) -> super::super::session::PreparedHlsOriginRuntime {
+    let id = session.read().await.proxy_session_id.clone();
+    super::super::prepare_hls_origin_runtime(
+        app,
+        session,
+        input,
+        "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+        "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+        &id,
+        &test_fingerprint(),
+        ConnectionKind::Normal,
+        0,
+        super::super::HlsOriginWorkKind::Manifest,
+        super::super::HlsOriginWorkClass::ManifestInteractive,
+        now_ms,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn healthy_prepare_detaches_an_unprotected_expired_binding_before_reacquisition() {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "expired-protection", "account-a", 1_000).await;
+    let generation = session.read().await.activity.origin_work_generation;
+    drop(prepare_overlap_origin(&app, &input, &session, 10_000).await);
+    let current = session.read().await;
+    assert!(current.activity.origin_work_generation > generation);
+    assert!(current.origin_account_binding.as_ref().unwrap().generation > 0);
 }

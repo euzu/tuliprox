@@ -325,25 +325,26 @@ pub(super) async fn stage_alternative_manifest_switch(
             return Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable));
         }
     };
-    let candidate_key_resources = materialize_normal_key_resources(
-        &mut manifest,
-        &request.reverse_proxy_rewrite_secret,
-        request.now_ms,
-        request.transient_resource_ttl_ms,
-    );
     let effective_host = fetched_effective_manifest_host(fetched)
         .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?;
     let effective_host_id = effective_origin_host_id(&effective_host);
-    let (generation, preview) = {
+    let (generation, preview, candidate_key_resources) = {
         let session = request.session.read().await;
         let generation = switch_staging_generation(&session)
             .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?;
         if !generation.candidate_identity.matches_candidate(Some(&effective_host), &fetched.body) {
             return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
         }
+        let candidate_key_resources = materialize_normal_key_resources(
+            &mut manifest,
+            &request.reverse_proxy_rewrite_secret,
+            request.now_ms,
+            request.transient_resource_ttl_ms,
+            session.transient.origin_account_generation(),
+        );
         let preview =
             session.preview_origin_handoff_manifest(&manifest, effective_host_id, 0).map_err(handoff_preview_error)?;
-        (generation, preview)
+        (generation, preview, candidate_key_resources)
     };
     let first_segment = preview
         .segments

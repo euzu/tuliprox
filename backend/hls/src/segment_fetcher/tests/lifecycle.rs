@@ -7,6 +7,41 @@ use std::time::Duration;
 use tuliprox_core::utils::current_time_millis;
 
 #[tokio::test]
+async fn account_handoff_during_segment_prepare_blocks_old_origin_request() {
+    use crate::{origin_attempt::tests::bound_origin_io, HlsOriginAccountIoLease, HlsOriginResourceFetchError};
+    use std::sync::{atomic::Ordering, Arc};
+
+    let server = spawn_segment_server(0).await;
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let policy =
+        SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..SegmentFetchPolicy::default() };
+    let (worker, mut context, _) = fetch_context(&server, &temp_dir, &policy).await;
+    let (io, replacement) = bound_origin_io(&context.session).await;
+    context.origin_io = Some(io);
+    let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.expect("segment snapshot");
+    let replacement_lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&replacement, 1));
+    let read_blocker = context.session.read().await;
+    let mut fetch = Box::pin(super::super::fetch_segment_with_retries_into_cache(&context, &snapshot, &policy));
+    assert!(futures::poll!(fetch.as_mut()).is_pending());
+    let mut handoff = Box::pin(context.session.write());
+    assert!(futures::poll!(handoff.as_mut()).is_pending());
+    drop(read_blocker);
+    assert!(futures::poll!(fetch.as_mut()).is_pending());
+    {
+        let mut session = handoff.await;
+        session.handoff_origin_account(replacement);
+        session.origin_account_io_lease = Some(Arc::clone(&replacement_lease));
+    }
+
+    let result = fetch.await;
+    assert!(server.requests.lock().await.is_empty(), "stale segment URL must never reach the origin");
+    assert!(matches!(result, Err(HlsOriginResourceFetchError::ProviderUnavailable(_))));
+    let session = context.session.read().await;
+    assert_eq!(session.activity.active_origin_work_count.load(Ordering::Acquire), 0);
+    assert_eq!(replacement_lease.active_io_count.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
 async fn popped_candidate_with_expired_fetch_binding_returns_to_discovered() {
     let server = spawn_sequence_response_server(vec![TestOriginResponse {
         status: 200,

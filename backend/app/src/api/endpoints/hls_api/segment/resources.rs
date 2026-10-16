@@ -226,7 +226,6 @@ pub(in crate::api::endpoints::hls_api) async fn serve_hls_live_transient_resourc
     };
     let resource = cache_resolution.resource;
     let origin_headers = cache_resolution.origin_headers;
-    let origin_provider_session_headers = cache_resolution.origin_provider_session_headers;
     let cache_action = cache_resolution.action;
 
     match cache_action {
@@ -266,7 +265,6 @@ pub(in crate::api::endpoints::hls_api) async fn serve_hls_live_transient_resourc
         resource,
         cache_action,
         origin_headers,
-        origin_provider_session_headers,
         cache_duration_ms,
     })
     .await
@@ -277,21 +275,14 @@ pub(in crate::api::endpoints::hls_api) struct HlsTransientPassthroughContext<'a>
     pub(in crate::api::endpoints::hls_api) resource: TransientResourceRef,
     pub(in crate::api::endpoints::hls_api) cache_action: HlsTransientObjectCacheAction,
     pub(in crate::api::endpoints::hls_api) origin_headers: HeaderMap,
-    pub(in crate::api::endpoints::hls_api) origin_provider_session_headers: HeaderMap,
     pub(in crate::api::endpoints::hls_api) cache_duration_ms: u64,
 }
 
 pub(in crate::api::endpoints::hls_api) async fn fetch_or_passthrough_transient_resource(
     context: HlsTransientPassthroughContext<'_>,
 ) -> axum::response::Response {
-    let HlsTransientPassthroughContext {
-        endpoint,
-        resource,
-        cache_action,
-        origin_headers,
-        origin_provider_session_headers,
-        cache_duration_ms,
-    } = context;
+    let HlsTransientPassthroughContext { endpoint, resource, cache_action, origin_headers, cache_duration_ms } =
+        context;
     if let HlsTransientObjectCacheAction::FetchAndCache(fetch_token) = cache_action {
         return fetch_and_cache_transient_origin_response(HlsTransientEndpointCacheFetchContext {
             app_state: endpoint.app_state,
@@ -304,7 +295,6 @@ pub(in crate::api::endpoints::hls_api) async fn fetch_or_passthrough_transient_r
             resource_file: endpoint.resource_file,
             fetch_token: *fetch_token,
             origin_headers,
-            origin_provider_session_headers,
             range_header: endpoint.range_header,
             cache_duration_ms,
         })
@@ -321,7 +311,6 @@ pub(in crate::api::endpoints::hls_api) async fn fetch_or_passthrough_transient_r
         resource: &resource,
         resource_file: &endpoint.resource_file,
         origin_headers,
-        origin_provider_session_headers,
         range_header: endpoint.range_header.clone(),
         policy: policy.clone(),
     })

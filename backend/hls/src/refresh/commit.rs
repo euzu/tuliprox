@@ -531,6 +531,7 @@ fn mark_manifest_acceptance_success(
     quality: &HlsManifestOriginQuality,
     observed_at_ms: u64,
 ) {
+    session.origin_account_manifest_pending = None;
     let binding = Url::parse(&fetched.resolved_request_url)
         .ok()
         .and_then(|request_url| HlsManifestOriginBinding::new(request_url, fetched.provider_url_index).ok());
@@ -599,6 +600,10 @@ fn prepare_transient_manifest_rewrite(
     let handoff_discontinuity_sequence = session
         .pending_handoff_discontinuity_sequence
         .or_else(|| input.quality.requires_handoff_discontinuity.then_some(0));
+    let rewrite_options = TransientRewriteOptions {
+        handoff_discontinuity_sequence,
+        origin_account_generation: session.transient.origin_account_generation(),
+    };
     let append_context = (handoff_discontinuity_sequence.is_none()
         && matches!(input.manifest_semantics.playlist_type, Some(HlsPlaylistType::Event)))
     .then(|| {
@@ -635,16 +640,17 @@ fn prepare_transient_manifest_rewrite(
             incremental_rewrite = true;
             appended
         } else {
-            TransientManifestRewriter::rewrite(
+            TransientManifestRewriter::rewrite_with_options(
                 input.body,
                 input.final_manifest_url,
                 &session.proxy_session_id,
                 input.reverse_proxy_rewrite_secret,
                 input.rendered_at_ms,
                 input.transient_resource_ttl_ms,
+                rewrite_options,
             )
         }
-    } else if handoff_discontinuity_sequence.is_some() {
+    } else {
         TransientManifestRewriter::rewrite_with_options(
             input.body,
             input.final_manifest_url,
@@ -652,16 +658,7 @@ fn prepare_transient_manifest_rewrite(
             input.reverse_proxy_rewrite_secret,
             input.rendered_at_ms,
             input.transient_resource_ttl_ms,
-            TransientRewriteOptions { handoff_discontinuity_sequence },
-        )
-    } else {
-        TransientManifestRewriter::rewrite(
-            input.body,
-            input.final_manifest_url,
-            &session.proxy_session_id,
-            input.reverse_proxy_rewrite_secret,
-            input.rendered_at_ms,
-            input.transient_resource_ttl_ms,
+            rewrite_options,
         )
     };
     let next_transient_discontinuity_sequence = if handoff_discontinuity_sequence.is_some() {
@@ -845,6 +842,7 @@ fn commit_normal_manifest(
         &request.reverse_proxy_rewrite_secret,
         rendered_at_ms,
         request.transient_resource_ttl_ms,
+        session.transient.origin_account_generation(),
     );
     let manifest = &manifest;
     let previous_highwater = session.origin_seq_highwater;
@@ -1010,11 +1008,12 @@ pub(super) fn materialize_normal_key_resources(
     reverse_proxy_rewrite_secret: &[u8],
     now_ms: u64,
     ttl_ms: u64,
+    origin_account_generation: u64,
 ) -> Vec<TransientResourceRef> {
     let mut resources = Vec::new();
     for encryption in manifest.segments.iter_mut().filter_map(|segment| segment.encryption.as_mut()) {
         let extension = key_resource_extension(&encryption.resolved_origin_uri);
-        let resource = TransientResourceRef::new(
+        let mut resource = TransientResourceRef::new(
             TransientResourceKind::Key,
             encryption.resolved_origin_uri.clone(),
             reverse_proxy_rewrite_secret,
@@ -1022,6 +1021,7 @@ pub(super) fn materialize_normal_key_resources(
             ttl_ms,
             Some(extension.clone()),
         );
+        resource.scope_to_origin_account(origin_account_generation, reverse_proxy_rewrite_secret);
         encryption.proxy_resource_id = Some(resource.id.0.clone());
         encryption.proxy_resource_extension = Some(extension);
         resources.push(resource);

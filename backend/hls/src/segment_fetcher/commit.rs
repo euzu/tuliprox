@@ -19,11 +19,7 @@ pub(super) struct SegmentFetchCommit {
     pub(super) generation_valid: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct SegmentOriginWorkFinish {
-    pub(super) generation_valid: bool,
-    pub(super) refresh_reservation: bool,
-}
+pub(super) use crate::origin_attempt::HlsMediaOriginWorkFinish as SegmentOriginWorkFinish;
 
 pub(super) fn segment_fetch_attempt_matches(entry: &SegmentEntry, snapshot: &SegmentFetchSnapshot) -> bool {
     entry.origin_key == snapshot.origin_key

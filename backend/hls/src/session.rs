@@ -267,6 +267,9 @@ pub struct HlsSession {
     pub origin_account_binding: Option<HlsOriginAccountBinding>,
     pub origin_account_io_lease: Option<Arc<HlsOriginAccountIoLease>>,
     pub origin_account_rebind: HlsOriginAccountRebindState,
+    pub origin_account_prepare_lock: Arc<tokio::sync::Mutex<()>>,
+    pub origin_account_runtime: Option<Arc<dyn crate::origin_account_runtime::HlsOriginAccountRuntime>>,
+    pub origin_account_manifest_pending: Option<u64>,
     pub effective_origin_acquire_policy: Option<HlsEffectiveOriginAcquirePolicyState>,
     pub mode: HlsSessionMode,
     pub transient: TransientPassthroughState,
@@ -346,6 +349,9 @@ impl HlsSession {
             origin_account_binding: None,
             origin_account_io_lease: None,
             origin_account_rebind: HlsOriginAccountRebindState::default(),
+            origin_account_prepare_lock: Arc::new(tokio::sync::Mutex::new(())),
+            origin_account_runtime: None,
+            origin_account_manifest_pending: None,
             effective_origin_acquire_policy: None,
             mode: HlsSessionMode::NormalCacheTimeline,
             transient: TransientPassthroughState::default(),
@@ -482,6 +488,43 @@ impl HlsSession {
     pub fn clear_gc_removal_mark(&mut self) { self.gc_marked_for_removal = false; }
 
     pub fn is_gc_marked_for_removal(&self) -> bool { self.gc_marked_for_removal }
+
+    /// Invalidates account-dependent work while preserving published media and host/content anchors.
+    pub fn handoff_origin_account(&mut self, binding: HlsOriginAccountBinding) {
+        self.invalidate_queued_origin_work();
+        self.origin_account_io_lease = None;
+        self.origin_provider_session_headers.clear();
+        self.origin_control.manifest_origin_binding = None;
+        self.origin_control.acceptance_episode = None;
+        self.origin_control.acceptance_generation.0 = self.origin_control.acceptance_generation.0.saturating_add(1);
+        self.origin_control.qualification = crate::short_manifest::HlsOriginQualification::default();
+        self.origin_refresh = OriginRefreshState::default();
+        self.origin_account_manifest_pending = Some(binding.generation);
+        self.transient.invalidate_origin_resources();
+        for segment in self.segments.values_mut() {
+            if !matches!(segment.status, SegmentCacheStatus::Ready { .. }) {
+                segment.origin_fetch_ref = None;
+                if !matches!(segment.status, SegmentCacheStatus::Fetching { .. }) {
+                    segment.status = SegmentCacheStatus::Discovered;
+                }
+            }
+        }
+        for map in self.maps.values_mut() {
+            if !matches!(map.status, MapCacheStatus::Ready { .. }) {
+                map.origin_fetch_ref = None;
+                if !matches!(map.status, MapCacheStatus::Fetching { .. }) {
+                    map.status = MapCacheStatus::Discovered;
+                }
+            }
+        }
+        self.replace_origin_account_binding(Some(binding));
+    }
+
+    pub(crate) fn origin_handoff_ready_after(&self, generation: u64) -> bool {
+        self.activity.origin_work_generation != generation
+            && self.origin_account_manifest_pending.is_none()
+            && !self.is_gc_marked_for_removal()
+    }
 
     pub fn replace_origin_account_binding(&mut self, binding: Option<HlsOriginAccountBinding>) {
         let binding_changed = match (&self.origin_account_binding, &binding) {
@@ -795,6 +838,15 @@ impl HlsSession {
         };
     }
 
+    /// Provider lease kind retained across account replacement and subsequent origin I/O.
+    pub const fn origin_playback_kind(&self) -> tuliprox_core::model::PlaybackKind {
+        if self.key.archive_reference.is_some() {
+            tuliprox_core::model::PlaybackKind::Catchup
+        } else {
+            tuliprox_core::model::PlaybackKind::LiveHls
+        }
+    }
+
     pub fn start_origin_work(&mut self) -> u64 {
         self.activity.active_origin_work_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.activity.origin_work_generation
@@ -845,6 +897,9 @@ impl fmt::Debug for HlsSession {
             .field("origin_account_binding", &self.origin_account_binding)
             .field("origin_account_io_lease", &self.origin_account_io_lease)
             .field("origin_account_rebind", &self.origin_account_rebind)
+            .field("origin_account_prepare_lock", &self.origin_account_prepare_lock)
+            .field("origin_account_runtime", &self.origin_account_runtime)
+            .field("origin_account_manifest_pending", &self.origin_account_manifest_pending)
             .field("effective_origin_acquire_policy", &self.effective_origin_acquire_policy)
             .field("mode", &self.mode)
             .field("transient", &self.transient)
@@ -1731,5 +1786,45 @@ mod tests {
         let fallback = session.effective_origin_acquire_policy_or_default();
         assert_eq!(fallback.connection_kind, ConnectionKind::Normal);
         assert_eq!(fallback.priority, 0);
+    }
+    #[test]
+    fn account_handoff_invalidates_work_and_recovery_but_preserves_timeline_and_archive() {
+        let mut session = recovery_eligible_session();
+        session.key = session.key.with_archive_reference(123).with_archive_identity("archive-identity");
+        session.origin_source = crate::HlsOriginSource::from_session_key(&session.key);
+        let source = session.origin_source.clone();
+        let entry = ready_segment(&session, 10, 0, 4_000, 32);
+        session.segments.insert(10, entry);
+        session.activity.active_access_lease_count = 2;
+        let key = session.key.clone();
+        let proxy_id = session.proxy_session_id.clone();
+        let rendered = session.last_rendered_manifest.clone();
+        let pinned_host = session.origin_control.pinned_host.clone();
+        session
+            .origin_provider_session_headers
+            .insert(axum::http::header::COOKIE, axum::http::HeaderValue::from_static("old=secret"));
+        let old_work = session.start_origin_work();
+        let binding = crate::origin::HlsOriginAccountBinding::rebound(
+            Arc::from("input"),
+            Arc::from("replacement"),
+            "owner".to_string(),
+            3,
+            10,
+        );
+        session.handoff_origin_account(binding);
+        assert!(!session.finish_origin_work(old_work));
+        assert_eq!(session.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert_eq!((&session.key, &session.proxy_session_id), (&key, &proxy_id));
+        assert_eq!(session.last_rendered_manifest, rendered);
+        assert_eq!(session.origin_control.pinned_host, pinned_host);
+        assert_eq!(session.origin_seq_highwater, Some(10));
+        assert_eq!(session.activity.active_access_lease_count, 2);
+        assert_eq!(session.origin_source, source);
+        assert_eq!(session.origin_playback_kind(), tuliprox_core::model::PlaybackKind::Catchup);
+        assert_eq!(session.origin_account_manifest_pending, Some(3));
+        assert!(session.origin_control.manifest_origin_binding.is_none());
+        assert!(session.origin_control.acceptance_episode.is_none());
+        assert!(session.origin_provider_session_headers.is_empty());
+        assert!(matches!(session.segments[&10].status, SegmentCacheStatus::Ready { content_length: 32, .. }));
     }
 }

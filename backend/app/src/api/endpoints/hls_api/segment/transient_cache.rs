@@ -35,7 +35,6 @@ pub(in crate::api::endpoints::hls_api) struct HlsTransientEndpointOriginFetchReq
     pub(in crate::api::endpoints::hls_api) resource: &'a TransientResourceRef,
     pub(in crate::api::endpoints::hls_api) resource_file: &'a TransientResourceFile,
     pub(in crate::api::endpoints::hls_api) origin_headers: HeaderMap,
-    pub(in crate::api::endpoints::hls_api) origin_provider_session_headers: HeaderMap,
     pub(in crate::api::endpoints::hls_api) range_header: Option<HeaderValue>,
     pub(in crate::api::endpoints::hls_api) policy: SegmentFetchPolicy,
 }
@@ -54,14 +53,18 @@ pub(in crate::api::endpoints::hls_api) async fn fetch_transient_origin_response_
         no_redirect_client: request.app_state.http_clients.no_redirect.load().as_ref().clone(),
         use_manual_redirects: request.app_state.should_use_manual_redirects(),
     };
-    let log_identity = {
+    let (log_identity, generation, provider_headers) = {
         let session = request.session.read().await;
-        HlsLogIdentity::from_session(&session)
+        (
+            HlsLogIdentity::from_session(&session),
+            session.activity.origin_work_generation,
+            session.origin_provider_session_headers.clone(),
+        )
     };
     let fetch_request = HlsTransientOriginFetchRequest {
         resolved_origin_uri: request.resource.resolved_origin_uri.clone(),
         origin_headers: request.origin_headers,
-        origin_provider_session_headers: request.origin_provider_session_headers,
+        origin_provider_session_headers: provider_headers,
         range_header: request.range_header,
         resource_file: request.resource_file.clone(),
         resource_kind: request.resource.kind,
@@ -77,10 +80,17 @@ pub(in crate::api::endpoints::hls_api) async fn fetch_transient_origin_response_
         request.fingerprint,
         request.headers,
         &runtime_prepare_error,
+        HlsTransientOriginBindingSnapshot { resource: request.resource.clone(), generation },
     );
     let result = fetch_hls_transient_origin_response_with_attempt_prepare(fetch_request, prepare_attempt).await;
     let runtime_prepare_error = *runtime_prepare_error.lock().await;
     HlsTransientOriginFetchResult { result, runtime_prepare_error }
+}
+
+#[derive(Clone)]
+pub(in crate::api::endpoints::hls_api) struct HlsTransientOriginBindingSnapshot {
+    resource: TransientResourceRef,
+    generation: u64,
 }
 
 /// Builds the shared per-attempt prepare closure for transient origin fetches.
@@ -93,6 +103,7 @@ pub(in crate::api::endpoints::hls_api) fn hls_transient_origin_prepare_closure(
     fingerprint: &Fingerprint,
     headers: &HeaderMap,
     runtime_prepare_error: &Arc<tokio::sync::Mutex<Option<HlsOriginRuntimeAcquireError>>>,
+    snapshot: HlsTransientOriginBindingSnapshot,
 ) -> impl FnMut(
     HlsResourceFetchAttempt,
 ) -> futures::future::BoxFuture<
@@ -112,6 +123,7 @@ pub(in crate::api::endpoints::hls_api) fn hls_transient_origin_prepare_closure(
         let fingerprint = fingerprint.clone();
         let headers = headers.clone();
         let runtime_prepare_error = Arc::clone(&runtime_prepare_error);
+        let snapshot = snapshot.clone();
         async move {
             match prepare_hls_transient_origin_io_for_authorized_resource_work(
                 &app_state,
@@ -123,7 +135,17 @@ pub(in crate::api::endpoints::hls_api) fn hls_transient_origin_prepare_closure(
             )
             .await
             {
-                Ok(guard) => Ok(guard),
+                Ok(guard) => {
+                    let session = session.read().await;
+                    if session.activity.origin_work_generation != snapshot.generation
+                        || !session.transient.origin_resource_is_fetchable(&snapshot.resource, current_time_millis())
+                    {
+                        return Err(HlsOriginResourceFetchError::ProviderUnavailable(
+                            HlsBoundAccountAcquireErrorKind::StoreRace,
+                        ));
+                    }
+                    Ok(guard)
+                }
                 Err(err) => {
                     *runtime_prepare_error.lock().await = Some(err);
                     Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Unavailable))
@@ -146,7 +168,6 @@ pub(in crate::api::endpoints::hls_api) struct HlsTransientEndpointCacheFetchCont
     pub(in crate::api::endpoints::hls_api) resource_file: TransientResourceFile,
     pub(in crate::api::endpoints::hls_api) fetch_token: TransientObjectFetchToken,
     pub(in crate::api::endpoints::hls_api) origin_headers: HeaderMap,
-    pub(in crate::api::endpoints::hls_api) origin_provider_session_headers: HeaderMap,
     pub(in crate::api::endpoints::hls_api) range_header: Option<HeaderValue>,
     pub(in crate::api::endpoints::hls_api) cache_duration_ms: u64,
 }
@@ -298,14 +319,18 @@ pub(in crate::api::endpoints::hls_api) async fn fetch_and_cache_transient_origin
         no_redirect_client: context.app_state.http_clients.no_redirect.load().as_ref().clone(),
         use_manual_redirects: context.app_state.should_use_manual_redirects(),
     };
-    let log_identity = {
+    let (log_identity, generation, provider_headers) = {
         let session = context.session.read().await;
-        HlsLogIdentity::from_session(&session)
+        (
+            HlsLogIdentity::from_session(&session),
+            session.activity.origin_work_generation,
+            session.origin_provider_session_headers.clone(),
+        )
     };
     let fetch_request = HlsTransientOriginFetchRequest {
         resolved_origin_uri: context.resource.resolved_origin_uri.clone(),
         origin_headers: context.origin_headers.clone(),
-        origin_provider_session_headers: context.origin_provider_session_headers.clone(),
+        origin_provider_session_headers: provider_headers,
         range_header: None,
         resource_file: context.resource_file.clone(),
         resource_kind: context.resource.kind,
@@ -336,6 +361,7 @@ pub(in crate::api::endpoints::hls_api) async fn fetch_and_cache_transient_origin
         context.fingerprint,
         context.headers,
         &runtime_prepare_error,
+        HlsTransientOriginBindingSnapshot { resource: context.resource.clone(), generation },
     );
     let final_failure =
         match fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(cache_fetch_request, prepare_attempt)
