@@ -88,5 +88,5 @@ async fn segment_decoder_failure_retries_then_commits_and_cleans_temp_file() {
     assert!(requests.iter().all(|request| request.to_ascii_lowercase().contains("accept-encoding: identity")));
     drop(requests);
     assert!(!context.segment_cache.has_active_temp_files());
-    assert!(temp_cache_files(temp_dir.path()).is_empty());
+    assert_eq!(temp_cache_files(temp_dir.path()).len(), 0);
 }

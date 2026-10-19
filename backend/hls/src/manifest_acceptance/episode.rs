@@ -218,6 +218,39 @@ impl HlsManifestAcceptanceEpisode {
         HlsRecoveryWorkloadBindingUpdate::Applied
     }
 
+    /// Reopens only the selection step of an authorized reduced retry. Holding owns
+    /// the selection reset; all workload and timing guards still run in `select_candidate`.
+    pub(crate) fn select_candidate_for_reduced_retry(
+        &mut self,
+        expected_generation: HlsManifestAcceptanceGeneration,
+        candidate_identity: HlsManifestRecoveryCandidateIdentity,
+    ) -> HlsRecoveryWorkloadBindingUpdate {
+        if self.generation != expected_generation {
+            return HlsRecoveryWorkloadBindingUpdate::StaleGeneration;
+        }
+        if !self.full_burst_completed
+            || self.deterministic_conflict_receipt.is_some()
+            || !matches!(
+                self.outcome,
+                HlsManifestAcceptanceEpisodeOutcome::Pending
+                    | HlsManifestAcceptanceEpisodeOutcome::FullBurstExhausted(
+                        HlsManifestAcceptanceExhaustionReason::AllFailed
+                            | HlsManifestAcceptanceExhaustionReason::NoProgress
+                            | HlsManifestAcceptanceExhaustionReason::NoCommittableCandidate
+                    )
+            )
+        {
+            return HlsRecoveryWorkloadBindingUpdate::EpisodeInactive;
+        }
+        let previous_outcome = self.outcome;
+        self.outcome = HlsManifestAcceptanceEpisodeOutcome::Pending;
+        let update = self.select_candidate(expected_generation, candidate_identity);
+        if update != HlsRecoveryWorkloadBindingUpdate::Applied {
+            self.outcome = previous_outcome;
+        }
+        update
+    }
+
     pub fn bind_selected_candidate(
         &mut self,
         expected_generation: HlsManifestAcceptanceGeneration,

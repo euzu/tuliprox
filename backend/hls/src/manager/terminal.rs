@@ -71,9 +71,26 @@ fn evaluate_terminal_commit_authorization(
     if !terminal_media_requirement_is_bound_to_preparation(preparation) {
         return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::SupersededGeneration);
     }
+    if let HlsTerminalLeaseDecision::CustomResponse(plan) = decision {
+        if preparation.trigger.is_runtime_policy()
+            || !plan.matches_route(&session.proxy_session_id, lease_id)
+            || plan.generation.0 != preparation.decision_generation
+            || plan.manifest_snapshot_generation != preparation.manifest_snapshot_generation
+        {
+            return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::SupersededGeneration);
+        }
+        if !session.origin_control.path_is_degraded_at(now_ms) {
+            return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::CutoverNoLongerRequired);
+        }
+        if now_ms < preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch() {
+            return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::BundleIncompatible);
+        }
+        return HlsTerminalCommitAuthorization::Authorized { protection_capacity_exceeded: false };
+    }
     let protection_capacity_exceeded = matches!(decision, HlsTerminalLeaseDecision::Tail(_))
         && !session.can_install_terminal_tail_protection(lease_id);
     let (terminal, terminal_preparation) = match (decision, protection_capacity_exceeded) {
+        (HlsTerminalLeaseDecision::CustomResponse(_), _) => unreachable!("custom response authorized above"),
         (HlsTerminalLeaseDecision::Tail(plan), false) => {
             let prepared_key = plan.media_preparation_key();
             if preparation.required_terminal_media_key != Some(prepared_key)
@@ -99,13 +116,12 @@ fn evaluate_terminal_commit_authorization(
         ) => (HlsTerminalCutoverCapability::TailUnavailable(*reason), preparation.terminal_media_preparation),
     };
     if matches!(decision, HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_)) {
-        if !session.origin_control.path_condition.is_degraded() {
+        if !session.origin_control.path_is_degraded_at(now_ms) {
             return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::CutoverNoLongerRequired);
         }
-        // This fallback publishes no media bytes. Submission arbitration and
-        // the terminal precondition retain the preparation's original
-        // exclusive deadline, so this authorization is reachable only while
-        // the autonomous owner still has time to commit safely.
+        // This fallback publishes no media bytes. Submission arbitration gives it
+        // a bounded CAS budget independent of the expired media-splice deadline.
+        // Session, recovery and lease generations still have to match.
         return HlsTerminalCommitAuthorization::Authorized { protection_capacity_exceeded: false };
     }
     if preparation.trigger.is_runtime_policy() {
@@ -190,14 +206,59 @@ impl HlsProxyManager {
         self.standalone_custom_access.register(entry, now_ms);
     }
 
-    pub fn resolve_standalone_custom_segment(
+    pub async fn resolve_standalone_custom_segment(
         &self,
         lease_id: &HlsAccessLeaseId,
         asset_fingerprint: &str,
         index: u16,
         now_ms: u64,
     ) -> Result<HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError> {
+        if let Some(access) =
+            self.access_leases.write().await.late_custom_segment_access(lease_id, asset_fingerprint, index, now_ms)
+        {
+            return access;
+        }
         self.standalone_custom_access.resolve(lease_id, asset_fingerprint, index, now_ms)
+    }
+
+    /// Records a successful authorized custom-media request for its exact terminal lease generation.
+    pub async fn record_standalone_custom_segment_activity(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        access: &HlsStandaloneCustomSegmentAccess,
+        now_ms: u64,
+    ) -> super::HlsMediaActivityCommitOutcome {
+        use super::{HlsCriticalHandoffStateAccess, HlsMediaActivityCommitOutcome};
+        if access.terminal_generation.is_none() {
+            return HlsMediaActivityCommitOutcome::Committed;
+        }
+        let Some(binding) = access.shared_lease.as_ref() else {
+            return HlsMediaActivityCommitOutcome::StaleLeaseIdentity;
+        };
+        let Some(session) = self.sessions.get_by_proxy_session_id(&binding.proxy_session_id).await else {
+            return HlsMediaActivityCommitOutcome::StaleLeaseIdentity;
+        };
+        let result = self
+            .with_critical_handoff_state(&session, |leases, session| {
+                let timing = super::HlsAccessLeaseTiming {
+                    active_window_ms: session.account_overlap_timing().hard_active_window_ms.saturating_mul(2),
+                    valid_window_ms: self.session_idle_timeout_ms(),
+                };
+                let lease = leases.activate_late_custom_segment_access(lease_id, access, now_ms, timing)?;
+                session.mark_authorized_media_access(now_ms);
+                Some(lease)
+            })
+            .await;
+        match result {
+            HlsCriticalHandoffStateAccess::Acquired(Some(lease)) => {
+                self.schedule_access_lease_activity(&lease).await;
+                self.schedule_access_lease_validity(&lease).await;
+                self.schedule_session_idle_for_handle(&session).await;
+                HlsMediaActivityCommitOutcome::Committed
+            }
+            HlsCriticalHandoffStateAccess::Acquired(None) => HlsMediaActivityCommitOutcome::StaleLeaseIdentity,
+            HlsCriticalHandoffStateAccess::LockBusy => HlsMediaActivityCommitOutcome::DeferredLockContention,
+        }
     }
 
     pub fn terminal_pending(&self) -> Arc<HlsTerminalPendingCoordinator> { Arc::clone(&self.terminal_pending) }
@@ -277,7 +338,7 @@ impl HlsProxyManager {
                 session.activity.media_readiness_generation,
                 session.origin_control.origin_epoch,
                 session.origin_control.last_media_progress_at_ms,
-                session.origin_control.path_condition.is_degraded(),
+                session.origin_control.path_is_degraded_at(now_ms),
                 recovery_snapshot,
             )
         };
@@ -470,7 +531,9 @@ impl HlsProxyManager {
         match command.asset_revision_guard.validate_current() {
             HlsTerminalAssetRevisionValidation::Current => {}
             HlsTerminalAssetRevisionValidation::Changed { current } => {
-                if command.preparation.trigger.is_runtime_policy() {
+                if command.preparation.trigger.is_runtime_policy()
+                    || matches!(decision, HlsTerminalLeaseDecision::CustomResponse(_))
+                {
                     return HlsTerminalCommitAttempt::Completed(HlsTerminalCommitOutcome::SupersededGeneration);
                 }
                 let reason = current.asset.map_or(HlsTerminalTailCompatibility::MissingAsset, |_| {
@@ -525,7 +588,7 @@ impl HlsProxyManager {
         let proxy_session_id = &command.key.proxy_session_id;
         let preparation = &command.preparation;
         let replay = match &command.decision {
-            HlsTerminalLeaseDecision::Tail(_) => {
+            HlsTerminalLeaseDecision::Tail(_) | HlsTerminalLeaseDecision::CustomResponse(_) => {
                 leases.terminal_tail_replay_outcome(lease_id, proxy_session_id, preparation, now_ms)
             }
             HlsTerminalLeaseDecision::Unavailable(_) | HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_) => {
@@ -545,7 +608,8 @@ impl HlsProxyManager {
             && session.activity.media_readiness_generation == preparation.media_readiness_generation
             && session.origin_control.origin_epoch == preparation.origin_epoch
             && session.origin_control.last_media_progress_at_ms == preparation.last_media_progress_at_ms
-            && hls_key_readiness_evidence_is_current(preparation.reserve.key_readiness_valid_until_ms, now_ms)
+            && (matches!(command.decision, HlsTerminalLeaseDecision::CustomResponse(_))
+                || hls_key_readiness_evidence_is_current(preparation.reserve.key_readiness_valid_until_ms, now_ms))
         {
             return None;
         }
@@ -575,7 +639,9 @@ impl HlsProxyManager {
             }),
             (HlsTerminalLeaseDecision::Tail(_), true)
             | (
-                HlsTerminalLeaseDecision::Unavailable(_) | HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_),
+                HlsTerminalLeaseDecision::CustomResponse(_)
+                | HlsTerminalLeaseDecision::Unavailable(_)
+                | HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_),
                 _,
             ) => None,
         };
@@ -595,6 +661,14 @@ impl HlsProxyManager {
             }
         }
         let outcome = match (decision, protection_capacity_exceeded) {
+            (HlsTerminalLeaseDecision::CustomResponse(plan), _) => leases
+                .commit_terminal_custom_response_if_generation_matches(
+                    lease_id,
+                    proxy_session_id,
+                    preparation,
+                    now_ms,
+                    Arc::clone(plan),
+                ),
             (HlsTerminalLeaseDecision::Tail(plan), false) => leases.commit_terminal_tail_if_generation_matches(
                 lease_id,
                 proxy_session_id,

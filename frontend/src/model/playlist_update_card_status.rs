@@ -990,7 +990,7 @@ mod tests {
             playlist_update_bulk_scope(&sources, &cards),
             PlaylistUpdateBulkScope { can_submit: true, visible_input_ids: vec![7] }
         );
-        assert!(local_controls.selected_target_ids.is_empty());
+        assert_eq!(local_controls.selected_target_ids.len(), 0);
         assert_eq!(local_controls.policy, InputRefreshPolicy::FORCE);
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(queued.status(), InputUpdateCardStatus::Queued);
         assert_eq!(queued.run_id().map(PlaylistUpdateRunId::as_ref), Some("r2"));
         assert_eq!(queued.refresh_policy(), Some(InputRefreshPolicy::FORCE));
-        assert!(queued.details().is_empty());
+        assert_eq!(queued.details().len(), 0);
         assert_eq!(queued.input_telemetry(), None);
     }
 
@@ -1425,7 +1425,7 @@ mod tests {
 
         let runtime = state.for_input(7);
         assert_eq!(runtime.status(), InputUpdateCardStatus::Failed);
-        assert!(runtime.details().is_empty());
+        assert_eq!(runtime.details().len(), 0);
         let terminal = state.terminal_by_input_id.get(&7).expect("terminal state");
         assert_eq!(terminal.run_id, run_id("r2"));
         assert_eq!(terminal.execution_order, execution_order(2));

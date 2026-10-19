@@ -80,6 +80,19 @@ pub(super) fn select_key_dependency(
     {
         return SegmentKeyDependencySelection::Unavailable;
     }
+    if !session.transient.origin_resource_is_fetchable(&resource, now_ms)
+        && session
+            .transient
+            .ready_key_object_valid_until_ms(
+                proxy_session_id,
+                &encryption.resource_id,
+                &encryption.resource_extension,
+                now_ms,
+            )
+            .is_none()
+    {
+        return SegmentKeyDependencySelection::Unavailable;
+    }
     let resource_file = TransientResourceFile {
         resource_id: encryption.resource_id.clone(),
         extension: encryption.resource_extension.clone(),
@@ -190,8 +203,15 @@ pub(super) async fn fetch_segment_key_dependency_into_cache(
         token.clone(),
         1_000,
     );
-    let (staged, origin_work) =
-        stage_segment_key_dependency(context, policy, &token, &resource, &resource_file).await?;
+    let (staged, origin_work) = stage_segment_key_dependency(
+        context,
+        policy,
+        &token,
+        &resource,
+        &resource_file,
+        binding.origin_work_generation,
+    )
+    .await?;
     let generation_valid = origin_work.generation_valid && {
         let session = context.session.read().await;
         segment_key_dependency_generation_matches(
@@ -249,11 +269,12 @@ async fn stage_segment_key_dependency(
     token: &TransientObjectFetchToken,
     resource: &TransientResourceRef,
     resource_file: &TransientResourceFile,
+    expected_generation: u64,
 ) -> Result<(StagedCacheObject, SegmentOriginWorkFinish), SegmentFetchError> {
     let request = HlsTransientOriginFetchRequest {
         resolved_origin_uri: resource.resolved_origin_uri.clone(),
         origin_headers: context.headers.clone(),
-        origin_provider_session_headers: context.origin_provider_session_headers.clone(),
+        origin_provider_session_headers: context.session.read().await.origin_provider_session_headers.clone(),
         range_header: None,
         resource_file: resource_file.clone(),
         resource_kind: TransientResourceKind::Key,
@@ -268,12 +289,22 @@ async fn stage_segment_key_dependency(
             super::super::HlsLogIdentity::from_session(&session)
         },
     };
+    let resource_for_prepare = resource.clone();
     let prepare_context = context.clone();
     let prepare_policy = policy.clone();
     let response = fetch_hls_transient_origin_response_with_attempt_prepare(request, move |_attempt| {
         let context = prepare_context.clone();
         let policy = prepare_policy.clone();
-        async move { prepare_segment_origin_attempt(context, policy).await }.boxed()
+        let resource = resource_for_prepare.clone();
+        async move {
+            let guard = prepare_segment_origin_attempt(context.clone(), policy, expected_generation).await?;
+            if !context.session.read().await.transient.origin_resource_is_fetchable(&resource, current_time_millis()) {
+                finish_segment_origin_attempt(context, guard).await;
+                return Err(SegmentFetchError::Timeout);
+            }
+            Ok(guard)
+        }
+        .boxed()
     })
     .await;
     let response = match response {

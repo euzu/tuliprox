@@ -579,7 +579,7 @@ mod tests {
             assert_eq!(state.for_input(input_id).details(), [detail]);
         }
         assert_eq!(state.for_input(9).status(), InputUpdateCardStatus::Ready);
-        assert!(state.for_input(9).details().is_empty());
+        assert_eq!(state.for_input(9).details().len(), 0);
         let library = LibraryScanProgressEvent {
             summary: LibraryScanSummary {
                 status: LibraryScanSummaryStatus::Success,

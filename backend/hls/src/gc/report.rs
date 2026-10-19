@@ -2,6 +2,11 @@ use super::ProxySessionId;
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct GarbageCollectionReport {
+    pub revision_deletions_planned: usize,
+    pub revision_deletions_succeeded: usize,
+    pub revision_deletions_failed: usize,
+    pub revision_bytes_reclaimed: u64,
+    pub revision_lock_conflicts: usize,
     pub secret_cache_invalidated: bool,
     pub secret_cache_invalidation_deferred: bool,
     pub temp_files_deleted: usize,
@@ -29,7 +34,9 @@ impl GarbageCollectionReport {
     }
 
     pub fn did_cleanup_or_invalidate(&self) -> bool {
-        self.secret_cache_invalidated
+        self.revision_deletions_planned > 0
+            || self.revision_deletions_failed > 0
+            || self.secret_cache_invalidated
             || self.secret_cache_invalidation_deferred
             || self.temp_files_deleted > 0
             || self.orphan_session_dirs_deleted > 0

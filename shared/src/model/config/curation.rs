@@ -195,7 +195,7 @@ mod tests {
         dto.prepare(&xtream()).expect("missing token is not a config-load failure");
         assert!(dto.trakt.is_none());
         let tmdb = dto.tmdb.unwrap();
-        assert!(tmdb.api.access_token.is_empty());
+        assert_eq!(tmdb.api.access_token.len(), 0);
         assert!(tmdb.enabled);
         assert_eq!(tmdb.trending[0].kind, TmdbTrendingKind::Movie);
         assert_eq!(tmdb.trending[0].time_window, TmdbTrendingTimeWindow::Week);

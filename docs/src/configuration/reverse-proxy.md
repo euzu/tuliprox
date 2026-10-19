@@ -290,6 +290,12 @@ For the configuration reference, see [Shared HLS Configuration](./shared-hls-con
 For the shared session, access lease, and transient delivery state machines, see
 [HLS Cache State Machines](./hls-cache-state-machine.md).
 
+The session and global byte limits cover committed objects, immutable revisions, and outstanding write reservations.
+Staging and postprocessing grow their budgets before writing additional bytes. Committing an object consumes its own
+reservation; capacity released by a completed or aborted write wakes deferred downloads. Both targeted reclamation
+and periodic GC retire obsolete, unpinned revisions. See
+[capacity diagnostics](./shared-hls-troubleshooting.md#symptom-downloads-wait-for-local-cache-capacity).
+
 ```yaml
 reverse_proxy:
   hls_cache:
@@ -315,6 +321,15 @@ reverse_proxy:
         mode: "off"
         max_parallel_jobs: 1
 ```
+
+Short rolling origin playlists (one or two segments) are permitted only after the session evaluates its complete
+configured manifest recovery burst. A suitable window with at least three segments takes priority. The resulting
+permission belongs to the session's validated origin binding and epoch, and survives subsequent short manifests
+and new access leases. Freshness refreshes share the existing singleflight; they do not themselves renew the burst.
+Failed qualification also shares its retry receipt and backoff. A genuine origin revalidation requires a new
+qualification. One warning per short-window qualification cites RFC 8216 section 6.2.2; larger available cache
+windows, media readiness, lease validity, and resource retention rules still apply. See
+[Shared HLS configuration](shared-hls-configuration.md#unstable-manifests).
 
 ### HLS Cache Parameter Details
 
@@ -351,7 +366,20 @@ Important boundaries:
 
 * `reverse_proxy.hls_cache` only prepares the global cache engine. A target must also set
   `options.share_live_streams.hls: true` in `source.yml` before generated HLS live entries use the shared HLS path.
-* HLS cache retry behavior is fixed internally and is not user-configurable.
+* HLS cache retry behavior is fixed internally and is not user-configurable. Shared HLS origin-manifest retries cap an
+  upstream `Retry-After` delay at half the last known target duration. When no target duration is available, the
+  15-second fallback limits the delay to 7.5 seconds.
+* Playback reserve uses a stable session media clock and completed segment deliveries. Removing old cache entries
+  does not reset the playback position; missing segments, MAPs and keys still limit the usable reserve.
+* A retryable manifest failure marks the origin as degraded on the first failed attempt. A bounded background owner
+  reevaluates the remaining reserve and schedules the terminal transition independently of origin retries and client
+  playlist polling. New origin progress invalidates the pending transition.
+* A terminal video splice must commit before its safe splice deadline. After that deadline, a valid published lease
+  receives an HTTP `200` finite `channel_unavailable` Custom Response on the same manifest URL, containing only prepared
+  custom segments. This fallback needs no old cache segments and has a separate bounded commit budget that playlist
+  polls cannot renew. Successful authorized custom-segment requests renew the lease and session activity independently
+  of manifest polling after `ENDLIST`. Disabled, missing or invalid custom media can still produce an error response;
+  concrete preparation failures such as `TargetDurationExceeded` retain their diagnostic reason.
 * `reverse_proxy.rewrite_secret` must stay stable. It is used for future HLS `proxy_session_id` values and transient resource IDs.
 * `session_idle_timeout` controls HLS cache access-lease validity and idle cleanup. It is independent from
   `reverse_proxy.stream.hls_session_ttl_secs`, which belongs to the non-cache HLS request continuity path.
@@ -589,6 +617,24 @@ reverse_proxy:
 &nbsp;
 
 ## Additional Information
+
+### Shared HLS account replacement
+
+A shared HLS session checks its bound account when it needs origin work. Removed, expired, disabled and runtime-blocked
+accounts are replaced using available accounts from the same input pool. Manifest refreshes, segment and MAP cache misses,
+key/transient fetches and existing background workers use the same preparation path. Cached media needs no new allocation.
+There is no additional monitoring service or configuration setting.
+
+Replacement retains the shared session identity, valid access leases, published timeline and cached media. Tuliprox drops
+old provider cookies and recovery targets, resolves the entry URL with the replacement account, and qualifies its manifest
+against the existing timeline and content/host checks before scheduling new media. Catchup retains its archive identity.
+Account replacement assigns new resource IDs even when the concrete key URI is unchanged. Cached AES keys for previously
+published media retain their old IDs, so the replacement manifest cannot reuse a key cached for the previous account.
+
+If no suitable account is available, requests receive the existing temporary response with `Retry-After`; background work
+uses its existing retry budgets. Failed replacement attempts are separated by at least two seconds. Full capacity, foreign
+reservations, timeouts and isolated HTTP errors do not invalidate an otherwise healthy account. Replacement never borrows
+an account from another source or guarantees uninterrupted playback.
 
 ### Session TTLs for HLS (`.m3u8`) & Catchup
 

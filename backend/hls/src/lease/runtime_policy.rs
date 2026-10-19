@@ -16,7 +16,9 @@ impl HlsAccessLease {
                 .runtime_policy_revocation
                 .clone()
                 .map(|token| HlsRuntimePolicyRevocationOutcome::AlreadyPending { token }),
-            HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => None,
+            HlsLeasePlaybackMode::TerminalCustomResponse(_)
+            | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+            | HlsLeasePlaybackMode::Ended => None,
         }
     }
 
@@ -24,9 +26,9 @@ impl HlsAccessLease {
         match &self.playback_mode {
             HlsLeasePlaybackMode::TerminalTail(plan) => Some(plan.reason),
             HlsLeasePlaybackMode::Live => self.runtime_policy_revocation.as_ref().map(|token| token.reason),
-            HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => {
-                self.runtime_policy_denial_reason
-            }
+            HlsLeasePlaybackMode::TerminalCustomResponse(_)
+            | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+            | HlsLeasePlaybackMode::Ended => self.runtime_policy_denial_reason,
         }
     }
 
@@ -177,13 +179,16 @@ impl HlsAccessLeaseStore {
         }
         let preserve_finite_decision = matches!(
             lease.playback_mode,
-            HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+            HlsLeasePlaybackMode::TerminalTail(_)
+                | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+                | HlsLeasePlaybackMode::TerminalUnavailable { .. }
         );
         if preserve_finite_decision {
             if evidence_changed {
                 lease.runtime_policy_denial_reason = match &lease.playback_mode {
                     HlsLeasePlaybackMode::TerminalTail(plan) => Some(plan.reason),
-                    HlsLeasePlaybackMode::TerminalUnavailable { .. } => lease.runtime_policy_denial_reason,
+                    HlsLeasePlaybackMode::TerminalCustomResponse(_)
+                    | HlsLeasePlaybackMode::TerminalUnavailable { .. } => lease.runtime_policy_denial_reason,
                     HlsLeasePlaybackMode::Live | HlsLeasePlaybackMode::Ended => None,
                 };
             }

@@ -195,6 +195,7 @@ pub enum HlsLeasePlaybackMode {
     #[default]
     Live,
     TerminalTail(Arc<HlsTerminalTailPlan>),
+    TerminalCustomResponse(Arc<crate::late_custom_response::HlsLateCustomResponsePlan>),
     TerminalUnavailable {
         decision_generation: u64,
         reason: HlsTerminalTailCompatibility,

@@ -38,7 +38,7 @@ fn shipped_tmdb_example_is_safe_by_default_and_prepares_when_explicitly_enabled(
         .expect("shipped TMDB example");
     assert!(!target.enabled);
     assert!(!target.curation.as_ref().unwrap().enabled);
-    assert!(target.curation.as_ref().unwrap().tmdb.as_ref().unwrap().api.access_token.is_empty());
+    assert_eq!(target.curation.as_ref().unwrap().tmdb.as_ref().unwrap().api.access_token.len(), 0);
     target.prepare(1, None, None).unwrap();
     target.enabled = true;
     target.curation.as_mut().unwrap().enabled = true;

@@ -48,6 +48,8 @@ pub struct StagedCacheObject {
     pub size: u64,
     cache_path_generation: Arc<CachePathGeneration>,
     _registration: Arc<ActiveTempFileRegistration>,
+    pub(crate) write_budget: Option<Arc<HlsRevisionDiskReservation>>,
+    cleanup: Arc<StagedFileCleanup>,
 }
 
 /// Typed source used to distinguish a decoded-object size violation from a filesystem failure.
@@ -106,6 +108,10 @@ pub struct HlsSegmentCache {
     capacity_reclaimer: StdRwLock<Option<Weak<dyn HlsCacheCapacityReclaimer>>>,
     capacity_admission_gate: AsyncMutex<()>,
     owned_operation_permits: Arc<Semaphore>,
+    #[cfg(test)]
+    startup_test_checkpoint: StdMutex<Option<test_support::StartupWriteCheckpoint>>,
+    #[cfg(test)]
+    delete_test_failures: StdMutex<HashMap<PathBuf, usize>>,
 }
 
 #[derive(Clone)]
@@ -125,8 +131,13 @@ struct CacheCapacityState {
     revision: Arc<CapacityRevision>,
     active_mutations: HashSet<PathBuf>,
     revision_reservations: HashMap<u64, (String, u64)>,
-    /// Revision file bytes found by the last completed usage scan.
+    next_write_id: u64,
+    write_owners: HashMap<PathBuf, u64>,
+    abandoned_writes: HashMap<PathBuf, (u64, String)>,
+    reserved_spools: HashMap<PathBuf, u64>,
+    /// Current revision bytes, reconciled by scans and successful file mutations.
     revision_bytes: u64,
+    revision_metrics: Option<Weak<crate::HlsCacheMetrics>>,
 }
 
 #[derive(Default)]
@@ -135,17 +146,24 @@ struct CapacityRevision;
 #[derive(Default)]
 struct TempFileState {
     active_files: HashSet<PathBuf>,
+    revision: Arc<CapacityRevision>,
     deletion_reservations: HashSet<PathBuf>,
 }
 
 struct ActiveTempFileRegistration {
     path: PathBuf,
     state: Arc<StdMutex<TempFileState>>,
+    changed: Arc<Notify>,
 }
 
 impl Drop for ActiveTempFileRegistration {
     fn drop(&mut self) {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active_files.remove(&self.path);
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active_files.remove(&self.path) {
+            state.revision = Arc::new(CapacityRevision);
+            drop(state);
+            self.changed.notify_waiters();
+        }
     }
 }
 
@@ -171,6 +189,8 @@ struct CapacityMutationReservation {
     session_component: String,
     replacement: Option<(u64, u64)>,
     filesystem_mutation_started: bool,
+    write_budget: Option<Arc<HlsRevisionDiskReservation>>,
+    transferred_bytes: u64,
     capacity: Arc<StdMutex<CacheCapacityState>>,
     changed: Arc<Notify>,
 }
@@ -198,6 +218,8 @@ pub struct HlsRevisionDiskReservation {
     changed: Arc<Notify>,
     /// Set when bytes were written under this reservation outside the staged commit accounting.
     unaccounted_writes: bool,
+    generation: Arc<CachePathGeneration>,
+    cache_path: PathBuf,
 }
 
 pub struct HlsRevisionFilePin {
@@ -217,6 +239,9 @@ mod lifecycle;
 mod revisions;
 mod staging;
 #[cfg(test)]
+mod test_support;
+mod write_budget;
+#[cfg(test)]
 use capacity::CapacityReservationError;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub use capacity::{
@@ -226,3 +251,6 @@ pub use capacity::{
 pub use error::{hls_cache_capacity_from_io, hls_cache_object_limit_from_io};
 pub use keys::HlsCacheObjectKey;
 pub use staging::CachedSegmentMetadata;
+#[cfg(test)]
+pub(crate) use test_support::StartupWritePhase;
+use write_budget::StagedFileCleanup;

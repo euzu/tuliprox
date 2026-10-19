@@ -2,7 +2,6 @@ use super::{
     safe_proxy_session_id, HlsAccessLeaseSessionSnapshot, HlsExpiredSessionMarker, HlsProxyManager, HlsSessionHandle,
     ProxySessionId,
 };
-use crate::sync_ext::MutexExt;
 use log::debug;
 use std::{
     io,
@@ -181,31 +180,10 @@ impl HlsProxyManager {
         }
         let report = self.gc.run_once(now_ms).await?;
         self.cleanup_after_garbage_collection(&report).await;
-        if self.revision_store.has_created_revisions() {
-            for handle in self.sessions.list_sessions().await {
-                let snapshot = {
-                    let mut session = handle.write().await;
-                    let super::super::HlsSession { segments, startup, proxy_session_id, .. } = &mut *session;
-                    startup.as_mut().map(|startup| {
-                        startup.revisions.retain(|seq, _| segments.contains_key(seq));
-                        (proxy_session_id.clone(), segments.first_key_value().map_or(u64::MAX, |(seq, _)| *seq))
-                    })
-                };
-                if let Some((id, floor)) = snapshot {
-                    self.access_leases.write().await.prune_revision_bindings(&id, floor);
-                }
-            }
-        }
         if self.revision_reconciliation_pending.load(Ordering::Acquire) {
             let deleted = self.segment_cache.delete_orphan_revision_files(std::time::SystemTime::now()).await?;
             if deleted < super::super::cache::MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN {
                 self.revision_reconciliation_pending.store(false, Ordering::Release);
-            }
-        }
-        for revision in self.revision_store.retire_unpinned()? {
-            revision.file_pin.lock_unpoisoned().take();
-            if self.segment_cache.delete_if_inactive(&revision.key).await.is_err() {
-                self.revision_store.requeue_retired(revision)?;
             }
         }
         if self.revision_store.has_created_revisions() {

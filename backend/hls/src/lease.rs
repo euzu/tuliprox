@@ -144,6 +144,8 @@ pub struct HlsAccessLease {
     pub startup_admission: HlsLeaseStartupAdmissionState,
     pub playback_cursor: HlsLeasePlaybackCursor,
     pub last_manifest_snapshot: Option<HlsLeaseManifestSnapshot>,
+    pub(crate) published_media_sequence_highwater: Option<u64>,
+    pub(crate) published_discontinuity_sequence_highwater: u64,
     revision_bindings: Option<Arc<HlsLeaseRevisionBindings>>,
     progressive_startup_claimed: bool,
     published_transient_resource_ids: HlsPublishedTransientResourceIds,

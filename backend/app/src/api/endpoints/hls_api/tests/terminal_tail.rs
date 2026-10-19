@@ -230,11 +230,16 @@ pub(in crate::api::endpoints::hls_api::tests) async fn run_recovery_outage(
         let episode = session.origin_control.acceptance_episode.as_ref().expect("bounded acceptance evidence");
         assert!(episode.full_burst_completed);
         assert_eq!(episode.completed_burst_candidates, plan.total_candidates());
-        last_episode_generation = Some(episode.generation.0);
+        if let Some(generation) = last_episode_generation {
+            assert_eq!(episode.generation.0, generation, "unchanged failures share the initial full-burst receipt");
+        } else {
+            last_episode_generation = Some(episode.generation.0);
+        }
     }
-    assert!(
-        fixture.origin.manifest_request_count().saturating_sub(requests_before)
-            >= plan.total_candidates().saturating_mul(3)
+    assert_eq!(
+        fixture.origin.manifest_request_count().saturating_sub(requests_before),
+        plan.total_candidates() + fixture.refresh.retry_policy.attempt_count().saturating_sub(1) + 2,
+        "one configured full burst, its bounded reduced retries, then one sample per due refresh"
     );
     let uri = format!("/hls/shared/live/{}/{}/000003.ts", fixture.proxy_session_id.0, fixture.lease_id.0);
     let cached = get_response(Arc::clone(&fixture.app_state), &uri, None).await;
@@ -794,9 +799,13 @@ pub(in crate::api::endpoints::hls_api::tests) async fn apply_terminal_cutover_pr
     session.origin_control.path_condition = HlsOriginPathCondition::HardFetchFailure;
     let transition_buffer_seq = fixture.base_manifest.last_proxy_seq.saturating_add(1);
     let commit_guard_seq = transition_buffer_seq.saturating_add(1);
+    let base_tail = session.segments.get(&fixture.base_manifest.last_proxy_seq).expect("live base tail");
+    let mut media_start_ms = base_tail.media_start_ms.saturating_add(base_tail.duration_ms);
     for segment in
         session.segments.values_mut().filter(|segment| segment.proxy_seq > fixture.base_manifest.last_proxy_seq)
     {
+        // Shortened test buffers must remain contiguous on the session media clock.
+        segment.media_start_ms = media_start_ms;
         if segment.proxy_seq == transition_buffer_seq {
             segment.duration_ms = 1_000;
         } else if segment.proxy_seq == commit_guard_seq {
@@ -804,6 +813,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn apply_terminal_cutover_pr
         } else {
             segment.status = SegmentCacheStatus::Expired;
         }
+        media_start_ms = media_start_ms.saturating_add(segment.duration_ms);
     }
     session.advance_media_readiness_generation();
 }
@@ -915,7 +925,11 @@ pub(in crate::api::endpoints::hls_api::tests) async fn commit_prepared_terminal_
         .playback_cursor
         .first_segment_completed_at_ms
         .expect("measured lease playback start")
-        .saturating_add(fixture.base_manifest.playlist_duration_ms);
+        // Enter the acquisition window while the live base and its key are still usable.
+        .saturating_add(
+            fixture.base_manifest.playlist_duration_ms.saturating_sub(fixture.base_manifest.target_duration_ms),
+        );
+
     let first = commit_terminal_tail_if_lease_reserve_requires_cutover(
         &fixture.app_state.hls_ctx(),
         &fixture.session,
@@ -1309,6 +1323,13 @@ pub(in crate::api::endpoints::hls_api::tests) async fn assert_publication_late_t
             assert!(body.contains("#EXT-X-ENDLIST"));
             assert!(body.contains("/terminal/"));
         }
+        HlsLeasePlaybackMode::TerminalCustomResponse(_) => {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = String::from_utf8(response_body(response).await.to_vec()).expect("late custom manifest utf8");
+            assert!(body.contains("#EXT-X-ENDLIST"));
+            assert!(body.contains("/cvs/hls/"));
+            assert!(!body.contains("/hls/shared/live/"));
+        }
         HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
@@ -1352,6 +1373,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn regression_origin_refresh_reque
         transient_resource_ttl_ms: app_state.hls.proxy.transient_resource_ttl_ms(),
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id,
         disabled_headers: None,

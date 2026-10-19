@@ -399,7 +399,7 @@ async fn segment_decoded_object_limit_is_authoritative_and_non_retryable() {
     let cache_key = context.session.read().await.segments.get(&1).expect("segment").cache_key.clone();
     assert!(context.segment_cache.metadata(&cache_key).await.expect("metadata reads").is_none());
     assert!(!context.segment_cache.has_active_temp_files());
-    assert!(temp_cache_files(temp_dir.path()).is_empty());
+    assert_eq!(temp_cache_files(temp_dir.path()).len(), 0);
 }
 
 #[tokio::test]

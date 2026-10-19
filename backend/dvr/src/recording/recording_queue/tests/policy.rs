@@ -233,7 +233,7 @@ fn the_entry_behind_a_finished_transfer_attaches_instead_of_downloading_again() 
     };
     let promoted = promote_from_queue(&mut candidate);
     assert!(promoted.is_none(), "nothing needs to run");
-    assert!(candidate.active.is_empty());
+    assert_eq!(candidate.active.len(), 0);
     assert!(candidate.queue.is_empty(), "bob left the queue");
     let bob = candidate.finished.iter().find(|task| task.uuid == "bob").expect("bob is filed");
     assert_eq!(bob.state, RecordingTaskState::Completed);

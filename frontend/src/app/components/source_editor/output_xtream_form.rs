@@ -833,7 +833,7 @@ mod tests {
         .expect("lists-only trakt config");
 
         assert_eq!(result.lists, lists);
-        assert!(result.charts.is_empty());
+        assert_eq!(result.charts.len(), 0);
     }
 
     #[test]
@@ -859,7 +859,7 @@ mod tests {
 
         assert_eq!(result.catalog_selection, TraktCatalogSelection::Curated);
         assert!(!result.include_xtream_base_categories);
-        assert!(result.lists.is_empty());
+        assert_eq!(result.lists.len(), 0);
         assert_eq!(result.charts, charts);
     }
 

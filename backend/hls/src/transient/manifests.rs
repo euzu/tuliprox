@@ -28,6 +28,8 @@ impl TransientPassthroughState {
     pub fn new(resource_ttl_ms: u64) -> Self {
         Self {
             resources: HashMap::new(),
+            invalid_origin_resources: HashSet::new(),
+            origin_account_generation: 0,
             object_cache: HashMap::new(),
             object_fetch_notifiers: HashMap::new(),
             next_resource_revision: 1,

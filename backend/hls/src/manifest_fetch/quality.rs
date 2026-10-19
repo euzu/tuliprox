@@ -228,6 +228,9 @@ fn classify_manifest_sequence_relation(
 }
 
 fn manifest_continuity_mode(session: &crate::HlsSession, now_ms: u64) -> HlsManifestContinuityMode {
+    if session.origin_is_qualified() {
+        return HlsManifestContinuityMode::StrictContinuity;
+    }
     if session.origin_seq_highwater.is_none() {
         return HlsManifestContinuityMode::RebaseAllowed;
     }

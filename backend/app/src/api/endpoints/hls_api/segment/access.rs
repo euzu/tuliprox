@@ -186,7 +186,9 @@ pub(in crate::api::endpoints::hls_api) fn hls_lease_allows_cached_segment(
     match &lease.playback_mode {
         HlsLeasePlaybackMode::Live => true,
         HlsLeasePlaybackMode::TerminalTail(plan) => plan.protected_base_proxy_seqs.contains(&proxy_seq),
-        HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => false,
+        HlsLeasePlaybackMode::TerminalCustomResponse(_)
+        | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+        | HlsLeasePlaybackMode::Ended => false,
     }
 }
 

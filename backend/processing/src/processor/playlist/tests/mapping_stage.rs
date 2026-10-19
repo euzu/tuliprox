@@ -153,7 +153,7 @@ async fn m3u_alias_playlist_is_downloaded_and_indexed_separately() {
     assert!(errors.is_empty(), "unexpected download errors: {errors:?}");
     assert!(storage_error.is_none(), "unexpected primary storage error: {storage_error:?}");
     assert!(!partial);
-    assert!(quality_rejections.is_empty());
+    assert_eq!(quality_rejections.len(), 0);
     assert!(!primary_playlist.is_empty());
     let alias_url = tuliprox_repository::load_input_m3u_stream_url(
         &ctx.config,
@@ -214,7 +214,7 @@ async fn failed_m3u_alias_is_retried_after_primary_input_is_processed() {
     assert!(!first_errors.is_empty(), "missing alias should report an error");
     assert!(first_storage_error.is_none(), "primary storage should succeed: {first_storage_error:?}");
     assert!(!first_partial);
-    assert!(first_quality_rejections.is_empty());
+    assert_eq!(first_quality_rejections.len(), 0);
     assert!(!first_playlist.is_empty());
     assert!(ctx.is_input_downloaded("main-account").await);
     assert!(!ctx.is_input_downloaded("retry-account").await);
@@ -238,7 +238,7 @@ async fn failed_m3u_alias_is_retried_after_primary_input_is_processed() {
     assert!(second_errors.is_empty(), "unexpected retry errors: {second_errors:?}");
     assert!(second_storage_error.is_none(), "primary storage should remain readable: {second_storage_error:?}");
     assert!(!second_partial);
-    assert!(second_quality_rejections.is_empty());
+    assert_eq!(second_quality_rejections.len(), 0);
     assert!(!second_playlist.is_empty());
     assert!(ctx.is_input_downloaded("retry-account").await);
     let alias_url = tuliprox_repository::load_input_m3u_stream_url(

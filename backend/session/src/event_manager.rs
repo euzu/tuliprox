@@ -746,7 +746,7 @@ mod snapshot_and_ring_tests {
         manager.send_event(EventMessage::ConfigChange(ConfigType::Config));
         manager.send_event(EventMessage::RecordingChanged);
 
-        assert!(manager.snapshot().is_empty());
+        assert_eq!(manager.snapshot().len(), 0);
     }
 
     #[test]

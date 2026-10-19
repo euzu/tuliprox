@@ -1302,7 +1302,7 @@ url;other;other;http://third/get.php?username=user&password=pass;0;2;\n";
         )
         .await?;
         assert!(!receipt.changed);
-        assert!(receipt.matched.is_empty());
+        assert_eq!(receipt.matched.len(), 0);
         assert_eq!(tokio::fs::read_to_string(&path).await?, original);
         Ok(())
     }
@@ -1397,7 +1397,7 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
         .await?;
 
         assert!(!changed);
-        assert!(updated.is_empty());
+        assert_eq!(updated.len(), 0);
         assert!(!backup_dir.exists());
         Ok(())
     }

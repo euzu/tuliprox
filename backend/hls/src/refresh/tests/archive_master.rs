@@ -31,6 +31,7 @@ async fn archive_master_resolution_binds_recovery_to_entry_and_scrubs_redirected
     headers.insert(header::COOKIE, HeaderValue::from_static("sid=entry-secret"));
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
+        availability_runtime: None,
         session: Arc::new(RwLock::new(HlsSession::new(
             HlsSessionKey::new(1, "12345").with_archive_reference(1_784_898_000),
             b"secret",

@@ -205,7 +205,6 @@ fn replace_server_status_snapshot(
     // Trust backend `panel_streams` as authoritative. Re-merging sticky FE ghosts resurrected
     // ended archive/HLS rows until a full page reload.
     dedupe_streams_by_identity(&mut server_status.active_user_streams);
-    prune_zapped_preserved_streams(&mut server_status.active_user_streams);
     merge_aux_streams(&mut server_status, download_streams);
     let server_status = Rc::new(server_status);
     *status_holder = Some(Rc::clone(&server_status));
@@ -256,14 +255,22 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
                 }
                 return;
             }
-            if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
-                server_status.active_user_streams[pos] = stream_info;
-            } else {
-                server_status.active_user_streams.push(stream_info);
-            }
+            let provider_only_update =
+                if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
+                    let mut previous = server_status.active_user_streams[pos].clone();
+                    previous.provider.clone_from(&stream_info.provider);
+                    let provider_only_update = previous == stream_info;
+                    server_status.active_user_streams[pos] = stream_info;
+                    provider_only_update
+                } else {
+                    server_status.active_user_streams.push(stream_info);
+                    false
+                };
             dedupe_streams_by_identity(&mut server_status.active_user_streams);
             // Channel zap: new active channel replaces preserved soft-kept previous channel immediately.
-            prune_zapped_preserved_streams(&mut server_status.active_user_streams);
+            if !provider_only_update {
+                prune_zapped_preserved_streams(&mut server_status.active_user_streams);
+            }
         }
         ActiveUserConnectionChange::Disconnected(addr) => {
             let mut retained = Vec::with_capacity(server_status.active_user_streams.len());
@@ -500,6 +507,58 @@ mod tests {
         let mut stream = test_stream(uid, addr, session_token, PlaylistItemType::LiveHls);
         stream.channel.shared = true;
         stream
+    }
+
+    #[test]
+    fn provider_update_replaces_existing_shared_hls_rows() {
+        let mut viewers = vec![
+            test_shared_hls_stream(11, "127.0.0.1:11001", Some("viewer-a")),
+            test_shared_hls_stream(12, "127.0.0.1:11002", Some("viewer-b")),
+            test_shared_hls_stream(13, "127.0.0.1:11003", Some("viewer-c")),
+        ];
+        viewers[1].preserved = true;
+        for row in &mut viewers {
+            row.channel.shared_stream_id = Some(42);
+            row.provider = "account-a".intern();
+            row.started_at = 123;
+            row.ts = 456;
+        }
+        let mut status = shared::model::StatusCheck { active_user_streams: viewers.clone(), ..Default::default() };
+        let viewer_count = viewers.len();
+        for row in &mut viewers {
+            row.provider = "account-b".intern();
+            apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(row.clone()));
+            assert_eq!(
+                status.active_user_streams.len(),
+                viewer_count,
+                "provider updates must never prune another viewer"
+            );
+        }
+        assert_eq!(status.active_user_streams, viewers);
+    }
+
+    #[test]
+    fn status_snapshot_replaces_stale_provider_names() {
+        let mut viewers = vec![
+            test_shared_hls_stream(11, "127.0.0.1:11001", Some("viewer-a")),
+            test_shared_hls_stream(12, "127.0.0.1:11002", Some("viewer-b")),
+        ];
+        viewers[1].preserved = true;
+        for row in &mut viewers {
+            row.provider = "account-a".intern();
+        }
+        let mut holder =
+            Some(Rc::new(shared::model::StatusCheck { active_user_streams: viewers.clone(), ..Default::default() }));
+        for row in &mut viewers {
+            row.provider = "account-b".intern();
+        }
+        let result = replace_server_status_snapshot(
+            &mut holder,
+            shared::model::StatusCheck { active_user_streams: viewers.clone(), ..Default::default() },
+            &[],
+        );
+        assert_eq!(result.active_user_streams, viewers);
+        assert_eq!(holder.unwrap().active_user_streams, viewers);
     }
 
     #[test]

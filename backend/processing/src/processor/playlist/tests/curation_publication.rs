@@ -342,7 +342,7 @@ impl Publication {
                 .all(|item| text.contains(item.header.title.as_ref()) && text.contains(item.header.url.as_ref()))
         }));
         let strm = self.strm_contents();
-        assert!(!strm.is_empty());
+        assert_ne!(strm.len(), 0);
         let files = file_snapshot(self.directory.path());
         let live_title = expected[0].channels[0].header.title.as_bytes();
         assert!(
@@ -352,7 +352,7 @@ impl Publication {
             }),
             "new EPG programme must be published"
         );
-        assert!(!self.cache_signature().await.is_empty());
+        assert_ne!(self.cache_signature().await.len(), 0);
     }
 
     async fn identity_signature(&self) -> BTreeMap<String, (u32, u32)> {
@@ -455,7 +455,7 @@ async fn tmdb_https_selection_only_publishes_m3u_strm_without_an_xtream_output()
     let text = std::fs::read_to_string(run.directory.path().join("published.m3u")).unwrap();
     assert!(text.contains("First") && text.contains("Show S01E01") && text.contains("Live"));
     assert!(!text.contains("Unselected") && !text.contains("TMDB"));
-    assert!(!run.strm_contents().is_empty());
+    assert_ne!(run.strm_contents().len(), 0);
     let cache = run.context.playlist_state.as_ref().unwrap().data.read().await;
     assert!(cache[&run.target.name].xtream.is_none());
     assert_eq!(server.requests.lock().unwrap().len(), 3);
@@ -469,7 +469,7 @@ async fn tmdb_https_empty_and_no_match_clear_published_vod_series_but_keep_live(
         let server = DiscoveryServer::start().await;
         let run = Publication::new(&server, &target("curated", false, true));
         run.publish().await.unwrap();
-        assert!(!run.strm_contents().is_empty());
+        assert_ne!(run.strm_contents().len(), 0);
         server.reply(MOVIES, 200, body);
         server.reply(TV, 200, body);
         run.publish().await.unwrap();

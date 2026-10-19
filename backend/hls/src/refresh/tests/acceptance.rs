@@ -247,6 +247,7 @@ pub(in crate::refresh::tests) fn install_stored_provisioning_manifest(session: &
                     host_local_index: u32::try_from(*proxy_seq).unwrap_or(u32::MAX),
                 },
                 proxy_seq: *proxy_seq,
+                media_start_ms: *proxy_seq * 2_000,
                 duration_ms: 2_000,
                 proxy_file_ext: "ts".to_string(),
                 content_type: "video/mp2t".to_string(),
@@ -267,6 +268,7 @@ pub(in crate::refresh::tests) fn install_stored_provisioning_manifest(session: &
     session.publishable_origin_head_proxy_seq = segment_proxy_seqs.first().copied();
     session.publishable_origin_tail_proxy_seq = segment_proxy_seqs.last().copied();
     session.proxy_next_seq = Some(3);
+    session.next_media_start_ms = 6_000;
     session.target_duration = Some(2);
     assert_eq!(
         session.store_rendered_manifest(RenderedManifest {

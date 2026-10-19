@@ -761,6 +761,7 @@ async fn concurrent_maybe_trigger_origin_refresh_starts_singleflight_once() {
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -1081,7 +1082,7 @@ async fn compatible_aes_128_manifest_commits_normal_timeline_with_opaque_key_res
 
 #[tokio::test]
 async fn cold_recovery_directive_is_suppressed_until_baseline() {
-    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(0)))).await;
     let session = test_session();
     let mut request = test_origin_refresh_request(Arc::clone(&session));
     request.origin_entry =
@@ -1097,7 +1098,7 @@ async fn cold_recovery_directive_is_suppressed_until_baseline() {
     assert_eq!(manifest_requests, 1);
     assert_ne!(manifest_requests, plan.total_candidates());
     let session = session.read().await;
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(2));
     assert!(session.origin_control.manifest_origin_binding.is_some());
     assert!(session.origin_control.acceptance_episode.is_none());
 }
@@ -1118,6 +1119,7 @@ async fn shared_initial_manifest_decoder_failure_retries_until_success() {
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),
@@ -1164,6 +1166,7 @@ async fn shared_initial_manifest_waits_for_next_attempt_base_delay() {
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),
@@ -1202,6 +1205,7 @@ async fn shared_initial_manifest_decoder_failures_stop_at_attempt_budget() {
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),
@@ -1266,7 +1270,7 @@ async fn shared_refresh_metrics_use_successful_manifest_attempt_count() {
         .filter(|request| request.lines().next().is_some_and(|line| line.contains(" /live/user/pass/12345.m3u8 ")))
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(manifest_requests.len(), 3);
+    assert_eq!(manifest_requests.len(), 4, "initial retries plus the configured single-candidate qualification");
     assert!(manifest_requests
         .iter()
         .all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
@@ -1400,7 +1404,7 @@ async fn recovery_unavailable_after_valid_response_preserves_response_evidence()
 #[tokio::test]
 async fn cold_start_uses_one_initial_fetch_and_commits_a_fresh_baseline_before_recovery() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
-    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(0)))).await;
     let session = test_session();
     {
         let mut session = session.write().await;
@@ -1421,7 +1425,7 @@ async fn cold_start_uses_one_initial_fetch_and_commits_a_fresh_baseline_before_r
     assert_eq!(manifest_requests, 1);
     assert_ne!(manifest_requests, plan.total_candidates());
     let session = session.read().await;
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(2));
     assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));
     assert!(session.origin_control.acceptance_episode.is_none());
 }
@@ -1448,4 +1452,39 @@ async fn cold_start_hard_error_is_preserved_by_fetch_policy() {
         session.origin_control.progress_phase,
         super::super::super::origin_progress::HlsOriginProgressPhase::Cold
     );
+}
+
+#[tokio::test]
+async fn shared_initial_manifest_caps_retry_after_at_half_target_duration() {
+    for use_manual_redirects in [false, true] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let server = spawn_test_origin(Arc::new(move |_path| {
+            if hits_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+                return (502, vec![("Retry-After", "60".to_string())], "retry".to_string());
+            }
+            (200, Vec::new(), manifest_body())
+        }))
+        .await;
+        let session = test_session();
+        session.write().await.origin_control.record_media_progress(50, 1_000);
+        let mut request = test_origin_refresh_request(session);
+        request.origin_entry =
+            LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url)).expect("entry url");
+        request.use_manual_redirects = use_manual_redirects;
+        let context = super::manifest_fetch_context(&request);
+        let started_at = std::time::Instant::now();
+
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context)),
+        )
+        .await
+        .expect("Retry-After must not stall the manifest fetch for 60 seconds")
+        .expect("second logical attempt should succeed");
+
+        assert_eq!(fetched.attempts, 2);
+        assert_eq!(server.requests.lock().await.len(), 2);
+        assert!(started_at.elapsed() >= std::time::Duration::from_millis(500));
+    }
 }

@@ -485,7 +485,7 @@ mod tests {
         let playlist = vec![group(1, XtreamCluster::Series, vec![series])];
 
         // `m3u_write_playlist` does not store series info, so the index must not point at it.
-        assert!(entries(&build_lineup_guide_index(&playlist, LineupGuideView::M3u)).is_empty());
+        assert_eq!(entries(&build_lineup_guide_index(&playlist, LineupGuideView::M3u)).len(), 0);
     }
 
     #[test]
@@ -529,7 +529,7 @@ mod tests {
 
         // `lineup.json` publishes the empty EPG id as the guide number of the first channel, which
         // no request can ask for, so neither the empty id nor the name may answer for it.
-        assert!(entries(&tree).is_empty());
+        assert_eq!(entries(&tree).len(), 0);
     }
 
     #[tokio::test]

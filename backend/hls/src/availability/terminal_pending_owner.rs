@@ -89,7 +89,7 @@ pub(super) async fn register_terminal_pending_owner(
             ownership,
         )
     });
-    terminal_resolution_for_pending_registration(context, expected_asset, latest_safe_commit_at_ms, registration)
+    terminal_resolution_for_pending_registration(context, expected_asset, latest_safe_commit_at_ms, registration).await
 }
 
 fn terminal_pending_owner_key(
@@ -117,7 +117,7 @@ fn terminal_pending_owner_key(
     })
 }
 
-pub(super) fn register_ready_terminal_pending_owner(
+pub(super) async fn register_ready_terminal_pending_owner(
     context: HlsTerminalCommitContext<'_>,
     asset: Arc<crate::terminal_tail::HlsTerminalMediaAsset>,
     expected_asset: HlsRuntimeCustomTailAssetIdentity,
@@ -150,16 +150,15 @@ pub(super) fn register_ready_terminal_pending_owner(
         };
         let outcome = commit_ready_terminal_bundle(task_context, asset, expected_asset, bundle_key, bundle).await;
         if ownership.is_current() {
-            observe_autonomous_terminal_resolution(terminal_resolution_with_failed_closed_fallback(
-                task_context,
-                outcome,
-            ));
+            observe_autonomous_terminal_resolution(
+                terminal_resolution_with_failed_closed_fallback(task_context, outcome).await,
+            );
         }
     });
-    terminal_resolution_for_pending_registration(context, expected_asset, latest_safe_commit_at_ms, registration)
+    terminal_resolution_for_pending_registration(context, expected_asset, latest_safe_commit_at_ms, registration).await
 }
 
-pub(super) fn terminal_resolution_for_pending_registration(
+pub(super) async fn terminal_resolution_for_pending_registration(
     context: HlsTerminalCommitContext<'_>,
     expected_asset: HlsRuntimeCustomTailAssetIdentity,
     latest_safe_commit_at_ms: u64,
@@ -178,7 +177,7 @@ pub(super) fn terminal_resolution_for_pending_registration(
                 Some(expected_asset),
                 HlsTerminalTailCompatibility::TerminalMediaNotReady,
             );
-            terminal_resolution_with_failed_closed_fallback(context, outcome)
+            terminal_resolution_with_failed_closed_fallback(context, outcome).await
         }
     }
 }
@@ -193,7 +192,7 @@ async fn terminal_resolution_after_settled_bundle_observation(
     match state {
         Some(HlsPreparedTerminalBundleState::Ready { bundle }) if bundle.matches_key_and_shape(bundle_key) => {
             let outcome = commit_ready_terminal_bundle(context, asset, expected_asset, bundle_key, bundle).await;
-            terminal_resolution_with_failed_closed_fallback(context, outcome)
+            terminal_resolution_with_failed_closed_fallback(context, outcome).await
         }
         Some(HlsPreparedTerminalBundleState::Ready { .. }) => {
             let outcome = commit_terminal_unavailable(
@@ -201,12 +200,12 @@ async fn terminal_resolution_after_settled_bundle_observation(
                 Some(expected_asset),
                 HlsTerminalTailCompatibility::AssetRevisionMismatch,
             );
-            terminal_resolution_with_failed_closed_fallback(context, outcome)
+            terminal_resolution_with_failed_closed_fallback(context, outcome).await
         }
         Some(HlsPreparedTerminalBundleState::Failed { key, reason }) => {
             let compatibility = terminal_bundle_failure_compatibility(key, bundle_key, reason);
             let outcome = commit_terminal_unavailable(context, Some(expected_asset), compatibility);
-            terminal_resolution_with_failed_closed_fallback(context, outcome)
+            terminal_resolution_with_failed_closed_fallback(context, outcome).await
         }
         Some(HlsPreparedTerminalBundleState::Incompatible { key, reason }) => {
             let compatibility = if key == bundle_key {
@@ -215,7 +214,7 @@ async fn terminal_resolution_after_settled_bundle_observation(
                 HlsTerminalTailCompatibility::AssetRevisionMismatch
             };
             let outcome = commit_terminal_unavailable(context, Some(expected_asset), compatibility);
-            terminal_resolution_with_failed_closed_fallback(context, outcome)
+            terminal_resolution_with_failed_closed_fallback(context, outcome).await
         }
         Some(HlsPreparedTerminalBundleState::Preparing { .. }) | None => {
             let outcome = commit_terminal_unavailable(
@@ -223,7 +222,7 @@ async fn terminal_resolution_after_settled_bundle_observation(
                 Some(expected_asset),
                 HlsTerminalTailCompatibility::TerminalMediaNotReady,
             );
-            terminal_resolution_with_failed_closed_fallback(context, outcome)
+            terminal_resolution_with_failed_closed_fallback(context, outcome).await
         }
     }
 }
@@ -330,7 +329,7 @@ pub(super) async fn run_terminal_pending_owner(
             commit_terminal_unavailable(context, Some(expected_asset), compatibility)
         }
     };
-    observe_autonomous_terminal_resolution(terminal_resolution_with_failed_closed_fallback(context, outcome));
+    observe_autonomous_terminal_resolution(terminal_resolution_with_failed_closed_fallback(context, outcome).await);
 }
 
 fn terminal_pending_retry_after_ms(now_ms: u64, latest_safe_commit_at_ms: u64) -> u64 {
@@ -378,7 +377,7 @@ pub(super) fn terminal_resolution_for_commit_outcome(
     }
 }
 
-pub(super) fn terminal_resolution_with_failed_closed_fallback(
+pub(super) async fn terminal_resolution_with_failed_closed_fallback(
     context: HlsTerminalCommitContext<'_>,
     outcome: HlsTerminalCommitOutcome,
 ) -> HlsTerminalResolution {
@@ -389,6 +388,9 @@ pub(super) fn terminal_resolution_with_failed_closed_fallback(
     if context.preparation.trigger.is_runtime_policy() {
         return resolution;
     }
+    if outcome == HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed {
+        return commit_late_custom_response(context).await;
+    }
     commit_prepared_terminal_unavailable_after_owner_failure(
         context.ctx,
         context.session,
@@ -396,7 +398,46 @@ pub(super) fn terminal_resolution_with_failed_closed_fallback(
         context.lease_id,
         context.preparation,
         context.now_ms,
+        HlsTerminalTailCompatibility::TerminalMediaNotReady,
     )
+}
+
+pub(super) async fn commit_late_custom_response(context: HlsTerminalCommitContext<'_>) -> HlsTerminalResolution {
+    let prepared = crate::late_custom_response::prepare_late_custom_response(
+        context.ctx,
+        context.proxy_session_id,
+        context.lease_id,
+        context.preparation,
+        context.now_ms,
+    )
+    .await;
+    let (plan, expected_asset) = match prepared {
+        Ok(prepared) => prepared,
+        Err(crate::late_custom_response::HlsLateCustomResponseError::Superseded) => {
+            return HlsTerminalResolution::Reevaluate
+        }
+        Err(crate::late_custom_response::HlsLateCustomResponseError::Unavailable(reason)) => {
+            return commit_prepared_terminal_unavailable_after_owner_failure(
+                context.ctx,
+                context.session,
+                context.proxy_session_id,
+                context.lease_id,
+                context.preparation,
+                context.now_ms,
+                reason,
+            )
+        }
+    };
+    let outcome = context.ctx.hls_proxy.commit_access_lease_terminal_if_generation_matches(HlsTerminalCommitRequest {
+        session: context.session,
+        lease_id: context.lease_id,
+        proxy_session_id: context.proxy_session_id,
+        preparation: context.preparation,
+        now_ms: context.ctx.hls_proxy.terminal_commit_now_ms().max(context.now_ms),
+        payload: HlsTerminalCommitPayload::CustomResponse(plan),
+        asset_revision_guard: terminal_asset_revision_guard(context.ctx, expected_asset.reason, Some(expected_asset)),
+    });
+    terminal_resolution_for_commit_outcome(outcome, context.now_ms)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +527,7 @@ pub(super) fn commit_prepared_terminal_unavailable_after_owner_failure(
     lease_id: &HlsAccessLeaseId,
     preparation: &HlsTerminalTailPreparation,
     now_ms: u64,
+    reason: HlsTerminalTailCompatibility,
 ) -> HlsTerminalResolution {
     let expected_asset = configured_terminal_asset_identity(ctx, HlsRuntimeCustomTailReason::ChannelUnavailable);
     let outcome = ctx.hls_proxy.commit_access_lease_terminal_if_generation_matches(HlsTerminalCommitRequest {
@@ -494,9 +536,7 @@ pub(super) fn commit_prepared_terminal_unavailable_after_owner_failure(
         proxy_session_id,
         preparation,
         now_ms: ctx.hls_proxy.terminal_commit_now_ms().max(now_ms),
-        payload: HlsTerminalCommitPayload::UnavailableAfterOwnerFailure(
-            HlsTerminalTailCompatibility::TerminalMediaNotReady,
-        ),
+        payload: HlsTerminalCommitPayload::UnavailableAfterOwnerFailure(reason),
         asset_revision_guard: terminal_asset_revision_guard(
             ctx,
             HlsRuntimeCustomTailReason::ChannelUnavailable,

@@ -195,7 +195,7 @@ async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_pi
     .await;
 
     assert_eq!(retry.admission.permission(), UserConnectionPermission::Allowed);
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -326,7 +326,7 @@ async fn resolve_admission_with_strategies_allows_other_channel_after_recent_evi
     let admission = result.admission;
 
     assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -458,7 +458,7 @@ async fn resolve_admission_with_strategies_does_not_suppress_different_session_o
 
     assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(grace_mode, None);
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -641,7 +641,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
 
     app_state.connection_manager.release_connection(&hls_addr).await;
     assert_eq!(app_state.active_users.user_connections(&user.username).await, 0);
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 
     let mut close_rx = app_state.connection_manager.get_close_connection_channel();
     let result = resolve_admission_with_strategies(
@@ -664,7 +664,7 @@ async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same
 
     assert_eq!(admission.permission(), UserConnectionPermission::Allowed);
     assert_eq!(grace_mode, None);
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
     assert_eq!(
         tokio::time::timeout(std::time::Duration::from_millis(100), close_rx.recv()).await.ok().and_then(Result::ok),
         Some(crate::api::model::CloseConnectionSignal::WithReason(

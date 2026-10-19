@@ -21,6 +21,10 @@ pub use tuliprox_core::utils::content_coding::{
 #[derive(Debug, Default)]
 pub struct HlsCacheMetrics {
     revision_disk_bytes: AtomicU64,
+    revision_deletions_planned: AtomicU64,
+    revision_deletions_succeeded: AtomicU64,
+    revision_deletions_failed: AtomicU64,
+    revision_bytes_reclaimed: AtomicU64,
     progressive_replay_bytes: AtomicU64,
     progressive_active_fills: AtomicU64,
     deferred_repairs: AtomicU64,
@@ -61,6 +65,10 @@ pub struct HlsCacheMetrics {
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct HlsCacheMetricsSnapshot {
     pub revision_disk_bytes: u64,
+    pub revision_deletions_planned: u64,
+    pub revision_deletions_succeeded: u64,
+    pub revision_deletions_failed: u64,
+    pub revision_bytes_reclaimed: u64,
     pub progressive_replay_bytes: u64,
     pub progressive_active_fills: u64,
     pub deferred_repairs: u64,
@@ -104,6 +112,13 @@ impl HlsCacheMetrics {
         self.progressive_replay_bytes.store(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
         self.deferred_repairs.store(u64::try_from(repairs).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
+    pub(crate) fn record_revision_gc(&self, planned: usize, succeeded: usize, failed: usize, bytes: u64) {
+        self.revision_deletions_planned.fetch_add(u64::try_from(planned).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.revision_deletions_succeeded.fetch_add(u64::try_from(succeeded).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.revision_deletions_failed.fetch_add(u64::try_from(failed).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.revision_bytes_reclaimed.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub fn record_revision_disk_bytes(&self, bytes: u64) { self.revision_disk_bytes.store(bytes, Ordering::Relaxed); }
     pub fn record_session_created(&self) { increment(&self.sessions_created, 1); }
     pub fn record_session_reused(&self) { increment(&self.sessions_reused, 1); }
@@ -157,6 +172,10 @@ impl HlsCacheMetrics {
     pub fn snapshot(&self) -> HlsCacheMetricsSnapshot {
         HlsCacheMetricsSnapshot {
             revision_disk_bytes: load(&self.revision_disk_bytes),
+            revision_deletions_planned: load(&self.revision_deletions_planned),
+            revision_deletions_succeeded: load(&self.revision_deletions_succeeded),
+            revision_deletions_failed: load(&self.revision_deletions_failed),
+            revision_bytes_reclaimed: load(&self.revision_bytes_reclaimed),
             progressive_replay_bytes: load(&self.progressive_replay_bytes),
             progressive_active_fills: load(&self.progressive_active_fills),
             deferred_repairs: load(&self.deferred_repairs),

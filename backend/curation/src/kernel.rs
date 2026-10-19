@@ -699,7 +699,7 @@ mod tests {
             panic!("an empty source is complete")
         };
         assert_eq!(reference_count, 0);
-        assert!(memberships.is_empty());
+        assert_eq!(memberships.len(), 0);
 
         let no_match = vec![reference(CurationMediaKind::Movie, "Missing", None, Some(8), Some(1))];
         let SelectorOutcome::Complete { reference_count, memberships, .. } =
@@ -708,7 +708,7 @@ mod tests {
             panic!("a complete source with no local match is complete")
         };
         assert_eq!(reference_count, 1);
-        assert!(memberships.is_empty());
+        assert_eq!(memberships.len(), 0);
 
         let matched = vec![reference(CurationMediaKind::Movie, "Matched", None, Some(7), Some(1))];
         let SelectorOutcome::Complete { reference_count, memberships, .. } =

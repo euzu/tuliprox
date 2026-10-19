@@ -41,6 +41,24 @@ pub struct HlsManifestTimelineFingerprint {
     pub segment_samples: Vec<HlsManifestSegmentFingerprint>,
 }
 
+/// Acceptance preference shared by cohort ranking and candidate selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum HlsManifestWindowClass {
+    Regular,
+    Short,
+    Empty,
+}
+
+impl HlsManifestTimelineFingerprint {
+    pub(super) const fn window_class(&self) -> HlsManifestWindowClass {
+        match self.segment_count {
+            0 => HlsManifestWindowClass::Empty,
+            1 | 2 => HlsManifestWindowClass::Short,
+            3.. => HlsManifestWindowClass::Regular,
+        }
+    }
+}
+
 /// Stable, window-independent technical identity of an alternative timeline.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HlsManifestTechnicalSignature {

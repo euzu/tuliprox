@@ -486,7 +486,7 @@ mod tests {
                 assert_eq!(reloaded.overall_state, InputUpdateCardStatus::Ready);
                 assert_eq!(reloaded.run_id, None);
                 assert_eq!(reloaded.cache_source, None);
-                assert!(reloaded.cluster_results.is_empty());
+                assert_eq!(reloaded.cluster_results.len(), 0);
             }
         }
     }
@@ -601,7 +601,7 @@ mod tests {
                     assert_eq!(view.cache_source, None);
                     assert_eq!(view.refresh_policy, None);
                     assert_eq!(view.library_scan_result, None);
-                    assert!(view.progress_details.is_empty());
+                    assert_eq!(view.progress_details.len(), 0);
                     assert_eq!(view.cluster_results.is_empty(), !(input_type.is_xtream() || input_type.is_stalker()));
                     assert!(view.cluster_results.iter().all(|cluster| cluster.outcome.is_none()
                         && cluster.quality.is_none()
@@ -713,7 +713,7 @@ mod tests {
             let view = build_input_update_run_views(&sources, &cards, &reloaded, &persisted).remove(0);
             assert_eq!(view.input_state, InputUpdateCardStatus::Success);
             assert_eq!(view.run_id, None);
-            assert!(view.progress_details.is_empty());
+            assert_eq!(view.progress_details.len(), 0);
             assert_eq!(view.refresh_policy, None);
         }
     }
@@ -762,7 +762,7 @@ mod tests {
             let reload = project(&fresh);
             assert_eq!(reload.library_catalog, Some(catalog.clone()));
             assert_eq!(reload.library_scan_result, None);
-            assert!(reload.cluster_results.is_empty());
+            assert_eq!(reload.cluster_results.len(), 0);
             assert_eq!(reload.last_update_at, Some(1234));
             let state = fresh
                 .reduce(accepted("r1"))
@@ -789,7 +789,7 @@ mod tests {
             assert_eq!(queued.run_id, Some("r2".into()));
             assert_eq!(queued.overall_state, InputUpdateCardStatus::Queued);
             assert_eq!(queued.library_scan_result, None);
-            assert!(queued.progress_details.is_empty());
+            assert_eq!(queued.progress_details.len(), 0);
             assert_eq!(project(&state.clone().reduce(accepted("r1"))), queued);
             let state = state.reduce(progress(PlaylistUpdateProgressEvent::for_run_input(
                 "r2".into(),
@@ -1533,7 +1533,7 @@ mod tests {
         assert_eq!(view.refresh_policy, None);
         assert_eq!(view.cache_source, None);
         assert_eq!(view.last_update_at, None);
-        assert!(view.progress_details.is_empty());
+        assert_eq!(view.progress_details.len(), 0);
         assert!(view.cluster_results.iter().all(|cluster| cluster.threshold.is_none()));
         assert_eq!(view.target_results[0].target_id, 99);
         assert_eq!(view.target_results[0].pipeline, None);
@@ -1702,7 +1702,7 @@ mod tests {
         assert_eq!(queued.run_id.as_ref().map(PlaylistUpdateRunId::as_ref), Some("force-run"));
         assert_eq!(queued.overall_state, InputUpdateCardStatus::Queued);
         assert_eq!(queued.refresh_policy, Some(InputRefreshPolicy::FORCE));
-        assert!(queued.progress_details.is_empty());
+        assert_eq!(queued.progress_details.len(), 0);
         assert_eq!(queued.target_results, partial.target_results);
         let live = queued.cluster_results[0];
         assert_eq!(live.requested, None);

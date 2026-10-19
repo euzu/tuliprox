@@ -304,7 +304,7 @@ the old location.
 | Target duration fallback | 15 seconds | Used before an origin target duration is known. |
 | Publication lateness | `1.5 * target_duration` | Observation signal only; never a cutover or terminal deadline. |
 | Recovery trigger | Lease READY reserve minus full acceptance ETA and transition margin | Starts recovery while the configured burst can still complete. |
-| Terminal cutover | Lease-specific safe commit deadline | Prevents terminal publication after the lease's usable reserve is exhausted. |
+| Terminal cutover | Lease-specific safe splice deadline | Bounds a live-tail splice; a late finite Custom Response uses a separate bounded commit budget. |
 | HLS cache GC interval | 30 seconds | Periodic cleanup cadence for cache objects and stale runtime state. |
 | Temporary file retention | 30 seconds | Retention window for temporary HLS cache files. |
 | Failed segment retention | 10 seconds | Short retention for failed segment state. |

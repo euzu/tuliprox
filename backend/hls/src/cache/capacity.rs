@@ -1,7 +1,7 @@
 use super::{
     error::{cache_object_limit_error, capacity_error},
     hls_cache_capacity_from_io,
-    lifecycle::{is_temp_cache_file, REWRITE_SECRET_FINGERPRINT_FILE},
+    lifecycle::REWRITE_SECRET_FINGERPRINT_FILE,
     revisions::{is_revision_cache_path, revision_reserved_bytes},
     safe_proxy_session_id, CacheCapacityPressure, CacheCapacityState, CapacityInvalidationGuard,
     CapacityMutationReservation, CapacityRevision, HlsCacheCapacityRevision, HlsCacheObjectKey, HlsSegmentCache,
@@ -82,11 +82,21 @@ impl CapacityMutationReservation {
             return Err(CapacityReservationError::Invalidated);
         }
         let session_size = capacity.session_bytes.get(&self.session_component).copied().unwrap_or_default();
-        let projected_total = capacity.total_bytes.saturating_sub(old_size).saturating_add(new_size);
-        let projected_session = session_size.saturating_sub(old_size).saturating_add(new_size);
+        // Old bytes remain on disk until rename succeeds. Reserve growth now,
+        // but publish any shrink only after the filesystem mutation completes.
+        let growth = new_size.saturating_sub(old_size);
+        let projected_total = capacity.total_bytes.saturating_add(growth);
+        let projected_session = session_size.saturating_add(growth);
         let (reserved_global, reserved_session) = revision_reserved_bytes(&capacity, &self.session_component);
-        if projected_total.saturating_add(reserved_global) > max_cache_bytes
-            || projected_session.saturating_add(reserved_session) > max_session_bytes
+        let transferred = self
+            .write_budget
+            .as_ref()
+            .and_then(|budget| {
+                capacity.revision_reservations.get(&budget.id).filter(|(owner, _)| owner == &self.session_component)
+            })
+            .map_or(0, |(_, bytes)| (*bytes).min(new_size.saturating_sub(old_size)));
+        if projected_total.saturating_add(reserved_global.saturating_sub(transferred)) > max_cache_bytes
+            || projected_session.saturating_add(reserved_session.saturating_sub(transferred)) > max_session_bytes
         {
             return Err(CapacityReservationError::Exceeded {
                 pressure: CacheCapacityPressure {
@@ -96,10 +106,10 @@ impl CapacityMutationReservation {
                     current_global_bytes: capacity.total_bytes,
                     staged_bytes: new_size,
                     required_session_bytes: projected_session
-                        .saturating_add(reserved_session)
+                        .saturating_add(reserved_session.saturating_sub(transferred))
                         .saturating_sub(max_session_bytes),
                     required_global_bytes: projected_total
-                        .saturating_add(reserved_global)
+                        .saturating_add(reserved_global.saturating_sub(transferred))
                         .saturating_sub(max_cache_bytes),
                 },
                 // Capture the opaque token in the same critical section as the
@@ -108,6 +118,12 @@ impl CapacityMutationReservation {
                 revision: HlsCacheCapacityRevision(Arc::clone(&capacity.revision)),
             });
         }
+        if let Some(budget) = &self.write_budget {
+            if let Some((_, bytes)) = capacity.revision_reservations.get_mut(&budget.id) {
+                *bytes -= transferred;
+            }
+        }
+        self.transferred_bytes = transferred;
         capacity.total_bytes = projected_total;
         store_session_bytes(&mut capacity, &self.session_component, projected_session);
         self.replacement = Some((old_size, new_size));
@@ -117,12 +133,36 @@ impl CapacityMutationReservation {
     pub(super) fn mark_filesystem_mutation_started(&mut self) { self.filesystem_mutation_started = true; }
 
     pub(super) fn finish_replacement(mut self) {
+        let mut capacity = self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((old, new)) = self.replacement {
+            let released = old.saturating_sub(new);
+            capacity.total_bytes = capacity.total_bytes.saturating_sub(released);
+            let session_size = capacity.session_bytes.get(&self.session_component).copied().unwrap_or_default();
+            store_session_bytes(&mut capacity, &self.session_component, session_size.saturating_sub(released));
+            if super::revisions::is_revision_cache_path(&self.path) {
+                capacity.revision_bytes = capacity.revision_bytes.saturating_sub(old).saturating_add(new);
+            }
+        }
+        capacity.abandoned_writes.remove(&self.path);
+        if let Some(budget) = &self.write_budget {
+            capacity.write_owners.insert(self.path.clone(), budget.id);
+        } else {
+            capacity.write_owners.remove(&self.path);
+        }
+        drop(capacity);
         self.replacement = None;
         self.finish_mutation(None);
     }
 
     pub(super) fn finish_delete(mut self, deleted_size: u64) {
-        self.finish_mutation(Some(deleted_size));
+        let unaccounted = self
+            .capacity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserved_spools
+            .remove(&self.path)
+            .is_some();
+        self.finish_mutation(Some(if unaccounted { 0 } else { deleted_size }));
         self.replacement = None;
     }
 
@@ -134,11 +174,17 @@ impl CapacityMutationReservation {
         capacity.active_mutations.remove(&self.path);
         if capacity.initialized && capacity.cache_path == self.cache_path {
             if let Some(deleted_size) = deleted_size {
+                capacity.write_owners.remove(&self.path);
+                capacity.abandoned_writes.remove(&self.path);
+                if super::revisions::is_revision_cache_path(&self.path) {
+                    capacity.revision_bytes = capacity.revision_bytes.saturating_sub(deleted_size);
+                }
                 capacity.total_bytes = capacity.total_bytes.saturating_sub(deleted_size);
                 let session_bytes = capacity.session_bytes.get(&self.session_component).copied().unwrap_or_default();
                 store_session_bytes(&mut capacity, &self.session_component, session_bytes.saturating_sub(deleted_size));
             }
         }
+        update_revision_metrics(&capacity);
         capacity.revision = Arc::new(CapacityRevision);
         drop(capacity);
         self.changed.notify_waiters();
@@ -152,18 +198,22 @@ impl Drop for CapacityMutationReservation {
             return;
         }
         capacity.active_mutations.remove(&self.path);
+        if !self.filesystem_mutation_started && self.transferred_bytes > 0 {
+            if let Some((_, bytes)) =
+                self.write_budget.as_ref().and_then(|budget| capacity.revision_reservations.get_mut(&budget.id))
+            {
+                *bytes = bytes.saturating_add(self.transferred_bytes);
+            }
+        }
         let revision_changed = if self.filesystem_mutation_started {
             capacity.initialized = false;
             true
         } else if capacity.initialized && capacity.cache_path == self.cache_path {
             if let Some((old_size, new_size)) = self.replacement.take() {
-                capacity.total_bytes = capacity.total_bytes.saturating_sub(new_size).saturating_add(old_size);
+                let growth = new_size.saturating_sub(old_size);
+                capacity.total_bytes = capacity.total_bytes.saturating_sub(growth);
                 let session_size = capacity.session_bytes.get(&self.session_component).copied().unwrap_or_default();
-                store_session_bytes(
-                    &mut capacity,
-                    &self.session_component,
-                    session_size.saturating_sub(new_size).saturating_add(old_size),
-                );
+                store_session_bytes(&mut capacity, &self.session_component, session_size.saturating_sub(growth));
                 true
             } else {
                 false
@@ -342,13 +392,36 @@ impl HlsSegmentCache {
                 notified.await;
                 continue;
             };
-            let (total_bytes, session_bytes, revision_bytes) = scan_committed_cache_usage(cache_path).await?;
+            let (temp_revision, mut excluded) = {
+                let temps = self.temp_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let excluded: std::collections::HashSet<_> = temps
+                    .active_files
+                    .iter()
+                    .filter(|path| super::lifecycle::is_temp_cache_file(path))
+                    .cloned()
+                    .collect();
+                (Arc::clone(&temps.revision), excluded)
+            };
+            excluded.extend(
+                self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reserved_spools.keys().cloned(),
+            );
+            #[cfg(test)]
+            self.startup_write_checkpoint(super::StartupWritePhase::AfterInventorySnapshot).await?;
+            let (total_bytes, session_bytes, revision_bytes) =
+                scan_cache_usage_excluding(cache_path, &excluded).await?;
             if self.cache_path_snapshot().path != cache_path {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "hls cache path changed during usage scan"));
             }
+            // Registration precedes file creation. Changes after this check cannot
+            // have affected the completed scan; no nested temp/capacity locks are needed.
+            let temps_changed = !Arc::ptr_eq(
+                &self.temp_files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).revision,
+                &temp_revision,
+            );
             let scan_invalidated = {
                 let mut capacity = self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !Arc::ptr_eq(&capacity.revision, &revision)
+                if temps_changed
+                    || !Arc::ptr_eq(&capacity.revision, &revision)
                     || capacity.active_mutations.iter().any(|path| path.starts_with(cache_path))
                 {
                     true
@@ -358,6 +431,18 @@ impl HlsSegmentCache {
                     capacity.total_bytes = total_bytes;
                     capacity.session_bytes = session_bytes;
                     capacity.revision_bytes = revision_bytes;
+                    let sessions: std::collections::HashSet<_> = capacity.session_bytes.keys().cloned().collect();
+                    let active_owners: std::collections::HashSet<_> =
+                        capacity.revision_reservations.keys().copied().collect();
+                    capacity.write_owners.retain(|path, owner| {
+                        active_owners.contains(owner)
+                            || path.strip_prefix(cache_path).ok().and_then(|path| path.components().next()).is_some_and(
+                                |session| sessions.contains(session.as_os_str().to_string_lossy().as_ref()),
+                            )
+                    });
+                    let owners = capacity.write_owners.clone();
+                    capacity.abandoned_writes.retain(|path, (owner, _)| owners.get(path) == Some(owner));
+                    update_revision_metrics(&capacity);
                     false
                 }
             };
@@ -407,6 +492,8 @@ impl HlsSegmentCache {
             session_component,
             replacement: None,
             filesystem_mutation_started: false,
+            write_budget: None,
+            transferred_bytes: 0,
             capacity: Arc::clone(&self.capacity),
             changed: Arc::clone(&self.capacity_changed),
         })
@@ -421,9 +508,39 @@ impl HlsSegmentCache {
         max_cache_bytes: u64,
         max_session_bytes: u64,
     ) -> io::Result<CapacityMutationReservation> {
+        self.prepare_capacity_replacement_with_budget(
+            cache_path,
+            final_path,
+            session_component,
+            new_size,
+            max_cache_bytes,
+            max_session_bytes,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn prepare_capacity_replacement_with_budget(
+        &self,
+        cache_path: &Path,
+        final_path: &Path,
+        session_component: String,
+        new_size: u64,
+        max_cache_bytes: u64,
+        max_session_bytes: u64,
+        budget: Option<Arc<super::HlsRevisionDiskReservation>>,
+    ) -> io::Result<CapacityMutationReservation> {
+        if budget.as_ref().is_some_and(|budget| {
+            !Arc::ptr_eq(&budget.capacity, &self.capacity)
+                || !Arc::ptr_eq(&budget.generation, &self.cache_path_snapshot().generation)
+        }) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "foreign or retired write reservation"));
+        }
         loop {
             self.ensure_capacity_initialized(cache_path).await?;
             let mut reservation = self.begin_capacity_mutation(cache_path, final_path, session_component.clone()).await;
+            reservation.write_budget = budget.clone();
             let old_size = match fs::metadata(final_path).await {
                 Ok(metadata) => metadata.len(),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
@@ -465,7 +582,15 @@ fn invalidate_capacity_state(capacity: &StdMutex<CacheCapacityState>, changed: &
     changed.notify_waiters();
 }
 
+#[cfg(test)]
 pub(super) async fn scan_committed_cache_usage(cache_path: &Path) -> io::Result<(u64, HashMap<String, u64>, u64)> {
+    scan_cache_usage_excluding(cache_path, &std::collections::HashSet::new()).await
+}
+
+async fn scan_cache_usage_excluding(
+    cache_path: &Path,
+    excluded: &std::collections::HashSet<PathBuf>,
+) -> io::Result<(u64, HashMap<String, u64>, u64)> {
     let mut total_bytes = 0_u64;
     let mut revision_bytes = 0_u64;
     let mut session_bytes = HashMap::new();
@@ -475,22 +600,37 @@ pub(super) async fn scan_committed_cache_usage(cache_path: &Path) -> io::Result<
         Err(err) => return Err(err),
     };
     while let Some(root_entry) = root_entries.next_entry().await? {
-        if !root_entry.file_type().await?.is_dir() {
-            continue;
+        match root_entry.file_type().await {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
         let session_component = root_entry.file_name().to_string_lossy().into_owned();
         let mut bytes = 0_u64;
         let mut pending_dirs = vec![root_entry.path()];
         while let Some(dir) = pending_dirs.pop() {
-            let mut entries = fs::read_dir(dir).await?;
+            let mut entries = match fs::read_dir(dir).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             while let Some(entry) = entries.next_entry().await? {
-                let file_type = entry.file_type().await?;
+                let file_type = match entry.file_type().await {
+                    Ok(kind) => kind,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
                 if file_type.is_dir() {
                     pending_dirs.push(entry.path());
                 } else if file_type.is_file() {
                     let revision = is_revision_cache_path(&entry.path());
-                    if revision || !is_temp_cache_file(&entry.path()) {
-                        let size = entry.metadata().await?.len();
+                    if !excluded.contains(&entry.path()) {
+                        let size = match entry.metadata().await {
+                            Ok(metadata) => metadata.len(),
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error),
+                        };
                         bytes = bytes.saturating_add(size);
                         if revision {
                             revision_bytes = revision_bytes.saturating_add(size);
@@ -505,4 +645,10 @@ pub(super) async fn scan_committed_cache_usage(cache_path: &Path) -> io::Result<
         }
     }
     Ok((total_bytes, session_bytes, revision_bytes))
+}
+
+pub(super) fn update_revision_metrics(capacity: &CacheCapacityState) {
+    if let Some(metrics) = capacity.revision_metrics.as_ref().and_then(Weak::upgrade) {
+        metrics.record_revision_disk_bytes(capacity.revision_bytes);
+    }
 }

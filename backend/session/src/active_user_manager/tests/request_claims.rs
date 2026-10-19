@@ -48,7 +48,7 @@ async fn affine_request_claims_keep_playback_until_oldest_body_finishes() {
 
     let removed = manager.release_stream_by_uid(&addr, 41).await;
     assert!(removed.as_ref().is_some_and(|stream| stream.uid == 41));
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -89,7 +89,7 @@ async fn affine_request_claims_keep_playback_until_newest_body_finishes() {
     let removed = manager.release_stream_by_uid(&addr, 46).await;
     assert!(removed.as_ref().is_some_and(|stream| stream.uid == 45));
     assert_eq!(manager.active_users_and_connections().await, (0, 0));
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 fn shared_hls_channel(virtual_id: u32, shared_stream_id: u64) -> shared::model::StreamChannel {

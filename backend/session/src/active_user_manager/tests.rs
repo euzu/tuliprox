@@ -4,6 +4,7 @@ mod adaptive_streams;
 mod admission;
 mod expiry_gc;
 mod observability;
+mod provider_handover;
 mod provider_headers;
 mod reentry_protection;
 mod request_claims;

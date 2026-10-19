@@ -31,11 +31,15 @@ impl HlsProxyManager {
         proxy_seq: u64,
         requested_at_ms: u64,
     ) -> Option<HlsPlaybackRequestToken> {
-        self.access_leases.write().await.record_segment_request_started_if_identity_matches(
+        let session = self.sessions.get_by_proxy_session_id(proxy_session_id).await?;
+        let mut leases = self.access_leases.write().await;
+        let session = session.read().await;
+        let segment = session.segments.get(&proxy_seq)?;
+        leases.record_timed_segment_request_started_if_identity_matches(
             lease_id,
             proxy_session_id,
             lease_identity,
-            proxy_seq,
+            segment,
             requested_at_ms,
         )
     }

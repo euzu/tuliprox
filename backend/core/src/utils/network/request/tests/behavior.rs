@@ -108,7 +108,7 @@ async fn atomic_download_temp_files_are_unique_and_use_target_directory() {
     drop(second_output);
     drop(first_temp);
     drop(second_temp);
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }
 
 #[test]
@@ -181,7 +181,7 @@ async fn local_epg_file_respects_max_download_bytes() {
 
     assert!(err.to_string().contains("exceeds configured limit"));
     assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }
 
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn file_url_epg_source_respects_streamed_size_limit() {
 
     assert!(err.to_string().contains("exceeds configured limit"));
     assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }
 
 #[tokio::test]
@@ -243,7 +243,7 @@ async fn local_epg_replace_error_cleans_temp_file() {
     .expect_err("replacing a directory should fail");
 
     assert!(persist.is_dir());
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }
 
 #[tokio::test]
@@ -273,7 +273,7 @@ async fn local_epg_read_error_preserves_existing_cache_and_cleans_temp_file() {
     .expect_err("reading a directory as an EPG file should fail");
 
     assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }
 
 #[tokio::test]
@@ -301,7 +301,7 @@ async fn unsupported_epg_url_scheme_is_rejected_without_network_access() {
 
     assert!(err.to_string().contains("Unsupported EPG URL scheme 'ftp'"));
     assert!(!persist.exists());
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
 }
 
 #[cfg(windows)]
@@ -370,7 +370,7 @@ async fn remote_epg_size_limit_preserves_existing_cache_and_cleans_temp_file() {
 
     assert!(err.to_string().contains("exceeds configured limit"));
     assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
     server_handle.abort();
 }
 
@@ -409,7 +409,7 @@ async fn remote_epg_stream_error_preserves_existing_cache_and_cleans_temp_file()
     .expect_err("truncated response body should fail");
 
     assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
     server_handle.abort();
 }
 
@@ -466,7 +466,7 @@ async fn parallel_epg_downloads_to_same_target_are_serialized_and_replace_atomic
     assert_eq!(accepted.load(Ordering::SeqCst), 2);
     assert_eq!(max_active.load(Ordering::SeqCst), 1);
     assert_eq!(tokio::fs::read(&persist).await.expect("read refreshed cache"), b"BEGIN:VCALENDAR\nEND:VCALENDAR\n");
-    assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    assert_eq!(atomic_download_temp_files(dir.path()).await.len(), 0);
     server_handle.abort();
 }
 

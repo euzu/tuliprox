@@ -200,7 +200,7 @@ async fn test_kicked_release_does_not_preserve_adaptive_stream() {
     let removed = manager.release_connection_as_kicked(&addr).await;
     assert!(removed.addr_removed);
     assert_eq!(removed.removed_streams.len(), 1);
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -323,7 +323,7 @@ async fn test_adaptive_session_release_connection_preserves_logical_stream_and_s
     assert!(released.removed_streams.is_empty(), "adaptive session should remain logically active");
     assert_eq!(manager.user_connections("user1").await, 0);
     assert_eq!(manager.active_users_and_connections().await, (0, 0));
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 
     let connections = manager.connections.read().await;
     let preserved_stream = connections
@@ -413,7 +413,7 @@ async fn test_release_stream_ignores_preserved_adaptive_entry() {
 
     let released = manager.release_connection(&addr).await;
     assert!(released.addr_removed);
-    assert!(released.removed_streams.is_empty());
+    assert_eq!(released.removed_streams.len(), 0);
     assert!(manager.release_stream(&addr).await.is_none());
 }
 
@@ -448,7 +448,7 @@ async fn test_release_stream_without_session_removes_adaptive_stream_instead_of_
 
     let released = manager.release_stream(&addr).await;
     assert!(released.is_some(), "stream without schedulable expiry must be removed");
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -597,7 +597,7 @@ async fn catchup_release_connection_preserves_logical_stream_until_session_expir
     );
 
     assert_eq!(manager.user_connections(&user.username).await, 0);
-    assert!(manager.active_streams().await.is_empty());
+    assert_eq!(manager.active_streams().await.len(), 0);
 
     let connections = manager.connections.read().await;
     let preserved_stream = connections
@@ -895,7 +895,7 @@ async fn preserved_soft_reactivation_and_cleanup_leave_normal_slot_unchanged() {
     manager.release_stream_by_uid(&normal_addr, normal_stream_uid).await.expect("normal stream should release");
     let connections = manager.connections.read().await;
     let connection_data = connections.by_key.get(&user.username).expect("user connection data");
-    assert!(connection_data.streams.is_empty());
+    assert_eq!(connection_data.streams.len(), 0);
     assert!(connection_data.stream_kinds.is_empty());
     assert_no_real_connection_slots(connection_data);
     drop(connections);
@@ -1105,7 +1105,7 @@ async fn release_session_streams_notifies_frontend_for_each_removed_row() {
         vec![(addr, 9101)],
         "lease-idle release removes the panel row and must tell the frontend"
     );
-    assert!(manager.panel_streams().await.is_empty());
+    assert_eq!(manager.panel_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -1156,7 +1156,7 @@ async fn expire_grace_active_notifies_frontend_for_each_removed_row() {
     manager.expire_grace_active(&user.username, &token, version).await;
 
     assert_eq!(drain_disconnected_streams(&mut events), vec![(addr, 9104)]);
-    assert!(manager.panel_streams().await.is_empty());
+    assert_eq!(manager.panel_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -1218,7 +1218,7 @@ async fn expire_grace_active_removes_every_row_of_the_expired_session() {
     let mut removed = drain_disconnected_streams(&mut events);
     removed.sort_unstable_by_key(|(_, uid)| *uid);
     assert_eq!(removed, vec![(addr, 9107), (second_addr, 9108)]);
-    assert!(manager.panel_streams().await.is_empty());
+    assert_eq!(manager.panel_streams().await.len(), 0);
 }
 
 #[tokio::test]

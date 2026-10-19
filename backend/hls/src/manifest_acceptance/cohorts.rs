@@ -1,4 +1,5 @@
 use super::{
+    evidence::HlsManifestWindowClass,
     timeline::{host_local_windows_compatible, same_host_timeline_compatible, strong_anchor_overlap},
     HlsAlternativeOriginCohort, HlsAlternativeOriginCohortIdentity, HlsAlternativeOriginWindow,
     HlsCandidateHostRelation, HlsCrossHostAcceptanceEvidence, HlsHostLocalSequenceRelation,
@@ -18,6 +19,7 @@ pub fn alternative_cohorts(observations: &[HlsManifestCandidateObservation]) -> 
         .iter()
         .filter(|candidate| {
             candidate.host_relation == HlsCandidateHostRelation::OtherHost
+                && candidate.timeline_fingerprint.window_class() != HlsManifestWindowClass::Empty
                 && candidate.resource_timeline_evidence.permits_acceptance()
                 && candidate.switch_segment_readiness.can_be_staged()
                 && candidate.effective_host.is_some()
@@ -45,7 +47,12 @@ pub fn alternative_cohorts(observations: &[HlsManifestCandidateObservation]) -> 
     let mut cohorts =
         groups.into_iter().filter_map(|samples| build_alternative_cohort(&samples, &pinned)).collect::<Vec<_>>();
     cohorts.sort_by_key(|cohort| {
-        (evidence_priority(cohort.evidence), std::cmp::Reverse(cohort.successful_samples), cohort.best_candidate_index)
+        (
+            cohort.window.fingerprint.window_class(),
+            evidence_priority(cohort.evidence),
+            std::cmp::Reverse(cohort.successful_samples),
+            cohort.best_candidate_index,
+        )
     });
     cohorts
 }
@@ -215,7 +222,9 @@ fn build_alternative_cohort(
     } else {
         HlsCrossHostAcceptanceEvidence::Insufficient
     };
-    let best = samples.iter().min_by_key(|sample| (sample.manifest_fetch_elapsed_ms, sample.candidate_index))?;
+    let best = samples.iter().min_by_key(|sample| {
+        (sample.timeline_fingerprint.window_class(), sample.manifest_fetch_elapsed_ms, sample.candidate_index)
+    })?;
     let best_candidate_index = best.candidate_index;
     let effective_host = first.effective_host.clone()?;
     Some(HlsAlternativeOriginCohort {

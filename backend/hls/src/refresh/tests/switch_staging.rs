@@ -208,7 +208,7 @@ async fn established_recovery_burst_uses_one_fixed_provider_url_for_every_candid
 #[tokio::test]
 async fn provisioning_handoff_without_established_origin_baseline_uses_one_initial_fetch() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
-    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let server = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(0)))).await;
     let session = test_session();
     let mut request = test_origin_refresh_request(Arc::clone(&session));
     request.origin_entry =
@@ -226,7 +226,7 @@ async fn provisioning_handoff_without_established_origin_baseline_uses_one_initi
     assert_eq!(manifest_requests, 1);
     assert_ne!(manifest_requests, plan.total_candidates());
     let session = session.read().await;
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(2));
     assert!(session.origin_control.manifest_origin_binding.is_some());
     assert!(session.origin_control.acceptance_episode.is_none());
 }
@@ -281,6 +281,7 @@ async fn different_host_single_candidate_retries_do_not_prove_acceptance() {
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -480,6 +481,7 @@ async fn host_switch_conflict_runs_one_full_plan_then_only_bounded_follow_ups() 
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -742,7 +744,7 @@ async fn staged_cross_host_aes_candidate_with_generation_local_ready_key_commits
         else {
             panic!("AES switch manifest parses as a normal timeline");
         };
-        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 300_000)
+        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 300_000, 0)
             .into_iter()
             .next()
             .expect("AES switch candidate has one key resource")
@@ -1037,6 +1039,9 @@ async fn provider_preflight_failure_real_refresh_path_has_zero_candidates() {
         reservation_ttl_secs: 60,
         preacquired_provider_handle: None,
         started_generation: None,
+        prepared_account: None,
+        playback_kind: tuliprox_core::model::PlaybackKind::LiveHls,
+        account_runtime: None,
     });
     let metrics = Arc::clone(request.segment_worker_pool.metrics());
     let error = super::super::provider_preflight_manifest_error(HlsBoundAccountAcquireErrorKind::Missing);

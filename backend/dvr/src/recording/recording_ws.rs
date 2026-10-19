@@ -276,7 +276,7 @@ mod tests {
         let queue = RecordingQueue::new();
         let snapshot = recording_snapshot(&queue, &no_subject_claims(), &bare_app_config()).await;
         assert_eq!(snapshot.revision.0, 0);
-        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.tasks.len(), 0);
         assert_eq!(snapshot.quota, RecordingQuotaSummaryDto::default(), "a session with no subject is charged nothing");
     }
 
@@ -285,7 +285,7 @@ mod tests {
         let queue = RecordingQueue::new();
         let snapshot = recording_snapshot(&queue, &no_read_claims(), &bare_app_config()).await;
         assert_eq!(snapshot.revision.0, 0);
-        assert!(snapshot.tasks.is_empty());
+        assert_eq!(snapshot.tasks.len(), 0);
     }
 
     /// Every internal fact a recording carries that a client must never

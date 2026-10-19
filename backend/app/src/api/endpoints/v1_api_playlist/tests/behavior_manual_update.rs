@@ -344,8 +344,8 @@ async fn manual_update_target_ids_preserve_named_legacy_and_empty_bulk_requests(
             assert_eq!(queued.targets.target_names, vec!["shared-name", "shared-name"]);
         } else {
             assert!(!queued.targets.enabled);
-            assert!(queued.targets.targets.is_empty());
-            assert!(queued.targets.target_names.is_empty());
+            assert_eq!(queued.targets.targets.len(), 0);
+            assert_eq!(queued.targets.target_names.len(), 0);
         }
     }
 }
@@ -582,7 +582,7 @@ async fn m3u_update_quality_playlist_update_status_reads_newest_timestamp_from_c
     assert_eq!(status.inputs[0].clusters[2].timestamp, 202);
     assert_eq!(status.inputs[1].input_id, 8);
     assert_eq!(status.inputs[1].last_update, None);
-    assert!(status.inputs[1].clusters.is_empty());
+    assert_eq!(status.inputs[1].clusters.len(), 0);
     assert_eq!(status.inputs[2].input_id, 9);
     assert_eq!(status.inputs[2].last_update, Some(404));
     assert_eq!(status.inputs[2].clusters.len(), 1, "Only the actually persisted M3U cluster is exposed");

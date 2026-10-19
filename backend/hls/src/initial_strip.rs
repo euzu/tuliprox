@@ -268,3 +268,21 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod short_window_tests {
+    use super::*;
+
+    #[test]
+    fn strip_preserves_every_segment_of_an_already_short_playlist() {
+        for count in [1, 2] {
+            for mode in [HlsStripMode::Segments, HlsStripMode::Seconds] {
+                let strip = StripConfig { mode, value: 30 };
+                let body = format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n{}", "#EXTINF:2.5,\nsegment.ts\n".repeat(count));
+                let view = materialize_initial_hls_strip_view(&body, &strip, HlsManifestWindowPolicy::ApplyLiveWindow);
+                assert_eq!(view.body, body);
+                assert_eq!(initial_hls_strip_segments_for_durations(&strip, &vec![2_500; count]), 0);
+            }
+        }
+    }
+}

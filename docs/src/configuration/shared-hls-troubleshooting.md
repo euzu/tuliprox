@@ -90,7 +90,11 @@ Fix:
 
 For the warm Shared HLS path, this is a lease-local terminal decision rather than a failure-counter threshold. The
 canonical manifest stays on the same URL and returns an HTTP `200` finite playlist when a compatible terminal tail is
-ready. An incompatible MAP/key/container/track state fails closed with `503`; it never creates an unsafe TS splice.
+ready. Before the splice deadline, an incompatible MAP/key/container/track state can fail closed with `503`.
+After the deadline, a valid published lease can receive a finite Custom Response containing only prepared
+`channel_unavailable` media, even when its live cache suffix is gone. The playlist uses `/cvs/hls/` URLs and does not
+attempt a late TS splice. The player may stall before displaying it. Disabled, missing or invalid custom media,
+expired authorization, and exhausted commit capacity can still prevent a usable response.
 
 Possible causes:
 
@@ -186,6 +190,38 @@ Fix:
 - Lower `cache_bytes_per_session` if single channels grow too large.
 - Lower `cache_duration` if unprotected old objects stay too long.
 - Put `cache_path` on a disk with enough free space and predictable cleanup behavior.
+
+## Symptom: downloads wait for local cache capacity
+
+`LocalCacheCapacity` means the decoded body cannot fit the current session or global budget. The budget includes
+committed segments, MAPs, transient objects, immutable revisions, and the remaining reservations of active writes.
+Startup reserves the existing peak allowance (three body copies for processed revisions, five for raw revisions).
+Committing a file transfers its bytes from that write's reservation into committed usage; it does not add the same
+bytes twice. Unknown or growing bodies reserve additional space before writing it.
+Replacing an object with a smaller file releases the old bytes only after the atomic rename succeeds.
+
+Use these debug messages to distinguish the causes:
+
+| Log signal | Meaning |
+| :--- | :--- |
+| `HLS capacity inventory` | Per-session `revision_bytes` and `remaining_reserved_bytes`, plus revision deletion outcomes. |
+| `HLS capacity FIFO` | The oldest segment, its status, and its actual blocker: protection, pending work, or no candidates. |
+| `outcome=lock-conflict protected_working_set_known=false` | Selection could not acquire the session lock. A zero protection estimate is unknown, not evidence that every byte is reclaimable. |
+| `HLS revision GC` | Bounded deletion attempts: `planned`, `succeeded`, `failed`, and actual `reclaimed_bytes`. |
+| `HLS revision delete deferred` | Filesystem error; the revision stays queued for a later attempt and contributes no reclaimed bytes. |
+
+Both periodic GC and targeted admission release obsolete references and retire unpinned revisions. A protected FIFO
+head still stops segment eviction. An inactive `CapacityDeferred` head can be retired once its origin binding and
+all protections are gone. Open readers and retained lease publications keep their revision bytes pinned.
+
+A capacity waiter resumes when reservation, accounting, or playback protection changes, then checks the complete
+peak of a fresh attempt before downloading again. Releasing too little capacity does not start another origin fetch.
+It does not need a periodic GC tick or traffic from another session. Published revision bytes remain immutable across
+repeated requests and ranges, even when the mutable normal cache object is replaced or rolled back.
+
+The in-memory `revision_disk_bytes` gauge is updated by successful file mutations and inventory reconciliation.
+Revision deletion counters distinguish attempts, successes, failures, and bytes actually reclaimed. Inspect sustained
+I/O failures or retained readers before changing limits. Do not copy credential-bearing origin URLs into diagnostics.
 
 ## Symptom: cache path permission errors
 

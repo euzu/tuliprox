@@ -250,6 +250,6 @@ mod tests {
         let jar = StalkerCookieJar::new();
         jar.ingest_set_cookie(["stb_lang=en; Max-Age=10"], 1_000);
         assert!(jar.active_cookie_header(1_009).contains("stb_lang=en"));
-        assert!(jar.active_cookie_header(1_010).is_empty());
+        assert_eq!(jar.active_cookie_header(1_010).len(), 0);
     }
 }

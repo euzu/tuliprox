@@ -110,10 +110,12 @@ pub(super) struct HlsProxyResourcePathParams {
 
 mod catchup;
 mod manifest;
+mod origin_account_runtime;
+mod origin_refresh_request;
 mod owner_token;
 mod segment;
 mod session;
-
+use self::origin_account_runtime::prepare_hls_origin_runtime;
 pub(in crate::api) use catchup::*;
 pub(in crate::api) use manifest::*;
 pub(in crate::api) use owner_token::*;

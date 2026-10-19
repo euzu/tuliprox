@@ -248,7 +248,7 @@ async fn curation_production_wiring_does_not_fall_back_to_the_generic_client() {
         server.requests.lock().unwrap().is_empty(),
         "generic client has the fixture CA and could succeed, but is not used"
     );
-    assert!(!run.cache_signature().await.is_empty());
+    assert_ne!(run.cache_signature().await.len(), 0);
     assert!(!file_snapshot(run.directory.path()).is_empty());
 }
 
@@ -272,7 +272,7 @@ async fn curation_failure_respects_empty_input_authorization() {
         assert_eq!(result.is_err(), authorized, "ordinary M3U persistence still rejects an empty playlist");
         assert_eq!(server.requests.lock().unwrap().len(), if authorized { 3 } else { 0 });
         assert!(file_snapshot(run.directory.path()).is_empty());
-        assert!(run.cache_signature().await.is_empty());
+        assert_eq!(run.cache_signature().await.len(), 0);
     }
 }
 

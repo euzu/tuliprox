@@ -48,6 +48,7 @@ mod gc;
 pub mod header_policy;
 mod headers;
 mod ids;
+mod late_custom_response;
 mod lease;
 mod lifecycle;
 mod manager;
@@ -63,6 +64,8 @@ mod master_playlist;
 mod media_reserve;
 mod observability;
 mod origin;
+mod origin_account_runtime;
+mod origin_attempt;
 mod origin_progress;
 mod paths;
 mod post_refresh_availability;
@@ -84,6 +87,7 @@ mod segment_revision;
 mod segment_watchdog;
 mod session;
 mod session_store;
+mod short_manifest;
 mod startup_observability;
 mod startup_policy;
 mod sync_ext;
@@ -128,6 +132,7 @@ pub mod api {
             scrub_hls_origin_headers, should_remove_hls_origin_header,
         },
         ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId, HLS_ACCESS_LEASE_ID_PLACEHOLDER},
+        late_custom_response::HlsLateCustomResponsePlan,
         lease::{
             new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId,
             HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsAccessLeaseTiming, HlsAccessLeaseTouch,
@@ -146,6 +151,7 @@ pub mod api {
             derive_hls_lease_manifest_snapshot, HlsLeaseManifestSnapshotInput, HlsTransientManifestTemplate,
         },
         map::{MapCacheStatus, MapEntry, OriginMapKey, ProxyMapId},
+        map_fetcher::MapFetchContext,
         master_playlist::{
             HlsBandwidthPersistenceOutcome, HlsMasterBandwidth, HlsMasterBandwidthSelection,
             HlsSingleVariantMasterPlaylist,
@@ -162,6 +168,9 @@ pub mod api {
             HlsEffectiveOriginAcquirePolicy, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
             HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginSource,
             HlsOriginSourceKind, HlsOriginWorkClass,
+        },
+        origin_account_runtime::{
+            HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
         },
         origin_progress::publication_late_after_ms,
         paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},

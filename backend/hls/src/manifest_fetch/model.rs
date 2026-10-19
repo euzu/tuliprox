@@ -240,6 +240,8 @@ impl FetchedOriginManifest {
 pub struct HlsOriginManifestFetchContext {
     pub app_config: Arc<AppConfig>,
     pub session: HlsSessionHandle,
+    /// Availability owner used to react to failed attempts while the logical fetch is still in flight.
+    pub availability_runtime: Option<crate::hls_ctx::WeakHlsCtx>,
     pub origin_entry: LiveHlsOriginEntry,
     pub headers: HeaderMap,
     pub client: Client,

@@ -8,6 +8,7 @@
 use super::{
     episode::candidate_resource_timeline_evidence,
     error::{HlsManifestRejectLogReason, OriginManifestFetchError},
+    fetch::cap_manifest_retry_after_ms,
     fingerprint::{
         build_manifest_timeline_fingerprint, deterministic_conflict_fingerprint,
         deterministic_timeline_conflict_from_rejection,
@@ -28,6 +29,7 @@ use crate::{
     recovery_timing::HlsAcceptanceDeadlineMs,
     resource_identity::{HlsMediaResourceIdentity, HlsMediaResourceSemanticKey},
     timeline::HlsResourceReplayDecision,
+    HlsSession, HlsSessionKey,
 };
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use flate2::{
@@ -382,6 +384,38 @@ fn initial_manifest_retry_delay_uses_next_slot_bounded_jitter_and_retry_after_ov
     assert_eq!(super::next_retry_delay_ms(&retry_policy, 0, None, 100), 125);
     assert_eq!(super::next_retry_delay_ms(&retry_policy, 1, None, 10), 260);
     assert_eq!(super::next_retry_delay_ms(&retry_policy, 0, Some(3_000), 25), 3_000);
+}
+
+#[test]
+fn manifest_retry_after_is_capped_at_half_the_origin_target_duration() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+    session.origin_control.record_media_progress(50, 12_000);
+    session.target_duration = Some(2);
+
+    assert_eq!(
+        [0, 3_000, 6_000, 60_000, u64::MAX].map(|delay_ms| cap_manifest_retry_after_ms(&session, delay_ms)),
+        [0, 3_000, 6_000, 6_000, 6_000]
+    );
+}
+
+#[test]
+fn manifest_retry_after_uses_session_target_duration_when_origin_timing_is_missing() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+    session.target_duration = Some(3);
+
+    assert_eq!(cap_manifest_retry_after_ms(&session, 60_000), 1_500);
+    session.origin_control.target_duration_snapshot_ms = Some(0);
+    assert_eq!(cap_manifest_retry_after_ms(&session, 60_000), 1_500);
+}
+
+#[test]
+fn manifest_retry_after_uses_default_target_duration_before_first_manifest() {
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+
+    assert_eq!(cap_manifest_retry_after_ms(&session, 60_000), 7_500);
+    session.target_duration = Some(0);
+    session.origin_control.target_duration_snapshot_ms = Some(0);
+    assert_eq!(cap_manifest_retry_after_ms(&session, 60_000), 7_500);
 }
 
 #[test]

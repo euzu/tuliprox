@@ -78,15 +78,20 @@ use tuliprox_hls::api::{
     HlsCachedManifestOptions, HlsLeaseManifestSnapshotInput, LiveHlsOriginEntry,
 };
 
+mod origin_account_rebind;
 mod owner_token;
+mod reduced_retry;
+mod same_account_resume;
 
 mod archive;
 mod bandwidth;
 mod encrypted_media;
 mod entry_identity;
 mod headers;
+mod late_custom_response;
 mod lease_lifecycle;
 mod manifest_entry_freshness;
+mod manifest_short_window;
 mod manifest_startup;
 mod observability;
 mod owner_handoff;

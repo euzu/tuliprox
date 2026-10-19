@@ -125,6 +125,27 @@ impl HlsSegmentWorkerPool {
         {
             return None;
         }
+        let needs_key_io = {
+            let session = context.session.read().await;
+            session.segments.values().filter_map(|entry| entry.encryption.as_ref()).any(|encryption| {
+                session
+                    .transient
+                    .ready_key_object_valid_until_ms(
+                        &proxy_session_id,
+                        &encryption.resource_id,
+                        &encryption.resource_extension,
+                        now_ms,
+                    )
+                    .is_none()
+            })
+        };
+        if needs_key_io
+            && crate::origin_account_runtime::prepare_media_origin(context.origin_io.as_ref(), &context.session)
+                .await
+                .is_err()
+        {
+            return None;
+        }
         let mut session = context.session.write().await;
         if session.is_gc_marked_for_removal() || session.active_segment_fetches >= policy.max_session_segment_fetches {
             return None;
@@ -186,7 +207,9 @@ impl HlsSegmentWorkerPool {
             }
         }
         drop(permit);
-        if result.is_ok() {
+        if result.is_ok()
+            || context.session.read().await.origin_handoff_ready_after(snapshot.binding.origin_work_generation)
+        {
             self.schedule_wake(context, current_time_millis());
         }
     }

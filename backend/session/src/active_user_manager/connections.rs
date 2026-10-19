@@ -12,10 +12,7 @@ use arc_swap::ArcSwapOption;
 use lru::LruCache;
 use shared::{
     defaults::{default_grace_period_millis, default_grace_period_timeout_secs},
-    model::{
-        ActiveUserConnectionChange, CustomVideoStreamType, EventMessage, StreamChannel, StreamInfo,
-        UserConnectionPermission, VirtualId,
-    },
+    model::{CustomVideoStreamType, StreamChannel, StreamInfo, UserConnectionPermission, VirtualId},
     utils::{current_time_secs, sanitize_sensitive_info, strip_port, Internable},
 };
 use std::{
@@ -690,8 +687,7 @@ impl ActiveUserManager {
         }
 
         if let Some(stream_info) = preserved_update.as_ref() {
-            self.event_manager
-                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info.clone())));
+            self.emit_current_stream_update(stream_info).await;
         }
 
         if connection_changed {
@@ -870,7 +866,7 @@ impl ActiveUserManager {
         }
 
         for stream_info in preserved_updates {
-            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+            self.emit_current_stream_update(&stream_info).await;
         }
 
         for username in &disconnected_users {

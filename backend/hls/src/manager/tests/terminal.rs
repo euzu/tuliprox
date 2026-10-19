@@ -1253,3 +1253,32 @@ async fn hls_terminal_commit_protection_capacity_has_typed_unavailable_outcome()
     assert_eq!(session.terminal_tail_protection_count(), HLS_TERMINAL_TAIL_PROTECTION_CAPACITY);
     assert!(session.terminal_tail_protection(&lease_id).is_none());
 }
+
+#[tokio::test]
+async fn unavailable_after_expired_splice_deadline_still_rejects_recovered_origin_generation() {
+    let (manager, session, proxy_session_id, lease_id, preparation, _) =
+        prepared_terminal_commit_fixture("recovered-before-unavailable").await;
+    let now_ms = preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch() + 1;
+    manager.terminal_commit_clock.set_fixed_now_ms(now_ms);
+    session.write().await.origin_control.record_media_progress(now_ms, 12_000);
+    let outcome = manager.commit_access_lease_terminal_if_generation_matches(HlsTerminalCommitRequest {
+        session: &session,
+        lease_id: &lease_id,
+        proxy_session_id: &proxy_session_id,
+        preparation: &preparation,
+        now_ms,
+        payload: HlsTerminalCommitPayload::UnavailableAfterOwnerFailure(
+            HlsTerminalTailCompatibility::TerminalMediaNotReady,
+        ),
+        asset_revision_guard: HlsTerminalAssetRevisionGuard::matching_for_test(None),
+    });
+    assert_eq!(outcome, HlsTerminalCommitOutcome::RecoveryCommitted);
+    assert_eq!(
+        manager
+            .access_lease_response_snapshot(&lease_id, &proxy_session_id, now_ms)
+            .await
+            .expect("recovered lease")
+            .playback_mode,
+        HlsLeasePlaybackMode::Live
+    );
+}

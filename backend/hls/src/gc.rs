@@ -37,6 +37,7 @@ pub struct HlsGarbageCollector {
     pending_cache_deletions: Arc<StdMutex<CacheDeletionQueueState>>,
     access_leases: StdRwLock<Option<Weak<RwLock<HlsAccessLeaseStore>>>>,
     run_once_gate: AsyncMutex<()>,
+    revision_store: StdRwLock<Option<Weak<super::SegmentRevisionStore>>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -112,6 +113,7 @@ mod deletion;
 mod policy;
 mod reclaim;
 mod report;
+mod revisions;
 mod selection;
 pub use collector::{build_rewrite_secret_fingerprint, exec_hls_cache_gc};
 use deletion::{CacheDeletionQueueGeneration, CacheObjectDeletion};

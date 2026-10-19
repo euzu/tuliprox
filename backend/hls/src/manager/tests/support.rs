@@ -254,6 +254,20 @@ pub(in crate::manager::tests) async fn live_media_fixture(
     let manager = HlsProxyManager::with_hls_cache_config(&config);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
+    {
+        use tuliprox_parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome};
+        let OriginManifestParseOutcome::Normal(manifest) = parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n40.ts\n",
+            "http://origin.example/index.m3u8",
+        ) else {
+            panic!("live media fixture parses");
+        };
+        let mut session = session.write().await;
+        session.proxy_next_seq = Some(40);
+        session.apply_origin_manifest(&manifest).expect("live segment timeline");
+        session.segments.get_mut(&40).expect("live segment").status =
+            crate::SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 1_000 };
+    }
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let lease_id = HlsAccessLeaseId(lease_name.to_string());
     let lease = access_lease(lease_name, &proxy_session_id);

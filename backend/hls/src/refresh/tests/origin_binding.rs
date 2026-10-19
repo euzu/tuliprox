@@ -1,8 +1,8 @@
 use super::{
     assert_stale_switch_generation_rejects_commit, bind_refresh_request_to_app_state, classify_manifest_fetch_failure,
     commit_fetched_manifest, fetch_and_commit_manifest_with_policy, fetched_manifest, host_from_base_url,
-    install_published_recovery_binding, manifest_body, manifest_fetch_context, mark_origin_refresh_started,
-    no_delay_policy, path_has_extension, prepare_cross_host_baseline, publish_ready_test_manifest, refresh_and_commit,
+    install_published_recovery_binding, manifest_fetch_context, mark_origin_refresh_started, no_delay_policy,
+    path_has_extension, prepare_cross_host_baseline, publish_ready_test_manifest, refresh_and_commit,
     request_header_value, resolved_hls_manifest_request_url_from_input, retry_test_manifest_recovery_chain,
     spawn_test_origin, switch_manifest_body, switch_test_request, test_app_config, test_origin_refresh_request,
     test_segment_repair_manager, test_session, three_segment_manifest_body, trigger_origin_refresh_sync,
@@ -102,7 +102,7 @@ async fn accepted_manifest_commit_stores_provider_session_cookie_separately() {
 #[tokio::test]
 async fn provider_failover_status_does_not_count_as_hls_retry() {
     let first = spawn_test_origin(Arc::new(|_path| (407, Vec::new(), "rotate".to_string()))).await;
-    let second = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), manifest_body()))).await;
+    let second = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(100)))).await;
     let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
         name: "demo".into(),
         urls: vec![first.base_url.as_str().into(), second.base_url.as_str().into()],
@@ -143,6 +143,7 @@ async fn provider_failover_status_does_not_count_as_hls_retry() {
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -183,7 +184,7 @@ async fn provider_failover_status_does_not_count_as_hls_retry() {
     assert!(!session.key.stable_value().contains("provider://"));
     assert!(!session.key.stable_value().contains(first.base_url.as_str()));
     assert!(!session.key.stable_value().contains(second.base_url.as_str()));
-    assert_eq!(session.origin_seq_highwater, Some(0));
+    assert_eq!(session.origin_seq_highwater, Some(102));
     assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));
     let metrics = segment_worker_pool.metrics().snapshot();
     assert_eq!(metrics.refresh_started, 1);
@@ -305,11 +306,7 @@ async fn provider_failover_initial_success_commits_without_hls_host_retry_when_u
     let second = spawn_test_origin(Arc::new(move |_path| {
         let hit = second_hits_for_handler.fetch_add(1, Ordering::SeqCst);
         if hit == 0 {
-            return (
-                200,
-                Vec::new(),
-                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:102\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n102.ts\n".to_string(),
-            );
+            return (200, Vec::new(), three_segment_manifest_body(100));
         }
         (
             200,
@@ -359,6 +356,7 @@ async fn provider_failover_initial_success_commits_without_hls_host_retry_when_u
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,

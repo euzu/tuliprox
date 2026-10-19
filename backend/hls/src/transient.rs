@@ -123,6 +123,7 @@ pub struct TransientResourceRef {
     pub expires_at_ms: u64,
     pub access: Arc<CacheAccessState>,
     revision: TransientResourceRevision,
+    origin_account_generation: u64,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -161,6 +162,8 @@ pub struct TransientObjectFetchToken {
 #[derive(Clone)]
 pub struct TransientPassthroughState {
     pub resources: HashMap<TransientResourceId, TransientResourceRef>,
+    invalid_origin_resources: HashSet<TransientResourceId>,
+    origin_account_generation: u64,
     pub object_cache: HashMap<TransientObjectCacheKey, TransientObjectCacheEntry>,
     object_fetch_notifiers: HashMap<TransientObjectCacheKey, Arc<Notify>>,
     next_resource_revision: u64,
@@ -193,6 +196,8 @@ impl fmt::Debug for TransientPassthroughState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TransientPassthroughState")
             .field("resources_len", &self.resources.len())
+            .field("invalid_origin_resources", &self.invalid_origin_resources.len())
+            .field("origin_account_generation", &self.origin_account_generation)
             .field("object_cache_len", &self.object_cache.len())
             .field("object_fetch_notifiers_len", &self.object_fetch_notifiers.len())
             .field("next_resource_revision", &self.next_resource_revision)

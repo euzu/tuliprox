@@ -347,7 +347,7 @@ async fn evaluate_post_refresh_terminal_attempt(
     cycle: &mut HlsAvailabilityReevaluationCycle,
     now_ms: u64,
 ) -> HlsTerminalReevaluationDecision {
-    if !matches!(mode, HlsAvailabilityReevaluationMode::PostRefresh(_)) {
+    if matches!(mode, HlsAvailabilityReevaluationMode::RecoveryPressure) {
         return HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: false };
     }
     match evaluate_active_terminal_leases_for_reevaluation(ctx, session, &owner_key.proxy_session_id, now_ms).await {
@@ -439,7 +439,7 @@ async fn run_hls_availability_reevaluation_attempt(
     session: &mut HlsSessionHandle,
     owner_key: &mut HlsAvailabilityReevaluationOwnerKey,
     ownership: &HlsAvailabilityReevaluationOwnership,
-    refresh_request: &mut OriginRefreshRequest,
+    refresh_request: &mut Option<OriginRefreshRequest>,
     cycle: &mut HlsAvailabilityReevaluationCycle,
 ) -> HlsAvailabilityCycleDecision {
     if !ownership.is_current(owner_key) {
@@ -463,6 +463,9 @@ async fn run_hls_availability_reevaluation_attempt(
             HlsTerminalReevaluationDecision::RestartCycle => return HlsAvailabilityCycleDecision::RestartCycle,
             HlsTerminalReevaluationDecision::Stop => return HlsAvailabilityCycleDecision::Stop,
         };
+    let Some(refresh_request) = refresh_request.as_mut() else {
+        return HlsAvailabilityCycleDecision::FinishCycle;
+    };
     let schedule = match evaluate_availability_refresh_attempt(
         ctx,
         session,
@@ -482,10 +485,13 @@ async fn run_hls_availability_reevaluation_attempt(
         return HlsAvailabilityCycleDecision::FinishCycle;
     }
     let retry_from_ms = ctx.hls_proxy.now_ms();
-    let Some(retry_at_ms) = schedule.wake_at_ms(retry_from_ms, cycle.attempts_completed, cycle.deadline_ms) else {
+    let Some(mut retry_at_ms) = schedule.wake_at_ms(retry_from_ms, cycle.attempts_completed, cycle.deadline_ms) else {
         warn!("HLS availability reevaluation cycle stopped: reason=deadline_elapsed");
         return HlsAvailabilityCycleDecision::FinishCycle;
     };
+    if let Some(deadline) = cycle.live_reserve_deadline {
+        retry_at_ms = retry_at_ms.min(deadline.next_reevaluation_at_ms);
+    }
     match wait_for_availability_owner_signal(ownership, retry_at_ms, retry_from_ms).await {
         HlsAvailabilityOwnerWaitOutcome::Cancelled => {
             ownership.discard_superseded(owner_key);
@@ -504,7 +510,7 @@ async fn run_hls_availability_reevaluation(
     mut session: HlsSessionHandle,
     mut owner_key: HlsAvailabilityReevaluationOwnerKey,
     ownership: HlsAvailabilityReevaluationOwnership,
-    mut refresh_request: OriginRefreshRequest,
+    mut refresh_request: Option<OriginRefreshRequest>,
 ) {
     'cycles: loop {
         let mut cycle = HlsAvailabilityReevaluationCycle::new(ctx.hls_proxy.now_ms());
@@ -605,6 +611,24 @@ pub(super) fn register_hls_availability_reevaluation_with_mode(
     let coordinator = ctx.hls_proxy.availability_reevaluations();
     let registration_key = owner_key.clone();
     coordinator.register(registration_key, mode, move |ownership| {
-        run_hls_availability_reevaluation(ctx, session, owner_key, ownership, refresh_request)
+        run_hls_availability_reevaluation(ctx, session, owner_key, ownership, Some(refresh_request))
+    })
+}
+
+pub(super) fn register_terminal_reserve_reevaluation(
+    ctx: HlsCtx,
+    session: HlsSessionHandle,
+) -> futures::future::BoxFuture<'static, HlsAvailabilityReevaluationRegistration> {
+    Box::pin(async move {
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let Some(owner_key) = ctx.hls_proxy.availability_reevaluation_owner_key(&session, &proxy_session_id).await
+        else {
+            return HlsAvailabilityReevaluationRegistration::Superseded;
+        };
+        ctx.hls_proxy.availability_reevaluations().register(
+            owner_key.clone(),
+            HlsAvailabilityReevaluationMode::TerminalReserve,
+            move |ownership| run_hls_availability_reevaluation(ctx, session, owner_key, ownership, None),
+        )
     })
 }

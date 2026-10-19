@@ -495,7 +495,7 @@ mod tests {
         assert!(!descriptor.is_empty());
         descriptor.clean();
         // clean() drops empty candidates, so the descriptor is now fully empty.
-        assert!(descriptor.candidates.is_empty());
+        assert_eq!(descriptor.candidates.len(), 0);
         assert!(descriptor.capabilities.is_none());
         assert!(descriptor.is_empty());
     }

@@ -169,6 +169,7 @@ pub(in crate::refresh::tests) async fn refresh_session_with_origin_body(body: &'
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -206,6 +207,19 @@ impl Drop for TestOriginServer {
 }
 
 pub(in crate::refresh::tests) async fn spawn_test_origin(handler: TestOriginHandler) -> TestOriginServer {
+    spawn_test_origin_with_response_gate(handler, None).await
+}
+
+pub(in crate::refresh::tests) struct TestOriginResponseGate {
+    pub request_number: usize,
+    pub entered: Notify,
+    pub release: Notify,
+}
+
+pub(in crate::refresh::tests) async fn spawn_test_origin_with_response_gate(
+    handler: TestOriginHandler,
+    gate: Option<Arc<TestOriginResponseGate>>,
+) -> TestOriginServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
     let addr = listener.local_addr().expect("local addr");
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -220,6 +234,7 @@ pub(in crate::refresh::tests) async fn spawn_test_origin(handler: TestOriginHand
             let requests = Arc::clone(&requests_for_task);
             let raw_requests = Arc::clone(&raw_requests_for_task);
             let handler = Arc::clone(&handler);
+            let gate = gate.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0_u8; 4096];
                 let mut used = 0_usize;
@@ -241,9 +256,17 @@ pub(in crate::refresh::tests) async fn spawn_test_origin(handler: TestOriginHand
                 let request = String::from_utf8_lossy(&buf[..used]).into_owned();
                 let path =
                     request.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/").to_string();
-                requests.lock().await.push(path.clone());
+                let request_number = {
+                    let mut requests = requests.lock().await;
+                    requests.push(path.clone());
+                    requests.len()
+                };
                 raw_requests.lock().await.push(request);
                 let (status, headers, body) = handler(path);
+                if let Some(gate) = gate.filter(|gate| gate.request_number == request_number) {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
                 let reason = match status {
                     200 => "OK",
                     302 => "Found",
@@ -351,6 +374,7 @@ pub(in crate::refresh::tests) fn test_origin_refresh_request(session: Arc<RwLock
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         disabled_headers: None,
@@ -780,6 +804,7 @@ pub(in crate::refresh::tests) async fn install_published_recovery_binding(
                         host_local_index: 0,
                     },
                     proxy_seq,
+                    media_start_ms: proxy_seq * 4_000,
                     duration_ms: 4_000,
                     proxy_file_ext: "ts".to_string(),
                     content_type: "video/mp2t".to_string(),
@@ -969,7 +994,7 @@ pub(in crate::refresh::tests) fn candidate_handoff_preview(
         panic!("candidate fixture must parse as a normal manifest");
     };
     let key_resources =
-        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 60_000);
+        super::super::commit::materialize_normal_key_resources(&mut manifest, b"secret", now_ms, 60_000, 0);
     let preview = session
         .preview_origin_handoff_manifest(&manifest, crate::timeline::effective_origin_host_id("candidate.example"), 0)
         .expect("candidate handoff preview");

@@ -1316,7 +1316,7 @@ mod tests {
             finish_completed_refresh(&app_config, temp.path(), identity, &checkpoint, update_quality(0, 0, 100))
                 .await?;
 
-        assert!(rejections.is_empty());
+        assert_eq!(rejections.len(), 0);
         let published = load_active_manifest(temp.path(), identity).await?;
         assert_eq!(published.series.as_ref().map(|files| files.generation), Some(generation));
         Ok(())
@@ -1379,7 +1379,7 @@ mod tests {
         )
         .await?;
 
-        assert!(reports.quality_rejections.is_empty());
+        assert_eq!(reports.quality_rejections.len(), 0);
         assert_eq!(
             reports.force_updates,
             vec![ClusterForceUpdate { cluster: XtreamCluster::Video, candidate_count: 0, configured_threshold: 100 }]
@@ -1423,7 +1423,7 @@ mod tests {
         )
         .await?;
 
-        assert!(reports.quality_rejections.is_empty());
+        assert_eq!(reports.quality_rejections.len(), 0);
         assert_eq!(reports.force_updates.len(), 1);
         assert_eq!(reports.force_updates[0].cluster, XtreamCluster::Live);
         let published = load_active_manifest(temp.path(), identity).await?;

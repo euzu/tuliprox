@@ -63,6 +63,7 @@ pub(super) async fn wait_for_runtime_custom_plan(fixture: &PostRefreshTerminalFi
     let playback = lease.as_ref().map_or("missing", |lease| match lease.playback_mode {
         HlsLeasePlaybackMode::Live => "live",
         HlsLeasePlaybackMode::TerminalTail(_) => "terminal-tail",
+        HlsLeasePlaybackMode::TerminalCustomResponse(_) => "terminal-custom-response",
         HlsLeasePlaybackMode::TerminalUnavailable { .. } => "terminal-unavailable",
         HlsLeasePlaybackMode::Ended => "ended",
     });
@@ -332,7 +333,7 @@ pub(super) async fn assert_multi_lease_fallback_handles_pending_and_unavailable(
     assert_eq!(aggregate.total, 2);
     assert_eq!(aggregate.pending_owned, 1);
     assert_eq!(aggregate.terminal_committed, 1, "{aggregate:?}");
-    assert!(aggregate.unresolved.is_empty());
+    assert_eq!(aggregate.unresolved.len(), 0);
     assert_eq!(fixture.ctx.hls_proxy.terminal_pending().owner_count(), 1);
     let unavailable = fixture
         .ctx

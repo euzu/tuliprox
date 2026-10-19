@@ -114,7 +114,7 @@ mod tests {
         manager.send_event(completed("r1", 2));
         assert_eq!(manager.playlist_update_snapshot(), vec![own]);
         manager.send_event(completed("r1", 1));
-        assert!(manager.playlist_update_snapshot().is_empty());
+        assert_eq!(manager.playlist_update_snapshot().len(), 0);
         manager.send_event(EventMessage::PlaylistUpdateProgress(progress("r1", 1, 7)));
         assert!(manager.playlist_update_snapshot().is_empty(), "late progress cannot resurrect a finished input/run");
         let next = progress("r2", 2, 7);
@@ -184,7 +184,7 @@ mod tests {
         for event in [PlaylistUpdateProgressEvent::global("target", "working"), no_order, no_run] {
             manager.send_event(EventMessage::PlaylistUpdateProgress(event));
         }
-        assert!(manager.playlist_update_snapshot().is_empty());
+        assert_eq!(manager.playlist_update_snapshot().len(), 0);
         manager.send_event(EventMessage::PlaylistUpdateProgress(valid.clone()));
         manager.send_event(EventMessage::PlaylistUpdateProgress(progress("conflicting", 1, 7)));
         assert_eq!(manager.playlist_update_snapshot(), vec![valid]);

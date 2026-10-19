@@ -279,12 +279,14 @@ impl SegmentRevisionStore {
         Ok(())
     }
 
-    pub fn retire_unpinned(&self) -> io::Result<Vec<Arc<SegmentRevision>>> {
+    pub fn retire_unpinned(&self) -> io::Result<Vec<Arc<SegmentRevision>>> { self.retire_unpinned_limit(128) }
+
+    pub(crate) fn retire_unpinned_limit(&self, limit: usize) -> io::Result<Vec<Arc<SegmentRevision>>> {
         let mut entries = self.entries.lock().map_err(|_| io::Error::other("revision registry poisoned"))?;
         let ids: Vec<_> = entries
             .iter()
             .filter_map(|(id, revision)| (revision.pins.load(Ordering::Acquire) == 0).then_some(*id))
-            .take(128)
+            .take(limit)
             .collect();
         Ok(ids.into_iter().filter_map(|id| entries.remove(&id)).collect())
     }

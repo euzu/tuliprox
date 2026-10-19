@@ -1186,11 +1186,11 @@ mod tests {
 
         assert_eq!(api_proxy.server.len(), 1);
         assert_eq!(api_proxy.server[0].name, "main");
-        assert!(api_proxy.server[0].protocol.is_empty());
-        assert!(api_proxy.server[0].host.is_empty());
+        assert_eq!(api_proxy.server[0].protocol.len(), 0);
+        assert_eq!(api_proxy.server[0].host.len(), 0);
         assert!(api_proxy.server[0].port.is_none());
-        assert!(api_proxy.server[0].timezone.is_empty());
-        assert!(api_proxy.server[0].message.is_empty());
+        assert_eq!(api_proxy.server[0].timezone.len(), 0);
+        assert_eq!(api_proxy.server[0].message.len(), 0);
         assert!(api_proxy.server[0].path.is_none());
         assert_eq!(api_proxy.user.len(), 1);
         assert!(!api_proxy.use_user_db);
@@ -1206,8 +1206,8 @@ mod tests {
 
         assert_eq!(api_proxy.server.len(), 1);
         assert_eq!(api_proxy.server[0].name, "main");
-        assert!(api_proxy.server[0].host.is_empty());
-        assert!(api_proxy.user.is_empty());
+        assert_eq!(api_proxy.server[0].host.len(), 0);
+        assert_eq!(api_proxy.user.len(), 0);
     }
 
     #[test]
@@ -1217,8 +1217,8 @@ mod tests {
 
         filter_api_proxy_by_permissions(&mut api_proxy, permissions);
 
-        assert!(api_proxy.server.is_empty());
-        assert!(api_proxy.user.is_empty());
+        assert_eq!(api_proxy.server.len(), 0);
+        assert_eq!(api_proxy.user.len(), 0);
         assert!(!api_proxy.use_user_db);
         assert_eq!(api_proxy.auth_error_status, 403);
     }
@@ -1270,20 +1270,20 @@ mod tests {
         filter_app_config_by_permissions(&mut app_config, Some(permissions));
 
         assert_eq!(app_config.config.storage_dir, None);
-        assert!(app_config.sources.inputs.is_empty());
+        assert_eq!(app_config.sources.inputs.len(), 0);
         assert!(app_config.sources.provider.is_none());
         assert!(app_config.sources.templates.is_none());
         assert!(app_config.mappings.is_none());
         assert!(app_config.templates.is_none());
         assert_eq!(app_config.sources.sources.len(), 1);
-        assert!(app_config.sources.sources[0].inputs.is_empty());
+        assert_eq!(app_config.sources.sources[0].inputs.len(), 0);
         assert_eq!(app_config.sources.sources[0].targets.len(), 1);
 
         let target = &app_config.sources.sources[0].targets[0];
         assert_eq!(target.name, "Default");
         assert_eq!(target.id, 1);
         assert_eq!(target.enabled, shared::model::ConfigTargetDto::default().enabled);
-        assert!(target.output.is_empty());
+        assert_eq!(target.output.len(), 0);
         assert!(target.curation.is_none(), "identity-only access must not disclose discovery credentials");
         assert!(target.filter.is_empty());
         assert!(target.options.is_none());
@@ -1296,7 +1296,7 @@ mod tests {
         let api_proxy = app_config.api_proxy.expect("api proxy should remain present");
         assert_eq!(api_proxy.server.len(), 1);
         assert_eq!(api_proxy.server[0].name, "main");
-        assert!(api_proxy.server[0].host.is_empty());
+        assert_eq!(api_proxy.server[0].host.len(), 0);
         assert_eq!(api_proxy.user.len(), 1);
     }
 

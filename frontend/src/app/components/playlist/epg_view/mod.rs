@@ -1342,6 +1342,6 @@ mod tests {
     #[test]
     fn pending_program_source_id_does_not_treat_numeric_epg_id_as_playlist_id() {
         let full = EpgGridModel::from_epg_tv(&EpgTv::new(vec![EpgChannel::new("123".intern())]), |_| 0);
-        assert!(pending_program_source_id(&full.channels[0]).is_empty());
+        assert_eq!(pending_program_source_id(&full.channels[0]).len(), 0);
     }
 }

@@ -311,7 +311,7 @@ mod tests {
 
         assert_eq!(config.catalog_selection, TraktCatalogSelection::Full);
         assert!(config.include_xtream_base_categories);
-        assert!(config.lists.is_empty());
+        assert_eq!(config.lists.len(), 0);
         assert_eq!(config.charts.len(), 1);
         assert_eq!(config.charts[0].kind, TraktChartKind::Movies);
         assert_eq!(config.charts[0].kind.content_type(), TraktContentType::Vod);

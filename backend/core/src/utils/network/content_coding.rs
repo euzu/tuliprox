@@ -793,7 +793,7 @@ mod tests {
         let response = local_response(StatusCode::OK, &[], encoded_binary.clone()).await;
         let mut untouched =
             decode_response_to_identity(response, ContentCodingDetection::DeclaredOnly).await.expect("identity setup");
-        assert!(untouched.decoded_from.is_empty());
+        assert_eq!(untouched.decoded_from.len(), 0);
         assert_eq!(read_to_end_limited(&mut untouched.body, 1024).await.expect("untouched body"), encoded_binary);
     }
 
@@ -806,7 +806,7 @@ mod tests {
                 .await
                 .expect("identity setup");
 
-        assert!(decoded.decoded_from.is_empty());
+        assert_eq!(decoded.decoded_from.len(), 0);
         assert_eq!(decoded.content_coding_observation(), None);
         assert!(!decoded.headers.contains_key(CONTENT_ENCODING));
         assert_eq!(read_to_end_limited(&mut decoded.body, 1024).await.expect("identity body"), encoded);

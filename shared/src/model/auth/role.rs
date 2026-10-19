@@ -120,7 +120,7 @@ mod tests {
         let set = RoleSet::new();
         assert!(set.is_empty());
         assert!(!set.contains(Role::Admin));
-        assert!(set.names().is_empty());
+        assert_eq!(set.names().len(), 0);
     }
 
     #[test]

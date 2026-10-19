@@ -12,7 +12,7 @@ fn pipeline_transparency_telemetry_reports_non_cluster_cache_without_synthetic_c
 
     assert_eq!(telemetry.refresh_policy, InputRefreshPolicy::NORMAL);
     assert_eq!(telemetry.source, Some(PlaylistUpdateDataSource::Cache));
-    assert!(telemetry.clusters.is_empty());
+    assert_eq!(telemetry.clusters.len(), 0);
 }
 
 #[test]

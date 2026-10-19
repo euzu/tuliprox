@@ -88,7 +88,7 @@ fn playlist_update_status_pipeline_transparency_reload_restores_running_target_r
         let queued = build_input_update_run_views(&sources, &cards, &state, &status).remove(0);
         assert_eq!(queued.run_id, Some("follow-up".into()));
         assert_eq!(queued.overall_state, InputUpdateCardStatus::Queued);
-        assert!(queued.progress_details.is_empty());
+        assert_eq!(queued.progress_details.len(), 0);
         assert!(state.for_input(8).input_telemetry().is_none());
     }
 }
@@ -191,7 +191,7 @@ fn playlist_update_status_pipeline_transparency_real_staged_trace_keeps_own_resu
             "persisted input result proves no target/run result"
         );
         assert_eq!(reload.run_id, None);
-        assert!(reload.progress_details.is_empty());
+        assert_eq!(reload.progress_details.len(), 0);
     }
 }
 

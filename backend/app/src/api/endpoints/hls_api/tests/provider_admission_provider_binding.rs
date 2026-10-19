@@ -22,6 +22,33 @@ use shared::model::{HlsStripMode, InputType, PlaylistItemType, UserConnectionPer
 use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
+async fn origin_resource_no_account_available_includes_retry_after() {
+    let app_state = test_app_state();
+    let access_context = test_hls_access_context(
+        ProxySessionId("shared-hls-session".to_string()),
+        HlsAccessLeaseId("access-lease".to_string()),
+    );
+
+    for reason in [
+        super::super::HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted,
+        super::super::HlsOriginRuntimeNoAccountReason::OriginBindingPreempted,
+    ] {
+        let response = super::super::hls_origin_runtime_resource_failure_response(
+            &app_state,
+            &access_context,
+            super::super::HlsOriginRuntimeAcquireError::NoAccountAvailable { reason },
+        );
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{reason:?}");
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),
+            Some("2"),
+            "{reason:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn transient_origin_binding_requires_runtime_prepare_for_missing_or_detached_account() {
     let input = single_hls_provider_input("known-account");
     let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
@@ -52,7 +79,7 @@ async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_autho
     }
     let old_generation = session.read().await.activity.origin_work_generation;
 
-    super::super::detach_unprotected_hls_origin_account_bindings(&app_state, 4_001).await;
+    super::super::detach_unprotected_hls_origin_account_bindings(&app_state, 6_001).await;
 
     {
         let session = session.read().await;
@@ -77,17 +104,16 @@ async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_autho
         0,
         super::super::HlsOriginWorkKind::Manifest,
         super::super::HlsOriginWorkClass::ManifestInteractive,
-        4_100,
+        6_100,
     )
     .await
     .expect("authorized origin work can reacquire a detached binding");
 
-    let binding =
-        prepared_origin.origin_account_binding_to_store.as_ref().expect("new binding should be stored by caller");
+    let binding = session.read().await.origin_account_binding.clone().expect("new binding is published atomically");
     assert_eq!(binding.account_name.as_ref(), "account-a");
     assert!(matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active));
     assert_eq!(prepared_origin.fetch_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
-    app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle);
+    app_state.connection_manager.release_managed_provider_handle(prepared_origin.preacquired_origin_account_handle);
 }
 
 #[tokio::test]
@@ -123,6 +149,70 @@ async fn hls_account_binding_without_media_activity_expires_after_startup_window
 }
 
 #[tokio::test]
+async fn fresh_hls_binding_has_bounded_startup_protection_despite_old_media_delivery() {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", "account-a", 200_000).await;
+    {
+        let mut s = session.write().await;
+        s.target_duration = Some(11);
+        s.activity.last_authorized_media_at_ms = Some(70_000);
+        s.activity.last_delivered_media_at_ms = Some(70_000);
+    }
+    let proxy_id = session.read().await.proxy_session_id.clone();
+    for now in [200_001, 204_999, 205_000] {
+        let prepared = super::super::prepare_hls_origin_runtime(
+            &app,
+            &session,
+            &input,
+            "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+            "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+            &proxy_id,
+            &test_fingerprint(),
+            ConnectionKind::Normal,
+            0,
+            super::super::HlsOriginWorkKind::Resource,
+            super::super::HlsOriginWorkClass::Demand,
+            now,
+        )
+        .await
+        .unwrap();
+        let s = session.read().await;
+        let binding = s.origin_account_binding.as_ref().unwrap();
+        assert!(binding.is_active());
+        assert_eq!(binding.pinned_at_ms, 200_000, "preparing the same binding cannot extend startup protection");
+        assert_eq!(binding.generation, 0);
+        assert_eq!(s.activity.last_delivered_media_at_ms, Some(70_000));
+        drop(s);
+        app.connection_manager.release_managed_provider_handle(prepared.preacquired_origin_account_handle);
+    }
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 205_001).await;
+    assert!(
+        session.read().await.origin_account_binding.as_ref().unwrap().is_detached(),
+        "no media progress: releasable after five seconds"
+    );
+}
+
+#[tokio::test]
+async fn hls_binding_expired_startup_protects_running_origin_work() {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", "account-a", 200_000).await;
+    let generation = {
+        let mut s = session.write().await;
+        s.target_duration = Some(11);
+        s.activity.last_authorized_media_at_ms = Some(70_000);
+        s.activity.last_delivered_media_at_ms = Some(70_000);
+        s.start_origin_work()
+    };
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 210_000).await;
+    assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_active());
+    assert!(session.write().await.finish_origin_work(generation));
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 210_001).await;
+    assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_detached());
+}
+
+#[tokio::test]
 async fn hls_ready_cache_hit_does_not_require_origin_reacquire_when_binding_is_detached() {
     let app_state = test_app_state();
     let input = ConfigInput { id: 1, name: Arc::from("overlap-input"), ..ConfigInput::default() };
@@ -145,6 +235,7 @@ async fn hls_ready_cache_hit_does_not_require_origin_reacquire_when_binding_is_d
                     host_local_index: 123,
                 },
                 proxy_seq: 123,
+                media_start_ms: 0,
                 duration_ms: 4_000,
                 proxy_file_ext: "ts".to_string(),
                 content_type: "video/mp2t".to_string(),

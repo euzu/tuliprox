@@ -172,6 +172,8 @@ pub fn is_hls_provisioning_gap_segment(entry: &SegmentEntry) -> bool {
 pub struct SegmentEntry {
     pub origin_key: OriginSegmentKey,
     pub proxy_seq: u64,
+    /// Immutable session-local media offset; independent of the retained cache window.
+    pub media_start_ms: u64,
     pub duration_ms: u64,
     pub proxy_file_ext: String,
     pub content_type: String,
@@ -193,6 +195,7 @@ impl fmt::Debug for SegmentEntry {
         f.debug_struct("SegmentEntry")
             .field("origin_key", &self.origin_key)
             .field("proxy_seq", &self.proxy_seq)
+            .field("media_start_ms", &self.media_start_ms)
             .field("duration_ms", &self.duration_ms)
             .field("proxy_file_ext", &self.proxy_file_ext)
             .field("content_type", &self.content_type)
@@ -317,6 +320,7 @@ struct TimelineDraft {
     origin_epoch_sequence_base: Option<u64>,
     origin_seq_highwater: Option<u64>,
     proxy_next_seq: Option<u64>,
+    next_media_start_ms: u64,
     origin_to_proxy: HashMap<OriginSegmentKey, u64>,
     published_resource_history: HlsPublishedResourceHistory,
     discontinuity_sequence: u64,
@@ -364,6 +368,7 @@ impl From<&HlsSession> for TimelineDraft {
             origin_epoch_sequence_base: session.origin_epoch_sequence_base,
             origin_seq_highwater: session.origin_seq_highwater,
             proxy_next_seq: session.proxy_next_seq,
+            next_media_start_ms: session.next_media_start_ms,
             origin_to_proxy: session.origin_to_proxy.clone(),
             published_resource_history: session.published_resource_history.clone(),
             discontinuity_sequence: session.discontinuity_sequence,
@@ -482,6 +487,7 @@ impl HlsSession {
         self.origin_epoch_sequence_base = draft.origin_epoch_sequence_base;
         self.origin_seq_highwater = draft.origin_seq_highwater;
         self.proxy_next_seq = draft.proxy_next_seq;
+        self.next_media_start_ms = draft.next_media_start_ms;
         self.origin_to_proxy = draft.origin_to_proxy;
         self.published_resource_history = draft.published_resource_history;
         self.discontinuity_sequence = draft.discontinuity_sequence;
@@ -502,7 +508,6 @@ impl HlsSession {
     ///
     /// The snapshot contains only metadata and is safe to evaluate after releasing the session lock.
     pub fn ready_timeline_snapshot(&self, first_proxy_seq: u64, now_ms: u64) -> HlsReadyTimelineSnapshot {
-        let mut start_ms = 0_u64;
         let mut expected_proxy_seq = first_proxy_seq;
         let mut units = Vec::new();
         for (&proxy_seq, segment) in self.segments.range(first_proxy_seq..) {
@@ -522,7 +527,7 @@ impl HlsSession {
             });
             units.push(HlsReadyTimelineUnit {
                 proxy_seq,
-                start_ms,
+                start_ms: segment.media_start_ms,
                 duration_ms: segment.duration_ms,
                 state: if matches!(segment.status, SegmentCacheStatus::Ready { .. }) {
                     HlsReadyMediaState::Ready
@@ -533,7 +538,6 @@ impl HlsSession {
                 required_key_ready: segment.encryption.is_none() || key_ready_valid_until_ms.is_some(),
                 key_ready_valid_until_ms,
             });
-            start_ms = start_ms.saturating_add(segment.duration_ms);
             expected_proxy_seq = expected_proxy_seq.saturating_add(1);
         }
         HlsReadyTimelineSnapshot { units: Arc::from(units) }
@@ -861,6 +865,13 @@ impl TimelineDraft {
         effective_host_id: u64,
         handoff_discontinuity_before: bool,
     ) -> Result<u64, TimelineMapError> {
+        let map_ref = parsed
+            .map_ref
+            .map(|map_id| {
+                let parsed_map = manifest.maps.get(map_id).ok_or(TimelineMapError::UnsupportedMapExtension)?;
+                self.map_origin_map(parsed_map)
+            })
+            .transpose()?;
         let current_epoch_key = self.origin_segment_key(effective_host_id, parsed.origin_seq);
         if let Some(proxy_seq) = self.origin_to_proxy.get(&current_epoch_key).copied() {
             if let Some(entry) = self.segments.get_mut(&proxy_seq) {
@@ -871,6 +882,7 @@ impl TimelineDraft {
                     valid_until_ms: None,
                 });
                 entry.encryption = map_segment_encryption(parsed)?;
+                entry.map_ref = map_ref;
             }
             return Ok(proxy_seq);
         }
@@ -883,18 +895,12 @@ impl TimelineDraft {
         let proxy_seq = self.proxy_next_seq.unwrap_or_default();
         self.proxy_next_seq = Some(proxy_seq.checked_add(1).ok_or(TimelineMapError::ProxySequenceOverflow)?);
 
-        let map_ref = parsed
-            .map_ref
-            .map(|map_id| {
-                let parsed_map = manifest.maps.get(map_id).ok_or(TimelineMapError::UnsupportedMapExtension)?;
-                self.map_origin_map(parsed_map)
-            })
-            .transpose()?;
         let proxy_file_ext = proxy_extension_from_url(&parsed.resolved_origin_url, SEGMENT_EXTENSIONS)
             .ok_or(TimelineMapError::UnsupportedSegmentExtension)?;
         let entry = SegmentEntry {
             origin_key,
             proxy_seq,
+            media_start_ms: self.next_media_start_ms,
             duration_ms: parsed.duration_ms,
             content_type: default_content_type_for_segment_ext(&proxy_file_ext).to_string(),
             cache_key: SegmentCacheKey::new(self.proxy_session_id.clone(), proxy_seq, &proxy_file_ext),
@@ -916,6 +922,7 @@ impl TimelineDraft {
             access: Arc::new(CacheAccessState::new()),
         };
 
+        self.next_media_start_ms = self.next_media_start_ms.saturating_add(parsed.duration_ms);
         self.origin_to_proxy.insert(origin_key, proxy_seq);
         self.segments.insert(proxy_seq, entry);
         Ok(proxy_seq)
@@ -1900,5 +1907,37 @@ mod tests {
         );
         assert_eq!(session.segments.get(&0).expect("first segment").map_ref, Some(ProxyMapId(0)));
         assert_eq!(session.segments.get(&1).expect("second segment").map_ref, Some(ProxyMapId(1)));
+    }
+
+    #[test]
+    fn media_clock_survives_complete_collection_and_origin_rollover_with_variable_durations() {
+        let mut session = session();
+        session
+            .apply_origin_manifest(&normal_manifest(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:100\n\
+             #EXTINF:4,\n100.ts\n#EXTINF:6,\n101.ts\n#EXTINF:5,\n102.ts\n",
+            ))
+            .expect("initial variable timeline");
+        assert_eq!(
+            session.segments.values().map(|entry| entry.media_start_ms).collect::<Vec<_>>(),
+            vec![0, 4_000, 10_000]
+        );
+        session.segments.clear();
+        session.origin_to_proxy.clear();
+        session
+            .apply_origin_rebase_manifest(
+                &normal_manifest(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n\
+             #EXTINF:6,\nnew-0.ts\n#EXTINF:3,\nnew-1.ts\n",
+                ),
+                2,
+                false,
+            )
+            .expect("rebased timeline after collection");
+        assert_eq!(
+            session.segments.values().map(|entry| (entry.proxy_seq, entry.media_start_ms)).collect::<Vec<_>>(),
+            vec![(3, 15_000), (4, 21_000)]
+        );
+        assert_eq!(session.next_media_start_ms, 24_000);
     }
 }

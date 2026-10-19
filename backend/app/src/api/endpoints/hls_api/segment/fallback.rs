@@ -94,7 +94,9 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_or_standalone_custom
         return fallback_status.into_response();
     };
     match &lease.playback_mode {
-        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
+        HlsLeasePlaybackMode::TerminalTail(_)
+        | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+        | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
             if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
                 return response;
             }
@@ -196,7 +198,9 @@ pub(in crate::api::endpoints::hls_api) fn hls_origin_runtime_resource_failure_re
     err: HlsOriginRuntimeAcquireError,
 ) -> axum::response::Response {
     match err {
-        HlsOriginRuntimeAcquireError::NoAccountAvailable { .. } => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        HlsOriginRuntimeAcquireError::NoAccountAvailable { .. } => {
+            hls_canonical_status_response(StatusCode::SERVICE_UNAVAILABLE)
+        }
         HlsOriginRuntimeAcquireError::Fatal(status) => hls_canonical_status_response(status),
     }
 }

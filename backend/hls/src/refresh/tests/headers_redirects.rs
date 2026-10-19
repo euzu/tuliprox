@@ -76,6 +76,7 @@ async fn refresh_stores_headers_after_hls_origin_policy() {
         transient_resource_ttl_ms: 300_000,
         manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
         fresh_manifest_requirement_generation: None,
+        refresh_identity: None,
         acceptance_directive: HlsManifestAcceptanceDirective::none(),
         access_lease_id: None,
         now_ms: 100,
@@ -218,6 +219,7 @@ async fn shared_initial_manifest_automatic_cross_origin_redirect_keeps_identity_
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers,
         client: reqwest::Client::builder().no_proxy().build().expect("client"),
@@ -276,6 +278,7 @@ async fn shared_initial_manifest_budget_covers_status_decoder_redirect_and_succe
     let context = HlsOriginManifestFetchContext {
         app_config: test_app_config(),
         session: test_session(),
+        availability_runtime: None,
         origin_entry,
         headers: HeaderMap::new(),
         client: reqwest::Client::new(),

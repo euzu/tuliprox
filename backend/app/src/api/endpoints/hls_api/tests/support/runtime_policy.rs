@@ -225,6 +225,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn wait_for_runtime_policy_t
         HlsLeasePlaybackMode::Live => "live",
         HlsLeasePlaybackMode::TerminalTail(_) => "terminal-tail",
         HlsLeasePlaybackMode::TerminalUnavailable { .. } => "terminal-unavailable",
+        HlsLeasePlaybackMode::TerminalCustomResponse(_) => "terminal-custom-response",
         HlsLeasePlaybackMode::Ended => "ended",
     });
     panic!(

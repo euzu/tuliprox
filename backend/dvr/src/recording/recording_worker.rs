@@ -405,7 +405,7 @@ pub async fn recovery_decision_for(final_path: &Path, partial: &Path) -> Recover
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use super::spawn_retrying_busy_executable;
     use super::{
         build_recording_args, classify_ffmpeg_failure, recording_partial_path,
@@ -778,7 +778,8 @@ mod tests {
         let _ = fs::remove_dir_all(&recording.file_dir);
     }
 
-    #[cfg(unix)]
+    // Linux rejects execution while a writer is open; macOS permits it.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn spawn_retries_while_executable_is_open_for_writing() {
         let script = fake_ffmpeg_script("busy", "#!/bin/sh\nexit 0\n");
@@ -970,8 +971,7 @@ mod tests {
         };
         assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
         let bytes = tokio::fs::read(&input).await?;
-        // This address is outside the usual environment's localhost exclusion.
-        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url =
             reqwest::Url::parse(&format!("http://{}/api/v1/playlist/recording/secret/live", listener.local_addr()?))?;
         let (request_tx, request_rx) = tokio::sync::oneshot::channel();
@@ -991,7 +991,12 @@ mod tests {
             Ok::<_, std::io::Error>(())
         });
         let wrapper = directory.path().join("ffmpeg-with-proxy");
-        tokio::fs::write(&wrapper, "#!/bin/sh\nexport http_proxy=http://127.0.0.1:9\nexec ffmpeg \"$@\"\n").await?;
+        // Explicitly remove proxy exclusions so localhost still exercises the bypass.
+        tokio::fs::write(
+            &wrapper,
+            "#!/bin/sh\nunset no_proxy NO_PROXY\nexport http_proxy=http://127.0.0.1:9\nexec ffmpeg \"$@\"\n",
+        )
+        .await?;
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
         let mut recording = make_recording(chrono::Utc::now().timestamp(), 60);
         recording.url = url;

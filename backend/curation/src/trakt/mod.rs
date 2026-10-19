@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(evaluation.selectors.len(), 1);
         assert_eq!(evaluation.selectors[0].reference_count, 0);
         assert_eq!(evaluation.selectors[0].membership_count, 0);
-        assert!(evaluation.memberships.is_empty());
+        assert_eq!(evaluation.memberships.len(), 0);
         server.abort();
     }
 

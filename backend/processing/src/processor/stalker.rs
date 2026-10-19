@@ -667,7 +667,7 @@ mod tests {
     fn playback_candidates_are_empty_without_any_command() {
         let item = stalker_item("", None);
 
-        assert!(playback_candidates(&item).is_empty());
+        assert_eq!(playback_candidates(&item).len(), 0);
     }
 
     #[test]

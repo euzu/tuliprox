@@ -706,7 +706,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let (queue, shared_file, target) = delete_one_of_two_entries_sharing(&dir).await;
         assert!(target.still_referenced, "Bob still holds this file");
-        assert!(target.paths_to_unlink().is_empty());
+        assert_eq!(target.paths_to_unlink().len(), 0);
         let unlinked = execute_deletion_target(&target).await.expect("execute");
         assert_eq!(unlinked, None, "nothing was unlinked");
         assert!(shared_file.exists(), "Bob's recording must survive Alice's deletion");

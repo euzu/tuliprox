@@ -67,3 +67,84 @@ fn expired_finalized_object_is_refetched_instead_of_served_stale() {
         super::super::TransientObjectFetchDecision::Fetch(_)
     ));
 }
+
+#[test]
+fn account_handoff_retains_cached_transient_bytes_but_blocks_old_origin_mapping() {
+    let mut state = TransientPassthroughState::default();
+    let proxy = ProxySessionId("account-handoff".to_string());
+    let resource = TransientResourceRef::new(
+        TransientResourceKind::Segment,
+        "https://origin.example/old/media.ts",
+        b"secret",
+        1,
+        100,
+        Some("ts".to_string()),
+    );
+    let id = resource.id.clone();
+    state.upsert_resources([resource]);
+    let resource = state.resolve_current_resource(&id, 2).unwrap();
+    let token = match state.begin_object_fetch(&proxy, &resource, "ts", 2, 100) {
+        super::super::TransientObjectFetchDecision::Fetch(token) => token,
+        super::super::TransientObjectFetchDecision::Ready | super::super::TransientObjectFetchDecision::Wait(_) => {
+            panic!("uncached media starts one fetch")
+        }
+    };
+    assert!(state.mark_object_ready_if_current(&token, "video/mp2t".to_string(), 7, 3, 100));
+    state.invalidate_origin_resources();
+    let key = TransientPassthroughState::transient_object_key(&proxy, &id, "ts");
+    assert!(state.ready_object(&key, TransientResourceKind::Segment, 4).is_some());
+    assert!(state.resolve_current_resource(&id, 4).is_some());
+    assert!(!state.origin_resource_is_fetchable(&resource, 4));
+    state.upsert_resources([resource.clone()]);
+    assert!(!state.origin_resource_is_fetchable(&resource, 5));
+    assert!(state.ready_object(&key, TransientResourceKind::Segment, 5).is_some());
+    state.invalidate_origin_resources();
+    state.prune_expired(102);
+    assert!(state.invalid_origin_resources.is_empty());
+}
+
+#[test]
+fn account_handoff_gives_identical_key_uri_a_new_cache_identity_and_retains_the_old_key() {
+    let mut state = TransientPassthroughState::default();
+    let proxy = ProxySessionId("key-handoff".to_string());
+    let body = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"shared.key\"\n#EXTINF:4,\nmedia.ts\n";
+    let old = TransientManifestRewriter::rewrite(body, "https://origin.example/index.m3u8", &proxy, b"secret", 1, 100);
+    let old_key = old.resources.iter().find(|resource| resource.kind == TransientResourceKind::Key).unwrap().id.clone();
+    state.upsert_resources(old.resources);
+    let old_key_ref = state.resolve_current_resource(&old_key, 2).unwrap();
+    let super::super::TransientObjectFetchDecision::Fetch(token) =
+        state.begin_object_fetch(&proxy, &old_key_ref, "key", 2, 100)
+    else {
+        panic!("old key starts its first cache fill")
+    };
+    assert!(state.mark_object_ready_if_current(&token, "application/octet-stream".to_string(), 16, 3, 100));
+    state.invalidate_origin_resources();
+    let new = TransientManifestRewriter::rewrite_with_options(
+        body,
+        "https://origin.example/index.m3u8",
+        &proxy,
+        b"secret",
+        4,
+        100,
+        crate::transient_manifest::TransientRewriteOptions {
+            origin_account_generation: state.origin_account_generation(),
+            ..crate::transient_manifest::TransientRewriteOptions::default()
+        },
+    );
+    let new_key = new.resources.iter().find(|resource| resource.kind == TransientResourceKind::Key).unwrap().id.clone();
+    assert_ne!(old_key, new_key);
+    assert_ne!(old.body, new.body);
+    state.upsert_resources(new.resources);
+    let new_key_ref = state.resolve_current_resource(&new_key, 5).unwrap();
+    assert_eq!(old_key_ref.resolved_origin_uri, new_key_ref.resolved_origin_uri);
+    let old_lookup = TransientPassthroughState::transient_object_key(&proxy, &old_key, "key");
+    let new_lookup = TransientPassthroughState::transient_object_key(&proxy, &new_key, "key");
+    assert!(state.ready_object(&old_lookup, TransientResourceKind::Key, 5).is_some());
+    assert!(state.ready_object(&new_lookup, TransientResourceKind::Key, 5).is_none());
+    assert!(!state.origin_resource_is_fetchable(&old_key_ref, 5));
+    assert!(state.origin_resource_is_fetchable(&new_key_ref, 5));
+    assert!(matches!(
+        state.begin_object_fetch(&proxy, &new_key_ref, "key", 5, 100),
+        super::super::TransientObjectFetchDecision::Fetch(_)
+    ));
+}

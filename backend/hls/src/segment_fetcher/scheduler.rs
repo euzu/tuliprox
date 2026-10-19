@@ -107,7 +107,7 @@ pub(super) enum SegmentRetryWake {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum CapacityRetryAdmission {
+pub(super) enum CapacityRetryAdmission {
     Ready,
     BindingExpired,
     LocalIoFailure,
@@ -189,6 +189,8 @@ impl HlsSegmentWorkerPool {
             access_leases,
             metrics,
             availability_reevaluations,
+            #[cfg(any(test, feature = "test-support"))]
+            origin_prepare_barrier: std::sync::Mutex::new(None),
         }
     }
 
@@ -201,6 +203,13 @@ impl HlsSegmentWorkerPool {
     pub fn access_leases(&self) -> &Arc<RwLock<HlsAccessLeaseStore>> { &self.access_leases }
 
     pub fn metrics(&self) -> &Arc<HlsCacheMetrics> { &self.metrics }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pause_next_origin_prepare_for_test(&self) -> Arc<super::HlsSegmentPrepareBarrier> {
+        let barrier = Arc::new(super::HlsSegmentPrepareBarrier::default());
+        *self.origin_prepare_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
+        barrier
+    }
 
     pub async fn classify_backpressure(&self, session: &HlsSessionHandle) -> HlsBackpressureState {
         let session = session.read().await;
@@ -217,6 +226,48 @@ impl HlsSegmentWorkerPool {
     }
 
     pub async fn wake_scheduler(self: &Arc<Self>, context: SegmentFetchContext, now_ms: u64) {
+        let (proxy_id, has_work, queued_generation) = {
+            let session = context.session.read().await;
+            (
+                session.proxy_session_id.clone(),
+                !session.is_gc_marked_for_removal() && !session.segment_prefetch_queue.is_empty(),
+                session.activity.origin_work_generation,
+            )
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let barrier = if has_work { self.origin_prepare_barrier.lock().unwrap().take() } else { None };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(barrier) = &barrier {
+            barrier.entered.notify_one();
+            barrier.prepare.notified().await;
+        }
+        let has_access =
+            has_work && self.access_leases.write().await.has_usable_access_lease_for_session(&proxy_id, now_ms);
+        let preparation_failed = has_access
+            && crate::origin_account_runtime::prepare_media_origin(context.origin_io.as_ref(), &context.session)
+                .await
+                .is_err();
+        if has_access && !preparation_failed {
+            let mut session = context.session.write().await;
+            // Preparation can invalidate the queue while renewing an account.
+            // Replan the current qualified window in the new work generation.
+            // Account handoff clears unqualified fetch refs and keeps this gate
+            // closed until its replacement manifest has committed.
+            if session.origin_handoff_ready_after(queued_generation)
+                && session.origin_account_binding.as_ref().is_none_or(crate::HlsOriginAccountBinding::is_active)
+            {
+                let backpressure = self.classify_backpressure_for_session(&session);
+                session.queue_manifest_fetch_candidates(now_ms, backpressure.allows_prefetch());
+            }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(barrier) = &barrier {
+            barrier.prepared.notify_one();
+            barrier.proceed.notified().await;
+        }
+        if preparation_failed {
+            return;
+        }
         loop {
             let runtime = self.runtime.load_full();
             let Ok(permit) = Arc::clone(&runtime.global_semaphore).try_acquire_owned() else {
@@ -392,7 +443,9 @@ impl HlsSegmentWorkerPool {
             self.schedule_segment_retry(context, snapshot, retry);
             return;
         }
-        if completion.generation_valid {
+        if completion.generation_valid
+            || context.session.read().await.origin_handoff_ready_after(snapshot.origin_work_generation)
+        {
             self.schedule_wake(context, finished_at_ms);
         }
     }
@@ -463,7 +516,7 @@ impl HlsSegmentWorkerPool {
     }
 }
 
-async fn wait_for_capacity_retry_admission(
+pub(super) async fn wait_for_capacity_retry_admission(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
     mut revision: HlsCacheCapacityRevision,
@@ -486,7 +539,9 @@ async fn wait_for_capacity_retry_admission(
         if !binding_current {
             return CapacityRetryAdmission::BindingExpired;
         }
-        match context.segment_cache.ensure_projected_write_capacity(&snapshot.cache_key, projected_write_bytes).await {
+        let admission =
+            context.segment_cache.ensure_revision_peak_capacity(&snapshot.cache_key, projected_write_bytes).await;
+        match admission {
             Ok(()) => return CapacityRetryAdmission::Ready,
             Err(error) => {
                 let Some(capacity) = super::super::cache::hls_cache_capacity_from_io(&error) else {

@@ -163,7 +163,7 @@ async fn hls_cache_entry_returns_master_playlist_without_origin_refresh_or_sessi
         .is_some());
     assert!(app_state.hls.proxy.sessions().get_by_key(&session_key).await.is_none());
     assert_eq!(app_state.hls.proxy.metrics().snapshot().refresh_started, 0);
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -398,7 +398,7 @@ async fn legacy_hls_token_route_renders_channel_unavailable_inline_when_target_h
     assert!(!response.headers().contains_key(header::LOCATION));
     assert_eq!(response.headers()[header::CONTENT_TYPE], "application/vnd.apple.mpegurl");
     assert!(app_state.hls.proxy.access_leases().read().await.is_empty());
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -424,7 +424,7 @@ async fn legacy_hls_token_route_with_invalid_token_returns_bad_request_when_targ
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(app_state.hls.proxy.access_leases().read().await.is_empty());
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]
@@ -545,7 +545,7 @@ async fn hls_entry_origin_reservation_blocks_foreign_sessions_only_after_media_c
 
     assert_eq!(reservation.request_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
     assert!(reservation.selected_provider_config.is_some());
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
     app_state.connection_manager.release_provider_handle(reservation.provider_handle);
 
     // A manifest-only entry reservation is still unconfirmed, so it must not block a
@@ -1053,7 +1053,7 @@ async fn hls_entry_for_input_in_maintenance_opens_no_session() {
     // No maintenance clip is configured here, so the configured fallback status answers.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(app_state.hls.proxy.access_leases().read().await.is_empty(), "no lease for a maintenance input");
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]

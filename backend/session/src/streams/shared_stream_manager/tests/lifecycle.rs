@@ -221,7 +221,7 @@ async fn shared_origin_abort_before_user_registration_releases_physical_and_logi
     .await?;
     assert_eq!(providers.get_provider_connections_count(), 0);
     assert_eq!(providers.provider_lease_usage(&"provider_1".intern()).total(), 0);
-    assert!(users.active_streams().await.is_empty());
+    assert_eq!(users.active_streams().await.len(), 0);
     Ok(())
 }
 
@@ -414,7 +414,7 @@ async fn shutdown_with_unpolled_shared_body_leaves_no_requests_or_subscribers() 
     connections.shutdown().await;
 
     assert_eq!(providers.get_provider_connections_count(), 0);
-    assert!(users.active_streams().await.is_empty());
+    assert_eq!(users.active_streams().await.len(), 0);
     assert!(manager.get_shared_state(url).await.is_none());
 
     drop(unpolled_body);

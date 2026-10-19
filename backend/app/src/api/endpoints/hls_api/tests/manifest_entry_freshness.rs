@@ -17,11 +17,14 @@ use std::sync::{
 const ORIGIN_WINDOW_SEGMENTS: u64 = 6;
 const SEGMENT_BODY: &[u8] = &[0x47; 8_192];
 
-fn origin_playlist(head: u64) -> Vec<u8> {
+fn origin_playlist(head: u64) -> Vec<u8> { origin_playlist_with_duration(head, 2) }
+
+pub(super) fn origin_playlist_with_duration(head: u64, target_duration: u64) -> Vec<u8> {
     use std::fmt::Write;
-    let mut body = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{head}\n");
+    let mut body =
+        format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:{head}\n");
     for sequence in head..head + ORIGIN_WINDOW_SEGMENTS {
-        let _ = write!(body, "#EXTINF:2.0,\nseg-{sequence}.ts\n");
+        let _ = write!(body, "#EXTINF:{target_duration}.0,\nseg-{sequence}.ts\n");
     }
     body.into_bytes()
 }
@@ -61,6 +64,20 @@ async fn first_origin_sequence_for_new_lease(
     request_url: &str,
     lease: &str,
 ) -> u64 {
+    let body = open_manifest_for_new_lease(app_state, input, request_url, lease).await;
+    let session_key = super::super::build_hls_origin_source(input, "12345").session_key();
+    let first_proxy_seq = manifest_media_sequence(&body);
+    let session = app_state.hls.proxy.sessions().get_by_key(&session_key).await.expect("shared hls session");
+    let session = session.read().await;
+    session.segments.get(&first_proxy_seq).expect("published segment is mapped").origin_key.host_local_sequence
+}
+
+pub(super) async fn open_manifest_for_new_lease(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    request_url: &str,
+    lease: &str,
+) -> String {
     let origin_source = super::super::build_hls_origin_source(input, "12345");
     let session_key = origin_source.session_key();
     let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
@@ -88,11 +105,7 @@ async fn first_origin_sequence_for_new_lease(
     .await
     .expect("hls cache should handle the live entrypoint");
     assert_eq!(response.status(), StatusCode::OK, "lease {lease}");
-    let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest should be utf8");
-    let first_proxy_seq = manifest_media_sequence(&body);
-    let session = app_state.hls.proxy.sessions().get_by_key(&session_key).await.expect("shared hls session");
-    let session = session.read().await;
-    session.segments.get(&first_proxy_seq).expect("published segment is mapped").origin_key.host_local_sequence
+    String::from_utf8(response_body(response).await.to_vec()).expect("manifest should be utf8")
 }
 
 /// Moves the retained session's last origin confirmation `idle_ms` into the

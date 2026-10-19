@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+fn regular_consensus_precedes_short_timeline_anchor_without_preferred_pinned_candidate() {
+    let mut pinned = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    pinned.local_sequence_relation = Some(HlsHostLocalSequenceRelation::Backward);
+    let mut short = observation(1, "origin-b", HlsCandidateHostRelation::OtherHost);
+    short.timeline_fingerprint.segment_count = 2;
+    short.timeline_fingerprint.segment_samples.truncate(2);
+    for (index, segment) in pinned.timeline_fingerprint.segment_samples.iter_mut().enumerate() {
+        segment.program_date_time_ms = Some(1_700_000_000_000 + i64::try_from(index).unwrap() * 4_000);
+    }
+    for (index, segment) in short.timeline_fingerprint.segment_samples.iter_mut().enumerate() {
+        segment.program_date_time_ms = Some(1_700_000_000_500 + i64::try_from(index).unwrap() * 4_000);
+    }
+    let regular = [
+        observation(2, "origin-c", HlsCandidateHostRelation::OtherHost),
+        observation(3, "origin-c", HlsCandidateHostRelation::OtherHost),
+    ];
+    for trigger in [HlsManifestAcceptanceTrigger::RecoveryRequired, HlsManifestAcceptanceTrigger::Critical] {
+        assert_eq!(
+            evaluate(&[pinned.clone(), short.clone(), regular[0].clone(), regular[1].clone()], trigger),
+            HlsManifestCommitPlan::StageAlternative {
+                candidate_index: 2,
+                kind: HlsManifestCommitKind::AlternativeAsNewEpoch,
+            }
+        );
+    }
+    assert_eq!(
+        evaluate(&[pinned.clone(), short.clone(), regular[0].clone()], HlsManifestAcceptanceTrigger::RecoveryRequired),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 1,
+            kind: HlsManifestCommitKind::AnchoredAlternative,
+        }
+    );
+    assert_eq!(
+        evaluate(&[pinned, short, regular[0].clone(), regular[1].clone()], HlsManifestAcceptanceTrigger::Observe),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 1,
+            kind: HlsManifestCommitKind::AnchoredAlternative,
+        }
+    );
+}
+
+#[test]
+fn regular_content_verification_precedes_short_anchor_and_unstageable_regular_does_not_block_fallback() {
+    let mut short = observation(0, "origin-b", HlsCandidateHostRelation::OtherHost);
+    short.timeline_fingerprint.segment_count = 2;
+    short.timeline_fingerprint.segment_samples.truncate(2);
+    short.evidence = HlsCrossHostAcceptanceEvidence::StrongTimelineAnchor { overlapping_segments: 2 };
+    let mut regular = observation(1, "origin-c", HlsCandidateHostRelation::OtherHost);
+    regular.committed_content_anchor = HlsCommittedContentAnchorEvidence::RequiresStagedByteVerification;
+    assert_eq!(
+        evaluate(&[short.clone(), regular.clone()], HlsManifestAcceptanceTrigger::RecoveryRequired),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 1,
+            kind: HlsManifestCommitKind::ContentVerifiedAlternative,
+        }
+    );
+    regular.switch_segment_readiness = HlsSwitchSegmentReadiness::Unavailable;
+    assert_eq!(
+        evaluate(&[short, regular], HlsManifestAcceptanceTrigger::RecoveryRequired),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 0,
+            kind: HlsManifestCommitKind::AnchoredAlternative,
+        }
+    );
+}
+
+#[test]
+fn empty_alternative_cannot_be_qualified_by_anchor_or_consensus() {
+    let mut empty = observation(0, "origin-b", HlsCandidateHostRelation::OtherHost);
+    empty.timeline_fingerprint.segment_count = 0;
+    empty.timeline_fingerprint.segment_samples.clear();
+    empty.evidence = HlsCrossHostAcceptanceEvidence::StrongTimelineAnchor { overlapping_segments: 2 };
+    let mut other = empty.clone();
+    other.candidate_index = 1;
+    assert_eq!(
+        evaluate(&[empty, other], HlsManifestAcceptanceTrigger::RecoveryRequired),
+        HlsManifestCommitPlan::RejectAll
+    );
+}
+
+#[test]
 fn forward_media_sequence_does_not_override_published_resource_replay() {
     let mut replay = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
     replay.local_sequence_relation = Some(HlsHostLocalSequenceRelation::PlausibleForward);
@@ -342,7 +423,7 @@ fn conflicting_reduced_follow_up_cannot_reuse_previous_full_burst() {
     let mut conflict = observation(0, "origin-c", HlsCandidateHostRelation::OtherHost);
     conflict.timeline_fingerprint = fingerprint(20);
 
-    assert!(alternative_cohorts_with_history(&[conflict], Some(&first), false).is_empty());
+    assert_eq!(alternative_cohorts_with_history(&[conflict], Some(&first), false).len(), 0);
 }
 
 #[test]
@@ -397,5 +478,85 @@ fn critical_mode_rejects_ambiguous_single_sample_cohorts() {
     assert_eq!(
         evaluate(&[first, second], HlsManifestAcceptanceTrigger::Critical),
         HlsManifestCommitPlan::HoldAlternative
+    );
+}
+
+#[test]
+fn short_initial_and_pinned_candidates_require_a_complete_burst() {
+    for relation in [HlsCandidateHostRelation::InitialBaseline, HlsCandidateHostRelation::PinnedHost] {
+        for count in [1, 2] {
+            let mut candidate = observation(0, "origin-a", relation);
+            candidate.timeline_fingerprint.segment_count = count;
+            candidate.timeline_fingerprint.segment_samples.truncate(usize::try_from(count).unwrap());
+            assert_eq!(
+                evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+                    full_burst_completed: false,
+                    current_burst_is_full_plan: true,
+                    trigger: HlsManifestAcceptanceTrigger::Observe,
+                    previous_alternative: None,
+                    observations: std::slice::from_ref(&candidate),
+                }),
+                HlsManifestCommitPlan::RejectAll
+            );
+            assert_eq!(
+                evaluate(&[candidate], HlsManifestAcceptanceTrigger::Observe),
+                HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
+            );
+        }
+    }
+}
+
+#[test]
+fn eligible_regular_window_wins_over_faster_short_candidate_in_same_origin_class() {
+    for relation in [HlsCandidateHostRelation::InitialBaseline, HlsCandidateHostRelation::PinnedHost] {
+        let mut short = observation(0, "origin-a", relation);
+        short.timeline_fingerprint.segment_count = 1;
+        short.manifest_fetch_elapsed_ms = 1;
+        let mut regular = observation(1, "origin-a", relation);
+        regular.manifest_fetch_elapsed_ms = 100;
+        assert_eq!(
+            evaluate(&[short.clone(), regular.clone()], HlsManifestAcceptanceTrigger::Observe),
+            HlsManifestCommitPlan::Commit { candidate_index: 1, kind: HlsManifestCommitKind::Pinned }
+        );
+        regular.resource_timeline_evidence = HlsResourceTimelineEvidence::ReplayOnly;
+        assert_eq!(
+            evaluate(&[short, regular], HlsManifestAcceptanceTrigger::Observe),
+            HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
+        );
+    }
+}
+
+#[test]
+fn empty_initial_candidates_are_not_qualified_by_a_complete_burst() {
+    let mut empty = observation(0, "origin-a", HlsCandidateHostRelation::InitialBaseline);
+    empty.timeline_fingerprint.segment_count = 0;
+    empty.timeline_fingerprint.segment_samples.clear();
+    assert_eq!(evaluate(&[empty], HlsManifestAcceptanceTrigger::Observe), HlsManifestCommitPlan::RejectAll);
+}
+
+#[test]
+fn independently_qualified_regular_alternative_takes_priority_over_short_pinned_progress() {
+    let mut pinned = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    pinned.timeline_fingerprint.segment_count = 1;
+    pinned.timeline_fingerprint.segment_samples.truncate(1);
+    let alternatives = [
+        observation(1, "origin-b", HlsCandidateHostRelation::OtherHost),
+        observation(2, "origin-b", HlsCandidateHostRelation::OtherHost),
+    ];
+    assert_eq!(
+        evaluate(
+            &[pinned.clone(), alternatives[0].clone(), alternatives[1].clone()],
+            HlsManifestAcceptanceTrigger::RecoveryRequired
+        ),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 1,
+            kind: HlsManifestCommitKind::AlternativeAsNewEpoch
+        }
+    );
+    let mut unstageable = alternatives[0].clone();
+    unstageable.switch_segment_readiness = HlsSwitchSegmentReadiness::Unavailable;
+    assert_eq!(
+        evaluate(&[pinned, unstageable], HlsManifestAcceptanceTrigger::RecoveryRequired),
+        HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
     );
 }

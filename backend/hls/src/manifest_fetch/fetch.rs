@@ -5,15 +5,15 @@ use super::{
         origin_manifest_fetch_error_from_io_error, resolved_hls_manifest_request_url_from_input,
         response_to_fetched_manifest, same_origin, ManifestRecoveryAttemptLogContext,
     },
-    model::{FetchedOriginManifest, HlsOriginManifestFetchContext, RetryPolicy},
+    model::{FetchedOriginManifest, HlsOriginManifestFetchContext, RetryPolicy, DEFAULT_HLS_TARGET_DURATION_SECS},
     selection_log::{log_manifest_initial_attempt, log_manifest_retry_scheduled, ManifestRetryLogKind},
 };
 #[cfg(any(test, feature = "test-support"))]
 use super::{model::LiveHlsOriginEntry, selection_log::log_origin_refresh_retry_scheduled};
 use crate::{
-    append_hls_provider_session_headers, headers::merge_hls_provider_session_headers,
-    manifest_origin_binding::HlsManifestOriginBinding, observability::hls_origin_log_value, scrub_hls_origin_headers,
-    MAX_MANUAL_REDIRECTS,
+    append_hls_provider_session_headers, availability::record_retryable_manifest_attempt_failure,
+    headers::merge_hls_provider_session_headers, manifest_origin_binding::HlsManifestOriginBinding,
+    observability::hls_origin_log_value, scrub_hls_origin_headers, MAX_MANUAL_REDIRECTS,
 };
 use axum::http::HeaderMap;
 use log::debug;
@@ -82,13 +82,10 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
     log_manifest_initial_attempt(context).await;
     let input_source = context.origin_entry.to_input_source();
-    let account_binding = {
+    let (account_binding, progress_generation) = {
         let session = context.session.read().await;
-        if session.origin_account_binding.is_some() {
-            "present"
-        } else {
-            "absent"
-        }
+        let account_binding = if session.origin_account_binding.is_some() { "present" } else { "absent" };
+        (account_binding, session.origin_control.progress_generation)
     };
     debug!(
         "HLS origin manifest request started: account_binding={account_binding} request_url={}",
@@ -151,8 +148,13 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
         match fetch_result {
             Ok(fetched) => return Ok(fetched.with_attempts(attempt_index + 1)),
             Err(err) if is_hls_retryable_initial_manifest_fetch_error(&err) && attempt_index + 1 < attempts => {
+                record_retryable_manifest_attempt_failure(context, progress_generation, &err, current_time_millis())
+                    .await;
                 let retry_after_ms = match &err {
-                    OriginManifestFetchError::RetryableStatus(_, retry_after_ms) => *retry_after_ms,
+                    OriginManifestFetchError::RetryableStatus(_, Some(retry_after_ms)) => {
+                        let session = context.session.read().await;
+                        Some(cap_manifest_retry_after_ms(&session, *retry_after_ms))
+                    }
                     _ => None,
                 };
                 let jitter_ms = if retry_after_ms.is_some() { 0 } else { context.retry_policy.sample_jitter_ms() };
@@ -282,6 +284,16 @@ pub(super) fn single_variant_url(body: &str, master_url: &str) -> Option<Url> {
     }
     let url = Url::parse(&rewrite_hls_url(master_url, variant?)).ok()?;
     matches!(url.scheme(), "http" | "https").then_some(url)
+}
+
+pub(super) fn cap_manifest_retry_after_ms(session: &crate::HlsSession, retry_after_ms: u64) -> u64 {
+    let target_duration_ms = session
+        .origin_control
+        .target_duration_snapshot_ms
+        .filter(|duration_ms| *duration_ms > 0)
+        .or_else(|| session.target_duration.filter(|seconds| *seconds > 0).map(|seconds| u64::from(seconds) * 1_000))
+        .unwrap_or(u64::from(DEFAULT_HLS_TARGET_DURATION_SECS) * 1_000);
+    retry_after_ms.min(target_duration_ms / 2)
 }
 
 pub(super) fn next_retry_delay_ms(

@@ -102,7 +102,7 @@ async fn intentional_empty_output_views_clear_managed_artifacts_without_alias_le
         "[]"
     );
     let strm_index = strm_get_file_paths(&hash_string_as_hex(&normalize_string_path("strm")), &target_storage);
-    assert!(std::fs::read_to_string(strm_index).expect("empty STRM index").is_empty());
+    assert_eq!(std::fs::read_to_string(strm_index).expect("empty STRM index").len(), 0);
     {
         let cache = playlist_state.data.read().await;
         let cached = cache.get(&target.name).expect("empty target cache");

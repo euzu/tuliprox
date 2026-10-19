@@ -265,7 +265,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn hls_session_last_media_at
 pub(in crate::api::endpoints::hls_api::tests) async fn assert_no_hls_cache_stream_registered(
     app_state: &Arc<AppState>,
 ) {
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 pub(in crate::api::endpoints::hls_api::tests) async fn access_lease_session_token(

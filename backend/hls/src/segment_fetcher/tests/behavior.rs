@@ -428,7 +428,7 @@ async fn same_origin_sequence_resource_conflict_preserves_in_flight_binding() {
     let (committed_key, bytes) = committed_segment(&context, 1).await;
     assert_eq!(committed_key, cache_key);
     assert_eq!(bytes, b"controlled-segment");
-    assert!(temp_cache_files(temp_dir.path()).is_empty());
+    assert_eq!(temp_cache_files(temp_dir.path()).len(), 0);
 }
 
 #[tokio::test]
@@ -495,7 +495,7 @@ async fn segment_decoder_failure_exhausts_attempt_budget_without_cache_or_temp_f
     let cache_key = context.session.read().await.segments.get(&1).expect("segment").cache_key.clone();
     assert!(context.segment_cache.metadata(&cache_key).await.expect("metadata reads").is_none());
     assert!(!context.segment_cache.has_active_temp_files());
-    assert!(temp_cache_files(temp_dir.path()).is_empty());
+    assert_eq!(temp_cache_files(temp_dir.path()).len(), 0);
 }
 
 #[tokio::test]
@@ -662,7 +662,7 @@ async fn unknown_body_reserves_more_disk_before_growing_its_raw_spool() -> std::
     let mut observed = prepared.observed.lock().await;
     observed.limit = 8;
     observed.observe(b"segment-body").await?;
-    assert_eq!(observed.additional_reservations.len(), 1);
+    assert_eq!(observed.limit, 16);
     observed.finish().await?;
     let metadata =
         prepared.revision.revision().wait_complete(tokio::time::Instant::now() + Duration::from_secs(1)).await?;

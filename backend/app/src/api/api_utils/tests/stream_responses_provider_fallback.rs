@@ -128,7 +128,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
             socket_bound: false,
         })
         .await;
-    assert!(!created.is_empty());
+    assert_ne!(created.len(), 0);
     app_state.active_users.update_session_provider_headers(&user.username, session_token, &initial_headers).await;
 
     let busy = app_state.active_provider.acquire_exact_connection_with_grace(
@@ -233,7 +233,7 @@ async fn force_provider_stream_response_clears_stored_headers_after_fallback_ope
             socket_bound: false,
         })
         .await;
-    assert!(!created.is_empty());
+    assert_ne!(created.len(), 0);
     app_state.active_users.update_session_provider_headers(&user.username, session_token, &initial_headers).await;
 
     let busy = app_state.active_provider.acquire_exact_connection_with_grace(

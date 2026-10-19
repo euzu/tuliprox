@@ -36,7 +36,7 @@ impl TestServer {
     }
 
     pub(crate) async fn serve(responses: Vec<Vec<u8>>, delay: Duration, send_headers: bool) -> Self {
-        assert!(!responses.is_empty());
+        assert_ne!(responses.len(), 0);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));

@@ -68,7 +68,11 @@ async fn global_size_gc_subtracts_map_bytes_after_segment_removal() {
         session.apply_origin_manifest(&manifest).expect("manifest should map");
         for (proxy_seq, ready_at_ms) in [(0, 0), (1, 1)] {
             let segment = session.segments.get_mut(&proxy_seq).expect("segment");
+            gc.cache.write_bytes_and_commit(&segment.cache_key, b"segment-body").await.expect("segment fixture");
             segment.status = SegmentCacheStatus::Ready { content_length: 12, ready_at_ms };
+        }
+        for map in session.maps.values() {
+            gc.cache.write_bytes_and_commit(&map.cache_key, &[0; 10]).await.expect("map fixture");
         }
         session.maps.get_mut(&ProxyMapId(0)).expect("first map").status =
             MapCacheStatus::Ready { content_length: 10, ready_at_ms: 0 };

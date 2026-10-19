@@ -420,7 +420,7 @@ async fn hls_cache_manifest_cold_start_synchronously_returns_initial_manifest() 
         assert_eq!(binding.input_name.as_ref(), "test-input");
         assert_eq!(binding.account_name.as_ref(), "test-input");
     }
-    assert!(app_state.active_users.active_streams().await.is_empty());
+    assert_eq!(app_state.active_users.active_streams().await.len(), 0);
 }
 
 #[tokio::test]

@@ -197,6 +197,21 @@ reverse_proxy:
 Use recovery burst levels gradually. Start with `friendly`. Move to stronger levels only when logs show manifest refresh
 instability and the provider can tolerate additional requests.
 
+Shared HLS evaluates a short live origin window (one or two segments) with the complete configured burst before
+allowing it. A suitable candidate with at least three segments takes priority. If only suitable short windows
+remain, the session records permission to publish them and emits one warning referencing RFC 8216 section 6.2.2.
+The `off` level evaluates its single candidate; no additional burst level is required.
+
+All access leases share the qualification and refresh work, including failure backoff. New leases, ordinary
+sequence movement, and later changes such as one → three → one segments do not consume or renew the permission.
+A request that needs a fresher manifest uses the normal shared refresh. A changed origin binding or epoch,
+acceptance conflict, or lifecycle state requiring origin revalidation starts a new shared qualification.
+
+The proxy continues to use larger available cache windows. Strip keeps already short windows intact, and
+startup admission and reserve accounting use their actual media duration. Missing segments, maps or keys,
+replayed media, empty playlists, and invalid leases remain subject to the existing checks. This exception cannot
+create media progress when the origin stops publishing.
+
 ### Problematic MPEG-TS segments
 
 ```yaml
@@ -290,8 +305,9 @@ or silently change the bytes of an already published URI. Revision and repair pe
 disk cache limits. Conservative behavior remains the default; existing sessions keep their startup policy after
 reload. Restart after changing to `conservative` when an immediate rollback of running sessions is required.
 
-Existing provider and fetch concurrency limits remain in effect. The initial playlist needs at least three
-publishable segments; `optimistic` counts successors the origin has accepted. With fewer than three concurrent
+Existing provider and fetch concurrency limits remain in effect. The initial playlist normally needs at least three
+publishable segments; a session qualified for short origin windows can publish one or two. `optimistic` counts
+successors the origin has accepted. With fewer than three concurrent
 fills, a cold session can still wait for an earlier origin EOF before that window is available. Raising the
 existing per-session concurrency limit to three is an operator choice and must fit the provider's connection
 allowance; startup mode never raises it automatically.
