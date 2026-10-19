@@ -10,7 +10,8 @@ use super::{
     episode::{
         begin_manifest_acceptance_episode, begin_requalified_manifest_acceptance_episode, committed_resource_evidence,
         complete_manifest_acceptance_episode, hold_uncommitted_manifest_acceptance_episode,
-        manifest_acceptance_episode_snapshot, manifest_acceptance_exhaustion_reason, manifest_candidate_observation,
+        manifest_acceptance_episode_snapshot, manifest_acceptance_exhaustion_reason,
+        manifest_acceptance_generation_is_current, manifest_candidate_observation,
         record_full_manifest_acceptance_burst, record_manifest_acceptance_exhaustion,
         record_manifest_acceptance_landscape, update_manifest_acceptance_episode_state,
     },
@@ -46,6 +47,7 @@ use crate::{
     manifest_origin_binding::HlsManifestOriginBinding,
     recovery_timing::HlsAcceptanceDeadlineMs,
 };
+use log::debug;
 use shared::model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan};
 use std::{
     future::Future,
@@ -56,7 +58,7 @@ use tokio::task::JoinSet;
 enum HlsManifestRecoveryAttemptError<T> {
     Fetch(OriginManifestFetchError),
     Rejected(HlsManifestRejectLogReason),
-    Requalified,
+    Requalified(HlsManifestAcceptanceGeneration),
     Committed(T),
 }
 
@@ -93,7 +95,11 @@ where
     }
     let attempts = context.retry_policy.attempt_count();
     let mut last_error = OriginManifestFetchError::RetryExhausted;
-    let resume = context.session.read().await.origin_qualification_retry_target().is_some();
+    let (resume, mut expected_generation) = {
+        let session = context.session.read().await;
+        let resume = session.origin_qualification_retry_target().is_some();
+        (resume, resume.then_some(session.origin_control.acceptance_generation))
+    };
     let mut next_attempt_is_full_plan = !resume;
     let mut requalifications = 0_u8;
     let mut attempt_index = usize::from(resume);
@@ -109,7 +115,7 @@ where
             let jitter = context.retry_policy.sample_jitter_ms();
             context.retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
         };
-        let acceptance_deadline = current_acceptance_deadline(context).await;
+        let acceptance_deadline = current_acceptance_deadline(context, expected_generation).await?;
         if !resume
             && !acceptance_attempt_may_start(
                 next_attempt_is_full_plan,
@@ -143,9 +149,13 @@ where
         };
         let candidate_requests_in_attempt = recovery_burst_plan(context, next_attempt_is_full_plan).total_candidates();
         next_attempt_is_full_plan = false;
-        match fetch_and_commit_manifest_recovery_attempt(context, attempt_plan, &mut commit).await {
+        match fetch_and_commit_manifest_recovery_attempt(context, attempt_plan, &mut expected_generation, &mut commit)
+            .await
+        {
             HlsManifestRecoveryAttemptError::Committed(committed) => return Ok(committed),
-            HlsManifestRecoveryAttemptError::Requalified => {
+            HlsManifestRecoveryAttemptError::Requalified(generation) => {
+                // Only an explicitly authorized requalification may transfer chain ownership.
+                expected_generation = Some(generation);
                 requalifications = requalifications.saturating_add(1);
                 next_attempt_is_full_plan = true;
                 last_error = OriginManifestFetchError::RetryExhausted;
@@ -205,11 +215,20 @@ pub(super) fn acceptance_attempt_may_start(
     current_burst_is_full_plan || now_ms.saturating_add(delay_ms) < acceptance_deadline.as_millis_since_epoch()
 }
 
-async fn current_acceptance_deadline(context: &HlsOriginManifestFetchContext) -> HlsAcceptanceDeadlineMs {
-    context.session.read().await.origin_control.acceptance_episode.as_ref().map_or_else(
+async fn current_acceptance_deadline(
+    context: &HlsOriginManifestFetchContext,
+    expected_generation: Option<HlsManifestAcceptanceGeneration>,
+) -> Result<HlsAcceptanceDeadlineMs, OriginManifestFetchError> {
+    let session = context.session.read().await;
+    if expected_generation.is_some_and(|generation| !manifest_acceptance_generation_is_current(&session, generation)) {
+        return Err(OriginManifestFetchError::RecoveryUnavailable {
+            reason: super::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+        });
+    }
+    Ok(session.origin_control.acceptance_episode.as_ref().map_or_else(
         || HlsAcceptanceDeadlineMs::from_millis_since_epoch(u64::MAX),
         |episode| episode.timing().acceptance_deadline,
-    )
+    ))
 }
 
 pub(super) fn attempt_limit_for_started_requalification(attempt_limit: usize, attempt_index: usize) -> usize {
@@ -242,6 +261,7 @@ pub(super) struct HlsManifestRecoveryAttemptPlan<'a> {
 async fn fetch_and_commit_manifest_recovery_attempt<T, C, Fut>(
     context: &HlsOriginManifestFetchContext,
     plan: HlsManifestRecoveryAttemptPlan<'_>,
+    expected_generation: &mut Option<HlsManifestAcceptanceGeneration>,
     commit: &mut C,
 ) -> HlsManifestRecoveryAttemptError<T>
 where
@@ -249,25 +269,27 @@ where
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
     let burst_plan = recovery_burst_plan(context, plan.current_burst_is_full_plan);
-    fetch_and_commit_manifest_recovery_burst_attempt(context, plan, burst_plan, commit).await
+    fetch_and_commit_manifest_recovery_burst_attempt(context, plan, burst_plan, expected_generation, commit).await
 }
 
 async fn fetch_and_commit_manifest_recovery_burst_attempt<T, C, Fut>(
     context: &HlsOriginManifestFetchContext,
     plan: HlsManifestRecoveryAttemptPlan<'_>,
     burst_plan: HlsManifestRecoveryBurstPlan,
+    expected_generation: &mut Option<HlsManifestAcceptanceGeneration>,
     commit: &mut C,
 ) -> HlsManifestRecoveryAttemptError<T>
 where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
-    let episode_generation = begin_manifest_acceptance_episode(context, &plan, burst_plan).await;
+    let episode_generation = begin_manifest_acceptance_episode(context, &plan, burst_plan, *expected_generation).await;
     if episode_generation.is_none() {
         return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::RecoveryUnavailable {
             reason: super::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
         });
     }
+    *expected_generation = episode_generation;
     let HlsManifestRecoveryBurstCollection {
         fetched_candidates,
         completed_candidates,
@@ -291,14 +313,19 @@ where
                     OriginManifestFetchError::DeterministicTimelineConflict(conflict),
                 );
             }
-            HlsManifestRecoveryBurstEvaluationOutcome::Requalified => {
-                return HlsManifestRecoveryAttemptError::Requalified;
+            HlsManifestRecoveryBurstEvaluationOutcome::Requalified(generation) => {
+                return HlsManifestRecoveryAttemptError::Requalified(generation);
             }
             HlsManifestRecoveryBurstEvaluationOutcome::Exhausted => {
                 return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::RetryExhausted);
             }
+            HlsManifestRecoveryBurstEvaluationOutcome::Superseded => {
+                return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::RecoveryUnavailable {
+                    reason: super::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+                });
+            }
         };
-    match commit_selected_manifest_recovery_candidate(
+    let selection_resumed = match commit_selected_manifest_recovery_candidate(
         context,
         &plan,
         burst_plan,
@@ -313,7 +340,19 @@ where
         HlsSelectedManifestRecoveryCommit::Committed(committed) => {
             return HlsManifestRecoveryAttemptError::Committed(committed);
         }
-        HlsSelectedManifestRecoveryCommit::Rejected(reason) => last_reject_reason = Some(reason),
+        HlsSelectedManifestRecoveryCommit::Rejected(reason) => {
+            last_reject_reason = Some(reason);
+            true
+        }
+        HlsSelectedManifestRecoveryCommit::SelectionRejected(HlsRecoveryWorkloadBindingUpdate::StaleGeneration) => {
+            return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::RecoveryUnavailable {
+                reason: super::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+            });
+        }
+        HlsSelectedManifestRecoveryCommit::SelectionRejected(_) => {
+            last_reject_reason = Some(HlsManifestRejectLogReason::StagedSwitchInvalidated);
+            false
+        }
         HlsSelectedManifestRecoveryCommit::LocalRepresentationLimit(violation) => {
             return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::LocalRepresentationLimit(
                 violation,
@@ -325,10 +364,10 @@ where
         HlsSelectedManifestRecoveryCommit::CommitGenerationExhausted => {
             return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::CommitGenerationExhausted);
         }
-        HlsSelectedManifestRecoveryCommit::NotSelected => {}
-    }
+        HlsSelectedManifestRecoveryCommit::NotSelected => false,
+    };
 
-    if plan.current_burst_is_full_plan {
+    if plan.current_burst_is_full_plan || selection_resumed {
         record_manifest_acceptance_exhaustion(
             context,
             episode_generation,
@@ -359,8 +398,9 @@ struct HlsManifestRecoveryBurstEvaluation {
 enum HlsManifestRecoveryBurstEvaluationOutcome {
     Continue(Box<HlsManifestRecoveryBurstEvaluation>),
     DeterministicConflict(Box<HlsDeterministicTimelineConflict>),
-    Requalified,
+    Requalified(HlsManifestAcceptanceGeneration),
     Exhausted,
+    Superseded,
 }
 
 const fn manifest_acceptance_state_for_plan(plan: &HlsManifestCommitPlan) -> HlsManifestAcceptanceState {
@@ -414,6 +454,10 @@ async fn evaluate_manifest_recovery_burst(
         }
     }
     let episode_snapshot = manifest_acceptance_episode_snapshot(context, episode_generation).await;
+    if episode_snapshot.is_none() {
+        // An old response must not let the next attempt join a successor episode.
+        return HlsManifestRecoveryBurstEvaluationOutcome::Superseded;
+    }
     let reduced_landscape_changed = !plan.current_burst_is_full_plan
         && episode_snapshot
             .as_ref()
@@ -421,16 +465,17 @@ async fn evaluate_manifest_recovery_burst(
             .map(|landscape| classify_reduced_retry_landscape(landscape, &observations))
             .is_some_and(HlsReducedRetryLandscapeChange::requires_full_requalification);
     if reduced_landscape_changed {
-        if plan.may_requalify
-            && begin_requalified_manifest_acceptance_episode(
+        if plan.may_requalify {
+            if let Some(generation) = begin_requalified_manifest_acceptance_episode(
                 context,
                 episode_generation,
                 plan.trigger,
                 &plan.requalification_window,
             )
             .await
-        {
-            return HlsManifestRecoveryBurstEvaluationOutcome::Requalified;
+            {
+                return HlsManifestRecoveryBurstEvaluationOutcome::Requalified(generation);
+            }
         }
         // A changed landscape may never fall through into reduced-burst
         // cross-host acceptance when its full requalification budget is gone.
@@ -476,6 +521,7 @@ async fn evaluate_manifest_recovery_burst(
 enum HlsSelectedManifestRecoveryCommit<T> {
     Committed(T),
     Rejected(HlsManifestRejectLogReason),
+    SelectionRejected(HlsRecoveryWorkloadBindingUpdate),
     LocalRepresentationLimit(crate::manifest_limits::HlsManifestLimitViolation),
     MalformedTransientRepresentation,
     CommitGenerationExhausted,
@@ -511,8 +557,15 @@ where
         report.quality.effective_host.as_deref(),
         &fetched.body,
     );
-    if !select_manifest_recovery_candidate(context, episode_generation, candidate_identity).await {
-        return HlsSelectedManifestRecoveryCommit::Rejected(HlsManifestRejectLogReason::StagedSwitchInvalidated);
+    let selection_update = select_manifest_recovery_candidate(
+        context,
+        episode_generation,
+        candidate_identity,
+        plan.current_burst_is_full_plan,
+    )
+    .await;
+    if selection_update != HlsRecoveryWorkloadBindingUpdate::Applied {
+        return HlsSelectedManifestRecoveryCommit::SelectionRejected(selection_update);
     }
     let acceptance_mode = selected_commit_acceptance_mode(selected_commit_kind, plan.acceptance_mode);
     let selection = if burst_plan.total_candidates() > 1 {
@@ -576,15 +629,36 @@ async fn select_manifest_recovery_candidate(
     context: &HlsOriginManifestFetchContext,
     generation: Option<HlsManifestAcceptanceGeneration>,
     candidate_identity: HlsManifestRecoveryCandidateIdentity,
-) -> bool {
+    current_burst_is_full_plan: bool,
+) -> HlsRecoveryWorkloadBindingUpdate {
+    let attempt_type = if current_burst_is_full_plan { "full" } else { "reduced" };
     let Some(generation) = generation else {
-        return false;
+        let session = context.session.read().await;
+        debug!("HLS manifest candidate selection rejected: update=EpisodeInactive attempt_type={attempt_type} expected_generation=none current_generation={} episode_status={:?}",
+            session.origin_control.acceptance_generation.0,
+            crate::manifest_acceptance::manifest_acceptance_episode_status(session.origin_control.acceptance_episode.as_ref(), session.origin_control.acceptance_generation, current_time_millis()));
+        return HlsRecoveryWorkloadBindingUpdate::EpisodeInactive;
     };
     let mut session = context.session.write().await;
+    let current_generation = session.origin_control.acceptance_generation;
     let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
-        return false;
+        debug!("HLS manifest candidate selection rejected: update=StaleGeneration attempt_type={attempt_type} expected_generation={} current_generation={} episode_status=Missing", generation.0, current_generation.0);
+        return HlsRecoveryWorkloadBindingUpdate::StaleGeneration;
     };
-    episode.select_candidate(generation, candidate_identity) == HlsRecoveryWorkloadBindingUpdate::Applied
+    let update = if current_burst_is_full_plan {
+        episode.select_candidate(generation, candidate_identity)
+    } else {
+        episode.select_candidate_for_reduced_retry(generation, candidate_identity)
+    };
+    if update != HlsRecoveryWorkloadBindingUpdate::Applied {
+        debug!(
+            "HLS manifest candidate selection rejected: update={update:?} attempt_type={attempt_type} expected_generation={} current_generation={} episode_status={:?}",
+            generation.0,
+            episode.generation.0,
+            crate::manifest_acceptance::manifest_acceptance_episode_status(Some(episode), current_generation, current_time_millis()),
+        );
+    }
+    update
 }
 
 const fn selected_commit_acceptance_mode(

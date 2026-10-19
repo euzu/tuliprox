@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tuliprox_core::model::{Config, PlaybackKind};
 use tuliprox_session::ConnectionKind;
 
-fn request_with_origin_work(session: &HlsSessionHandle) -> super::OriginRefreshRequest {
+pub(super) fn request_with_origin_work(session: &HlsSessionHandle) -> super::OriginRefreshRequest {
     let mut request = test_origin_refresh_request(Arc::clone(session));
     request.origin_io = Some(HlsOriginIoContext {
         ctx: HlsCtx::for_test(Config::default()),

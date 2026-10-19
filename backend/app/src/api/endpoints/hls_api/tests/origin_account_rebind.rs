@@ -363,11 +363,23 @@ enum RebindMediaLayout {
 }
 
 async fn rebind_origin(extra_tags: &'static str, layout: RebindMediaLayout) -> RebindOrigin {
-    rebind_origin_with_window(extra_tags, layout, None).await
+    rebind_origin_with_window(extra_tags, layout, None, None).await
 }
 
 pub(super) async fn resume_origin(head: Arc<std::sync::atomic::AtomicU64>) -> RebindOrigin {
-    rebind_origin_with_window("", RebindMediaLayout::AccountPath, Some(head)).await
+    rebind_origin_with_window("", RebindMediaLayout::AccountPath, Some(head), None).await
+}
+
+#[derive(Default)]
+pub(super) struct ReducedRetryOriginControl {
+    pub(super) recovering: std::sync::atomic::AtomicBool,
+    pub(super) recovery_requests: std::sync::atomic::AtomicUsize,
+    pub(super) retry_started: tokio::sync::Notify,
+    pub(super) release_retry: tokio::sync::Notify,
+}
+
+pub(super) async fn reduced_retry_origin(control: Arc<ReducedRetryOriginControl>) -> RebindOrigin {
+    rebind_origin_with_window("", RebindMediaLayout::AccountPath, None, Some(control)).await
 }
 
 pub(super) fn resume_origin_media(path: &str) -> Vec<u8> {
@@ -387,6 +399,7 @@ async fn rebind_origin_with_window(
     extra_tags: &'static str,
     layout: RebindMediaLayout,
     live_head: Option<Arc<std::sync::atomic::AtomicU64>>,
+    recovery: Option<Arc<ReducedRetryOriginControl>>,
 ) -> RebindOrigin {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -401,6 +414,7 @@ async fn rebind_origin_with_window(
         while let Ok((mut socket, _)) = listener.accept().await {
             let requests = Arc::clone(&recorded);
             let live_head = live_head.clone();
+            let recovery = recovery.clone();
             let (block, started, release) = (Arc::clone(&block), Arc::clone(&started), Arc::clone(&release));
             tokio::spawn(async move {
                 let mut buffer = [0; 4096];
@@ -414,7 +428,38 @@ async fn rebind_origin_with_window(
                     release.acquire().await.unwrap().forget();
                 }
                 let replacement = path.contains("account-user");
-                let body = if let Some(head) = live_head {
+                let body = if let Some(control) = recovery {
+                    // The playlists use virtual segment URIs; resume_origin_media supplies their TS bodies.
+                    if path.ends_with("m3u8") {
+                        let manifest: &[u8] = if !control.recovering.load(Ordering::Acquire) {
+                            include_bytes!(concat!(
+                                env!("CARGO_MANIFEST_DIR"),
+                                "/../../test/fixtures/hls/reduced-retry/baseline.m3u8"
+                            ))
+                        } else {
+                            let n = control.recovery_requests.fetch_add(1, Ordering::AcqRel) + 1;
+                            eprintln!("app recovery HTTP request={n} status=200");
+                            if n == 13 {
+                                control.retry_started.notify_one();
+                                control.release_retry.notified().await;
+                            }
+                            if n <= 12 {
+                                include_bytes!(concat!(
+                                    env!("CARGO_MANIFEST_DIR"),
+                                    "/../../test/fixtures/hls/reduced-retry/conflict.m3u8"
+                                ))
+                            } else {
+                                include_bytes!(concat!(
+                                    env!("CARGO_MANIFEST_DIR"),
+                                    "/../../test/fixtures/hls/reduced-retry/repaired.m3u8"
+                                ))
+                            }
+                        };
+                        manifest.to_vec()
+                    } else {
+                        resume_origin_media(&path)
+                    }
+                } else if let Some(head) = live_head {
                     if path.ends_with("m3u8") {
                         super::manifest_entry_freshness::origin_playlist_with_duration(head.load(Ordering::Acquire), 11)
                     } else {

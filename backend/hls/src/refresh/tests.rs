@@ -67,6 +67,7 @@ mod critical_handoff;
 mod headers_redirects;
 mod origin_binding;
 mod ownership;
+mod reduced_retry;
 mod retry_policy;
 mod short_manifest;
 mod startup_representation;
