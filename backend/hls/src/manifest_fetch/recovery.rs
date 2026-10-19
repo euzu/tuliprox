@@ -162,16 +162,7 @@ where
                 attempt_limit = attempt_limit_for_started_requalification(attempt_limit, attempt_index);
             }
             HlsManifestRecoveryAttemptError::Rejected(reason) if attempt_index.saturating_add(1) < attempt_limit => {
-                log_manifest_retry_scheduled(
-                    context,
-                    ManifestRetryLogKind::PinnedHostRecovery,
-                    attempt_index,
-                    attempt_limit,
-                    next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
-                    Some(&reason),
-                    None,
-                )
-                .await;
+                log_manifest_recovery_retry(context, attempt_index, attempt_limit, Some(&reason), None).await;
                 reject_reason = Some(reason);
                 last_error = OriginManifestFetchError::RetryExhausted;
             }
@@ -182,16 +173,7 @@ where
                 if is_hls_retryable_manifest_reject_fetch_error(&err)
                     && attempt_index.saturating_add(1) < attempt_limit =>
             {
-                log_manifest_retry_scheduled(
-                    context,
-                    ManifestRetryLogKind::PinnedHostRecovery,
-                    attempt_index,
-                    attempt_limit,
-                    next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
-                    None,
-                    Some(&err),
-                )
-                .await;
+                log_manifest_recovery_retry(context, attempt_index, attempt_limit, None, Some(&err)).await;
                 last_error = err;
             }
             HlsManifestRecoveryAttemptError::Fetch(err) => return Err(err),
@@ -201,6 +183,25 @@ where
     }
 
     Err(last_error)
+}
+
+async fn log_manifest_recovery_retry(
+    context: &HlsOriginManifestFetchContext,
+    attempt_index: usize,
+    attempt_limit: usize,
+    reject_reason: Option<&HlsManifestRejectLogReason>,
+    fetch_error: Option<&OriginManifestFetchError>,
+) {
+    log_manifest_retry_scheduled(
+        context,
+        ManifestRetryLogKind::PinnedHostRecovery,
+        attempt_index,
+        attempt_limit,
+        next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
+        reject_reason,
+        fetch_error,
+    )
+    .await;
 }
 
 pub(super) fn acceptance_attempt_may_start(
@@ -367,25 +368,38 @@ where
         HlsSelectedManifestRecoveryCommit::NotSelected => false,
     };
 
-    if plan.current_burst_is_full_plan || selection_resumed {
-        record_manifest_acceptance_exhaustion(
-            context,
-            episode_generation,
-            manifest_acceptance_exhaustion_reason(&evaluation.observations),
-        )
-        .await;
-    }
-    hold_uncommitted_manifest_acceptance_episode(
+    hold_manifest_recovery_burst(
         context,
         episode_generation,
+        &evaluation.observations,
         evaluation.held_alternative,
         evaluation.next_retry_at_ms,
+        plan.current_burst_is_full_plan || selection_resumed,
     )
     .await;
     if let Some(reason) = last_reject_reason {
         return HlsManifestRecoveryAttemptError::Rejected(reason);
     }
     HlsManifestRecoveryAttemptError::Fetch(last_fetch_error.unwrap_or(OriginManifestFetchError::RetryExhausted))
+}
+
+async fn hold_manifest_recovery_burst(
+    context: &HlsOriginManifestFetchContext,
+    episode_generation: Option<HlsManifestAcceptanceGeneration>,
+    observations: &[HlsManifestCandidateObservation],
+    held_alternative: Option<HlsAlternativeOriginCohort>,
+    next_retry_at_ms: u64,
+    record_exhaustion: bool,
+) {
+    if record_exhaustion {
+        record_manifest_acceptance_exhaustion(
+            context,
+            episode_generation,
+            manifest_acceptance_exhaustion_reason(observations),
+        )
+        .await;
+    }
+    hold_uncommitted_manifest_acceptance_episode(context, episode_generation, held_alternative, next_retry_at_ms).await;
 }
 
 struct HlsManifestRecoveryBurstEvaluation {

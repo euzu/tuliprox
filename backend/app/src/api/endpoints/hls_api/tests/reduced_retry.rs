@@ -32,7 +32,7 @@ async fn ready(app: &Arc<AppState>, session: &HlsSessionHandle, sequences: &[u64
     })
     .await
     .expect("autonomous segment work and singleflight complete");
-    assert!(app.active_provider.get_provider_connections_count() == 0);
+    assert_eq!(app.active_provider.get_provider_connections_count(), 0);
 }
 
 async fn deliver(app: &Arc<AppState>, session: &HlsSessionHandle, manifest: &str, expected: &[u64]) {
@@ -58,6 +58,7 @@ async fn deliver(app: &Arc<AppState>, session: &HlsSessionHandle, manifest: &str
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "Keep the ordered end-to-end recovery scenario and its assertions together.")]
 async fn repaired_reduced_retry(mode: HlsStartupMode) {
     let control = Arc::new(ReducedRetryOriginControl::default());
     let origin = reduced_retry_origin(Arc::clone(&control)).await;
@@ -196,9 +197,9 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
         );
         episode
     };
-    let scheduler = app.hls.proxy.segment_worker_pool().pause_next_origin_prepare_for_test();
+    let prepare_gate = app.hls.proxy.segment_worker_pool().pause_next_origin_prepare_for_test();
     control.release_retry.notify_one();
-    tokio::time::timeout(WAIT, scheduler.entered.notified())
+    tokio::time::timeout(WAIT, prepare_gate.entered.notified())
         .await
         .expect("repaired reduced retry commits and schedules media");
     let scheduled = {
@@ -228,9 +229,9 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
         eprintln!("{mode:?} committed generation={} scheduled={resources:?}", episode_before.generation.0);
         resources
     };
-    scheduler.prepare.notify_one();
-    tokio::time::timeout(WAIT, scheduler.prepared.notified()).await.unwrap();
-    scheduler.proceed.notify_one();
+    prepare_gate.prepare.notify_one();
+    tokio::time::timeout(WAIT, prepare_gate.prepared.notified()).await.unwrap();
+    prepare_gate.proceed.notify_one();
     let seqs = scheduled.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>();
     ready(&app, &session, &seqs).await;
     tokio::time::timeout(WAIT, refresh).await.unwrap().unwrap();

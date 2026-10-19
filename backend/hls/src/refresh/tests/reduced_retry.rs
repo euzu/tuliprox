@@ -1,5 +1,9 @@
 use super::*;
-use crate::{manifest_acceptance::HlsManifestAcceptanceEpisodeStatus, SegmentCacheStatus};
+use crate::{
+    manifest_acceptance::{HlsManifestAcceptanceEpisode, HlsManifestAcceptanceEpisodeStatus},
+    session_store::HlsSessionHandle,
+    SegmentCacheStatus,
+};
 use shared::model::HlsManifestRecoveryBurstLevel;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -31,14 +35,46 @@ async fn commit_baseline(request: &OriginRefreshRequest, context: &HlsOriginMani
     }
 }
 
+async fn commit_observed_recovery_candidate(
+    request: &OriginRefreshRequest,
+    fetched: FetchedOriginManifest,
+    mode: HlsManifestCommitAcceptanceMode,
+    observations: &Mutex<Vec<(String, HlsManifestAcceptanceEpisode)>>,
+) -> Result<super::super::CommittedOriginManifest, HlsManifestCommitError> {
+    let before = {
+        let s = request.session.read().await;
+        let score = score_manifest_recovery_candidate(&s, &fetched, &manifest_fetch_context(request)).unwrap();
+        assert_eq!(score.quality.host_relation, crate::manifest_fetch::HlsManifestOriginRelation::SameRedirectHost);
+        assert_eq!(score.quality.sequence_relation, HlsManifestSequenceRelation::PlausibleForward);
+        eprintln!(
+            "selected candidate host={:?} sequence={:?}",
+            score.quality.host_relation, score.quality.sequence_relation
+        );
+        s.origin_control.acceptance_episode.clone().unwrap()
+    };
+    let outcome = super::super::commit_manifest_recovery_candidate(request, fetched, mode).await;
+    let label = match &outcome {
+        Ok(_) => "committed".to_string(),
+        Err(HlsManifestCommitError::TimelineRejected { reason }) => reason.status_label(),
+        Err(error) => format!("{error:?}"),
+    };
+    eprintln!(
+        "real commit callback={} generation={} full_bursts={} timing={:?}",
+        label,
+        before.generation.0,
+        before.full_bursts_completed,
+        before.timing()
+    );
+    observations.lock().await.push((label, before));
+    outcome
+}
+
 async fn conflict_then_reduced_retry(permanent_conflict: bool) {
     let recovery = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(AtomicUsize::new(0));
     let (phase, count) = (Arc::clone(&recovery), Arc::clone(&requests));
     let server = spawn_test_origin(Arc::new(move |_| {
-        let body = if !phase.load(Ordering::Acquire) {
-            BASELINE
-        } else {
+        let body = if phase.load(Ordering::Acquire) {
             let n = count.fetch_add(1, Ordering::AcqRel) + 1;
             eprintln!("recovery HTTP request={n} status=200 permanent={permanent_conflict}");
             if n <= 12 || permanent_conflict {
@@ -46,6 +82,8 @@ async fn conflict_then_reduced_retry(permanent_conflict: bool) {
             } else {
                 REPAIRED
             }
+        } else {
+            BASELINE
         };
         (200, Vec::new(), body.to_string())
     }))
@@ -72,39 +110,7 @@ async fn conflict_then_reduced_retry(permanent_conflict: bool) {
             HlsManifestCommitAcceptanceMode::StrictPinnedHost,
             move |fetched, mode| {
                 let observations = Arc::clone(&observations);
-                async move {
-                    let before = {
-                        let s = request_ref.session.read().await;
-                        let score =
-                            score_manifest_recovery_candidate(&s, &fetched, &manifest_fetch_context(request_ref))
-                                .unwrap();
-                        assert_eq!(
-                            score.quality.host_relation,
-                            crate::manifest_fetch::HlsManifestOriginRelation::SameRedirectHost
-                        );
-                        assert_eq!(score.quality.sequence_relation, HlsManifestSequenceRelation::PlausibleForward);
-                        eprintln!(
-                            "selected candidate host={:?} sequence={:?}",
-                            score.quality.host_relation, score.quality.sequence_relation
-                        );
-                        s.origin_control.acceptance_episode.clone().unwrap()
-                    };
-                    let outcome = super::super::commit_manifest_recovery_candidate(request_ref, fetched, mode).await;
-                    let label = match &outcome {
-                        Ok(_) => "committed".to_string(),
-                        Err(HlsManifestCommitError::TimelineRejected { reason }) => reason.status_label().to_string(),
-                        Err(error) => format!("{error:?}"),
-                    };
-                    eprintln!(
-                        "real commit callback={} generation={} full_bursts={} timing={:?}",
-                        label,
-                        before.generation.0,
-                        before.full_bursts_completed,
-                        before.timing()
-                    );
-                    observations.lock().await.push((label, before));
-                    outcome
-                }
+                async move { commit_observed_recovery_candidate(request_ref, fetched, mode, &observations).await }
             },
         ),
     )
@@ -168,9 +174,53 @@ async fn reduced_retry_permanent_resource_conflict_exhausts_existing_budget() {
     conflict_then_reduced_retry(true).await;
 }
 
+async fn replace_acceptance_episode_with_successor(
+    session: &HlsSessionHandle,
+    retry_binding: HlsManifestOriginBinding,
+    account_handoff: bool,
+    after_selection: bool,
+) -> HlsManifestAcceptanceEpisode {
+    use crate::short_manifest::{HlsOriginQualification, HlsOriginQualificationBasis};
+
+    let mut s = session.write().await;
+    let old = s.origin_control.acceptance_episode.as_ref().unwrap().clone();
+    if after_selection {
+        assert!(old.exhaustion_reason().is_none());
+        assert_eq!(old.state, crate::manifest_acceptance::HlsManifestAcceptanceState::Committing);
+    } else {
+        assert!(old.exhaustion_reason().is_some());
+    }
+    if account_handoff {
+        let owner = s.proxy_session_id.0.clone();
+        s.handoff_origin_account(crate::HlsOriginAccountBinding::rebound(
+            Arc::from("input"),
+            Arc::from("account-b"),
+            owner,
+            1,
+            200,
+        ));
+    } else {
+        s.invalidate_queued_origin_work();
+    }
+    let now = tuliprox_core::utils::current_time_millis();
+    let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
+    let generation = s.origin_control.begin_acceptance_episode(
+        now,
+        plan,
+        HlsManifestAcceptanceTrigger::RecoveryRequired,
+        &test_acceptance_episode_timing(now, plan),
+    );
+    assert_ne!(generation, old.generation);
+    s.origin_control.qualification = HlsOriginQualification::Checking {
+        basis: HlsOriginQualificationBasis::capture(&s),
+        generation,
+        target: retry_binding,
+    };
+    s.origin_control.acceptance_episode.clone().unwrap()
+}
+
 async fn superseded_reduced_response_preserves_successor(account_handoff: bool, after_selection: bool) {
     use super::support::{spawn_test_origin_with_response_gate, TestOriginResponseGate};
-    use crate::short_manifest::{HlsOriginQualification, HlsOriginQualificationBasis};
     use tokio::sync::Notify;
 
     let requests = Arc::new(AtomicUsize::new(0));
@@ -233,43 +283,8 @@ async fn superseded_reduced_response_preserves_successor(account_handoff: bool, 
         .await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.notified()).await.unwrap();
-    let successor = {
-        let mut s = session.write().await;
-        let old = s.origin_control.acceptance_episode.as_ref().unwrap().clone();
-        if after_selection {
-            assert!(old.exhaustion_reason().is_none());
-            assert_eq!(old.state, crate::manifest_acceptance::HlsManifestAcceptanceState::Committing);
-        } else {
-            assert!(old.exhaustion_reason().is_some());
-        }
-        if account_handoff {
-            let owner = s.proxy_session_id.0.clone();
-            s.handoff_origin_account(crate::HlsOriginAccountBinding::rebound(
-                Arc::from("input"),
-                Arc::from("account-b"),
-                owner,
-                1,
-                200,
-            ));
-        } else {
-            s.invalidate_queued_origin_work();
-        }
-        let now = tuliprox_core::utils::current_time_millis();
-        let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
-        let generation = s.origin_control.begin_acceptance_episode(
-            now,
-            plan,
-            HlsManifestAcceptanceTrigger::RecoveryRequired,
-            &test_acceptance_episode_timing(now, plan),
-        );
-        assert_ne!(generation, old.generation);
-        s.origin_control.qualification = HlsOriginQualification::Checking {
-            basis: HlsOriginQualificationBasis::capture(&s),
-            generation,
-            target: retry_binding,
-        };
-        s.origin_control.acceptance_episode.clone().unwrap()
-    };
+    let successor =
+        replace_acceptance_episode_with_successor(&session, retry_binding, account_handoff, after_selection).await;
     gate.release.notify_one();
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), recovery).await.unwrap().unwrap();
     {

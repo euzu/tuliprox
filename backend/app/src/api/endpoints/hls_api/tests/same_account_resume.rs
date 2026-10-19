@@ -29,7 +29,7 @@ async fn settle_origin(session: &HlsSessionHandle) {
 }
 
 /// Model wall-clock absence without erasing actual media delivery, or relying on
-/// Tokio's clock (account preparation and HTTP serving also read SystemTime).
+/// Tokio's clock (account preparation and HTTP serving also read `SystemTime`).
 async fn pause_playback(app: &Arc<AppState>, session: &HlsSessionHandle, lease: &str) {
     settle_origin(session).await;
     assert!(app
@@ -123,6 +123,7 @@ async fn deliver_origin_segment(app: &Arc<AppState>, session: &HlsSessionHandle,
     );
 }
 
+#[expect(clippy::too_many_lines, reason = "Keep the ordered pause/resume scenario and its assertions together.")]
 async fn same_account_resume(mode: HlsStartupMode, resumes: usize) {
     let head = Arc::new(AtomicU64::new(1113));
     let origin = resume_origin(Arc::clone(&head)).await;

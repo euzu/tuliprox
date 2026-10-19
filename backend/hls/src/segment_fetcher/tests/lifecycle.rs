@@ -202,11 +202,12 @@ async fn scheduler_replan_uses_current_backpressure_for_prefetch() {
             pressure.allows_prefetch(),
             "{pressure:?}: replan must respect the current prefetch policy"
         );
-        assert!(
+        assert_eq!(
             matches!(
                 s.segments[&3].status,
                 SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Prefetch, .. }
-            ) == pressure.allows_prefetch()
+            ),
+            pressure.allows_prefetch()
         );
         assert_eq!(s.segment_prefetch_queue.len(), if pressure.allows_prefetch() { 3 } else { 2 });
         assert!(server.requests.lock().await.is_empty(), "the barrier precedes origin segment work");

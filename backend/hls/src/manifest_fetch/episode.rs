@@ -171,9 +171,7 @@ pub(super) async fn begin_requalified_manifest_acceptance_episode(
     trigger: HlsManifestAcceptanceTrigger,
     window: &HlsManifestRequalificationWindow,
 ) -> Option<HlsManifestAcceptanceGeneration> {
-    let Some(generation) = generation else {
-        return None;
-    };
+    let generation = generation?;
     let mut session = context.session.write().await;
     let now_ms = current_time_millis();
     match window {
@@ -193,9 +191,7 @@ pub(super) async fn begin_requalified_manifest_acceptance_episode(
     ) {
         return None;
     }
-    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
-        return None;
-    };
+    let episode = session.origin_control.acceptance_episode.as_mut()?;
     if episode.generation != generation
         || !episode.full_burst_completed
         || episode.state == HlsManifestAcceptanceState::Completed

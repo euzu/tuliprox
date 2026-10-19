@@ -378,6 +378,32 @@ pub(super) struct ReducedRetryOriginControl {
     pub(super) release_retry: tokio::sync::Notify,
 }
 
+impl ReducedRetryOriginControl {
+    async fn manifest_body(&self) -> &'static [u8] {
+        if self.recovering.load(Ordering::Acquire) {
+            let n = self.recovery_requests.fetch_add(1, Ordering::AcqRel) + 1;
+            eprintln!("app recovery HTTP request={n} status=200");
+            if n == 13 {
+                self.retry_started.notify_one();
+                self.release_retry.notified().await;
+            }
+            if n <= 12 {
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../test/fixtures/hls/reduced-retry/conflict.m3u8"
+                ))
+            } else {
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../test/fixtures/hls/reduced-retry/repaired.m3u8"
+                ))
+            }
+        } else {
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/reduced-retry/baseline.m3u8"))
+        }
+    }
+}
+
 pub(super) async fn reduced_retry_origin(control: Arc<ReducedRetryOriginControl>) -> RebindOrigin {
     rebind_origin_with_window("", RebindMediaLayout::AccountPath, None, Some(control)).await
 }
@@ -431,31 +457,7 @@ async fn rebind_origin_with_window(
                 let body = if let Some(control) = recovery {
                     // The playlists use virtual segment URIs; resume_origin_media supplies their TS bodies.
                     if path.ends_with("m3u8") {
-                        let manifest: &[u8] = if !control.recovering.load(Ordering::Acquire) {
-                            include_bytes!(concat!(
-                                env!("CARGO_MANIFEST_DIR"),
-                                "/../../test/fixtures/hls/reduced-retry/baseline.m3u8"
-                            ))
-                        } else {
-                            let n = control.recovery_requests.fetch_add(1, Ordering::AcqRel) + 1;
-                            eprintln!("app recovery HTTP request={n} status=200");
-                            if n == 13 {
-                                control.retry_started.notify_one();
-                                control.release_retry.notified().await;
-                            }
-                            if n <= 12 {
-                                include_bytes!(concat!(
-                                    env!("CARGO_MANIFEST_DIR"),
-                                    "/../../test/fixtures/hls/reduced-retry/conflict.m3u8"
-                                ))
-                            } else {
-                                include_bytes!(concat!(
-                                    env!("CARGO_MANIFEST_DIR"),
-                                    "/../../test/fixtures/hls/reduced-retry/repaired.m3u8"
-                                ))
-                            }
-                        };
-                        manifest.to_vec()
+                        control.manifest_body().await.to_vec()
                     } else {
                         resume_origin_media(&path)
                     }
