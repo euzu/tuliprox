@@ -1,6 +1,9 @@
 use crate::{
-    api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
-    config_loader::{prepare_sources_batch, read_sources_file_with_revision},
+    api::{
+        api_utils::failover_group_hot_apply::try_hot_apply,
+        model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
+    },
+    config_loader::{prepare_sources_batch, read_sources_file_with_revision, resolve_failover_source},
     model::{CompiledMappings, Config, ProcessTargets, SourcesConfig},
     utils,
     utils::read_mappings_file_with_templates,
@@ -14,6 +17,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tuliprox_core::{model::FailoverOverrides, utils::FailoverSource};
+use tuliprox_repository::{load_failover_snapshot, reload_failover_snapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
@@ -23,6 +28,7 @@ pub enum ConfigFile {
     Template,
     Sources,
     SourceFile,
+    Failover,
 }
 
 #[derive(Debug)]
@@ -46,6 +52,35 @@ enum PreparedFollowUp {
     Unchanged,
     Mapping(Option<PreparedMappingsReload>, Option<Vec<PatternTemplate>>),
     Sources(Box<PreparedSourcesReload>),
+}
+
+/// A failover snapshot published ahead of the config update that moved the failover location.
+struct PublishedFailover {
+    previous: Arc<FailoverOverrides>,
+    next: Arc<FailoverOverrides>,
+}
+
+impl PublishedFailover {
+    fn publish(app_state: &Arc<AppState>, next: FailoverOverrides) -> Self {
+        let next = Arc::new(next);
+        Self { previous: app_state.app_config.failover.swap(Arc::clone(&next)), next }
+    }
+
+    fn restore(&self, app_state: &Arc<AppState>) { app_state.app_config.failover.store(Arc::clone(&self.previous)); }
+}
+
+/// Targets whose failover section was added, removed or edited (different etag) between two snapshots, sorted.
+fn changed_override_targets(previous: &FailoverOverrides, next: &FailoverOverrides) -> Vec<String> {
+    let mut changed: Vec<&str> = next
+        .sections
+        .iter()
+        .filter(|(target, entry)| previous.sections.get(*target).is_none_or(|old| old.etag != entry.etag))
+        .map(|(target, _)| target.as_ref())
+        .chain(previous.sections.keys().filter(|target| !next.sections.contains_key(*target)).map(AsRef::as_ref))
+        .collect();
+    // The two halves are disjoint (present in `next` vs. only in `previous`), so sorting is enough.
+    changed.sort_unstable();
+    changed.into_iter().map(str::to_string).collect()
 }
 
 /// Refreshes CLI-forced target IDs against an incoming `SourcesConfig`.
@@ -268,6 +303,59 @@ impl ConfigFile {
     }
 
     // -----------------------------------------------------------------
+    // Failover override files
+    // -----------------------------------------------------------------
+
+    /// Reads the failover files of `source` under the failover mutation lock. The live snapshot stays untouched,
+    /// so a failing read keeps the last good state active.
+    async fn prepare_failover_reload(
+        app_state: &Arc<AppState>,
+        source: &FailoverSource,
+    ) -> Result<FailoverOverrides, TuliproxError> {
+        load_failover_snapshot(&app_state.app_config, source)
+            .await
+            .inspect_err(|err| error!("Failed to load failover overrides: {err}"))
+    }
+
+    /// Hot-applies the targets whose section changed between two snapshots and tells listeners which targets
+    /// those are. Nothing is emitted when no section changed.
+    async fn announce_failover_change(
+        app_state: &Arc<AppState>,
+        previous: &FailoverOverrides,
+        next: &FailoverOverrides,
+    ) {
+        let changed = changed_override_targets(previous, next);
+        if changed.is_empty() {
+            return;
+        }
+        for target in &changed {
+            // A removed section is structural and waits for the next playlist update.
+            if let Some(entry) = next.sections.get(target.as_str()) {
+                let applied = try_hot_apply(app_state, target, entry).await;
+                debug!("Failover overrides of target {target}: hot applied = {applied}");
+            }
+        }
+        info!("Loaded failover overrides, changed targets: {}", changed.join(", "));
+        app_state.event_manager.send_event(EventMessage::FailoverOverridesChanged { targets: changed });
+    }
+
+    /// Entry-point for failover file-watch events; the source is resolved from the live config and paths.
+    /// The files are read and the snapshot is swapped under the failover mutation lock, so a reload never
+    /// overwrites a concurrent Web UI save with older content.
+    pub(crate) async fn load_failover(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
+        let source = {
+            let paths = app_state.app_config.paths.load();
+            let config = app_state.app_config.config.load();
+            resolve_failover_source(&paths, &config, true)
+        };
+        let (previous, next) = reload_failover_snapshot(&app_state.app_config, &source)
+            .await
+            .inspect_err(|err| error!("Failed to load failover overrides: {err}"))?;
+        Self::announce_failover_change(app_state, &previous, &next).await;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
     // Main config (config.yml) — full prepare-then-apply
     // -----------------------------------------------------------------
 
@@ -325,13 +413,27 @@ impl ConfigFile {
             PreparedFollowUp::Unchanged
         };
 
+        // A changed failover location is read before anything is applied, so an unreadable one rejects the reload.
+        let next_failover_source = resolve_failover_source(&effective_paths, &config, true);
+        let prepared_failover = if app_state.app_config.failover.load().source.as_ref() == Some(&next_failover_source) {
+            None
+        } else {
+            Some(Self::prepare_failover_reload(app_state, &next_failover_source).await?)
+        };
+
         let previous_config: Config = (*app_state.app_config.config.load_full()).clone();
         let previous_sources: SourcesConfig = (*app_state.app_config.sources.load_full()).clone();
         let previous_forced_targets = app_state.playlist_updates.forced_targets.load_full();
 
+        // The config watcher restarted by the config update reads the failover location from the snapshot, so a
+        // changed location is published first. A failed reload puts the previous snapshot back.
+        let failover_swap = prepared_failover.map(|next| PublishedFailover::publish(app_state, next));
+        let restore_failover = || failover_swap.iter().for_each(|swap| swap.restore(app_state));
+
         // Update live state only after every dependent value has been prepared.
         if let Err(err) = update_app_state_config(app_state, config).await {
             error!("Failed to apply config reload: {err}. Attempting config rollback.");
+            restore_failover();
             if let Err(rollback_err) = update_app_state_config(app_state, previous_config).await {
                 error!("Failed to rollback config after reload failure: {rollback_err}");
                 error!(
@@ -352,6 +454,7 @@ impl ConfigFile {
 
         if let Err(err) = follow_up_result {
             error!("Failed to apply dependent reload after config update: {err}. Attempting rollback.");
+            restore_failover();
 
             if let Err(rollback_err) = update_app_state_config(app_state, previous_config).await {
                 error!("Failed to rollback config after dependent reload failure: {rollback_err}");
@@ -370,6 +473,10 @@ impl ConfigFile {
             }
 
             return Err(err);
+        }
+
+        if let Some(swap) = &failover_swap {
+            Self::announce_failover_change(app_state, &swap.previous, &swap.next).await;
         }
 
         info!("Loaded config file {config_file}");
@@ -415,6 +522,7 @@ impl ConfigFile {
                 ConfigFile::reload_source_file(app_state).await?;
                 app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Sources));
             }
+            ConfigFile::Failover => ConfigFile::load_failover(app_state).await?,
         }
         Ok(())
     }
@@ -422,10 +530,208 @@ impl ConfigFile {
 
 #[cfg(test)]
 mod tests {
-    use super::refresh_forced_targets;
-    use crate::model::{ConfigSource, ConfigTarget, ProcessTargets, SourcesConfig};
+    use super::{changed_override_targets, refresh_forced_targets, ConfigFile};
+    use crate::{
+        api::model::{create_test_app_state, AppState, EventMessage},
+        model::{Config, ConfigSource, ConfigTarget, ProcessTargets, SourcesConfig},
+    };
     use shared::model::ProcessingOrder;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
+    use tuliprox_core::{
+        model::{FailoverOverrides, TargetOverridesEntry},
+        utils::FailoverSource,
+    };
+
+    fn section_yaml(target: &str, stream_ids: &[&str]) -> String {
+        let excluded = stream_ids
+            .iter()
+            .map(|id| format!("      - {{ input: a, stream_id: \"{id}\" }}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        format!("version: 1\ntargets:\n  - target: {target}\n    excluded:\n{excluded}")
+    }
+
+    fn app_state_in(config_dir: &Path) -> Arc<AppState> {
+        let app_state = create_test_app_state(Config::default());
+        let mut paths = (*app_state.app_config.paths.load_full()).clone();
+        paths.config_path = config_dir.to_string_lossy().into_owned();
+        paths.config_file_path = config_dir.join("config.yml").to_string_lossy().into_owned();
+        app_state.app_config.paths.store(Arc::new(paths));
+        app_state
+    }
+
+    /// Mirrors the start-up load so the snapshot carries the source a reload compares against.
+    fn load_initial_failover(app_state: &Arc<AppState>) {
+        let paths = app_state.app_config.paths.load();
+        let config = app_state.app_config.config.load();
+        let source = crate::config_loader::resolve_failover_source(&paths, &config, true);
+        let overrides = tuliprox_repository::load_failover_overrides(&source).expect("initial failover load");
+        app_state.app_config.failover.store(Arc::new(overrides));
+    }
+
+    fn drain_overrides_events(events: &mut tokio::sync::broadcast::Receiver<EventMessage>) -> Vec<Vec<String>> {
+        let mut changed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let EventMessage::FailoverOverridesChanged { targets } = event {
+                changed.push(targets);
+            }
+        }
+        changed
+    }
+
+    fn entry(etag: &str) -> Arc<TargetOverridesEntry> {
+        Arc::new(TargetOverridesEntry {
+            overrides: shared::model::TargetFailoverOverridesDto::new("t"),
+            file: std::path::PathBuf::from("failover.yml"),
+            etag: Arc::from(etag),
+            findings: Vec::new(),
+        })
+    }
+
+    fn snapshot(sections: &[(&str, &str)]) -> FailoverOverrides {
+        FailoverOverrides {
+            sections: sections.iter().map(|(target, etag)| (Arc::from(*target), entry(etag))).collect(),
+            ..FailoverOverrides::default()
+        }
+    }
+
+    #[test]
+    fn changed_targets_are_edited_added_and_removed_sections_sorted() {
+        let previous = snapshot(&[("b", "1"), ("same", "9"), ("gone", "1"), ("a", "1")]);
+        let next = snapshot(&[("b", "2"), ("same", "9"), ("new", "1"), ("a", "2")]);
+
+        assert_eq!(changed_override_targets(&previous, &next), vec!["a", "b", "gone", "new"]);
+        assert!(changed_override_targets(&next, &next).is_empty());
+    }
+
+    #[tokio::test]
+    async fn failover_change_swaps_snapshot_and_emits_event() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("failover.yml");
+        std::fs::write(&file, section_yaml("Main", &["1"]))?;
+        let app_state = app_state_in(dir.path());
+        load_initial_failover(&app_state);
+        let old_etag = Arc::clone(&app_state.app_config.failover.load().sections["Main"].etag);
+        let mut events = app_state.event_manager.get_event_channel();
+
+        std::fs::write(&file, section_yaml("Main", &["1", "2"]))?;
+        ConfigFile::Failover.reload(&file, &app_state).await?;
+
+        let snapshot = app_state.app_config.failover.load_full();
+        assert_ne!(snapshot.sections["Main"].etag, old_etag);
+        assert_eq!(snapshot.source, Some(FailoverSource::File(file.clone())));
+        assert_eq!(drain_overrides_events(&mut events), vec![vec!["Main".to_string()]]);
+
+        // Same content again: swapped, but no section changed, so nothing is announced.
+        ConfigFile::Failover.reload(&file, &app_state).await?;
+        assert!(drain_overrides_events(&mut events).is_empty());
+
+        // A section added in a second target and the first one removed are both reported, sorted.
+        std::fs::write(&file, section_yaml("Other", &["1"]))?;
+        ConfigFile::Failover.reload(&file, &app_state).await?;
+        assert_eq!(drain_overrides_events(&mut events), vec![vec!["Main".to_string(), "Other".to_string()]]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_failover_change_keeps_previous_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("failover.yml");
+        std::fs::write(&file, section_yaml("Main", &["1"]))?;
+        let app_state = app_state_in(dir.path());
+        load_initial_failover(&app_state);
+        let before = app_state.app_config.failover.load_full();
+        let mut events = app_state.event_manager.get_event_channel();
+
+        std::fs::write(&file, "version: 9\ntargets: []\n")?;
+        let result = ConfigFile::Failover.reload(&file, &app_state).await;
+
+        assert!(result.is_err(), "an unsupported version must fail the reload");
+        let after = app_state.app_config.failover.load_full();
+        assert!(Arc::ptr_eq(&before, &after), "the previous snapshot must stay active");
+        assert!(after.error.is_none());
+        assert!(after.sections.contains_key("Main"));
+        assert!(drain_overrides_events(&mut events).is_empty());
+        Ok(())
+    }
+
+    const MINIMAL_CONFIG: &str = "api:\n  host: localhost\n  port: 8901\n  web_root: ./web\n";
+
+    #[tokio::test]
+    async fn config_failover_path_change_reloads_failover() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("failover.yml"), section_yaml("Main", &["1"]))?;
+        std::fs::write(dir.path().join("other.yml"), section_yaml("Other", &["1"]))?;
+        let storage = dir.path().join("storage");
+        let config_yml = dir.path().join("config.yml");
+        let config_text = |extra: &str| format!("{MINIMAL_CONFIG}storage_dir: {}\n{extra}", storage.display());
+        std::fs::write(&config_yml, config_text(""))?;
+        let app_state = app_state_in(dir.path());
+        load_initial_failover(&app_state);
+        assert!(app_state.app_config.failover.load().sections.contains_key("Main"));
+        let mut events = app_state.event_manager.get_event_channel();
+
+        // Unchanged location: the failover snapshot is not touched.
+        let before = app_state.app_config.failover.load_full();
+        ConfigFile::Config.reload(&config_yml, &app_state).await?;
+        assert!(Arc::ptr_eq(&before, &app_state.app_config.failover.load_full()));
+
+        std::fs::write(&config_yml, config_text("failover_path: other.yml\n"))?;
+        ConfigFile::Config.reload(&config_yml, &app_state).await?;
+
+        let snapshot = app_state.app_config.failover.load_full();
+        assert_eq!(snapshot.source, Some(FailoverSource::File(dir.path().join("other.yml"))));
+        assert!(snapshot.sections.contains_key("Other") && !snapshot.sections.contains_key("Main"));
+        assert_eq!(drain_overrides_events(&mut events), vec![vec!["Main".to_string(), "Other".to_string()]]);
+
+        // An unreadable new location rejects the whole reload and keeps config and snapshot.
+        std::fs::write(dir.path().join("broken.yml"), "version: 9\ntargets: []\n")?;
+        std::fs::write(&config_yml, config_text("failover_path: broken.yml\n"))?;
+        assert!(ConfigFile::Config.reload(&config_yml, &app_state).await.is_err());
+        assert_eq!(
+            app_state.app_config.failover.load().source,
+            Some(FailoverSource::File(dir.path().join("other.yml")))
+        );
+        assert_eq!(app_state.app_config.config.load().failover_path.as_deref(), Some("other.yml"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failover_path_change_watches_new_source() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("failover.yml"), section_yaml("Main", &["1"]))?;
+        let other = dir.path().join("other.yml");
+        std::fs::write(&other, section_yaml("Other", &["1"]))?;
+        let storage = dir.path().join("storage");
+        let config_yml = dir.path().join("config.yml");
+        let config_text = |extra: &str| {
+            format!("{MINIMAL_CONFIG}storage_dir: {}\nconfig_hot_reload: true\n{extra}", storage.display())
+        };
+        std::fs::write(&config_yml, config_text(""))?;
+        let app_state = app_state_in(dir.path());
+        load_initial_failover(&app_state);
+
+        // The config reload restarts the file watcher; it must already see the new failover location.
+        std::fs::write(&config_yml, config_text("failover_path: other.yml\n"))?;
+        ConfigFile::Config.reload(&config_yml, &app_state).await?;
+        let mut events = app_state.event_manager.get_event_channel();
+        drain_overrides_events(&mut events);
+
+        std::fs::write(&other, section_yaml("Other", &["1", "2"]))?;
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(EventMessage::FailoverOverridesChanged { targets }) => break Some(targets),
+                    Ok(_) => {}
+                    Err(_) => break None,
+                }
+            }
+        })
+        .await;
+        app_state.cancel_tokens.load().file_watch.cancel();
+        assert_eq!(changed?, Some(vec!["Other".to_string()]));
+        Ok(())
+    }
 
     fn target(id: u16, name: &str) -> Arc<ConfigTarget> {
         Arc::new(ConfigTarget {

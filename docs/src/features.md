@@ -40,8 +40,9 @@ That makes it usable both for IPTV players and for media-server-oriented workflo
 - put inputs into maintenance mode: new streams get a maintenance video, the provider is not contacted
 - persist optional stream history for per-variant connect/disconnect, startup-failure, and reconnect telemetry
 - aggregate optional QoS snapshots from stream history to rank equivalent channel variants by reliability
-- group equal live channels from several inputs into one channel with source selection and runtime failover
-  ([Channel Groups](./configuration/channel-groups.md))
+- group equal live channels from several inputs into one channel with source selection and runtime failover, and
+  correct or extend the groups in a Web UI editor or in YAML failover files
+  ([Failover Groups](./configuration/failover-groups.md))
 
 ## Metadata and library
 

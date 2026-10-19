@@ -15,6 +15,7 @@ backup_dir: ./data/backup
 user_config_dir: ./data/user
 mapping_path: mapping.yml
 template_path: template.yml
+failover_path: null                    # auto-detect failover.yml or failover.d in the config directory
 update_on_boot: false
 config_hot_reload: false
 accept_insecure_ssl_certificates: false
@@ -40,7 +41,7 @@ hdhomerun:
 library:
 reverse_proxy:
 metadata_update:
-channel_groups:
+failover_groups:
 ```
 
 ### Global System & Storage Settings (Flat Keys)
@@ -55,8 +56,9 @@ channel_groups:
 | `user_config_dir`                     | String |    No    | `{storage_dir}/user`   | Storage location for user-specific configurations (like favorites or custom bouquets created via the Web UI).                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `mapping_path`                        | String |    No    | `mapping.yml`          | Path to the mapping file. **Pro-Tip:** If you specify a folder path here (e.g., `./config/mappings/`), Tuliprox loads *all* `.yml` files in that folder in **alphanumeric** order and merges them. Note: This is a lexicographic sort, meaning `m_10.yml` comes before `m_2.yml`. Name files carefully (e.g., `m_01.yml`, `m_02.yml`).                                                                                                                                                                                                                      |
 | `template_path`                       | String |    No    | `template.yml`         | Path to the template macro file. Specifying a folder here is also possible and highly recommended (see above).                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `failover_path`                       | String |    No    | auto-detected          | Failover override files: a single file or a directory with `.yml` / `.yaml` files, relative to the config directory. Holds corrections of automatic failover groups and your own groups, see [Failover Groups](./failover-groups.md#corrections-and-own-groups-failover-files). Default: `failover.yml` if it exists, else directory `failover.d`, else `failover.yml` (created by the Web UI on first save). CLI: `--failover <PATH>`.                                                                                                                     |
 | `update_on_boot`                      | Bool   |    No    | `false`                | Forces Tuliprox to immediately query all providers and rebuild all playlists upon startup. If `false`, the proxy serves the local DB cache from the last run until the scheduler triggers the next update.                                                                                                                                                                                                                                                                                                                                                  |
-| `config_hot_reload`                   | Bool   |    No    | `false`                | Spawns a filesystem watcher for `mapping.yml` and `api-proxy.yml`. Upon saving, mappings and user credentials become active immediately *without* requiring a server restart. **(See Bind-Mount Note below)**                                                                                                                                                                                                                                                                                                                                               |
+| `config_hot_reload`                   | Bool   |    No    | `false`                | Spawns a filesystem watcher for `mapping.yml`, `api-proxy.yml`, templates and the [failover files](./failover-groups.md#hot-reload). Upon saving, mappings, user credentials and failover corrections become active *without* a server restart. Mapping, template and failover directories are watched for `.yml` and `.yaml` files. **(See Bind-Mount Note below)**                                                                                                                                                                                        |
 | `accept_insecure_ssl_certificates`    | Bool   |    No    | `false`                | Set to `true` if your upstream provider uses expired, self-signed, or improperly configured HTTPS certificates. Otherwise, the HTTP client drops the connection securely.                                                                                                                                                                                                                                                                                                                                                                                   |
 | `sleep_timer_mins`                    | Int    |    No    | `null`                 | Automatic kill-switch for proxied streams. Forcibly terminates active stream connections after X minutes (Protects against users falling asleep with the TV on).                                                                                                                                                                                                                                                                                                                                                                                            |
 | `connect_timeout_secs`                | Int    |    No    | `10`                   | Maximum time (in seconds) Tuliprox waits to establish the initial TCP connection to a provider. `0` disables the timeout and the connection attempt continues until the provider closes it or a network timeout occurs (Warning: risk of hanging threads!).                                                                                                                                                                                                                                                                                                 |
@@ -88,21 +90,21 @@ instead of your mount point.
 
 ### Subsections (Object Keys)
 
-| Block             | Description                                                                       | Link                                               |
-|:------------------|:----------------------------------------------------------------------------------|:---------------------------------------------------|
-| `api`             | Internal web server binding settings.                                             | [See section](#1-api-server-api)                   |
-| `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui)    |
-| `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                      |
-| `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)              |
-| `messaging`       | Webhooks & Push-Notifications (Telegram, Discord, etc.).                          | [See section](#5-messaging-messaging)              |
-| `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)          |
-| `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)             |
-| `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)                 |
-| `hdhomerun`       | Virtual DVB-C/T network tuner emulation.                                          | [See section](#9-hdhomerun-emulation-hdhomerun)    |
-| `library`         | Local Media Library integration.                                                  | [See Local Library](./local-library.md)            |
-| `reverse_proxy`   | Streaming buffers, rate limits, caching.                                          | [See Reverse Proxy](./reverse-proxy.md)            |
-| `metadata_update` | TMDB matching, FFprobe processing, Job Queues.                                    | [See Metadata Update](./metadata-update.md)        |
-| `channel_groups`  | Matching, source selection and failover of channel groups.                        | [See Channel Groups](./channel-groups-settings.md) |
+| Block             | Description                                                                       | Link                                                 |
+|:------------------|:----------------------------------------------------------------------------------|:-----------------------------------------------------|
+| `api`             | Internal web server binding settings.                                             | [See section](#1-api-server-api)                     |
+| `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui)      |
+| `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                        |
+| `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)                |
+| `messaging`       | Webhooks & Push-Notifications (Telegram, Discord, etc.).                          | [See section](#5-messaging-messaging)                |
+| `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)            |
+| `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)               |
+| `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)                   |
+| `hdhomerun`       | Virtual DVB-C/T network tuner emulation.                                          | [See section](#9-hdhomerun-emulation-hdhomerun)      |
+| `library`         | Local Media Library integration.                                                  | [See Local Library](./local-library.md)              |
+| `reverse_proxy`   | Streaming buffers, rate limits, caching.                                          | [See Reverse Proxy](./reverse-proxy.md)              |
+| `metadata_update` | TMDB matching, FFprobe processing, Job Queues.                                    | [See Metadata Update](./metadata-update.md)          |
+| `failover_groups` | Matching, source selection and failover of failover groups.                       | [See Failover Groups](./failover-groups-settings.md) |
 
 *(Note: The advanced topics **Local Library**, **Reverse Proxy** and **Metadata Update** are extremely extensive and
 have their own

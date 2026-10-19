@@ -80,6 +80,7 @@ fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -87,6 +88,7 @@ fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     })
 }
 
@@ -192,6 +194,7 @@ fn target_test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -199,6 +202,7 @@ fn target_test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     })
 }
 
@@ -388,7 +392,7 @@ fn make_media_server_episode(
     }
 }
 
-mod channel_groups;
+mod failover_groups;
 mod lifecycle;
 mod playlist;
 mod policy;

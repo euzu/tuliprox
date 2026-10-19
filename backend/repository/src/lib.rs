@@ -6,10 +6,11 @@ mod target_id_mapping;
 // `utils`, which must not depend on this layer.
 mod alias_repository;
 mod api_user_recovery;
-pub mod channel_group_repository;
 mod db_viewer;
 mod epg_group_index;
 mod epg_repository;
+pub mod failover_group_repository;
+mod failover_repository;
 mod geoip;
 mod library_repository;
 mod lineup_guide_index;
@@ -44,10 +45,11 @@ mod xtream_playlist_iterator;
 mod xtream_repository;
 
 pub use alias_repository::*;
-pub use channel_group_repository::*;
 pub use db_viewer::*;
 pub use epg_group_index::*;
 pub use epg_repository::*;
+pub use failover_group_repository::*;
+pub use failover_repository::*;
 pub use geoip::*;
 pub use library_repository::*;
 pub use lineup_guide_index::*;

@@ -521,6 +521,11 @@ impl SourcesConfig {
         None
     }
 
+    /// The target called `name`; `SourcesConfigDto::prepare` rejects duplicate target names across sources.
+    pub fn get_target_by_name(&self, name: &str) -> Option<&Arc<ConfigTarget>> {
+        self.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == name)
+    }
+
     pub fn get_source_inputs_by_target_by_name(&self, target_name: &str) -> Option<Vec<Arc<str>>> {
         for source in &self.sources {
             for target in &source.targets {
@@ -608,7 +613,8 @@ impl SourcesConfig {
 mod tests {
     use super::{ConfigProvider, SourcesConfig};
     use shared::model::{
-        ConfigInputAliasDto, ConfigInputDto, ConfigProviderDto, ProviderUrlSelectionPolicy, SourcesConfigDto,
+        ConfigInputAliasDto, ConfigInputDto, ConfigProviderDto, ConfigSourceDto, ConfigTargetDto,
+        ProviderUrlSelectionPolicy, SourcesConfigDto,
     };
     use std::net::IpAddr;
 
@@ -623,6 +629,25 @@ mod tests {
             }],
             sources: Vec::new(),
         }
+    }
+
+    #[test]
+    fn get_target_by_name_finds_targets_of_every_source() {
+        let mut dto = sources_dto();
+        let target = |id: u16, name: &str| ConfigTargetDto { id, name: name.to_string(), ..ConfigTargetDto::default() };
+        dto.sources = vec![
+            ConfigSourceDto { inputs: vec!["first-input".into()], targets: vec![target(1, "Main TV")] },
+            ConfigSourceDto {
+                inputs: vec!["first-input".into()],
+                targets: vec![target(2, "Kids"), target(3, "Sport")],
+            },
+        ];
+        let sources = SourcesConfig::try_from(&dto).expect("sources load");
+
+        assert_eq!(sources.get_target_by_name("Main TV").map(|found| found.id), Some(1));
+        assert_eq!(sources.get_target_by_name("Sport").map(|found| found.id), Some(3));
+        assert!(sources.get_target_by_name("sport").is_none());
+        assert!(sources.get_target_by_name("Unknown").is_none());
     }
 
     /// A duplicate member name silently resolves to whichever entry was inserted last, so a request

@@ -288,6 +288,14 @@ body {
   --theme-brand-emphasis: var(--theme-palette-emphasis-tone-500);
   --theme-brand-accent: var(--theme-palette-accent-tone-500);
 
+  --failover-group-origin-auto: var(--theme-palette-failover-group-origin-auto);
+  --failover-group-origin-edited: var(--theme-palette-failover-group-origin-edited);
+  --failover-group-origin-manual: var(--theme-palette-failover-group-origin-manual);
+  --failover-group-problem: var(--theme-palette-failover-group-problem);
+  --failover-group-health-ok: var(--theme-palette-failover-group-health-ok);
+  --failover-group-health-degraded: var(--theme-palette-failover-group-health-degraded);
+  --failover-group-health-open: var(--theme-palette-failover-group-health-open);
+
   --theme-brand-log-console-background: var(--theme-palette-log-console-background);
   --theme-brand-log-console-text: var(--theme-palette-log-console-text);
   --theme-brand-log-console-muted: var(--theme-palette-log-console-muted);

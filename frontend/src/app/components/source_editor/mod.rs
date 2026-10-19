@@ -1,11 +1,11 @@
 mod alias_item_form;
 mod block_view;
-mod channel_groups_form;
 mod editor_form;
 mod editor_model;
 mod editor_view;
 mod epg_smart_match_form;
 mod epg_source_item_form;
+mod failover_groups_form;
 mod input_form;
 mod layout;
 mod output_form;

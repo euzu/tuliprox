@@ -485,6 +485,9 @@ impl WebSocketService {
             ProtocolMessage::MaintenanceChangedResponse(entries) => {
                 event_service.broadcast(EventMessage::MaintenanceChanged(Rc::new(entries)));
             }
+            ProtocolMessage::FailoverOverridesChanged(targets) => {
+                event_service.broadcast(EventMessage::FailoverOverridesChanged(Rc::new(targets)));
+            }
             ProtocolMessage::RecordingWsError { code } => {
                 event_service.broadcast(EventMessage::RecordingUnavailable { code });
             }

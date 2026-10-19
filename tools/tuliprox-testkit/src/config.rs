@@ -163,6 +163,15 @@ impl Default for FixtureStalker {
     }
 }
 
+/// Replaces the single generated provider input with one m3u input per name, each served as
+/// its own origin account, and turns failover groups on for the generated target. All inputs
+/// carry the same channels, so the target groups them automatically.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureFailoverGroups {
+    pub inputs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TuliproxConfig {
@@ -173,6 +182,8 @@ pub struct TuliproxConfig {
     pub input_type: FixtureInputType,
     #[serde(default)]
     pub stalker: FixtureStalker,
+    #[serde(default)]
+    pub failover_groups: Option<FixtureFailoverGroups>,
     #[serde(default)]
     pub admin_username: Option<String>,
     #[serde(default)]
@@ -213,6 +224,20 @@ pub struct BootstrapConfig {
     pub readiness_url: String,
     #[serde(default = "default_readiness_timeout_millis")]
     pub readiness_timeout_millis: u64,
+    /// Files copied into the isolated config directory before the SUT starts, for example a
+    /// `failover.d/` override file.
+    #[serde(default)]
+    pub extra_config_files: Vec<ExtraConfigFile>,
+}
+
+/// One fixture file placed next to the generated `config.yml`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtraConfigFile {
+    /// Path relative to the scenario file's directory.
+    pub source: String,
+    /// Path relative to the isolated config directory. Must stay below it.
+    pub destination: String,
 }
 
 fn default_readiness_timeout_millis() -> u64 { 30_000 }
@@ -618,6 +643,8 @@ impl Scenario {
         self.validate_policy_contract()?;
         self.validate_playback_endpoint()?;
         self.validate_stalker_fixture()?;
+        self.validate_failover_groups_fixture()?;
+        self.validate_extra_config_files()?;
         Ok(())
     }
 
@@ -690,11 +717,61 @@ impl Scenario {
         Ok(())
     }
 
+    /// Failover-group inputs are plain m3u inputs of the fixture origin; they cannot be
+    /// combined with a provider pool or the Stalker portal, which define the inputs themselves.
+    fn validate_failover_groups_fixture(&self) -> Result<(), TestkitError> {
+        let Some(failover) = &self.tuliprox.failover_groups else {
+            return Ok(());
+        };
+        let mut names = HashSet::new();
+        let valid_names = failover.inputs.iter().all(|name| {
+            !name.is_empty()
+                && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                && names.insert(name.as_str())
+        });
+        if failover.inputs.len() < 2 || !valid_names {
+            return Err(TestkitError::Configuration(
+                "failover_groups requires at least two unique URL-safe input names".to_owned(),
+            ));
+        }
+        let uses_pool = self
+            .policy_contract
+            .as_ref()
+            .is_some_and(|contract| !contract.provider_pool.is_empty() || contract.provider_max_connections.is_some());
+        if uses_pool || self.tuliprox.input_type != FixtureInputType::M3u {
+            return Err(TestkitError::Configuration(
+                "failover_groups cannot be combined with provider_pool, provider_max_connections or input_type: stalker"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_extra_config_files(&self) -> Result<(), TestkitError> {
+        for file in self.tuliprox.bootstrap.iter().flat_map(|bootstrap| &bootstrap.extra_config_files) {
+            if !is_confined_relative_path(&file.destination) {
+                return Err(TestkitError::Configuration(format!(
+                    "extra_config_files destination '{}' must be a relative path inside the config directory",
+                    file.destination
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn expanded_steps(&self) -> Result<Vec<Step>, TestkitError> {
         let mut expanded = Vec::new();
         expand_steps(&self.steps, "", &mut expanded)?;
         Ok(expanded)
     }
+}
+
+/// True for a non-empty relative path made of normal components only, so joining it to a
+/// directory can never leave that directory.
+#[must_use]
+pub fn is_confined_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path).components().all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn validate_provider_pool_contract(contract: &PolicyContract) -> Result<(), TestkitError> {
@@ -829,6 +906,7 @@ steps:
                 fixture_stream: FixtureStreamOptions::default(),
                 input_type: FixtureInputType::default(),
                 stalker: FixtureStalker::default(),
+                failover_groups: None,
             },
             origin: None,
             actors: vec![Actor {
@@ -1007,12 +1085,14 @@ steps:
                     arguments: Vec::new(),
                     readiness_url: "http://example.invalid/healthcheck".to_owned(),
                     readiness_timeout_millis: 1000,
+                    extra_config_files: Vec::new(),
                 }),
                 execution_mode: ExecutionMode::IsolatedFixture,
                 playback_endpoint: PlaybackEndpoint::M3u,
                 fixture_stream: FixtureStreamOptions::default(),
                 input_type: FixtureInputType::Stalker,
                 stalker: FixtureStalker::default(),
+                failover_groups: None,
             },
             origin: None,
             actors: Vec::new(),
@@ -1137,5 +1217,73 @@ steps:
         )
         .unwrap();
         assert!(scenario.validate().is_err());
+    }
+
+    fn failover_scenario(extra: &str) -> Result<Scenario, TestkitError> {
+        let yaml = format!(
+            r"
+schema_version: 1
+name: failover-validation
+tuliprox:
+  base_url: 'http://example.invalid'
+  bootstrap:
+    command: 'true'
+    readiness_url: 'http://example.invalid/healthcheck'
+{extra}
+"
+        );
+        serde_saphyr::from_str(&yaml).map_err(|error| TestkitError::Configuration(error.to_string()))
+    }
+
+    #[test]
+    fn failover_groups_fixture_accepts_two_unique_inputs() -> Result<(), TestkitError> {
+        failover_scenario("  failover_groups: { inputs: [input-a, input-b] }")?.validate()
+    }
+
+    #[test]
+    fn failover_groups_fixture_rejects_bad_input_lists() -> Result<(), TestkitError> {
+        for inputs in ["[input-a]", "[input-a, input-a]", "[input-a, 'bad name']", "[input-a, '']"] {
+            let scenario = failover_scenario(&format!("  failover_groups: {{ inputs: {inputs} }}"))?;
+            assert!(scenario.validate().is_err(), "{inputs} must be rejected");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failover_groups_fixture_rejects_provider_pool() -> Result<(), TestkitError> {
+        let mut scenario = failover_scenario("  failover_groups: { inputs: [input-a, input-b] }")?;
+        scenario.policy_contract = Some(PolicyContract {
+            user_access_control: false,
+            users: HashMap::new(),
+            admission_strategies: None,
+            recent_eviction_reentry_ttl_ms: None,
+            hls_session_ttl_secs: None,
+            provider_affinity_ttl_secs: None,
+            hls_wrap_media_playlist: None,
+            grace: None,
+            provider_max_connections: None,
+            provider_pool: vec![ProviderPoolAccount {
+                name: "account-a".to_owned(),
+                max_connections: 1,
+                priority: None,
+            }],
+            expected_provider_slots: None,
+        });
+        assert!(scenario.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn extra_config_file_destinations_must_be_confined() -> Result<(), TestkitError> {
+        let valid =
+            failover_scenario("    extra_config_files: [{ source: ../x.yml, destination: failover.d/testkit.yml }]")?;
+        valid.validate()?;
+        let escaping = failover_scenario("    extra_config_files: [{ source: x.yml, destination: ../x.yml }]")?;
+        assert!(escaping.validate().is_err());
+        assert!(is_confined_relative_path("failover.d/testkit.yml"));
+        assert!(!is_confined_relative_path("/etc/passwd"));
+        assert!(!is_confined_relative_path("a/../../b"));
+        assert!(!is_confined_relative_path(""));
+        Ok(())
     }
 }

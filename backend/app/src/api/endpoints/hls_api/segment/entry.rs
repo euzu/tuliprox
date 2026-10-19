@@ -42,7 +42,7 @@ use tuliprox_hls::api::{
     HlsSessionKey,
 };
 use tuliprox_session::{
-    channel_group::{FailureClass, HalfOpenGuard},
+    failover_group::{FailureClass, HalfOpenGuard},
     MemberBinding,
 };
 

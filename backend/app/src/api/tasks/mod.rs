@@ -15,16 +15,16 @@
 //!   would gain `session` for an event publish - and 194 lines is not worth
 //!   degrading a leaf crate or minting a package to hold.
 
-mod channel_group_members;
 mod config_watch;
+mod failover_group_members;
 mod hdhomerun_ssdp;
 mod library_scan;
 mod notification_bridge;
 mod scheduler;
 mod xtream_expiry;
 
-pub(in crate::api) use channel_group_members::*;
 pub(in crate::api) use config_watch::*;
+pub(in crate::api) use failover_group_members::*;
 pub(in crate::api) use hdhomerun_ssdp::*;
 pub(in crate::api) use library_scan::*;
 pub(in crate::api) use notification_bridge::*;

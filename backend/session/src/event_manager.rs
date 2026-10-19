@@ -157,7 +157,7 @@ struct LatchedEvents {
 pub struct EventManager {
     pub(crate) account_provider:
         std::sync::OnceLock<std::sync::Weak<crate::active_provider_manager::ActiveProviderManagerCore>>,
-    pub(crate) member_health: std::sync::OnceLock<std::sync::Weak<crate::channel_group::health::MemberHealthIndex>>,
+    pub(crate) member_health: std::sync::OnceLock<std::sync::Weak<crate::failover_group::health::MemberHealthIndex>>,
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
     stats: Arc<EventBusStats>,
@@ -393,7 +393,7 @@ impl FilteredEventReceiver {
 }
 
 impl EventManager {
-    pub fn bind_member_health(&self, health: &Arc<crate::channel_group::health::MemberHealthIndex>) {
+    pub fn bind_member_health(&self, health: &Arc<crate::failover_group::health::MemberHealthIndex>) {
         let _ = self.member_health.set(Arc::downgrade(health));
     }
 

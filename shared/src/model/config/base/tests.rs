@@ -146,6 +146,52 @@ fn prepare_sets_default_optional_paths() {
 }
 
 #[test]
+fn failover_path_is_optional_and_keeps_auto_detection_after_prepare() {
+    let raw = r"
+api:
+  host: 127.0.0.1
+  port: 8901
+  web_root: ./web
+storage_dir: .
+failover_path: failover.d/
+";
+    let mut cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
+    assert_eq!(cfg.failover_path.as_deref(), Some("failover.d/"));
+
+    cfg.failover_path = None;
+    cfg.prepare(false).expect("prepare should succeed");
+    // no default is injected: an unset path lets the resolver auto-detect failover.yml / failover.d
+    assert!(cfg.failover_path.is_none());
+}
+
+#[test]
+fn update_from_main_config_keeps_failover_path_none_when_blank() {
+    let mut cfg = ConfigDto { failover_path: Some("failover.d/".to_string()), ..ConfigDto::default() };
+    for blank in [None, Some(String::new()), Some("   ".to_string())] {
+        let main = MainConfigDto { failover_path: blank, ..MainConfigDto::default() };
+        cfg.update_from_main_config(&main);
+        assert!(cfg.failover_path.is_none());
+    }
+}
+
+#[test]
+fn update_from_main_config_round_trips_failover_path() {
+    let mut cfg = ConfigDto::default();
+    let main = MainConfigDto { failover_path: Some("failover.d/".to_string()), ..MainConfigDto::default() };
+    cfg.update_from_main_config(&main);
+    assert_eq!(cfg.failover_path.as_deref(), Some("failover.d/"));
+    assert_eq!(MainConfigDto::from(&cfg).failover_path.as_deref(), Some("failover.d/"));
+}
+
+#[test]
+fn explicit_default_failover_path_survives_serialization() {
+    let cfg = ConfigDto { failover_path: Some("failover.yml".to_string()), ..ConfigDto::default() };
+    let value = serde_json::to_value(&cfg).expect("config should serialize");
+    let restored: ConfigDto = serde_json::from_value(value).expect("config should deserialize");
+    assert_eq!(restored.failover_path.as_deref(), Some("failover.yml"));
+}
+
+#[test]
 fn deserializing_rejects_legacy_video_ffprobe_fields() {
     let raw = json!({
         "api": {

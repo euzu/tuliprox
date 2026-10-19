@@ -159,6 +159,7 @@ You can view all arguments using `./tuliprox --help`:
 | `-i, --source <FILE>` | Specific path to the `source.yml`. |
 | `-m, --mapping <FILE>` | Specific path to the mapping file/directory. |
 | `-T, --template <FILE>` | Specific path to the template file/directory. |
+| `--failover <PATH>` | Specific path to the failover override file/directory (default: `failover_path` of `config.yml`, else `failover.yml` / `failover.d`). See [Failover Groups](configuration/failover-groups.md#corrections-and-own-groups-failover-files). |
 | `-t, --target <NAME>` | **Target Override:** Forces processing of the specified target *only*. Extremely useful to quickly re-render a broken list via shell without blocking the entire system, even if `enabled: false` in config. |
 | `-a, --api-proxy <FILE>` | Specific path to the `api-proxy.yml`. |
 | `-s, --server` | Run in continuous Server Mode. |

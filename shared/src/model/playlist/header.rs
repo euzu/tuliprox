@@ -56,12 +56,12 @@ pub struct PlaylistItemHeader {
     pub input_stream_id: Arc<str>,
     #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
     pub upstream_user_agent: Option<Arc<str>>,
-    /// Mapping override for channel grouping: `Some("")` opts out, `Some(key)` forces a key.
+    /// Mapping override for failover grouping: `Some("")` opts out, `Some(key)` forces a key.
     #[serde(default, with = "arc_str_option_serde")]
-    pub channel_group: Option<Arc<str>>,
+    pub failover_group: Option<Arc<str>>,
     /// Set on group items by the grouping stage; copies (favourites) inherit it.
     #[serde(default)]
-    pub channel_group_uuid: Option<UUIDType>,
+    pub failover_group_uuid: Option<UUIDType>,
 }
 
 impl Default for PlaylistItemHeader {
@@ -90,8 +90,8 @@ impl Default for PlaylistItemHeader {
             source_ordinal: 0,
             input_stream_id: "".intern(),
             upstream_user_agent: None,
-            channel_group: None,
-            channel_group_uuid: None,
+            failover_group: None,
+            failover_group_uuid: None,
         }
     }
 }
@@ -122,6 +122,11 @@ impl PlaylistItemHeader {
 
     #[inline]
     pub const fn get_uuid(&self) -> &UUIDType { &self.uuid }
+
+    /// Numeric provider id of the stream, `0` when neither the id nor the url carries one.
+    #[inline]
+    #[must_use]
+    pub fn provider_id_or_default(&self) -> u32 { get_provider_id(&self.id, &self.url).unwrap_or_default() }
 
     pub fn get_provider_id(&mut self) -> Option<u32> {
         match get_provider_id(&self.id, &self.url) {
@@ -174,7 +179,7 @@ impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
             HeaderField::Genre => {
                 self.additional_properties.as_ref().and_then(StreamProperties::genre).map(FieldRef::Shared)
             }
-            HeaderField::ChannelGroup => self.channel_group.as_ref().map(FieldRef::Shared),
+            HeaderField::FailoverGroup => self.failover_group.as_ref().map(FieldRef::Shared),
             // Not carried by the header.
             HeaderField::ProviderId => None,
         }
@@ -201,7 +206,7 @@ impl crate::model::FieldSet for crate::model::PlaylistItemHeader {
                 self.name = interned;
             }
             HeaderField::EpgChannelId => self.epg_channel_id = Some(value.intern()),
-            HeaderField::ChannelGroup => self.channel_group = Some(value.intern()),
+            HeaderField::FailoverGroup => self.failover_group = Some(value.intern()),
             HeaderField::Chno => match value.parse::<u32>() {
                 Ok(parsed) => self.chno = parsed,
                 Err(_) => return false,

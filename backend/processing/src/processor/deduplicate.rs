@@ -14,7 +14,7 @@ fn item_raw_match_value(config: DeduplicateConfig, item: &PlaylistItem) -> &str 
 }
 
 fn should_skip(channel: &PlaylistItem, skip: &HashSet<UUIDType>) -> bool {
-    skip.contains(&channel.header.uuid) || channel.header.channel_group_uuid.is_some()
+    skip.contains(&channel.header.uuid) || channel.header.failover_group_uuid.is_some()
 }
 
 /// Collapse duplicate channels across the whole target playlist (per cluster).

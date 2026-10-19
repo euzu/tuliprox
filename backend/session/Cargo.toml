@@ -28,7 +28,6 @@ jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_
 log.workspace = true
 rand = "0.9.5"
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 lru = "0.16.4"

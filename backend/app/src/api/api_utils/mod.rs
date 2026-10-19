@@ -238,9 +238,10 @@ pub(crate) mod tests;
 mod activation;
 mod auth;
 mod catchup;
-pub(crate) mod channel_group;
-pub(crate) mod channel_group_failover;
 mod clock;
+pub(crate) mod failover_group;
+pub(crate) mod failover_group_hot_apply;
+pub(crate) mod failover_group_runtime;
 mod local_files;
 mod maintenance;
 mod media_server;
@@ -326,7 +327,7 @@ pub use self::{
 pub(crate) use self::{
     auth::{input_for_user, with_recording_headers},
     catchup::get_catchup_session_ttl_secs,
-    channel_group::{group_playback_settings, resolve_hls_group_entry, GroupSelectionRequest, PlaybackSource},
+    failover_group::{group_playback_settings, resolve_hls_group_entry, GroupSelectionRequest, PlaybackSource},
     local_files::local_stream_response,
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
     provider_acquire::{acquire_exact_provider_handle, stream_response_with_provider_handle},

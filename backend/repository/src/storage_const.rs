@@ -27,6 +27,8 @@ pub const STALKER_SEASONS_FILE: &str = "stalker_seasons";
 pub const STALKER_SERIES_ROOTS_FILE: &str = "stalker_series_roots";
 pub const STALKER_EPG_FILE: &str = "stalker_epg";
 
-pub const FILE_CHANNEL_GROUPS: &str = "channel_groups.db";
-pub const FILE_CHANNEL_GROUPS_MEMBER: &str = "channel_groups.member.db";
-pub const FILE_CHANNEL_GROUPS_ALIAS: &str = "channel_groups.alias.db";
+pub const FILE_FAILOVER_GROUPS: &str = "failover_groups.db";
+pub const FILE_FAILOVER_GROUPS_MEMBER: &str = "failover_groups.member.db";
+pub const FILE_FAILOVER_GROUPS_ALIAS: &str = "failover_groups.alias.db";
+pub const FILE_FAILOVER_GROUPS_CATALOG: &str = "failover_groups.catalog.db";
+pub const FILE_FAILOVER_GROUPS_META: &str = "failover_groups.meta.json";

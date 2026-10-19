@@ -12,8 +12,9 @@ use crate::{
     ensure_target_storage_path, epg_write_for_target, lineup_guide_index_carry_over, lineup_guide_index_remove,
     lineup_guide_index_view, lineup_guide_index_write, load_input_local_library_playlist, m3u_lineup_guide_index_path,
     m3u_write_playlist, persist_input_library_playlist, write_strm_playlist, xtream_get_file_path,
-    xtream_get_storage_path, xtream_lineup_guide_index_path, ChannelGroupRecord, ChannelGroupStore, GroupMember,
-    LineupGuideCarryOver, LineupGuideView, MemberArchive, PendingChannelGroup, TargetIdMapping,
+    xtream_get_storage_path, xtream_lineup_guide_index_path, FailoverGroupBatch, FailoverGroupRecord,
+    FailoverGroupStore, GroupMember, LineupGuideCarryOver, LineupGuideView, MemberArchive, PendingFailoverGroup,
+    TargetIdMapping,
 };
 use log::warn;
 use shared::{
@@ -63,7 +64,7 @@ pub async fn persist_playlist_views(
         target,
         playlist_state,
         options,
-        &mut [],
+        &mut FailoverGroupBatch::default(),
     )
     .await
 }
@@ -77,7 +78,7 @@ pub async fn persist_playlist_views_with_groups(
     target: &ConfigTarget,
     playlist_state: Option<&Arc<PlaylistStorageState>>,
     options: TargetPlaylistPersistOptions,
-    channel_groups: &mut [PendingChannelGroup],
+    failover_groups: &mut FailoverGroupBatch,
 ) -> Result<(), Vec<TuliproxError>> {
     persist_playlist_views_with_mode(
         app_config,
@@ -88,7 +89,7 @@ pub async fn persist_playlist_views_with_groups(
         playlist_state,
         options,
         TargetPersistenceMode::Persist,
-        channel_groups,
+        failover_groups,
     )
     .await
 }
@@ -111,19 +112,19 @@ pub(super) async fn persist_playlist_with_mode(
         playlist_state,
         options,
         persistence_mode,
-        &mut [],
+        &mut FailoverGroupBatch::default(),
     )
     .await
 }
 
-fn collect_channel_group_aliases(
+fn collect_failover_group_aliases(
     playlist: &[PlaylistGroup],
     mapping: &TargetIdMapping,
     aliases: &mut Vec<(VirtualId, VirtualId)>,
 ) {
     for group in playlist {
         for channel in &group.channels {
-            if let Some(cg_uuid) = channel.header.channel_group_uuid {
+            if let Some(cg_uuid) = channel.header.failover_group_uuid {
                 if channel.header.uuid != cg_uuid {
                     if let Some(group_vid) = mapping.get_virtual_id_by_uuid(&cg_uuid) {
                         aliases.push((channel.header.virtual_id, group_vid));
@@ -134,11 +135,11 @@ fn collect_channel_group_aliases(
     }
 }
 
-fn build_channel_group_records(
-    channel_groups: &[PendingChannelGroup],
+fn build_failover_group_records(
+    failover_groups: &[PendingFailoverGroup],
     mapping: &TargetIdMapping,
-) -> Vec<ChannelGroupRecord> {
-    channel_groups
+) -> Vec<FailoverGroupRecord> {
+    failover_groups
         .iter()
         .map(|pending| {
             let group_vid = mapping.get_virtual_id_by_uuid(&pending.group_uuid).unwrap_or_default();
@@ -156,8 +157,7 @@ fn build_channel_group_records(
                     GroupMember {
                         member_vid: member.header.virtual_id,
                         input_name: Arc::clone(&member.header.input_name),
-                        provider_id: shared::utils::get_provider_id(&member.header.id, &member.header.url)
-                            .unwrap_or_default(),
+                        provider_id: member.header.provider_id_or_default(),
                         input_stream_id: Arc::clone(&member.header.input_stream_id),
                         url: Arc::clone(&member.header.url),
                         item_type: member.header.item_type,
@@ -169,7 +169,7 @@ fn build_channel_group_records(
                     }
                 })
                 .collect();
-            ChannelGroupRecord {
+            FailoverGroupRecord {
                 group_vid,
                 key: Arc::clone(&pending.key),
                 origin: pending.origin,
@@ -191,7 +191,7 @@ async fn persist_playlist_views_with_mode(
     playlist_state: Option<&Arc<PlaylistStorageState>>,
     options: TargetPlaylistPersistOptions,
     persistence_mode: TargetPersistenceMode,
-    channel_groups: &mut [PendingChannelGroup],
+    failover_groups: &mut FailoverGroupBatch,
 ) -> Result<(), Vec<TuliproxError>> {
     let playlist_is_empty = !playlist_has_items(base_playlist)
         && xtream_playlist.as_deref().is_none_or(|playlist| !playlist_has_items(playlist));
@@ -217,7 +217,7 @@ async fn persist_playlist_views_with_mode(
         prepare_target_playlist_for_persistence(xtream_view, target, &mut target_id_mapping, &mut source_ordinal);
     }
 
-    for pending in channel_groups.iter_mut() {
+    for pending in &mut failover_groups.groups {
         for member in &mut pending.members {
             assign_item_identity(&mut member.header, &mut source_ordinal, &mut target_id_mapping);
         }
@@ -231,25 +231,26 @@ async fn persist_playlist_views_with_mode(
         return Err(vec![error]);
     }
 
-    let records = build_channel_group_records(channel_groups, &target_id_mapping);
+    let records = build_failover_group_records(&failover_groups.groups, &target_id_mapping);
     let mut aliases = Vec::new();
-    collect_channel_group_aliases(base_playlist, &target_id_mapping, &mut aliases);
+    collect_failover_group_aliases(base_playlist, &target_id_mapping, &mut aliases);
     if let Some(xtream_view) = xtream_playlist.as_deref() {
-        collect_channel_group_aliases(xtream_view, &target_id_mapping, &mut aliases);
+        collect_failover_group_aliases(xtream_view, &target_id_mapping, &mut aliases);
     }
 
-    let staged_groups = match ChannelGroupStore::write_staged(&target_path, &records, &aliases) {
-        Ok(staged) => staged,
-        Err(err) => {
-            target_id_mapping.discard_unpersisted_changes();
-            drop(target_id_mapping);
-            drop(file_lock);
-            return Err(vec![TuliproxError::RepositoryPlaylist(format!(
-                "Failed to stage channel groups for target '{}': {err}",
-                target.name
-            ))]);
-        }
-    };
+    let staged_groups =
+        match FailoverGroupStore::write_staged(&target_path, &records, &aliases, failover_groups.side_files()) {
+            Ok(staged) => staged,
+            Err(err) => {
+                target_id_mapping.discard_unpersisted_changes();
+                drop(target_id_mapping);
+                drop(file_lock);
+                return Err(vec![TuliproxError::RepositoryPlaylist(format!(
+                    "Failed to stage failover groups for target '{}': {err}",
+                    target.name
+                ))]);
+            }
+        };
 
     // Only the view `lineup.json` is published from keeps a guide index. Any other index would
     // describe a playlist the reader no longer asks, and a later re-configuration could mistake it
@@ -383,11 +384,11 @@ async fn persist_playlist_views_with_mode(
     if errors.is_empty() {
         if let Err(err) = staged_groups.publish() {
             errors.push(TuliproxError::RepositoryPlaylist(format!(
-                "Failed to publish channel groups for target '{}': {err}",
+                "Failed to publish failover groups for target '{}': {err}",
                 target.name
             )));
         } else if let Some(playlist_storage) = playlist_state {
-            playlist_storage.bump_channel_group_generation(&target.name);
+            playlist_storage.bump_failover_group_generation(&target.name);
         }
     } else {
         staged_groups.discard();

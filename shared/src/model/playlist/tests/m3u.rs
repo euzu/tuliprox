@@ -21,7 +21,7 @@ fn header_field_parse_round_trips_every_variant() {
         HeaderField::EpgChannelId,
         HeaderField::Chno,
         HeaderField::Genre,
-        HeaderField::ChannelGroup,
+        HeaderField::FailoverGroup,
     ] {
         assert_eq!(HeaderField::parse(field.as_str()), Some(field), "{field} did not round-trip");
         // Lookup stayed case-insensitive.
@@ -46,7 +46,7 @@ fn m3u_item_exposes_provider_id_but_not_the_header_only_fields() {
     assert_eq!(item.get_field("chno").as_deref(), Some("7"));
     assert_eq!(item.get_field("caption").as_deref(), Some("Channel"));
 
-    for absent in ["id", "input", "type", "genre", "channel_group", "not_a_field"] {
+    for absent in ["id", "input", "type", "genre", "failover_group", "not_a_field"] {
         assert!(item.get_field(absent).is_none(), "{absent} must not resolve on an M3U item");
     }
 }

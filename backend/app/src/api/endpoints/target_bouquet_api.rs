@@ -69,8 +69,7 @@ fn resolve_target_with_inputs(
 
 async fn target_summary(state: &AppState, target_name: &str) -> Result<Option<TargetBouquetStatusDto>, TuliproxError> {
     let sources = state.app_config.sources.load();
-    let target =
-        sources.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == target_name).cloned();
+    let target = sources.get_target_by_name(target_name).cloned();
     drop(sources);
     let Some(target) = target else { return Ok(None) };
     let bouquet = tuliprox_repository::load_target_bouquet(&state.app_config, &target.name).await?;
@@ -273,9 +272,7 @@ async fn save_target_bouquet_handler(
     Json(bouquet): Json<TargetBouquetDto>,
 ) -> Response {
     let sources = app_state.app_config.sources.load();
-    let Some(target) =
-        sources.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == query.target)
-    else {
+    let Some(target) = sources.get_target_by_name(&query.target) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("Target '{}' not found", query.target) })),
@@ -296,9 +293,7 @@ async fn delete_target_bouquet_handler(
     Query(query): Query<TargetBouquetQuery>,
 ) -> Response {
     let sources = app_state.app_config.sources.load();
-    let Some(target) =
-        sources.sources.iter().flat_map(|source| &source.targets).find(|target| target.name == query.target)
-    else {
+    let Some(target) = sources.get_target_by_name(&query.target) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("Target '{}' not found", query.target) })),
@@ -372,6 +367,7 @@ mod tests {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         }));

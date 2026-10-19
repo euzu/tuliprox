@@ -186,15 +186,36 @@
 
 ## 🌟 New Features
 
-- **Channel groups with stream failover.** A target with `options.channel_groups.enabled` collapses equal live
+- **Failover groups with stream failover.** A target with `options.failover_groups.enabled` collapses equal live
   channels from several inputs (matched by caption, name, title or EPG id) into one channel. A start picks the best
   member by QoS history, probed quality and free provider capacity and moves on to the next member when one fails.
   While a client watches an MPEG-TS stream, a member that ends, fails, stops sending data or is too slow is replaced
   underneath the open response, spliced at PAT/PMT and a keyframe; this works for direct and shared streams. Failing
   members and inputs are paused for a while, and an outage limit and a switch limit bound the switching. The settings
-  live once in `config.yml` (`channel_groups`, Web UI: Settings → Channel groups); a target turns the feature on and
-  can override matching, source order, grace and failover on its own Channel groups page. Off by default. See
-  [Channel Groups & Stream Failover](docs/src/configuration/channel-groups.md).
+  live once in `config.yml` (`failover_groups`, Web UI: Settings → Failover groups); a target turns the feature on and
+  can override matching, source order, grace and failover on its own Failover groups page. Off by default. See
+  [Failover Groups & Stream Failover](docs/src/configuration/failover-groups.md).
+
+- **Failover groups editor and failover files.** Automatic failover groups can be corrected and your own groups can
+  be created, either on the new Web UI page **Failover groups** (sidebar → Playlist) or by editing YAML files. The
+  files only hold deviations from the automatic result (corrections of automatic groups, manual groups, excluded
+  channels), so automatic grouping keeps working and channels that appear later are still grouped; the `.db` files
+  stay derived data. One `failover.yml` or a `failover.d/` directory with any number of `.yml` / `.yaml` files holds
+  any number of targets, each target in exactly one file. With `config_hot_reload: true` changes are picked up
+  without a restart, an invalid change keeps the previous state, order and policy changes take effect immediately
+  (also a new first member, the playlist entry refreshes with the next update) and structural changes wait for a
+  playlist update. The editor offers a group list with filters, member order by
+  drag and drop, a candidate panel, a preview of unsaved changes, save and save & apply, a conflict dialog when the
+  file changed elsewhere, member health columns and a problems view for outdated corrections, inactive manual
+  groups, conflicting or unresolved channels and sections of unknown targets or of targets with failover groups
+  disabled (with "Assign to target…"), a hint with a marker in the group list while the name and logo of a playlist
+  entry wait for the next update, and a refresh when a playlist update of the open target finishes (the WebSocket
+  `PlaylistUpdateResponse` frame carries the processed `targets`). Deep links
+  come from the source editor target block and the playlist explorer context menu. Saving from the Web UI rewrites
+  the owning file, comments and formatting of that file are lost. New REST routes below `/api/v1/failover/` and the
+  event `failover.overrides_changed` serve the editor. See
+  [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
+  and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
 
 - **Maintenance mode.** Inputs can be put into maintenance from the new dashboard card or through
   `/api/v1/maintenance` (`*` addresses all inputs). New streams of an input in maintenance get the new
@@ -1124,6 +1145,12 @@
 
 ## 🐛 Fixes
 
+- **`.yaml` files in watched config directories now trigger a hot reload.** `mapping_path` and `template_path`
+  directories were loaded with `.yml` and `.yaml` files at start, but the file watcher only reacted to `.yml`, so a
+  `.yaml` file in `mapping.d` or `template.d` was never hot reloaded.
+- **Hidden files and editor temporary files in `mapping.d` and `template.d` are skipped.** Files starting with `.`
+  and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
+  longer breaks a reload.
 - **Long Telegram and ntfy notifications are no longer rejected.** Telegram accepts at most 4096 characters (UTF-16
   units) and ntfy 4096 bytes per message; neither channel had a limit, so a large watch or statistics notification
   failed and landed in the dead letter queue. Telegram now cuts the final text, after `MarkdownV2` escaping, and drops
@@ -1609,16 +1636,24 @@
 
 ## ⚙️ New Settings
 
-- **config.yml (`channel_groups`)**:
-  - Added the global channel group settings: `match_by`, `match_as_ascii`, `match_normalize`, `epg_conflict`,
+- **config.yml (`failover_groups`)**:
+  - Added the global failover group settings: `match_by`, `match_as_ascii`, `match_normalize`, `epg_conflict`,
     `name_strip_quality`, `policy`, `allow_provider_grace`, `start` (`timeout_secs`, `max_attempts`), `failover`
     (`enabled`, `no_data_timeout_secs`, `slow_source_pct`, `slow_source_secs`, `max_outage_secs`,
     `same_source_retries`, `stable_after_secs`, `max_switches`, `max_switches_window_secs`, `audio_language`) and
     `circuit` (`source_failures`, `cooldown_secs`, `cooldown_max_secs`, `input_failures`, `input_window_secs`). See
-    [Channel Groups & Stream Failover](docs/src/configuration/channel-groups.md).
+    [Failover Groups & Stream Failover](docs/src/configuration/failover-groups.md).
+
+- **config.yml (`failover_path`) and CLI `--failover`**:
+  - Added `failover_path`, the file or directory with the failover files (corrections of automatic failover groups
+    and manual groups), relative to the config directory. The CLI argument `--failover <PATH>` overrides it. Without
+    either, `failover.yml` is used if it exists, else the directory `failover.d`, else `failover.yml`, which the Web
+    UI creates with the first save. See
+    [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files).
+    Editable in the Web UI on the main configuration page (Failover Path).
 
 - **source.yml (target `options`)**:
-  - Added `channel_groups` (default off): `enabled` plus the optional overrides `match_by`, `match_as_ascii`,
+  - Added `failover_groups` (default off): `enabled` plus the optional overrides `match_by`, `match_as_ascii`,
     `epg_conflict`, `name_strip_quality`, `policy`, `allow_provider_grace` and `failover`.
 
 - **config.yml (`reverse_proxy.stream`)**:

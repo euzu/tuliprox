@@ -355,6 +355,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_config() -> AppConfig {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -362,6 +363,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_config() -> AppConfig {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     }
 }
 
@@ -399,6 +401,7 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_config() -> App
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -406,6 +409,7 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_config() -> App
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     }
 }
 
@@ -454,6 +458,7 @@ pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config() -
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -461,6 +466,7 @@ pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config() -
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::default(),
     }
 }
 

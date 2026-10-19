@@ -103,6 +103,10 @@ struct Args {
     #[arg(short = 'T', long = "template")]
     template_file: Option<String>,
 
+    /// The failover overrides file or directory
+    #[arg(long = "failover")]
+    failover_file: Option<String>,
+
     /// The target to process
     #[arg(short = 't', long)]
     target: Option<Vec<String>>,
@@ -497,6 +501,9 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         let path = resolve_env_var(p);
         utils::resolve_template_file_path(config_path.as_str(), Some(path.as_str()))
     });
+    // kept as given (env resolved): `resolve_failover_path` scopes it to the config dir and needs the trailing
+    // separator to tell a directory from a file
+    let failover_file = args.failover_file.as_ref().map(|p| resolve_env_var(p));
     let storage_path = if Path::new(&config_file).exists() {
         match crate::config_loader::read_config_file_with_options(
             &config_file,
@@ -522,6 +529,7 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         mapping_files_used: None,
         template_file_path: template_file, // need to be set after config read
         template_files_used: None,
+        failover_file_path: failover_file, // CLI override; resolved after config read
         api_proxy_file_path: api_proxy_file,
         custom_stream_response_path: None,
     }

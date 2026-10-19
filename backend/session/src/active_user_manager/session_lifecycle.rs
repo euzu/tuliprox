@@ -404,7 +404,7 @@ impl ActiveUserManager {
         }
     }
 
-    /// After a shared channel group stream switched member: every viewer's stream and session
+    /// After a shared failover group stream switched member: every viewer's stream and session
     /// of the group on `target_id` shows `provider`.
     pub async fn update_shared_group_provider(&self, target_id: u16, group_vid: u32, provider: Arc<str>) {
         let now = current_time_secs();

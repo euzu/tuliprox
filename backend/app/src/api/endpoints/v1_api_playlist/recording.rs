@@ -134,14 +134,7 @@ pub(in crate::api) async fn resolve_target_recording_source(
 
 /// `SourcesConfigDto::prepare` rejects duplicate target names across sources.
 fn find_target_by_name(app_config: &crate::model::AppConfig, target_name: &str) -> Option<Arc<ConfigTarget>> {
-    app_config
-        .sources
-        .load()
-        .sources
-        .iter()
-        .flat_map(|source| &source.targets)
-        .find(|target| target.name == target_name)
-        .cloned()
+    app_config.sources.load().get_target_by_name(target_name).cloned()
 }
 
 /// Whether `input_name` belongs to the source that configures `target`.

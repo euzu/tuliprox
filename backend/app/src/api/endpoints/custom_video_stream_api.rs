@@ -671,6 +671,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             })),
@@ -678,6 +679,7 @@ mod tests {
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
         };
 
         app_cfg.custom_stream_response.store(Some(Arc::new(test_custom_stream_response())));
@@ -711,7 +713,7 @@ mod tests {
             qos_aggregation: CancellationToken::new(),
             recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
-            channel_groups: tokio_util::sync::CancellationToken::new(),
+            failover_groups: tokio_util::sync::CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 

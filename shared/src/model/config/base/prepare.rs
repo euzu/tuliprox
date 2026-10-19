@@ -78,8 +78,8 @@ impl ConfigDto {
         if let Some(library) = &mut self.library {
             library.playlist.prepare();
         }
-        if let Some(channel_groups) = &mut self.channel_groups {
-            channel_groups.prepare()?;
+        if let Some(failover_groups) = &mut self.failover_groups {
+            failover_groups.prepare()?;
         }
 
         Ok(())
@@ -172,6 +172,7 @@ impl ConfigDto {
         self.user_config_dir = normalize_optional_dir(&main_config.user_config_dir, DEFAULT_USER_CONFIG_DIR);
         self.mapping_path = normalize_optional_config_file_path(&main_config.mapping_path, MAPPING_FILE);
         self.template_path = normalize_optional_config_file_path(&main_config.template_path, TEMPLATE_FILE);
+        self.failover_path = main_config.failover_path.as_deref().filter(|p| !p.trim().is_empty()).map(str::to_owned);
         self.custom_stream_response_path =
             normalize_optional_dir(&main_config.custom_stream_response_path, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH);
         self.custom_stream_response_timeout_secs = main_config.custom_stream_response_timeout_secs;

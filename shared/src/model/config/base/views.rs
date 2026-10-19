@@ -37,6 +37,8 @@ pub struct MainConfigDto {
     #[serde(default = "default_main_template_path", skip_serializing_if = "is_blank_or_default_template_path")]
     pub template_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub failover_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub custom_stream_response_timeout_secs: u32,
@@ -86,6 +88,7 @@ impl Default for MainConfigDto {
             user_config_dir: default_main_user_config_dir(),
             mapping_path: default_main_mapping_path(),
             template_path: default_main_template_path(),
+            failover_path: None,
             custom_stream_response_path: None,
             custom_stream_response_timeout_secs: 0,
             custom_stream_response_enabled: true,
@@ -116,6 +119,7 @@ impl From<&ConfigDto> for MainConfigDto {
             user_config_dir: config.user_config_dir.clone(),
             mapping_path: config.mapping_path.clone(),
             template_path: config.template_path.clone(),
+            failover_path: config.failover_path.clone(),
             custom_stream_response_path: config.custom_stream_response_path.clone(),
             custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
             custom_stream_response_enabled: config.custom_stream_response_enabled,

@@ -732,11 +732,7 @@ pub fn TableColumnsPanel(props: &TableColumnsPanelProps) -> Html {
             </footer>
         } else { <p>{translate.t("TABLE_COLUMNS.LIMIT")}</p> }
     </CustomDialog> };
-    if let Some(body) = web_sys::window().and_then(|window| window.document()).and_then(|document| document.body()) {
-        yew::create_portal(content, body.into())
-    } else {
-        content
-    }
+    crate::utils::in_body(content)
 }
 
 #[cfg(test)]

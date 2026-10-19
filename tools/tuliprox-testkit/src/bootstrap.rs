@@ -1,5 +1,8 @@
 use crate::{
-    config::{BootstrapConfig, Channel, FixtureInputType, FixtureStalker, PolicyContract},
+    config::{
+        is_confined_relative_path, BootstrapConfig, Channel, ExtraConfigFile, FixtureInputType, FixtureStalker,
+        PolicyContract,
+    },
     TestkitError,
 };
 use std::{
@@ -19,6 +22,9 @@ const FIXTURE_PASSWORD: &str = "testkit-password";
 pub struct FixtureInputPlan<'a> {
     pub input_type: FixtureInputType,
     pub stalker: &'a FixtureStalker,
+    /// Names of the separate m3u inputs of a failover-group fixture; empty for the single
+    /// generated input.
+    pub failover_inputs: &'a [String],
 }
 
 impl FixtureInputPlan<'_> {
@@ -76,6 +82,37 @@ impl FixturePaths {
         std::fs::write(&api_proxy_file, render_api_proxy(tuliprox_address, policy))?;
 
         Ok(Self { _directory: directory, root, config_file, source_file, api_proxy_file, web_root })
+    }
+}
+
+impl FixturePaths {
+    /// Copies the scenario's extra config files into the isolated config directory, creating
+    /// intermediate directories. Sources resolve against `source_root`, destinations against
+    /// the run root, which also holds `config.yml`.
+    pub fn copy_extra_config_files(&self, files: &[ExtraConfigFile], source_root: &Path) -> Result<(), TestkitError> {
+        for file in files {
+            if !is_confined_relative_path(&file.destination) {
+                return Err(TestkitError::Configuration(format!(
+                    "extra config file destination '{}' must stay inside the config directory",
+                    file.destination
+                )));
+            }
+            if !is_confined_relative_path(&file.source) {
+                return Err(TestkitError::Configuration(format!(
+                    "extra config file source '{}' must stay inside the scenario directory",
+                    file.source
+                )));
+            }
+            let destination = self.root.join(&file.destination);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let source = source_root.join(&file.source);
+            std::fs::copy(&source, &destination).map_err(|error| {
+                TestkitError::Configuration(format!("cannot copy extra config file {}: {error}", source.display()))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -156,9 +193,22 @@ fn render_sources(
     let share_hls = fixture_stream.share_live_hls;
     let share_mpeg_ts = fixture_stream.share_live_mpeg_ts;
     let extra_output = if add_xtream_output { "          - type: xtream\n" } else { "" };
+    let source_inputs = render_source_input_names(input);
+    let failover_options =
+        if input.failover_inputs.is_empty() { "" } else { "          failover_groups:\n            enabled: true\n" };
     format!(
-        "inputs:\n{provider_config}sources:\n  - inputs:\n      - testkit-origin\n    targets:\n      - name: testkit\n        output:\n          - type: m3u\n{extra_output}        options:\n          share_live_streams:\n            hls: {share_hls}\n            mpeg_ts: {share_mpeg_ts}\n# Origin markers for this fixture: {marker_comment}\n"
+        "inputs:\n{provider_config}sources:\n  - inputs:\n{source_inputs}    targets:\n      - name: testkit\n        output:\n          - type: m3u\n{extra_output}        options:\n          share_live_streams:\n            hls: {share_hls}\n            mpeg_ts: {share_mpeg_ts}\n{failover_options}# Origin markers for this fixture: {marker_comment}\n"
     )
+}
+
+fn render_source_input_names(input: &FixtureInputPlan<'_>) -> String {
+    if input.failover_inputs.is_empty() {
+        return "      - testkit-origin\n".to_owned();
+    }
+    input.failover_inputs.iter().fold(String::new(), |mut rendered, name| {
+        let _ = writeln!(rendered, "      - {}", yaml_string(name));
+        rendered
+    })
 }
 
 fn render_provider_input(
@@ -169,6 +219,9 @@ fn render_provider_input(
 ) -> String {
     if input.is_stalker() {
         return render_stalker_input(origin_address, input.stalker);
+    }
+    if !input.failover_inputs.is_empty() {
+        return render_failover_inputs(run_id, origin_address, input.failover_inputs);
     }
     render_provider_pool(run_id, origin_address, policy)
 }
@@ -184,6 +237,19 @@ fn render_stalker_input(origin_address: SocketAddr, stalker: &FixtureStalker) ->
         yaml_string(&stalker.mag_preset),
         yaml_string(&stalker.mac_address)
     )
+}
+
+/// One m3u input per failover member. Each input is served as its own origin account with
+/// the member-shaped catalog (live channels only, stable stream ids).
+fn render_failover_inputs(run_id: &str, origin_address: SocketAddr, names: &[String]) -> String {
+    names.iter().fold(String::new(), |mut rendered, name| {
+        let _ = writeln!(
+            rendered,
+            "  - name: {}\n    type: m3u\n    url: http://{origin_address}/catalog/input.m3u?run={run_id}&account={name}&failover_member=true",
+            yaml_string(name)
+        );
+        rendered
+    })
 }
 
 fn render_provider_pool(run_id: &str, origin_address: SocketAddr, policy: Option<&PolicyContract>) -> String {
@@ -341,6 +407,7 @@ impl IsolatedFixture {
             add_xtream_output,
             input,
         )?;
+        paths.copy_extra_config_files(&bootstrap.extra_config_files, working_directory)?;
         let markers = fixture_markers(channels);
         let mut origin_cmd = Command::new(testkit_binary);
         origin_cmd
@@ -463,6 +530,7 @@ fn render_bootstrap(
         arguments: bootstrap.arguments.iter().map(|argument| render(argument)).collect(),
         readiness_url: render(&bootstrap.readiness_url),
         readiness_timeout_millis: bootstrap.readiness_timeout_millis,
+        extra_config_files: bootstrap.extra_config_files.clone(),
     })
 }
 
@@ -564,6 +632,7 @@ mod tests {
             arguments: Vec::new(),
             readiness_url: "http://127.0.0.1:1/ready".to_owned(),
             readiness_timeout_millis: 5_000,
+            extra_config_files: Vec::new(),
         };
         let started_at = tokio::time::Instant::now();
         let result = IsolatedSut::start(&config, Path::new("/tmp")).await;
@@ -604,6 +673,7 @@ mod tests {
             &FixtureInputPlan {
                 input_type: crate::config::FixtureInputType::M3u,
                 stalker: &crate::config::FixtureStalker::default(),
+                failover_inputs: &[],
             },
         )?;
         let config = std::fs::read_to_string(&fixture.config_file)?;
@@ -642,6 +712,7 @@ mod tests {
         FixtureInputPlan {
             input_type: crate::config::FixtureInputType::M3u,
             stalker: Box::leak(Box::new(crate::config::FixtureStalker::default())),
+            failover_inputs: &[],
         }
     }
 
@@ -654,7 +725,11 @@ mod tests {
             refuse_create_link_markers: vec![19],
             separate_descriptor_command: false,
         };
-        let plan = FixtureInputPlan { input_type: crate::config::FixtureInputType::Stalker, stalker: &stalker };
+        let plan = FixtureInputPlan {
+            input_type: crate::config::FixtureInputType::Stalker,
+            stalker: &stalker,
+            failover_inputs: &[],
+        };
         let source = render_sources(
             "run",
             "127.0.0.1:9910".parse().unwrap(),
@@ -701,5 +776,118 @@ mod tests {
             render_sources("run", "127.0.0.1:9910".parse().unwrap(), &HashMap::new(), None, &opts, false, &m3u_input());
         assert!(!source.contains("type: xtream"));
         assert!(source.contains("mpeg_ts: true"));
+    }
+
+    fn fixture_paths_for_tests() -> Result<FixturePaths, TestkitError> {
+        FixturePaths::create(
+            "extra-files-run",
+            "127.0.0.1:9910".parse::<SocketAddr>().map_err(|error| TestkitError::Configuration(error.to_string()))?,
+            "127.0.0.1:8901".parse::<SocketAddr>().map_err(|error| TestkitError::Configuration(error.to_string()))?,
+            None,
+            &HashMap::new(),
+            &crate::config::FixtureStreamOptions::default(),
+            false,
+            &m3u_input(),
+        )
+    }
+
+    #[test]
+    fn bootstrap_copies_extra_config_files() -> Result<(), TestkitError> {
+        let source_root = tempfile::tempdir()?;
+        std::fs::create_dir_all(source_root.path().join("fixtures"))?;
+        std::fs::write(source_root.path().join("fixtures/override.yml"), "version: 1\ntargets: []\n")?;
+        let paths = fixture_paths_for_tests()?;
+        let files = [ExtraConfigFile {
+            source: "fixtures/override.yml".to_owned(),
+            destination: "failover.d/testkit.yml".to_owned(),
+        }];
+
+        paths.copy_extra_config_files(&files, source_root.path())?;
+
+        let copied = std::fs::read_to_string(paths.root.join("failover.d/testkit.yml"))?;
+        assert_eq!(copied, "version: 1\ntargets: []\n");
+        Ok(())
+    }
+
+    #[test]
+    fn extra_config_files_cannot_leave_the_config_directory() -> Result<(), TestkitError> {
+        let source_root = tempfile::tempdir()?;
+        std::fs::write(source_root.path().join("override.yml"), "version: 1\n")?;
+        let paths = fixture_paths_for_tests()?;
+        for destination in ["../escape.yml", "/tmp/escape.yml", ""] {
+            let files = [ExtraConfigFile { source: "override.yml".to_owned(), destination: destination.to_owned() }];
+            assert!(
+                paths.copy_extra_config_files(&files, source_root.path()).is_err(),
+                "destination {destination:?} must be rejected"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn extra_config_file_sources_cannot_leave_the_scenario_directory() -> Result<(), TestkitError> {
+        let source_root = tempfile::tempdir()?;
+        let paths = fixture_paths_for_tests()?;
+        for source in ["../escape.yml", "/etc/hostname", ""] {
+            let files = [ExtraConfigFile { source: source.to_owned(), destination: "failover.d/a.yml".to_owned() }];
+            assert!(
+                paths.copy_extra_config_files(&files, source_root.path()).is_err(),
+                "source {source:?} must be rejected"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_extra_config_file_source_is_a_configuration_error() -> Result<(), TestkitError> {
+        let source_root = tempfile::tempdir()?;
+        let paths = fixture_paths_for_tests()?;
+        let files = [ExtraConfigFile { source: "absent.yml".to_owned(), destination: "failover.d/a.yml".to_owned() }];
+        assert!(matches!(
+            paths.copy_extra_config_files(&files, source_root.path()),
+            Err(TestkitError::Configuration(message)) if message.contains("absent.yml")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn failover_inputs_render_one_member_account_input_each_and_enable_the_target() {
+        let names = ["input-a".to_owned(), "input-b".to_owned()];
+        let plan = FixtureInputPlan {
+            input_type: crate::config::FixtureInputType::M3u,
+            stalker: &crate::config::FixtureStalker::default(),
+            failover_inputs: &names,
+        };
+        let source = render_sources(
+            "run",
+            "127.0.0.1:9910".parse().unwrap(),
+            &HashMap::new(),
+            None,
+            &crate::config::FixtureStreamOptions::default(),
+            false,
+            &plan,
+        );
+
+        assert!(source.contains("  - name: 'input-a'\n    type: m3u\n"), "{source}");
+        assert!(source.contains("account=input-a&failover_member=true"), "{source}");
+        assert!(source.contains("account=input-b&failover_member=true"), "{source}");
+        assert!(source.contains("  - inputs:\n      - 'input-a'\n      - 'input-b'\n    targets:"), "{source}");
+        assert!(source.contains("failover_groups:\n            enabled: true\n"), "{source}");
+        assert!(!source.contains("testkit-origin"), "{source}");
+    }
+
+    #[test]
+    fn single_input_fixture_keeps_failover_groups_off() {
+        let source = render_sources(
+            "run",
+            "127.0.0.1:9910".parse().unwrap(),
+            &HashMap::new(),
+            None,
+            &crate::config::FixtureStreamOptions::default(),
+            false,
+            &m3u_input(),
+        );
+        assert!(source.contains("      - testkit-origin\n"), "{source}");
+        assert!(!source.contains("failover_groups"), "{source}");
     }
 }

@@ -1,4 +1,4 @@
-use super::{ManualUpdateEnqueueError, PLAYLIST_UPDATE_STATUS_READ_CONCURRENCY};
+use super::{error::QUEUE_BUSY_MESSAGE, ManualUpdateEnqueueError, PLAYLIST_UPDATE_STATUS_READ_CONCURRENCY};
 use crate::{
     api::{
         auth_middleware::{check_permission, VerifiedClaims},
@@ -21,7 +21,7 @@ use shared::{
 };
 use std::sync::Arc;
 
-fn enqueue_manual_playlist_update(
+pub(in crate::api) fn enqueue_manual_playlist_update(
     sender: &tokio::sync::mpsc::Sender<crate::api::model::ManualPlaylistUpdateRequest>,
     targets: Arc<ProcessTargets>,
     input_action: Option<InputUpdateRequest>,
@@ -77,11 +77,7 @@ pub(super) async fn playlist_update(
                 }
                 Err(ManualUpdateEnqueueError::Busy) => {
                     debug!("Manual playlist update rejected: another update is already queued");
-                    (
-                        axum::http::StatusCode::CONFLICT,
-                        axum::Json(json!({"error": "Another playlist update is already queued; retry this request"})),
-                    )
-                        .into_response()
+                    (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error": QUEUE_BUSY_MESSAGE}))).into_response()
                 }
                 Err(ManualUpdateEnqueueError::Unavailable) => {
                     debug!("Manual playlist update rejected: worker channel closed (server shutting down)");
@@ -96,7 +92,7 @@ pub(super) async fn playlist_update(
     }
 }
 
-pub(super) fn resolve_manual_playlist_update_targets(
+pub(in crate::api) fn resolve_manual_playlist_update_targets(
     sources: &SourcesConfig,
     request: &PlaylistUpdateRequestDto,
 ) -> Result<ProcessTargets, TuliproxError> {

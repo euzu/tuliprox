@@ -71,3 +71,12 @@ fn maintenance_changed_requires_maintenance_read() {
     );
     assert_eq!(EventKind::MaintenanceChanged.as_wire_name(), "maintenance.changed");
 }
+
+#[test]
+fn failover_overrides_changed_needs_playlist_read() {
+    assert_eq!(
+        EventKind::FailoverOverridesChanged.required_permission(),
+        crate::model::permission::Permission::PlaylistRead
+    );
+    assert_eq!(EventKind::FailoverOverridesChanged.as_wire_name(), "failover.overrides_changed");
+}

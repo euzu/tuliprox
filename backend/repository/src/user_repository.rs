@@ -673,6 +673,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             }))),
@@ -681,6 +682,7 @@ mod tests {
             access_token_secret: Default::default(),
             encrypt_secret: Default::default(),
             media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
         };
         let target_user = vec![user];
         store_api_user(&cfg, &target_user).await.expect("the users must be stored");
@@ -728,6 +730,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             }))),
@@ -736,6 +739,7 @@ mod tests {
             access_token_secret: Default::default(),
             encrypt_secret: Default::default(),
             media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
         };
 
         let db_path = get_api_user_db_path(&cfg);
@@ -768,6 +772,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             }))),
@@ -776,6 +781,7 @@ mod tests {
             access_token_secret: Default::default(),
             encrypt_secret: Default::default(),
             media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
         };
 
         save_xtream_user_bouquet_for_target(&app_config, "target", dir.path(), XtreamCluster::Live, None)

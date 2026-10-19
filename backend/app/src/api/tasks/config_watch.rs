@@ -8,7 +8,7 @@ use crate::{
     utils::is_directory,
 };
 use arc_swap::{access::Access, ArcSwap};
-use log::{error, info};
+use log::{error, info, warn};
 use notify::{
     event::{AccessKind, AccessMode},
     recommended_watcher, EventKind, RecursiveMode, Watcher,
@@ -24,6 +24,7 @@ use std::{
     sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::utils::FailoverSource;
 
 #[allow(clippy::too_many_lines)]
 fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToken) -> Result<(), TuliproxError> {
@@ -34,7 +35,14 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_state.app_config.paths);
     let mapping_file_path = paths.mapping_file_path.as_ref().map_or_else(String::new, ToString::to_string);
     let template_file_path = paths.template_file_path.as_ref().map_or_else(String::new, ToString::to_string);
-    let files = get_watch_files(app_state, &paths, mapping_file_path.as_str(), template_file_path.as_str());
+    let failover_source = app_state.app_config.failover.load_full().source.clone();
+    let files = get_watch_files(
+        app_state,
+        &paths,
+        mapping_file_path.as_str(),
+        template_file_path.as_str(),
+        failover_source.as_ref(),
+    );
     //
     // // Add a path to be watched. All files and directories at that path and
     // // below will be monitored for changes.
@@ -44,6 +52,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     let settings_root = normalized_watch_path(path, &working_dir).join("user_settings");
     let recursive_mode = if (!mapping_file_path.is_empty() && utils::is_directory(&mapping_file_path))
         || (!template_file_path.is_empty() && utils::is_directory(&template_file_path))
+        || failover_source.as_ref().is_some_and(FailoverSource::is_directory)
     {
         RecursiveMode::Recursive
     } else {
@@ -66,6 +75,14 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
         .watch(path, recursive_mode)
         .map_err(|err| TuliproxError::Io(format!("Failed to start config file watcher {err}")))?;
     info!("Watching config file changes {}", path.display());
+    if let Some((extra_path, extra_mode)) =
+        failover_source.as_ref().and_then(|source| extra_failover_watch(source, path, recursive_mode, &working_dir))
+    {
+        match watcher.watch(&extra_path, extra_mode) {
+            Ok(()) => info!("Watching failover file changes {}", extra_path.display()),
+            Err(err) => warn!("Failed to watch failover path {}: {err}", extra_path.display()),
+        }
+    }
 
     let event_manager = Arc::clone(&app_state.event_manager);
     let cancel = cancel_token.clone();
@@ -119,19 +136,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                             let mut trigger = false;
                             for path in event.paths {
                                 if is_settings_path(&path, &settings_root, &working_dir) { continue; }
-                                let mut resolved = None;
-                                if let Some((config_file, _is_dir)) = files.get(&path) {
-                                    resolved = Some(*config_file);
-                                } else if recursive_mode == RecursiveMode::Recursive && path.extension().is_some_and(|ext| ext == "yml") {
-                                    for (key, (config_file, is_dir)) in &files {
-                                        if *is_dir && path.starts_with(key) {
-                                            resolved = Some(*config_file);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if let Some(config_file) = resolved {
+                                if let Some(config_file) = resolve_watched_config_file(&path, &files) {
                                     // Consolidate updates
                                     let effective = if config_file == ConfigFile::SourceFile { ConfigFile::Sources } else { config_file };
                                     pending_configs.entry(effective).or_default().insert(path);
@@ -153,8 +158,8 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                 timer_active = false;
                 if !pending_configs.is_empty() {
                     for (config_file, paths) in pending_configs.drain() {
-                        if config_file == ConfigFile::Sources
-                            && !has_external_source_write(&watcher_app_state.app_config.file_locks, &paths).await
+                        if skips_internal_writes(config_file)
+                            && !has_external_write(&watcher_app_state.app_config.file_locks, &paths).await
                         {
                             continue;
                         }
@@ -175,7 +180,53 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     Ok(())
 }
 
-async fn has_external_source_write(file_locks: &crate::utils::FileLockManager, paths: &HashSet<PathBuf>) -> bool {
+/// Files the server rewrites itself and records via `mark_internal_write_content`.
+const fn skips_internal_writes(config_file: ConfigFile) -> bool {
+    matches!(config_file, ConfigFile::Sources | ConfigFile::Failover)
+}
+
+/// Maps a changed path to the config file it belongs to: an exact match, or a `.yml` / `.yaml` file
+/// below a watched directory (mapping, template or failover directory).
+fn resolve_watched_config_file(path: &Path, files: &HashMap<PathBuf, (ConfigFile, bool)>) -> Option<ConfigFile> {
+    if let Some((config_file, _is_dir)) = files.get(path) {
+        return Some(*config_file);
+    }
+    if !path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+        return None;
+    }
+    files.iter().find(|(key, (_, is_dir))| *is_dir && path.starts_with(key)).map(|(_, (config_file, _))| *config_file)
+}
+
+/// Where an additional watch is needed so the failover files are observed, if the config directory watch does not
+/// already cover them. A file needs its parent directory, a directory is watched recursively.
+fn extra_failover_watch(
+    source: &FailoverSource,
+    config_dir: &Path,
+    config_mode: RecursiveMode,
+    working_dir: &Path,
+) -> Option<(PathBuf, RecursiveMode)> {
+    let path = source.path();
+    let config_dir = normalized_watch_path(config_dir, working_dir);
+    let absolute = normalized_watch_path(path, working_dir);
+    if source.is_directory() {
+        // The config watch is recursive whenever the failover source is a directory.
+        return if absolute.starts_with(&config_dir) {
+            None
+        } else {
+            Some((path.to_path_buf(), RecursiveMode::Recursive))
+        };
+    }
+    let parent = absolute.parent();
+    let covered = parent == Some(config_dir.as_ref())
+        || (config_mode == RecursiveMode::Recursive && absolute.starts_with(&config_dir));
+    if covered {
+        return None;
+    }
+    let watch_parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    Some((watch_parent.to_path_buf(), RecursiveMode::NonRecursive))
+}
+
+async fn has_external_write(file_locks: &crate::utils::FileLockManager, paths: &HashSet<PathBuf>) -> bool {
     for path in paths {
         let _guard = file_locks.read_lock(path).await;
         if !file_locks.is_internal_write_revision(path).await {
@@ -196,6 +247,7 @@ fn get_watch_files(
     paths: &ConfigPaths,
     mapping_file_path: &str,
     template_file_path: &str,
+    failover_source: Option<&FailoverSource>,
 ) -> HashMap<PathBuf, (ConfigFile, bool)> {
     let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_state.app_config.sources);
     let input_files_paths = sources.get_input_files();
@@ -215,6 +267,9 @@ fn get_watch_files(
     for path in input_files_paths {
         files.insert(path, (ConfigFile::SourceFile, false));
     }
+    if let Some(source) = failover_source {
+        files.insert(source.path().to_path_buf(), (ConfigFile::Failover, source.is_directory()));
+    }
     files
 }
 
@@ -233,9 +288,97 @@ pub fn exec_config_watch(app_state: &Arc<AppState>, cancel: &CancellationToken) 
 
 #[cfg(test)]
 mod tests {
-    use super::{format_paths, has_external_source_write};
-    use crate::utils::FileLockManager;
-    use std::{collections::HashSet, path::PathBuf};
+    use super::{
+        extra_failover_watch, format_paths, has_external_write, resolve_watched_config_file, skips_internal_writes,
+    };
+    use crate::{api::config_file::ConfigFile, utils::FileLockManager};
+    use notify::RecursiveMode;
+    use std::{
+        collections::{HashMap, HashSet},
+        path::{Path, PathBuf},
+    };
+    use tuliprox_core::utils::FailoverSource;
+
+    fn watched_files() -> HashMap<PathBuf, (ConfigFile, bool)> {
+        HashMap::from([
+            (PathBuf::from("/c/config.yml"), (ConfigFile::Config, false)),
+            (PathBuf::from("/c/mapping.d"), (ConfigFile::Mapping, true)),
+            (PathBuf::from("/c/failover.d"), (ConfigFile::Failover, true)),
+            (PathBuf::from("/c/failover.yml"), (ConfigFile::Failover, false)),
+        ])
+    }
+
+    #[test]
+    fn yaml_extension_in_watched_dir_resolves_config_file() {
+        let files = watched_files();
+        for (path, expected) in [
+            ("/c/failover.d/a.yml", Some(ConfigFile::Failover)),
+            ("/c/failover.d/nested/b.yaml", Some(ConfigFile::Failover)),
+            ("/c/mapping.d/m.yaml", Some(ConfigFile::Mapping)),
+            ("/c/failover.d/notes.txt", None),
+            ("/c/failover.d/.a.yml.swp", None),
+            ("/c/elsewhere/a.yaml", None),
+            ("/c/config.yml", Some(ConfigFile::Config)),
+            ("/c/failover.yml", Some(ConfigFile::Failover)),
+        ] {
+            assert_eq!(resolve_watched_config_file(Path::new(path), &files), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn only_server_written_files_skip_internal_writes() {
+        assert!(skips_internal_writes(ConfigFile::Failover));
+        assert!(skips_internal_writes(ConfigFile::Sources));
+        assert!(!skips_internal_writes(ConfigFile::Mapping));
+        assert!(!skips_internal_writes(ConfigFile::Config));
+    }
+
+    #[test]
+    fn failover_inside_the_config_dir_needs_no_extra_watch() {
+        let work = Path::new("/w");
+        let config = Path::new("/c");
+        let file = FailoverSource::File(PathBuf::from("/c/failover.yml"));
+        assert_eq!(extra_failover_watch(&file, config, RecursiveMode::NonRecursive, work), None);
+        let dir = FailoverSource::Directory(PathBuf::from("/c/failover.d"));
+        assert_eq!(extra_failover_watch(&dir, config, RecursiveMode::Recursive, work), None);
+        let nested = FailoverSource::File(PathBuf::from("/c/sub/failover.yml"));
+        assert_eq!(extra_failover_watch(&nested, config, RecursiveMode::Recursive, work), None);
+    }
+
+    #[test]
+    fn failover_outside_the_config_dir_gets_its_own_watch() {
+        let work = Path::new("/w");
+        let config = Path::new("/c");
+        let file = FailoverSource::File(PathBuf::from("/data/failover.yml"));
+        assert_eq!(
+            extra_failover_watch(&file, config, RecursiveMode::NonRecursive, work),
+            Some((PathBuf::from("/data"), RecursiveMode::NonRecursive))
+        );
+        let dir = FailoverSource::Directory(PathBuf::from("/data/failover.d"));
+        assert_eq!(
+            extra_failover_watch(&dir, config, RecursiveMode::Recursive, work),
+            Some((PathBuf::from("/data/failover.d"), RecursiveMode::Recursive))
+        );
+        // A file in a subdirectory is not seen by a non-recursive config watch.
+        let nested = FailoverSource::File(PathBuf::from("/c/sub/failover.yml"));
+        assert_eq!(
+            extra_failover_watch(&nested, config, RecursiveMode::NonRecursive, work),
+            Some((PathBuf::from("/c/sub"), RecursiveMode::NonRecursive))
+        );
+    }
+
+    #[test]
+    fn relative_failover_paths_are_compared_against_the_working_dir() {
+        let work = Path::new("/w");
+        let config = Path::new("config");
+        let file = FailoverSource::File(PathBuf::from("config/failover.yml"));
+        assert_eq!(extra_failover_watch(&file, config, RecursiveMode::NonRecursive, work), None);
+        let bare = FailoverSource::File(PathBuf::from("failover.yml"));
+        assert_eq!(
+            extra_failover_watch(&bare, config, RecursiveMode::NonRecursive, work),
+            Some((PathBuf::from("."), RecursiveMode::NonRecursive))
+        );
+    }
 
     #[test]
     fn pending_paths_are_formatted_completely_and_deterministically() {
@@ -255,9 +398,9 @@ mod tests {
         locks.mark_internal_write_content(&internal, &tokio::fs::read(&internal).await?).await;
         let paths = HashSet::from([internal, external.clone()]);
 
-        assert!(has_external_source_write(&locks, &paths).await);
+        assert!(has_external_write(&locks, &paths).await);
         locks.mark_internal_write_content(&external, &tokio::fs::read(&external).await?).await;
-        assert!(!has_external_source_write(&locks, &paths).await);
+        assert!(!has_external_write(&locks, &paths).await);
         Ok(())
     }
 }

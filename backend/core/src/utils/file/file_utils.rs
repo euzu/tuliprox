@@ -3,8 +3,8 @@ use log::{debug, error, trace, warn};
 use path_clean::PathClean;
 use shared::{
     defaults::{
-        API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_WEB_DIR, MAPPING_FILE, SOURCE_FILE, TEMPLATE_FILE, USER_FILE,
-        USER_GROUP_FILE,
+        API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_WEB_DIR, FAILOVER_DIR, FAILOVER_FILE, MAPPING_FILE,
+        SOURCE_FILE, TEMPLATE_FILE, USER_FILE, USER_GROUP_FILE,
     },
     error::str_to_io_error,
     utils::{DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_ROOT_ENV_VAR},
@@ -107,6 +107,9 @@ pub fn get_default_mappings_path(config_path: &str) -> String { get_default_file
 #[inline]
 pub fn get_default_templates_path(config_path: &str) -> String { get_default_file_path(config_path, TEMPLATE_FILE) }
 
+#[inline]
+pub fn get_default_failover_path(config_path: &str) -> String { get_default_file_path(config_path, FAILOVER_FILE) }
+
 fn resolve_config_scoped_path(config_path: &str, candidate: &str) -> String {
     let candidate_path = PathBuf::from(candidate.trim()).clean();
     if candidate_path.is_absolute() {
@@ -123,6 +126,55 @@ fn resolve_config_scoped_path(config_path: &str, candidate: &str) -> String {
     };
 
     config_dir.join(relative).clean().to_string_lossy().to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailoverSource {
+    File(PathBuf),
+    Directory(PathBuf),
+}
+
+impl FailoverSource {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::File(path) | Self::Directory(path) => path,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_directory(&self) -> bool { matches!(self, Self::Directory(_)) }
+}
+
+/// Resolves where the failover overrides live. A configured path (CLI value first, then `failover_path`) wins and is
+/// resolved against the config dir. Without one, `failover.yml` is preferred, then `failover.d/`, else `failover.yml`.
+pub fn resolve_failover_path(config_path: &str, configured: Option<&str>) -> FailoverSource {
+    if let Some(configured) = configured.map(str::trim).filter(|path| !path.is_empty()) {
+        let resolved = PathBuf::from(resolve_config_scoped_path(config_path, configured));
+        let looks_like_directory = resolved.is_dir()
+            || configured.ends_with('/')
+            || configured.ends_with('\\')
+            || resolved.extension().is_some_and(|ext| ext == "d");
+        return if looks_like_directory { FailoverSource::Directory(resolved) } else { FailoverSource::File(resolved) };
+    }
+
+    let default_file = PathBuf::from(get_default_failover_path(config_path));
+    let default_dir = PathBuf::from(get_default_file_path(config_path, FAILOVER_DIR));
+    if default_file.is_file() {
+        if default_dir.is_dir() {
+            warn!(
+                "Both {} and {} exist, ignoring directory {}",
+                default_file.display(),
+                default_dir.display(),
+                default_dir.display()
+            );
+        }
+        FailoverSource::File(default_file)
+    } else if default_dir.is_dir() {
+        FailoverSource::Directory(default_dir)
+    } else {
+        FailoverSource::File(default_file)
+    }
 }
 
 #[inline]
@@ -414,17 +466,35 @@ where
     Ok(())
 }
 
-pub fn collect_yaml_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut files = vec![];
-    let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
-        if metadata.is_file() {
-            let file_path = entry.path();
-            if file_path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
-                files.push(file_path);
-            }
+fn is_ignored_config_entry_name(name: &str) -> bool {
+    name.starts_with('.')
+        || name.ends_with('~')
+        || Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("swp"))
+}
+
+fn collect_config_yaml_files_into(path: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(is_ignored_config_entry_name) {
+            continue;
         }
-    };
-    traverse_dir(path, &mut visit)?;
+        let entry_path = entry.path();
+        if entry.metadata()?.is_dir() {
+            collect_config_yaml_files_into(&entry_path, files)?;
+        } else if entry_path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+            files.push(entry_path);
+        }
+    }
+    Ok(())
+}
+
+/// Collects all `.yml`/`.yaml` files below `path` (recursive), ignoring hidden entries and editor temp files.
+/// The result is sorted by file name, ties are broken by the full path.
+pub fn collect_config_yaml_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = vec![];
+    collect_config_yaml_files_into(path, &mut files)?;
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then_with(|| a.cmp(b)));
     Ok(files)
 }
 
@@ -552,8 +622,8 @@ pub fn get_file_extension(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_yaml_files, normalize_string_path, resolve_mapping_file_path, resolve_template_file_path,
-        resolve_template_persist_file_path,
+        collect_config_yaml_files, normalize_string_path, resolve_failover_path, resolve_mapping_file_path,
+        resolve_template_file_path, resolve_template_persist_file_path, FailoverSource,
     };
     use std::path::PathBuf;
 
@@ -626,13 +696,99 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_yaml_files_accepts_both_extensions() {
+    fn collect_config_yaml_files_reads_yaml_and_yml_recursively() {
         let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("nested").join("deeper")).unwrap();
         std::fs::write(temp_dir.path().join("one.yml"), "").unwrap();
         std::fs::write(temp_dir.path().join("two.yaml"), "").unwrap();
         std::fs::write(temp_dir.path().join("ignored.txt"), "").unwrap();
+        std::fs::write(temp_dir.path().join("nested").join("three.yml"), "").unwrap();
+        std::fs::write(temp_dir.path().join("nested").join("deeper").join("four.yaml"), "").unwrap();
 
-        let files = collect_yaml_files(temp_dir.path()).unwrap();
-        assert_eq!(files.len(), 2);
+        let files = collect_config_yaml_files(temp_dir.path()).unwrap();
+        let names: Vec<_> =
+            files.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["four.yaml", "one.yml", "three.yml", "two.yaml"]);
+    }
+
+    #[test]
+    fn collect_config_yaml_files_sorts_and_skips_hidden_and_temp() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden_dir")).unwrap();
+        std::fs::write(root.join("b").join("a.yml"), "").unwrap();
+        std::fs::write(root.join("a.yml"), "").unwrap();
+        std::fs::write(root.join("c.yml"), "").unwrap();
+        std::fs::write(root.join(".dot.yml"), "").unwrap();
+        std::fs::write(root.join("backup.yml~"), "").unwrap();
+        std::fs::write(root.join("edit.yml.swp"), "").unwrap();
+        std::fs::write(root.join(".hidden_dir").join("x.yml"), "").unwrap();
+
+        let files = collect_config_yaml_files(root).unwrap();
+        // sorted by file name first, full path breaks the tie between the two `a.yml`
+        assert_eq!(files, vec![root.join("a.yml"), root.join("b").join("a.yml"), root.join("c.yml")]);
+    }
+
+    #[test]
+    fn resolve_failover_prefers_file_then_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().to_string_lossy().to_string();
+        std::fs::create_dir_all(temp_dir.path().join("failover.d")).unwrap();
+        assert_eq!(
+            resolve_failover_path(&config_path, None),
+            FailoverSource::Directory(temp_dir.path().join("failover.d"))
+        );
+
+        std::fs::write(temp_dir.path().join("failover.yml"), "").unwrap();
+        assert_eq!(
+            resolve_failover_path(&config_path, None),
+            FailoverSource::File(temp_dir.path().join("failover.yml"))
+        );
+    }
+
+    #[test]
+    fn resolve_failover_configured_dir_and_relative_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().to_string_lossy().to_string();
+        std::fs::create_dir_all(temp_dir.path().join("existing")).unwrap();
+        std::fs::write(temp_dir.path().join("failover.yml"), "").unwrap();
+
+        // configured wins over the default file, relative paths are resolved against the config dir
+        assert_eq!(
+            resolve_failover_path(&config_path, Some("existing")),
+            FailoverSource::Directory(temp_dir.path().join("existing"))
+        );
+        assert_eq!(
+            resolve_failover_path(&config_path, Some("overrides.d")),
+            FailoverSource::Directory(temp_dir.path().join("overrides.d"))
+        );
+        assert_eq!(
+            resolve_failover_path(&config_path, Some("overrides/")),
+            FailoverSource::Directory(temp_dir.path().join("overrides"))
+        );
+        assert_eq!(
+            resolve_failover_path(&config_path, Some("custom.yml")),
+            FailoverSource::File(temp_dir.path().join("custom.yml"))
+        );
+        let absolute = temp_dir.path().join("abs.yml");
+        assert_eq!(
+            resolve_failover_path(&config_path, Some(absolute.to_string_lossy().as_ref())),
+            FailoverSource::File(absolute)
+        );
+    }
+
+    #[test]
+    fn resolve_failover_defaults_to_file_when_nothing_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().to_string_lossy().to_string();
+        assert_eq!(
+            resolve_failover_path(&config_path, None),
+            FailoverSource::File(temp_dir.path().join("failover.yml"))
+        );
+        assert_eq!(
+            resolve_failover_path(&config_path, Some("  ")),
+            FailoverSource::File(temp_dir.path().join("failover.yml"))
+        );
     }
 }

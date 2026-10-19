@@ -1,4 +1,4 @@
-use crate::{ChannelGroupRecord, PlaylistStorageState};
+use crate::{FailoverGroupRecord, PlaylistStorageState};
 use shared::{
     model::{M3uPlaylistItem, VirtualId, XtreamPlaylistItem},
     utils::Internable,
@@ -9,14 +9,14 @@ use tuliprox_core::model::{AppConfig, ConfigTarget};
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedStreamTarget {
     Item,
-    Group(Arc<ChannelGroupRecord>),
-    Member { group: Arc<ChannelGroupRecord>, index: usize },
+    Group(Arc<FailoverGroupRecord>),
+    Member { group: Arc<FailoverGroupRecord>, index: usize },
 }
 
-/// Whether `target` resolves channel groups at all. Targets without them skip every group lookup.
+/// Whether `target` resolves failover groups at all. Targets without them skip every group lookup.
 #[must_use]
-pub fn channel_groups_enabled(target: &ConfigTarget) -> bool {
-    target.options.as_ref().and_then(|options| options.channel_groups.as_ref()).is_some_and(|groups| groups.enabled)
+pub fn failover_groups_enabled(target: &ConfigTarget) -> bool {
+    target.options.as_ref().and_then(|options| options.failover_groups.as_ref()).is_some_and(|groups| groups.enabled)
 }
 
 pub async fn classify_virtual_id(
@@ -25,10 +25,10 @@ pub async fn classify_virtual_id(
     target: &ConfigTarget,
     vid: VirtualId,
 ) -> ResolvedStreamTarget {
-    if !channel_groups_enabled(target) {
+    if !failover_groups_enabled(target) {
         return ResolvedStreamTarget::Item;
     }
-    let target_data = playlists.channel_groups.get_or_load(app_config, playlists, target).await;
+    let target_data = playlists.failover_groups.get_or_load(app_config, playlists, target).await;
     if let Some(group) = target_data.groups.get(&vid) {
         return ResolvedStreamTarget::Group(Arc::clone(group));
     }
@@ -46,7 +46,7 @@ pub async fn classify_virtual_id(
 }
 
 #[must_use]
-pub fn member_to_xtream_item(group: &ChannelGroupRecord, index: usize, target: &ConfigTarget) -> XtreamPlaylistItem {
+pub fn member_to_xtream_item(group: &FailoverGroupRecord, index: usize, target: &ConfigTarget) -> XtreamPlaylistItem {
     let _ = target;
     let member = &group.members[index];
     XtreamPlaylistItem {
@@ -74,7 +74,7 @@ pub fn member_to_xtream_item(group: &ChannelGroupRecord, index: usize, target: &
 }
 
 #[must_use]
-pub fn member_to_m3u_item(group: &ChannelGroupRecord, index: usize, target: &ConfigTarget) -> M3uPlaylistItem {
+pub fn member_to_m3u_item(group: &FailoverGroupRecord, index: usize, target: &ConfigTarget) -> M3uPlaylistItem {
     let _ = target;
     let member = &group.members[index];
     M3uPlaylistItem {
@@ -109,12 +109,12 @@ pub fn member_to_m3u_item(group: &ChannelGroupRecord, index: usize, target: &Con
 mod tests {
     use super::*;
     use crate::{
-        persist_playlist_views_with_groups, ChannelGroupOrigin, ChannelGroupStore, PendingChannelGroup,
-        PlaylistStorageState, TargetPlaylistPersistOptions,
+        persist_playlist_views_with_groups, FailoverGroupBatch, FailoverGroupOrigin, FailoverGroupStore,
+        PendingFailoverGroup, PlaylistStorageState, TargetPlaylistPersistOptions,
     };
     use arc_swap::ArcSwap;
     use shared::model::{
-        ChannelGroupPolicy, ConfigPaths, ConfigTargetDto, M3uTargetOutputDto, PlaylistGroup, PlaylistItem,
+        ConfigPaths, ConfigTargetDto, FailoverGroupPolicy, M3uTargetOutputDto, PlaylistGroup, PlaylistItem,
         PlaylistItemHeader, PlaylistItemType, TargetOutputDto, UUIDType, XtreamCluster,
     };
     use std::path::PathBuf;
@@ -142,7 +142,7 @@ mod tests {
                 &self.target,
                 Some(&self.playlists),
                 TargetPlaylistPersistOptions::default(),
-                &mut [],
+                &mut FailoverGroupBatch::default(),
             )
             .await
             .expect("republished");
@@ -169,6 +169,7 @@ mod tests {
                 mapping_files_used: None,
                 template_file_path: None,
                 template_files_used: None,
+                failover_file_path: None,
                 api_proxy_file_path: String::new(),
                 custom_stream_response_path: None,
             })),
@@ -176,6 +177,7 @@ mod tests {
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
             media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::new()),
+            failover: Arc::default(),
         })
     }
 
@@ -184,7 +186,7 @@ mod tests {
         crate::get_target_storage_path(&config, &target.name).expect("target storage path")
     }
 
-    fn grouped_fixture() -> (Vec<PlaylistGroup>, Vec<PendingChannelGroup>) {
+    fn grouped_fixture() -> (Vec<PlaylistGroup>, FailoverGroupBatch) {
         let group_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000001");
         let group_channel = PlaylistItem {
             header: PlaylistItemHeader {
@@ -198,7 +200,7 @@ mod tests {
                 input_name: "korath".intern(),
                 item_type: PlaylistItemType::Live,
                 xtream_cluster: XtreamCluster::Live,
-                channel_group_uuid: Some(group_uuid),
+                failover_group_uuid: Some(group_uuid),
                 ..PlaylistItemHeader::default()
             },
         };
@@ -261,31 +263,31 @@ mod tests {
                 xtream_cluster: XtreamCluster::Live,
             },
         ];
-        let pending = vec![PendingChannelGroup {
+        let pending = FailoverGroupBatch::with_groups(vec![PendingFailoverGroup {
             group_uuid,
             key: Arc::from("bbc one"),
-            origin: ChannelGroupOrigin::Auto,
-            policy: ChannelGroupPolicy::Priority,
+            origin: FailoverGroupOrigin::Auto,
+            policy: FailoverGroupPolicy::Priority,
             members: vec![member1, member2],
             orphaned: vec![],
             epg_split: false,
-        }];
+        }]);
         (playlist, pending)
     }
 
-    fn grouped_fixture_ungrouped() -> (Vec<PlaylistGroup>, Vec<PendingChannelGroup>) {
+    fn grouped_fixture_ungrouped() -> (Vec<PlaylistGroup>, FailoverGroupBatch) {
         let (mut playlist, _) = grouped_fixture();
         playlist.remove(0);
-        (playlist, Vec::new())
+        (playlist, FailoverGroupBatch::default())
     }
 
-    fn grouped_fixture_with_favourite_copy() -> (Vec<PlaylistGroup>, Vec<PendingChannelGroup>) {
+    fn grouped_fixture_with_favourite_copy() -> (Vec<PlaylistGroup>, FailoverGroupBatch) {
         let (mut playlist, pending) = grouped_fixture();
         let group_item = &playlist[0].channels[0];
         let fav_copy = PlaylistItem {
             header: PlaylistItemHeader {
                 uuid: UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000099"),
-                channel_group_uuid: Some(group_item.header.uuid),
+                failover_group_uuid: Some(group_item.header.uuid),
                 group: "My Favourites".intern(),
                 ..group_item.header.clone()
             },
@@ -312,7 +314,7 @@ mod tests {
             ..ConfigTargetDto::default()
         });
         target.options = Some(shared::model::ConfigTargetOptions {
-            channel_groups: Some(shared::model::ChannelGroupsTargetConfig { enabled: true, ..Default::default() }),
+            failover_groups: Some(shared::model::FailoverGroupsTargetConfig { enabled: true, ..Default::default() }),
             ..Default::default()
         });
         let (mut playlist, mut pending) = grouped_fixture();
@@ -331,7 +333,7 @@ mod tests {
         let group_vid = playlist[0].channels[0].header.virtual_id;
         let plain_vid = playlist[1].channels[0].header.virtual_id;
         let path = target_path(&app_config, &target);
-        let record = ChannelGroupStore::read_group(&path, group_vid).expect("read").expect("group");
+        let record = FailoverGroupStore::read_group(&path, group_vid).expect("read").expect("group");
         let member_vids = record.members.iter().map(|m| m.member_vid).collect();
         PersistedGroupEnv {
             app_config,
@@ -358,7 +360,7 @@ mod tests {
             ..ConfigTargetDto::default()
         });
         target.options = Some(shared::model::ConfigTargetOptions {
-            channel_groups: Some(shared::model::ChannelGroupsTargetConfig { enabled: true, ..Default::default() }),
+            failover_groups: Some(shared::model::FailoverGroupsTargetConfig { enabled: true, ..Default::default() }),
             ..Default::default()
         });
         let (mut playlist, mut pending) = grouped_fixture_with_favourite_copy();
@@ -379,7 +381,7 @@ mod tests {
         let favourite_vid =
             playlist.iter().find(|g| g.title.as_ref() == "My Favourites").unwrap().channels[0].header.virtual_id;
         let path = target_path(&app_config, &target);
-        let record = ChannelGroupStore::read_group(&path, group_vid).expect("read").expect("group");
+        let record = FailoverGroupStore::read_group(&path, group_vid).expect("read").expect("group");
         let member_vids = record.members.iter().map(|m| m.member_vid).collect();
         PersistedGroupEnv { app_config, playlists, target, _dir: dir, group_vid, plain_vid, member_vids, favourite_vid }
     }

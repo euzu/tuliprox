@@ -15,7 +15,7 @@ use shared::{
         DEFAULT_RECORDING_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR,
     },
     error::TuliproxError,
-    model::{ChannelGroupsConfig, ConfigDto, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview},
+    model::{ConfigDto, FailoverGroupsConfig, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview},
     utils::set_sanitize_sensitive_info,
 };
 use std::{
@@ -85,6 +85,7 @@ pub struct Config {
     pub user_config_dir: Option<String>,
     pub mapping_path: Option<String>,
     pub template_path: Option<String>,
+    pub failover_path: Option<String>,
     pub custom_stream_response_path: Option<String>,
     pub custom_stream_response_timeout_secs: u32,
     pub custom_stream_response_enabled: bool,
@@ -115,7 +116,7 @@ pub struct Config {
     pub proxy: Option<ProxyConfig>,
     pub ipcheck: Option<IpCheckConfig>,
     pub library: Option<LibraryConfig>,
-    pub channel_groups: ChannelGroupsConfig,
+    pub failover_groups: FailoverGroupsConfig,
 }
 
 /// Resolve a configured recording directory the way `Config::prepare` does:
@@ -344,6 +345,7 @@ impl From<&ConfigDto> for Config {
             user_config_dir: dto.user_config_dir.clone(),
             mapping_path: dto.mapping_path.clone(),
             template_path: dto.template_path.clone(),
+            failover_path: dto.failover_path.clone(),
             custom_stream_response_path: dto.custom_stream_response_path.clone(),
             custom_stream_response_timeout_secs: dto.custom_stream_response_timeout_secs,
             custom_stream_response_enabled: dto.custom_stream_response_enabled,
@@ -368,7 +370,7 @@ impl From<&ConfigDto> for Config {
             proxy: dto.proxy.as_ref().map(Into::into),
             ipcheck: dto.ipcheck.as_ref().map(Into::into),
             library: dto.library.as_ref().map(Into::into),
-            channel_groups: dto.channel_groups.clone().unwrap_or_default(),
+            failover_groups: dto.failover_groups.clone().unwrap_or_default(),
         }
     }
 }

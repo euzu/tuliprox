@@ -278,17 +278,20 @@ async fn contactable_input_hides_inputs_in_maintenance() {
 }
 
 #[tokio::test]
-async fn config_reload_applies_channel_group_circuit_settings() {
+async fn config_reload_applies_failover_group_circuit_settings() {
     let state = super::create_test_app_state(Config::default());
-    let circuit = shared::model::ChannelGroupCircuitConfig {
+    let circuit = shared::model::FailoverGroupCircuitConfig {
         source_failures: 5,
-        ..shared::model::ChannelGroupCircuitConfig::default()
+        ..shared::model::FailoverGroupCircuitConfig::default()
     };
     let config = Config {
-        channel_groups: shared::model::ChannelGroupsConfig { circuit, ..shared::model::ChannelGroupsConfig::default() },
+        failover_groups: shared::model::FailoverGroupsConfig {
+            circuit,
+            ..shared::model::FailoverGroupsConfig::default()
+        },
         ..Config::default()
     };
 
     assert!(state.set_config(config).await.is_ok());
-    assert_eq!(*state.member_health.policy(), tuliprox_session::channel_group::CircuitPolicy::from(&circuit));
+    assert_eq!(*state.member_health.policy(), tuliprox_session::failover_group::CircuitPolicy::from(&circuit));
 }

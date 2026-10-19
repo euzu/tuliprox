@@ -104,6 +104,7 @@ pub(in crate::refresh::tests) fn test_app_config() -> Arc<AppConfig> {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -111,6 +112,7 @@ pub(in crate::refresh::tests) fn test_app_config() -> Arc<AppConfig> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::default()),
+        failover: Arc::default(),
     })
 }
 

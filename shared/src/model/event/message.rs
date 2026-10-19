@@ -102,28 +102,32 @@ pub enum EventMessage {
     /// without being woken by every successful sign-in.
     AuthAudit(AuthAuditEvent),
 
-    ChannelGroupMemberSelected {
+    FailoverGroupMemberSelected {
         target_id: u16,
         group_vid: u32,
         member_vid: u32,
         tier: CapacityTier,
     },
-    ChannelGroupExhausted {
+    FailoverGroupExhausted {
         target_id: u16,
         group_vid: u32,
     },
-    ChannelGroupCircuitChanged {
+    FailoverGroupCircuitChanged {
         input_name: Arc<str>,
         input_stream_id: Arc<str>,
         state: CircuitState,
     },
     /// A running group stream continued on another member.
-    ChannelGroupMemberSwitched {
+    FailoverGroupMemberSwitched {
         target_id: u16,
         group_vid: u32,
         from_member_vid: u32,
         to_member_vid: u32,
         reason: SwitchReason,
+    },
+    /// Failover override files were reloaded and these targets' sections were added, changed or removed.
+    FailoverOverridesChanged {
+        targets: Vec<String>,
     },
 }
 
@@ -195,10 +199,11 @@ impl EventMessage {
                 AuthAuditOutcome::SignInThrottled => EventKind::AuthSignInThrottled,
                 AuthAuditOutcome::PermissionDenied => EventKind::AuthPermissionDenied,
             },
-            Self::ChannelGroupMemberSelected { .. } => EventKind::ChannelGroupMemberSelected,
-            Self::ChannelGroupExhausted { .. } => EventKind::ChannelGroupExhausted,
-            Self::ChannelGroupCircuitChanged { .. } => EventKind::ChannelGroupCircuitChanged,
-            Self::ChannelGroupMemberSwitched { .. } => EventKind::ChannelGroupMemberSwitched,
+            Self::FailoverGroupMemberSelected { .. } => EventKind::FailoverGroupMemberSelected,
+            Self::FailoverGroupExhausted { .. } => EventKind::FailoverGroupExhausted,
+            Self::FailoverGroupCircuitChanged { .. } => EventKind::FailoverGroupCircuitChanged,
+            Self::FailoverGroupMemberSwitched { .. } => EventKind::FailoverGroupMemberSwitched,
+            Self::FailoverOverridesChanged { .. } => EventKind::FailoverOverridesChanged,
         }
     }
 
@@ -299,10 +304,11 @@ impl EventMessage {
             Self::PlaylistUpdateProgress(_)
             | Self::SystemInfoUpdate(_)
             | Self::RecordingProgress
-            | Self::ChannelGroupMemberSelected { .. }
-            | Self::ChannelGroupExhausted { .. }
-            | Self::ChannelGroupCircuitChanged { .. }
-            | Self::ChannelGroupMemberSwitched { .. } => return None,
+            | Self::FailoverGroupMemberSelected { .. }
+            | Self::FailoverGroupExhausted { .. }
+            | Self::FailoverGroupCircuitChanged { .. }
+            | Self::FailoverGroupMemberSwitched { .. }
+            | Self::FailoverOverridesChanged { .. } => return None,
         })
     }
 
@@ -358,7 +364,7 @@ impl EventMessage {
             Self::NotificationDeadLettered(dead_letter) => encode(dead_letter),
             Self::ScheduledTaskFailed(failure) => encode(failure),
             Self::AuthAudit(event) => encode(event),
-            Self::ChannelGroupMemberSelected { target_id, group_vid, member_vid, tier } => {
+            Self::FailoverGroupMemberSelected { target_id, group_vid, member_vid, tier } => {
                 serde_json::json!({
                     "target_id": target_id,
                     "group_vid": group_vid,
@@ -366,13 +372,13 @@ impl EventMessage {
                     "tier": tier,
                 })
             }
-            Self::ChannelGroupExhausted { target_id, group_vid } => {
+            Self::FailoverGroupExhausted { target_id, group_vid } => {
                 serde_json::json!({
                     "target_id": target_id,
                     "group_vid": group_vid,
                 })
             }
-            Self::ChannelGroupMemberSwitched { target_id, group_vid, from_member_vid, to_member_vid, reason } => {
+            Self::FailoverGroupMemberSwitched { target_id, group_vid, from_member_vid, to_member_vid, reason } => {
                 serde_json::json!({
                     "target_id": target_id,
                     "group_vid": group_vid,
@@ -381,7 +387,8 @@ impl EventMessage {
                     "reason": reason,
                 })
             }
-            Self::ChannelGroupCircuitChanged { input_name, input_stream_id, state } => {
+            Self::FailoverOverridesChanged { targets } => serde_json::json!({ "targets": targets }),
+            Self::FailoverGroupCircuitChanged { input_name, input_stream_id, state } => {
                 let state_str = match state {
                     CircuitState::Closed => "closed",
                     CircuitState::OpenUntil(_) => "open",
@@ -431,6 +438,11 @@ pub struct PlaylistUpdateSummary {
 }
 
 impl PlaylistUpdateSummary {
+    /// Names of the targets the run processed, in report order.
+    pub fn processed_targets(&self) -> impl Iterator<Item = &str> {
+        self.stats.iter().flat_map(|source| source.targets.iter()).map(|target| target.name.as_str())
+    }
+
     /// A summary carrying only an outcome - the timeout and panic paths,
     /// which have no statistics to report.
     #[must_use]

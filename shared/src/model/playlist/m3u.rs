@@ -305,7 +305,7 @@ impl crate::model::FieldGet for M3uPlaylistItem {
             | HeaderField::Input
             | HeaderField::Type
             | HeaderField::Genre
-            | HeaderField::ChannelGroup => None,
+            | HeaderField::FailoverGroup => None,
         }
     }
 }

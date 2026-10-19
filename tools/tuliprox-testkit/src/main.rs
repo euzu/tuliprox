@@ -784,17 +784,25 @@ async fn serve_origin(
     Ok(RunExit::Passed)
 }
 
-fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>) -> String {
+/// `failover_member` shapes the catalog for a failover-group member input: no VOD entries, so a
+/// playlist merging several inputs of this origin does not carry each movie once per input,
+/// and a stable `xui-id` per channel, because HLS entry URLs have no numeric id a member
+/// reference (input name plus provider stream id) could use.
+fn catalog_m3u(state: &OriginState, host: &str, account: Option<&str>, failover_member: bool) -> String {
     let account_query = account.map_or_else(String::new, |account| format!("&token={account}"));
     let mut catalog = String::from("#EXTM3U\n");
     for marker in state.markers.iter() {
-        let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\",Test channel {marker}");
+        let member_id = if failover_member { format!(" xui-id=\"{marker}\"") } else { String::new() };
+        let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-{marker}\"{member_id},Test channel {marker}");
         let path = if state.hls_markers.contains(marker) {
             format!("hls/{marker}/index.m3u8")
         } else {
             format!("live/{marker}.ts")
         };
         let _ = writeln!(catalog, "http://{host}/{path}?run={}{}", state.run_id.0, account_query);
+    }
+    if failover_member {
+        return catalog;
     }
     let _ = writeln!(catalog, "#EXTINF:-1 tvg-id=\"test-vod-movie.mkv\" tvg-type=\"movie\",Test Movie");
     let _ = writeln!(catalog, "http://{host}/vod/movie.mkv?run={}{}", state.run_id.0, account_query);
@@ -910,7 +918,11 @@ async fn catalog(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("127.0.0.1");
-    ([(header::CONNECTION, "close")], catalog_m3u(&state, host, query.get("account").map(String::as_str)))
+    let failover_member = query.get("failover_member").is_some_and(|value| value == "true");
+    (
+        [(header::CONNECTION, "close")],
+        catalog_m3u(&state, host, query.get("account").map(String::as_str), failover_member),
+    )
 }
 
 struct LiveStreamState {
@@ -2154,6 +2166,11 @@ async fn run_controller(
                 &tuliprox_testkit::bootstrap::FixtureInputPlan {
                     input_type: scenario.tuliprox.input_type,
                     stalker: &scenario.tuliprox.stalker,
+                    failover_inputs: scenario
+                        .tuliprox
+                        .failover_groups
+                        .as_ref()
+                        .map_or(&[][..], |failover| failover.inputs.as_slice()),
                 },
             )
             .await
@@ -3738,10 +3755,24 @@ mod tests {
     async fn catalog_exposes_each_configured_marker() {
         let mut state = test_origin_state("catalog-run");
         state.markers = Arc::new(vec![17, 19]);
-        let document = catalog_m3u(&state, "127.0.0.1", None);
+        let document = catalog_m3u(&state, "127.0.0.1", None, false);
         assert!(document.contains("tvg-id=\"test-17\""));
         assert!(document.contains("tvg-id=\"test-19\""));
         assert!(document.contains("run=catalog-run"));
+    }
+
+    #[tokio::test]
+    async fn failover_member_catalog_omits_vod_and_carries_stable_ids() {
+        let mut state = test_origin_state("catalog-run");
+        state.markers = Arc::new(vec![17]);
+        let full = catalog_m3u(&state, "127.0.0.1", Some("input-a"), false);
+        assert!(full.contains("test-vod-movie.mkv"));
+        assert!(!full.contains("xui-id"));
+        let member = catalog_m3u(&state, "127.0.0.1", Some("input-a"), true);
+        assert!(member.contains("tvg-id=\"test-17\" xui-id=\"17\",Test channel 17"));
+        assert!(member.contains("token=input-a"));
+        assert!(!member.contains("test-vod"));
+        assert!(!member.contains("Test Series"));
     }
 
     #[tokio::test]
@@ -3749,7 +3780,7 @@ mod tests {
         let mut state = test_origin_state("hls-run");
         state.markers = Arc::new(vec![17, 19]);
         state.hls_markers = Arc::new(HashSet::from([17]));
-        let document = catalog_m3u(&state, "127.0.0.1", Some("account-b"));
+        let document = catalog_m3u(&state, "127.0.0.1", Some("account-b"), false);
         assert!(document.contains("/hls/17/index.m3u8?run=hls-run&token=account-b"));
         assert!(document.contains("/live/19.ts?run=hls-run&token=account-b"));
         let response = hls(

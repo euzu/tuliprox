@@ -1,16 +1,16 @@
 use super::{
     activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
-    channel_group::{
+    cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
+    detected_catchup_hls_response,
+    failover_group::{
         acquire_group_member, group_playback_settings, group_representative, group_shared_key, open_group_member,
         wait_for_user_capacity, GroupOpenRequest, GroupSelectionFailure, GroupSelectionRequest, OpenedGroupMember,
         PlaybackSource, ProbedPayload,
     },
-    channel_group_failover::{GroupFailoverContext, GroupFailoverDriver, GroupFailoverStream},
-    cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
-    detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
-    is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
-    no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering, probe_catchup_payload,
-    record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
+    failover_group_runtime::{GroupFailoverContext, GroupFailoverDriver, GroupFailoverStream},
+    get_session_reservation_ttl_secs, get_stream_options, is_socket_bound_playback_session, is_stream_share_enabled,
+    mark_response_as_uncompressed, no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering,
+    probe_catchup_payload, record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
     resolve_xtream_vod_provider_url, select_provider_stream_url, should_pin_provider_for_session,
     stream_admission_rejected_response, try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload,
     ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass,
@@ -41,7 +41,7 @@ use shared::{
     utils::{extract_extension_from_url, sanitize_sensitive_info, Internable},
 };
 use std::{borrow::Cow, sync::Arc, time::Duration};
-use tuliprox_session::{channel_group::FailureClass, ProviderSessionHeaders};
+use tuliprox_session::{failover_group::FailureClass, ProviderSessionHeaders};
 
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
@@ -338,7 +338,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         PlaybackSource::Single { input, stream_url } => (Arc::clone(input), Cow::Borrowed(*stream_url)),
         PlaybackSource::Group { group, .. } => {
             let Some((input, url)) = group_representative(app_state, group) else {
-                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                app_state.event_manager.send_event(EventMessage::FailoverGroupExhausted {
                     target_id: target.id,
                     group_vid: group.group_vid.get(),
                 });
@@ -729,7 +729,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                         ConnectFailureReason::Maintenance,
                     );
                 }
-                app_state.event_manager.send_event(EventMessage::ChannelGroupExhausted {
+                app_state.event_manager.send_event(EventMessage::FailoverGroupExhausted {
                     target_id: target.id,
                     group_vid: group.group_vid.get(),
                 });
@@ -751,7 +751,7 @@ pub(crate) async fn stream_response_with_provider_handle(
                 .into_response();
             };
 
-            app_state.event_manager.send_event(EventMessage::ChannelGroupMemberSelected {
+            app_state.event_manager.send_event(EventMessage::FailoverGroupMemberSelected {
                 target_id: target.id,
                 group_vid: group.group_vid.get(),
                 member_vid: opened.member.member_vid.get(),

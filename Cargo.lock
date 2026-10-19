@@ -4917,7 +4917,6 @@ dependencies = [
  "lru",
  "rand 0.9.5",
  "reqwest",
- "serde",
  "serde_json",
  "shared",
  "tempfile",

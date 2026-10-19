@@ -110,7 +110,7 @@ error_kinds! {
     ConfigVideoDownload => "config video download error",
     ConfigTarget => "config target error",
     TargetBouquet => "target bouquet error",
-    ChannelGroup => "channel group error",
+    FailoverGroup => "failover group error",
     ConfigWebUi => "config web UI error",
     RepositoryEpg => "repository EPG error",
     RepositoryXtream => "repository XTream error",

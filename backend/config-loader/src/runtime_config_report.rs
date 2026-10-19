@@ -75,6 +75,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         user_config_dir: config.user_config_dir.clone(),
         mapping_path: config.mapping_path.clone(),
         template_path: config.template_path.clone(),
+        failover_path: config.failover_path.clone(),
         custom_stream_response_path: config.custom_stream_response_path.clone(),
         custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
         custom_stream_response_enabled: config.custom_stream_response_enabled,
@@ -103,7 +104,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         proxy: config.proxy.as_ref().map(shared::model::ProxyConfigDto::from),
         ipcheck: config.ipcheck.as_ref().map(shared::model::IpCheckConfigDto::from),
         library: config.library.as_ref().map(library_config_to_dto),
-        channel_groups: (!config.channel_groups.is_default()).then(|| config.channel_groups.clone()),
+        failover_groups: (!config.failover_groups.is_default()).then(|| config.failover_groups.clone()),
     }
 }
 
@@ -274,6 +275,7 @@ mod tests {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: config_dir.join("api-proxy.yml").to_string_lossy().to_string(),
             custom_stream_response_path: None,
         }

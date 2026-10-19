@@ -1568,6 +1568,7 @@ mod tests {
                     run_id: Some(run_id("r1")),
                     execution_order: None,
                     state: PlaylistUpdateState::Success,
+                    targets: Vec::new(),
                 },
             },
         );

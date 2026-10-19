@@ -179,22 +179,22 @@ fn legacy_playlist_items_fall_back_to_provider_id_without_virtual_id() {
 }
 
 #[test]
-fn channel_group_field_round_trips_through_dsl_setters() {
+fn failover_group_field_round_trips_through_dsl_setters() {
     use crate::model::{FieldGet, FieldSet, HeaderField, PlaylistItemHeader};
     let mut header = PlaylistItemHeader::default();
-    assert_eq!(HeaderField::parse("channel_group"), Some(HeaderField::ChannelGroup));
-    assert_eq!(HeaderField::ChannelGroup.as_str(), "channel_group");
-    assert!(header.set(HeaderField::ChannelGroup, "ZDF"));
-    assert_eq!(header.channel_group.as_deref(), Some("ZDF"));
-    assert!(header.set(HeaderField::ChannelGroup, ""));
-    assert_eq!(header.channel_group.as_deref(), Some(""));
-    assert!(header.get(HeaderField::ChannelGroup).is_some());
+    assert_eq!(HeaderField::parse("failover_group"), Some(HeaderField::FailoverGroup));
+    assert_eq!(HeaderField::FailoverGroup.as_str(), "failover_group");
+    assert!(header.set(HeaderField::FailoverGroup, "ZDF"));
+    assert_eq!(header.failover_group.as_deref(), Some("ZDF"));
+    assert!(header.set(HeaderField::FailoverGroup, ""));
+    assert_eq!(header.failover_group.as_deref(), Some(""));
+    assert!(header.get(HeaderField::FailoverGroup).is_some());
 }
 
 #[test]
-fn header_without_channel_group_field_still_deserializes() {
+fn header_without_failover_group_field_still_deserializes() {
     let mut value = serde_json::to_value(crate::model::PlaylistItemHeader::default()).expect("serializes");
-    value.as_object_mut().expect("object").remove("channel_group");
+    value.as_object_mut().expect("object").remove("failover_group");
     let header: crate::model::PlaylistItemHeader = serde_json::from_value(value).expect("deserializes");
-    assert!(header.channel_group.is_none());
+    assert!(header.failover_group.is_none());
 }

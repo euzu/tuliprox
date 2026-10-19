@@ -25,16 +25,16 @@ use std::{
 };
 use tokio::fs;
 use tuliprox_core::{
-    model::{ApiProxyConfig, AppConfig, Config, MediaToolCapabilities, SourcesConfig, UserPlan},
+    model::{ApiProxyConfig, AppConfig, Config, FailoverOverrides, MediaToolCapabilities, SourcesConfig, UserPlan},
     utils,
     utils::{
         config_file_reader, exit, file_exists_async, open_file, read_mappings_file_unprepared, read_templates_file,
-        request::is_uri, resolve_env_var, FileLockManager,
+        request::is_uri, resolve_env_var, resolve_failover_path, FailoverSource, FileLockManager,
     },
 };
 use tuliprox_repository::{
     backup_api_user_db_file, csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
-    merge_api_user,
+    load_failover_overrides, merge_api_user,
 };
 use url::Url;
 
@@ -555,6 +555,41 @@ pub async fn prepare_users(app_config_dto: &mut AppConfigDto, app_config: &AppCo
     Ok(())
 }
 
+/// Where the failover override files live: the CLI path wins over `failover_path` of `config.yml`,
+/// a relative path is resolved against the config directory.
+pub fn resolve_failover_source(paths: &ConfigPaths, config: &Config, resolve_env: bool) -> FailoverSource {
+    let configured = paths.failover_file_path.as_deref().or(config.failover_path.as_deref()).map(|path| {
+        if resolve_env {
+            resolve_env_var(path)
+        } else {
+            path.to_string()
+        }
+    });
+    resolve_failover_path(&paths.config_path, configured.as_deref())
+}
+
+/// Loads the failover override files. A load error does not stop the start: the snapshot stays empty,
+/// carries the error and refuses write-back, while playback and automatic grouping keep working.
+fn read_failover_overrides(paths: &ConfigPaths, config: &Config, resolve_env: bool) -> FailoverOverrides {
+    let source = resolve_failover_source(paths, config, resolve_env);
+    match load_failover_overrides(&source) {
+        Ok(overrides) => {
+            if !overrides.sections.is_empty() {
+                info!(
+                    "Failover overrides: {} target section(s) from {} file(s)",
+                    overrides.sections.len(),
+                    overrides.files_used.len()
+                );
+            }
+            overrides
+        }
+        Err(err) => {
+            error!("Failed to load failover overrides, failover group overrides are disabled: {err}");
+            FailoverOverrides { source: Some(source), error: Some(err.to_string()), ..FailoverOverrides::default() }
+        }
+    }
+}
+
 pub async fn read_initial_app_config(
     paths: &mut ConfigPaths,
     resolve_env: bool,
@@ -622,6 +657,7 @@ pub async fn read_initial_app_config(
     config.prepare(config_path, paths.home_path.as_str())?;
     paths.storage_path.clone_from(&config.storage_dir);
     config.update_runtime();
+    let failover = read_failover_overrides(paths, &config, resolve_env);
 
     let mut app_config = AppConfig {
         config: Arc::new(ArcSwap::from_pointee(config)),
@@ -634,6 +670,7 @@ pub async fn read_initial_app_config(
         access_token_secret: generate_default_access_secret()?,
         encrypt_secret: generate_default_encrypt_secret()?,
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        failover: Arc::new(ArcSwap::from_pointee(failover)),
     };
     app_config.prepare(include_computed)?;
     for (path, revision) in loaded_revisions {
@@ -1383,11 +1420,15 @@ mod tests {
         write_config_text_file,
     };
     use shared::{
-        model::{ConfigInputAliasDto, ConfigInputDto, InputType, SourcesConfigDto},
+        model::{ConfigInputAliasDto, ConfigInputDto, ConfigPaths, InputType, SourcesConfigDto},
         utils::Internable,
     };
+    use std::path::Path;
     use tempfile::tempdir;
-    use tuliprox_core::utils::resolve_env_var;
+    use tuliprox_core::{
+        model::Config,
+        utils::{resolve_env_var, FailoverSource},
+    };
 
     #[test]
     fn a_config_with_the_old_download_block_says_what_to_rename() {
@@ -1424,6 +1465,7 @@ mod tests {
             mapping_files_used: None,
             template_file_path: Some(template_path.to_string_lossy().into_owned()),
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: proxy_path.to_string_lossy().into_owned(),
             custom_stream_response_path: None,
         };
@@ -1440,6 +1482,7 @@ mod tests {
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
+            failover: Arc::default(),
         };
         for resolve_env in [false, true] {
             assert!(read_api_proxy(&config, resolve_env).await.is_err());
@@ -1501,6 +1544,7 @@ templates:
             mapping_files_used: None,
             template_file_path: Some(template_path.to_string_lossy().into_owned()),
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         };
@@ -1828,6 +1872,57 @@ sources:
         .await?;
 
         assert_eq!(tokio::fs::read_to_string(&path).await?, "key: value");
+        Ok(())
+    }
+
+    fn failover_test_paths(config_dir: &Path, cli_failover: Option<&str>) -> ConfigPaths {
+        ConfigPaths {
+            home_path: String::new(),
+            config_path: config_dir.to_string_lossy().into_owned(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            failover_file_path: cli_failover.map(str::to_string),
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }
+    }
+
+    const FAILOVER_SECTION_YAML: &str =
+        "version: 1\ntargets:\n  - target: Main\n    excluded:\n      - { input: a, stream_id: \"1\" }\n";
+
+    #[test]
+    fn failover_overrides_prefer_cli_path_over_config_path() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("cli.yml"), FAILOVER_SECTION_YAML)?;
+        std::fs::write(dir.path().join("configured.yml"), "version: 1\ntargets: []\n")?;
+        let config = Config { failover_path: Some("configured.yml".to_string()), ..Config::default() };
+
+        let from_config = super::read_failover_overrides(&failover_test_paths(dir.path(), None), &config, true);
+        assert!(from_config.sections.is_empty());
+        assert_eq!(from_config.files_used, vec![dir.path().join("configured.yml")]);
+
+        let from_cli = super::read_failover_overrides(&failover_test_paths(dir.path(), Some("cli.yml")), &config, true);
+        assert!(from_cli.error.is_none());
+        assert!(from_cli.sections.contains_key("Main"));
+        Ok(())
+    }
+
+    #[test]
+    fn failover_overrides_load_error_is_fail_open() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("failover.yml"), "version: 9\ntargets: []\n")?;
+
+        let overrides =
+            super::read_failover_overrides(&failover_test_paths(dir.path(), None), &Config::default(), true);
+
+        assert!(overrides.sections.is_empty());
+        assert!(overrides.error.as_deref().is_some_and(|error| error.contains("version")));
+        assert_eq!(overrides.source, Some(FailoverSource::File(dir.path().join("failover.yml"))));
         Ok(())
     }
 }

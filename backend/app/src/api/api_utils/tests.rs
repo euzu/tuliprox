@@ -38,9 +38,10 @@ mod stream_responses_provider_fallback;
 mod stream_responses_response_headers;
 mod stream_responses_session_activation;
 
-mod channel_group_playback;
-mod channel_group_probe;
-mod channel_group_runtime;
-mod channel_group_selection;
-mod channel_group_sticky;
+mod failover_group_hot_apply;
+mod failover_group_playback;
+mod failover_group_probe;
+mod failover_group_runtime;
+mod failover_group_selection;
+mod failover_group_sticky;
 pub(crate) mod group_playback_support;

@@ -13,6 +13,33 @@ use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
 
 pub fn create_test_app_state(config: Config) -> Arc<AppState> {
+    create_test_app_state_with_playlist_updates(config, PlaylistUpdateControl::for_tests())
+}
+
+/// Like [`create_test_app_state`], with a manual update channel whose receiver the test keeps.
+pub fn create_test_app_state_with_manual_update_sender(
+    config: Config,
+    manual_update_sender: tokio::sync::mpsc::Sender<super::ManualPlaylistUpdateRequest>,
+) -> Arc<AppState> {
+    create_test_app_state_with_playlist_updates(
+        config,
+        PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
+    )
+}
+
+/// `Config::update_runtime` points the process-wide temp dir at the storage dir of the loaded config. A test that
+/// reloads the config would leave every later `tempfile` of the test process pointing into its own, already removed,
+/// storage dir. Every test state is created through this module, so the override is switched off before the first one.
+fn disable_temp_dir_override() {
+    static DISABLED: std::sync::Once = std::sync::Once::new();
+    DISABLED.call_once(|| std::env::set_var("TULIPROX_DISABLE_TEMP_DIR_OVERRIDE", "1"));
+}
+
+fn create_test_app_state_with_playlist_updates(
+    config: Config,
+    playlist_updates: PlaylistUpdateControl,
+) -> Arc<AppState> {
+    disable_temp_dir_override();
     let app_config = Arc::new(AppConfig {
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
@@ -29,6 +56,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         })),
@@ -36,6 +64,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(crate::model::MediaToolCapabilities::new()),
+        failover: Arc::default(),
     });
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
@@ -86,7 +115,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         geoip,
         metadata_manager,
         auth: AuthState::for_tests(),
-        playlist_updates: PlaylistUpdateControl::for_tests(),
+        playlist_updates,
         maintenance,
         member_health: Arc::new(tuliprox_session::MemberHealthIndex::default()),
     })

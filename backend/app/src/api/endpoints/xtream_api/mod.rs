@@ -760,14 +760,14 @@ async fn xtream_player_api_stream(
                 .map(|b| b.member_index);
             PlaybackSource::Group {
                 group,
-                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
                 prefer: bound_prefer,
             }
         }
         tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
             PlaybackSource::Group {
                 group,
-                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
                 prefer: Some(index),
             }
         }

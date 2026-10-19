@@ -401,6 +401,88 @@ Every call answers with the complete state:
 - Unknown inputs answer `404`, remarks longer than 500 characters `400`.
 - Without Web UI authentication the endpoints are as open as the other `/api/v1` routes.
 
+## Failover groups editor
+
+The Web UI page [Failover groups](configuration/failover-groups.md#editor-web-ui) is built on the routes below. They
+read and write the [failover files](configuration/failover-groups.md#corrections-and-own-groups-failover-files), so
+they are also useful for scripts. Reading needs `playlist.read`, everything that changes something (`PUT`,
+`DELETE`, `reassign`, `apply`) needs `playlist.write`. All answers are sent with `Cache-Control: no-store`.
+
+The `target` parameter is the target **name** from `source.yml`. Only targets with failover groups enabled are
+accepted; others answer `404`.
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+AUTH=(-H "Authorization: Bearer $TOKEN")
+
+# Targets with failover groups, their section etag, the applied etag and unknown (orphan) sections
+curl -s "$BASE_URL/api/v1/failover/targets" "${AUTH[@]}" | jq .
+
+# Effective groups of the last playlist update, plus diagnostics
+curl -s -G "$BASE_URL/api/v1/failover/groups" "${AUTH[@]}" --data-urlencode "target=Main TV" | jq .
+
+# The stored section of the target (the base of an edit) with its etag and owning file
+curl -s -G "$BASE_URL/api/v1/failover/overrides" "${AUTH[@]}" --data-urlencode "target=Main TV" | jq .
+
+# Page through the channels of the target: filter = all | ungrouped | grouped | excluded
+curl -s -G "$BASE_URL/api/v1/failover/candidates" "${AUTH[@]}" \
+    --data-urlencode "target=Main TV" --data-urlencode "q=zdf" \
+    --data-urlencode "filter=ungrouped" --data-urlencode "offset=0" --data-urlencode "limit=50" | jq .
+
+# Preview a draft section: the groups it would produce, nothing is written
+curl -s -X POST -G "$BASE_URL/api/v1/failover/preview" "${AUTH[@]}" --data-urlencode "target=Main TV" \
+    -H "Content-Type: application/json" \
+    --data-raw '{"target":"Main TV","excluded":[{"input":"prov-c","stream_id":"55"}]}' | jq .
+
+# Save the section; expected_etag is the etag you based the change on (null for a new section)
+curl -s -X PUT -G "$BASE_URL/api/v1/failover/overrides" "${AUTH[@]}" --data-urlencode "target=Main TV" \
+    -H "Content-Type: application/json" \
+    --data-raw '{"expected_etag":null,"overrides":{"target":"Main TV","excluded":[{"input":"prov-c","stream_id":"55"}]}}' | jq .
+
+# Start a playlist update for the target so the saved section is used
+curl -s -X POST -G "$BASE_URL/api/v1/failover/apply" "${AUTH[@]}" --data-urlencode "target=Main TV" | jq .
+```
+
+| Method   | Path                                  | Parameters                                    | Purpose                                                                                                                                                                                                                                                                         |
+| :------- | :------------------------------------ | :-------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET`    | `/api/v1/failover/targets`            | --------------------------------------------- | Used files, load error, targets with `etag`, `applied_etag`, `file`, `group_count`, `problem_count`, validation findings; sections of targets without failover groups or of unknown targets are listed with `state: "disabled"` or `state: "orphan"`.                           |
+| `GET`    | `/api/v1/failover/groups`             | `target`                                      | Effective groups (`key`, origin, policy, metadata, members) of the saved state, diagnostics, `etag`, `applied_etag` and `display_stale`.                                                                                                                                        |
+| `GET`    | `/api/v1/failover/overrides`          | `target`                                      | The stored section with `etag` and `file`; an empty section without `etag` when none exists.                                                                                                                                                                                    |
+| `PUT`    | `/api/v1/failover/overrides`          | `target`, body `{ expected_etag, overrides }` | Validates and writes the section. An empty section removes it. Answers `{ etag, file, hot_applied }`.                                                                                                                                                                           |
+| `DELETE` | `/api/v1/failover/overrides`          | `target`, `expected_etag`                     | Removes the whole section of the target (also of a target that no longer exists).                                                                                                                                                                                               |
+| `POST`   | `/api/v1/failover/overrides/reassign` | body `{ from, to, expected_etag }`            | Moves a section to a target with failover groups enabled by rewriting its `target:` field (orphan sections).                                                                                                                                                                    |
+| `POST`   | `/api/v1/failover/preview`            | `target`, body: draft section                 | Groups and diagnostics the draft would produce. Writes nothing.                                                                                                                                                                                                                 |
+| `GET`    | `/api/v1/failover/candidates`         | `target`, `q`, `filter`, `offset`, `limit`    | Channel catalog of the target; `limit` defaults to 100, at most 500.                                                                                                                                                                                                            |
+| `GET`    | `/api/v1/failover/health`             | `target`, `group` (virtual id of the group)   | Per member: rank, QoS, probed quality, circuit state, connection slots, score; plus the capacity of the group. Reads in-memory data only.                                                                                                                                       |
+| `POST`   | `/api/v1/failover/apply`              | `target`                                      | Queues a manual playlist update for the target. Answers `202` with the run id.                                                                                                                                                                                                  |
+
+Status codes:
+
+| Status | Meaning                                                                                                                                                                                                                                                                                                                                              |
+| :----- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `404`  | Target unknown or failover groups not enabled for it; `health`: group not found; `reassign`: `to` is no target with failover groups enabled.                                                                                                                                                                                                         |
+| `409`  | `PUT`, `DELETE`, `reassign`: the section changed since `expected_etag` (also by a hand edit on disk). `reassign` also answers `409` when the target `to` already has a section. The body is `{"current_etag": "..."}`. `groups`, `preview`, `candidates`: no channel catalog yet, run a playlist update first. `apply`: an update is already queued. |
+| `422`  | `PUT`: the section is invalid. The body lists the findings, for example `[{"error": "invalid_manual_id", "detail": "Zdf"}]`.                                                                                                                                                                                                                         |
+| `423`  | The failover files failed to load, so writing is refused until they are fixed.                                                                                                                                                                                                                                                                       |
+
+Notes:
+
+- `preview` uses the same grouping code as a playlist update, so the result matches what an applied save produces.
+- `PUT` rejects a section with validation findings (`422`); `preview` does not validate, it shows what the draft would do.
+- `hot_applied: true` means the change only reordered members or switched the policy and is already active, also when
+  it changes the first member of a group. Otherwise call `apply`, which respects the input cache like a normal manual
+  update.
+- `display_stale` lists the keys of groups whose first member changed by such a change while name, logo, EPG id or
+  playlist group are not all set explicitly: the published playlist entry still shows the old first member until the
+  next playlist update, which clears the list.
+- `PUT` and `DELETE` need the current etag. Read it with `GET /failover/overrides` immediately before the change; a
+  `409` returns the etag on disk.
+- Every save, reset, reassign and every change of the files on disk sends the WebSocket event
+  `failover.overrides_changed` with `{"targets": [...]}` to clients with `playlist.read`.
+
 ## Available `/api/v1` Endpoints
 
 This is a compact operator-oriented overview of the `/api/v1` REST API groups currently registered by the backend.
@@ -521,6 +603,21 @@ form's scheduled interval, never as a hard block.
 | `POST` | `/api/v1/playlist/series/episode/{virtual_id}` | Episode item lookup |
 | `POST` | `/api/v1/playlist/filter/preview` | Dry-run a filter DSL expression against a target's stored playlist |
 | `GET` | `/api/v1/playlist/resource/{resource}` | Public resource access for playlist-related assets |
+
+### Failover groups
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/failover/targets` | Failover files, load error and per-target status (`playlist.read`) |
+| `GET` | `/api/v1/failover/groups` | Effective groups and diagnostics of a target (`playlist.read`) |
+| `GET` | `/api/v1/failover/overrides` | Stored section of a target (`playlist.read`) |
+| `PUT` | `/api/v1/failover/overrides` | Save the section of a target (`playlist.write`) |
+| `DELETE` | `/api/v1/failover/overrides` | Reset the section of a target (`playlist.write`) |
+| `POST` | `/api/v1/failover/overrides/reassign` | Move a section to another target (`playlist.write`) |
+| `POST` | `/api/v1/failover/preview` | Preview a draft section (`playlist.read`) |
+| `GET` | `/api/v1/failover/candidates` | Search channels of a target (`playlist.read`) |
+| `GET` | `/api/v1/failover/health` | Member health of a group (`playlist.read`) |
+| `POST` | `/api/v1/failover/apply` | Queue a playlist update for a target (`playlist.write`) |
 
 ### Configuration
 

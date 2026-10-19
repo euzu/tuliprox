@@ -8,7 +8,7 @@ use crate::{
         },
         ConfigContext, PlaylistContext,
     },
-    hooks::{is_text_input_focused, use_key_down, use_service_context},
+    hooks::{is_text_input_focused, use_key_down, use_service_context, use_unsaved_changes_guard},
     i18n::use_translation,
     model::DialogResult,
     services::DialogService,
@@ -28,9 +28,7 @@ use std::{
     rc::Rc,
 };
 use wasm_bindgen::{prelude::Closure, JsCast};
-use web_sys::{
-    window, BeforeUnloadEvent, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, WheelEvent,
-};
+use web_sys::{window, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, WheelEvent};
 use yew::{platform::spawn_local, prelude::*};
 
 const PENDING_LINE: &str = "pending-line";
@@ -727,28 +725,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     };
 
     // Warn before the browser unloads while the editor holds unsaved changes.
-    {
-        let dirty = *is_dirty && !is_local_mode;
-        use_effect_with(dirty, move |&dirty| {
-            let closure = Closure::<dyn FnMut(BeforeUnloadEvent)>::wrap(Box::new(move |event: BeforeUnloadEvent| {
-                event.prevent_default();
-                event.set_return_value("");
-            }));
-            if dirty {
-                if let Some(win) = window() {
-                    let _ = win.add_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
-                }
-            }
-            move || {
-                if dirty {
-                    if let Some(win) = window() {
-                        let _ =
-                            win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
-                    }
-                }
-            }
-        });
-    }
+    use_unsaved_changes_guard(*is_dirty && !is_local_mode);
 
     {
         let playlists = playlist_ctx.clone();

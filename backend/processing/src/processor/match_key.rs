@@ -116,7 +116,7 @@ impl<'a> MatchKeyNormalizer<'a> {
 mod tests {
     use super::*;
     use shared::{
-        model::{ChannelGroupsConfig, ChannelMatchNormalize, PlaylistItemHeader},
+        model::{ChannelMatchNormalize, FailoverGroupsConfig, PlaylistItemHeader},
         utils::Internable,
     };
 
@@ -159,14 +159,14 @@ mod tests {
     }
 
     fn normalize(strip: Option<&str>, ignore: &[&str], aliases: &[(&str, &str)]) -> ChannelMatchNormalize {
-        let mut cfg = ChannelGroupsConfig {
+        let mut cfg = FailoverGroupsConfig {
             match_normalize: ChannelMatchNormalize {
                 strip_regex: strip.map(str::to_string),
                 ignore_tokens: ignore.iter().map(|t| (*t).to_string()).collect(),
                 aliases: aliases.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
                 ..Default::default()
             },
-            ..ChannelGroupsConfig::default()
+            ..FailoverGroupsConfig::default()
         };
         cfg.prepare().expect("valid");
         cfg.match_normalize

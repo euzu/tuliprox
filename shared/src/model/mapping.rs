@@ -31,7 +31,7 @@ pub const MAPPER_FIELDS: &[HeaderField] = &[
     HeaderField::Rec,
     HeaderField::Url,
     HeaderField::EpgChannelId,
-    HeaderField::ChannelGroup,
+    HeaderField::FailoverGroup,
 ];
 
 /// Whether `name` resolves to one of `allowed`.

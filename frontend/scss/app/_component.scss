@@ -80,7 +80,7 @@
 @forward "components/config/config_view";
 @forward "components/config/local_library_config";
 @forward "components/config/log_config";
-@forward "components/config/channel_groups_config";
+@forward "components/config/failover_groups_config";
 @forward "components/config/api_config";
 @forward "components/config/messaging_config";
 @forward "components/config/panel_api_config";
@@ -108,3 +108,4 @@
 @forward "components/country";
 @forward "components/recording";
 @forward "components/target_bouquet_view";
+@forward "components/failover_groups";

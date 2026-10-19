@@ -1,7 +1,7 @@
 use shared::{
     error::TuliproxError,
     model::{
-        ApiProxyConfigDto, ChannelGroupsConfig, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto,
+        ApiProxyConfigDto, ConfigApiDto, FailoverGroupsConfig, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto,
         LogConfigDto, MainConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto,
         ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
     },
@@ -22,7 +22,7 @@ pub const LABEL_RECORDING_CONFIG: &str = "LABEL.RECORDING_CONFIG";
 pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL_CONFIG";
 pub const LABEL_LIBRARY_CONFIG: &str = "LABEL.LIBRARY_CONFIG";
 pub const LABEL_METADATA_UPDATE_CONFIG: &str = "LABEL.METADATA_UPDATE_CONFIG";
-pub const LABEL_CHANNEL_GROUPS_CONFIG: &str = "LABEL.CHANNEL_GROUPS_CONFIG";
+pub const LABEL_FAILOVER_GROUPS_CONFIG: &str = "LABEL.FAILOVER_GROUPS_CONFIG";
 
 const MAIN_PAGE: &str = "main";
 const API_PAGE: &str = "api";
@@ -38,7 +38,7 @@ const RECORDING_PAGE: &str = "recording";
 const METADATA_UPDATE_PAGE: &str = "metadata_update";
 const PANEL_PAGE: &str = "panel";
 const LIBRARY_PAGE: &str = "library";
-const CHANNEL_GROUPS_PAGE: &str = "channel_groups";
+const FAILOVER_GROUPS_PAGE: &str = "failover_groups";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ConfigPage {
@@ -56,7 +56,7 @@ pub enum ConfigPage {
     IpCheck,
     Panel,
     Library,
-    ChannelGroups,
+    FailoverGroups,
 }
 
 impl FromStr for ConfigPage {
@@ -78,7 +78,7 @@ impl FromStr for ConfigPage {
             IPCHECK_PAGE => Ok(ConfigPage::IpCheck),
             PANEL_PAGE => Ok(ConfigPage::Panel),
             LIBRARY_PAGE => Ok(ConfigPage::Library),
-            CHANNEL_GROUPS_PAGE => Ok(ConfigPage::ChannelGroups),
+            FAILOVER_GROUPS_PAGE => Ok(ConfigPage::FailoverGroups),
             _ => Err(TuliproxError::Config(format!("Unknown config page: {s}"))),
         }
     }
@@ -101,7 +101,7 @@ impl fmt::Display for ConfigPage {
             ConfigPage::IpCheck => IPCHECK_PAGE,
             ConfigPage::Panel => PANEL_PAGE,
             ConfigPage::Library => LIBRARY_PAGE,
-            ConfigPage::ChannelGroups => CHANNEL_GROUPS_PAGE,
+            ConfigPage::FailoverGroups => FAILOVER_GROUPS_PAGE,
         };
         write!(f, "{s}")
     }
@@ -129,7 +129,7 @@ pub enum ConfigForm {
     IpCheck(bool, IpCheckConfigDto),
     Panel(bool, SourcesConfigDto),
     Library(bool, LibraryConfigDto),
-    ChannelGroups(bool, ChannelGroupsConfig),
+    FailoverGroups(bool, FailoverGroupsConfig),
 }
 
 impl ConfigForm {
@@ -151,7 +151,7 @@ impl ConfigForm {
                 | ConfigForm::IpCheck(true, _)
                 | ConfigForm::Panel(true, _)
                 | ConfigForm::Library(true, _)
-                | ConfigForm::ChannelGroups(true, _)
+                | ConfigForm::FailoverGroups(true, _)
         )
     }
 }
@@ -173,7 +173,7 @@ pub struct ConfigFormSlots {
     pub ipcheck: Option<ConfigForm>,
     pub panel: Option<ConfigForm>,
     pub library: Option<ConfigForm>,
-    pub channel_groups: Option<ConfigForm>,
+    pub failover_groups: Option<ConfigForm>,
 }
 
 impl ConfigFormSlots {
@@ -196,7 +196,7 @@ impl ConfigFormSlots {
             ConfigForm::IpCheck(_, _) => Self::set_form_slot(&mut self.ipcheck, form),
             ConfigForm::Panel(_, _) => Self::set_form_slot(&mut self.panel, form),
             ConfigForm::Library(_, _) => Self::set_form_slot(&mut self.library, form),
-            ConfigForm::ChannelGroups(_, _) => Self::set_form_slot(&mut self.channel_groups, form),
+            ConfigForm::FailoverGroups(_, _) => Self::set_form_slot(&mut self.failover_groups, form),
         }
     }
 
@@ -217,7 +217,7 @@ impl ConfigFormSlots {
             &self.ipcheck,
             &self.panel,
             &self.library,
-            &self.channel_groups,
+            &self.failover_groups,
         ]
     }
 

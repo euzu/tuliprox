@@ -19,6 +19,7 @@ mod date_input_action;
 mod datetime_input;
 mod drop_down_icon_button;
 mod error_boundary;
+pub mod failover_groups;
 mod health_banner;
 mod hide_content;
 mod home;

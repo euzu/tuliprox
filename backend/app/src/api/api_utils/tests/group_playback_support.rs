@@ -1,7 +1,7 @@
 use super::support::FakeOriginMode;
 use crate::{
     api::{
-        api_utils::channel_group::{member_key, CircuitView},
+        api_utils::failover_group::{member_key, CircuitView},
         endpoints::{
             hdhomerun_api::hdhr_api_register, m3u_api::m3u_api_register, xmltv_api::xmltv_api_register,
             xtream_api::xtream_api_register,
@@ -13,8 +13,9 @@ use crate::{
         M3uTargetOutput, ProxyUserCredentials, SourcesConfig, StreamConfig, TargetOutput, XtreamTargetOutput,
     },
     repository::{
-        get_target_storage_path, persist_playlist_views_with_groups, ChannelGroupOrigin, ChannelGroupRecord,
-        ChannelGroupStore, PendingChannelGroup, PlaylistStorageState, TargetPlaylistPersistOptions,
+        get_target_storage_path, persist_playlist_views_with_groups, FailoverGroupBatch, FailoverGroupOrigin,
+        FailoverGroupRecord, FailoverGroupStore, PendingFailoverGroup, PlaylistStorageState,
+        TargetPlaylistPersistOptions,
     },
 };
 use arc_swap::ArcSwap;
@@ -26,10 +27,10 @@ use axum::{
 use shared::{
     foundation::Filter,
     model::{
-        AdmissionStrategy, ChannelGroupPolicy, ChannelGroupsConfig, ChannelGroupsTargetConfig, ClusterFlags,
-        ConfigPaths, ConfigTargetOptions, HdHomeRunTargetOutputDto, InputType, LiveStreamProperties,
-        M3uTargetOutputDto, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder, ProxyUserStatus,
-        StreamProperties, TargetType, UUIDType, VirtualId, XtreamCluster, XtreamTargetOutputDto,
+        AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigTargetOptions, FailoverGroupPolicy, FailoverGroupsConfig,
+        FailoverGroupsTargetConfig, HdHomeRunTargetOutputDto, InputType, LiveStreamProperties, M3uTargetOutputDto,
+        PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder, ProxyUserStatus, StreamProperties,
+        TargetType, UUIDType, VirtualId, XtreamCluster, XtreamTargetOutputDto,
     },
     utils::Internable,
 };
@@ -299,7 +300,7 @@ pub(crate) struct GroupPlaybackEnv {
     pub group_vid: u32,
     pub plain_vid: u32,
     pub favourite_vid: u32,
-    pub group_record: Arc<ChannelGroupRecord>,
+    pub group_record: Arc<FailoverGroupRecord>,
     pub origins: HashMap<String, TrackedOrigin>,
     pub router: axum::Router,
     pub hdhr_router: Option<axum::Router>,
@@ -326,7 +327,7 @@ impl GroupPlaybackEnv {
             epg: None,
             epg_channel_id: None,
             hdhomerun: false,
-            channel_groups: None,
+            failover_groups: None,
             hls_cache: false,
             share_ts: false,
             sleep_timer_mins: None,
@@ -459,7 +460,7 @@ impl GroupPlaybackEnv {
             }
             self.app_state.member_health.record_classified_failure(
                 &key,
-                tuliprox_session::channel_group::FailureClass::Stream,
+                tuliprox_session::failover_group::FailureClass::Stream,
                 std::time::Instant::now(),
             );
         }
@@ -566,7 +567,7 @@ impl GroupPlaybackEnv {
             &self.target,
             Some(&self.app_state.playlists),
             TargetPlaylistPersistOptions::default(),
-            &mut [],
+            &mut FailoverGroupBatch::default(),
         )
         .await
         .expect("republished without groups");
@@ -590,7 +591,7 @@ pub(crate) struct GroupPlaybackEnvBuilder {
     epg: Option<Epg>,
     epg_channel_id: Option<String>,
     hdhomerun: bool,
-    channel_groups: Option<ChannelGroupsConfig>,
+    failover_groups: Option<FailoverGroupsConfig>,
     hls_cache: bool,
     share_ts: bool,
     sleep_timer_mins: Option<u32>,
@@ -627,16 +628,16 @@ impl GroupPlaybackEnvBuilder {
         self
     }
 
-    /// The `config.yml` channel group settings.
-    pub fn with_channel_groups(mut self, channel_groups: ChannelGroupsConfig) -> Self {
-        self.channel_groups = Some(channel_groups);
+    /// The `config.yml` failover group settings.
+    pub fn with_failover_groups(mut self, failover_groups: FailoverGroupsConfig) -> Self {
+        self.failover_groups = Some(failover_groups);
         self
     }
 
     /// The `config.yml` failover settings.
-    pub fn with_failover(self, failover: shared::model::ChannelGroupFailoverConfig) -> Self {
-        let channel_groups = ChannelGroupsConfig { failover, ..self.channel_groups.clone().unwrap_or_default() };
-        self.with_channel_groups(channel_groups)
+    pub fn with_failover(self, failover: shared::model::FailoverGroupRuntimeConfig) -> Self {
+        let failover_groups = FailoverGroupsConfig { failover, ..self.failover_groups.clone().unwrap_or_default() };
+        self.with_failover_groups(failover_groups)
     }
 
     pub fn origin_mode(mut self, input: &str, mode: FakeOriginMode) -> Self {
@@ -779,7 +780,7 @@ impl GroupPlaybackEnvBuilder {
             sleep_timer_mins: self.sleep_timer_mins,
             storage_dir: storage_dir.clone(),
             user_access_control: true,
-            channel_groups: self.channel_groups.clone().unwrap_or_default(),
+            failover_groups: self.failover_groups.clone().unwrap_or_default(),
             reverse_proxy: Some(crate::model::ReverseProxyConfig {
                 resource_rewrite_disabled: false,
                 rewrite_secret: [0; 16],
@@ -833,9 +834,9 @@ impl GroupPlaybackEnvBuilder {
             enabled: true,
             name: "test_target".to_string(),
             options: Some(ConfigTargetOptions {
-                channel_groups: Some(ChannelGroupsTargetConfig {
+                failover_groups: Some(FailoverGroupsTargetConfig {
                     enabled: true,
-                    ..ChannelGroupsTargetConfig::default()
+                    ..FailoverGroupsTargetConfig::default()
                 }),
                 share_live_streams: shared::model::ConfigTargetShareLiveStreams {
                     hls: self.hls_cache,
@@ -878,6 +879,7 @@ impl GroupPlaybackEnvBuilder {
             mapping_files_used: None,
             template_file_path: None,
             template_files_used: None,
+            failover_file_path: None,
             api_proxy_file_path: String::new(),
             custom_stream_response_path: None,
         }));
@@ -919,7 +921,7 @@ impl GroupPlaybackEnvBuilder {
                 input_name: Arc::from(representative_input.as_str()),
                 item_type: if self.hls { PlaylistItemType::LiveHls } else { PlaylistItemType::Live },
                 xtream_cluster: XtreamCluster::Live,
-                channel_group_uuid: Some(group_uuid),
+                failover_group_uuid: Some(group_uuid),
                 epg_channel_id: group_epg.clone(),
                 additional_properties: group_additional_props,
                 ..PlaylistItemHeader::default()
@@ -1001,7 +1003,7 @@ impl GroupPlaybackEnvBuilder {
             let fav_channel = PlaylistItem {
                 header: PlaylistItemHeader {
                     uuid: fav_uuid,
-                    channel_group_uuid: Some(group_uuid),
+                    failover_group_uuid: Some(group_uuid),
                     group: "Favourites".intern(),
                     ..group_channel.header.clone()
                 },
@@ -1014,15 +1016,15 @@ impl GroupPlaybackEnvBuilder {
             });
         }
 
-        let mut pending = vec![PendingChannelGroup {
+        let mut pending = FailoverGroupBatch::with_groups(vec![PendingFailoverGroup {
             group_uuid,
             key: Arc::from("zdf hd"),
-            origin: ChannelGroupOrigin::Auto,
-            policy: ChannelGroupPolicy::Auto,
+            origin: FailoverGroupOrigin::Auto,
+            policy: FailoverGroupPolicy::Auto,
             members,
             orphaned: Vec::new(),
             epg_split: false,
-        }];
+        }]);
 
         let app_cfg = Arc::new(app_cfg);
         let playlists = Arc::new(PlaylistStorageState::new());
@@ -1048,7 +1050,7 @@ impl GroupPlaybackEnvBuilder {
         let config_snapshot = app_cfg.config.load();
         let path = get_target_storage_path(&config_snapshot, &target.name).expect("path");
         let record =
-            ChannelGroupStore::read_group(&path, VirtualId::new(group_vid)).expect("read").expect("record exists");
+            FailoverGroupStore::read_group(&path, VirtualId::new(group_vid)).expect("read").expect("record exists");
         let group_record = Arc::new(record);
 
         let app_state = crate::api::api_utils::tests::support::create_test_app_state_for_config(Arc::clone(&app_cfg));
@@ -1073,8 +1075,8 @@ impl GroupPlaybackEnvBuilder {
 
         for (input, provider_id, score) in self.qos {
             app_state.member_health.replace_qos([(
-                tuliprox_session::channel_group::QosKey::Provider { input: Arc::from(input.as_str()), provider_id },
-                tuliprox_session::channel_group::QosPart {
+                tuliprox_session::failover_group::QosKey::Provider { input: Arc::from(input.as_str()), provider_id },
+                tuliprox_session::failover_group::QosPart {
                     score_24h: score,
                     score_7d: score,
                     confidence: 100,

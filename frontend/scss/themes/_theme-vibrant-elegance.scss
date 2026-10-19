@@ -283,4 +283,12 @@ body[data-theme="vibrant-elegance"] {
     rgba(6, 21, 27, 0.4) 72%,
     rgba(6, 21, 27, 0) 86%
   );
+
+  --theme-palette-failover-group-origin-auto: var(--theme-palette-info-tone-500);
+  --theme-palette-failover-group-origin-edited: var(--theme-palette-warning-tone-500);
+  --theme-palette-failover-group-origin-manual: var(--theme-palette-accent-tone-500);
+  --theme-palette-failover-group-problem: var(--theme-palette-danger-tone-500);
+  --theme-palette-failover-group-health-ok: var(--theme-palette-success-tone-520);
+  --theme-palette-failover-group-health-degraded: var(--theme-palette-warning-tone-520);
+  --theme-palette-failover-group-health-open: var(--theme-palette-danger-tone-520);
 }

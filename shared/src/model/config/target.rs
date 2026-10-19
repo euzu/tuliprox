@@ -253,14 +253,14 @@ impl ConfigTargetDto {
 #[cfg(test)]
 mod tests;
 
-mod channel_groups;
+mod failover_groups;
 mod filter;
 mod options;
 mod output;
-pub use channel_groups::{
-    ChannelGroupCircuitConfig, ChannelGroupFailoverConfig, ChannelGroupPlayback, ChannelGroupPolicy,
-    ChannelGroupStartConfig, ChannelGroupsConfig, ChannelGroupsTargetConfig, ChannelMatchBy, ChannelMatchNormalize,
-    EpgConflictMode, RuntimeAudioLanguage, MIN_GROUP_MEMBERS,
+pub use failover_groups::{
+    ChannelMatchBy, ChannelMatchNormalize, EpgConflictMode, FailoverGroupCircuitConfig, FailoverGroupPlayback,
+    FailoverGroupPolicy, FailoverGroupRuntimeConfig, FailoverGroupStartConfig, FailoverGroupsConfig,
+    FailoverGroupsTargetConfig, RuntimeAudioLanguage, MIN_GROUP_MEMBERS,
 };
 pub use filter::ConfigTargetFilterDto;
 pub use options::{

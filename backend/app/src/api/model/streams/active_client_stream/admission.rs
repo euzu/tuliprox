@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     api::{
-        api_utils::channel_group_failover::GroupSwitcher,
+        api_utils::failover_group_runtime::GroupSwitcher,
         model::{
             connection_manager::PROVIDER_END_NOT_SET, AppState, BoxedProviderStream, ConnectionManager, EventManager,
             MeteringStream, StreamDetails, StreamMeterHandle,

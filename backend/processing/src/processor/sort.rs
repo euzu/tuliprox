@@ -303,7 +303,7 @@ impl SortPlan {
             ));
         }
         for (group_index, (group, indices)) in groups.iter().zip(&self.channel_indices).enumerate() {
-            validate_permutation(indices, group.channels.len(), &format!("channel group {group_index}"))?;
+            validate_permutation(indices, group.channels.len(), &format!("failover group {group_index}"))?;
         }
         Ok(())
     }

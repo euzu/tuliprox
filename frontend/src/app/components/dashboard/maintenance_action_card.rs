@@ -17,13 +17,6 @@ use yew::prelude::*;
 
 const ALERT_CLASS: &str = "tp__card--maintenance";
 
-fn dialog_portal(content: Html) -> Html {
-    match web_sys::window().and_then(|window| window.document()).and_then(|document| document.body()) {
-        Some(body) => yew::create_portal(content, body.into()),
-        None => content,
-    }
-}
-
 #[component]
 pub fn MaintenanceActionCard() -> Html {
     let services = use_service_context();
@@ -149,7 +142,7 @@ pub fn MaintenanceActionCard() -> Html {
           if *dialog_open {
             // Rendered into <body>: inside the card the backdrop would share the card's stacking
             // context and let pointer events reach the dashboard behind it.
-            { dialog_portal(html! {
+            { crate::utils::in_body(html! {
                 <MaintenanceDialog state={(*state).clone()} can_write={can_write} on_state={apply_state} on_close={close_dialog} />
             }) }
           }

@@ -3,6 +3,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
+    services::AuthService,
     utils::{get_local_storage_item, html_if, set_local_storage_item, MOBILE_BREAKPOINT_PX},
 };
 use shared::model::permission::Permission;
@@ -72,6 +73,132 @@ pub const fn show_stream_history_nav(has_system_read: bool, stream_history_enabl
     has_system_read && stream_history_enabled
 }
 
+/// What the signed-in user may open; the one input of the navigation, whether it is shown expanded or collapsed.
+#[derive(Debug, Clone, Copy, Default)]
+struct NavAccess {
+    admin: bool,
+    system_read: bool,
+    config_read: bool,
+    source_read: bool,
+    user_read: bool,
+    user_write: bool,
+    playlist_read: bool,
+    playlist_write: bool,
+    epg_read: bool,
+    show_streams_page: bool,
+    show_stream_history: bool,
+    show_recording: bool,
+}
+
+impl NavAccess {
+    fn new(auth: &AuthService, props: &SidebarProps) -> Self {
+        Self {
+            admin: auth.is_admin(),
+            system_read: auth.has_permission(Permission::SystemRead),
+            config_read: auth.has_permission(Permission::ConfigRead),
+            source_read: auth.has_permission(Permission::SourceRead),
+            user_read: auth.has_permission(Permission::UserRead),
+            user_write: auth.has_permission(Permission::UserWrite),
+            playlist_read: auth.has_permission(Permission::PlaylistRead),
+            playlist_write: auth.has_permission(Permission::PlaylistWrite),
+            epg_read: auth.has_permission(Permission::EpgRead),
+            show_streams_page: props.show_streams_page,
+            show_stream_history: show_stream_history_nav(
+                auth.has_permission(Permission::SystemRead),
+                props.show_stream_history,
+            ),
+            show_recording: show_recording_nav(auth.has_permission(Permission::RecordingRead), props.show_recording),
+        }
+    }
+}
+
+/// One navigation entry; the collapsed sidebar may show another icon than the expanded one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NavEntry {
+    view: ViewType,
+    icon: &'static str,
+    collapsed_icon: &'static str,
+    label_key: &'static str,
+}
+
+impl NavEntry {
+    const fn new(view: ViewType, icon: &'static str, label_key: &'static str) -> Self {
+        Self { view, icon, collapsed_icon: icon, label_key }
+    }
+
+    const fn collapsed_icon(self, collapsed_icon: &'static str) -> Self { Self { collapsed_icon, ..self } }
+}
+
+/// Entries the user may see. A titled section is a collapsible panel when expanded and is preceded by a spacer
+/// when collapsed; the untitled section is always shown as is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NavSection {
+    title_key: Option<&'static str>,
+    entries: Vec<NavEntry>,
+}
+
+fn nav_section(title_key: Option<&'static str>, entries: &[(bool, NavEntry)]) -> NavSection {
+    NavSection { title_key, entries: entries.iter().filter_map(|&(visible, entry)| visible.then_some(entry)).collect() }
+}
+
+/// The navigation of the sidebar in display order: the sections and entries the user may see, titled sections
+/// without any visible entry left out.
+fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
+    let sections = [
+        nav_section(
+            None,
+            &[
+                (true, NavEntry::new(ViewType::Dashboard, "DashboardOutline", "LABEL.DASHBOARD")),
+                (access.system_read, NavEntry::new(ViewType::Stats, "Stats", "LABEL.STATS")),
+                (
+                    access.show_streams_page && access.system_read,
+                    NavEntry::new(ViewType::Streams, "Streams", "LABEL.STREAMS"),
+                ),
+                (access.show_stream_history, NavEntry::new(ViewType::StreamHistory, "Log", "LABEL.STREAM_HISTORY")),
+            ],
+        ),
+        nav_section(
+            Some("LABEL.SETTINGS"),
+            &[
+                (access.admin, NavEntry::new(ViewType::Rbac, "Shield", "LABEL.RBAC")),
+                (access.config_read, NavEntry::new(ViewType::Config, "Config", "LABEL.CONFIG")),
+                (access.user_read || access.user_write, NavEntry::new(ViewType::Users, "UserOutline", "LABEL.USER")),
+                (access.config_read, NavEntry::new(ViewType::Plans, "Group", "LABEL.PLANS")),
+                (access.source_read, NavEntry::new(ViewType::SourceEditor, "SourceEditor", "LABEL.SOURCE_EDITOR")),
+                (
+                    access.source_read || access.playlist_read,
+                    NavEntry::new(ViewType::PlaylistSettings, "PlayArrowOutline", "LABEL.PLAYLIST"),
+                ),
+            ],
+        ),
+        nav_section(
+            Some("LABEL.PLAYLIST"),
+            &[
+                (access.playlist_write, NavEntry::new(ViewType::PlaylistUpdate, "Refresh", "LABEL.UPDATE")),
+                (access.playlist_read, NavEntry::new(ViewType::PlaylistExplorer, "Live", "LABEL.PLAYLIST_VIEWER")),
+                (access.playlist_read, NavEntry::new(ViewType::FailoverGroups, "Group", "LABEL.FAILOVER_GROUPS")),
+                (access.epg_read, NavEntry::new(ViewType::PlaylistEpg, "Epg", "LABEL.PLAYLIST_EPG")),
+            ],
+        ),
+        nav_section(
+            Some("LABEL.RECORDING"),
+            &[
+                (
+                    access.show_recording,
+                    NavEntry::new(ViewType::RecordingLibrary, "DVR", "LABEL.RECORDING_LIBRARY")
+                        .collapsed_icon("LibraryOutline"),
+                ),
+                (
+                    access.show_recording,
+                    NavEntry::new(ViewType::RecordingRules, "DVR", "LABEL.RECORDING_RULES")
+                        .collapsed_icon("ScheduleOutline"),
+                ),
+            ],
+        ),
+    ];
+    sections.into_iter().filter(|section| section.title_key.is_none() || !section.entries.is_empty()).collect()
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -84,10 +211,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let is_mobile = use_state(|| false);
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
     let active_menu = props.active_page;
-    let show_recording =
-        show_recording_nav(services.auth.has_permission(Permission::RecordingRead), props.show_recording);
-    let show_stream_history =
-        show_stream_history_nav(services.auth.has_permission(Permission::SystemRead), props.show_stream_history);
+    let access = NavAccess::new(&services.auth, props);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -198,150 +322,43 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         });
     }
 
+    let sections = nav_sections(&access);
+
     let render_expanded = || {
-        let auth = &services.auth;
         html! {
           <div class="tp__app-sidebar__content">
-            <MenuItem class={if active_menu == ViewType::Dashboard { "active" } else {""}} icon="DashboardOutline" name={ViewType::Dashboard.to_string()} label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></MenuItem>
-            {html_if!(auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if active_menu == ViewType::Stats { "active" } else {""}} icon="Stats" name={ViewType::Stats.to_string()} label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></MenuItem>
-            })}
-            {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
-             })}
-            {html_if!(show_stream_history, {
-                <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
-            })}
-            {html_if!(
-                auth.has_any_permissions(
-                    Permission::ConfigRead
-                        | Permission::SourceRead
-                        | Permission::UserRead
-                        | Permission::UserWrite
-                        | Permission::PlaylistRead,
-                ),
-                {
-                    <CollapsePanel title={translate.t("LABEL.SETTINGS")}>
-                      {html_if!(auth.is_admin(), {
-                        <MenuItem class={if active_menu == ViewType::Rbac { "active" } else {""}} icon="Shield" name={ViewType::Rbac.to_string()} label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_permission(Permission::ConfigRead), {
-                          <MenuItem class={if active_menu == ViewType::Config { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
-                          <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_permission(Permission::ConfigRead), {
-                          <MenuItem class={if active_menu == ViewType::Plans { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_permission(Permission::SourceRead), {
-                          <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistSettings { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                    </CollapsePanel>
+            { for sections.iter().map(|section| {
+                let items = html! {
+                    { for section.entries.iter().map(|entry| html! {
+                        <MenuItem class={if active_menu == entry.view { "active" } else { "" }} icon={entry.icon}
+                            name={entry.view.to_string()} label={translate.t(entry.label_key)} onclick={&handle_menu_click}></MenuItem>
+                    }) }
+                };
+                match section.title_key {
+                    Some(title_key) => html! { <CollapsePanel title={translate.t(title_key)}>{ items }</CollapsePanel> },
+                    None => items,
                 }
-            )}
-            {html_if!(
-                auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),
-                {
-                    <CollapsePanel title={translate.t("LABEL.PLAYLIST")}>
-                      {html_if!(auth.has_permission(Permission::PlaylistWrite), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistUpdate { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                      {html_if!(auth.has_permission(Permission::PlaylistRead), {
-                          <>
-                          <MenuItem class={if active_menu == ViewType::PlaylistExplorer { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
-                          </>
-                      })}
-                      {html_if!(auth.has_permission(Permission::EpgRead), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistEpg { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
-                      })}
-                    </CollapsePanel>
-                }
-            )}
-            {html_if!(
-                show_recording,
-                {
-                    <CollapsePanel title={translate.t("LABEL.RECORDING")}>
-                      <MenuItem class={if active_menu == ViewType::RecordingLibrary { "active" } else {""}} icon="DVR" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
-                      <MenuItem class={if active_menu == ViewType::RecordingRules { "active" } else {""}} icon="DVR" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
-                    </CollapsePanel>
-                }
-            )}
+            }) }
           </div>
         }
     };
 
     let render_collapsed = || {
-        let auth = &services.auth;
         html! {
           <div class="tp__app-sidebar__content">
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Dashboard, if active_menu == ViewType::Dashboard { " active" } else {""})}  icon="DashboardOutline" name={ViewType::Dashboard.to_string()} hint={translate.t("LABEL.DASHBOARD")} aria_label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></IconButton>
-            {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Stats, if active_menu == ViewType::Stats { " active" } else {""})} icon="Stats" name={ViewType::Stats.to_string()} hint={translate.t("LABEL.STATS")} aria_label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
-             <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(show_stream_history, {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(
-                auth.has_any_permissions(
-                    Permission::ConfigRead
-                        | Permission::SourceRead
-                        | Permission::UserRead
-                        | Permission::UserWrite
-                        | Permission::PlaylistRead,
-                ),
-                {
-                    <span class="tp__app-sidebar__content-space"></span>
-                }
-            )}
-            {html_if!(auth.is_admin(), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if active_menu == ViewType::Rbac { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} hint={translate.t("LABEL.RBAC")} aria_label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_permission(Permission::ConfigRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_permission(Permission::ConfigRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if active_menu == ViewType::Plans { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_permission(Permission::SourceRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if active_menu == ViewType::PlaylistSettings { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(
-                auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),
-                {
-                    <span class="tp__app-sidebar__content-space"></span>
-                }
-            )}
-            {html_if!(auth.has_permission(Permission::PlaylistWrite), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if active_menu == ViewType::PlaylistUpdate { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} hint={translate.t("LABEL.UPDATE")} aria_label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(auth.has_permission(Permission::PlaylistRead), {
-               <>
-               <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if active_menu == ViewType::PlaylistExplorer { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} hint={translate.t("LABEL.PLAYLIST_VIEWER")} aria_label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></IconButton>
-               </>
-            })}
-            {html_if!(auth.has_permission(Permission::EpgRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>
-            })}
-            {html_if!(show_recording, {
+            { for sections.iter().map(|section| html! {
                 <>
-                <span class="tp__app-sidebar__content-space"></span>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if active_menu == ViewType::RecordingLibrary { " active" } else {""})} icon="LibraryOutline" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if active_menu == ViewType::RecordingRules { " active" } else {""})} icon="ScheduleOutline" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
+                    { html_if!(section.title_key.is_some(), { <span class="tp__app-sidebar__content-space"></span> }) }
+                    { for section.entries.iter().map(|entry| {
+                        let label = translate.t(entry.label_key);
+                        html! {
+                            <IconButton class={format!("tp__app-sidebar-menu--{}{}", entry.view, if active_menu == entry.view { " active" } else { "" })}
+                                icon={entry.collapsed_icon} name={entry.view.to_string()} hint={label.clone()} aria_label={label}
+                                onclick={&handle_menu_click}></IconButton>
+                        }
+                    }) }
                 </>
-            })}
+            }) }
           </div>
         }
     };
@@ -404,8 +421,32 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sidebar_expanded, resolved_sidebar_state, sidebar_variant_class, CollapseState};
-    use crate::app::components::show_recording_nav;
+    use super::{
+        is_sidebar_expanded, nav_sections, resolved_sidebar_state, sidebar_variant_class, CollapseState, NavAccess,
+        NavSection,
+    };
+    use crate::{app::components::show_recording_nav, model::ViewType};
+
+    fn full_access() -> NavAccess {
+        NavAccess {
+            admin: true,
+            system_read: true,
+            config_read: true,
+            source_read: true,
+            user_read: true,
+            user_write: true,
+            playlist_read: true,
+            playlist_write: true,
+            epg_read: true,
+            show_streams_page: true,
+            show_stream_history: true,
+            show_recording: true,
+        }
+    }
+
+    fn views(sections: &[NavSection]) -> Vec<ViewType> {
+        sections.iter().flat_map(|section| section.entries.iter().map(|entry| entry.view)).collect()
+    }
 
     #[test]
     fn sidebar_variant_class_reports_collapsed_variants() {
@@ -448,5 +489,78 @@ mod tests {
         assert!(!super::show_stream_history_nav(true, false));
         assert!(!super::show_stream_history_nav(false, true));
         assert!(!super::show_stream_history_nav(false, false));
+    }
+
+    #[test]
+    fn nav_without_any_access_offers_only_the_dashboard() {
+        let sections = nav_sections(&NavAccess::default());
+        assert_eq!(views(&sections), vec![ViewType::Dashboard]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title_key, None);
+    }
+
+    #[test]
+    fn nav_with_full_access_keeps_the_display_order() {
+        let sections = nav_sections(&full_access());
+        assert_eq!(
+            views(&sections),
+            vec![
+                ViewType::Dashboard,
+                ViewType::Stats,
+                ViewType::Streams,
+                ViewType::StreamHistory,
+                ViewType::Rbac,
+                ViewType::Config,
+                ViewType::Users,
+                ViewType::Plans,
+                ViewType::SourceEditor,
+                ViewType::PlaylistSettings,
+                ViewType::PlaylistUpdate,
+                ViewType::PlaylistExplorer,
+                ViewType::FailoverGroups,
+                ViewType::PlaylistEpg,
+                ViewType::RecordingLibrary,
+                ViewType::RecordingRules,
+            ]
+        );
+        let titles: Vec<_> = sections.iter().map(|section| section.title_key).collect();
+        assert_eq!(titles, vec![None, Some("LABEL.SETTINGS"), Some("LABEL.PLAYLIST"), Some("LABEL.RECORDING")]);
+    }
+
+    #[test]
+    fn nav_entries_follow_their_permissions() {
+        let playlist_reader = NavAccess { playlist_read: true, ..NavAccess::default() };
+        assert_eq!(
+            views(&nav_sections(&playlist_reader)),
+            vec![ViewType::Dashboard, ViewType::PlaylistSettings, ViewType::PlaylistExplorer, ViewType::FailoverGroups]
+        );
+
+        let epg_reader = NavAccess { epg_read: true, ..NavAccess::default() };
+        assert_eq!(views(&nav_sections(&epg_reader)), vec![ViewType::Dashboard, ViewType::PlaylistEpg]);
+
+        let streams_without_system_read = NavAccess { show_streams_page: true, ..NavAccess::default() };
+        assert_eq!(views(&nav_sections(&streams_without_system_read)), vec![ViewType::Dashboard]);
+
+        let user_writer = NavAccess { user_write: true, ..NavAccess::default() };
+        assert_eq!(views(&nav_sections(&user_writer)), vec![ViewType::Dashboard, ViewType::Users]);
+
+        let config_reader = NavAccess { config_read: true, ..NavAccess::default() };
+        assert_eq!(views(&nav_sections(&config_reader)), vec![ViewType::Dashboard, ViewType::Config, ViewType::Plans]);
+    }
+
+    #[test]
+    fn nav_recording_entries_use_other_icons_when_collapsed() {
+        let sections = nav_sections(&NavAccess { show_recording: true, ..NavAccess::default() });
+        let recording = sections.last().expect("recording section");
+        assert_eq!(recording.title_key, Some("LABEL.RECORDING"));
+        assert_eq!(
+            recording.entries.iter().map(|entry| (entry.icon, entry.collapsed_icon)).collect::<Vec<_>>(),
+            vec![("DVR", "LibraryOutline"), ("DVR", "ScheduleOutline")]
+        );
+        assert!(nav_sections(&full_access())
+            .iter()
+            .flat_map(|section| &section.entries)
+            .filter(|entry| !matches!(entry.view, ViewType::RecordingLibrary | ViewType::RecordingRules))
+            .all(|entry| entry.icon == entry.collapsed_icon));
     }
 }

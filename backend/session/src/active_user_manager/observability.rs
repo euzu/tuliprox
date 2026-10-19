@@ -108,7 +108,7 @@ impl ActiveUserManager {
         })
     }
 
-    /// Provider of the session bound to a channel group member.
+    /// Provider of the session bound to a failover group member.
     pub async fn bound_member_session_provider(&self, username: &str) -> Option<Arc<str>> {
         let connections = self.connections.read().await;
         let data = connections.by_key.get(username)?;

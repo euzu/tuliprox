@@ -1,11 +1,11 @@
 mod active_user_connection_change;
 mod auth;
 mod auth_audit;
-pub mod channel_group;
 mod cluster_flags;
 mod config;
 mod connection_denied;
 mod custom_video_stream_type;
+pub mod failover_group;
 
 mod epg;
 mod epg_grid;
@@ -79,8 +79,8 @@ mod xtream;
 pub mod xtream_const;
 
 pub use self::{
-    active_user_connection_change::*, auth::*, auth_audit::*, channel_group::*, cluster_flags::*, config::*,
-    connection_denied::*, custom_video_stream_type::*, epg::*, epg_grid::*, epg_request::*, event::*,
+    active_user_connection_change::*, auth::*, auth_audit::*, cluster_flags::*, config::*, connection_denied::*,
+    custom_video_stream_type::*, epg::*, epg_grid::*, epg_request::*, event::*, failover_group::*,
     input_refresh_policy::*, input_update_action::*, ip_check::*, item_field::*, library_request::*, log::*,
     maintenance::*, mapping::*, media_properties::*, messaging::*, metadata_update_failure::*, notification::*,
     notification_dead_letter::*, pagination::*, playlist::*, playlist_categories::*, playlist_info_document::*,

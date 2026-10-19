@@ -507,27 +507,43 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 
-pub(super) async fn process_target_channel_groups(
+pub(super) fn process_target_failover_groups(
     config: &tuliprox_core::model::AppConfig,
     target: &ConfigTarget,
     playlist: &mut Vec<PlaylistGroup>,
     step: &mut StepMeasure,
     errors: &mut Vec<TuliproxError>,
-) -> Vec<PendingChannelGroup> {
-    let Some(target_cfg) = target.execution_plan.channel_groups.as_ref() else {
-        return Vec::new();
+) -> FailoverGroupBatch {
+    let Some(target_cfg) = target.execution_plan.failover_groups.as_ref() else {
+        return FailoverGroupBatch::default();
     };
-    let cg_cfg = config.config.load().channel_groups.for_target(target_cfg);
-    let overrides =
-        tuliprox_repository::load_channel_group_overrides(config, &target.name).await.unwrap_or_else(|err| {
-            errors.push(err);
-            None
-        });
-    step.broadcast("Processing channel groups for '{}' playlist", &target.name);
-    let groups = crate::processor::channel_group::group_playlist(&cg_cfg, overrides.as_ref(), &target.name, playlist);
-    step.tick("channel grouping");
-    log_memory_snapshot(format!("target '{}' after_channel_grouping", target.name).as_str());
-    groups
+    let cg_cfg = config.config.load().failover_groups.for_target(target_cfg);
+    // One snapshot for error and section, so the meta never mixes two failover generations.
+    let failover = config.failover.load();
+    if let Some(error) = failover.error.as_deref() {
+        errors.push(TuliproxError::FailoverGroup(format!(
+            "Failover overrides are not applied to target '{}': {error}",
+            target.name
+        )));
+    }
+    let overrides = failover.sections.get(target.name.as_str());
+    step.broadcast("Processing failover groups for '{}' playlist", &target.name);
+    let mut batch = crate::processor::failover_group::group_playlist(
+        &cg_cfg,
+        overrides.map(|entry| &entry.overrides),
+        &target.name,
+        playlist,
+    );
+    batch.meta = FailoverGroupMeta {
+        overrides_etag: overrides.map(|entry| Arc::clone(&entry.etag)),
+        overrides_error: failover.error.clone(),
+        applied_overrides: overrides.map(|entry| entry.overrides.clone()),
+        // A publication shows the current representatives, so nothing is stale after it.
+        display_stale_groups: Vec::new(),
+    };
+    step.tick("failover grouping");
+    log_memory_snapshot(format!("target '{}' after_failover_grouping", target.name).as_str());
+    batch
 }
 
 pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
@@ -542,8 +558,8 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
 
-    let pending_channel_groups =
-        process_target_channel_groups(&ctx.config, target, &mut new_playlist, &mut step, &mut errors).await;
+    let pending_failover_groups =
+        process_target_failover_groups(&ctx.config, target, &mut new_playlist, &mut step, &mut errors);
 
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
@@ -559,10 +575,10 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         return (Ok(()), errors);
     }
 
-    let group_uuids: HashSet<UUIDType> = pending_channel_groups.iter().map(|p| p.group_uuid).collect();
+    let group_uuids: HashSet<UUIDType> = pending_failover_groups.groups.iter().map(|p| p.group_uuid).collect();
     let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &group_uuids, &mut step);
     let mut views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
-    views.channel_groups = pending_channel_groups;
+    views.failover_groups = pending_failover_groups;
 
     if views.base.is_empty()
         && views.xtream.is_none()
@@ -620,7 +636,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
             library_empty,
             publication_plan: views.publication_plan,
         },
-        &mut views.channel_groups,
+        &mut views.failover_groups,
     )
     .await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
@@ -933,7 +949,7 @@ pub(crate) struct TargetPlaylistViews {
     pub(crate) base: Vec<PlaylistGroup>,
     pub(crate) xtream: Option<Vec<PlaylistGroup>>,
     pub(crate) publication_plan: PlaylistPublicationPlan,
-    pub(crate) channel_groups: Vec<PendingChannelGroup>,
+    pub(crate) failover_groups: FailoverGroupBatch,
 }
 
 pub(crate) fn build_curated_playlist_views(
@@ -959,7 +975,7 @@ pub(crate) fn build_curated_playlist_views(
             has_xtream_output && !config.include_xtream_base_categories,
             appearance_filter_configured,
         ),
-        channel_groups: Vec::new(),
+        failover_groups: FailoverGroupBatch::default(),
     }
 }
 
@@ -974,7 +990,7 @@ pub(crate) async fn prepare_target_playlist_views(
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
-            channel_groups: Vec::new(),
+            failover_groups: FailoverGroupBatch::default(),
         };
     };
 
@@ -993,7 +1009,7 @@ pub(super) fn curation_playlist_views(
             base: playlist,
             xtream: None,
             publication_plan: PlaylistPublicationPlan::Ordinary,
-            channel_groups: Vec::new(),
+            failover_groups: FailoverGroupBatch::default(),
         },
         CurationRunOutcome::Failed(failure) => {
             warn_curation_failure(&target.name, &failure);
@@ -1002,7 +1018,7 @@ pub(super) fn curation_playlist_views(
                 base: playlist,
                 xtream: None,
                 publication_plan: PlaylistPublicationPlan::Ordinary,
-                channel_groups: Vec::new(),
+                failover_groups: FailoverGroupBatch::default(),
             }
         }
         CurationRunOutcome::Complete(evaluation) => {
@@ -1218,11 +1234,11 @@ pub(crate) async fn process_watch<E: EventSink>(
 pub(crate) async fn run_finalize_until_persist(
     target: &ConfigTarget,
     mut playlist: Vec<PlaylistGroup>,
-) -> (Vec<PlaylistGroup>, Vec<PendingChannelGroup>) {
+) -> (Vec<PlaylistGroup>, Vec<tuliprox_repository::PendingFailoverGroup>) {
     let mut step = StepMeasure::new("test", |_, _| {});
-    let pending = if let Some(target_cfg) = target.execution_plan.channel_groups.as_ref() {
-        let cg_cfg = shared::model::ChannelGroupsConfig::default().for_target(target_cfg);
-        crate::processor::channel_group::group_playlist(&cg_cfg, None, &target.name, &mut playlist)
+    let pending = if let Some(target_cfg) = target.execution_plan.failover_groups.as_ref() {
+        let cg_cfg = shared::model::FailoverGroupsConfig::default().for_target(target_cfg);
+        crate::processor::failover_group::group_playlist(&cg_cfg, None, &target.name, &mut playlist).groups
     } else {
         Vec::new()
     };

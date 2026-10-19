@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_groups_by_id_when_present() {
+    fn failover_groups_by_id_when_present() {
         // Two recordings on the same stable channel id but
         // different display names still group together.
         let config = RetentionConfig { keep_last_per_channel: Some(0), delete_after_days: None };

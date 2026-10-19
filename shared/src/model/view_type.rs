@@ -13,6 +13,7 @@ const PLAYLIST_UPDATE: &str = "playlist_update";
 const PLAYLIST_SETTINGS: &str = "playlist_settings";
 const PLAYLIST_EXPLORER: &str = "playlist_explorer";
 const PLAYLIST_EPG: &str = "playlist_epg";
+const FAILOVER_GROUPS: &str = "failover_groups";
 const RBAC: &str = "rbac";
 const SOURCE_EDITOR: &str = "source_editor";
 const STREAM_HISTORY: &str = "stream_history";
@@ -35,6 +36,7 @@ pub enum ViewType {
     PlaylistSettings,
     PlaylistExplorer,
     PlaylistEpg,
+    FailoverGroups,
     Rbac,
     RecordingLibrary,
     RecordingRules,
@@ -57,6 +59,7 @@ impl ViewType {
             ViewType::PlaylistSettings => PLAYLIST_SETTINGS,
             ViewType::PlaylistExplorer => PLAYLIST_EXPLORER,
             ViewType::PlaylistEpg => PLAYLIST_EPG,
+            ViewType::FailoverGroups => FAILOVER_GROUPS,
             ViewType::Rbac => RBAC,
             ViewType::RecordingLibrary => RECORDING_LIBRARY,
             ViewType::RecordingRules => RECORDING_RULES,
@@ -82,6 +85,7 @@ impl FromStr for ViewType {
             PLAYLIST_SETTINGS => Ok(ViewType::PlaylistSettings),
             PLAYLIST_EXPLORER => Ok(ViewType::PlaylistExplorer),
             PLAYLIST_EPG => Ok(ViewType::PlaylistEpg),
+            FAILOVER_GROUPS => Ok(ViewType::FailoverGroups),
             RBAC => Ok(ViewType::Rbac),
             RECORDING_LIBRARY => Ok(ViewType::RecordingLibrary),
             RECORDING_RULES => Ok(ViewType::RecordingRules),
@@ -124,6 +128,13 @@ impl Serialize for ViewType {
 mod tests {
     use super::ViewType;
     use std::str::FromStr;
+
+    #[test]
+    fn failover_groups_view_round_trips_through_its_string_form() {
+        assert_eq!(ViewType::FailoverGroups.to_string(), "failover_groups");
+        assert_eq!(ViewType::from_str("failover_groups").ok(), Some(ViewType::FailoverGroups));
+        assert_eq!(ViewType::from_str("Failover_Groups").ok(), Some(ViewType::FailoverGroups));
+    }
 
     #[test]
     fn standalone_downloads_route_is_removed() {

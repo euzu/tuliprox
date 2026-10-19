@@ -1,14 +1,16 @@
 use crate::{
     app::{
         components::{
+            failover_groups::FailoverGroupsPreselect,
             menu_item::MenuItem,
             popup_menu::PopupMenu,
             recording::{
-                ensure_recording_available, target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill,
+                ensure_recording_available, target_for_id, target_name_for_id, PaddingBounds, RecordingForm,
+                RecordingFormPrefill,
             },
             AppIcon, Chip, DropDownOption, IconButton, NoContent, Panel, Search,
         },
-        context::{ConfigContext, PlaylistExplorerContext},
+        context::{ConfigContext, FailoverGroupsNavigation, PlaylistExplorerContext},
     },
     hooks::{use_clipboard_copy, use_service_context},
     html_if,
@@ -19,9 +21,9 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{
-        recording::RecordingVisibility, Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest,
-        SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId,
-        XtreamCluster,
+        recording::RecordingVisibility, ChannelMemberRefDto, Permission, PlaylistRequest, PlaylistUrlResolveRequest,
+        SearchRequest, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, SourcesConfigDto, UiPlaylistGroup,
+        UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::{format_float_localized, Internable},
 };
@@ -33,6 +35,8 @@ const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 const RECORD_ITEM: &str = "record_item";
+const OPEN_FAILOVER_GROUP: &str = "open_failover_group";
+const ADD_TO_FAILOVER_GROUP: &str = "add_to_failover_group";
 const TP_EXPLORER_SEARCH_FIELDS_KEY: &str = "tp-explorer-search-fields";
 
 #[derive(Clone)]
@@ -43,6 +47,7 @@ struct ChannelSelection {
     url: String,
     title: String,
     input_name: String,
+    input_stream_id: String,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -52,6 +57,8 @@ enum ExplorerAction {
     CopyLinkTuliproxWebPlayerUrl,
     CopyLinkProviderUrl,
     Record,
+    OpenFailoverGroup,
+    AddToFailoverGroup,
 }
 
 impl Display for ExplorerAction {
@@ -64,6 +71,8 @@ impl Display for ExplorerAction {
                 Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
                 Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
                 Self::Record => RECORD_ITEM,
+                Self::OpenFailoverGroup => OPEN_FAILOVER_GROUP,
+                Self::AddToFailoverGroup => ADD_TO_FAILOVER_GROUP,
             }
         )
     }
@@ -81,6 +90,10 @@ impl FromStr for ExplorerAction {
             Ok(Self::CopyLinkProviderUrl)
         } else if s.eq(RECORD_ITEM) {
             Ok(Self::Record)
+        } else if s.eq(OPEN_FAILOVER_GROUP) {
+            Ok(Self::OpenFailoverGroup)
+        } else if s.eq(ADD_TO_FAILOVER_GROUP) {
+            Ok(Self::AddToFailoverGroup)
         } else {
             Err(TuliproxError::Config(format!("Unknown ExplorerAction: {s}")))
         }
@@ -92,6 +105,24 @@ fn can_show_record_action(can_write_recordings: bool, selected_channel: Option<&
         && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live || item.downloadable)
 }
 
+/// Name of the browsed target when it has failover groups enabled.
+fn failover_group_target(
+    request: Option<&PlaylistRequest>,
+    sources: Option<&SourcesConfigDto>,
+    input_name: &str,
+) -> Option<String> {
+    let PlaylistRequest::Target(target_id) = request? else { return None };
+    let target = target_for_id(sources?, *target_id, Some(input_name))?;
+    target.options.as_ref()?.failover_groups.as_ref()?.enabled.then(|| target.name.clone())
+}
+
+/// Live channels of a target with failover groups can be opened in, or added to, a failover group; the channel
+/// reference needs the id the provider gave the stream.
+fn can_show_failover_group_actions(selected_channel: Option<&ChannelSelection>, failover_target: Option<&str>) -> bool {
+    failover_target.is_some()
+        && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live && !item.input_stream_id.is_empty())
+}
+
 enum ExplorerLevel {
     Categories,
     Group(Rc<UiPlaylistGroup>),
@@ -101,6 +132,7 @@ enum ExplorerLevel {
 #[component]
 pub fn PlaylistExplorer() -> Html {
     let explorer_ctx = use_context::<PlaylistExplorerContext>();
+    let failover_navigation = use_context::<FailoverGroupsNavigation>();
     let cfg_ctx = use_context::<ConfigContext>();
     let dialog_ctx = use_context::<DialogService>();
     let translate = use_translation();
@@ -197,6 +229,7 @@ pub fn PlaylistExplorer() -> Html {
                     url: dto.url.to_string(),
                     title: dto.title.to_string(),
                     input_name: dto.input_name.to_string(),
+                    input_stream_id: dto.input_stream_id.to_string(),
                 }));
                 set_anchor_ref.set(Some(target));
                 set_is_open.set(true);
@@ -287,9 +320,29 @@ pub fn PlaylistExplorer() -> Html {
         let translate_clone = translate.clone();
         let copy_to_clipboard = copy_to_clipboard.clone();
         let config = config_ctx.config.clone();
+        let failover_navigation = failover_navigation.clone();
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = ExplorerAction::from_str(&name) {
                 match action {
+                    ExplorerAction::OpenFailoverGroup | ExplorerAction::AddToFailoverGroup => {
+                        let (Some(navigation), Some(dto)) = (failover_navigation.as_ref(), selected_channel.as_ref())
+                        else {
+                            return;
+                        };
+                        let request = playlist_ctx.playlist_request.as_ref();
+                        let sources = config.as_ref().map(|app_config| &app_config.sources);
+                        let Some(target) = failover_group_target(request, sources, &dto.input_name) else { return };
+                        let preselect = FailoverGroupsPreselect::for_target(&target);
+                        navigation.open(if action == ExplorerAction::OpenFailoverGroup {
+                            preselect.with_group_search(&dto.title)
+                        } else {
+                            let member = ChannelMemberRefDto {
+                                input: dto.input_name.clone(),
+                                stream_id: dto.input_stream_id.clone(),
+                            };
+                            preselect.with_channel(member, &dto.title)
+                        });
+                    }
                     ExplorerAction::CopyLinkTuliproxVirtualId => {
                         if let Some(dto) = &*selected_channel {
                             copy_to_clipboard.emit(dto.virtual_id.to_string());
@@ -695,6 +748,7 @@ pub fn PlaylistExplorer() -> Html {
             url: chan.direct_source.to_string(),
             title: chan.title.to_string(),
             input_name: String::new(),
+            input_stream_id: String::new(),
         };
         let popup_onclick = handle_episode_popup_onclick.clone();
         let rating = chan.rating.unwrap_or_default();
@@ -835,6 +889,13 @@ pub fn PlaylistExplorer() -> Html {
         }
     };
 
+    let failover_target = selected_channel.as_ref().and_then(|channel| {
+        failover_group_target(
+            context.playlist_request.as_ref(),
+            config_ctx.config.as_ref().map(|app_config| &app_config.sources),
+            &channel.input_name,
+        )
+    });
     html! {
       <div class="tp__playlist-explorer">
         <div class="tp__playlist-explorer__header">
@@ -874,6 +935,14 @@ pub fn PlaylistExplorer() -> Html {
             }
             <MenuItem icon="Clipboard" name={ExplorerAction::CopyLinkProviderUrl.to_string()} label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")} onclick={&handle_menu_click}></MenuItem>
             { html_if!(
+                can_show_failover_group_actions(selected_channel.as_ref(), failover_target.as_deref()),
+                {
+                <>
+                 <MenuItem icon="Group" name={ExplorerAction::OpenFailoverGroup.to_string()} label={translate.t("LABEL.FAILOVER_GROUPS_OPEN_GROUP")} onclick={&handle_menu_click}></MenuItem>
+                 <MenuItem icon="Add" name={ExplorerAction::AddToFailoverGroup.to_string()} label={translate.t("LABEL.FAILOVER_GROUPS_ADD_TO_GROUP_ELLIPSIS")} onclick={&handle_menu_click}></MenuItem>
+                </>
+            })}
+            { html_if!(
                 can_show_record_action(can_write_recordings, selected_channel.as_ref()),
                 {
                 <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
@@ -885,8 +954,11 @@ pub fn PlaylistExplorer() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_show_record_action, ChannelSelection};
-    use shared::model::{VirtualId, XtreamCluster};
+    use super::{can_show_failover_group_actions, can_show_record_action, failover_group_target, ChannelSelection};
+    use shared::model::{
+        ConfigSourceDto, ConfigTargetDto, ConfigTargetOptions, FailoverGroupsTargetConfig, PlaylistRequest,
+        SourcesConfigDto, VirtualId, XtreamCluster,
+    };
 
     #[test]
     fn record_action_covers_live_vod_and_episode_with_recording_write() {
@@ -897,6 +969,7 @@ mod tests {
             url: String::new(),
             title: "Live".to_string(),
             input_name: String::new(),
+            input_stream_id: String::new(),
         };
         let vod = ChannelSelection {
             virtual_id: VirtualId::default(),
@@ -905,6 +978,7 @@ mod tests {
             url: String::new(),
             title: "VOD".to_string(),
             input_name: String::new(),
+            input_stream_id: String::new(),
         };
         let series_container = ChannelSelection {
             virtual_id: VirtualId::default(),
@@ -913,6 +987,7 @@ mod tests {
             url: String::new(),
             title: "Series".to_string(),
             input_name: String::new(),
+            input_stream_id: String::new(),
         };
         let episode = ChannelSelection {
             virtual_id: VirtualId::default(),
@@ -921,6 +996,7 @@ mod tests {
             url: String::new(),
             title: "Episode".to_string(),
             input_name: String::new(),
+            input_stream_id: String::new(),
         };
 
         assert!(!can_show_record_action(false, Some(&live)));
@@ -929,5 +1005,61 @@ mod tests {
         assert!(can_show_record_action(true, Some(&vod)));
         assert!(!can_show_record_action(true, Some(&series_container)));
         assert!(can_show_record_action(true, Some(&episode)));
+    }
+
+    fn selection(cluster: XtreamCluster, input_stream_id: &str) -> ChannelSelection {
+        ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster,
+            downloadable: cluster == XtreamCluster::Video,
+            url: String::new(),
+            title: "Channel".to_string(),
+            input_name: "input-a".to_string(),
+            input_stream_id: input_stream_id.to_string(),
+        }
+    }
+
+    fn sources_with_failover(enabled: Option<bool>) -> SourcesConfigDto {
+        let options = enabled.map(|enabled| ConfigTargetOptions {
+            failover_groups: Some(FailoverGroupsTargetConfig { enabled, ..FailoverGroupsTargetConfig::default() }),
+            ..ConfigTargetOptions::default()
+        });
+        SourcesConfigDto {
+            sources: vec![ConfigSourceDto {
+                inputs: vec!["input-a".to_string().into()],
+                targets: vec![ConfigTargetDto { id: 7, name: "Main TV".to_string(), options, ..Default::default() }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explorer_failover_group_actions_only_for_live_target_items() {
+        let live = selection(XtreamCluster::Live, "42");
+        let vod = selection(XtreamCluster::Video, "42");
+        let series = selection(XtreamCluster::Series, "42");
+        let no_stream_id = selection(XtreamCluster::Live, "");
+
+        assert!(can_show_failover_group_actions(Some(&live), Some("Main TV")));
+        assert!(!can_show_failover_group_actions(Some(&live), None), "target without failover groups");
+        assert!(!can_show_failover_group_actions(Some(&vod), Some("Main TV")));
+        assert!(!can_show_failover_group_actions(Some(&series), Some("Main TV")));
+        assert!(!can_show_failover_group_actions(Some(&no_stream_id), Some("Main TV")), "no channel reference");
+        assert!(!can_show_failover_group_actions(None, Some("Main TV")));
+
+        let enabled = sources_with_failover(Some(true));
+        let disabled = sources_with_failover(Some(false));
+        let unset = sources_with_failover(None);
+        let target = PlaylistRequest::Target(7);
+        let other_target = PlaylistRequest::Target(8);
+        let input = PlaylistRequest::Input("input-a".to_string());
+
+        assert_eq!(failover_group_target(Some(&target), Some(&enabled), "input-a").as_deref(), Some("Main TV"));
+        assert!(failover_group_target(Some(&target), Some(&disabled), "input-a").is_none());
+        assert!(failover_group_target(Some(&target), Some(&unset), "input-a").is_none());
+        assert!(failover_group_target(Some(&other_target), Some(&enabled), "input-a").is_none());
+        assert!(failover_group_target(Some(&input), Some(&enabled), "input-a").is_none(), "only target playlists");
+        assert!(failover_group_target(Some(&target), None, "input-a").is_none());
+        assert!(failover_group_target(None, Some(&enabled), "input-a").is_none());
     }
 }

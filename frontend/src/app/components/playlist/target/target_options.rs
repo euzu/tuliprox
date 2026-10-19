@@ -20,7 +20,7 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
             None => (
                 vec![false, false, false, false, false, false],
                 vec![
-                    (false, "LABEL.CHANNEL_GROUPS"),
+                    (false, "LABEL.FAILOVER_GROUPS"),
                     (false, "LABEL.IGNORE_LOGO"),
                     (false, "LABEL.SHARE_LIVE_STREAMS"),
                     (false, "LABEL.HLS"),
@@ -38,10 +38,10 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
                         (force_redirect.contains(ClusterFlags::Series), "LABEL.SERIES"),
                     ],
                 };
-                let channel_groups = options.channel_groups.as_ref().is_some_and(|groups| groups.enabled);
+                let failover_groups = options.failover_groups.as_ref().is_some_and(|groups| groups.enabled);
                 (
                     vec![
-                        channel_groups,
+                        failover_groups,
                         options.ignore_logo,
                         options.share_live_any_enabled(),
                         options.share_live_hls_enabled(),
@@ -52,7 +52,7 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
                         force_redirect[2].0,
                     ],
                     vec![
-                        (channel_groups, "LABEL.CHANNEL_GROUPS"),
+                        (failover_groups, "LABEL.FAILOVER_GROUPS"),
                         (options.ignore_logo, "LABEL.IGNORE_LOGO"),
                         (options.share_live_any_enabled(), "LABEL.SHARE_LIVE_STREAMS"),
                         (options.share_live_hls_enabled(), "LABEL.HLS"),

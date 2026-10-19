@@ -3,7 +3,7 @@ use crate::{
         components::{
             config::{
                 config_page::{
-                    ConfigForm, ConfigFormSlots, ConfigPage, LABEL_API_CONFIG, LABEL_CHANNEL_GROUPS_CONFIG,
+                    ConfigForm, ConfigFormSlots, ConfigPage, LABEL_API_CONFIG, LABEL_FAILOVER_GROUPS_CONFIG,
                     LABEL_HDHOMERUN_CONFIG, LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG,
                     LABEL_MAIN_CONFIG, LABEL_MESSAGING_CONFIG, LABEL_METADATA_UPDATE_CONFIG, LABEL_PANEL_CONFIG,
                     LABEL_PROXY_CONFIG, LABEL_RECORDING_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG,
@@ -11,7 +11,7 @@ use crate::{
                 },
                 config_update::apply_and_prepare_config,
                 config_view_context::ConfigViewContext,
-                ApiConfigView, ChannelGroupsConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView,
+                ApiConfigView, FailoverGroupsConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView,
                 LogConfigView, MainConfigView, MessagingConfigView, MetadataUpdateConfigView, PanelConfigView,
                 ProxyConfigView, RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView, WebUiConfigView,
             },
@@ -20,7 +20,7 @@ use crate::{
         },
         ConfigContext,
     },
-    hooks::{use_key_down, use_service_context},
+    hooks::{use_key_down, use_service_context, use_unsaved_changes_guard},
     html_if,
     i18n::use_translation,
     services::{get_base_href, SetupCompleteRequestDto, SetupWebUserCredentialDto},
@@ -29,8 +29,6 @@ use crate::{
 use log::warn;
 use shared::model::{permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::str::FromStr;
-use wasm_bindgen::{closure::Closure, JsCast};
-use web_sys::BeforeUnloadEvent;
 use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
@@ -63,7 +61,7 @@ fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
         ConfigForm::IpCheck(_, _) => ConfigPage::IpCheck,
         ConfigForm::Panel(_, _) => ConfigPage::Panel,
         ConfigForm::Library(_, _) => ConfigPage::Library,
-        ConfigForm::ChannelGroups(_, _) => ConfigPage::ChannelGroups,
+        ConfigForm::FailoverGroups(_, _) => ConfigPage::FailoverGroups,
     }
 }
 
@@ -137,7 +135,12 @@ pub fn ConfigView() -> Html {
                     "Metadata",
                 ),
                 (ConfigPage::Library, LABEL_LIBRARY_CONFIG, html! { <LibraryConfigView/> }, "VideoLibrary"),
-                (ConfigPage::ChannelGroups, LABEL_CHANNEL_GROUPS_CONFIG, html! { <ChannelGroupsConfigView/> }, "Nodes"),
+                (
+                    ConfigPage::FailoverGroups,
+                    LABEL_FAILOVER_GROUPS_CONFIG,
+                    html! { <FailoverGroupsConfigView/> },
+                    "Nodes",
+                ),
             ];
 
             let editing = *editing;
@@ -452,27 +455,7 @@ pub fn ConfigView() -> Html {
             || !setup_password_repeat.is_empty());
     let has_unsaved_changes = (*edit_mode || setup_mode)
         && (!form_state.slots.collect_modified_forms().is_empty() || setup_credentials_dirty);
-    {
-        use_effect_with(has_unsaved_changes, move |&dirty| {
-            let closure = Closure::<dyn FnMut(BeforeUnloadEvent)>::wrap(Box::new(move |event: BeforeUnloadEvent| {
-                event.prevent_default();
-                event.set_return_value("");
-            }));
-            if dirty {
-                if let Some(win) = web_sys::window() {
-                    let _ = win.add_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
-                }
-            }
-            move || {
-                if dirty {
-                    if let Some(win) = web_sys::window() {
-                        let _ =
-                            win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
-                    }
-                }
-            }
-        });
-    }
+    use_unsaved_changes_guard(has_unsaved_changes);
 
     // Save shortcut (Ctrl/Cmd+S) while editing
     {

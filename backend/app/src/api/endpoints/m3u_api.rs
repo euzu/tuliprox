@@ -565,12 +565,12 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     let mut source = source.unwrap_or_else(|| match resolved_target {
         tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => {
             let prefer = bound_prefer.filter(|(gvid, _)| *gvid == group.group_vid.get()).map(|(_, idx)| idx);
-            PlaybackSource::Group { group, mode: tuliprox_session::channel_group::SelectionMode::Live, prefer }
+            PlaybackSource::Group { group, mode: tuliprox_session::failover_group::SelectionMode::Live, prefer }
         }
         tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
             PlaybackSource::Group {
                 group,
-                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
                 prefer: Some(index),
             }
         }
@@ -837,13 +837,13 @@ async fn m3u_api_stream(
     let source = match resolved_target {
         tuliprox_repository::target_stream_item::ResolvedStreamTarget::Group(group) => Some(PlaybackSource::Group {
             group,
-            mode: tuliprox_session::channel_group::SelectionMode::Live,
+            mode: tuliprox_session::failover_group::SelectionMode::Live,
             prefer: None,
         }),
         tuliprox_repository::target_stream_item::ResolvedStreamTarget::Member { group, index } => {
             Some(PlaybackSource::Group {
                 group,
-                mode: tuliprox_session::channel_group::SelectionMode::Live,
+                mode: tuliprox_session::failover_group::SelectionMode::Live,
                 prefer: Some(index),
             })
         }

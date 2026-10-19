@@ -754,6 +754,7 @@ mod tests {
                 run_id: Some(run.into()),
                 execution_order: Some(order.into()),
                 state,
+                targets: Vec::new(),
             },
         };
         for terminal in [PlaylistUpdateState::Success, PlaylistUpdateState::Partial, PlaylistUpdateState::Failure] {

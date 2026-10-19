@@ -2,6 +2,7 @@ use crate::{
     app::{
         components::{
             config::{ConfigView, PlansView},
+            failover_groups::FailoverGroupsView,
             loading_indicator::BusyIndicator,
             map_sources_to_playlist_rows,
             recording::{RecordingLibraryView, RecordingRulesView},
@@ -11,7 +12,7 @@ use crate::{
             Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView,
             WebsocketStatus,
         },
-        context::{ConfigContext, PlaylistContext, StatusContext},
+        context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, StatusContext},
     },
     hooks::{use_server_status, use_service_context},
     html_if,
@@ -96,6 +97,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::PlaylistSettings => access.can_read_sources || access.can_read_playlist,
         ViewType::PlaylistExplorer => access.can_read_playlist,
         ViewType::PlaylistEpg => access.can_read_epg,
+        ViewType::FailoverGroups => access.can_read_playlist,
         ViewType::Rbac => access.is_admin,
         ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
             access.show_recording && access.can_read_recordings
@@ -117,6 +119,7 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::PlaylistSettings,
         ViewType::PlaylistExplorer,
         ViewType::PlaylistEpg,
+        ViewType::FailoverGroups,
         ViewType::Rbac,
         ViewType::RecordingLibrary,
         ViewType::RecordingRules,
@@ -179,6 +182,7 @@ pub fn Home() -> Html {
             get_location_hash().and_then(|hash| ViewType::from_str(&hash).ok())
         }
     });
+    let failover_groups_pending = use_state(|| None);
     let theme = use_state(Theme::get_current_theme);
     let force_update = use_force_update();
 
@@ -495,10 +499,12 @@ pub fn Home() -> Html {
         resolve_visible_home_view(*view_visible, configured_landing_page, stored_last_home_view, home_access)
             .unwrap_or(ViewType::Dashboard);
     let view_page = resolved_view.intern();
+    let failover_groups_navigation = FailoverGroupsNavigation { pending: failover_groups_pending };
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
         <ContextProvider<StatusContext> context={status_context}>
         <ContextProvider<PlaylistContext> context={playlist_context}>
+        <ContextProvider<FailoverGroupsNavigation> context={failover_groups_navigation}>
         <DialogProvider>
             <ToastrView />
             <div class="tp__app">
@@ -629,6 +635,13 @@ pub fn Home() -> Html {
                                          </ErrorBoundary>
                                        </Panel>
                                        })}
+                                       { html_if!(can_read_playlist, {
+                                       <Panel class="tp__full-width" value={ViewType::FailoverGroups.intern()} active={view_page.clone()}>
+                                         <ErrorBoundary name={translate.t("LABEL.FAILOVER_GROUPS")}>
+                                           <FailoverGroupsView/>
+                                         </ErrorBoundary>
+                                       </Panel>
+                                       })}
                                        { html_if!(can_read_epg, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistEpg.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.PLAYLIST_EPG")}>
@@ -665,6 +678,7 @@ pub fn Home() -> Html {
               </div>
             </div>
         </DialogProvider>
+        </ContextProvider<FailoverGroupsNavigation>>
         </ContextProvider<PlaylistContext>>
         </ContextProvider<StatusContext>>
         </ContextProvider<ConfigContext>>

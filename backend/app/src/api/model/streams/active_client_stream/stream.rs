@@ -3,7 +3,7 @@ use super::{
     TimedStreamContext,
 };
 use crate::api::{
-    api_utils::channel_group_failover::{GroupEnd, GroupPoll, MemberHost, RuntimeMember},
+    api_utils::failover_group_runtime::{GroupEnd, GroupPoll, MemberHost, RuntimeMember},
     model::{
         connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
         open_provider_stream_with_lifecycle, AppState, BoxedProviderStream, ProviderStreamOpen,

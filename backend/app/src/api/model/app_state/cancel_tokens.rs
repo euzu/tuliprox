@@ -9,8 +9,8 @@ pub struct CancelTokens {
     pub(crate) qos_aggregation: CancellationToken,
     pub(crate) recordings: CancellationToken,
     pub(crate) hls_cache: CancellationToken,
-    /// Member key refresh of channel groups; lives across config reloads.
-    pub(crate) channel_groups: CancellationToken,
+    /// Member key refresh of failover groups; lives across config reloads.
+    pub(crate) failover_groups: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -23,7 +23,7 @@ impl Default for CancelTokens {
             qos_aggregation: CancellationToken::new(),
             recordings: CancellationToken::new(),
             hls_cache: CancellationToken::new(),
-            channel_groups: CancellationToken::new(),
+            failover_groups: CancellationToken::new(),
         }
     }
 }
