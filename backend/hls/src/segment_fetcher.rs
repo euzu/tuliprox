@@ -90,6 +90,18 @@ pub struct HlsSegmentWorkerPool {
     access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
     metrics: Arc<HlsCacheMetrics>,
     availability_reevaluations: Option<Arc<super::availability_reevaluation::HlsAvailabilityReevaluationCoordinator>>,
+    #[cfg(any(test, feature = "test-support"))]
+    origin_prepare_barrier: std::sync::Mutex<Option<Arc<HlsSegmentPrepareBarrier>>>,
+}
+
+/// One-shot observation points around scheduler account preparation, before any queue is consumed.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct HlsSegmentPrepareBarrier {
+    pub entered: tokio::sync::Notify,
+    pub prepare: tokio::sync::Notify,
+    pub prepared: tokio::sync::Notify,
+    pub proceed: tokio::sync::Notify,
 }
 
 #[cfg(test)]

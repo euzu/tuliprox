@@ -331,7 +331,7 @@ async fn concurrent_prepare_publishes_one_replacement() {
     assert_eq!(app.active_provider.get_provider_connections_count(), 0);
 }
 
-fn enable_isolated_rebind_cache(app: &Arc<AppState>, path: &std::path::Path) {
+pub(super) fn enable_isolated_rebind_cache(app: &Arc<AppState>, path: &std::path::Path) {
     app.app_config.config.store(Arc::new(Config {
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
             hls_cache: Some(HlsCacheConfigDto {
@@ -344,9 +344,9 @@ fn enable_isolated_rebind_cache(app: &Arc<AppState>, path: &std::path::Path) {
     }));
 }
 
-struct RebindOrigin {
-    base_url: String,
-    requests: Arc<tokio::sync::Mutex<Vec<String>>>,
+pub(super) struct RebindOrigin {
+    pub(super) base_url: String,
+    pub(super) requests: Arc<tokio::sync::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
     block_old_media: Arc<std::sync::atomic::AtomicBool>,
     old_media_started: Arc<tokio::sync::Notify>,
@@ -363,6 +363,31 @@ enum RebindMediaLayout {
 }
 
 async fn rebind_origin(extra_tags: &'static str, layout: RebindMediaLayout) -> RebindOrigin {
+    rebind_origin_with_window(extra_tags, layout, None).await
+}
+
+pub(super) async fn resume_origin(head: Arc<std::sync::atomic::AtomicU64>) -> RebindOrigin {
+    rebind_origin_with_window("", RebindMediaLayout::AccountPath, Some(head)).await
+}
+
+pub(super) fn resume_origin_media(path: &str) -> Vec<u8> {
+    // Valid TS, distinct from the enabled channel-unavailable asset. A null packet
+    // identifies the exact origin URI as well, preventing old cache hits from passing.
+    let mut media =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/user_connections_exhausted.ts"))
+            .to_vec();
+    let mut marker = [0xff; 188];
+    marker[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+    marker[4..4 + path.len()].copy_from_slice(path.as_bytes());
+    media.extend_from_slice(&marker);
+    media
+}
+
+async fn rebind_origin_with_window(
+    extra_tags: &'static str,
+    layout: RebindMediaLayout,
+    live_head: Option<Arc<std::sync::atomic::AtomicU64>>,
+) -> RebindOrigin {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -375,6 +400,7 @@ async fn rebind_origin(extra_tags: &'static str, layout: RebindMediaLayout) -> R
     let task = tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let requests = Arc::clone(&recorded);
+            let live_head = live_head.clone();
             let (block, started, release) = (Arc::clone(&block), Arc::clone(&started), Arc::clone(&release));
             tokio::spawn(async move {
                 let mut buffer = [0; 4096];
@@ -388,7 +414,13 @@ async fn rebind_origin(extra_tags: &'static str, layout: RebindMediaLayout) -> R
                     release.acquire().await.unwrap().forget();
                 }
                 let replacement = path.contains("account-user");
-                let body = if path.ends_with("m3u8") {
+                let body = if let Some(head) = live_head {
+                    if path.ends_with("m3u8") {
+                        super::manifest_entry_freshness::origin_playlist_with_duration(head.load(Ordering::Acquire), 11)
+                    } else {
+                        resume_origin_media(&path)
+                    }
+                } else if path.ends_with("m3u8") {
                     let (head, count) = match (layout, replacement) {
                         (RebindMediaLayout::AccountPath, true) => (108, 8),
                         (RebindMediaLayout::SharedPath, true) => (102, 7),

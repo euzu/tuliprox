@@ -840,14 +840,15 @@ pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &A
                 timing.target_duration_ms
             );
             let starting_window_ms = tuliprox_session::STARTING_LEASE_TTL_SECS.saturating_mul(1000);
-            let media_window_expired = session_guard.activity.last_delivered_media_at_ms.map_or_else(
-                || now_ms > binding.pinned_at_ms.saturating_add(starting_window_ms),
-                |last| {
-                    now_ms
-                        > last.saturating_add(timing.hard_active_window_ms).saturating_add(timing.soft_active_window_ms)
-                },
-            );
-            if !media_window_expired
+            // A retained session can contain delivery from an earlier playback.
+            // Give each newly published binding its own bounded start window;
+            // healthy preparation leaves pinned_at_ms unchanged.
+            let starting_window_expired = now_ms > binding.pinned_at_ms.saturating_add(starting_window_ms);
+            let media_window_expired = session_guard.activity.last_delivered_media_at_ms.is_none_or(|last| {
+                now_ms > last.saturating_add(timing.hard_active_window_ms).saturating_add(timing.soft_active_window_ms)
+            });
+            if !starting_window_expired
+                || !media_window_expired
                 || session_guard.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0
             {
                 continue;

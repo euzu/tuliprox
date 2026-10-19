@@ -79,7 +79,7 @@ async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_autho
     }
     let old_generation = session.read().await.activity.origin_work_generation;
 
-    super::super::detach_unprotected_hls_origin_account_bindings(&app_state, 4_001).await;
+    super::super::detach_unprotected_hls_origin_account_bindings(&app_state, 6_001).await;
 
     {
         let session = session.read().await;
@@ -104,7 +104,7 @@ async fn hls_account_binding_soft_expiry_retains_session_and_reacquires_on_autho
         0,
         super::super::HlsOriginWorkKind::Manifest,
         super::super::HlsOriginWorkClass::ManifestInteractive,
-        4_100,
+        6_100,
     )
     .await
     .expect("authorized origin work can reacquire a detached binding");
@@ -146,6 +146,70 @@ async fn hls_account_binding_without_media_activity_expires_after_startup_window
     assert_eq!(session.activity.origin_work_generation, old_generation + 1);
     assert_eq!(session.activity.last_authorized_media_at_ms, None);
     assert_eq!(session.account_overlap_timing().target_duration_ms, 12_000);
+}
+
+#[tokio::test]
+async fn fresh_hls_binding_has_bounded_startup_protection_despite_old_media_delivery() {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", "account-a", 200_000).await;
+    {
+        let mut s = session.write().await;
+        s.target_duration = Some(11);
+        s.activity.last_authorized_media_at_ms = Some(70_000);
+        s.activity.last_delivered_media_at_ms = Some(70_000);
+    }
+    let proxy_id = session.read().await.proxy_session_id.clone();
+    for now in [200_001, 204_999, 205_000] {
+        let prepared = super::super::prepare_hls_origin_runtime(
+            &app,
+            &session,
+            &input,
+            "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+            "http://root.example.com/live/root-user/root-pass/12345.m3u8",
+            &proxy_id,
+            &test_fingerprint(),
+            ConnectionKind::Normal,
+            0,
+            super::super::HlsOriginWorkKind::Resource,
+            super::super::HlsOriginWorkClass::Demand,
+            now,
+        )
+        .await
+        .unwrap();
+        let s = session.read().await;
+        let binding = s.origin_account_binding.as_ref().unwrap();
+        assert!(binding.is_active());
+        assert_eq!(binding.pinned_at_ms, 200_000, "preparing the same binding cannot extend startup protection");
+        assert_eq!(binding.generation, 0);
+        assert_eq!(s.activity.last_delivered_media_at_ms, Some(70_000));
+        drop(s);
+        app.connection_manager.release_managed_provider_handle(prepared.preacquired_origin_account_handle);
+    }
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 205_001).await;
+    assert!(
+        session.read().await.origin_account_binding.as_ref().unwrap().is_detached(),
+        "no media progress: releasable after five seconds"
+    );
+}
+
+#[tokio::test]
+async fn hls_binding_expired_startup_protects_running_origin_work() {
+    let input = overlap_provider_input();
+    let app = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+    let session = create_bound_hls_test_session(&app, &input, "12345", "account-a", 200_000).await;
+    let generation = {
+        let mut s = session.write().await;
+        s.target_duration = Some(11);
+        s.activity.last_authorized_media_at_ms = Some(70_000);
+        s.activity.last_delivered_media_at_ms = Some(70_000);
+        s.start_origin_work()
+    };
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 210_000).await;
+    assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_active());
+    assert!(session.write().await.finish_origin_work(generation));
+    super::super::detach_unprotected_hls_origin_account_bindings(&app, 210_001).await;
+    assert!(session.read().await.origin_account_binding.as_ref().unwrap().is_detached());
 }
 
 #[tokio::test]

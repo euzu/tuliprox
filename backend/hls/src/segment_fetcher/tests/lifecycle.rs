@@ -2,9 +2,216 @@ use super::{
     encrypted_fetch_context, fetch_context, spawn_segment_server, spawn_sequence_response_server,
     take_queued_segment_fetch_candidate, SegmentFetchPolicy, SegmentFetchPriority, TestOriginResponse,
 };
-use crate::{HlsSegmentFile, SegmentCacheStatus, TransientResourceKind};
+use crate::{
+    api::{
+        HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
+        LiveHlsOriginEntry,
+    },
+    HlsSegmentFile, SegmentCacheStatus, TransientResourceKind,
+};
 use std::time::Duration;
 use tuliprox_core::utils::current_time_millis;
+
+#[derive(Debug)]
+struct InvalidatingPrepare {
+    first: std::sync::atomic::AtomicBool,
+    handoff: bool,
+}
+
+impl HlsOriginAccountRuntime for InvalidatingPrepare {
+    fn prepare<'a>(
+        &'a self,
+        session: &'a crate::HlsSessionHandle,
+        _work: HlsOriginAccountWork,
+        _class: crate::HlsOriginWorkClass,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<HlsPreparedOriginAccount, crate::HlsBoundAccountAcquireErrorKind>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let mut s = session.write().await;
+            if self.first.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                if self.handoff {
+                    let binding = crate::HlsOriginAccountBinding::new(
+                        "input".into(),
+                        "new-account".into(),
+                        &s.proxy_session_id,
+                        current_time_millis(),
+                    );
+                    s.handoff_origin_account(binding);
+                } else {
+                    s.invalidate_queued_origin_work();
+                }
+            }
+            Ok(HlsPreparedOriginAccount {
+                entry: LiveHlsOriginEntry::parse("http://unused.example/index.m3u8").unwrap(),
+                snapshot: HlsOriginAccountSnapshot::from_session(&s),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn scheduler_replans_valid_manifest_work_after_prepare_invalidates_generation() {
+    use std::sync::{atomic::AtomicBool, Arc};
+    use tuliprox_core::model::{Config, PlaybackKind};
+    use tuliprox_session::ConnectionKind;
+    for handoff in [false, true] {
+        let server = spawn_segment_server(0).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, mut context, _) = fetch_context(&server, &temp_dir, &policy).await;
+        super::support::grant_usable_worker_access_lease_at(
+            &worker,
+            &context.session.read().await.proxy_session_id,
+            current_time_millis(),
+        )
+        .await;
+        let original = context.session.read().await.segment_prefetch_queue.proxy_seqs();
+        assert_eq!(original.len(), 3);
+        let runtime = Arc::new(InvalidatingPrepare { first: AtomicBool::new(true), handoff });
+        context.origin_io = Some(crate::HlsOriginIoContext {
+            ctx: crate::HlsCtx::for_test(Config::default()),
+            client_addr: "127.0.0.1:12345".parse().unwrap(),
+            allow_grace: false,
+            priority: 0,
+            connection_kind: ConnectionKind::Normal,
+            reservation_ttl_secs: 1,
+            preacquired_provider_handle: None,
+            started_generation: None,
+            prepared_account: None,
+            playback_kind: PlaybackKind::LiveHls,
+            account_runtime: Some(runtime.clone()),
+        });
+        worker.wake_scheduler(context.clone(), current_time_millis()).await;
+        assert!(!runtime.first.load(std::sync::atomic::Ordering::Acquire), "account preparation actually ran");
+        assert_eq!(context.session.read().await.activity.origin_work_generation, 1);
+        if handoff {
+            let s = context.session.read().await;
+            assert!(s.origin_account_manifest_pending.is_some());
+            assert!(s.segment_prefetch_queue.is_empty());
+            assert!(original.iter().all(|seq| s.segments[seq].origin_fetch_ref.is_none()));
+            assert!(server.requests.lock().await.is_empty(), "unqualified old-account resources stay invalid");
+        } else {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let s = context.session.read().await;
+                    if original.iter().all(|seq| matches!(s.segments[seq].status, SegmentCacheStatus::Ready { .. })) {
+                        break;
+                    }
+                    drop(s);
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("valid jobs survive invalidation in prepare without test-side requeue");
+            assert_eq!(server.requests.lock().await.len(), original.len());
+        }
+    }
+}
+
+#[tokio::test]
+async fn scheduler_replan_uses_current_backpressure_for_prefetch() {
+    use crate::HlsBackpressureState;
+    use std::sync::{atomic::AtomicBool, Arc};
+    use tuliprox_core::model::{Config, PlaybackKind};
+    use tuliprox_session::ConnectionKind;
+
+    for expected_pressure in
+        [HlsBackpressureState::Degraded, HlsBackpressureState::Saturated, HlsBackpressureState::Normal]
+    {
+        let server = spawn_segment_server(0).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy { max_global_segment_fetches: 2, ..SegmentFetchPolicy::default() };
+        let (worker, mut context, _) = fetch_context(&server, &temp_dir, &policy).await;
+        super::support::grant_usable_worker_access_lease_at(
+            &worker,
+            &context.session.read().await.proxy_session_id,
+            current_time_millis(),
+        )
+        .await;
+        let semaphore = Arc::clone(&worker.runtime.load().global_semaphore);
+        let mut held_permits = vec![semaphore.try_acquire().unwrap()];
+        let previous_generation = {
+            let mut s = context.session.write().await;
+            s.invalidate_queued_origin_work();
+            s.initial_prefetch_gap_segments = 1;
+            let pressure = worker.classify_backpressure_for_session(&s);
+            assert_eq!(pressure, HlsBackpressureState::Degraded);
+            let report = s.queue_manifest_fetch_candidates(current_time_millis(), pressure.allows_prefetch());
+            assert_eq!(report.render_window_queued, 2);
+            assert_eq!(report.prefetch_queued, 0);
+            assert_eq!(report.prefetch_skipped, 1);
+            s.activity.origin_work_generation
+        };
+        let runtime = Arc::new(InvalidatingPrepare { first: AtomicBool::new(true), handoff: false });
+        context.origin_io = Some(crate::HlsOriginIoContext {
+            ctx: crate::HlsCtx::for_test(Config::default()),
+            client_addr: "127.0.0.1:12345".parse().unwrap(),
+            allow_grace: false,
+            priority: 0,
+            connection_kind: ConnectionKind::Normal,
+            reservation_ttl_secs: 1,
+            preacquired_provider_handle: None,
+            started_generation: None,
+            prepared_account: None,
+            playback_kind: PlaybackKind::LiveHls,
+            account_runtime: Some(runtime.clone()),
+        });
+        let barrier = worker.pause_next_origin_prepare_for_test();
+        let scheduler_worker = Arc::clone(&worker);
+        let scheduler_context = context.clone();
+        let task = tokio::spawn(async move {
+            scheduler_worker.wake_scheduler(scheduler_context, current_time_millis()).await;
+        });
+        tokio::time::timeout(Duration::from_secs(3), barrier.entered.notified()).await.unwrap();
+        // Pressure can change after the manifest commit. Replanning must use its
+        // current classification, including recovery back to Normal.
+        match expected_pressure {
+            HlsBackpressureState::Normal => held_permits.clear(),
+            HlsBackpressureState::Degraded => {}
+            HlsBackpressureState::Saturated => held_permits.push(semaphore.try_acquire().unwrap()),
+        }
+        barrier.prepare.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), barrier.prepared.notified()).await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled(), "observe the replan before workers consume its queue");
+
+        assert!(!runtime.first.load(std::sync::atomic::Ordering::Acquire), "account preparation actually ran");
+        let s = context.session.read().await;
+        assert_eq!(s.activity.origin_work_generation, previous_generation + 1);
+        let pressure = worker.classify_backpressure_for_session(&s);
+        assert_eq!(pressure, expected_pressure);
+        for seq in [1, 2] {
+            assert!(s.segment_prefetch_queue.contains(seq), "{pressure:?}: restore render-window work");
+            assert!(matches!(
+                s.segments[&seq].status,
+                SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, .. }
+            ));
+        }
+        let prefetch_queued = s.segment_prefetch_queue.contains(3);
+        eprintln!(
+            "replan pressure={pressure:?} generation={} render_window=[1, 2] prefetch_queued={prefetch_queued}",
+            s.activity.origin_work_generation
+        );
+        assert_eq!(
+            prefetch_queued,
+            pressure.allows_prefetch(),
+            "{pressure:?}: replan must respect the current prefetch policy"
+        );
+        assert!(
+            matches!(
+                s.segments[&3].status,
+                SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Prefetch, .. }
+            ) == pressure.allows_prefetch()
+        );
+        assert_eq!(s.segment_prefetch_queue.len(), if pressure.allows_prefetch() { 3 } else { 2 });
+        assert!(server.requests.lock().await.is_empty(), "the barrier precedes origin segment work");
+    }
+}
 
 #[tokio::test]
 async fn account_handoff_during_segment_prepare_blocks_old_origin_request() {
