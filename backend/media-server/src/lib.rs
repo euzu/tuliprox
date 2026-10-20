@@ -4,11 +4,14 @@
 //! Source Acquisition boundary. Playlist Curation and Stream Brokerage should
 //! depend on the typed concepts exported here instead of provider-specific DTOs.
 
+pub mod any_client;
 pub mod catalog;
 pub mod client;
 pub mod emby;
 pub mod errors;
 pub mod jellyfin;
+pub(crate) mod library_selection;
+pub(crate) mod operation;
 pub mod playback;
 pub mod playlist_mapper;
 pub mod plex;
@@ -17,8 +20,15 @@ pub mod types;
 
 #[cfg(test)]
 pub mod test_fixtures;
+#[cfg(test)]
+pub(crate) mod test_server;
 
-use std::fmt::Write as _;
+use std::{fmt::Write as _, sync::Arc};
+
+/// Trimmed, shared copy of `value`, or `None` when it is absent or blank.
+pub(crate) fn non_blank_arc(value: Option<&str>) -> Option<Arc<str>> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(Arc::<str>::from)
+}
 
 /// Percent-encode a single URL path segment using the unreserved-character
 /// rules of [RFC 3986 §2.3]: alphanumeric, `-`, `.`, `_`, `~` are passed
@@ -39,6 +49,7 @@ pub fn encode_url_path_segment(value: &str) -> String {
     encoded
 }
 
+pub use any_client::*;
 pub use catalog::*;
 pub use client::*;
 pub use errors::*;

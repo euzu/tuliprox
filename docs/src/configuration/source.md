@@ -127,23 +127,24 @@ inputs:
 
 ### Input Base Parameters
 
-| Parameter               | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                             |
-|:------------------------|:-------|:--------:|:--------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                     |
-| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `stalker`, `library`, `staged`, `emby`, `jellyfin`, `plex`, and `m3u_batch` / `xtream_batch` / `stalker_batch` (CSV offloading). Stalker inputs use the portal handshake/catalog flow instead of a plain playlist download.                                                                                                                                                                                     |
-| `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                                |
-| `username` / `password` | String |  Often   |         | Mandatory for `xtream` and for Stalker inputs using `credentials_only` or `mac_plus_credentials`. Stalker inputs using `mac_only` do not need them.                                                                                                                                                                                                                                                                                       |
-| `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                           |
-| `sequential_group`      | Int    |    No    |         | Optional non-zero process-wide group ID. With `process_parallel: true`, complete refreshes of inputs sharing an ID run one after another, including all Stalker page slices. Different groups and ungrouped inputs may overlap. Not valid for `staged` inputs; a staged overlay inherits its provider job.                                                                                                                                |
-| `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again.  |
-| `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                                |
-| `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                             |
-| `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. In server mode, Tuliprox refreshes missing or soon-expiring Xtream account dates through the account's `player_api.php` credentials; see [Automatic Xtream Expiration Refresh](#automatic-xtream-expiration-refresh).                                                                                                                                                       |
-| `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                     |
-| `epg`                   | Object |    No    |         | Allows mapping of external XMLTV files (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
-| `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                          |
-| `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                    |
-| `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                      |
+| Parameter               | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                            |
+|:------------------------|:-------|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                    |
+| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `stalker`, `library`, `staged`, `emby`, `jellyfin`, `plex` (see [Media server inputs](#27-media-server-inputs-plex-emby-jellyfin)), and `m3u_batch` / `xtream_batch` / `stalker_batch` (CSV offloading). Stalker inputs use the portal handshake/catalog flow instead of a plain playlist download.                                                                                                            |
+| `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                               |
+| `username` / `password` | String |  Often   |         | Mandatory for `xtream` and for Stalker inputs using `credentials_only` or `mac_plus_credentials`. Stalker inputs using `mac_only` do not need them. `emby` and `jellyfin` inputs may use them instead of a token (login bootstrap).                                                                                                                                                                                                      |
+| `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                          |
+| `sequential_group`      | Int    |    No    |         | Optional non-zero process-wide group ID. With `process_parallel: true`, complete refreshes of inputs sharing an ID run one after another, including all Stalker page slices. Different groups and ungrouped inputs may overlap. Not valid for `staged` inputs; a staged overlay inherits its provider job.                                                                                                                               |
+| `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again. |
+| `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                               |
+| `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                            |
+| `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. In server mode, Tuliprox refreshes missing or soon-expiring Xtream account dates through the account's `player_api.php` credentials; see [Automatic Xtream Expiration Refresh](#automatic-xtream-expiration-refresh).                                                                                                                                                      |
+| `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                    |
+| `epg`                   | Object |    No    |         | Allows mapping of external XMLTV files (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                    |
+| `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                         |
+| `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                   |
+| `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
+| `media_server`          | Object |   Yes*   |         | Settings of `plex`, `emby` and `jellyfin` inputs: library selection, credentials and catalog options. *Mandatory for these input types only; see [Media server inputs](#27-media-server-inputs-plex-emby-jellyfin).                                                                                                                                                                                                                      |
 
 #### Minimal Stalker Input Example
 
@@ -204,14 +205,15 @@ logic.
 
 ### Input Subsections (Object Keys)
 
-| Block       | Description                                                                | Link                                               |
-|:------------|:---------------------------------------------------------------------------|:---------------------------------------------------|
-| `headers`   | Custom HTTP request headers for playlist and EPG downloads.                | [See Headers](#21-headers-headers)                 |
-| `options`   | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)           |
-| `epg`       | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)     |
-| `aliases`   | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch) |
-| `staged`    | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)            |
-| `panel_api` | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)  |
+| Block          | Description                                                                           | Link                                                                  |
+|:---------------|:--------------------------------------------------------------------------------------|:----------------------------------------------------------------------|
+| `headers`      | Custom HTTP request headers for playlist and EPG downloads.                           | [See Headers](#21-headers-headers)                                    |
+| `options`      | Behavior controls for metadata resolution, stream probing, and skip logic.            | [See Options](#22-input-options-options)                              |
+| `epg`          | XMLTV source management and Smart Match fuzzy logic settings.                         | [See EPG](#23-epg-assignment--smart-match-epg)                        |
+| `aliases`      | Connection pooling for multiple subscriptions from the same provider.                 | [See Aliases](#24-provider-aliases-aliases--batch)                    |
+| `staged`       | Overlay settings for first-class staged inputs.                                       | [See Staged](#25-staged-sources-staged)                               |
+| `panel_api`    | Automated reseller panel integration (provisioning/renewal).                          | [See Panel API](#26-provider-panel-api-panel_api)                     |
+| `media_server` | Library selection, credentials and catalog options of Plex, Emby and Jellyfin inputs. | [See Media server inputs](#27-media-server-inputs-plex-emby-jellyfin) |
 
 ---
 
@@ -1196,6 +1198,213 @@ Tuliprox processes all Panel API responses as JSON and strictly requires `status
 * **`client_renew`**: Updates the expiration date without modifying existing credentials.
 * **`client_adult_content`**: Optionally executed after `client_new` or `client_renew` to toggle adult content settings
   on the provider side. Requires `status: true` for success.
+
+---
+
+### 2.7 Media server inputs (`plex`, `emby`, `jellyfin`)
+
+Inputs of `type: plex`, `type: emby` and `type: jellyfin` import the movie and TV libraries you select from a media
+server into the playlist, so they can be mapped, filtered and published through targets like any other input. The
+server stays the owner of the files: Tuliprox does not copy media, it proxies **direct play** on demand.
+
+All three types share the `media_server` block and the rules below. A media server input must not use `aliases`,
+`epg`, `panel_api` or `provider` failover definitions, and its `url` must not use the `batch://` or `provider://`
+schemes. The `media_server` block and at least one entry in `media_server.libraries` are mandatory.
+
+#### The `media_server` block
+
+Unknown keys inside `media_server` are rejected while loading the configuration.
+
+| Field                           | Type   | Required       | Default           | Description                                                                                                                                                |
+|:--------------------------------|:-------|:---------------|:------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `libraries`                     | List   | Yes            |                   | Libraries to import. Each entry is a library name or an object (see [Library selectors](#library-selectors)). Empty entries are rejected.                  |
+| `token`                         | String | See below      |                   | Plex: PMS token for direct access. Emby/Jellyfin: access token sent as `X-Emby-Token` (Emby) or in the `Authorization: MediaBrowser` header (Jellyfin).    |
+| `api_key`                       | String | See below      |                   | Emby/Jellyfin only: server API key. It is sent exactly like `token` (never as a `?api_key=` query parameter). Ignored when `token` is set.                 |
+| `user_id`                       | String | No             |                   | Emby/Jellyfin only: user whose library views and items are listed. Required for non-admin tokens (see [Emby and Jellyfin](#emby-and-jellyfin)).            |
+| `account_token`                 | String | Plex, no `url` |                   | Plex only: plex.tv account token used to discover the server when `url` is omitted.                                                                        |
+| `server_id`                     | String | No             |                   | Plex only: machine identifier of the server. With `url` it is verified against the server; without `url` it selects the server.                            |
+| `server_name`                   | String | No             |                   | Plex only: friendly name of the server, used like `server_id`.                                                                                             |
+| `prefer_https`                  | Bool   | No             | `true`            | Plex only: with account discovery, try `https` connections before `http` ones.                                                                             |
+| `allow_relay`                   | Bool   | No             | `false`           | Plex only: with account discovery, allow plex.tv relay connections (tried last).                                                                           |
+| `catalog.page_size`             | Int    | No             | `100`             | Items requested per page. Must be greater than `0`.                                                                                                        |
+| `catalog.request_delay_ms`      | Int    | No             | `250`             | Pause in milliseconds between two catalog page requests, to keep the load on the server low.                                                               |
+| `catalog.include_media_sources` | Bool   | No             | `true`            | Emby/Jellyfin: request `MediaSources` to pick the file to play and to fill container, codec, bitrate and duration. See [Playback](#media-server-playback). |
+
+#### Credentials per server type
+
+Input-level `url`, `username` and `password` sit next to `media_server`, not inside it.
+
+##### Plex
+
+* **Direct access:** set `url` to the Plex Media Server and `media_server.token`. `server_id` and `server_name`
+  are optional checks against the server identity.
+* **Account discovery:** omit `url` and set `media_server.account_token` plus `server_id` or `server_name`. The
+  server is looked up on plex.tv; `prefer_https` and `allow_relay` steer the connection choice.
+
+##### Emby and Jellyfin
+
+`url` is mandatory. The server URL may carry a path prefix, for example `https://media.example.invalid/jellyfin` or
+`http://192.0.2.10:8096/emby`; the prefix is kept for every request, with or without a trailing slash.
+
+Credentials are resolved in this order, the first one present wins:
+
+1. `media_server.token`
+2. `media_server.api_key`
+3. Login with the input's `username` and `password` (`POST /Users/AuthenticateByName`).
+
+At least one of them is mandatory. A configured `token` or `api_key` is used as is; if the server rejects it
+(`401`), the update fails with an authentication error. A token obtained by login is kept in a process-wide session
+that is shared by every request of the same input, so concurrent playback and refreshes log in only once. If the
+server invalidates that token (expired session, server restart), the next request logs in again once and is
+retried. The device identity sent to the server is derived from the input name and user name, so a restart of
+Tuliprox replaces its previous session on the server instead of adding a new device.
+
+| Server   | How the token is sent                                                                              |
+|:---------|:---------------------------------------------------------------------------------------------------|
+| Emby     | `X-Emby-Token` header, with the client identity in `X-Emby-Authorization`.                         |
+| Jellyfin | Only `Authorization: MediaBrowser Client=..., Device=..., DeviceId=..., Version=..., Token="..."`. |
+
+Jellyfin requests never carry `X-Emby-Token`, `X-MediaBrowser-Token`, `X-Emby-Authorization` or an `api_key` query
+parameter. These legacy authentication methods are deprecated since Jellyfin 10.11 and removed in Jellyfin 12.0, so
+imports keep working there. The token is never placed in a URL.
+
+`user_id` decides which library list is used:
+
+* **With a user** (`user_id` configured, or the user returned by the login): the libraries visible to that user are
+  listed and items are requested in the context of that user. A configured `user_id` takes precedence over the
+  user returned by the login.
+* **Without a user** (`token` or `api_key` and no `user_id`): the server-wide library list
+  (`/Library/VirtualFolders`) is used. This requires an administrator token or API key. A non-admin token fails
+  with an authentication error; set `user_id` to the user that owns the token in that case.
+
+#### Library selectors
+
+`libraries` lists what to import. Each entry is either a plain library name or an object:
+
+```yaml
+libraries:
+  - Movies                       # by name
+  - id: LIBRARY_ID               # by library id (Emby/Jellyfin) ...
+    kind: tvshows
+  - key: "2"                     # ... or by section key (Plex)
+    kind: movies
+```
+
+* A plain string, or `name`, matches the library title exactly (case-sensitive, surrounding spaces ignored).
+* `id` and `key` are interchangeable and match the library's stable identifier. If several of `id`, `key` and `name`
+  are given, a library matching any of them is selected.
+* `kind` (`movies` or `tvshows`, aliases `shows` and `series`) additionally requires the library to be of that
+  kind. A library of another kind does not match.
+* Every selector must resolve to exactly one library: no match fails the update (`selected library was not
+  visible`), several matches fail it (`selected library name was ambiguous`). Use `id` to disambiguate.
+
+Only libraries of the types **movies** (`movies` on Emby/Jellyfin, `movie` on Plex) and **TV shows** (`tvshows`,
+`show`) are imported. A selected library of any other type, such as `mixed`, `boxsets`, `music` or `homevideos`, is
+skipped and nothing is imported from it. Emby/Jellyfin collections (BoxSets) are not imported as collections; their
+members appear through their own library.
+
+#### What is imported
+
+For Emby and Jellyfin the import reads, per selected library:
+
+* **Movies** and, for TV libraries, **series**, **seasons** and **episodes**, with title, year, release date,
+  provider ids (TMDB, IMDb, TVDB), summary, genres, studio or network, content and audience rating, cast and crew,
+  and, when `catalog.include_media_sources` is enabled, container, codec, resolution, bitrate and duration.
+* The **primary image** of every item that has one.
+
+Items are skipped or marked as follows:
+
+* Missing episodes and movies (`LocationType: Virtual`, items the server knows but has no file for) are not
+  imported.
+* Items without a name are imported with a generic title such as `Jellyfin Movie`; items without an id are skipped.
+* Items whose media sources are all remote (`Protocol` other than `File`, `IsRemote`, or `.strm` entries) are
+  imported but not playable: Tuliprox does not proxy them, which also prevents a server library that is fed by
+  Tuliprox's own STRM output from looping back into Tuliprox. Requesting such an item fails because no stream can be
+  opened ("no direct playable source" is logged). This detection needs the media source data, so it only applies
+  while `catalog.include_media_sources` is `true`.
+* When `catalog.include_media_sources` is `true` and an item reports no media source at all, it is also imported as
+  not playable.
+
+An update reads all selected libraries completely before anything is published; an error while reading any of them
+fails the input update instead of producing a partial catalog.
+
+#### Updating
+
+The input card in the **Update** tab of the Web UI offers **Update** and **Refresh** for Plex, Emby and Jellyfin
+inputs. There is no **Force Update** for these inputs. An update contacts the server and reads all selected
+libraries; to keep the load low, requests are paged by `catalog.page_size` with `catalog.request_delay_ms` between
+pages.
+
+#### Media server playback
+
+Playlist entries of a media server input point to Tuliprox, never to the media server:
+
+* **Direct play proxy:** a play request is answered by streaming the original file from the server through
+  Tuliprox (Emby/Jellyfin: `/Videos/{id}/stream?static=true`, with the selected `mediaSourceId`). `Range` requests
+  are forwarded, so seeking works and the server's `206` status and `Content-Range` are passed on. Nothing is
+  transcoded.
+* **Artwork:** posters are fetched from the server on demand (`Primary` image, using the image tag so changes are
+  picked up) and served by Tuliprox.
+* **No credentials for clients:** the server URL, token, API key and password are never part of playlists, redirects
+  or responses. Only `Content-Type`, `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag` and `Last-Modified`
+  are passed from the server to the client.
+* **Media source choice (Emby/Jellyfin):** the first local file source is used; a source that supports direct
+  play or direct stream is preferred. With `catalog.include_media_sources: false` no source is selected and the
+  server's default source is played.
+
+#### Examples
+
+Plex, direct access:
+
+```yaml
+inputs:
+  - name: plex_home
+    type: plex
+    url: http://192.0.2.20:32400
+    enabled: true
+    media_server:
+      token: YOUR_PMS_TOKEN
+      libraries:
+        - Movies
+        - name: TV Shows
+          kind: tvshows
+```
+
+Emby with an API key (server-wide library list, requires an administrator key):
+
+```yaml
+inputs:
+  - name: emby_main
+    type: emby
+    url: http://192.0.2.10:8096/emby
+    enabled: true
+    media_server:
+      api_key: YOUR_EMBY_API_KEY
+      libraries:
+        - Movies
+        - Series
+```
+
+Jellyfin with a login, behind a reverse proxy with a path prefix:
+
+```yaml
+inputs:
+  - name: jellyfin_main
+    type: jellyfin
+    url: https://media.example.invalid/jellyfin
+    username: tuliprox
+    password: YOUR_PASSWORD
+    enabled: true
+    media_server:
+      libraries:
+        - Movies
+        - name: Shows
+          kind: tvshows
+      catalog:
+        page_size: 200
+```
+
+The login bootstraps the token and the user id; use a dedicated Jellyfin user that can see the selected libraries.
 
 ---
 

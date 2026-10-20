@@ -8,25 +8,9 @@ use crate::{
 };
 use std::sync::Arc;
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaServerCatalogRefreshMode {
-    #[default]
-    Manual,
-    Scheduled,
-}
-
-pub fn is_default_media_server_catalog_refresh_mode(value: &MediaServerCatalogRefreshMode) -> bool {
-    *value == MediaServerCatalogRefreshMode::default()
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MediaServerCatalogConfigDto {
-    #[serde(default, skip_serializing_if = "is_default_media_server_catalog_refresh_mode")]
-    pub refresh_mode: MediaServerCatalogRefreshMode,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub refresh_on_startup: bool,
     #[serde(
         default = "default_media_server_catalog_page_size",
         skip_serializing_if = "is_default_media_server_catalog_page_size"
@@ -39,22 +23,14 @@ pub struct MediaServerCatalogConfigDto {
     pub request_delay_ms: u64,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub include_media_sources: bool,
-    #[serde(default, alias = "include_file_paths", skip_serializing_if = "is_false")]
-    pub include_paths: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub include_user_state: bool,
 }
 
 impl Default for MediaServerCatalogConfigDto {
     fn default() -> Self {
         Self {
-            refresh_mode: MediaServerCatalogRefreshMode::default(),
-            refresh_on_startup: false,
             page_size: default_media_server_catalog_page_size(),
             request_delay_ms: default_media_server_catalog_request_delay_ms(),
             include_media_sources: default_as_true(),
-            include_paths: false,
-            include_user_state: false,
         }
     }
 }
@@ -70,58 +46,6 @@ impl MediaServerCatalogConfigDto {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaServerPlaybackInfoPolicy {
-    #[default]
-    OnDemand,
-    Disabled,
-}
-
-pub fn is_default_media_server_playback_info_policy(value: &MediaServerPlaybackInfoPolicy) -> bool {
-    *value == MediaServerPlaybackInfoPolicy::default()
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MediaServerPlaybackConfigDto {
-    #[serde(default, skip_serializing_if = "is_default_media_server_playback_info_policy")]
-    pub playback_info_policy: MediaServerPlaybackInfoPolicy,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub preflight_streams: bool,
-    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
-    pub direct_play_only: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_transcode: bool,
-}
-
-impl Default for MediaServerPlaybackConfigDto {
-    fn default() -> Self {
-        Self {
-            playback_info_policy: MediaServerPlaybackInfoPolicy::default(),
-            preflight_streams: false,
-            direct_play_only: default_as_true(),
-            allow_transcode: false,
-        }
-    }
-}
-
-impl MediaServerPlaybackConfigDto {
-    pub fn is_default(&self) -> bool { self == &Self::default() }
-}
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaServerImagePolicy {
-    #[default]
-    ProxyOnDemand,
-    Disabled,
-}
-
-pub fn is_default_media_server_image_policy(value: &MediaServerImagePolicy) -> bool {
-    *value == MediaServerImagePolicy::default()
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -199,10 +123,6 @@ pub struct MediaServerInputConfigDto {
     pub libraries: Vec<MediaServerLibrarySelector>,
     #[serde(default, skip_serializing_if = "MediaServerCatalogConfigDto::is_default")]
     pub catalog: MediaServerCatalogConfigDto,
-    #[serde(default, skip_serializing_if = "MediaServerPlaybackConfigDto::is_default")]
-    pub playback: MediaServerPlaybackConfigDto,
-    #[serde(default, skip_serializing_if = "is_default_media_server_image_policy")]
-    pub image_policy: MediaServerImagePolicy,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -226,8 +146,6 @@ impl Default for MediaServerInputConfigDto {
         Self {
             libraries: Vec::new(),
             catalog: MediaServerCatalogConfigDto::default(),
-            playback: MediaServerPlaybackConfigDto::default(),
-            image_policy: MediaServerImagePolicy::default(),
             token: None,
             api_key: None,
             user_id: None,

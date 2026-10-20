@@ -8,7 +8,13 @@ pub type JellyfinItemsPageDto<T> = crate::emby::dto::EmbyItemsPageDto<T>;
 pub type JellyfinViewDto = crate::emby::dto::EmbyViewDto;
 pub type JellyfinItemDto = crate::emby::dto::EmbyItemDto;
 pub type JellyfinMediaSourceDto = crate::emby::dto::EmbyMediaSourceDto;
-pub type JellyfinPlaybackInfoDto = crate::emby::dto::EmbyPlaybackInfoDto;
+pub type JellyfinNameDto = crate::emby::dto::EmbyNameDto;
+pub type JellyfinPersonDto = crate::emby::dto::EmbyPersonDto;
+pub type JellyfinMediaStreamDto = crate::emby::dto::EmbyMediaStreamDto;
+pub type JellyfinVirtualFolderDto = crate::emby::dto::EmbyVirtualFolderDto;
+pub type JellyfinUserDto = crate::emby::dto::EmbyUserDto;
+pub type JellyfinAuthenticationResultDto = crate::emby::dto::EmbyAuthenticationResultDto;
+pub type JellyfinAuthenticateByNameRequest<'a> = crate::emby::dto::EmbyAuthenticateByNameRequest<'a>;
 
 #[cfg(test)]
 mod tests {

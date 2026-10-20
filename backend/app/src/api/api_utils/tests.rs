@@ -8,6 +8,7 @@ mod http_smoke;
 mod http_soak;
 mod local_files;
 mod maintenance;
+mod media_server_stream;
 mod network_access;
 mod provider_leases;
 mod provider_urls;

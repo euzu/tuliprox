@@ -9,8 +9,8 @@ use super::{
     telemetry::{
         finalize_input_telemetry, input_telemetry_for_fetch, is_cluster_input, persist_finalized_cluster_snapshots,
     },
-    CacheStatusScope, InputDownloadResult, LibraryProvider, PendingInputStatusUpdate, PlaylistDownloadResult,
-    PlaylistProcessingContext, PlaylistUpdateExecutionRef, PlexProvider, StalkerProvider,
+    CacheStatusScope, InputDownloadResult, LibraryProvider, MediaServerProvider, PendingInputStatusUpdate,
+    PlaylistDownloadResult, PlaylistProcessingContext, PlaylistUpdateExecutionRef, StalkerProvider,
     PIPELINE_TRANSPARENCY_CLUSTERS,
 };
 use crate::{input_cache, metadata_sink::MetadataUpdateSink, processor::StalkerRefreshMode};
@@ -171,15 +171,7 @@ async fn playlist_download_from_input<E: EventSink>(
             StalkerProvider::new(stalker_refresh_mode, !config.disk_based_processing).fetch(&request).await
         }
         InputType::Library => LibraryProvider.fetch(&request).await,
-        InputType::Plex => PlexProvider.fetch(&request).await,
-        InputType::Emby | InputType::Jellyfin => {
-            UnsupportedProvider::new(
-                "media-server",
-                format!("media-server input '{}' is configured but catalog import is not implemented yet", input.name),
-            )
-            .fetch(&request)
-            .await
-        }
+        InputType::Plex | InputType::Emby | InputType::Jellyfin => MediaServerProvider.fetch(&request).await,
         InputType::Staged => {
             UnsupportedProvider::new(
                 "staged",

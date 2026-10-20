@@ -10,10 +10,9 @@ use shared::{
     foundation::Filter,
     model::{
         ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
-        FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy,
-        MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, ProviderAccountIdentity,
-        StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto,
-        StalkerMagPreset,
+        FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerInputConfigDto,
+        MediaServerLibrarySelector, ProviderAccountIdentity, StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto,
+        StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -30,9 +29,10 @@ use std::{
     sync::{Arc, LazyLock},
 };
 use tuliprox_media_server::{
-    client::MediaServerHttpClient,
-    errors::{MediaServerError, MediaServerErrorKind},
+    emby::{client::EmbyClientSettings, EmbyCatalogClient},
+    jellyfin::JellyfinCatalogClient,
     plex::client::{PlexCatalogClient, PlexClientSettings},
+    AnyMediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
 };
 use url::Url;
 
@@ -128,8 +128,6 @@ static DEFAULT_CONFIG_INPUT_OPTIONS: LazyLock<ConfigInputOptions> =
 pub struct MediaServerInputConfig {
     pub libraries: Vec<MediaServerLibrarySelector>,
     pub catalog: MediaServerCatalogConfigDto,
-    pub playback: MediaServerPlaybackConfigDto,
-    pub image_policy: MediaServerImagePolicy,
     pub token: Option<String>,
     pub api_key: Option<String>,
     pub user_id: Option<String>,
@@ -159,22 +157,64 @@ impl MediaServerInputConfig {
 }
 
 impl ConfigInput {
-    /// Builds the Plex catalog client this input describes.
-    ///
-    /// Previously `PlexCatalogClient::from_input`; it moved out of `media_server`
-    /// because it is the only thing there that knew what a `ConfigInput` is.
-    pub fn plex_catalog_client(&self, http: MediaServerHttpClient) -> Result<PlexCatalogClient, MediaServerError> {
-        if self.input_type != InputType::Plex {
-            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-                .provider("plex")
-                .detail("plex catalog client requires a plex input"));
-        }
-        let media_server = self.media_server.as_ref().ok_or_else(|| {
+    /// The `media_server` block of this input, or a discovery error naming `provider`.
+    fn media_server_config(&self, provider: &'static str) -> Result<&MediaServerInputConfig, MediaServerError> {
+        self.media_server.as_ref().ok_or_else(|| {
             MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-                .provider("plex")
-                .detail("plex input is missing media_server configuration")
-        })?;
-        Ok(PlexCatalogClient::new(self.name.clone(), self.url.as_str(), &media_server.plex_client_settings(), http))
+                .provider(provider)
+                .detail("media-server input is missing media_server configuration")
+        })
+    }
+
+    fn plex_client(&self, media_server: &MediaServerInputConfig, http: MediaServerHttpClient) -> PlexCatalogClient {
+        PlexCatalogClient::new(self.name.clone(), self.url.as_str(), &media_server.plex_client_settings(), http)
+    }
+
+    /// The subset of this input an Emby/Jellyfin catalog client actually needs: server credentials from
+    /// the `media_server` block, login credentials from the input's own `username`/`password`.
+    pub fn emby_client_settings(&self, media_server: &MediaServerInputConfig) -> EmbyClientSettings {
+        EmbyClientSettings {
+            token: media_server.token.clone(),
+            api_key: media_server.api_key.clone(),
+            user_id: media_server.user_id.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            include_media_sources: media_server.catalog.include_media_sources,
+            libraries: media_server.libraries.clone(),
+        }
+    }
+
+    /// Builds the catalog client for whichever media-server kind this input is.
+    pub fn media_server_catalog_client(
+        &self,
+        http: MediaServerHttpClient,
+    ) -> Result<AnyMediaServerCatalogClient, MediaServerError> {
+        match self.input_type {
+            InputType::Plex => {
+                let media_server = self.media_server_config("plex")?;
+                Ok(AnyMediaServerCatalogClient::Plex(self.plex_client(media_server, http)))
+            }
+            InputType::Emby => {
+                let settings = self.emby_client_settings(self.media_server_config("emby")?);
+                Ok(AnyMediaServerCatalogClient::Emby(EmbyCatalogClient::new(
+                    self.name.clone(),
+                    self.url.as_str(),
+                    &settings,
+                    http,
+                )?))
+            }
+            InputType::Jellyfin => {
+                let settings = self.emby_client_settings(self.media_server_config("jellyfin")?);
+                Ok(AnyMediaServerCatalogClient::Jellyfin(JellyfinCatalogClient::new(
+                    self.name.clone(),
+                    self.url.as_str(),
+                    &settings,
+                    http,
+                )?))
+            }
+            _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                .detail("input is not a media-server input")),
+        }
     }
 }
 
@@ -195,8 +235,6 @@ impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
         Self {
             libraries: normalized.libraries,
             catalog: normalized.catalog,
-            playback: normalized.playback,
-            image_policy: normalized.image_policy,
             token: normalized.token,
             api_key: normalized.api_key,
             user_id: normalized.user_id,
@@ -1129,6 +1167,101 @@ mod tests {
         })
     }
 
+    fn media_server_input(
+        input_type: InputType,
+        url: &str,
+        media_server: Option<MediaServerInputConfig>,
+    ) -> ConfigInput {
+        ConfigInput {
+            name: "ms".into(),
+            input_type,
+            url: url.to_string(),
+            media_server,
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn media_server_catalog_client_builds_each_kind() {
+        let http = || MediaServerHttpClient::new(reqwest::Client::new());
+        let with = |token: Option<&str>, api_key: Option<&str>| {
+            Some(MediaServerInputConfig {
+                token: token.map(str::to_string),
+                api_key: api_key.map(str::to_string),
+                ..media_server_config_with_library()
+            })
+        };
+
+        let plex = media_server_input(InputType::Plex, "http://plex.example.invalid:32400", with(Some("t"), None));
+        assert!(matches!(plex.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Plex(_))));
+
+        let emby = media_server_input(InputType::Emby, "http://emby.example.invalid:8096", with(Some("t"), None));
+        assert!(matches!(emby.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Emby(_))));
+
+        let jellyfin =
+            media_server_input(InputType::Jellyfin, "http://jf.example.invalid:8096", with(None, Some("key")));
+        assert!(matches!(jellyfin.media_server_catalog_client(http()), Ok(AnyMediaServerCatalogClient::Jellyfin(_))));
+    }
+
+    #[test]
+    fn media_server_catalog_client_rejects_non_media_server_input() {
+        let input = media_server_input(InputType::M3u, "http://example.invalid/list.m3u", None);
+
+        let err = input
+            .media_server_catalog_client(MediaServerHttpClient::new(reqwest::Client::new()))
+            .err()
+            .expect("m3u input must be rejected");
+
+        assert_eq!(err.kind, MediaServerErrorKind::MediaServerDiscoveryFailed);
+        assert!(err.to_string().contains("input is not a media-server input"), "{err}");
+    }
+
+    #[test]
+    fn media_server_catalog_client_requires_media_server_block() {
+        for (input_type, provider) in
+            [(InputType::Plex, "plex"), (InputType::Emby, "emby"), (InputType::Jellyfin, "jellyfin")]
+        {
+            let input = media_server_input(input_type, "http://ms.example.invalid", None);
+
+            let err = input
+                .media_server_catalog_client(MediaServerHttpClient::new(reqwest::Client::new()))
+                .err()
+                .expect("missing media_server block must be rejected");
+
+            assert_eq!(err.kind, MediaServerErrorKind::MediaServerDiscoveryFailed);
+            assert_eq!(err.provider, Some(provider));
+            assert!(err.to_string().contains("media-server input is missing media_server configuration"), "{err}");
+        }
+    }
+
+    #[test]
+    fn emby_client_settings_copies_login_credentials_and_media_source_flag() {
+        let media_server = MediaServerInputConfig {
+            token: Some("token".to_string()),
+            api_key: Some("api-key".to_string()),
+            user_id: Some("user-id".to_string()),
+            ..media_server_config_with_library()
+        };
+        let mut input = media_server_input(InputType::Emby, "http://emby.example.invalid", Some(media_server.clone()));
+        input.username = Some("login".to_string());
+        input.password = Some("secret".to_string());
+
+        let settings = input.emby_client_settings(&media_server);
+
+        assert_eq!(settings.token.as_deref(), Some("token"));
+        assert_eq!(settings.api_key.as_deref(), Some("api-key"));
+        assert_eq!(settings.user_id.as_deref(), Some("user-id"));
+        assert_eq!(settings.username.as_deref(), Some("login"));
+        assert_eq!(settings.password.as_deref(), Some("secret"));
+        assert_eq!(settings.libraries, media_server.libraries);
+        assert!(settings.include_media_sources);
+
+        let mut no_sources = media_server;
+        no_sources.catalog.include_media_sources = false;
+        assert!(!input.emby_client_settings(&no_sources).include_media_sources);
+    }
+
     #[test]
     fn input_options_conversion_sets_disable_hls_streaming_flag() {
         let dto = ConfigInputOptionsDto {
@@ -1262,8 +1395,6 @@ mod tests {
 
         assert_eq!(media_server.libraries, vec![MediaServerLibrarySelector::Name("Movies".to_string())]);
         assert_eq!(media_server.catalog.page_size, 100);
-        assert!(media_server.playback.direct_play_only);
-        assert!(!media_server.playback.allow_transcode);
         assert_eq!(media_server.token.as_deref(), Some("token"));
         assert_eq!(media_server.api_key.as_deref(), Some("api-key"));
         assert_eq!(media_server.user_id.as_deref(), Some("user"));

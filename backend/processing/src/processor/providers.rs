@@ -1,8 +1,8 @@
 //! The [`PlaylistProvider`] implementations whose orchestration lives in this crate.
 //!
 //! The M3U and Xtream providers ship with the client code in `tuliprox-iptv`. These three
-//! cannot: Stalker's resumable refresh, the local library scan and the Plex catalog import
-//! all reach into `tuliprox-repository` and this crate's own processors, and `tuliprox-iptv`
+//! cannot: Stalker's resumable refresh, the local library scan and the media-server catalog
+//! import (Plex, Emby, Jellyfin) all reach into `tuliprox-repository` and this crate's own processors, and `tuliprox-iptv`
 //! sits below both. The trait is what lets them keep that dependency direction and still
 //! answer the dispatcher in one shape.
 
@@ -67,20 +67,20 @@ impl PlaylistProvider for LibraryProvider {
     }
 }
 
-/// Plex media server catalog import.
+/// Media server catalog import for Plex, Emby and Jellyfin inputs.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct PlexProvider;
+pub struct MediaServerProvider;
 
-impl PlaylistProvider for PlexProvider {
-    fn name(&self) -> &'static str { "plex" }
+impl PlaylistProvider for MediaServerProvider {
+    fn name(&self) -> &'static str { "media-server" }
 
     async fn fetch(&self, request: &PlaylistFetchRequest<'_>) -> PlaylistFetch {
-        let (groups, errors) = download_plex_media_server_playlist(request.client, request.input).await;
+        let (groups, errors) = download_media_server_playlist(request.client, request.input).await;
         PlaylistFetch::groups(groups).with_errors(errors)
     }
 }
 
-async fn download_plex_media_server_playlist(
+async fn download_media_server_playlist(
     client: &reqwest::Client,
     input: &ConfigInput,
 ) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
@@ -94,7 +94,7 @@ async fn download_plex_media_server_playlist(
         );
     };
     let http_client = MediaServerHttpClient::new(client.clone());
-    let plex_client = match input.plex_catalog_client(http_client) {
+    let catalog_client = match input.media_server_catalog_client(http_client) {
         Ok(client) => client,
         Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
     };
@@ -103,7 +103,7 @@ async fn download_plex_media_server_playlist(
         request_delay_ms: media_server.catalog.request_delay_ms,
     };
 
-    match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
+    match refresh_media_server_catalog_complete_before_publish(&catalog_client, policy).await {
         Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
         Err(error) => (vec![], vec![TuliproxError::Download(error.to_string())]),
     }
@@ -152,5 +152,33 @@ impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> EpgProvider for Xmlt
         let (guide, errors) = crate::epg::get_xmltv(self.ctx, request.input, None, &storage_dir).await;
         self.errors.lock().extend(errors);
         Ok(guide.map_or(EpgOutcome::NotConfigured, EpgOutcome::Guide))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{download_media_server_playlist, MediaServerProvider};
+    use shared::{error::ErrorKind, model::InputType};
+    use tuliprox_core::model::ConfigInput;
+    use tuliprox_iptv::provider::PlaylistProvider;
+
+    #[tokio::test]
+    async fn media_server_inputs_without_media_server_block_report_download_error() {
+        let client = reqwest::Client::new();
+        for input_type in [InputType::Plex, InputType::Emby, InputType::Jellyfin] {
+            let input = ConfigInput { name: "ms".into(), input_type, media_server: None, ..ConfigInput::default() };
+
+            let (groups, errors) = download_media_server_playlist(&client, &input).await;
+
+            assert!(groups.is_empty());
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].kind(), ErrorKind::Download, "{input_type:?}");
+            assert!(errors[0].message().contains("media_server"), "{}", errors[0].message());
+        }
+    }
+
+    #[test]
+    fn media_server_provider_is_named_media_server() {
+        assert_eq!(MediaServerProvider.name(), "media-server");
     }
 }

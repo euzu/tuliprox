@@ -2063,7 +2063,6 @@
       "BASELINE": "المجموعة السابقة",
       "BULK_BUSY": "يوجد تحديث آخر لقائمة التشغيل قيد التشغيل أو الانتظار. لم يبدأ التحديث الشامل.",
       "BULK_ONLY_DESCRIPTION": "لا يتوفر تحديث منفرد لهذا الإدخال. استخدم «تحديث جميع الإدخالات».",
-      "PROVIDER_IMPORT_UNAVAILABLE": "استيراد المزود غير متاح",
       "CACHE_BYPASSED_FORCE": "تم تجاوزه بواسطة Force",
       "CACHE_BYPASSED_REFRESH": "تم تجاوزه بواسطة Refresh",
       "CACHE_NOT_USED": "لم يُستخدم (المزوّد)",

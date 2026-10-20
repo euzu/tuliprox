@@ -1,4 +1,4 @@
-use super::providers::{LibraryProvider, PlexProvider, StalkerProvider, XmltvEpgProvider};
+use super::providers::{LibraryProvider, MediaServerProvider, StalkerProvider, XmltvEpgProvider};
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache,

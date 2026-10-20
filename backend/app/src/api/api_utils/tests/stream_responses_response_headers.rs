@@ -86,6 +86,7 @@ fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
 fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
     let plex_input = ConfigInput { input_type: InputType::Plex, ..ConfigInput::default() };
     let emby_input = ConfigInput { input_type: InputType::Emby, ..ConfigInput::default() };
+    let jellyfin_input = ConfigInput { input_type: InputType::Jellyfin, ..ConfigInput::default() };
     let m3u_input = ConfigInput { input_type: InputType::M3u, ..ConfigInput::default() };
 
     assert!(is_media_server_playback_url(
@@ -97,7 +98,12 @@ fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
         "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
     ));
     assert!(is_media_server_playback_url(&plex_input, "https://plex.example/stream.mkv"));
-    assert!(!is_media_server_playback_url(&emby_input, "https://emby.example/stream.mkv"));
+    assert!(is_media_server_playback_url(&emby_input, "https://emby.example/stream.mkv"));
+    assert!(is_media_server_playback_url(&jellyfin_input, "https://jellyfin.example/stream.mkv"));
+    assert!(is_media_server_playback_url(&emby_input, "media-server://emby/server/item?source_id=redacted"));
+    assert!(is_media_server_playback_url(&jellyfin_input, "media-server://jellyfin/server/item?source_id=redacted"));
+    assert!(is_media_server_stream_ref_url("media-server://emby/server/item?source_id=redacted"));
+    assert!(is_media_server_stream_ref_url("media-server://jellyfin/server/item?source_id=redacted"));
     assert!(!is_media_server_playback_url(&m3u_input, "https://provider.example/stream.mkv"));
     assert!(!is_media_server_stream_ref_url("https://provider.example/stream.mkv"));
     assert!(is_media_server_stream_ref_url("media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"));

@@ -24,7 +24,6 @@ pub enum InputUpdateCapabilities {
     Manual { policies: &'static [InputRefreshPolicy] },
     Rescan,
     BulkOnly,
-    ImportUnavailable,
     Disabled,
 }
 
@@ -38,9 +37,10 @@ impl InputUpdateCapabilities {
             InputType::Xtream | InputType::Stalker | InputType::M3u => Self::Manual {
                 policies: &[InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE],
             },
-            InputType::Plex => Self::Manual { policies: &[InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH] },
+            InputType::Plex | InputType::Jellyfin | InputType::Emby => {
+                Self::Manual { policies: &[InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH] }
+            }
             InputType::Library => Self::Rescan,
-            InputType::Jellyfin | InputType::Emby => Self::ImportUnavailable,
             InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch | InputType::Staged => {
                 Self::BulkOnly
             }
@@ -51,7 +51,7 @@ impl InputUpdateCapabilities {
     pub const fn policies(self) -> &'static [InputRefreshPolicy] {
         match self {
             Self::Manual { policies } => policies,
-            Self::Rescan | Self::BulkOnly | Self::ImportUnavailable | Self::Disabled => &[],
+            Self::Rescan | Self::BulkOnly | Self::Disabled => &[],
         }
     }
 
@@ -82,8 +82,8 @@ mod tests {
             (InputType::M3u, 3),
             (InputType::Plex, 2),
             (InputType::Library, 0),
-            (InputType::Jellyfin, 0),
-            (InputType::Emby, 0),
+            (InputType::Jellyfin, 2),
+            (InputType::Emby, 2),
             (InputType::M3uBatch, 0),
             (InputType::XtreamBatch, 0),
             (InputType::StalkerBatch, 0),

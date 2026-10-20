@@ -58,42 +58,6 @@ impl MediaServerCatalogSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct MediaServerCatalogCache {
-    trusted: Option<MediaServerCatalogSnapshot>,
-}
-
-impl MediaServerCatalogCache {
-    pub fn trusted(&self) -> Option<&MediaServerCatalogSnapshot> { self.trusted.as_ref() }
-
-    pub fn publish(&mut self, snapshot: MediaServerCatalogSnapshot) -> &MediaServerCatalogSnapshot {
-        self.trusted.insert(snapshot)
-    }
-
-    pub async fn refresh_or_retain<C>(
-        &mut self,
-        client: &C,
-        policy: MediaServerCatalogRefreshPolicy,
-    ) -> MediaServerCatalogRefreshOutcome
-    where
-        C: MediaServerCatalogClient,
-    {
-        match refresh_media_server_catalog_complete_before_publish(client, policy).await {
-            Ok(snapshot) => {
-                self.publish(snapshot);
-                MediaServerCatalogRefreshOutcome::Published
-            }
-            Err(error) => MediaServerCatalogRefreshOutcome::Retained { error, retained: self.trusted.is_some() },
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MediaServerCatalogRefreshOutcome {
-    Published,
-    Retained { error: MediaServerError, retained: bool },
-}
-
 pub async fn refresh_media_server_catalog_complete_before_publish<C>(
     client: &C,
     policy: MediaServerCatalogRefreshPolicy,
@@ -188,8 +152,8 @@ mod tests {
     use super::*;
     use crate::{
         MediaServerDescriptiveFacts, MediaServerImageRef, MediaServerKind, MediaServerLibraryRef,
-        MediaServerProviderIdHint, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries,
-        MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
+        MediaServerProviderIdHint, MediaServerSeason, MediaServerSeries, MediaServerStatus, MediaServerStreamRef,
+        MediaServerStreamResponse,
     };
     use bytes::Bytes;
     use futures::{stream, StreamExt};
@@ -274,13 +238,9 @@ mod tests {
         fn open_image(
             &self,
             _image_ref: &MediaServerImageRef,
-        ) -> impl std::future::Future<Output = Result<MediaServerResourceResponse, MediaServerError>> {
-            std::future::ready(Ok(empty_response()))
+        ) -> impl std::future::Future<Output = Result<MediaServerStreamResponse, MediaServerError>> {
+            std::future::ready(Ok(empty_stream_response()))
         }
-    }
-
-    fn empty_response() -> MediaServerResourceResponse {
-        MediaServerResourceResponse { status: StatusCode::OK, headers: HeaderMap::new(), body: Bytes::new() }
     }
 
     fn empty_stream_response() -> MediaServerStreamResponse {
@@ -401,31 +361,6 @@ mod tests {
             stream_ref: None,
             image_ref: None,
         }
-    }
-
-    #[tokio::test]
-    async fn incomplete_refresh_retains_previous_trusted_snapshot() {
-        let mut cache = MediaServerCatalogCache::default();
-        cache.publish(MediaServerCatalogSnapshot {
-            movies: vec![movie("old")],
-            ..MediaServerCatalogSnapshot::default()
-        });
-
-        let client = MockMediaServerCatalogClient::with_libraries(vec![movie_library()]);
-        client.movie_pages.lock().expect("lock").extend([
-            Ok(MediaServerPage::new(MediaServerPageRequest::new(0, 1), Some(2), vec![movie("new-1")])),
-            Err(MediaServerError::new(MediaServerErrorKind::MediaServerUnavailable)),
-        ]);
-
-        let outcome = cache
-            .refresh_or_retain(
-                &client,
-                MediaServerCatalogRefreshPolicy { page_size: 1, ..MediaServerCatalogRefreshPolicy::default() },
-            )
-            .await;
-
-        assert!(matches!(outcome, MediaServerCatalogRefreshOutcome::Retained { retained: true, .. }));
-        assert_eq!(cache.trusted().expect("previous snapshot retained").movies[0].item_id.as_ref(), "old");
     }
 
     #[tokio::test]

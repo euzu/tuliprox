@@ -1917,8 +1917,8 @@ mod tests {
             (InputType::Staged, &[], false),
             (InputType::Library, &["rescan"], true),
             (InputType::Plex, &[POLICY_NORMAL, POLICY_REFRESH], true),
-            (InputType::Jellyfin, &[], false),
-            (InputType::Emby, &[], false),
+            (InputType::Jellyfin, &[POLICY_NORMAL, POLICY_REFRESH], true),
+            (InputType::Emby, &[POLICY_NORMAL, POLICY_REFRESH], true),
         ];
         for &(input_type, expected, starts_playlist_update) in cases {
             for enabled in [true, false] {

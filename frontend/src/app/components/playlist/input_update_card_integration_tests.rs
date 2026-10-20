@@ -22,8 +22,8 @@ const INPUTS: [(u16, InputType, &[&str]); 11] = [
     (33, InputType::Staged, &[]),
     (15, InputType::Library, &["rescan"]),
     (4, InputType::Plex, &["normal", "refresh"]),
-    (28, InputType::Jellyfin, &[]),
-    (9, InputType::Emby, &[]),
+    (28, InputType::Jellyfin, &["normal", "refresh"]),
+    (9, InputType::Emby, &["normal", "refresh"]),
 ];
 
 fn sources() -> SourcesConfigDto {

@@ -2063,7 +2063,6 @@
       "BASELINE": "Previous population",
       "BULK_BUSY": "Another playlist update is already running or queued. The bulk update was not started.",
       "BULK_ONLY_DESCRIPTION": "Single-input updates are not available for this input. Use ‘Update all inputs’.",
-      "PROVIDER_IMPORT_UNAVAILABLE": "Provider import not available",
       "CACHE_BYPASSED_FORCE": "Bypassed by Force",
       "CACHE_BYPASSED_REFRESH": "Bypassed by Refresh",
       "CACHE_NOT_USED": "Not used (provider)",
