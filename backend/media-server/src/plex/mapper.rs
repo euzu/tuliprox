@@ -1,10 +1,12 @@
 use crate::{
+    library_selection::MediaServerLibraryCandidate,
+    non_blank_arc,
     plex::dto::{PlexDirectoryDto, PlexGuidDto, PlexMediaDto, PlexSectionDto, PlexVideoDto},
     MediaServerAudioTechnicalFacts, MediaServerDescriptiveFacts, MediaServerEpisode, MediaServerImageRef,
     MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason,
     MediaServerSeries, MediaServerStreamRef, MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
 };
-use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelector};
+use shared::model::MediaServerLibraryKind;
 use std::{cmp::Reverse, collections::HashSet, sync::Arc};
 
 pub fn plex_section_to_library(
@@ -12,8 +14,8 @@ pub fn plex_section_to_library(
     server_id: &Arc<str>,
     section: &PlexSectionDto,
 ) -> Option<MediaServerLibrary> {
-    let library_id = non_blank(section.key.as_deref())?;
-    let name = non_blank(section.title.as_deref()).unwrap_or_else(|| library_id.clone());
+    let library_id = non_blank_arc(section.key.as_deref())?;
+    let name = non_blank_arc(section.title.as_deref()).unwrap_or_else(|| library_id.clone());
     Some(MediaServerLibrary {
         reference: MediaServerLibraryRef {
             input_name: Arc::clone(input_name),
@@ -25,28 +27,14 @@ pub fn plex_section_to_library(
     })
 }
 
-pub fn plex_section_matches_selector(section: &PlexSectionDto, selector: &MediaServerLibrarySelector) -> bool {
-    match selector {
-        MediaServerLibrarySelector::Name(name) => matches_trimmed(section.title.as_deref(), name),
-        MediaServerLibrarySelector::Detailed(details) => {
-            let identity_matches =
-                details.key.as_deref().is_some_and(|key| matches_trimmed(section.key.as_deref(), key))
-                    || details.id.as_deref().is_some_and(|id| matches_trimmed(section.key.as_deref(), id))
-                    || details.name.as_deref().is_some_and(|name| matches_trimmed(section.title.as_deref(), name));
-            identity_matches
-                && details.kind.is_none_or(|kind| plex_section_kind_matches(section.section_type.as_deref(), kind))
-        }
-    }
-}
-
 pub fn plex_video_to_movie(
     input_name: &Arc<str>,
     server_id: &Arc<str>,
     library_id: &Arc<str>,
     video: &PlexVideoDto,
 ) -> Option<MediaServerMovie> {
-    let rating_key = non_blank(video.rating_key.as_deref())?;
-    let title = non_blank(video.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Movie"));
+    let rating_key = non_blank_arc(video.rating_key.as_deref())?;
+    let title = non_blank_arc(video.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Movie"));
     let media = first_media(&video.media);
 
     Some(MediaServerMovie {
@@ -56,7 +44,7 @@ pub fn plex_video_to_movie(
         item_id: Arc::clone(&rating_key),
         title,
         year: video.year,
-        release_date: non_blank(video.originally_available_at.as_deref()),
+        release_date: non_blank_arc(video.originally_available_at.as_deref()),
         source_version_hint: source_version_hint(video.updated_at, video.added_at),
         provider_hints: provider_hints(video.guid.as_deref(), &video.guids),
         descriptive_facts: video_descriptive_facts(video),
@@ -72,8 +60,8 @@ pub fn plex_directory_to_series(
     library_id: &Arc<str>,
     directory: &PlexDirectoryDto,
 ) -> Option<MediaServerSeries> {
-    let rating_key = non_blank(directory.rating_key.as_deref())?;
-    let title = non_blank(directory.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Series"));
+    let rating_key = non_blank_arc(directory.rating_key.as_deref())?;
+    let title = non_blank_arc(directory.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Series"));
 
     Some(MediaServerSeries {
         input_name: Arc::clone(input_name),
@@ -82,7 +70,7 @@ pub fn plex_directory_to_series(
         item_id: Arc::clone(&rating_key),
         title,
         year: directory.year,
-        release_date: non_blank(directory.originally_available_at.as_deref()),
+        release_date: non_blank_arc(directory.originally_available_at.as_deref()),
         source_version_hint: source_version_hint(directory.updated_at, directory.added_at),
         provider_hints: provider_hints(directory.guid.as_deref(), &directory.guids),
         descriptive_facts: directory_descriptive_facts(directory),
@@ -103,20 +91,20 @@ pub fn plex_directory_to_season(
     library_id: &Arc<str>,
     directory: &PlexDirectoryDto,
 ) -> Option<MediaServerSeason> {
-    let rating_key = non_blank(directory.rating_key.as_deref())?;
-    let title = non_blank(directory.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Season"));
+    let rating_key = non_blank_arc(directory.rating_key.as_deref())?;
+    let title = non_blank_arc(directory.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Season"));
 
     Some(MediaServerSeason {
         input_name: Arc::clone(input_name),
         server_id: Arc::clone(server_id),
         library_id: Arc::clone(library_id),
         item_id: Arc::clone(&rating_key),
-        series_id: non_blank(directory.parent_rating_key.as_deref()),
-        series_title: non_blank(directory.parent_title.as_deref()),
+        series_id: non_blank_arc(directory.parent_rating_key.as_deref()),
+        series_title: non_blank_arc(directory.parent_title.as_deref()),
         title,
         season: directory.index,
         year: directory.year,
-        release_date: non_blank(directory.originally_available_at.as_deref()),
+        release_date: non_blank_arc(directory.originally_available_at.as_deref()),
         source_version_hint: source_version_hint(directory.updated_at, directory.added_at),
         provider_hints: provider_hints(directory.guid.as_deref(), &directory.guids),
         descriptive_facts: directory_descriptive_facts(directory),
@@ -131,8 +119,8 @@ pub fn plex_video_to_episode(
     library_id: &Arc<str>,
     video: &PlexVideoDto,
 ) -> Option<MediaServerEpisode> {
-    let rating_key = non_blank(video.rating_key.as_deref())?;
-    let title = non_blank(video.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Episode"));
+    let rating_key = non_blank_arc(video.rating_key.as_deref())?;
+    let title = non_blank_arc(video.title.as_deref()).unwrap_or_else(|| Arc::<str>::from("Plex Episode"));
     let media = first_media(&video.media);
 
     Some(MediaServerEpisode {
@@ -140,12 +128,12 @@ pub fn plex_video_to_episode(
         server_id: Arc::clone(server_id),
         library_id: Arc::clone(library_id),
         item_id: Arc::clone(&rating_key),
-        series_id: non_blank(video.grandparent_rating_key.as_deref()),
-        series_title: non_blank(video.grandparent_title.as_deref()),
+        series_id: non_blank_arc(video.grandparent_rating_key.as_deref()),
+        series_title: non_blank_arc(video.grandparent_title.as_deref()),
         title,
         season: video.parent_index,
         episode: video.index,
-        release_date: non_blank(video.originally_available_at.as_deref()),
+        release_date: non_blank_arc(video.originally_available_at.as_deref()),
         source_version_hint: source_version_hint(video.updated_at, video.added_at),
         provider_hints: provider_hints(video.guid.as_deref(), &video.guids),
         descriptive_facts: video_descriptive_facts(video),
@@ -155,13 +143,12 @@ pub fn plex_video_to_episode(
     })
 }
 
-fn plex_section_kind_matches(section_type: Option<&str>, expected: MediaServerLibraryKind) -> bool {
-    let kind = plex_library_kind(section_type);
-    match expected {
-        MediaServerLibraryKind::Movies => matches!(kind, MediaServerLibraryKind::Movies),
-        MediaServerLibraryKind::TvShows => matches!(kind, MediaServerLibraryKind::TvShows),
-        MediaServerLibraryKind::Unsupported => false,
-    }
+impl MediaServerLibraryCandidate for PlexSectionDto {
+    fn library_key(&self) -> Option<&str> { self.key.as_deref() }
+
+    fn library_title(&self) -> Option<&str> { self.title.as_deref() }
+
+    fn library_kind(&self) -> MediaServerLibraryKind { plex_library_kind(self.section_type.as_deref()) }
 }
 
 fn plex_library_kind(section_type: Option<&str>) -> MediaServerLibraryKind {
@@ -170,10 +157,6 @@ fn plex_library_kind(section_type: Option<&str>) -> MediaServerLibraryKind {
         Some(value) if value.eq_ignore_ascii_case("show") => MediaServerLibraryKind::TvShows,
         _ => MediaServerLibraryKind::Unsupported,
     }
-}
-
-fn matches_trimmed(candidate: Option<&str>, expected: &str) -> bool {
-    candidate.is_some_and(|candidate| candidate.trim() == expected.trim())
 }
 
 fn first_media(media: &[PlexMediaDto]) -> Option<&PlexMediaDto> {
@@ -220,7 +203,7 @@ fn plex_stream_ref(
 }
 
 fn first_part_key(media: &PlexMediaDto) -> Option<Arc<str>> {
-    media.parts.iter().find_map(|part| non_blank(part.key.as_deref()))
+    media.parts.iter().find_map(|part| non_blank_arc(part.key.as_deref()))
 }
 
 fn plex_image_ref<const N: usize>(
@@ -229,7 +212,7 @@ fn plex_image_ref<const N: usize>(
     rating_key: &Arc<str>,
     candidates: [&Option<String>; N],
 ) -> Option<MediaServerImageRef> {
-    let image_path = candidates.into_iter().find_map(|candidate| non_blank(candidate.as_deref()))?;
+    let image_path = candidates.into_iter().find_map(|candidate| non_blank_arc(candidate.as_deref()))?;
     Some(MediaServerImageRef::Plex {
         input_name: Arc::clone(input_name),
         server_id: Arc::clone(server_id),
@@ -240,14 +223,14 @@ fn plex_image_ref<const N: usize>(
 
 fn video_descriptive_facts(video: &PlexVideoDto) -> Option<MediaServerDescriptiveFacts> {
     let facts = MediaServerDescriptiveFacts {
-        original_title: non_blank(video.original_title.as_deref()),
-        sort_title: non_blank(video.title_sort.as_deref()),
-        summary: non_blank(video.summary.as_deref()),
-        tagline: non_blank(video.tagline.as_deref()),
-        studio: non_blank(video.studio.as_deref()),
-        content_rating: non_blank(video.content_rating.as_deref()),
+        original_title: non_blank_arc(video.original_title.as_deref()),
+        sort_title: non_blank_arc(video.title_sort.as_deref()),
+        summary: non_blank_arc(video.summary.as_deref()),
+        tagline: non_blank_arc(video.tagline.as_deref()),
+        studio: non_blank_arc(video.studio.as_deref()),
+        content_rating: non_blank_arc(video.content_rating.as_deref()),
         parental_age: video.content_rating_age,
-        audience_rating: non_blank(video.audience_rating.as_deref()),
+        audience_rating: non_blank_arc(video.audience_rating.as_deref()),
         genres: tag_values(&video.genres),
         countries: tag_values(&video.countries),
         directors: tag_values(&video.directors),
@@ -255,81 +238,49 @@ fn video_descriptive_facts(video: &PlexVideoDto) -> Option<MediaServerDescriptiv
         cast: tag_values(&video.roles),
         ..MediaServerDescriptiveFacts::default()
     };
-    has_descriptive_facts(&facts).then_some(facts)
+    (!facts.is_empty()).then_some(facts)
 }
 
 fn directory_descriptive_facts(directory: &PlexDirectoryDto) -> Option<MediaServerDescriptiveFacts> {
     let facts = MediaServerDescriptiveFacts {
-        original_title: non_blank(directory.original_title.as_deref()),
-        sort_title: non_blank(directory.title_sort.as_deref()),
-        summary: non_blank(directory.summary.as_deref()),
-        tagline: non_blank(directory.tagline.as_deref()),
-        studio: non_blank(directory.studio.as_deref()),
-        content_rating: non_blank(directory.content_rating.as_deref()),
+        original_title: non_blank_arc(directory.original_title.as_deref()),
+        sort_title: non_blank_arc(directory.title_sort.as_deref()),
+        summary: non_blank_arc(directory.summary.as_deref()),
+        tagline: non_blank_arc(directory.tagline.as_deref()),
+        studio: non_blank_arc(directory.studio.as_deref()),
+        content_rating: non_blank_arc(directory.content_rating.as_deref()),
         parental_age: directory.content_rating_age,
-        audience_rating: non_blank(directory.audience_rating.as_deref()),
+        audience_rating: non_blank_arc(directory.audience_rating.as_deref()),
         genres: tag_values(&directory.genres),
         countries: tag_values(&directory.countries),
         cast: tag_values(&directory.roles),
         ..MediaServerDescriptiveFacts::default()
     };
-    has_descriptive_facts(&facts).then_some(facts)
-}
-
-fn has_descriptive_facts(facts: &MediaServerDescriptiveFacts) -> bool {
-    facts.original_title.is_some()
-        || facts.sort_title.is_some()
-        || facts.summary.is_some()
-        || facts.tagline.is_some()
-        || facts.studio.is_some()
-        || facts.network.is_some()
-        || facts.content_rating.is_some()
-        || facts.parental_age.is_some()
-        || facts.audience_rating.is_some()
-        || !facts.genres.is_empty()
-        || !facts.countries.is_empty()
-        || !facts.directors.is_empty()
-        || !facts.writers.is_empty()
-        || !facts.cast.is_empty()
-        || !facts.crew.is_empty()
+    (!facts.is_empty()).then_some(facts)
 }
 
 fn media_technical_facts(media: &PlexMediaDto) -> Option<MediaServerTechnicalFacts> {
     let video = MediaServerVideoTechnicalFacts {
-        codec: non_blank(media.video_codec.as_deref()),
+        codec: non_blank_arc(media.video_codec.as_deref()),
         width: media.width,
         height: media.height,
     };
     let audio = MediaServerAudioTechnicalFacts {
-        codec: non_blank(media.audio_codec.as_deref()),
+        codec: non_blank_arc(media.audio_codec.as_deref()),
         channels: media.audio_channels,
     };
     let facts = MediaServerTechnicalFacts {
-        container: non_blank(media.container.as_deref()).or_else(|| first_part_container(media)),
+        container: non_blank_arc(media.container.as_deref()).or_else(|| first_part_container(media)),
         duration_secs: plex_duration_ms_to_secs(media.duration),
         bitrate: media.bitrate.and_then(plex_bitrate_kbps_to_bps),
-        video: has_video_facts(&video).then_some(video),
-        audio: has_audio_facts(&audio).then_some(audio),
+        video: (!video.is_empty()).then_some(video),
+        audio: (!audio.is_empty()).then_some(audio),
     };
-    has_technical_facts(&facts).then_some(facts)
+    (!facts.is_empty()).then_some(facts)
 }
 
 fn first_part_container(media: &PlexMediaDto) -> Option<Arc<str>> {
-    media.parts.iter().find_map(|part| non_blank(part.container.as_deref()))
-}
-
-fn has_video_facts(facts: &MediaServerVideoTechnicalFacts) -> bool {
-    facts.codec.is_some() || facts.width.is_some() || facts.height.is_some()
-}
-
-fn has_audio_facts(facts: &MediaServerAudioTechnicalFacts) -> bool { facts.codec.is_some() || facts.channels.is_some() }
-
-fn has_technical_facts(facts: &MediaServerTechnicalFacts) -> bool {
-    facts.container.is_some()
-        || facts.duration_secs.is_some()
-        || facts.bitrate.is_some()
-        || facts.video.is_some()
-        || facts.audio.is_some()
+    media.parts.iter().find_map(|part| non_blank_arc(part.container.as_deref()))
 }
 
 fn plex_duration_ms_to_secs(duration: Option<u64>) -> Option<u32> {
@@ -380,10 +331,6 @@ fn normalize_guid_namespace(namespace: &str) -> Option<Arc<str>> {
 
 fn tag_values(tags: &[crate::plex::dto::PlexTagDto]) -> Vec<Arc<str>> {
     tags.iter().filter_map(crate::plex::dto::PlexTagDto::value).collect()
-}
-
-fn non_blank(value: Option<&str>) -> Option<Arc<str>> {
-    value.map(str::trim).filter(|value| !value.is_empty()).map(Arc::<str>::from)
 }
 
 fn source_version_hint(updated_at: Option<i64>, added_at: Option<i64>) -> Option<Arc<str>> {

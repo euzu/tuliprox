@@ -144,6 +144,12 @@ pub struct MediaServerDescriptiveFacts {
     pub crew: Vec<Arc<str>>,
 }
 
+impl MediaServerDescriptiveFacts {
+    /// `true` when no field carries a value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self == &Self::default() }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaServerVideoTechnicalFacts {
     pub codec: Option<Arc<str>>,
@@ -151,10 +157,22 @@ pub struct MediaServerVideoTechnicalFacts {
     pub height: Option<u32>,
 }
 
+impl MediaServerVideoTechnicalFacts {
+    /// `true` when no field carries a value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self == &Self::default() }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaServerAudioTechnicalFacts {
     pub codec: Option<Arc<str>>,
     pub channels: Option<u32>,
+}
+
+impl MediaServerAudioTechnicalFacts {
+    /// `true` when no field carries a value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self == &Self::default() }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -165,6 +183,12 @@ pub struct MediaServerTechnicalFacts {
     pub bitrate: Option<u32>,
     pub video: Option<MediaServerVideoTechnicalFacts>,
     pub audio: Option<MediaServerAudioTechnicalFacts>,
+}
+
+impl MediaServerTechnicalFacts {
+    /// `true` when no field carries a value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self == &Self::default() }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,19 +295,6 @@ pub enum MediaServerImageRef {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MediaServerPlaybackLease {
-    pub provider_kind: MediaServerKind,
-    pub lease_id: Arc<str>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MediaServerResourceResponse {
-    pub status: StatusCode,
-    pub headers: HeaderMap,
-    pub body: Bytes,
-}
-
 pub type BoxedMediaServerStream = BoxStream<'static, Result<Bytes, MediaServerError>>;
 
 pub struct MediaServerStreamResponse {
@@ -305,6 +316,25 @@ impl fmt::Debug for MediaServerStreamResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facts_are_empty_only_when_every_field_is_unset() {
+        assert!(MediaServerDescriptiveFacts::default().is_empty());
+        assert!(MediaServerTechnicalFacts::default().is_empty());
+        assert!(MediaServerVideoTechnicalFacts::default().is_empty());
+        assert!(MediaServerAudioTechnicalFacts::default().is_empty());
+
+        assert!(!MediaServerDescriptiveFacts { parental_age: Some(12), ..Default::default() }.is_empty());
+        assert!(!MediaServerDescriptiveFacts { crew: vec!["crew".into()], ..Default::default() }.is_empty());
+        assert!(!MediaServerTechnicalFacts { bitrate: Some(1), ..Default::default() }.is_empty());
+        assert!(!MediaServerTechnicalFacts {
+            audio: Some(MediaServerAudioTechnicalFacts::default()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!MediaServerVideoTechnicalFacts { height: Some(1), ..Default::default() }.is_empty());
+        assert!(!MediaServerAudioTechnicalFacts { channels: Some(2), ..Default::default() }.is_empty());
+    }
 
     #[test]
     fn media_server_page_next_request_advances_until_total() {

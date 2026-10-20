@@ -1,7 +1,7 @@
 use crate::{
-    redaction::redact_media_server_text, MediaServerEpisode, MediaServerError, MediaServerErrorKind,
-    MediaServerImageRef, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
-    MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus,
+    operation::MediaServerOperation, redaction::redact_media_server_text, MediaServerEpisode, MediaServerError,
+    MediaServerErrorKind, MediaServerImageRef, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie,
+    MediaServerPage, MediaServerPageRequest, MediaServerSeason, MediaServerSeries, MediaServerStatus,
     MediaServerStreamRef, MediaServerStreamResponse,
 };
 use reqwest::{
@@ -45,10 +45,7 @@ pub trait MediaServerCatalogClient: Send + Sync {
         range: Option<&str>,
     ) -> Result<MediaServerStreamResponse, MediaServerError>;
 
-    async fn open_image(
-        &self,
-        image_ref: &MediaServerImageRef,
-    ) -> Result<MediaServerResourceResponse, MediaServerError>;
+    async fn open_image(&self, image_ref: &MediaServerImageRef) -> Result<MediaServerStreamResponse, MediaServerError>;
 }
 
 #[derive(Clone)]
@@ -69,6 +66,15 @@ impl MediaServerHttpClient {
             fallback_kind: MediaServerErrorKind::MediaServerStreamOpenFailed,
         }
     }
+
+    pub(crate) fn request_for(
+        &self,
+        method: Method,
+        url: &str,
+        operation: MediaServerOperation,
+    ) -> MediaServerHttpRequestBuilder {
+        self.request(method, url).error_kinds(operation.not_found_kind(), operation.fallback_kind())
+    }
 }
 
 pub struct MediaServerHttpRequestBuilder {
@@ -88,6 +94,11 @@ impl MediaServerHttpRequestBuilder {
 
     pub fn headers(mut self, headers: HeaderMap) -> Self {
         self.builder = self.builder.headers(headers);
+        self
+    }
+
+    pub fn json<T: serde::Serialize + ?Sized>(mut self, body: &T) -> Self {
+        self.builder = self.builder.json(body);
         self
     }
 
@@ -152,5 +163,60 @@ mod tests {
 
         assert_eq!(request.not_found_kind, MediaServerErrorKind::MediaServerLibraryUnavailable);
         assert_eq!(request.fallback_kind, MediaServerErrorKind::MediaServerCatalogDecodeFailed);
+    }
+
+    #[test]
+    fn request_for_selects_error_kinds_per_operation() {
+        let client = MediaServerHttpClient::new(reqwest::Client::new());
+        for operation in
+            [MediaServerOperation::Discovery, MediaServerOperation::Catalog, MediaServerOperation::Playback]
+        {
+            let request = client.request_for(Method::GET, "https://media.example.invalid/x", operation);
+
+            assert_eq!(request.not_found_kind, operation.not_found_kind());
+            assert_eq!(request.fallback_kind, operation.fallback_kind());
+        }
+    }
+
+    #[test]
+    fn json_keeps_safe_url_redacted() {
+        let client = MediaServerHttpClient::new(reqwest::Client::new());
+        let request = client
+            .request(Method::POST, "https://media.example.invalid/login?api_key=secret")
+            .json(&serde_json::json!({"Username": "u"}));
+
+        assert!(!request.safe_url().contains("secret"));
+        assert!(request.safe_url().contains("api_key=***"));
+    }
+
+    #[tokio::test]
+    async fn json_sends_serialized_body_with_content_type() {
+        use crate::test_server::{start_test_server, test_response};
+        use http_body_util::BodyExt;
+        use reqwest::StatusCode;
+
+        let (base_url, server) = start_test_server(|req| async move {
+            let content_type = req
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned);
+            let body = req.into_body().collect().await.map(http_body_util::Collected::to_bytes).unwrap_or_default();
+            let ok =
+                content_type.as_deref() == Some("application/json") && body.as_ref() == br#"{"Username":"u","Pw":"p"}"#;
+            Ok(test_response(if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST }, b""))
+        })
+        .await;
+        let client = MediaServerHttpClient::new(reqwest::Client::new());
+
+        let response = client
+            .request_for(Method::POST, &format!("{base_url}/login"), MediaServerOperation::Discovery)
+            .json(&serde_json::json!({"Username": "u", "Pw": "p"}))
+            .send()
+            .await
+            .expect("request is sent");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        server.abort();
     }
 }

@@ -7,7 +7,8 @@ use crate::{
             media_server_stream_response as open_media_server_proxy_stream_response, parse_media_server_image_ref,
             parse_media_server_stream_ref,
         },
-        MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
+        AnyMediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
+        MediaServerImageRef,
     },
     model::ConfigInput,
 };
@@ -16,16 +17,29 @@ use axum::{
     http::{header, HeaderMap, Response, StatusCode},
 };
 use futures::{StreamExt, TryStreamExt};
-use shared::model::InputType;
 use std::sync::Arc;
 use url::Url;
 
 pub(super) fn is_media_server_playback_url(input: &ConfigInput, stream_url: &str) -> bool {
-    input.input_type == InputType::Plex || is_media_server_stream_ref_url(stream_url)
+    input.input_type.is_media_server() || is_media_server_stream_ref_url(stream_url)
 }
 
 pub(super) fn is_media_server_stream_ref_url(stream_url: &str) -> bool {
     Url::parse(stream_url).is_ok_and(|url| url.scheme() == "media-server")
+}
+
+fn media_server_catalog_client_for_input(
+    app_state: &AppState,
+    input: &ConfigInput,
+    not_media_server_detail: &'static str,
+) -> Result<AnyMediaServerCatalogClient, MediaServerError> {
+    if !input.input_type.is_media_server() {
+        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .provider("media-server")
+            .detail(not_media_server_detail));
+    }
+    let http_client = MediaServerHttpClient::new(app_state.http_clients.default.load().as_ref().clone());
+    input.media_server_catalog_client(http_client)
 }
 
 pub(super) async fn open_media_server_stream_for_input(
@@ -36,31 +50,9 @@ pub(super) async fn open_media_server_stream_for_input(
 ) -> Result<(BoxedProviderStream, ProviderStreamInfo), MediaServerError> {
     let stream_ref = parse_media_server_stream_ref(&input.name, stream_url)?;
     let range = req_headers.get(header::RANGE).and_then(|value| value.to_str().ok());
-    let http_client = MediaServerHttpClient::new(app_state.http_clients.default.load().as_ref().clone());
-
-    let response = match input.input_type {
-        InputType::Plex => {
-            let client = input.plex_catalog_client(http_client)?;
-            open_media_server_proxy_stream_response(&client, &stream_ref, range).await?
-        }
-        InputType::Emby | InputType::Jellyfin => {
-            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
-                .provider("media-server")
-                .detail("media-server playback proxy is not implemented for this input type"));
-        }
-        InputType::M3u
-        | InputType::Xtream
-        | InputType::M3uBatch
-        | InputType::XtreamBatch
-        | InputType::Stalker
-        | InputType::StalkerBatch
-        | InputType::Library
-        | InputType::Staged => {
-            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
-                .provider("media-server")
-                .detail("playlist item is not backed by a media-server input"));
-        }
-    };
+    let client =
+        media_server_catalog_client_for_input(app_state, input, "playlist item is not backed by a media-server input")?;
+    let response = open_media_server_proxy_stream_response(&client, &stream_ref, range).await?;
 
     let headers = response
         .headers
@@ -84,31 +76,12 @@ pub(super) async fn open_media_server_image_resource(
             .provider("media-server")
             .detail("media-server image input was not found")
     })?;
-    let http_client = MediaServerHttpClient::new(app_state.http_clients.default.load().as_ref().clone());
-
-    let response = match input.input_type {
-        InputType::Plex => {
-            let client = input.plex_catalog_client(http_client)?;
-            open_media_server_proxy_image_response(&client, &image_ref).await?
-        }
-        InputType::Emby | InputType::Jellyfin => {
-            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
-                .provider("media-server")
-                .detail("media-server image proxy is not implemented for this input type"));
-        }
-        InputType::M3u
-        | InputType::Xtream
-        | InputType::M3uBatch
-        | InputType::XtreamBatch
-        | InputType::Stalker
-        | InputType::StalkerBatch
-        | InputType::Library
-        | InputType::Staged => {
-            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
-                .provider("media-server")
-                .detail("media-server image input is not backed by a media-server input"));
-        }
-    };
+    let client = media_server_catalog_client_for_input(
+        app_state,
+        &input,
+        "media-server image input is not backed by a media-server input",
+    )?;
+    let response = open_media_server_proxy_image_response(&client, &image_ref).await?;
 
     let mut builder = Response::builder().status(response.status);
     for (key, value) in &response.headers {

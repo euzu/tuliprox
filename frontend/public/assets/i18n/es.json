@@ -2232,7 +2232,6 @@
       "BASELINE": "Contenido anterior",
       "BULK_BUSY": "Ya hay otra actualización de lista en curso o en cola. La actualización en conjunto no se ha iniciado.",
       "BULK_ONLY_DESCRIPTION": "Esta entrada no admite actualizaciones individuales. Usa ‘Actualizar todas las entradas’.",
-      "PROVIDER_IMPORT_UNAVAILABLE": "Importación del proveedor no disponible",
       "CACHE_BYPASSED_FORCE": "Omitida por Forzar",
       "CACHE_BYPASSED_REFRESH": "Omitida por Recargar",
       "CACHE_NOT_USED": "No usada (proveedor)",

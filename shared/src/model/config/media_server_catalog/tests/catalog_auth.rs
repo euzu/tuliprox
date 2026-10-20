@@ -54,13 +54,6 @@ fn media_server_defaults_are_conservative() {
     assert_eq!(media_server.catalog.page_size, 100);
     assert_eq!(media_server.catalog.request_delay_ms, 250);
     assert!(media_server.catalog.include_media_sources);
-    assert!(!media_server.catalog.include_paths);
-    assert!(!media_server.catalog.include_user_state);
-    assert!(!media_server.catalog.refresh_on_startup);
-    assert!(media_server.playback.direct_play_only);
-    assert!(!media_server.playback.allow_transcode);
-    assert!(!media_server.playback.preflight_streams);
-    assert_eq!(media_server.image_policy, MediaServerImagePolicy::ProxyOnDemand);
     assert!(!media_server.allow_relay);
 }
 
@@ -99,6 +92,24 @@ fn media_server_enrichment_block_is_not_part_of_schema() {
     .expect_err("media_server.enrichment must not be accepted");
 
     assert!(err.to_string().contains("unknown field `enrichment`"));
+}
+
+#[test]
+fn removed_media_server_options_are_rejected() {
+    for (json, field) in [
+        (r#"{"libraries":["Movies"],"playback":{"allow_transcode":true}}"#, "playback"),
+        (r#"{"libraries":["Movies"],"image_policy":"disabled"}"#, "image_policy"),
+        (r#"{"libraries":["Movies"],"catalog":{"refresh_mode":"scheduled"}}"#, "refresh_mode"),
+        (r#"{"libraries":["Movies"],"catalog":{"refresh_on_startup":true}}"#, "refresh_on_startup"),
+        (r#"{"libraries":["Movies"],"catalog":{"include_paths":true}}"#, "include_paths"),
+        (r#"{"libraries":["Movies"],"catalog":{"include_file_paths":true}}"#, "include_file_paths"),
+        (r#"{"libraries":["Movies"],"catalog":{"include_user_state":true}}"#, "include_user_state"),
+    ] {
+        let err =
+            serde_json::from_str::<MediaServerInputConfigDto>(json).expect_err("removed options must be rejected");
+
+        assert!(err.to_string().contains(&format!("unknown field `{field}`")), "{field}: {err}");
+    }
 }
 
 #[test]

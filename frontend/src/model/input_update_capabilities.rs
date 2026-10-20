@@ -14,9 +14,7 @@ impl InputUpdateCapabilitiesExt for InputUpdateCapabilities {
     fn selected_action(self, policy: InputRefreshPolicy) -> InputUpdateAction {
         match self {
             Self::Rescan => InputUpdateAction::Rescan,
-            Self::Manual { .. } | Self::BulkOnly | Self::ImportUnavailable | Self::Disabled => {
-                InputUpdateAction::Provider(policy)
-            }
+            Self::Manual { .. } | Self::BulkOnly | Self::Disabled => InputUpdateAction::Provider(policy),
         }
     }
 
@@ -40,7 +38,6 @@ impl InputUpdateCapabilitiesExt for InputUpdateCapabilities {
             }
             Self::Rescan => "MESSAGES.PLAYLIST_UPDATE.LIBRARY_DESCRIPTION",
             Self::BulkOnly => "MESSAGES.PLAYLIST_UPDATE.BULK_ONLY_DESCRIPTION",
-            Self::ImportUnavailable => "MESSAGES.PLAYLIST_UPDATE.PROVIDER_IMPORT_UNAVAILABLE",
             Self::Disabled => "MESSAGES.PLAYLIST_UPDATE.INPUT_DISABLED",
         }
     }
@@ -82,11 +79,7 @@ mod tests {
         assert_eq!(capability.policies().len(), 0);
         assert!(capability.rebuilds_targets());
         assert_eq!(capability.selected_action(InputRefreshPolicy::NORMAL), InputUpdateAction::Rescan);
-        for unavailable in [
-            InputUpdateCapabilities::BulkOnly,
-            InputUpdateCapabilities::ImportUnavailable,
-            InputUpdateCapabilities::Disabled,
-        ] {
+        for unavailable in [InputUpdateCapabilities::BulkOnly, InputUpdateCapabilities::Disabled] {
             assert!(!unavailable.rebuilds_targets());
         }
     }
@@ -99,7 +92,7 @@ mod tests {
             include_str!("../../public/assets/i18n/ar.json"),
         ] {
             let locale: serde_json::Value = serde_json::from_str(source)?;
-            for key in ["LIBRARY_DESCRIPTION", "PROVIDER_IMPORT_UNAVAILABLE", "BULK_ONLY_DESCRIPTION"] {
+            for key in ["LIBRARY_DESCRIPTION", "BULK_ONLY_DESCRIPTION"] {
                 assert!(locale["MESSAGES"]["PLAYLIST_UPDATE"][key].as_str().is_some_and(|text| !text.is_empty()));
             }
             for key in ["RESCAN", "START_RESCAN"] {

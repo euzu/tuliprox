@@ -1,25 +1,13 @@
 use crate::{
     BoxedMediaServerStream, MediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
-    MediaServerResourceResponse, MediaServerStreamRef, MediaServerStreamResponse,
+    MediaServerStreamRef, MediaServerStreamResponse,
 };
-use bytes::Bytes;
-use futures::{stream, StreamExt};
 use reqwest::{
     header::{HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED},
     StatusCode,
 };
-use shared::{
-    model::{InputType, PlaylistItemType},
-    utils::hex_digit,
-};
+use shared::utils::hex_digit;
 use std::{fmt, sync::Arc};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlaybackOrigin {
-    Provider,
-    LocalLibrary,
-    MediaServer(MediaServerStreamRef),
-}
 
 pub struct MediaServerProxyResponse {
     pub status: StatusCode,
@@ -35,23 +23,6 @@ impl fmt::Debug for MediaServerProxyResponse {
             .field("body", &"<stream>")
             .finish()
     }
-}
-
-pub fn classify_playback_origin(
-    input_type: InputType,
-    item_type: PlaylistItemType,
-    input_name: &Arc<str>,
-    item_url: &str,
-) -> Result<PlaybackOrigin, MediaServerError> {
-    if input_type.is_media_server() || item_url.starts_with("media-server://") {
-        return parse_media_server_stream_ref(input_name, item_url).map(PlaybackOrigin::MediaServer);
-    }
-
-    if matches!(item_type, PlaylistItemType::LocalVideo | PlaylistItemType::LocalSeries) {
-        return Ok(PlaybackOrigin::LocalLibrary);
-    }
-
-    Ok(PlaybackOrigin::Provider)
 }
 
 pub async fn media_server_stream_response<C>(
@@ -74,15 +45,7 @@ where
     C: MediaServerCatalogClient,
 {
     let response = client.open_image(image_ref).await?;
-    Ok(media_server_resource_to_proxy_response(response))
-}
-
-fn media_server_resource_to_proxy_response(response: MediaServerResourceResponse) -> MediaServerProxyResponse {
-    MediaServerProxyResponse {
-        status: response.status,
-        headers: safe_media_server_response_headers(&response.headers),
-        body: single_chunk_stream(response.body),
-    }
+    Ok(media_server_stream_to_proxy_response(response))
 }
 
 fn media_server_stream_to_proxy_response(response: MediaServerStreamResponse) -> MediaServerProxyResponse {
@@ -91,10 +54,6 @@ fn media_server_stream_to_proxy_response(response: MediaServerStreamResponse) ->
         headers: safe_media_server_response_headers(&response.headers),
         body: response.body,
     }
-}
-
-fn single_chunk_stream(body: Bytes) -> BoxedMediaServerStream {
-    stream::once(async move { Ok::<Bytes, MediaServerError>(body) }).boxed()
 }
 
 pub fn safe_media_server_response_headers(headers: &HeaderMap) -> HeaderMap {
@@ -230,6 +189,7 @@ mod tests {
         MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
         MediaServerSeries, MediaServerStatus,
     };
+    use bytes::Bytes;
     use futures::{stream, StreamExt};
     use reqwest::header::{HeaderValue, AUTHORIZATION};
     use std::sync::{Arc as StdArc, Mutex};
@@ -305,11 +265,11 @@ mod tests {
         fn open_image(
             &self,
             _image_ref: &MediaServerImageRef,
-        ) -> impl std::future::Future<Output = Result<MediaServerResourceResponse, MediaServerError>> {
-            std::future::ready(Ok(MediaServerResourceResponse {
+        ) -> impl std::future::Future<Output = Result<MediaServerStreamResponse, MediaServerError>> {
+            std::future::ready(Ok(MediaServerStreamResponse {
                 status: StatusCode::OK,
                 headers: HeaderMap::new(),
-                body: Bytes::new(),
+                body: stream::empty().boxed(),
             }))
         }
     }
@@ -338,25 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn classifies_media_server_local_and_provider_origins() {
+    fn parses_media_server_stream_refs() {
         let input_name = StdArc::<str>::from("media_server");
-        let media_server = classify_playback_origin(
-            InputType::Plex,
-            PlaylistItemType::Video,
+        let plex = parse_media_server_stream_ref(
             &input_name,
             "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv",
         )
         .expect("media_server ref parses");
-        assert!(matches!(media_server, PlaybackOrigin::MediaServer(MediaServerStreamRef::Plex { .. })));
-
-        let local = classify_playback_origin(
-            InputType::Library,
-            PlaylistItemType::LocalVideo,
-            &input_name,
-            "file:///tmp/a.mkv",
-        )
-        .expect("local classifies");
-        assert_eq!(local, PlaybackOrigin::LocalLibrary);
+        assert!(matches!(plex, MediaServerStreamRef::Plex { .. }));
 
         let encoded = parse_media_server_stream_ref(
             &input_name,
@@ -377,14 +326,9 @@ mod tests {
             .expect_err("unavailable sentinel should map to a stable playback error");
         assert_eq!(unavailable.kind, MediaServerErrorKind::NoDirectPlayableMediaServerSource);
 
-        let provider = classify_playback_origin(
-            InputType::M3u,
-            PlaylistItemType::Live,
-            &input_name,
-            "http://example.invalid/live",
-        )
-        .expect("provider classifies");
-        assert_eq!(provider, PlaybackOrigin::Provider);
+        let not_media_server = parse_media_server_stream_ref(&input_name, "http://example.invalid/live")
+            .expect_err("plain provider URLs are not media-server refs");
+        assert_eq!(not_media_server.kind, MediaServerErrorKind::MediaServerStreamOpenFailed);
     }
 
     #[test]

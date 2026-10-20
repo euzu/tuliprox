@@ -4,6 +4,12 @@
 
 ## ⚠️ Breaking Changes
 
+- **Unused `media_server` options removed.** The input keys `media_server.playback` (`direct_play_only`,
+  `allow_transcode`, `playback_info_policy`, `preflight_streams`), `media_server.image_policy`,
+  `media_server.catalog.refresh_mode`, `media_server.catalog.refresh_on_startup`, `media_server.catalog.include_paths`
+  (alias `include_file_paths`) and `media_server.catalog.include_user_state` never had an effect and are no longer
+  accepted. Configurations that still contain them fail to load with `unknown field`; remove these keys.
+
 - **Web UI sessions must sign in again once.** The new maintenance permissions bump the permission schema, so tokens
   issued before the update are rejected with `X-Token-Refresh: required` and the Web UI returns to the sign-in page.
 
@@ -216,6 +222,16 @@
   event `failover.overrides_changed` serve the editor. See
   [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
   and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
+
+- **Emby and Jellyfin inputs import their libraries.** `type: emby` and `type: jellyfin` inputs now import the selected
+  movie and TV libraries like Plex inputs do, and Tuliprox proxies direct playback (with `Range` support) and artwork
+  without exposing server URLs or tokens to clients. Credentials are resolved from `media_server.token`, then
+  `media_server.api_key`, then a login with the input's `username` and `password`; `media_server.user_id` selects the
+  user for non-admin tokens. The login session is reused across refreshes and playback and renewed once when the
+  server invalidates it. Jellyfin requests use only the `Authorization: MediaBrowser` header, so imports keep working
+  with Jellyfin 12.0, which removes the legacy `X-Emby-Token` and `api_key` authentication. Missing (virtual)
+  movies and episodes are not imported; remote or `.strm` sources are imported but not playable. The Update tab
+  offers Update and Refresh for these inputs. See [Media server inputs](docs/src/configuration/source.md#27-media-server-inputs-plex-emby-jellyfin).
 
 - **Maintenance mode.** Inputs can be put into maintenance from the new dashboard card or through
   `/api/v1/maintenance` (`*` addresses all inputs). New streams of an input in maintenance get the new

@@ -1,21 +1,21 @@
 use crate::{
     encode_url_path_segment,
+    library_selection::select_libraries,
+    operation::MediaServerOperation,
     plex::{
-        dto::{PlexMediaContainerDto, PlexResourcesDto, PlexSectionDto, PlexSectionsDto},
-        mapper::{
-            plex_directory_to_season, plex_directory_to_series, plex_section_matches_selector, plex_section_to_library,
-            plex_video_to_episode, plex_video_to_movie,
-        },
+        dto::{PlexMediaContainerDto, PlexResourcesDto, PlexSectionsDto},
+        mapper::{plex_directory_to_season, plex_directory_to_series, plex_video_to_episode, plex_video_to_movie},
     },
+    redaction::redacted_secret,
     MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
     MediaServerImageRef, MediaServerKind, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
-    MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus,
-    MediaServerStreamRef, MediaServerStreamResponse,
+    MediaServerPageRequest, MediaServerSeason, MediaServerSeries, MediaServerStatus, MediaServerStreamRef,
+    MediaServerStreamResponse,
 };
 use futures::{StreamExt, TryStreamExt};
 use reqwest::{
     header::{HeaderName, HeaderValue, RANGE},
-    Method, StatusCode,
+    Method,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use shared::model::MediaServerLibrarySelector;
@@ -37,7 +37,7 @@ static PLEX_CONNECTION_CACHE: LazyLock<Mutex<HashMap<PlexConnectionCacheKey, Ple
 /// file, from environment variables, from anywhere - and hands over the resolved
 /// values. The client does not name the application's configuration model, which
 /// is what keeps this module a leaf.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PlexClientSettings {
     pub token: Option<String>,
     pub account_token: Option<String>,
@@ -46,6 +46,20 @@ pub struct PlexClientSettings {
     pub prefer_https: bool,
     pub allow_relay: bool,
     pub libraries: Vec<MediaServerLibrarySelector>,
+}
+
+impl std::fmt::Debug for PlexClientSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlexClientSettings")
+            .field("token", &redacted_secret(self.token.as_deref()))
+            .field("account_token", &redacted_secret(self.account_token.as_deref()))
+            .field("server_id", &self.server_id)
+            .field("server_name", &self.server_name)
+            .field("prefer_https", &self.prefer_https)
+            .field("allow_relay", &self.allow_relay)
+            .field("libraries", &self.libraries)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -168,7 +182,7 @@ impl PlexCatalogClient {
                 .detail("Plex resource discovery requires media_server.account_token")
         })?;
         let resources: PlexResourcesDto =
-            self.get_xml(PLEX_TV_RESOURCES_URL, &account_token, PlexOperation::Discovery).await?;
+            self.get_xml(PLEX_TV_RESOURCES_URL, &account_token, MediaServerOperation::Discovery).await?;
         let resource = select_resource(&resources.devices, &self.config)?;
         let resource_token =
             resource.access_token.as_deref().and_then(non_blank).map(Arc::<str>::from).ok_or_else(|| {
@@ -200,12 +214,12 @@ impl PlexCatalogClient {
 
     async fn fetch_identity(&self, base_url: &Arc<str>, token: &Arc<str>) -> Result<PlexIdentityDto, MediaServerError> {
         let url = pms_url(base_url, "/identity")?;
-        self.get_xml(&url, token, PlexOperation::Discovery).await
+        self.get_xml(&url, token, MediaServerOperation::Discovery).await
     }
 
     async fn fetch_sections(&self, connection: &PlexConnectionState) -> Result<PlexSectionsDto, MediaServerError> {
         let url = pms_url(&connection.base_url, "/library/sections")?;
-        self.get_xml(&url, &connection.token, PlexOperation::Catalog).await
+        self.get_xml(&url, &connection.token, MediaServerOperation::Catalog).await
     }
 
     async fn fetch_catalog_page(
@@ -226,23 +240,23 @@ impl PlexCatalogClient {
         if include_guids {
             append_query_pair(&mut url, "includeGuids", "1");
         }
-        self.get_xml(&url, &connection.token, PlexOperation::Catalog).await
+        self.get_xml(&url, &connection.token, MediaServerOperation::Catalog).await
     }
 
-    async fn get_xml<T>(&self, url: &str, token: &Arc<str>, operation: PlexOperation) -> Result<T, MediaServerError>
+    async fn get_xml<T>(
+        &self,
+        url: &str,
+        token: &Arc<str>,
+        operation: MediaServerOperation,
+    ) -> Result<T, MediaServerError>
     where
         T: DeserializeOwned,
     {
         let response = self.get_response(url, token, operation).await?;
-        let body = response.text().await.map_err(|err| {
-            MediaServerError::from_reqwest_error_with_fallback(
-                &err,
-                operation.not_found_kind(),
-                operation.fallback_kind(),
-            )
-            .provider("plex")
-            .detail("Plex response body read failed")
-        })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|err| operation.reqwest_error(&err, "plex").detail("Plex response body read failed"))?;
         quick_xml::de::from_str(&body).map_err(|err| {
             MediaServerError::new(operation.fallback_kind())
                 .provider("plex")
@@ -254,22 +268,18 @@ impl PlexCatalogClient {
         &self,
         url: &str,
         token: &Arc<str>,
-        operation: PlexOperation,
+        operation: MediaServerOperation,
     ) -> Result<reqwest::Response, MediaServerError> {
         let token = HeaderValue::from_str(token).map_err(|_| {
             MediaServerError::new(MediaServerErrorKind::MediaServerAuthDenied)
                 .provider("plex")
                 .detail("Plex token contains invalid header characters")
         })?;
-        let request = match operation {
-            PlexOperation::Discovery => self.http.request(Method::GET, url).discovery_errors(),
-            PlexOperation::Catalog => self.http.request(Method::GET, url).catalog_errors(),
-            PlexOperation::Playback => self.http.request(Method::GET, url).playback_errors(),
-        };
+        let request = self.http.request_for(Method::GET, url, operation);
         let response = request.header(X_PLEX_TOKEN, token).send_with_error_detail("Plex request failed").await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(operation.status_error(status).detail(format!("Plex request returned {status}")));
+            return Err(operation.status_error(status, "plex").detail(format!("Plex request returned {status}")));
         }
         Ok(response)
     }
@@ -282,7 +292,13 @@ impl MediaServerCatalogClient for PlexCatalogClient {
     async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
         let connection = self.connection().await?;
         let sections = self.fetch_sections(&connection).await?;
-        select_libraries(&self.config, &connection.status.server_id, &sections.directories)
+        select_libraries(
+            "plex",
+            &self.config.input_name,
+            &connection.status.server_id,
+            &self.config.libraries,
+            &sections.directories,
+        )
     }
 
     async fn list_movies(
@@ -420,30 +436,21 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         let response = request.send_with_error_detail("Plex stream request failed").await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(PlexOperation::Playback
-                .status_error(status)
+            return Err(MediaServerOperation::Playback
+                .status_error(status, "plex")
                 .detail(format!("Plex stream request returned {status}")));
         }
         let headers = response.headers().clone();
         let body = response
             .bytes_stream()
             .map_err(|err| {
-                MediaServerError::from_reqwest_error_with_fallback(
-                    &err,
-                    PlexOperation::Playback.not_found_kind(),
-                    PlexOperation::Playback.fallback_kind(),
-                )
-                .provider("plex")
-                .detail("Plex stream body read failed")
+                MediaServerOperation::Playback.reqwest_error(&err, "plex").detail("Plex stream body read failed")
             })
             .boxed();
         Ok(MediaServerStreamResponse { status, headers, body })
     }
 
-    async fn open_image(
-        &self,
-        image_ref: &MediaServerImageRef,
-    ) -> Result<MediaServerResourceResponse, MediaServerError> {
+    async fn open_image(&self, image_ref: &MediaServerImageRef) -> Result<MediaServerStreamResponse, MediaServerError> {
         let MediaServerImageRef::Plex { input_name, server_id, rating_key, image_path } = image_ref else {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("plex")
@@ -468,49 +475,17 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         }
 
         let url = pms_image_url(&connection.base_url, image_path)?;
-        let response: reqwest::Response = self.get_response(&url, &connection.token, PlexOperation::Playback).await?;
+        let response: reqwest::Response =
+            self.get_response(&url, &connection.token, MediaServerOperation::Playback).await?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = response.bytes().await.map_err(|err| {
-            MediaServerError::from_reqwest_error_with_fallback(
-                &err,
-                PlexOperation::Playback.not_found_kind(),
-                PlexOperation::Playback.fallback_kind(),
-            )
-            .provider("plex")
-            .detail("Plex image body read failed")
-        })?;
-        Ok(MediaServerResourceResponse { status, headers, body })
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-enum PlexOperation {
-    Discovery,
-    Catalog,
-    Playback,
-}
-
-impl PlexOperation {
-    const fn not_found_kind(self) -> MediaServerErrorKind {
-        match self {
-            Self::Discovery => MediaServerErrorKind::MediaServerUnavailable,
-            Self::Catalog => MediaServerErrorKind::MediaServerLibraryUnavailable,
-            Self::Playback => MediaServerErrorKind::MediaServerItemNotFound,
-        }
-    }
-
-    const fn fallback_kind(self) -> MediaServerErrorKind {
-        match self {
-            Self::Discovery => MediaServerErrorKind::MediaServerDiscoveryFailed,
-            Self::Catalog => MediaServerErrorKind::MediaServerCatalogDecodeFailed,
-            Self::Playback => MediaServerErrorKind::MediaServerStreamOpenFailed,
-        }
-    }
-
-    fn status_error(self, status: StatusCode) -> MediaServerError {
-        MediaServerError::from_http_status_with_fallback(status, self.not_found_kind(), self.fallback_kind())
-            .provider("plex")
+        let body = response
+            .bytes_stream()
+            .map_err(|err| {
+                MediaServerOperation::Playback.reqwest_error(&err, "plex").detail("Plex image body read failed")
+            })
+            .boxed();
+        Ok(MediaServerStreamResponse { status, headers, body })
     }
 }
 
@@ -556,39 +531,6 @@ impl PlexMediaContainerDto {
     fn upstream_item_count(&self) -> usize {
         self.size.unwrap_or_else(|| self.videos.len().saturating_add(self.directories.len()))
     }
-}
-
-fn select_libraries(
-    config: &PlexClientConfig,
-    server_id: &Arc<str>,
-    sections: &[PlexSectionDto],
-) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
-    let mut libraries = Vec::new();
-    for selector in &config.libraries {
-        let matches =
-            sections.iter().filter(|section| plex_section_matches_selector(section, selector)).collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] => {
-                return Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)
-                    .provider("plex")
-                    .detail("selected Plex library was not visible"));
-            }
-            [section] => {
-                let library = plex_section_to_library(&config.input_name, server_id, section).ok_or_else(|| {
-                    MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)
-                        .provider("plex")
-                        .detail("selected Plex library did not expose a stable key")
-                })?;
-                libraries.push(library);
-            }
-            _ => {
-                return Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)
-                    .provider("plex")
-                    .detail("selected Plex library name was ambiguous"));
-            }
-        }
-    }
-    Ok(libraries)
 }
 
 fn select_resource<'a>(
@@ -820,15 +762,15 @@ fn non_blank(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plex::dto::{PlexConnectionDto, PlexResourceDto};
+    use crate::{
+        plex::dto::{PlexConnectionDto, PlexResourceDto, PlexSectionDto},
+        test_server::{start_test_server, test_response},
+    };
     use bytes::Bytes;
     use futures::StreamExt;
     use http_body_util::Full;
-    use hyper::{body::Incoming, http, service::service_fn, Request, Response};
-    use hyper_util::{
-        rt::{TokioExecutor, TokioIo},
-        server::conn::auto::Builder,
-    };
+    use hyper::{body::Incoming, http, Request, Response};
+    use reqwest::StatusCode;
     use shared::model::MediaServerLibrarySelectorDetailsDto;
     use std::{
         convert::Infallible,
@@ -837,7 +779,7 @@ mod tests {
             Arc as StdArc,
         },
     };
-    use tokio::{net::TcpListener, sync::Mutex as TokioMutex};
+    use tokio::sync::Mutex as TokioMutex;
 
     const PLEX_TEST_TOKEN: &str = "pms-token-redacted";
 
@@ -1007,7 +949,14 @@ mod tests {
                 section_type: Some("movie".to_string()),
             },
         ];
-        let error = select_libraries(&config(), &"machine-redacted".into(), &sections).expect_err("duplicate title");
+        let error = select_libraries(
+            "plex",
+            &"media_server".into(),
+            &"machine-redacted".into(),
+            &config().libraries,
+            &sections,
+        )
+        .expect_err("duplicate title");
 
         assert_eq!(error.kind, MediaServerErrorKind::MediaServerLibraryUnavailable);
     }
@@ -1032,7 +981,8 @@ mod tests {
             },
         ];
         let libraries =
-            select_libraries(&config, &"machine-redacted".into(), &sections).expect("stable key disambiguates");
+            select_libraries("plex", &"media_server".into(), &"machine-redacted".into(), &config.libraries, &sections)
+                .expect("stable key disambiguates");
 
         assert_eq!(libraries[0].reference.library_id.as_ref(), "2");
     }
@@ -1096,10 +1046,6 @@ mod tests {
         );
     }
 
-    fn plex_test_response(status: StatusCode, body: &'static [u8]) -> Response<Full<Bytes>> {
-        Response::builder().status(status).body(Full::new(Bytes::from_static(body))).expect("response builds")
-    }
-
     fn plex_test_media_server_config() -> PlexClientSettings {
         PlexClientSettings {
             token: Some(PLEX_TEST_TOKEN.to_string()),
@@ -1120,13 +1066,13 @@ mod tests {
         state: StdArc<PlexPlaybackServerState>,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
         if !plex_test_token_is_valid(&req) {
-            return Ok(plex_test_response(StatusCode::UNAUTHORIZED, b""));
+            return Ok(test_response(StatusCode::UNAUTHORIZED, b""));
         }
 
         match req.uri().path() {
             "/identity" => {
                 state.identity_requests.fetch_add(1, Ordering::SeqCst);
-                Ok(plex_test_response(
+                Ok(test_response(
                     StatusCode::OK,
                     br#"<MediaContainer machineIdentifier="machine-redacted" friendlyName="PMS Redacted" version="1.0"/>"#,
                 ))
@@ -1152,34 +1098,19 @@ mod tests {
                 .header(http::header::CONTENT_LENGTH, "4")
                 .body(Full::new(Bytes::from_static(b"jpeg")))
                 .expect("response builds")),
-            _ => Ok(plex_test_response(StatusCode::NOT_FOUND, b"")),
+            _ => Ok(test_response(StatusCode::NOT_FOUND, b"")),
         }
     }
 
-    async fn start_plex_playback_server(
-        state: StdArc<PlexPlaybackServerState>,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test server binds");
-        let addr = listener.local_addr().expect("local addr");
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((socket, _)) = listener.accept().await else { continue };
-                let state = StdArc::clone(&state);
-                tokio::spawn(async move {
-                    let io = TokioIo::new(socket);
-                    let service = service_fn(move |req| plex_playback_handler(req, StdArc::clone(&state)));
-                    let builder = Builder::new(TokioExecutor::new());
-                    let _ = builder.serve_connection(io, service).await;
-                });
-            }
-        });
-        (format!("http://{addr}"), handle)
+    async fn start_plex_test_server(state: &StdArc<PlexPlaybackServerState>) -> (String, tokio::task::JoinHandle<()>) {
+        let state = StdArc::clone(state);
+        start_test_server(move |req| plex_playback_handler(req, StdArc::clone(&state))).await
     }
 
     #[tokio::test]
     async fn open_stream_proxies_plex_part_key_with_token_header_and_range() {
         let state = StdArc::new(PlexPlaybackServerState::default());
-        let (base_url, server) = start_plex_playback_server(StdArc::clone(&state)).await;
+        let (base_url, server) = start_plex_test_server(&state).await;
         let media_server = plex_test_media_server_config();
         let client = PlexCatalogClient::new(
             "media_server".into(),
@@ -1213,10 +1144,29 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn settings_debug_hides_secrets() {
+        let settings = PlexClientSettings {
+            token: Some("tok-secret".to_string()),
+            account_token: Some("account-secret".to_string()),
+            server_id: Some("machine-1".to_string()),
+            ..PlexClientSettings::default()
+        };
+
+        let debug = format!("{settings:?}");
+
+        for secret in ["tok-secret", "account-secret"] {
+            assert!(!debug.contains(secret), "{secret} leaked into {debug}");
+        }
+        assert!(debug.contains("token: Some(\"***\")") && debug.contains("account_token: Some(\"***\")"), "{debug}");
+        assert!(debug.contains("machine-1"), "{debug}");
+        assert!(format!("{:?}", PlexClientSettings::default()).contains("account_token: None"));
+    }
+
     #[tokio::test]
     async fn open_image_proxies_plex_metadata_image_with_token_header() {
         let state = StdArc::new(PlexPlaybackServerState::default());
-        let (base_url, server) = start_plex_playback_server(StdArc::clone(&state)).await;
+        let (base_url, server) = start_plex_test_server(&state).await;
         let media_server = plex_test_media_server_config();
         let client = PlexCatalogClient::new(
             "media_server".into(),
@@ -1238,7 +1188,9 @@ mod tests {
             response.headers.get(http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()),
             Some("image/jpeg")
         );
-        assert_eq!(response.body.as_ref(), b"jpeg");
+        let chunks = response.body.collect::<Vec<_>>().await;
+        let body: Vec<u8> = chunks.into_iter().flat_map(|chunk| chunk.expect("image chunk").to_vec()).collect();
+        assert_eq!(body, b"jpeg");
 
         server.abort();
     }
@@ -1246,7 +1198,7 @@ mod tests {
     #[tokio::test]
     async fn direct_playback_reuses_discovered_connection_across_client_instances() {
         let state = StdArc::new(PlexPlaybackServerState::default());
-        let (base_url, server) = start_plex_playback_server(StdArc::clone(&state)).await;
+        let (base_url, server) = start_plex_test_server(&state).await;
         let media_server = plex_test_media_server_config();
         let stream_ref = MediaServerStreamRef::Plex {
             input_name: "media_server".into(),

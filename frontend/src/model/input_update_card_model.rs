@@ -284,7 +284,7 @@ mod tests {
                 .filter(|card| card.capabilities.supports(InputRefreshPolicy::NORMAL))
                 .map(|card| card.input_id)
                 .collect::<Vec<_>>(),
-            vec![1, 5, 6, 10]
+            vec![1, 5, 6, 10, 11, 12]
         );
     }
 
