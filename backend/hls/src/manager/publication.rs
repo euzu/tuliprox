@@ -525,7 +525,12 @@ impl HlsProxyManager {
             } else {
                 published_transient_resource_ids
             };
-            return leases.commit_manifest_publication_with_resources(
+            let mut session_guard = match session.as_ref() {
+                Some(session) => Some(session.write().await),
+                None => None,
+            };
+            let published = snapshot.clone();
+            let outcome = leases.commit_manifest_publication_with_resources(
                 lease_id,
                 proxy_session_id,
                 expected,
@@ -533,6 +538,12 @@ impl HlsProxyManager {
                 published_transient_resource_ids,
                 now_ms,
             );
+            if outcome.is_committed() {
+                if let Some(session) = session_guard.as_mut() {
+                    session.record_live_window_publication(lease_id, lease_issued_at_ms, &published);
+                }
+            }
+            return outcome;
         };
         let Some(current_session) = self.sessions.hold_current_proxy_session(proxy_session_id).await else {
             return HlsLeaseManifestPublicationOutcome::Rejected(
@@ -639,7 +650,6 @@ impl HlsProxyManager {
                 cursor: &lease.playback_cursor,
                 ready_timeline: &ready_timeline,
                 now_ms,
-                playback_rate_guard_milli: super::super::HLS_PLAYBACK_RATE_GUARD_MILLI,
                 recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(0),
                 origin_path_degraded: true,
                 recovery_committed: false,

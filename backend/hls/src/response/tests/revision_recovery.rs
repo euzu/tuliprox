@@ -774,7 +774,7 @@ async fn origin_generation_and_mapping_changes_never_install_retired_retry_bytes
 #[tokio::test]
 async fn expired_lease_cannot_be_rebound_or_ended_by_a_stale_recovery_guard() -> std::io::Result<()> {
     let fixture = CachedSegmentFixture::new(b"retry-body".to_vec()).await;
-    let failed = failed_optimistic_revision(&fixture, 6).await?;
+    let _failed = failed_optimistic_revision(&fixture, 6).await?;
     install_completed_retry(&fixture).await?;
     let mut leases = fixture.manager.access_leases().write().await;
     let guard = leases.revision_recovery_guard(&fixture.lease_id, fixture.segment_file.proxy_seq).expect("guard");
@@ -788,7 +788,7 @@ async fn expired_lease_cannot_be_rebound_or_ended_by_a_stale_recovery_guard() ->
         HlsRevisionRecoveryOutcome::Unchanged
     );
     assert!(leases.end_revision_playback_if_current(&fixture.lease_id, &guard, &session, expires + 1).is_none());
-    assert_eq!(leases.published_segment_revision(&fixture.lease_id, fixture.segment_file.proxy_seq), Some(failed));
+    assert_eq!(leases.published_segment_revision(&fixture.lease_id, fixture.segment_file.proxy_seq), None);
     Ok(())
 }
 

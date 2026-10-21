@@ -118,7 +118,7 @@ fn acceptance_episode_timing(
         .origin_control
         .target_duration_snapshot_ms
         .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
-        .unwrap_or(15_000);
+        .unwrap_or_else(|| context.acceptance_timing_seed.map_or(15_000, |seed| seed.target_duration_ms));
     let seed = context.acceptance_timing_seed.unwrap_or(HlsAcceptanceEpisodeTimingSeed {
         target_duration_ms: fallback_target_duration_ms,
         transition_margin: HlsTransitionMarginMs::from_millis(fallback_target_duration_ms),
@@ -129,7 +129,7 @@ fn acceptance_episode_timing(
     HlsAcceptanceEpisodeTiming::from_input(&HlsAcceptanceEpisodeTimingInput {
         started_at_ms,
         burst_plan,
-        target_duration_ms: seed.target_duration_ms,
+        target_duration_ms: fallback_target_duration_ms,
         transition_margin: seed.transition_margin,
         workload: seed.workload,
         observed_latency: session.origin_control.recovery_samples.latency_snapshot(),

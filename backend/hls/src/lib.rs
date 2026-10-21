@@ -239,7 +239,7 @@ pub mod api {
 #[cfg(test)]
 pub(crate) use self::timeline::TimelineMapError;
 pub(crate) use self::{
-    availability::{hls_recovery_timing_policy, HlsManifestAcceptanceDirective, HLS_PLAYBACK_RATE_GUARD_MILLI},
+    availability::{hls_recovery_timing_policy, HlsManifestAcceptanceDirective},
     availability_reevaluation::HlsAvailabilityReevaluationRegistration,
     backpressure::{classify_hls_backpressure, HlsBackpressureState},
     cache::{

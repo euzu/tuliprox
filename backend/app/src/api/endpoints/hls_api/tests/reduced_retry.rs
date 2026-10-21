@@ -153,6 +153,16 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
         "{mode:?} baseline account={} binding_generation={} pinned_at_ms={} proxy_session={}",
         binding.account_name, binding.generation, binding.pinned_at_ms, proxy_id.0
     );
+    {
+        let mut leases = app.hls.proxy.access_leases().write().await;
+        let mut active = leases.remove_access_lease(&HlsAccessLeaseId(lease.to_string())).unwrap();
+        let start_seq = active.playback_cursor.first_segment_started_proxy_seq.unwrap();
+        let state = session.read().await;
+        let start = state.segments[&start_seq].media_start_ms;
+        let horizon = state.segments.values().map(|entry| entry.media_start_ms + entry.duration_ms).max().unwrap();
+        active.playback_cursor.first_segment_started_at_ms = Some(current_time_millis() - (horizon - start - 8_000));
+        leases.prepare_access_lease(active);
+    }
     session.write().await.origin_control.path_condition = tuliprox_hls::HlsOriginPathCondition::HardFetchFailure;
     let directive =
         match tuliprox_hls::api::hls_manifest_acceptance_directive_for_session(&app.hls_ctx(), &session, &proxy_id)

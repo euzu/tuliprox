@@ -338,7 +338,7 @@ pub(super) async fn post_refresh_terminal_fixture_with_bundle_state(
             &session,
             &proxy_session_id,
             &lease_id,
-            if terminal_asset { 22_000 } else { 7_000 },
+            if terminal_asset { 36_000 } else { 16_000 },
             now_ms,
         )
         .await;

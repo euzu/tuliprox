@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy)]
 enum HlsMediaActivityCommitKind {
     Access,
-    Delivered,
+    Delivered(Option<HlsPlaybackRequestToken>),
     LiveSegmentCompletion(HlsPlaybackRequestToken),
 }
 
@@ -89,6 +89,7 @@ impl HlsProxyManager {
         lease_id: &HlsAccessLeaseId,
         proxy_session_id: &ProxySessionId,
         lease_identity: HlsMediaLeaseIdentity,
+        token: Option<HlsPlaybackRequestToken>,
         now_ms: u64,
     ) -> HlsMediaActivityCommitOutcome {
         self.commit_media_activity_if_identity_matches(
@@ -97,7 +98,7 @@ impl HlsProxyManager {
             proxy_session_id,
             lease_identity,
             now_ms,
-            HlsMediaActivityCommitKind::Delivered,
+            HlsMediaActivityCommitKind::Delivered(token),
         )
         .await
     }
@@ -243,8 +244,18 @@ impl HlsProxyManager {
             };
         }
         let (current, capacity_protection_released) = match kind {
-            HlsMediaActivityCommitKind::Access | HlsMediaActivityCommitKind::Delivered => {
+            HlsMediaActivityCommitKind::Access | HlsMediaActivityCommitKind::Delivered(None) => {
                 (leases.media_identity_is_current(lease_id, proxy_session_id, lease_identity, now_ms), false)
+            }
+            HlsMediaActivityCommitKind::Delivered(Some(token)) => {
+                let started = leases.record_segment_transfer_started_if_identity_matches(
+                    lease_id,
+                    proxy_session_id,
+                    lease_identity,
+                    token,
+                    now_ms,
+                );
+                (started.is_some(), started == Some(true))
             }
             HlsMediaActivityCommitKind::LiveSegmentCompletion(token) => {
                 let completion = leases.record_segment_request_completed_if_identity_matches(
@@ -264,7 +275,7 @@ impl HlsProxyManager {
             };
         }
         session.mark_authorized_media_access(now_ms);
-        if lease_identity.is_live() && matches!(kind, HlsMediaActivityCommitKind::Delivered) {
+        if lease_identity.is_live() && matches!(kind, HlsMediaActivityCommitKind::Delivered(_)) {
             session.activity.last_delivered_media_at_ms = Some(now_ms);
         }
         HlsMediaActivityCommitAttempt::Completed {

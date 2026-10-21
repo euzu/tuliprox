@@ -106,6 +106,7 @@ struct HlsTerminalBaseSegmentProbe {
     media_ready: bool,
     required_map_ready: bool,
     cache_key: Option<super::SegmentCacheKey>,
+    revision_metadata: Option<super::CachedSegmentMetadata>,
     origin_epoch: Option<u64>,
     key_evidence: HlsTerminalBaseKeyEvidence,
 }

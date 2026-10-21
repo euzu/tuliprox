@@ -130,7 +130,7 @@ async fn prepare_hls_revision_response(
     let stream = RevisionResponseStream {
         inner: super::super::progressive_startup::revision_body(revision, lifetime, body_range.start, body_range.end),
         qos_meter: Arc::clone(&context.qos_meter),
-        completion,
+        completion: completion.clone(),
         observation,
         expected_len: body_range.length,
         bytes_sent: 0,
@@ -142,7 +142,7 @@ async fn prepare_hls_revision_response(
     body_range.apply_headers(&mut response, metadata.as_ref(), context.cache_duration_seconds);
     mark_response_as_uncompressed(&mut response);
     context.metrics.record_cache_hit();
-    HlsResourceServeOutcome::Ready(marker.confirm_media_response(response))
+    HlsResourceServeOutcome::Ready(completion.as_ref().unwrap_or(marker).confirm_media_response(response))
 }
 
 fn remaining_wait_deadline(requested_at_ms: u64, wait_ms: u64) -> tokio::time::Instant {

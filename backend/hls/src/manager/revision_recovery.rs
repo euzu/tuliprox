@@ -230,7 +230,7 @@ impl HlsProxyManager {
             .commit_manifest_publication_with_resources(lease_id, session_id, expected, snapshot, resources, now_ms);
         if outcome.is_committed() {
             if let Some(snapshot) = published {
-                session.record_live_window_publication(lease_id, &snapshot);
+                session.record_live_window_publication(lease_id, expected.lease_issued_at_ms(), &snapshot);
             }
         }
         outcome

@@ -14,10 +14,10 @@ use super::{
     HlsManifestFetchFailureSignal, HlsManifestHttpResponseEvidence, HlsManifestProgress,
     HlsManifestRecoveryUnavailableReason, HlsManifestRejectLogReason, HlsManifestSequenceRelation,
     HlsOriginManifestFetchContext, HlsOriginManifestFetchRequest, HlsOriginRefreshTriggerOutcome,
-    HlsPostRefreshAvailabilityAction, HlsPostRefreshAvailabilityReason, HlsTerminalCommitAcquisitionBudgetMs,
-    HlsTerminalCommitPayload, HlsTerminalCommitRequest, HlsTerminalCommitWindow, HlsTerminalTailPreparationRequest,
-    HlsTransitionMarginMs, LiveHlsOriginEntry, OriginManifestFetchError, OriginManifestStatusClass,
-    OriginRefreshRequest, OriginRefreshState, RetryPolicy,
+    HlsPostRefreshAvailabilityAction, HlsPostRefreshAvailabilityReason, HlsTerminalCommitPayload,
+    HlsTerminalCommitRequest, HlsTerminalCommitWindow, HlsTerminalTailPreparationRequest, HlsTransitionMarginMs,
+    LiveHlsOriginEntry, OriginManifestFetchError, OriginManifestStatusClass, OriginRefreshRequest, OriginRefreshState,
+    RetryPolicy,
 };
 use crate::{
     media_reserve::{HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot},
@@ -927,13 +927,12 @@ async fn hls_cutover_policy_advanced_commit_supersedes_preparation_and_keeps_lea
         .is_committed());
     let prepared_progress_generation = prepare_failed_acceptance_episode(&session).await;
     let transition_margin = HlsTransitionMarginMs::from_millis(4_000);
-    let guaranteed_reserve_ms = transition_margin
-        .as_millis()
-        .saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis());
+    let guaranteed_reserve_ms = 0;
     let reserve = HlsLeaseReserveSnapshot {
         availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
         guaranteed_media_horizon_ms: 8_000_u64.saturating_add(guaranteed_reserve_ms),
         conservative_playback_position_ms: 8_000,
+        playback_position_known: true,
         guaranteed_reserve_ms,
         initial_hidden_ready_duration_ms: 0,
         transition_margin,

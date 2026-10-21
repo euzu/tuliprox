@@ -42,7 +42,6 @@ pub use self::{
 };
 use std::future::Future;
 
-pub const HLS_PLAYBACK_RATE_GUARD_MILLI: u16 = 1_050;
 const HLS_AVAILABILITY_STATE_ACCESS_ATTEMPTS: usize = 3;
 const HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS: u8 = 64;
 const HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS: u64 = 2_000;
@@ -169,13 +168,18 @@ pub async fn hls_startup_admission_allows_snapshot(
     snapshot: &HlsLeaseManifestSnapshot,
     now_ms: u64,
 ) -> bool {
-    let (ready_timeline, origin_state, observed_latency) = {
+    let (ready_timeline, origin_state, observed_latency, target_duration_ms) = {
         let session = session.read().await;
         let degraded = session.origin_control.path_condition.is_degraded();
         (
             session.ready_timeline_snapshot(snapshot.first_proxy_seq, now_ms),
             if degraded { HlsStartupAdmissionOriginState::Degraded } else { HlsStartupAdmissionOriginState::Healthy },
             session.origin_control.recovery_samples.latency_snapshot(),
+            session
+                .origin_control
+                .target_duration_snapshot_ms
+                .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
+                .unwrap_or(snapshot.target_duration_ms),
         )
     };
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
@@ -190,7 +194,7 @@ pub async fn hls_startup_admission_allows_snapshot(
         origin_state,
         recovery_trigger_budget: recovery_trigger_budget(
             pressure_policy,
-            snapshot.target_duration_ms,
+            target_duration_ms,
             workload,
             observed_latency,
         ),

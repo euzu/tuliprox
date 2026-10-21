@@ -678,7 +678,6 @@ pub(in crate::refresh::tests) async fn assert_critical_handoff_evidence(
         cursor: &live_lease.playback_cursor,
         ready_timeline: &ready_timeline,
         now_ms,
-        playback_rate_guard_milli: super::super::super::HLS_PLAYBACK_RATE_GUARD_MILLI,
         recovery_trigger_budget: super::super::super::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(0),
         origin_path_degraded: true,
         recovery_committed: false,

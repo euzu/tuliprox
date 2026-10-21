@@ -256,6 +256,15 @@ pub(super) async fn add_active_post_refresh_lease(
         )
         .await
         .is_activated());
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &lease_id,
+        36_000,
+        fixture.now_ms,
+    )
+    .await;
 }
 
 pub(super) async fn advance_post_refresh_fixture_playback(
@@ -285,6 +294,19 @@ pub(super) async fn advance_post_refresh_fixture_playback(
             )
             .await
             .expect("fixture segment request starts");
+        assert_eq!(
+            ctx.hls_proxy
+                .mark_delivered_media_for_lease(
+                    session,
+                    lease_id,
+                    proxy_session_id,
+                    identity,
+                    Some(token),
+                    playback_at_ms,
+                )
+                .await,
+            crate::manager::HlsMediaActivityCommitOutcome::Committed
+        );
         assert_eq!(
             ctx.hls_proxy
                 .record_access_lease_segment_request_completed_and_mark_media_if_identity_matches(

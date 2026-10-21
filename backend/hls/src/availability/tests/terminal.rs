@@ -39,7 +39,7 @@ fn autonomous_terminal_live_allowed_means_no_cutover_is_required() {
 }
 
 #[test]
-fn live_reserve_wake_is_strictly_before_safe_terminal_deadline() {
+fn live_reserve_wake_is_at_exhaustion_without_an_immediate_margin_loop() {
     let now_ms = 1_000;
     let mut reserve = terminal_pending_commit_reserve();
     reserve.guaranteed_reserve_ms = reserve.guaranteed_reserve_ms.saturating_add(5_000);
@@ -49,7 +49,7 @@ fn live_reserve_wake_is_strictly_before_safe_terminal_deadline() {
 
     let deadline = live_reserve_deadline(now_ms, reserve, cutover_timing).expect("future acquisition wake");
     assert_eq!(deadline.next_reevaluation_at_ms, now_ms.saturating_add(5_000));
-    assert!(deadline.next_reevaluation_at_ms < deadline.latest_safe_terminal_commit_at_ms);
+    assert_eq!(deadline.next_reevaluation_at_ms, deadline.latest_safe_terminal_commit_at_ms);
 }
 
 #[tokio::test]

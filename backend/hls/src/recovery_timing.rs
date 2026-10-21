@@ -7,6 +7,11 @@ const HLS_ACCEPTANCE_COMMIT_ETA_MS: u64 = 100;
 const HLS_ACCEPTANCE_SCHEDULING_ETA_MS: u64 = 100;
 const HLS_MANIFEST_REQUEST_FALLBACK_ETA_MS: u64 = 3_000;
 
+/// Decision budget derived from the session's publication cadence, not an HTTP timeout.
+pub const fn recovery_budget_ceiling_ms(target_duration_ms: u64) -> u64 {
+    target_duration_ms.saturating_add(target_duration_ms.div_ceil(2))
+}
+
 /// Converts a hard per-operation limit into a conservative fallback estimate
 /// without treating unusually large protection timeouts as expected latency.
 pub const fn bounded_manifest_request_eta_ms(operation_timeout_ms: u64) -> u64 {
@@ -99,9 +104,8 @@ impl HlsTerminalCommitAcquisitionBudgetMs {
     pub const fn as_millis(self) -> u64 { self.0 }
 }
 
-/// Lease-local phase of terminal acquisition. `AcquisitionOpen` is not an
-/// admission or origin-progress transition; it only permits the bounded final
-/// commit to begin before the unchanged product transition margin.
+/// Lease-local preparation pressure. Neither `AcquisitionOpen` nor the old
+/// transition boundary proves exhaustion or authorizes CSV publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HlsTerminalCommitWindow {
     NotDue,
@@ -401,6 +405,11 @@ impl HlsAcceptanceEpisodeTiming {
             calculated_eta_ms.max(input.observed_latency.p95.map_or(0, HlsRecoveryEtaMs::as_millis));
         let initial_recovery_eta_ms =
             calculated_eta_ms.max(input.observed_latency.p99.map_or(trigger_budget_ms, HlsRecoveryEtaMs::as_millis));
+        let ceiling_ms = recovery_budget_ceiling_ms(input.target_duration_ms);
+        log::debug!("HLS recovery decision budget: session_target_duration_ms={} raw_trigger_ms={trigger_budget_ms} raw_eta_ms={initial_recovery_eta_ms} ceiling_ms={ceiling_ms} effective_trigger_ms={} effective_eta_ms={}",
+            input.target_duration_ms, trigger_budget_ms.min(ceiling_ms), initial_recovery_eta_ms.min(ceiling_ms));
+        let trigger_budget_ms = trigger_budget_ms.min(ceiling_ms);
+        let initial_recovery_eta_ms = initial_recovery_eta_ms.min(ceiling_ms);
         let deadline_budget_ms = trigger_budget_ms.max(initial_recovery_eta_ms);
         Self {
             manifest_operation_timeout: input.policy.manifest_operation_timeout,
@@ -438,11 +447,9 @@ impl HlsAcceptanceEpisodeTiming {
             media_eta,
             self.scheduling_eta,
         ));
-        if workload == self.initial_workload {
-            workload_eta.max(self.initial_recovery_eta)
-        } else {
-            workload_eta
-        }
+        let eta =
+            if workload == self.initial_workload { workload_eta.max(self.initial_recovery_eta) } else { workload_eta };
+        HlsRecoveryEtaMs::from_millis(eta.as_millis().min(recovery_budget_ceiling_ms(self.target_duration_ms)))
     }
 
     pub fn estimated_completion_at(
@@ -451,7 +458,9 @@ impl HlsAcceptanceEpisodeTiming {
         workload: HlsRecoveryWorkload,
     ) -> HlsEstimatedRecoveryCompletionAtMs {
         HlsEstimatedRecoveryCompletionAtMs::from_millis_since_epoch(
-            now_ms.saturating_add(self.remaining_eta(workload).as_millis()),
+            now_ms
+                .saturating_add(self.remaining_eta(workload).as_millis())
+                .min(self.acceptance_deadline.as_millis_since_epoch()),
         )
     }
 }
@@ -605,6 +614,51 @@ mod tests {
     }
 
     #[test]
+    fn all_decision_budgets_are_capped_after_latency_and_workload_without_changing_timeouts() {
+        for target_duration_ms in [1, 999, 10_000, 30_001, u64::MAX] {
+            let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
+            let input = HlsAcceptanceEpisodeTimingInput {
+                started_at_ms: 1_000,
+                burst_plan: HlsManifestRecoveryBurstLevel::Beast.plan(),
+                target_duration_ms,
+                transition_margin: HlsTransitionMarginMs::from_millis(target_duration_ms),
+                workload,
+                observed_latency: HlsObservedRecoveryLatency {
+                    p95: Some(HlsRecoveryEtaMs::from_millis(u64::MAX)),
+                    p99: Some(HlsRecoveryEtaMs::from_millis(u64::MAX)),
+                },
+                required_terminal_media_key: None,
+                terminal_media_preparation: HlsTerminalMediaPreparationState::Failed { key: None },
+                policy: HlsRecoveryTimingPolicy::new(
+                    HlsOperationTimeoutMs::from_millis(1_000_000),
+                    HlsOperationTimeoutMs::from_millis(2_000_000),
+                    HlsRecoveryEtaMs::from_millis(1_000_000),
+                    HlsRecoveryEtaMs::from_millis(2_000_000),
+                ),
+            };
+            let timing = HlsAcceptanceEpisodeTiming::from_input(&input);
+            let ceiling = recovery_budget_ceiling_ms(target_duration_ms);
+            assert_eq!(timing.trigger_budget.as_millis(), ceiling);
+            assert_eq!(timing.initial_recovery_eta.as_millis(), ceiling);
+            for remaining in [workload, workload.after_full_burst(), HlsRecoveryWorkload::clear_fetch()] {
+                assert!(timing.remaining_eta(remaining).as_millis() <= ceiling);
+                for now_ms in [1_000, 2_000, 50_000] {
+                    assert!(
+                        timing.estimated_completion_at(now_ms, remaining).as_millis_since_epoch()
+                            <= timing.acceptance_deadline.as_millis_since_epoch()
+                    );
+                }
+            }
+            assert_eq!(timing.manifest_operation_timeout, input.policy.manifest_operation_timeout);
+            assert_eq!(timing.media_operation_timeout, input.policy.media_operation_timeout);
+        }
+        let small = timing(HlsRecoveryWorkload::clear_fetch());
+        assert!(small.trigger_budget.as_millis() < 15_000);
+        assert_eq!(recovery_budget_ceiling_ms(10_000), 15_000);
+        assert_eq!(recovery_budget_ceiling_ms(999), 1_499);
+    }
+
+    #[test]
     fn hls_recovery_timing_workload_classes_have_distinct_expected_etas() {
         let staged = timing(HlsRecoveryWorkload {
             burst: HlsRecoveryBurstWorkload::FullBurstCompleted,
@@ -720,7 +774,7 @@ mod tests {
 
         assert_eq!(frozen.observed_latency.p99.map(HlsRecoveryEtaMs::as_millis), Some(14_000));
         assert_eq!(frozen.remaining_eta(frozen.initial_workload), frozen.initial_recovery_eta);
-        assert_ne!(frozen.acceptance_deadline, later.acceptance_deadline);
+        assert_eq!(frozen.acceptance_deadline, later.acceptance_deadline);
         assert!(frozen.initial_recovery_eta.as_millis() < frozen.media_operation_timeout.as_millis());
         assert_eq!(bounded_manifest_request_eta_ms(120_000), 3_000);
         assert_eq!(bounded_manifest_request_eta_ms(750), 750);
@@ -812,8 +866,8 @@ mod tests {
         });
 
         assert_eq!(timing.acceptance_deadline.as_millis_since_epoch(), u64::MAX);
-        assert_eq!(timing.trigger_budget.as_millis(), u64::MAX);
-        assert_eq!(timing.initial_recovery_eta.as_millis(), u64::MAX);
+        assert_eq!(timing.trigger_budget.as_millis(), 15_000);
+        assert_eq!(timing.initial_recovery_eta.as_millis(), 15_000);
     }
 
     #[test]

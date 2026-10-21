@@ -329,10 +329,11 @@ impl HlsTerminalCommitCommand {
     }
 
     fn has_independent_commit_deadline(&self) -> bool {
-        matches!(
-            &self.decision,
-            HlsTerminalLeaseDecision::CustomResponse(_) | HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_)
-        )
+        !self.preparation.trigger.is_runtime_policy()
+            || matches!(
+                &self.decision,
+                HlsTerminalLeaseDecision::CustomResponse(_) | HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_)
+            )
     }
 
     fn may_replace(&self, current: &Self) -> bool {
@@ -1357,6 +1358,7 @@ mod tests {
             availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
             guaranteed_media_horizon_ms: deadline_ms.saturating_add(100),
             conservative_playback_position_ms: 0,
+            playback_position_known: true,
             guaranteed_reserve_ms: deadline_ms.saturating_add(100),
             initial_hidden_ready_duration_ms: 0,
             transition_margin,
@@ -1365,7 +1367,9 @@ mod tests {
             cutover_required: true,
         };
         let preparation = HlsTerminalTailPreparation {
-            trigger: super::super::runtime_custom_tail::HlsFiniteTailTrigger::AvailabilityReserve,
+            trigger: super::super::runtime_custom_tail::HlsFiniteTailTrigger::RuntimePolicy(
+                HlsRuntimeCustomTailReason::LowPriorityPreempted,
+            ),
             runtime_policy_revocation: None,
             lease_issued_at_ms: 1,
             decision_generation: 1,
@@ -1426,6 +1430,29 @@ mod tests {
             cancellation_epoch: 0,
             submission_token: HlsTerminalCommitOwnerToken::for_test(submission_token),
         }
+    }
+
+    #[test]
+    fn availability_submission_gets_one_fixed_cas_budget_after_the_old_splice_deadline() {
+        let coordinator = HlsTerminalCommitRetryCoordinator::default();
+        let mut command = retry_command("availability-budget", 1, 1, 1);
+        command.preparation.trigger = crate::runtime_custom_tail::HlsFiniteTailTrigger::AvailabilityReserve;
+        command.preparation.reserve.guaranteed_reserve_ms = 0;
+        let key = command.key.clone();
+        let first_deadline = 100 + terminal_commit_retry_schedule_budget_ms();
+        assert!(matches!(coordinator.submit(command, 100), HlsTerminalCommitSubmissionDecision::Attempt { .. }));
+        assert_eq!(
+            coordinator.lock_state().owners.get(&key).map(|owner| owner.effective_deadline_ms),
+            Some(first_deadline)
+        );
+        let mut replay = retry_command("availability-budget", 1_000_000, 2, 1);
+        replay.preparation.trigger = crate::runtime_custom_tail::HlsFiniteTailTrigger::AvailabilityReserve;
+        replay.preparation.reserve.guaranteed_reserve_ms = 0;
+        let _ = coordinator.submit(replay, 200);
+        assert_eq!(
+            coordinator.lock_state().owners.get(&key).map(|owner| owner.effective_deadline_ms),
+            Some(first_deadline)
+        );
     }
 
     fn scheduled_worker_token(

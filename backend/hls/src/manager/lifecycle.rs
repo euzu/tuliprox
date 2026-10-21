@@ -16,6 +16,13 @@ pub(super) fn hls_session_idle_protection_retry_at(due_at_ms: u64, now_ms: u64) 
 }
 
 impl HlsProxyManager {
+    pub(crate) async fn terminal_playback_snapshots_for_session(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Vec<HlsAccessLease> {
+        self.access_leases.write().await.terminal_playback_snapshots_for_session(proxy_session_id, now_ms)
+    }
     pub fn lifecycle(&self) -> &Arc<HlsLifecycleManager> { &self.lifecycle }
 
     pub async fn active_live_playback_snapshots_for_session(

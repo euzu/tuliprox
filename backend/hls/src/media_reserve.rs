@@ -113,6 +113,8 @@ impl HlsLeaseManifestSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HlsLeasePlaybackCursor {
     pub first_requested_proxy_seq: Option<u64>,
+    pub first_segment_started_at_ms: Option<u64>,
+    pub first_segment_started_proxy_seq: Option<u64>,
     pub first_segment_completed_at_ms: Option<u64>,
     pub highest_contiguous_completed_proxy_seq: Option<u64>,
     pub last_requested_proxy_seq: Option<u64>,
@@ -121,6 +123,7 @@ pub struct HlsLeasePlaybackCursor {
     request_epoch: u64,
     highest_requested_proxy_seq: Option<u64>,
     first_requested_media_start_ms: Option<u64>,
+    first_segment_media_start_ms: Option<u64>,
     highest_contiguous_completed_media_end_ms: Option<u64>,
     out_of_order_completed_proxy_seqs: BTreeMap<u64, Option<u64>>,
 }
@@ -134,6 +137,7 @@ pub struct HlsPlaybackRequestToken {
     proxy_seq: u64,
     request_epoch: u64,
     media_end_ms: Option<u64>,
+    media_start_ms: Option<u64>,
 }
 
 /// Result of committing a fully delivered segment to a playback cursor.
@@ -170,6 +174,9 @@ impl HlsLeasePlaybackCursor {
         if forward_seek {
             self.request_epoch = self.request_epoch.saturating_add(1);
             self.first_requested_proxy_seq = Some(proxy_seq);
+            self.first_segment_started_at_ms = None;
+            self.first_segment_started_proxy_seq = None;
+            self.first_segment_media_start_ms = None;
             self.first_segment_completed_at_ms = None;
             self.highest_contiguous_completed_proxy_seq = None;
             self.highest_requested_proxy_seq = Some(proxy_seq);
@@ -188,7 +195,12 @@ impl HlsLeasePlaybackCursor {
         );
         self.cursor_generation = self.cursor_generation.saturating_add(1);
 
-        HlsPlaybackRequestToken { proxy_seq, request_epoch: self.request_epoch, media_end_ms: None }
+        HlsPlaybackRequestToken {
+            proxy_seq,
+            request_epoch: self.request_epoch,
+            media_end_ms: None,
+            media_start_ms: None,
+        }
     }
 
     /// Binds playback evidence to the immutable session media clock before cache entries can be collected.
@@ -203,7 +215,23 @@ impl HlsLeasePlaybackCursor {
             self.first_requested_media_start_ms.get_or_insert(segment.media_start_ms);
         }
         token.media_end_ms = Some(segment.media_start_ms.saturating_add(segment.duration_ms));
+        token.media_start_ms = Some(segment.media_start_ms);
         token
+    }
+
+    /// Starts the 1x media clock only when the first request actually yields bytes.
+    /// A successor or duplicate cannot reset it; tokens from earlier seeks are rejected.
+    pub fn record_transfer_started(&mut self, token: HlsPlaybackRequestToken, started_at_ms: u64) -> bool {
+        if token.request_epoch != self.request_epoch || self.first_requested_proxy_seq.is_none() {
+            return false;
+        }
+        if self.first_segment_started_at_ms.is_none() {
+            self.first_segment_started_at_ms = Some(started_at_ms);
+            self.first_segment_started_proxy_seq = Some(token.proxy_seq);
+            self.first_segment_media_start_ms = token.media_start_ms;
+            self.cursor_generation = self.cursor_generation.saturating_add(1);
+        }
+        true
     }
 
     /// Commits a token only after the corresponding response body was delivered completely.
@@ -295,12 +323,18 @@ pub struct HlsLeaseReserveSnapshot {
     pub availability_basis: HlsLeaseReserveAvailabilityBasis,
     pub guaranteed_media_horizon_ms: u64,
     pub conservative_playback_position_ms: u64,
+    pub playback_position_known: bool,
     pub guaranteed_reserve_ms: u64,
     pub initial_hidden_ready_duration_ms: u64,
     pub transition_margin: HlsTransitionMarginMs,
     pub key_readiness_valid_until_ms: Option<u64>,
     pub recovery_required: bool,
     pub cutover_required: bool,
+}
+
+impl HlsLeaseReserveSnapshot {
+    /// Missing playback evidence is not proof that the player consumed its reserve.
+    pub fn is_exhausted(self) -> bool { self.playback_position_known && self.guaranteed_reserve_ms == 0 }
 }
 
 /// Typed source of guaranteed reserve evidence.
@@ -316,7 +350,6 @@ pub struct HlsLeaseReserveInput<'a> {
     pub cursor: &'a HlsLeasePlaybackCursor,
     pub ready_timeline: &'a HlsReadyTimelineSnapshot,
     pub now_ms: u64,
-    pub playback_rate_guard_milli: u16,
     pub recovery_trigger_budget: HlsRecoveryTriggerBudgetMs,
     pub origin_path_degraded: bool,
     pub recovery_committed: bool,
@@ -329,6 +362,7 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
             availability_basis: HlsLeaseReserveAvailabilityBasis::TransientOriginBacked,
             guaranteed_media_horizon_ms: 0,
             conservative_playback_position_ms: 0,
+            playback_position_known: false,
             guaranteed_reserve_ms: 0,
             initial_hidden_ready_duration_ms: 0,
             transition_margin,
@@ -344,9 +378,18 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
     };
     let guaranteed_ready_span = contiguous_ready_span(input.ready_timeline, input.manifest, first_needed_seq);
     let visible_tail = aligned_visible_tail_ms(input.ready_timeline, input.manifest);
-    let guaranteed_media_horizon_ms = guaranteed_ready_span.horizon_ms;
-    let conservative_playback_position_ms =
-        conservative_playback_position(&input, visible_tail, guaranteed_media_horizon_ms);
+    // Fully delivered contiguous history survives metadata GC; incomplete bodies do not advance it.
+    let guaranteed_media_horizon_ms =
+        guaranteed_ready_span.horizon_ms.max(input.cursor.highest_contiguous_completed_media_end_ms.unwrap_or(0));
+    let position = conservative_playback_position(&input);
+    let playback_position_known = position.is_some();
+    let conservative_playback_position_ms = position.unwrap_or_else(|| {
+        input
+            .cursor
+            .first_requested_proxy_seq
+            .and_then(|seq| input.ready_timeline.units.iter().find(|unit| unit.proxy_seq == seq))
+            .map_or(visible_tail, |unit| visible_tail.max(unit.start_ms))
+    });
     let guaranteed_reserve_ms = guaranteed_media_horizon_ms.saturating_sub(conservative_playback_position_ms);
     let initial_hidden_ready_duration_ms = guaranteed_media_horizon_ms.saturating_sub(visible_tail);
     let transition_margin = HlsTransitionMarginMs::from_millis(
@@ -363,6 +406,7 @@ pub fn evaluate_lease_reserve(input: HlsLeaseReserveInput<'_>) -> HlsLeaseReserv
         availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
         guaranteed_media_horizon_ms,
         conservative_playback_position_ms,
+        playback_position_known,
         guaranteed_reserve_ms,
         initial_hidden_ready_duration_ms,
         transition_margin,
@@ -461,37 +505,13 @@ fn aligned_visible_tail_ms(timeline: &HlsReadyTimelineSnapshot, manifest: &HlsLe
         .map_or(manifest.last_visible_media_end_ms, |unit| unit.start_ms.saturating_add(manifest.playlist_duration_ms))
 }
 
-fn conservative_playback_position(
-    input: &HlsLeaseReserveInput<'_>,
-    visible_tail_ms: u64,
-    guaranteed_media_horizon_ms: u64,
-) -> u64 {
-    let Some(first_seq) = input.cursor.first_requested_proxy_seq else {
-        return visible_tail_ms;
-    };
-    let Some(first_start_ms) = input.cursor.first_requested_media_start_ms.or_else(|| {
+fn conservative_playback_position(input: &HlsLeaseReserveInput<'_>) -> Option<u64> {
+    let started_at_ms = input.cursor.first_segment_started_at_ms?;
+    let first_seq = input.cursor.first_segment_started_proxy_seq?;
+    let first_start_ms = input.cursor.first_segment_media_start_ms.or_else(|| {
         input.ready_timeline.units.iter().find(|unit| unit.proxy_seq == first_seq).map(|unit| unit.start_ms)
-    }) else {
-        return visible_tail_ms.max(guaranteed_media_horizon_ms);
-    };
-    if input.cursor.first_segment_completed_at_ms.is_none() {
-        return visible_tail_ms.max(first_start_ms);
-    }
-    let delivered_end = input
-        .cursor
-        .highest_contiguous_completed_media_end_ms
-        .or_else(|| {
-            input
-                .cursor
-                .highest_contiguous_completed_proxy_seq
-                .and_then(|seq| input.ready_timeline.units.iter().find(|unit| unit.proxy_seq == seq))
-                .map(|unit| unit.start_ms.saturating_add(unit.duration_ms))
-        })
-        .unwrap_or(guaranteed_media_horizon_ms);
-    let elapsed_guarded = input.cursor.first_segment_completed_at_ms.map_or(0, |completed_at_ms| {
-        input.now_ms.saturating_sub(completed_at_ms).saturating_mul(u64::from(input.playback_rate_guard_milli)) / 1_000
-    });
-    delivered_end.min(first_start_ms.saturating_add(elapsed_guarded))
+    })?;
+    Some(first_start_ms.saturating_add(input.now_ms.saturating_sub(started_at_ms)))
 }
 
 fn guaranteed_transition_margin(
@@ -629,6 +649,7 @@ pub fn evaluate_startup_admission(input: HlsStartupAdmissionInput<'_>) -> HlsSta
 
 #[cfg(test)]
 mod tests {
+    mod playback;
     use super::*;
 
     fn manifest() -> HlsLeaseManifestSnapshot {
@@ -714,7 +735,6 @@ mod tests {
             cursor,
             ready_timeline,
             now_ms,
-            playback_rate_guard_milli: 1_050,
             recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(4_000),
             origin_path_degraded: true,
             recovery_committed: false,
@@ -874,17 +894,19 @@ mod tests {
     fn completed_first_segment_uses_measured_start_position() {
         let mut cursor = HlsLeasePlaybackCursor::default();
         let request = cursor.record_request_started(1, 1_000);
+        cursor.record_transfer_started(request, 1_000);
         assert_eq!(cursor.record_request_completed(request, 1_000), HlsPlaybackCompletionOutcome::Advanced);
         let reserve = reserve(&manifest(), &cursor, &ready_timeline(), 3_000);
 
-        assert_eq!(reserve.conservative_playback_position_ms, 6_100);
-        assert_eq!(reserve.guaranteed_reserve_ms, 20_900);
+        assert_eq!(reserve.conservative_playback_position_ms, 6_000);
+        assert_eq!(reserve.guaranteed_reserve_ms, 21_000);
     }
 
     #[test]
     fn sliding_manifest_keeps_cursor_and_ready_horizon_on_one_timeline() {
         let mut cursor = HlsLeasePlaybackCursor::default();
         let request = cursor.record_request_started(0, 100);
+        cursor.record_transfer_started(request, 100);
         assert_eq!(cursor.record_request_completed(request, 100), HlsPlaybackCompletionOutcome::Advanced);
         let mut current_manifest = manifest();
         current_manifest.first_proxy_seq = 2;
@@ -911,12 +933,12 @@ mod tests {
         current_manifest.last_visible_media_end_ms = 9_000;
 
         assert_eq!(cursor.ready_timeline_start_proxy_seq(current_manifest.first_proxy_seq), 0);
-        let reserve = reserve(&current_manifest, &cursor, &ready_timeline(), 2_100);
+        let reserve = reserve(&current_manifest, &cursor, &ready_timeline(), 2_000);
 
-        assert_eq!(reserve.conservative_playback_position_ms, 2_100);
+        assert_eq!(reserve.conservative_playback_position_ms, 1_900);
         assert_eq!(reserve.guaranteed_media_horizon_ms, 27_000);
         assert_eq!(reserve.initial_hidden_ready_duration_ms, 9_000);
-        assert_eq!(reserve.guaranteed_reserve_ms, 24_900);
+        assert_eq!(reserve.guaranteed_reserve_ms, 25_100);
         assert!(!reserve.cutover_required);
     }
 
@@ -940,10 +962,14 @@ mod tests {
         let second = cursor.record_request_started(1, 200);
         let third = cursor.record_request_started(2, 300);
 
+        cursor.record_transfer_started(third, 600);
+
         assert_eq!(cursor.record_request_completed(third, 600), HlsPlaybackCompletionOutcome::Buffered);
         assert_eq!(cursor.highest_contiguous_completed_proxy_seq, None);
+        cursor.record_transfer_started(first, 700);
         assert_eq!(cursor.record_request_completed(first, 700), HlsPlaybackCompletionOutcome::Advanced);
         assert_eq!(cursor.highest_contiguous_completed_proxy_seq, Some(0));
+        cursor.record_transfer_started(second, 800);
         assert_eq!(cursor.record_request_completed(second, 800), HlsPlaybackCompletionOutcome::Advanced);
         assert_eq!(cursor.highest_contiguous_completed_proxy_seq, Some(2));
         assert_eq!(cursor.first_segment_completed_at_ms, Some(700));
@@ -955,19 +981,23 @@ mod tests {
         let old_request = cursor.record_request_started(0, 100);
         let seek_request = cursor.record_request_started(4, 200);
 
+        cursor.record_transfer_started(old_request, 300);
+
         assert_eq!(cursor.record_request_completed(old_request, 300), HlsPlaybackCompletionOutcome::StaleRequest);
         assert_eq!(cursor.highest_contiguous_completed_proxy_seq, None);
+        cursor.record_transfer_started(seek_request, 400);
         assert_eq!(cursor.record_request_completed(seek_request, 400), HlsPlaybackCompletionOutcome::Advanced);
 
         let reserve = reserve(&manifest(), &cursor, &ready_timeline(), 1_400);
-        assert_eq!(reserve.conservative_playback_position_ms, 19_050);
-        assert_eq!(reserve.guaranteed_reserve_ms, 7_950);
+        assert_eq!(reserve.conservative_playback_position_ms, 19_000);
+        assert_eq!(reserve.guaranteed_reserve_ms, 8_000);
     }
 
     #[test]
     fn regressing_clock_saturates_playback_estimate() {
         let mut cursor = HlsLeasePlaybackCursor::default();
         let request = cursor.record_request_started(1, 2_000);
+        cursor.record_transfer_started(request, 2_000);
         assert_eq!(cursor.record_request_completed(request, 2_000), HlsPlaybackCompletionOutcome::Advanced);
 
         let reserve = reserve(&manifest(), &cursor, &ready_timeline(), 1_000);
@@ -1309,9 +1339,13 @@ mod tests {
                 cursor.bind_request_timing(token, &session.segments[&seq])
             })
             .collect::<Vec<_>>();
+        cursor.record_transfer_started(tokens[0], 1_000);
+        cursor.record_transfer_started(tokens[2], 1_100);
         assert_eq!(cursor.record_request_completed(tokens[2], 1_100), HlsPlaybackCompletionOutcome::Buffered);
+        cursor.record_transfer_started(tokens[0], 1_200);
         assert_eq!(cursor.record_request_completed(tokens[0], 1_200), HlsPlaybackCompletionOutcome::Advanced);
         assert_eq!(cursor.highest_contiguous_completed_media_end_ms, Some(4_000));
+        cursor.record_transfer_started(tokens[1], 1_300);
         assert_eq!(cursor.record_request_completed(tokens[1], 1_300), HlsPlaybackCompletionOutcome::Advanced);
         assert_eq!(cursor.highest_contiguous_completed_media_end_ms, Some(15_000));
         let mut current = manifest();
@@ -1330,8 +1364,8 @@ mod tests {
             11_200,
         );
         assert_eq!(before, after);
-        assert_eq!(after.conservative_playback_position_ms, 10_500);
-        assert_eq!(after.guaranteed_reserve_ms, 16_500);
+        assert_eq!(after.conservative_playback_position_ms, 10_200);
+        assert_eq!(after.guaranteed_reserve_ms, 16_800);
     }
 
     #[test]
@@ -1340,6 +1374,7 @@ mod tests {
         let mut cursor = HlsLeasePlaybackCursor::default();
         let first = cursor.record_request_started(0, 1_000);
         let first = cursor.bind_request_timing(first, &session.segments[&0]);
+        cursor.record_transfer_started(first, 1_000);
         assert_eq!(cursor.record_request_completed(first, 1_000), HlsPlaybackCompletionOutcome::Advanced);
         let mut current = manifest();
         current.first_proxy_seq = 2;
@@ -1350,13 +1385,13 @@ mod tests {
         assert_eq!(cursor.ready_timeline_start_proxy_seq(2), 1);
         session.segments.remove(&0);
         let timeline = session.ready_timeline_snapshot(1, 2_000);
-        assert_eq!(reserve(&current, &cursor, &timeline, 2_000).guaranteed_reserve_ms, 25_950);
+        assert_eq!(reserve(&current, &cursor, &timeline, 2_000).guaranteed_reserve_ms, 26_000);
         session.segments.get_mut(&1).expect("undelivered segment").status = crate::SegmentCacheStatus::Discovered;
         let timeline = session.ready_timeline_snapshot(1, 2_000);
-        assert_eq!(reserve(&current, &cursor, &timeline, 2_000).guaranteed_reserve_ms, 2_950);
+        assert_eq!(reserve(&current, &cursor, &timeline, 2_000).guaranteed_reserve_ms, 3_000);
         session.segments.remove(&1);
         let timeline = session.ready_timeline_snapshot(1, 2_000);
-        assert_eq!(reserve(&current, &cursor, &timeline, 2_000).guaranteed_reserve_ms, 0);
+        assert_eq!(reserve(&current, &cursor, &timeline, 2_000).guaranteed_reserve_ms, 3_000);
     }
 
     #[test]
@@ -1367,12 +1402,14 @@ mod tests {
         let old = cursor.bind_request_timing(old, &session.segments[&0]);
         let seek = cursor.record_request_started(4, 2_000);
         let seek = cursor.bind_request_timing(seek, &session.segments[&4]);
+        cursor.record_transfer_started(old, 2_500);
         assert_eq!(cursor.record_request_completed(old, 2_500), HlsPlaybackCompletionOutcome::StaleRequest);
+        cursor.record_transfer_started(seek, 3_000);
         assert_eq!(cursor.record_request_completed(seek, 3_000), HlsPlaybackCompletionOutcome::Advanced);
         assert_eq!(cursor.first_requested_media_start_ms, Some(18_000));
         assert_eq!(cursor.highest_contiguous_completed_media_end_ms, Some(27_000));
         let reserve = reserve(&manifest(), &cursor, &session.ready_timeline_snapshot(0, 4_000), 4_000);
-        assert_eq!(reserve.conservative_playback_position_ms, 19_050);
-        assert_eq!(reserve.guaranteed_reserve_ms, 7_950);
+        assert_eq!(reserve.conservative_playback_position_ms, 19_000);
+        assert_eq!(reserve.guaranteed_reserve_ms, 8_000);
     }
 }

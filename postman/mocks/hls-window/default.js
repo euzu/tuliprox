@@ -16,12 +16,22 @@ http.createServer(async (req, res) => {
   }
   if (req.method === 'GET' && req.url === '/index.m3u8') {
     const config = await pm.state.get('hls-window.config');
+    if (config && (config.failAlways || config.failures > 0)) {
+      if (!config.failAlways) {
+        config.failures -= 1;
+        await pm.state.set('hls-window.config', config);
+      }
+      res.writeHead(502, { 'retry-after': '1', 'content-type': 'text/plain' });
+      return res.end('controlled manifest failure');
+    }
     const first = config ? config.firstSequence : 0;
     const segmentOrigin = config ? config.segmentOrigin + '/' : '';
     res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
-    return res.end('#EXTM3U\n#EXT-X-TARGETDURATION:4\n' +
+    const target = config && config.targetDuration || 4;
+    const duration = (config && config.segmentDurationMs || 4000) / 1000;
+    return res.end(`#EXTM3U\n#EXT-X-TARGETDURATION:${target}\n` +
       `#EXT-X-MEDIA-SEQUENCE:${first}\n` +
-      Array.from({ length: 6 }, (_, i) => `#EXTINF:4,\n${segmentOrigin}${first + i}.ts\n`).join(''));
+      Array.from({ length: 6 }, (_, i) => `#EXTINF:${duration},\n${segmentOrigin}${first + i}.ts\n`).join(''));
   }
   if (req.method === 'GET' && /^\/[0-5]\.ts$/.test(req.url)) {
     res.writeHead(200, { 'content-type': 'video/mp2t', 'content-length': 12 });
