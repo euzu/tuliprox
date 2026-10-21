@@ -89,6 +89,9 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
     let mut config = app.app_config.config.load_full().as_ref().clone();
     let hls = config.reverse_proxy.as_mut().unwrap().hls_cache.as_mut().unwrap();
     hls.startup = (&HlsStartupConfigDto { mode, ..Default::default() }).into();
+    // Keep this recovery-pressure scenario's original fixed budget; AUTO changes
+    // its reserve precondition independently of the retry behavior under test.
+    hls.origin_segment_timeout_ms = shared::model::HlsSegmentTimeout::Fixed(shared::model::Millis::new(10_000));
     hls.manifest_recovery_burst.level = HlsManifestRecoveryBurstLevel::Beast;
     app.app_config.config.store(Arc::new(config));
     enable_channel_unavailable_custom_response(&app);

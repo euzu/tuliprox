@@ -30,8 +30,8 @@ use shared::{
     model::{
         ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
         HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStartupConfigDto, HlsStartupMode, HlsStripConfigDto,
-        HlsStripMode, Millis, QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsSegmentTimeout, HlsStartupConfigDto, HlsStartupMode,
+        HlsStripConfigDto, HlsStripMode, Millis, QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto,
         ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, Secs, StreamBufferConfigDto, StreamConfigDto,
         StreamHistoryConfigDto,
     },
@@ -74,6 +74,7 @@ const LABEL_CACHE_BYTES_PER_SESSION: &str = "LABEL.CACHE_BYTES_PER_SESSION";
 const LABEL_MAX_SEGMENTS_PREFETCH: &str = "LABEL.MAX_SEGMENTS_PREFETCH";
 const LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION: &str = "LABEL.MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION";
 const LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL: &str = "LABEL.MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL";
+const LABEL_MIN_ORIGIN_TARGET_DURATION_SECS: &str = "LABEL.MIN_ORIGIN_TARGET_DURATION_SECS";
 const LABEL_ORIGIN_MANIFEST_TIMEOUT_MS: &str = "LABEL.ORIGIN_MANIFEST_TIMEOUT_MS";
 const LABEL_MANIFEST_RECOVERY_BURST: &str = "LABEL.MANIFEST_RECOVERY_BURST";
 const LABEL_ORIGIN_SEGMENT_TIMEOUT_MS: &str = "LABEL.ORIGIN_SEGMENT_TIMEOUT_MS";
@@ -236,8 +237,9 @@ generate_form_reducer!(
         MaxConcurrentSegmentFetchesPerSession => max_concurrent_segment_fetches_per_session: usize,
         MaxConcurrentSegmentFetchesGlobal => max_concurrent_segment_fetches_global: usize,
         OriginManifestTimeoutMs => origin_manifest_timeout_ms: Millis,
+        MinOriginTargetDurationSecs => min_origin_target_duration_secs: Secs,
         ManifestRecoveryBurst => manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto,
-        OriginSegmentTimeoutMs => origin_segment_timeout_ms: Millis,
+        OriginSegmentTimeoutMs => origin_segment_timeout_ms: HlsSegmentTimeout,
         SessionIdleTimeout => session_idle_timeout: Secs,
         SegmentRepair => segment_repair: HlsSegmentRepairConfigDto,
         Startup => startup: HlsStartupConfigDto,
@@ -525,6 +527,7 @@ pub fn ReverseProxyConfigView() -> Html {
         use_reducer(|| StreamHistoryConfigFormState { form: StreamHistoryConfigDto::default(), modified: false });
     let qos_aggregation_state: UseReducerHandle<QosAggregationConfigFormState> =
         use_reducer(|| QosAggregationConfigFormState { form: QosAggregationConfigDto::default(), modified: false });
+    let manual_segment_timeout = use_mut_ref(|| 10_000_u64);
     let last_emitted_form = use_mut_ref(|| None::<ConfigForm>);
 
     {
@@ -889,6 +892,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), max_concurrent_segment_fetches_per_session) }
                 { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), max_concurrent_segment_fetches_global) }
                 { config_field!(hls_cache_state.form, translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), origin_manifest_timeout_ms) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_MIN_ORIGIN_TARGET_DURATION_SECS), min_origin_target_duration_secs) }
                 { config_field_child!(translate.t(LABEL_MANIFEST_RECOVERY_BURST), "HLS_CACHE_CONFIG.MANIFEST_RECOVERY_BURST", {
                     html! { <span class="tp__form-field__value">{hls_manifest_recovery_burst_label(hls_cache_state.form.manifest_recovery_burst.level)}</span> }
                 }) }
@@ -950,7 +954,11 @@ pub fn ReverseProxyConfigView() -> Html {
             })
         };
         let edit_hls_cache_u64_min =
-            |label: String, field: &'static str, value: u64, action: fn(u64) -> HlsCacheConfigFormAction| {
+            |label: String,
+             field: &'static str,
+             value: u64,
+             minimum: u64,
+             action: fn(u64) -> HlsCacheConfigFormAction| {
                 let hls_cache_state = hls_cache_state.clone();
                 html! {
                     <div class="tp__form-field tp__form-field__number">
@@ -960,7 +968,7 @@ pub fn ReverseProxyConfigView() -> Html {
                             field_id={Some(dto_field_id(&hls_cache_state.form, field))}
                             value={value.min(i64::MAX as u64) as i64}
                             on_change={Callback::from(move |value: Option<i64>| {
-                                hls_cache_state.dispatch(action(clamp_u64_min(value, 1)));
+                                hls_cache_state.dispatch(action(clamp_u64_min(value, minimum)));
                             })}
                         />
                     </div>
@@ -983,6 +991,28 @@ pub fn ReverseProxyConfigView() -> Html {
                     </div>
                 }
             };
+        let automatic_timeout = hls_cache_state.form.origin_segment_timeout_ms == HlsSegmentTimeout::Auto;
+        if let HlsSegmentTimeout::Fixed(value) = hls_cache_state.form.origin_segment_timeout_ms {
+            *manual_segment_timeout.borrow_mut() = value.get();
+        }
+        let timeout_options = Rc::new(vec![
+            DropDownOption::new("auto", html! { "AUTO" }, automatic_timeout),
+            DropDownOption::new("fixed", html! { translate.t("LABEL.HLS_TIMEOUT_FIXED") }, !automatic_timeout),
+        ]);
+        let set_timeout_mode = {
+            let state = hls_cache_state.clone();
+            let manual = manual_segment_timeout.clone();
+            Callback::from(move |(_, selection): (String, DropDownSelection)| {
+                if let DropDownSelection::Single(value) = selection {
+                    let timeout = if value == "auto" {
+                        HlsSegmentTimeout::Auto
+                    } else {
+                        HlsSegmentTimeout::Fixed(Millis::new(*manual.borrow()))
+                    };
+                    state.dispatch(HlsCacheConfigFormAction::OriginSegmentTimeoutMs(timeout));
+                }
+            })
+        };
         let selected_startup = hls_cache_state.form.startup.mode;
         let startup_options = Rc::new(vec![
             DropDownOption::new(
@@ -1032,7 +1062,7 @@ pub fn ReverseProxyConfigView() -> Html {
             })
         };
         html! {
-            <Card class="tp__config-view__card">
+            <Card class="tp__config-view__card tp__hls-cache">
                 <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
                 { edit_field_text_option!(hls_cache_state, translate.t(LABEL_CACHE_PATH), cache_path, HlsCacheConfigFormAction::CachePath) }
                 { config_field_child!(translate.t("LABEL.HLS_STARTUP_MODE"), "HLS_CACHE_CONFIG.STARTUP_MODE", {
@@ -1070,7 +1100,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         })}
                     />
                 </div>
-                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration.get(), |value| HlsCacheConfigFormAction::CacheDuration(Secs::new(value))) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration.get(), 1, |value| HlsCacheConfigFormAction::CacheDuration(Secs::new(value))) }
                 { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES), cache_bytes, HlsCacheConfigFormAction::CacheBytes) }
                 { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES_PER_SESSION), cache_bytes_per_session, HlsCacheConfigFormAction::CacheBytesPerSession) }
                 <div class="tp__form-field tp__form-field__number">
@@ -1084,7 +1114,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 </div>
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), "max_concurrent_segment_fetches_per_session", hls_cache_state.form.max_concurrent_segment_fetches_per_session, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesPerSession) }
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), "max_concurrent_segment_fetches_global", hls_cache_state.form.max_concurrent_segment_fetches_global, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesGlobal) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms.get(), |value| HlsCacheConfigFormAction::OriginManifestTimeoutMs(Millis::new(value))) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms.get(), 1, |value| HlsCacheConfigFormAction::OriginManifestTimeoutMs(Millis::new(value))) }
                 { config_field_child!(translate.t(LABEL_MANIFEST_RECOVERY_BURST), "HLS_CACHE_CONFIG.MANIFEST_RECOVERY_BURST", {
                     html! {
                         <Select
@@ -1095,8 +1125,14 @@ pub fn ReverseProxyConfigView() -> Html {
                         />
                     }
                 }) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms.get(), |value| HlsCacheConfigFormAction::OriginSegmentTimeoutMs(Millis::new(value))) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout.get(), |value| HlsCacheConfigFormAction::SessionIdleTimeout(Secs::new(value))) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_MIN_ORIGIN_TARGET_DURATION_SECS), "min_origin_target_duration_secs", hls_cache_state.form.min_origin_target_duration_secs.get(), 0, |value| HlsCacheConfigFormAction::MinOriginTargetDurationSecs(Secs::new(value))) }
+                { config_field_child!(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "HLS_CACHE_CONFIG.ORIGIN_SEGMENT_TIMEOUT_MS", {
+                    html! { <Select name="hls_segment_timeout_mode" multi_select={false} options={timeout_options} on_select={set_timeout_mode} /> }
+                }) }
+                { if let HlsSegmentTimeout::Fixed(value) = hls_cache_state.form.origin_segment_timeout_ms {
+                    edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", value.get(), 1, |value| HlsCacheConfigFormAction::OriginSegmentTimeoutMs(HlsSegmentTimeout::Fixed(Millis::new(value))))
+                } else { Html::default() } }
+                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout.get(), 1, |value| HlsCacheConfigFormAction::SessionIdleTimeout(Secs::new(value))) }
             </Card>
         }
     };

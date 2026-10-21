@@ -5,12 +5,15 @@ use crate::{
     hls_origin_log_value,
     manifest_acceptance::HlsManifestAcceptanceTrigger,
     manifest_fetch::{
-        retry_hls_origin_manifest_recovery_chain, FetchedOriginManifest, HlsOriginManifestFetchContext,
-        OriginManifestFetchError,
+        retry_hls_origin_manifest_recovery_chain_with_diagnostics, FetchedOriginManifest,
+        HlsManifestRecoveryDiagnostics, HlsOriginManifestFetchContext, OriginManifestFetchError,
     },
     manifest_origin_binding::HlsManifestOriginBinding,
     safe_proxy_session_id, safe_session_key,
-    short_manifest::{HlsOriginQualification, HlsOriginQualificationBasis, HlsQualifiedOriginWindows},
+    short_manifest::{
+        HlsOriginQualification, HlsOriginQualificationBasis, HlsQualifiedOriginWindows, HlsTargetDurationQualification,
+        HlsTargetDurationQualificationResult,
+    },
     HlsFreshManifestRequiredReason, HlsSession,
 };
 use tuliprox_parser::hls::origin_manifest::{
@@ -61,6 +64,68 @@ pub(super) fn prepare_qualification_refresh(request: &mut OriginRefreshRequest, 
     }
 }
 
+pub(super) fn prepare_target_duration_qualification(request: &OriginRefreshRequest, session: &mut HlsSession) {
+    if session.key.archive_reference.is_some()
+        || matches!(session.mode, crate::HlsSessionMode::TransientPassthrough { .. })
+    {
+        session.origin_control.target_duration_qualification = None;
+        return;
+    }
+    let basis = HlsOriginQualificationBasis::capture(session);
+    let reset = session.origin_control.target_duration_qualification.as_ref().is_none_or(|check| {
+        check.basis != basis
+            || (check.result.is_some()
+                && matches!(session.origin_control.qualification, HlsOriginQualification::Unchecked))
+    });
+    if reset {
+        session.origin_control.target_duration_qualification =
+            Some(HlsTargetDurationQualification::new(session, request.hls_proxy.min_origin_target_duration_secs()));
+    }
+}
+
+pub(crate) fn observe_target_duration(session: &mut HlsSession, target_duration: Option<u32>, host: Option<&str>) {
+    let Some(check) = session.origin_control.target_duration_qualification.as_mut() else { return };
+    let Some(duration) = target_duration else { return };
+    if check.result.is_none() && !check.warned && u64::from(duration) < check.minimum.get() {
+        check.warned = true;
+        log::warn!(
+            "HLS origin target duration below minimum: session={} proxy_session={} host={} target_duration_secs={} minimum_target_duration_secs={} action=recovery",
+            safe_session_key(&session.key), safe_proxy_session_id(&session.proxy_session_id),
+            host.map_or_else(|| "none".to_string(), hls_origin_log_value), duration, check.minimum.get(),
+        );
+    }
+}
+
+pub(super) fn record_target_duration_qualification(session: &mut HlsSession, duration: Option<u32>) {
+    let basis = HlsOriginQualificationBasis::capture(session);
+    let Some(check) = session.origin_control.target_duration_qualification.as_mut() else { return };
+    if check.result.is_some() {
+        return;
+    }
+    let result = match duration.filter(|duration| *duration > 0) {
+        Some(duration) if u64::from(duration) >= check.minimum.get() => {
+            HlsTargetDurationQualificationResult::SuitableOriginSelected
+        }
+        Some(_) => HlsTargetDurationQualificationResult::NoSuitableOrigin,
+        None => HlsTargetDurationQualificationResult::NotApplicable,
+    };
+    check.basis = basis;
+    check.result = Some(result);
+    if check.warned {
+        let result_label = match result {
+            HlsTargetDurationQualificationResult::SuitableOriginSelected => "suitable_origin_selected",
+            HlsTargetDurationQualificationResult::NoSuitableOrigin
+            | HlsTargetDurationQualificationResult::NotApplicable => "no_suitable_origin",
+        };
+        log::info!(
+            "HLS origin target duration qualification completed: session={} proxy_session={} result={} host={} target_duration_secs={} minimum_target_duration_secs={}",
+            safe_session_key(&session.key), safe_proxy_session_id(&session.proxy_session_id), result_label,
+            session.origin_control.pinned_host.as_deref().map_or_else(|| "none".to_string(), hls_origin_log_value),
+            duration.map_or_else(|| "none".to_string(), |value| value.to_string()), check.minimum.get(),
+        );
+    }
+}
+
 pub(super) async fn qualify_short_manifest_if_needed(
     request: &OriginRefreshRequest,
     context: &HlsOriginManifestFetchContext,
@@ -74,7 +139,15 @@ pub(super) async fn qualify_short_manifest_if_needed(
     else {
         return None;
     };
-    if !(1..3).contains(&manifest.segments.len()) {
+    let duration = manifest.target_duration.filter(|duration| *duration > 0);
+    let short_window = (1..3).contains(&manifest.segments.len());
+    let short_duration = {
+        let session = request.session.read().await;
+        session.origin_control.target_duration_qualification.as_ref().is_some_and(|check| {
+            check.result.is_none() && duration.is_some_and(|value| u64::from(value) < check.minimum.get())
+        })
+    };
+    if !short_window && !short_duration {
         return None;
     }
     let binding = Url::parse(&fetched.resolved_request_url)
@@ -89,6 +162,19 @@ pub(super) async fn qualify_short_manifest_if_needed(
     };
     if qualified {
         return None;
+    }
+    {
+        let mut session = request.session.write().await;
+        if !super::commit::refresh_origin_work_generation_is_current(&session, request) {
+            return Some(Err(OriginManifestFetchError::RecoveryUnavailable {
+                reason: crate::manifest_fetch::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+            }));
+        }
+        observe_target_duration(
+            &mut session,
+            duration,
+            crate::manifest_fetch::fetched_effective_manifest_host(fetched).as_deref(),
+        );
     }
     let mut qualification_context = context.clone();
     if !fetched.provider_session_headers.is_empty() {
@@ -107,10 +193,32 @@ pub(super) async fn qualify_short_manifest_if_needed(
         qualification_context.headers =
             crate::hls_origin_headers_with_provider_session(&context.headers, &session.origin_provider_session_headers);
     }
-    let result = run_qualification(request, &qualification_context, binding).await.map(|mut committed| {
-        committed.fetched.attempts = committed.fetched.attempts.saturating_add(fetched.attempts.saturating_sub(1));
-        committed.fetched.candidate_requests =
-            committed.fetched.candidate_requests.saturating_add(fetched.candidate_requests);
+    let mut diagnostics = HlsManifestRecoveryDiagnostics::default();
+    let recovery_result = run_qualification(request, &qualification_context, binding, &mut diagnostics).await;
+    // Duration is a preference, never a new failure reason. The original regular
+    // window still has to pass the ordinary commit and ownership checks.
+    let recovery_result = if recovery_result.is_err() && short_duration && !short_window {
+        match commit_manifest_recovery_candidate(
+            request,
+            fetched.clone(),
+            request.manifest_commit_requirement.acceptance_mode(),
+        )
+        .await
+        {
+            Ok(committed) => {
+                let mut session = request.session.write().await;
+                if let Some(episode) = session.origin_control.acceptance_episode.as_mut() {
+                    episode.complete();
+                }
+                Ok(committed)
+            }
+            Err(_) => recovery_result,
+        }
+    } else {
+        recovery_result
+    };
+    let result = recovery_result.map(|mut committed| {
+        diagnostics.include_initial_fetch(fetched, &mut committed.fetched);
         committed
     });
     Some(result)
@@ -136,17 +244,22 @@ pub(super) async fn resume_qualification(
                 // A new lifecycle finding gets one new full check of the known
                 // concrete target. Further leases inherit that check's receipt.
                 session.origin_control.qualification = HlsOriginQualification::Unchecked;
+                session.origin_control.target_duration_qualification = Some(HlsTargetDurationQualification::new(
+                    &session,
+                    request.hls_proxy.min_origin_target_duration_secs(),
+                ));
             }
         }
         target
     };
-    Some(run_qualification(request, context, target).await)
+    Some(run_qualification(request, context, target, &mut HlsManifestRecoveryDiagnostics::default()).await)
 }
 
 async fn run_qualification(
     request: &OriginRefreshRequest,
     context: &HlsOriginManifestFetchContext,
     binding: HlsManifestOriginBinding,
+    diagnostics: &mut HlsManifestRecoveryDiagnostics,
 ) -> Result<CommittedOriginManifest, OriginManifestFetchError> {
     let trigger = {
         let session = request.session.read().await;
@@ -168,7 +281,7 @@ async fn run_qualification(
                 }
             })
     };
-    Box::pin(retry_hls_origin_manifest_recovery_chain(
+    Box::pin(retry_hls_origin_manifest_recovery_chain_with_diagnostics(
         context,
         binding,
         None,
@@ -176,6 +289,7 @@ async fn run_qualification(
         trigger,
         request.manifest_commit_requirement.acceptance_mode(),
         |fetched, mode| Box::pin(commit_manifest_recovery_candidate(request, fetched, mode)),
+        diagnostics,
     ))
     .await
 }

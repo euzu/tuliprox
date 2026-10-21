@@ -363,7 +363,7 @@ fn manifest_recovery_candidate_score_prefers_same_host_next_sequence() {
     session.last_effective_manifest_host = Some("origin.example.com".to_string());
     session.mark_authorized_media_access(super::super::current_time_millis());
     let request = test_origin_refresh_request(test_session());
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
     let same_host_unchanged =
         fetched_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n100.ts\n");
     let same_host_next =

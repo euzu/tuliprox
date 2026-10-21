@@ -1,9 +1,9 @@
 use super::{
     append_hls_provider_session_headers,
     cache::{hls_cache_capacity_from_io, hls_cache_object_limit_from_io},
-    force_identity_without_range, hls_object_body_deadline, hls_origin_log_value, log_hls_origin_content_coding,
-    scrub_hls_origin_headers, HlsBoundAccountAcquireErrorKind, HlsLogIdentity, HlsOriginContentCodingObjectKind,
-    HlsOriginContentCodingSource, SegmentFetchPolicy,
+    force_identity_without_range, hls_origin_log_value, log_hls_origin_content_coding, scrub_hls_origin_headers,
+    HlsBoundAccountAcquireErrorKind, HlsLogIdentity, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
+    SegmentFetchPolicy,
 };
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use futures::{future::BoxFuture, FutureExt};
@@ -23,6 +23,8 @@ use tuliprox_parser::hls::origin_manifest::ParsedByteRange;
 use url::Url;
 
 const STORAGE_FULL_RAW_OS_ERRORS: &[i32] = &[28, 112, 122];
+
+mod transport;
 
 use super::MAX_MANUAL_REDIRECTS;
 
@@ -138,6 +140,7 @@ impl HlsOriginResourceFetchTarget {
 
 #[derive(Clone)]
 pub struct HlsOriginResourceClients {
+    pub session: Option<crate::HlsSessionHandle>,
     pub client: Client,
     pub no_redirect_client: Client,
     pub use_manual_redirects: bool,
@@ -400,7 +403,13 @@ pub struct HlsOriginResourceBodyDeadline {
 }
 
 impl HlsOriginResourceBodyDeadline {
-    fn new(timeout: Duration) -> Self { Self { deadline: tokio::time::Instant::now() + timeout, timeout } }
+    fn new(timeout: Duration) -> Self {
+        {
+            let now = tokio::time::Instant::now();
+            // An unrepresentable fixed duration fails closed instead of panicking or disabling the timer.
+            Self { deadline: now.checked_add(timeout).unwrap_or(now), timeout }
+        }
+    }
 
     /// Returns the remaining body budget, saturating at zero once the deadline is exhausted.
     pub fn remaining(self) -> Duration { self.deadline.saturating_duration_since(tokio::time::Instant::now()) }
@@ -511,21 +520,42 @@ where
     let HlsOriginResourceRetryRun { target, clients, policy, identity } = run;
     let attempts = policy.retry_delays_ms.len();
     for attempt_index in 0..attempts {
-        let attempt = HlsResourceFetchAttempt { attempt_index, attempts };
         let delay_ms = policy.retry_delay_ms(attempt_index);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
+        let target_duration = match &clients.session {
+            Some(session) => session.read().await.target_duration,
+            None => None,
+        };
+        let timeout = policy.timeouts.snapshot(target.kind, target_duration);
+        let attempt = HlsResourceFetchAttempt { attempt_index, attempts, timeout };
+        log::debug!(
+            "HLS origin timeout snapshot: kind={:?} mode={} session_target_duration={:?} effective_ms={}",
+            timeout.kind,
+            timeout.mode,
+            timeout.session_target_duration,
+            timeout.effective_ms
+        );
         log_hls_resource_attempt_started(identity, target.log_context(), attempt);
         let attempt_started_at = Instant::now();
+        let mut timeout_phase = "headers";
         let result = match prepare_attempt(attempt).await {
-            Ok(guard) => match fetch_hls_origin_resource_response(&target, &clients).await {
-                Ok(response) => {
-                    let deadline =
-                        HlsOriginResourceBodyDeadline::new(hls_object_body_deadline(policy.origin_segment_timeout_ms));
+            Ok(guard) => match fetch_hls_origin_resource_response_with_timeout(
+                &target,
+                &clients,
+                Duration::from_millis(timeout.effective_ms),
+            )
+            .await
+            {
+                Ok((response, deadline)) => {
+                    timeout_phase = "decoder";
                     match prepare_response(response, deadline).await {
-                        Ok(response) => commit(response, attempt, deadline, guard).await,
+                        Ok(response) => {
+                            timeout_phase = "body";
+                            commit(response, attempt, deadline, guard).await
+                        }
                         Err(err) => {
                             cleanup_attempt(guard).await;
                             Err(err)
@@ -551,7 +581,8 @@ where
                         identity,
                         target.log_context(),
                         attempt,
-                        hls_object_body_deadline(policy.origin_segment_timeout_ms).as_millis(),
+                        u128::from(timeout.effective_ms),
+                        timeout_phase,
                     );
                 }
                 log_hls_resource_fetch_failed(identity, target.log_context(), attempt, err.log_status());
@@ -563,7 +594,8 @@ where
                         identity,
                         target.log_context(),
                         attempt,
-                        hls_object_body_deadline(policy.origin_segment_timeout_ms).as_millis(),
+                        u128::from(timeout.effective_ms),
+                        timeout_phase,
                     );
                 }
                 log_hls_resource_retry_scheduled(
@@ -580,41 +612,36 @@ where
     Err(HlsOriginResourceFetchError::Timeout)
 }
 
+#[cfg(test)]
 async fn fetch_hls_origin_resource_response(
     target: &HlsOriginResourceFetchTarget,
     clients: &HlsOriginResourceClients,
 ) -> Result<reqwest::Response, HlsOriginResourceFetchError> {
-    let url = Url::parse(&target.origin_url).map_err(|_| HlsOriginResourceFetchError::InvalidOriginUrl)?;
-    let response = if clients.use_manual_redirects {
-        fetch_hls_origin_resource_with_manual_redirects(&url, target.headers.clone(), &clients.no_redirect_client)
-            .await?
-    } else {
-        let mut headers = target.headers.clone();
-        apply_outbound_content_coding_policy(&mut headers, OutboundContentCodingPolicy::Identity);
-        clients.client.get(url).headers(headers).send().await.map_err(|err| {
-            HlsOriginResourceFetchError::Transport(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-        })?
-    };
-    classify_hls_origin_resource_response(response, target.byte_range_expectation)
+    fetch_hls_origin_resource_response_with_timeout(target, clients, Duration::from_secs(10))
+        .await
+        .map(|(response, _)| response)
 }
 
-async fn fetch_hls_origin_resource_with_manual_redirects(
-    entry_url: &Url,
-    headers: HeaderMap,
-    client: &Client,
-) -> Result<reqwest::Response, HlsOriginResourceFetchError> {
-    let mut current_url = entry_url.clone();
-    let mut current_headers = headers;
+async fn fetch_hls_origin_resource_response_with_timeout(
+    target: &HlsOriginResourceFetchTarget,
+    clients: &HlsOriginResourceClients,
+    timeout: Duration,
+) -> Result<(reqwest::Response, HlsOriginResourceBodyDeadline), HlsOriginResourceFetchError> {
+    let mut url = Url::parse(&target.origin_url).map_err(|_| HlsOriginResourceFetchError::InvalidOriginUrl)?;
+    let mut headers = target.headers.clone();
+    let mut deadline = None;
     let mut remaining_redirects = MAX_MANUAL_REDIRECTS;
-
+    let client = if clients.use_manual_redirects { &clients.no_redirect_client } else { &clients.client };
     loop {
-        let mut request_headers = current_headers.clone();
+        let mut request_headers = headers.clone();
         apply_outbound_content_coding_policy(&mut request_headers, OutboundContentCodingPolicy::Identity);
-        let response = client.get(current_url.clone()).headers(request_headers).send().await.map_err(|err| {
-            HlsOriginResourceFetchError::Transport(sanitize_sensitive_info(err.to_string().as_str()).to_string())
+        let request = client.get(url).headers(request_headers).build().map_err(|err| {
+            HlsOriginResourceFetchError::Transport(sanitize_sensitive_info(&err.to_string()).to_string())
         })?;
-        if !response.status().is_redirection() {
-            return Ok(response);
+        let response = transport::send(client, request, timeout, &mut deadline).await?;
+        if !clients.use_manual_redirects || !response.status().is_redirection() {
+            let response = classify_hls_origin_resource_response(response, target.byte_range_expectation)?;
+            return Ok((response, deadline.expect("transport returned a connection deadline")));
         }
         if remaining_redirects == 0 {
             return Err(HlsOriginResourceFetchError::Redirect);
@@ -630,9 +657,9 @@ async fn fetch_hls_origin_resource_with_manual_redirects(
             .or_else(|_| Url::parse(location))
             .map_err(|_| HlsOriginResourceFetchError::Redirect)?;
         if !same_origin(&response_url, &next_url) {
-            strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+            strip_sensitive_headers_for_cross_origin_redirect(&mut headers);
         }
-        current_url = next_url;
+        url = next_url;
         remaining_redirects = remaining_redirects.saturating_sub(1);
     }
 }
@@ -785,6 +812,7 @@ impl HlsResourceFetchLogStatus {
 pub struct HlsResourceFetchAttempt {
     pub attempt_index: usize,
     pub attempts: usize,
+    pub timeout: HlsOriginTimeoutSnapshot,
 }
 
 impl HlsResourceFetchAttempt {
@@ -897,9 +925,10 @@ fn log_hls_resource_timeout(
     context: HlsResourceFetchLogContext<'_>,
     attempt: HlsResourceFetchAttempt,
     deadline_ms: u128,
+    phase: &str,
 ) {
     warn!(
-        "HLS origin object fetch timed out: session={} proxy_session={} source={} kind={} object={} attempt={} of {} deadline_ms={}",
+        "HLS origin object fetch timed out: session={} proxy_session={} source={} kind={} object={} attempt={} of {} deadline_ms={} mode={} session_target_duration={:?} phase={}",
         identity.session(),
         identity.proxy_session(),
         context.source.as_log_value(),
@@ -907,7 +936,10 @@ fn log_hls_resource_timeout(
         context.object_id,
         attempt.display_number(),
         attempt.attempts,
-        deadline_ms
+        deadline_ms,
+        attempt.timeout.mode,
+        attempt.timeout.session_target_duration,
+        phase
     );
 }
 
@@ -924,7 +956,7 @@ pub(super) fn log_hls_resource_body_failure(
 
     let failure = HlsOriginResourceFetchError::from_body_read_error(error);
     if matches!(&failure, HlsOriginResourceFetchError::Timeout) {
-        log_hls_resource_timeout(identity, context, attempt, deadline_ms);
+        log_hls_resource_timeout(identity, context, attempt, deadline_ms, "body");
     } else {
         log_hls_resource_fetch_failed(identity, context, attempt, failure.log_status());
     }
@@ -992,6 +1024,7 @@ mod tests {
 
     fn fetch_clients(use_manual_redirects: bool) -> HlsOriginResourceClients {
         HlsOriginResourceClients {
+            session: None,
             client: Client::builder().build().expect("client"),
             no_redirect_client: Client::builder().redirect(Policy::none()).build().expect("no redirect client"),
             use_manual_redirects,
@@ -1015,8 +1048,12 @@ mod tests {
 
     #[test]
     fn resource_fetch_attempt_display_number_is_one_based_without_changing_raw_index() {
-        let first = HlsResourceFetchAttempt { attempt_index: 0, attempts: 3 };
-        let last = HlsResourceFetchAttempt { attempt_index: 2, attempts: 3 };
+        let first = HlsResourceFetchAttempt {
+            attempt_index: 0,
+            attempts: 3,
+            timeout: crate::HlsOriginTimeoutPolicy::default().snapshot(HlsResourceFetchKind::Segment, None),
+        };
+        let last = HlsResourceFetchAttempt { attempt_index: 2, ..first };
 
         assert_eq!(first.display_number(), 1);
         assert_eq!(last.display_number(), 3);
@@ -1606,4 +1643,94 @@ mod tests {
         assert!(!without_range.contains_key(header::RANGE));
         assert_eq!(parsed.get(header::RANGE).expect("parsed range"), "bytes=2-5");
     }
+    #[tokio::test]
+    async fn attempt_snapshot_is_frozen_before_prepare_and_next_retry_observes_updates() {
+        use crate::{HlsSession, HlsSessionKey};
+        use shared::model::{HlsSegmentTimeout, Millis};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for status in ["503 Service Unavailable", "200 OK"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_request(&mut socket).await;
+                if status.starts_with("503") {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let session =
+            Arc::new(tokio::sync::RwLock::new(HlsSession::new(HlsSessionKey::new(1, "snapshot"), b"secret", 0)));
+        session.write().await.target_duration = Some(2);
+        let policy = SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..Default::default() };
+        let mut clients = fetch_clients(false);
+        clients.session = Some(session.clone());
+        let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = snapshots.clone();
+        let timeouts = policy.timeouts.clone();
+        run_hls_origin_resource_retry_loop_with_attempt_prepare(
+            fetch_target(format!("http://{address}/segment")),
+            clients,
+            &policy,
+            &test_log_identity(),
+            move |attempt| {
+                observed.lock().unwrap().push(attempt.timeout);
+                let session = session.clone();
+                let timeouts = timeouts.clone();
+                async move {
+                    // This mutation is controlled by the prepare boundary, after the snapshot.
+                    session.write().await.target_duration = Some(12);
+                    let mut config = timeouts.config();
+                    config.segment = HlsSegmentTimeout::Fixed(Millis::new(150));
+                    timeouts.update(config);
+                    Ok(())
+                }
+                .boxed()
+            },
+            |()| async {}.boxed(),
+            |_response, _attempt, _deadline, ()| async { Ok(()) }.boxed(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let snapshots = snapshots.lock().unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!((snapshots[0].effective_ms, snapshots[0].session_target_duration), (2_000, Some(2)));
+        assert_eq!((snapshots[1].effective_ms, snapshots[1].session_target_duration), (150, Some(12)));
+    }
+
+    #[tokio::test]
+    async fn redirects_keep_the_original_deadline_for_manual_and_automatic_clients() {
+        for manual in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for response in [
+                    "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ] {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    read_request(&mut socket).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            });
+            let result = super::fetch_hls_origin_resource_response_with_timeout(
+                &fetch_target(format!("http://{address}/first")),
+                &fetch_clients(manual),
+                Duration::from_millis(450),
+            )
+            .await;
+            assert!(matches!(result, Err(HlsOriginResourceFetchError::Timeout)), "manual={manual}: {result:?}");
+            server.abort();
+        }
+    }
 }
+
+mod timeout;
+pub use timeout::{HlsOriginTimeoutConfig, HlsOriginTimeoutPolicy, HlsOriginTimeoutSnapshot};

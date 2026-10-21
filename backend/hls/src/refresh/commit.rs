@@ -268,6 +268,10 @@ fn commit_normal_fetched_manifest(
     update_origin_provider_session_headers(session, fetched);
     mark_manifest_acceptance_success(session, fetched, &quality, fetch_finished_at_ms);
     super::short_manifest::record_origin_qualification(session, manifest.segments.len());
+    super::short_manifest::record_target_duration_qualification(
+        session,
+        manifest.target_duration.filter(|duration| *duration > 0),
+    );
     queue_and_render_normal_manifest(session, request, fetch_finished_at_ms);
     Ok((HlsManifestCommitProgressEvidence::CacheTimeline(refresh_timing), true, true))
 }
@@ -442,7 +446,7 @@ fn evaluate_manifest_acceptance_for_commit(
     now_ms: u64,
     mode: HlsManifestCommitAcceptanceMode,
 ) -> Result<HlsManifestOriginQuality, HlsManifestCommitError> {
-    let fetch_context = manifest_fetch_context(request);
+    let fetch_context = manifest_fetch_context(request, session.target_duration);
     match evaluate_manifest_acceptance(session, fetched, timeline, &fetch_context, now_ms, mode) {
         HlsManifestAcceptanceDecision::Accept { quality }
         | HlsManifestAcceptanceDecision::AcceptHostSwitch { quality } => Ok(quality),

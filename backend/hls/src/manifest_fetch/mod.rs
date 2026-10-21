@@ -47,6 +47,9 @@ use self::{
         HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT,
     },
 };
+pub(crate) use self::{
+    model::HlsManifestRecoveryDiagnostics, recovery::retry_hls_origin_manifest_recovery_chain_with_diagnostics,
+};
 #[cfg(test)]
 use crate::timeline::TimelineMapError;
 

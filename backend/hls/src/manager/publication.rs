@@ -18,7 +18,7 @@ use super::{
     HlsTerminalCommitWindow, HlsTerminalLeaseDecision, HlsTerminalMediaPreparationKey,
     HlsTerminalMediaPreparationState, HlsTerminalMediaRequirementOrigin, HlsTerminalPendingCoordinator,
     HlsTerminalTailPreparation, HlsTerminalTailPreparationInput, HlsTransitionMarginMs, ProxySessionId,
-    SegmentFetchPolicy, TransientManifestLeaseBinding, TransientResourceStore, HLS_STATE_CAS_LOCK_RETRIES,
+    TransientManifestLeaseBinding, TransientResourceStore, HLS_STATE_CAS_LOCK_RETRIES,
 };
 use arc_swap::ArcSwap;
 use log::{debug, error, info};
@@ -126,15 +126,23 @@ impl HlsProxyManager {
     }
 
     pub fn with_hls_cache_config_and_secret(config: &HlsCacheConfig, rewrite_secret: &[u8]) -> Self {
-        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, true)
+        Self::with_hls_cache_config_and_secret_enabled(
+            config,
+            rewrite_secret,
+            true,
+            shared::defaults::default_connect_timeout_secs(),
+        )
     }
 
     pub(super) fn with_hls_cache_config_and_secret_enabled(
         config: &HlsCacheConfig,
         rewrite_secret: &[u8],
         enabled: bool,
+        connect_timeout_secs: u32,
     ) -> Self {
-        let segment_fetch_policy = SegmentFetchPolicy::from_config(config);
+        let runtime_config =
+            HlsProxyRuntimeConfig::from_config_with_enabled(config, rewrite_secret, enabled, connect_timeout_secs);
+        let segment_fetch_policy = runtime_config.segment_fetch_policy.clone();
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&config.cache_path)));
@@ -146,7 +154,6 @@ impl HlsProxyManager {
         let lifecycle = Arc::new(HlsLifecycleManager::new());
         let account_overlap_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let gc_policy = GarbageCollectionPolicy::from_config(config);
-        let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(config, rewrite_secret, enabled);
         let gc = Arc::new(HlsGarbageCollector::new_with_metrics(
             Arc::clone(&sessions),
             Arc::clone(&segment_cache),
@@ -895,7 +902,6 @@ impl HlsProxyManager {
         let startup = (runtime.startup.mode != shared::model::HlsStartupMode::Conservative
             && origin_source.archive_reference.is_none())
         .then(|| super::super::HlsSessionStartup {
-            first_data_timeout_ms: runtime.segment_fetch_policy.origin_segment_timeout_ms,
             worker: Arc::downgrade(&self.segment_worker_pool),
             access_leases: Arc::clone(&self.access_leases),
             config: runtime.startup.clone(),

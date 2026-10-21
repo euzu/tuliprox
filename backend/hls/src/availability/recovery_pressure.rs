@@ -89,10 +89,11 @@ pub(super) fn recovery_trigger_budget(
 pub(super) fn hls_recovery_pressure_policy(
     manager: &HlsProxyManager,
     origin_manifest_timeout_ms: u64,
+    target_duration: Option<u32>,
 ) -> HlsRecoveryPressurePolicy {
     HlsRecoveryPressurePolicy {
         burst_plan: manager.manifest_recovery_burst().level.plan(),
-        timing: hls_recovery_timing_policy(manager, origin_manifest_timeout_ms),
+        timing: hls_recovery_timing_policy(manager, origin_manifest_timeout_ms, target_duration),
     }
 }
 

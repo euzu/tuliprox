@@ -32,7 +32,8 @@ use super::{
         ManifestRetryLogKind,
     },
     FetchedOriginManifest, HlsManifestCommitAcceptanceMode, HlsManifestFetchSelection,
-    HlsManifestRecoveryCandidateScoreReport, HlsOriginManifestFetchContext, HlsOriginManifestFetchRequest,
+    HlsManifestRecoveryCandidateScoreReport, HlsManifestRecoveryDiagnostics, HlsOriginManifestFetchContext,
+    HlsOriginManifestFetchRequest,
 };
 use crate::{
     deterministic_conflict::HlsDeterministicTimelineConflict,
@@ -80,11 +81,39 @@ struct HlsManifestRecoveryBurstCollection {
 pub async fn retry_hls_origin_manifest_recovery_chain<T, C, Fut>(
     context: &HlsOriginManifestFetchContext,
     binding: HlsManifestOriginBinding,
+    reject_reason: Option<HlsManifestRejectLogReason>,
+    initial_deterministic_conflict: Option<HlsDeterministicTimelineConflict>,
+    trigger: HlsManifestAcceptanceTrigger,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+    commit: C,
+) -> Result<T, OriginManifestFetchError>
+where
+    C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
+    Fut: Future<Output = Result<T, HlsManifestCommitError>>,
+{
+    retry_hls_origin_manifest_recovery_chain_with_diagnostics(
+        context,
+        binding,
+        reject_reason,
+        initial_deterministic_conflict,
+        trigger,
+        acceptance_mode,
+        commit,
+        &mut HlsManifestRecoveryDiagnostics::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn retry_hls_origin_manifest_recovery_chain_with_diagnostics<T, C, Fut>(
+    context: &HlsOriginManifestFetchContext,
+    binding: HlsManifestOriginBinding,
     mut reject_reason: Option<HlsManifestRejectLogReason>,
     initial_deterministic_conflict: Option<HlsDeterministicTimelineConflict>,
     trigger: HlsManifestAcceptanceTrigger,
     acceptance_mode: HlsManifestCommitAcceptanceMode,
     mut commit: C,
+    diagnostics: &mut HlsManifestRecoveryDiagnostics,
 ) -> Result<T, OriginManifestFetchError>
 where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
@@ -104,7 +133,6 @@ where
     let mut requalifications = 0_u8;
     let mut attempt_index = usize::from(resume);
     let mut attempt_limit = if resume { 2 } else { attempts };
-    let mut completed_candidate_requests = 0_usize;
     while attempt_index < attempt_limit {
         // A materially changed landscape is requalified immediately. Once
         // authorized, that new generation must still receive its complete
@@ -145,12 +173,17 @@ where
             } else {
                 HlsManifestRequalificationWindow::CurrentEpisode(acceptance_deadline)
             },
-            completed_candidate_requests,
+            completed_candidate_requests: diagnostics.candidate_requests(),
         };
-        let candidate_requests_in_attempt = recovery_burst_plan(context, next_attempt_is_full_plan).total_candidates();
         next_attempt_is_full_plan = false;
-        match fetch_and_commit_manifest_recovery_attempt(context, attempt_plan, &mut expected_generation, &mut commit)
-            .await
+        match fetch_and_commit_manifest_recovery_attempt(
+            context,
+            attempt_plan,
+            &mut expected_generation,
+            &mut commit,
+            diagnostics,
+        )
+        .await
         {
             HlsManifestRecoveryAttemptError::Committed(committed) => return Ok(committed),
             HlsManifestRecoveryAttemptError::Requalified(generation) => {
@@ -178,7 +211,6 @@ where
             }
             HlsManifestRecoveryAttemptError::Fetch(err) => return Err(err),
         }
-        completed_candidate_requests = completed_candidate_requests.saturating_add(candidate_requests_in_attempt);
         attempt_index = attempt_index.saturating_add(1);
     }
 
@@ -264,13 +296,22 @@ async fn fetch_and_commit_manifest_recovery_attempt<T, C, Fut>(
     plan: HlsManifestRecoveryAttemptPlan<'_>,
     expected_generation: &mut Option<HlsManifestAcceptanceGeneration>,
     commit: &mut C,
+    diagnostics: &mut HlsManifestRecoveryDiagnostics,
 ) -> HlsManifestRecoveryAttemptError<T>
 where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
     let burst_plan = recovery_burst_plan(context, plan.current_burst_is_full_plan);
-    fetch_and_commit_manifest_recovery_burst_attempt(context, plan, burst_plan, expected_generation, commit).await
+    fetch_and_commit_manifest_recovery_burst_attempt(
+        context,
+        plan,
+        burst_plan,
+        expected_generation,
+        commit,
+        diagnostics,
+    )
+    .await
 }
 
 async fn fetch_and_commit_manifest_recovery_burst_attempt<T, C, Fut>(
@@ -279,6 +320,7 @@ async fn fetch_and_commit_manifest_recovery_burst_attempt<T, C, Fut>(
     burst_plan: HlsManifestRecoveryBurstPlan,
     expected_generation: &mut Option<HlsManifestAcceptanceGeneration>,
     commit: &mut C,
+    diagnostics: &mut HlsManifestRecoveryDiagnostics,
 ) -> HlsManifestRecoveryAttemptError<T>
 where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
@@ -297,6 +339,7 @@ where
         last_fetch_error,
         mut last_reject_reason,
     } = fetch_manifest_recovery_burst_candidates(context, &plan, burst_plan).await;
+    diagnostics.record_attempt(plan.attempt_index + 1, completed_candidates, burst_plan.total_candidates() > 1);
     record_full_manifest_acceptance_burst(
         context,
         episode_generation,
@@ -326,18 +369,18 @@ where
                 });
             }
         };
-    let selection_resumed = match commit_selected_manifest_recovery_candidate(
+    let outcome = commit_manifest_recovery_selection(
         context,
         &plan,
         burst_plan,
         episode_generation,
-        evaluation.acceptance_plan,
-        fetched_candidates,
+        &evaluation,
+        &fetched_candidates,
         completed_candidates,
         commit,
     )
-    .await
-    {
+    .await;
+    let selection_resumed = match outcome {
         HlsSelectedManifestRecoveryCommit::Committed(committed) => {
             return HlsManifestRecoveryAttemptError::Committed(committed);
         }
@@ -383,6 +426,75 @@ where
     HlsManifestRecoveryAttemptError::Fetch(last_fetch_error.unwrap_or(OriginManifestFetchError::RetryExhausted))
 }
 
+/// Try eligible selections from the collected burst. A failed candidate keeps
+/// its manifest evidence, but can no longer be selected for another commit.
+#[allow(clippy::too_many_arguments)]
+async fn commit_manifest_recovery_selection<T, C, Fut>(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+    burst_plan: HlsManifestRecoveryBurstPlan,
+    episode_generation: Option<HlsManifestAcceptanceGeneration>,
+    evaluation: &HlsManifestRecoveryBurstEvaluation,
+    fetched_candidates: &[HlsManifestRecoveryCandidate],
+    completed_candidates: usize,
+    commit: &mut C,
+) -> HlsSelectedManifestRecoveryCommit<T>
+where
+    C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
+    Fut: Future<Output = Result<T, HlsManifestCommitError>>,
+{
+    let mut acceptance_plan = evaluation.acceptance_plan;
+    let mut excluded_candidates = Vec::new();
+    loop {
+        let selected = selected_manifest_candidate(acceptance_plan);
+        let outcome = commit_selected_manifest_recovery_candidate(
+            context,
+            plan,
+            burst_plan,
+            episode_generation,
+            acceptance_plan,
+            fetched_candidates,
+            completed_candidates,
+            commit,
+        )
+        .await;
+        if !matches!(outcome, HlsSelectedManifestRecoveryCommit::Rejected(_))
+            || evaluation.minimum_target_duration.is_none()
+        {
+            return outcome;
+        }
+        let Some((index, _)) = selected else { return outcome };
+        let Some(candidate) = fetched_candidates.iter().find(|candidate| candidate.candidate_index == index) else {
+            return outcome;
+        };
+        let identity = HlsManifestRecoveryCandidateIdentity::from_candidate(
+            index,
+            candidate.report.quality.effective_host.as_deref(),
+            &candidate.fetched.body,
+        );
+        let mut session = context.session.write().await;
+        let Some(generation) = episode_generation else { return outcome };
+        let Some(episode) = session.origin_control.acceptance_episode.as_mut() else { return outcome };
+        if !episode.release_failed_candidate(generation, identity) {
+            return outcome;
+        }
+        excluded_candidates.push(index);
+        acceptance_plan = evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+            preferred_min_target_duration_secs: evaluation.minimum_target_duration,
+            excluded_candidates: &excluded_candidates,
+            full_burst_completed: episode.full_burst_completed,
+            current_burst_is_full_plan: plan.current_burst_is_full_plan,
+            trigger: episode.trigger(),
+            previous_alternative: episode.held_alternative.as_ref(),
+            observations: &evaluation.observations,
+        });
+        if selected_manifest_candidate(acceptance_plan).is_none() {
+            return outcome;
+        }
+        episode.state = manifest_acceptance_state_for_plan(&acceptance_plan);
+    }
+}
+
 async fn hold_manifest_recovery_burst(
     context: &HlsOriginManifestFetchContext,
     episode_generation: Option<HlsManifestAcceptanceGeneration>,
@@ -404,6 +516,7 @@ async fn hold_manifest_recovery_burst(
 
 struct HlsManifestRecoveryBurstEvaluation {
     observations: Vec<HlsManifestCandidateObservation>,
+    minimum_target_duration: Option<shared::model::Secs>,
     acceptance_plan: HlsManifestCommitPlan,
     held_alternative: Option<HlsAlternativeOriginCohort>,
     next_retry_at_ms: u64,
@@ -425,6 +538,30 @@ const fn manifest_acceptance_state_for_plan(plan: &HlsManifestCommitPlan) -> Hls
             HlsManifestAcceptanceState::Holding
         }
     }
+}
+
+async fn qualification_duration_preference(
+    context: &HlsOriginManifestFetchContext,
+    observations: &[HlsManifestCandidateObservation],
+    episode_generation: Option<HlsManifestAcceptanceGeneration>,
+) -> Option<shared::model::Secs> {
+    let mut session = context.session.write().await;
+    if !manifest_acceptance_generation_is_current(&session, episode_generation?) {
+        return None;
+    }
+    for observation in observations {
+        crate::refresh::observe_target_duration(
+            &mut session,
+            observation.target_duration_secs,
+            observation.effective_host.as_deref(),
+        );
+    }
+    session
+        .origin_control
+        .target_duration_qualification
+        .as_ref()
+        .filter(|check| check.result.is_none() && check.minimum.get() > 0)
+        .map(|check| check.minimum)
 }
 
 async fn evaluate_manifest_recovery_burst(
@@ -453,6 +590,7 @@ async fn evaluate_manifest_recovery_burst(
         })
         .collect::<Vec<_>>();
     let observations = candidate_evaluations.iter().map(|(observation, _)| observation.clone()).collect::<Vec<_>>();
+    let minimum_target_duration = qualification_duration_preference(context, &observations, episode_generation).await;
     if plan.current_burst_is_full_plan {
         record_manifest_acceptance_landscape(context, episode_generation, manifest_acceptance_landscape(&observations))
             .await;
@@ -510,6 +648,8 @@ async fn evaluate_manifest_recovery_burst(
     }
     let acceptance_plan = episode_snapshot.as_ref().map_or(HlsManifestCommitPlan::RejectAll, |episode| {
         evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+            preferred_min_target_duration_secs: minimum_target_duration,
+            excluded_candidates: &[],
             full_burst_completed: episode.full_burst_completed,
             current_burst_is_full_plan: plan.current_burst_is_full_plan,
             trigger: episode.trigger,
@@ -526,6 +666,7 @@ async fn evaluate_manifest_recovery_burst(
     update_manifest_acceptance_episode_state(context, episode_generation, next_state).await;
     HlsManifestRecoveryBurstEvaluationOutcome::Continue(Box::new(HlsManifestRecoveryBurstEvaluation {
         observations,
+        minimum_target_duration,
         acceptance_plan,
         held_alternative,
         next_retry_at_ms,
@@ -549,7 +690,7 @@ async fn commit_selected_manifest_recovery_candidate<T, C, Fut>(
     burst_plan: HlsManifestRecoveryBurstPlan,
     episode_generation: Option<HlsManifestAcceptanceGeneration>,
     acceptance_plan: HlsManifestCommitPlan,
-    fetched_candidates: Vec<HlsManifestRecoveryCandidate>,
+    fetched_candidates: &[HlsManifestRecoveryCandidate],
     completed_candidates: usize,
     commit: &mut C,
 ) -> HlsSelectedManifestRecoveryCommit<T>
@@ -561,11 +702,13 @@ where
         return HlsSelectedManifestRecoveryCommit::NotSelected;
     };
     let Some(candidate) =
-        fetched_candidates.into_iter().find(|candidate| candidate.candidate_index == selected_candidate_index)
+        fetched_candidates.iter().find(|candidate| candidate.candidate_index == selected_candidate_index)
     else {
         return HlsSelectedManifestRecoveryCommit::NotSelected;
     };
-    let HlsManifestRecoveryCandidate { candidate_index, fetched, report, .. } = candidate;
+    let candidate_index = candidate.candidate_index;
+    let fetched = candidate.fetched.clone();
+    let report = &candidate.report;
     let candidate_identity = HlsManifestRecoveryCandidateIdentity::from_candidate(
         candidate_index,
         report.quality.effective_host.as_deref(),
@@ -596,7 +739,7 @@ where
     {
         Ok(committed) => {
             complete_manifest_acceptance_episode(context, episode_generation).await;
-            log_manifest_recovery_selected(context, candidate_index, burst_plan.total_candidates(), &report).await;
+            log_manifest_recovery_selected(context, candidate_index, burst_plan.total_candidates(), report).await;
             HlsSelectedManifestRecoveryCommit::Committed(committed)
         }
         Err(HlsManifestCommitError::LocalRepresentationLimit(violation)) => {

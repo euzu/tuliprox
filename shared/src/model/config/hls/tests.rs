@@ -28,7 +28,13 @@ hls_cache:
 "#;
 
     let cfg: ReverseProxyConfigDto = serde_saphyr::from_str(yaml).expect("reverse_proxy should deserialize");
-    assert_eq!(cfg.hls_cache, Some(HlsCacheConfigDto::default()));
+    assert_eq!(
+        cfg.hls_cache,
+        Some(HlsCacheConfigDto {
+            origin_segment_timeout_ms: crate::model::HlsSegmentTimeout::Fixed(Millis::new(10_000)),
+            ..Default::default()
+        })
+    );
 }
 
 #[test]
@@ -235,7 +241,10 @@ fn hls_cache_prepare_rejects_invalid_minimums() {
         ),
         (
             "origin_segment_timeout_ms",
-            HlsCacheConfigDto { origin_segment_timeout_ms: Millis::new(0), ..Default::default() },
+            HlsCacheConfigDto {
+                origin_segment_timeout_ms: crate::model::HlsSegmentTimeout::Fixed(Millis::new(0)),
+                ..Default::default()
+            },
         ),
         ("session_idle_timeout", HlsCacheConfigDto { session_idle_timeout: Secs::new(0), ..Default::default() }),
     ];
@@ -302,4 +311,44 @@ fn hls_strip_config_default_is_segments() {
     let cfg = HlsStripConfigDto::default();
     assert_eq!(cfg.mode, HlsStripMode::Segments);
     assert_eq!(cfg.value, 0);
+}
+
+#[test]
+fn origin_target_duration_defaults_validates_and_roundtrips() {
+    let legacy: HlsCacheConfigDto = serde_json::from_str("{}").unwrap();
+    assert_eq!(legacy.min_origin_target_duration_secs, Secs::new(0));
+    for raw in ["-1", "1.5"] {
+        let json = format!("{{\"min_origin_target_duration_secs\":{raw}}}");
+        assert!(serde_json::from_str::<HlsCacheConfigDto>(&json).is_err());
+    }
+    for seconds in [0, 6] {
+        let mut valid = HlsCacheConfigDto { min_origin_target_duration_secs: Secs::new(seconds), ..Default::default() };
+        valid.prepare().unwrap();
+        let restored: HlsCacheConfigDto = serde_saphyr::from_str(&serde_saphyr::to_string(&valid).unwrap()).unwrap();
+        assert_eq!(restored.min_origin_target_duration_secs, Secs::new(seconds));
+    }
+}
+
+#[test]
+fn segment_timeout_config_contract() {
+    use crate::model::HlsSegmentTimeout;
+    let missing: HlsCacheConfigDto = serde_json::from_str("{}").unwrap();
+    assert_eq!(missing.origin_segment_timeout_ms, HlsSegmentTimeout::Auto);
+    for input in ["\"auto\"", "\"AUTO\"", "1", "10000", "18446744073709551615"] {
+        let json = format!("{{\"origin_segment_timeout_ms\":{input}}}");
+        let value: HlsCacheConfigDto = serde_json::from_str(&json).unwrap();
+        let json_roundtrip: HlsCacheConfigDto = serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap();
+        let yaml_roundtrip: HlsCacheConfigDto =
+            serde_saphyr::from_str(&serde_saphyr::to_string(&value).unwrap()).unwrap();
+        assert_eq!(value, json_roundtrip);
+        assert_eq!(value, yaml_roundtrip);
+    }
+    assert_eq!(serde_json::to_string(&HlsSegmentTimeout::Auto).unwrap(), "\"auto\"");
+    for input in ["0", "-1", "1.5", "null", "\"invalid\"", "true"] {
+        let json = format!("{{\"origin_segment_timeout_ms\":{input}}}");
+        let error = serde_json::from_str::<HlsCacheConfigDto>(&json).unwrap_err().to_string();
+        assert!(error.contains("origin_segment_timeout_ms") && error.contains("positive integer"), "{error}");
+        let yaml = format!("origin_segment_timeout_ms: {input}");
+        assert!(serde_saphyr::from_str::<HlsCacheConfigDto>(&yaml).is_err(), "{input}");
+    }
 }

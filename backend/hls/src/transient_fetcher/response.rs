@@ -133,74 +133,86 @@ fn hls_transient_direct_body(
     });
     let resource_id = resource.id.0.clone();
     let resource_kind = resource.kind;
-    let stream = futures::stream::unfold(
-        (
-            ReaderStream::new(decoded.body),
-            Some(guard),
-            origin_io_guard,
-            finalizer,
-            Box::pin(sleep(hls_client_body_send_deadline())),
-            false,
-        ),
-        move |(mut stream, guard, mut origin_io_guard, mut finalizer, mut send_deadline, finished)| {
-            let log_identity = log_identity.clone();
-            let resource_id = resource_id.clone();
-            async move {
-                if finished {
-                    return None;
-                }
-                let next_chunk = tokio::select! {
-                    () = send_deadline.as_mut() => {
-                        finalizer.finish(HlsTransientDirectStreamOutcome::ClientAborted).await;
-                        return Some((
-                            Err(io::Error::new(io::ErrorKind::TimedOut, "hls client body send timed out")),
-                            (stream, None, None, finalizer, send_deadline, true),
-                        ));
+    // One queued chunk and one pending chunk bound memory. The producer owns
+    // origin resources so its absolute timer runs even if the client never polls.
+    let (chunks_tx, chunks_rx) = tokio::sync::mpsc::channel(1);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let read_guard = guard;
+        let mut origin_io_guard = origin_io_guard;
+        let mut finalizer = finalizer;
+        let mut reader = ReaderStream::with_capacity(decoded.body, 64 * 1024);
+        let mut send_deadline = Box::pin(sleep(hls_client_body_send_deadline()));
+        let mut client_timed_out = false;
+        let result = async {
+            loop {
+                let chunk = tokio::select! {
+                    biased;
+                    () = chunks_tx.closed() => return Ok(false),
+                    () = send_deadline.as_mut() => { client_timed_out = true; return Ok(false); },
+                    () = tokio::time::sleep_until(body_deadline.deadline()) => {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "transient origin transfer deadline exceeded"));
                     }
-                    // Decoder setup is bounded by the absolute attempt deadline before this
-                    // response is built. Once handed to the client, retain the existing
-                    // per-chunk origin-body idle timeout instead of imposing a total-body limit.
-                    next_chunk = tokio::time::timeout(body_deadline.timeout(), stream.next()) => next_chunk,
+                    chunk = reader.next() => chunk,
                 };
-                match next_chunk {
-                    Ok(Some(Ok(chunk))) => {
-                        refresh_hls_client_body_send_deadline(send_deadline.as_mut());
-                        Some((Ok(chunk), (stream, guard, origin_io_guard, finalizer, send_deadline, false)))
+                let Some(chunk) = chunk else { return Ok(true); };
+                let chunk = chunk?;
+                tokio::select! {
+                    biased;
+                    () = chunks_tx.closed() => return Ok(false),
+                    () = send_deadline.as_mut() => { client_timed_out = true; return Ok(false); },
+                    () = tokio::time::sleep_until(body_deadline.deadline()) => {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "transient origin transfer deadline exceeded"));
                     }
-                    Ok(Some(Err(err))) => {
-                        log_hls_resource_body_failure(
-                            &log_identity,
-                            hls_transient_direct_log_context(&resource_id, resource_kind),
-                            attempt,
-                            &err,
-                            body_deadline.timeout().as_millis(),
-                        );
-                        finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
-                        Some((Err(err), (stream, None, None, finalizer, send_deadline, true)))
-                    }
-                    Ok(None) => {
-                        finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
-                        if let Some(guard) = origin_io_guard.take() {
-                            guard.finish_clean().await;
-                        }
-                        None
-                    }
-                    Err(_) => {
-                        let error = io::Error::new(io::ErrorKind::TimedOut, "transient passthrough body timed out");
-                        log_hls_resource_body_failure(
-                            &log_identity,
-                            hls_transient_direct_log_context(&resource_id, resource_kind),
-                            attempt,
-                            &error,
-                            body_deadline.timeout().as_millis(),
-                        );
-                        finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
-                        Some((Err(error), (stream, None, None, finalizer, send_deadline, true)))
-                    }
+                    result = chunks_tx.send(chunk) => if result.is_err() { return Ok(false); },
+                }
+                refresh_hls_client_body_send_deadline(send_deadline.as_mut());
+            }
+        }.await;
+        // Stop origin I/O before lifecycle work or downstream notification.
+        drop(reader);
+        match &result {
+            Ok(true) => {
+                finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
+                if let Some(guard) = origin_io_guard.take() {
+                    guard.finish_clean().await;
                 }
             }
-        },
-    );
+            Ok(false) => finalizer.finish(HlsTransientDirectStreamOutcome::ClientAborted).await,
+            Err(error) => {
+                log_hls_resource_body_failure(
+                    &log_identity,
+                    hls_transient_direct_log_context(&resource_id, resource_kind),
+                    attempt,
+                    error,
+                    body_deadline.timeout().as_millis(),
+                );
+                finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
+            }
+        }
+        drop(origin_io_guard);
+        drop(read_guard);
+        let completion = if client_timed_out {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "hls client body send timed out"))
+        } else {
+            result.map(|_| ())
+        };
+        let _ = completion_tx.send(completion);
+        drop(chunks_tx);
+    });
+    let stream = futures::stream::unfold((chunks_rx, Some(completion_rx)), |(mut chunks, mut completion)| async move {
+        if let Some(chunk) = chunks.recv().await {
+            return Some((Ok(chunk), (chunks, completion)));
+        }
+        if let Some(done) = completion.take() {
+            match done.await {
+                Ok(Err(error)) => return Some((Err(error), (chunks, completion))),
+                Err(_) => return Some((Err(io::Error::other("origin transfer task stopped")), (chunks, completion))),
+                Ok(Ok(())) => {}
+            }
+        }
+        None
+    });
     Body::from_stream(stream)
 }
 

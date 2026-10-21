@@ -327,12 +327,7 @@ async fn create_shared_data(
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     active_provider.bind_event_manager(&event_manager);
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    let rewrite_secret =
-        config.reverse_proxy.as_ref().map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
-    let hls_proxy = Arc::new(HlsProxyManager::from_hls_cache_config_and_secret(
-        config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
-        &rewrite_secret,
-    ));
+    let hls_proxy = Arc::new(HlsProxyManager::from_config(&config, &app_config.encrypt_secret));
     active_provider.set_shared_stream_manager(&shared_stream_manager);
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
@@ -997,6 +992,50 @@ mod tests {
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[tokio::test]
+    async fn cold_start_applies_configured_connect_timeout_to_hls_workers() {
+        use crate::{
+            api::model::create_test_app_state,
+            model::{Config, ProcessTargets, ReverseProxyConfig},
+        };
+        use shared::model::{HlsCacheConfigDto, HlsSegmentTimeout, Millis, ReverseProxyConfigDto};
+        use std::{sync::Arc, time::Duration};
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            storage_dir: directory.path().join("storage").to_string_lossy().into_owned(),
+            backup_dir: Some(directory.path().join("backup").to_string_lossy().into_owned()),
+            connect_timeout_secs: 30,
+            reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                hls_cache: Some(HlsCacheConfigDto {
+                    cache_path: Some(directory.path().join("cache").to_string_lossy().into_owned()),
+                    origin_segment_timeout_ms: HlsSegmentTimeout::Fixed(Millis::new(2_000)),
+                    origin_manifest_timeout_ms: Millis::new(8_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&config.storage_dir).unwrap();
+        let app_config = Arc::clone(&create_test_app_state(config).app_config);
+        let targets =
+            Arc::new(ProcessTargets { enabled: false, inputs: vec![], targets: vec![], target_names: vec![] });
+        let (state, _) = super::create_shared_data(&app_config, &targets).await.unwrap();
+        let policies = [
+            state.hls.proxy.segment_fetch_policy(),
+            state.hls.proxy.segment_worker_pool().policy(),
+            state.hls.proxy.map_worker_pool().policy(),
+        ];
+        for policy in policies {
+            assert_eq!(
+                policy.timeouts.config().connect_ms,
+                30_000,
+                "configured connect timeout must apply before any reload"
+            );
+            assert_eq!(policy.demand_wait_timeout(), Duration::from_millis(405_200));
+        }
+    }
 
     fn temp_state_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();

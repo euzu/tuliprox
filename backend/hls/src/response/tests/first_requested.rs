@@ -178,8 +178,7 @@ async fn headers_only_first_get_keeps_the_claim_until_its_own_prefix_arrives() -
 #[tokio::test]
 async fn headers_only_first_get_times_out_temporarily_and_preserves_the_lease() -> std::io::Result<()> {
     let fixture = FirstRequestFixture::new(shared::model::HlsStartupMode::Optimistic, false, true).await?;
-    fixture.cached.session.write().await.startup.as_mut().expect("startup").first_data_timeout_ms = 25;
-    let failure = match fixture.serve(13, None).await {
+    let failure = match elapse_revision_wait(&fixture.cached, fixture.serve(13, None)).await {
         HlsResourceServeOutcome::Failure(failure) => failure,
         HlsResourceServeOutcome::Ready(_) => panic!("the origin has not supplied a prefix"),
     };
@@ -305,5 +304,65 @@ async fn first_successor_body_failure_is_terminal_for_the_exposed_revision() -> 
         )
         .await
         .is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn revision_wait_uses_session_duration_and_hot_updated_policy_for_each_request() -> std::io::Result<()> {
+    use crate::segment_fetcher::HlsSegmentFetchWorkload;
+    use shared::model::{HlsSegmentTimeout, HlsStartupMode, Millis, Secs};
+    let fixture = FirstRequestFixture::new(HlsStartupMode::Optimistic, false, true).await?;
+    fixture.cached.session.write().await.target_duration = Some(12);
+    let initial_wait = fixture
+        .cached
+        .manager
+        .segment_fetch_policy()
+        .demand_wait_timeout_for_session(HlsSegmentFetchWorkload::EncryptedWithKey, Some(12));
+    tokio::time::pause();
+    let initial = fixture.serve(13, None);
+    tokio::pin!(initial);
+    assert!(futures::poll!(initial.as_mut()).is_pending());
+    advance(Duration::from_secs(11)).await;
+    assert!(futures::poll!(initial.as_mut()).is_pending(), "AUTO 12s must not inherit the startup 10s fallback");
+
+    // Updating a live session must affect the next request, while this request
+    // retains the budget with which it entered the revision wait.
+    fixture.cached.manager.update_origin_preferences(
+        Secs::new(0),
+        HlsSegmentTimeout::Fixed(Millis::new(20_000)),
+        3_000,
+    );
+    fixture.cached.session.write().await.target_duration = Some(2);
+    advance(initial_wait.checked_sub(Duration::from_secs(12)).expect("the initial wait must exceed 12s")).await;
+    assert!(futures::poll!(initial.as_mut()).is_pending());
+    advance(Duration::from_secs(2)).await;
+    let std::task::Poll::Ready(initial_outcome) = futures::poll!(initial.as_mut()) else {
+        panic!("the running request must retain its original deadline after the policy update");
+    };
+    assert!(matches!(
+        initial_outcome,
+        HlsResourceServeOutcome::Failure(HlsResourceServeFailure::TemporaryUnavailable { .. })
+    ));
+
+    let updated_wait = fixture
+        .cached
+        .manager
+        .segment_fetch_policy()
+        .demand_wait_timeout_for_session(HlsSegmentFetchWorkload::EncryptedWithKey, Some(2));
+    assert!(updated_wait > initial_wait);
+    let updated = fixture.serve(14, None);
+    tokio::pin!(updated);
+    assert!(futures::poll!(updated.as_mut()).is_pending());
+    advance(updated_wait.checked_sub(Duration::from_secs(1)).expect("the updated wait must exceed 1s")).await;
+    assert!(futures::poll!(updated.as_mut()).is_pending(), "the existing session must use the updated 20s policy");
+    advance(Duration::from_secs(2)).await;
+    let std::task::Poll::Ready(updated_outcome) = futures::poll!(updated.as_mut()) else {
+        panic!("the new request must expire at the updated policy deadline");
+    };
+    assert!(matches!(
+        updated_outcome,
+        HlsResourceServeOutcome::Failure(HlsResourceServeFailure::TemporaryUnavailable { .. })
+    ));
+    tokio::time::resume();
     Ok(())
 }

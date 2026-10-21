@@ -716,7 +716,6 @@ mod tests {
         }
         session.startup = Some(crate::HlsSessionStartup {
             config: config.clone(),
-            first_data_timeout_ms: 10_000,
             worker: std::sync::Arc::downgrade(&worker),
             access_leases: std::sync::Arc::new(tokio::sync::RwLock::new(crate::HlsAccessLeaseStore::default())),
             revisions,

@@ -73,6 +73,7 @@ mod short_manifest;
 mod startup_representation;
 mod support;
 mod switch_staging;
+mod target_duration;
 mod timing;
 mod transient;
 
@@ -149,7 +150,6 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
         revisions[&0].revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
         session.startup = Some(crate::HlsSessionStartup {
             config: config.clone(),
-            first_data_timeout_ms: 10000,
             worker: std::sync::Weak::new(),
             access_leases: Arc::new(tokio::sync::RwLock::new(crate::HlsAccessLeaseStore::default())),
             revisions,

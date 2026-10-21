@@ -26,6 +26,10 @@ impl HlsSegmentFetchWorkload {
 
 impl SegmentFetchPolicy {
     pub fn from_config(config: &HlsCacheConfig) -> Self {
+        Self::from_config_with_connect_timeout(config, shared::defaults::default_connect_timeout_secs())
+    }
+
+    pub(crate) fn from_config_with_connect_timeout(config: &HlsCacheConfig, connect_timeout_secs: u32) -> Self {
         let postprocess_enabled = (config.segment_repair.max_level != HlsSegmentRepairMode::Off
             && config.segment_repair.apply_to_first_segments > 0)
             || config.segment_repair.corrupt_segment_watchdog.mode.is_enabled();
@@ -33,7 +37,11 @@ impl SegmentFetchPolicy {
             max_global_segment_fetches: config.max_concurrent_segment_fetches_global.max(1),
             max_session_segment_fetches: config.max_concurrent_segment_fetches_per_session.max(1),
             max_prefetch_queue_depth: config.max_segments_prefetch,
-            origin_segment_timeout_ms: config.origin_segment_timeout_ms.get().max(1),
+            timeouts: crate::HlsOriginTimeoutPolicy::new(crate::HlsOriginTimeoutConfig {
+                segment: config.origin_segment_timeout_ms,
+                manifest_ms: config.origin_manifest_timeout_ms.get(),
+                connect_ms: u64::from(connect_timeout_secs) * 1_000,
+            }),
             effective_repair_postprocess_timeout_ms: if postprocess_enabled {
                 config.segment_repair.postprocess_timeout_ms.get().max(100)
             } else {
@@ -51,8 +59,14 @@ impl SegmentFetchPolicy {
     /// for recovery ETA, while `workload_budget_ms` remains the hard wait bound.
     /// Configured protection timeouts above the conservative fallback are not
     /// predictions of successful-object latency.
-    pub fn recovery_object_eta_ms(&self) -> u64 {
-        self.origin_segment_timeout_ms
+    pub fn recovery_object_eta_ms(&self) -> u64 { self.recovery_object_eta_ms_for(None) }
+
+    pub fn recovery_object_eta_ms_for(&self, target_duration: Option<u32>) -> u64 {
+        let config = self.timeouts.config();
+        config
+            .snapshot(crate::HlsResourceFetchKind::Segment, target_duration)
+            .effective_ms
+            .max(config.manifest_ms)
             .min(DEFAULT_ORIGIN_SEGMENT_TIMEOUT_MS)
             .saturating_add(self.effective_repair_postprocess_timeout_ms.min(DEFAULT_REPAIR_POSTPROCESS_TIMEOUT_MS))
             .saturating_add(SEGMENT_FETCH_SCHEDULING_MARGIN_MS)

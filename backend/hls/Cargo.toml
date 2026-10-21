@@ -43,6 +43,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros
 tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 url.workspace = true
 http-body-util = "0.1.5"
+hyper-util = { version = "=0.1.20", features = ["client-legacy"] }
 
 [dev-dependencies]
 rand = "0.9.5"
@@ -53,3 +54,6 @@ async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflat
 filetime = "0.2.29"
 flate2 = "1.1.9"
 brotli.workspace = true
+
+rcgen = "0.14.9"
+tokio-rustls = "0.26.6"

@@ -79,7 +79,7 @@ async fn origin_byterange_segment_fetch_uses_http_range_and_stores_logical_segme
     let policy = SegmentFetchPolicy {
         retry_delays_ms: [0, 0, 0, 0, 0],
         retry_jitter_max_ms: 0,
-        origin_segment_timeout_ms: 1_000,
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(1_000, 1_000),
         ..SegmentFetchPolicy::default()
     };
     let store = HlsSessionStore::new();
@@ -121,4 +121,43 @@ async fn origin_byterange_segment_fetch_uses_http_range_and_stores_logical_segme
     let segment = session.segments.get(&0).expect("segment");
     assert!(matches!(segment.status, SegmentCacheStatus::Ready { content_length: 5, .. }));
     assert!(context.segment_cache.metadata(&segment.cache_key).await.expect("metadata").is_some());
+}
+
+#[tokio::test]
+async fn switch_map_uses_manifest_budget_while_segment_uses_segment_budget() {
+    use crate::segment_fetcher::{stage_hls_switch_resource, HlsSwitchResourceKind};
+    let server = super::spawn_segment_server(350).await;
+    let temp = tempfile::tempdir().unwrap();
+    let policy = SegmentFetchPolicy {
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(100, 1_000),
+        retry_delays_ms: [0; 5],
+        retry_jitter_max_ms: 0,
+        ..Default::default()
+    };
+    let (_, context, _) = super::fetch_context(&server, &temp, &policy).await;
+    let key = context.session.read().await.segments[&1].cache_key.clone();
+    let staged = stage_hls_switch_resource(
+        &context,
+        &policy,
+        key.clone(),
+        format!("{}/map.mp4", server.base_url),
+        None,
+        HlsSwitchResourceKind::Map,
+    )
+    .await
+    .unwrap();
+    assert!(staged.size > 0);
+    context.segment_cache.remove_staged(staged).await.unwrap();
+    let result = stage_hls_switch_resource(
+        &context,
+        &policy,
+        key.clone(),
+        format!("{}/segment.ts", server.base_url),
+        None,
+        HlsSwitchResourceKind::Segment,
+    )
+    .await;
+    assert!(matches!(result, Err(crate::HlsOriginResourceFetchError::Timeout)));
+    assert!(context.segment_cache.metadata(&key).await.unwrap().is_none());
+    assert!(!context.segment_cache.has_active_temp_files());
 }

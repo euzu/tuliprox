@@ -1,0 +1,4 @@
+{
+  // Keep the published third-party dependency byte-for-byte apart from its documented patch.
+  "ignores": ["vendor/**"]
+}

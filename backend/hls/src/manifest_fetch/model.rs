@@ -187,6 +187,35 @@ pub enum HlsManifestFetchSelection {
     Burst,
 }
 
+/// Work performed by a recovery chain, including chains that selected no manifest.
+#[derive(Default)]
+pub(crate) struct HlsManifestRecoveryDiagnostics {
+    attempts: usize,
+    candidate_requests: usize,
+    selection: Option<HlsManifestFetchSelection>,
+}
+
+impl HlsManifestRecoveryDiagnostics {
+    pub(super) const fn candidate_requests(&self) -> usize { self.candidate_requests }
+
+    pub(super) fn record_attempt(&mut self, attempts: usize, candidate_requests: usize, burst: bool) {
+        self.attempts = attempts;
+        self.candidate_requests = self.candidate_requests.saturating_add(candidate_requests);
+        self.selection =
+            Some(if burst { HlsManifestFetchSelection::Burst } else { HlsManifestFetchSelection::Recovery });
+    }
+
+    pub(crate) fn include_initial_fetch(&self, initial: &FetchedOriginManifest, selected: &mut FetchedOriginManifest) {
+        selected.attempts = if self.selection.is_some() {
+            self.attempts.saturating_add(initial.attempts.saturating_sub(1))
+        } else {
+            initial.attempts
+        };
+        selected.candidate_requests = self.candidate_requests.saturating_add(initial.candidate_requests);
+        selected.selection = self.selection.unwrap_or(initial.selection);
+    }
+}
+
 impl HlsManifestFetchSelection {
     pub const fn as_log_value(self) -> &'static str {
         match self {

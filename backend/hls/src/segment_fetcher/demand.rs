@@ -84,7 +84,11 @@ impl HlsSegmentWorkerPool {
 
         self.wake_scheduler(context.clone(), now_ms).await;
 
-        let wait_timeout = self.runtime.load().policy.demand_wait_timeout_for(workload);
+        let wait_timeout = self
+            .runtime
+            .load()
+            .policy
+            .demand_wait_timeout_for_session(workload, context.session.read().await.target_duration);
         if timeout(wait_timeout, notifier.notified()).await.is_err() {
             return SegmentDemandFetchOutcome::TimedOut;
         }

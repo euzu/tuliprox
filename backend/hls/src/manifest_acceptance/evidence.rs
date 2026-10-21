@@ -180,6 +180,7 @@ pub struct HlsManifestCandidateObservation {
     pub local_sequence_relation: Option<HlsHostLocalSequenceRelation>,
     pub resource_timeline_evidence: HlsResourceTimelineEvidence,
     pub timeline_fingerprint: HlsManifestTimelineFingerprint,
+    pub target_duration_secs: Option<u32>,
     pub manifest_fetch_elapsed_ms: u64,
     pub switch_segment_readiness: HlsSwitchSegmentReadiness,
     pub committed_content_anchor: HlsCommittedContentAnchorEvidence,
@@ -243,6 +244,8 @@ pub enum HlsManifestCommitPlan {
 
 #[derive(Clone, Copy)]
 pub struct HlsManifestAcceptanceInput<'a> {
+    pub preferred_min_target_duration_secs: Option<shared::model::Secs>,
+    pub excluded_candidates: &'a [usize],
     pub full_burst_completed: bool,
     pub current_burst_is_full_plan: bool,
     pub trigger: HlsManifestAcceptanceTrigger,

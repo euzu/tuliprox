@@ -142,6 +142,7 @@ impl HlsObservedFill {
             self.revision.revision().complete(CachedSegmentMetadata { path: self.path.clone(), size: self.bytes });
             self.revision.revision().replay.lock_unpoisoned().take();
         }
+        self.deadline = Instant::now() + self.context.segment_repair.postprocess_timeout();
         self.repair_permit = Some(self.budget.wait_for_repair(self.deadline).await?);
         Ok(())
     }
@@ -171,19 +172,14 @@ pub(super) async fn commit_startup_response(
     let result = async {
         let chunks_owner = Arc::clone(&observed);
         let finish_owner = Arc::clone(&observed);
-        let stream = tokio_util::io::ReaderStream::new(response.body)
-            .then(move |chunk| {
-                let observed = Arc::clone(&chunks_owner);
-                async move {
-                    let chunk = chunk?;
-                    observed.lock().await.observe(&chunk).await?;
-                    Ok::<_, std::io::Error>(chunk)
-                }
-            })
-            .chain(futures::stream::once(async move {
-                finish_owner.lock().await.finish().await?;
-                Ok::<_, std::io::Error>(bytes::Bytes::new())
-            }));
+        let stream = tokio_util::io::ReaderStream::new(response.body).then(move |chunk| {
+            let observed = Arc::clone(&chunks_owner);
+            async move {
+                let chunk = chunk?;
+                observed.lock().await.observe(&chunk).await?;
+                Ok::<_, std::io::Error>(chunk)
+            }
+        });
         let reader = Box::pin(tokio_util::io::StreamReader::new(stream.boxed()));
         #[cfg(test)]
         context
@@ -200,6 +196,7 @@ pub(super) async fn commit_startup_response(
                 deadline,
                 repair_context.clone(),
                 Some(Arc::clone(&reservation)),
+                Some(Box::pin(async move { finish_owner.lock().await.finish().await })),
             )
             .await
             .map_err(|error| SegmentFetchError::cache_body(&error))?;
@@ -234,7 +231,7 @@ pub(super) async fn commit_startup_response(
                 .publish_processed_revision_with_budget(
                     &revision.revision().key,
                     &metadata.path,
-                    deadline,
+                    Instant::now() + context.segment_repair.postprocess_timeout(),
                     Some(Arc::clone(&reservation)),
                 )
                 .await

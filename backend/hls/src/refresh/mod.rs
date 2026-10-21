@@ -51,6 +51,7 @@ use tuliprox_core::model::{AppConfig, HlsManifestRecoveryBurstConfig, ReversePro
 mod commit;
 mod failure;
 mod short_manifest;
+pub(crate) use short_manifest::observe_target_duration;
 mod switch_staging;
 mod timing;
 
@@ -442,6 +443,7 @@ fn mark_origin_refresh_started_in_session(
         };
     }
     short_manifest::prepare_qualification_refresh(request, session, fetch_started_at_ms);
+    short_manifest::prepare_target_duration_qualification(request, session);
     if let Some(origin_io) = request.origin_io.as_mut() {
         origin_io.started_generation = Some(session.start_origin_work());
     }
@@ -914,7 +916,10 @@ impl HlsManifestRefreshCompletionDiagnostic {
     }
 }
 
-fn manifest_fetch_context(request: &OriginRefreshRequest) -> HlsOriginManifestFetchContext {
+fn manifest_fetch_context(
+    request: &OriginRefreshRequest,
+    target_duration: Option<u32>,
+) -> HlsOriginManifestFetchContext {
     HlsOriginManifestFetchContext {
         app_config: Arc::clone(&request.app_config),
         session: Arc::clone(&request.session),
@@ -927,7 +932,11 @@ fn manifest_fetch_context(request: &OriginRefreshRequest) -> HlsOriginManifestFe
         origin_manifest_timeout_ms: request.origin_manifest_timeout_ms,
         manifest_recovery_burst: request.manifest_recovery_burst.clone(),
         retry_policy: request.retry_policy.clone(),
-        recovery_timing_policy: hls_recovery_timing_policy(&request.hls_proxy, request.origin_manifest_timeout_ms),
+        recovery_timing_policy: hls_recovery_timing_policy(
+            &request.hls_proxy,
+            request.origin_manifest_timeout_ms,
+            target_duration,
+        ),
         acceptance_timing_seed: request.acceptance_directive.timing_seed,
     }
 }
@@ -952,7 +961,7 @@ async fn fetch_and_commit_manifest_with_policy(
         };
         (session.established_manifest_recovery_binding(), trigger)
     };
-    let fetch_context = manifest_fetch_context(request);
+    let fetch_context = manifest_fetch_context(request, request.session.read().await.target_duration);
     if let Some(result) = short_manifest::resume_qualification(request, &fetch_context).await {
         return result;
     }

@@ -280,7 +280,7 @@ async fn recovery_binding_supersession_is_discarded_without_failure_signal() {
     assert_eq!(origin.requests.lock().await.len(), requests_before_supersession);
 
     let Err(error) = super::super::recover_manifest_for_request(
-        &manifest_fetch_context(&verification_request),
+        &manifest_fetch_context(&verification_request, None),
         &verification_request,
         super::super::HlsManifestRecoveryPath {
             binding: baseline_binding,

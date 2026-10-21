@@ -148,15 +148,16 @@ fn acceptance_directive_for_progress(
 pub fn hls_recovery_timing_policy(
     manager: &HlsProxyManager,
     origin_manifest_timeout_ms: u64,
+    target_duration: Option<u32>,
 ) -> HlsRecoveryTimingPolicy {
     let segment_policy = manager.segment_fetch_policy();
     HlsRecoveryTimingPolicy::new(
         HlsOperationTimeoutMs::from_millis(origin_manifest_timeout_ms),
         HlsOperationTimeoutMs::from_millis(
-            segment_policy.workload_budget_ms(HlsSegmentFetchWorkload::EncryptedWithKey),
+            segment_policy.workload_budget_ms_for(HlsSegmentFetchWorkload::EncryptedWithKey, target_duration),
         ),
         HlsRecoveryEtaMs::from_millis(bounded_manifest_request_eta_ms(origin_manifest_timeout_ms)),
-        HlsRecoveryEtaMs::from_millis(segment_policy.recovery_object_eta_ms()),
+        HlsRecoveryEtaMs::from_millis(segment_policy.recovery_object_eta_ms_for(target_duration)),
     )
 }
 
@@ -178,7 +179,11 @@ pub async fn hls_startup_admission_allows_snapshot(
         )
     };
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
-    let pressure_policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let pressure_policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        session.read().await.target_duration,
+    );
     let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
         manifest: snapshot,
         ready_timeline: &ready_timeline,
@@ -251,7 +256,11 @@ pub async fn hls_manifest_acceptance_directive_for_session(
     let Some(owner_key) = ctx.hls_proxy.availability_reevaluation_owner_key(session, proxy_session_id).await else {
         return HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded;
     };
-    let policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        session.read().await.target_duration,
+    );
     let state_access = retry_availability_state_access(|| {
         ctx.hls_proxy.with_critical_handoff_state(session, |leases, session| {
             let evidence = evaluate_and_commit_session_recovery_pressure_in_snapshot(
@@ -289,7 +298,11 @@ async fn hls_manifest_acceptance_directive_for_reevaluation(
     if !ctx.hls_proxy.availability_reevaluation_session_is_current(session, owner_key).await {
         return HlsAvailabilityReevaluationAttempt::Superseded;
     }
-    let policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        session.read().await.target_duration,
+    );
     let state_access = retry_availability_state_access(|| {
         ctx.hls_proxy.with_critical_handoff_state(session, |leases, session| {
             if session.proxy_session_id != owner_key.proxy_session_id

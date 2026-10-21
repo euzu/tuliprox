@@ -38,8 +38,13 @@ pub(super) async fn serve_hls_revision_outcome(
     let Some(marker) = &context.media_activity_marker else {
         return HlsResourceServeOutcome::Failure(HlsResourceServeFailure::Expired);
     };
-    let deadline =
-        remaining_wait_deadline(context.now_ms, marker.manager.segment_fetch_policy().origin_segment_timeout_ms);
+    let deadline = remaining_wait_deadline(
+        context.now_ms,
+        marker.manager.segment_fetch_policy().workload_budget_ms_for(
+            crate::segment_fetcher::HlsSegmentFetchWorkload::EncryptedWithKey,
+            session.read().await.target_duration,
+        ),
+    );
     match tokio::time::timeout_at(
         deadline,
         prepare_hls_revision_response(session, segment_file, range, context, deadline),
@@ -63,14 +68,13 @@ async fn prepare_hls_revision_response(
     let Some(marker) = &context.media_activity_marker else {
         return HlsResourceServeOutcome::Failure(HlsResourceServeFailure::Expired);
     };
-    let (lifetime, wait_ms) = {
+    let lifetime = {
         let session = session.read().await;
         let Some(startup) = &session.startup else {
             return HlsResourceServeOutcome::Failure(HlsResourceServeFailure::Expired);
         };
-        (Duration::from_secs(startup.config.max_progressive_reader_lifetime_secs.get()), startup.first_data_timeout_ms)
+        Duration::from_secs(startup.config.max_progressive_reader_lifetime_secs.get())
     };
-    let deadline = deadline.min(remaining_wait_deadline(context.now_ms, wait_ms));
     let (revision, metadata) = match resolve_revision_metadata(
         marker,
         segment_file,
@@ -143,7 +147,10 @@ async fn prepare_hls_revision_response(
 
 fn remaining_wait_deadline(requested_at_ms: u64, wait_ms: u64) -> tokio::time::Instant {
     let elapsed_ms = current_time_millis().saturating_sub(requested_at_ms);
-    tokio::time::Instant::now() + Duration::from_millis(wait_ms.saturating_sub(elapsed_ms))
+    {
+        let now = tokio::time::Instant::now();
+        now.checked_add(Duration::from_millis(wait_ms.saturating_sub(elapsed_ms))).unwrap_or(now)
+    }
 }
 
 async fn resolve_revision_metadata(

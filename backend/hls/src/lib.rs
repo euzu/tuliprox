@@ -292,8 +292,8 @@ pub(crate) use self::{
         build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
         retry_after_secs_from_ms, run_hls_origin_resource_retry_loop_with_attempt_prepare,
         HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
-        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt, HlsResourceFetchKind,
-        HlsResourceFetchSource,
+        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsOriginTimeoutConfig, HlsOriginTimeoutPolicy,
+        HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource,
     },
     segment_fetcher::{HlsSegmentWorkerPool, SegmentFetchContext, SegmentFetchPolicy},
     segment_repair::{

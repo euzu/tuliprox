@@ -569,8 +569,7 @@ async fn partial_revision_retry_recovers_same_get_and_snapshot_without_playlist_
 async fn retry_pending_is_503_without_ending_the_lease() -> std::io::Result<()> {
     let fixture = CachedSegmentFixture::new(b"retry-body".to_vec()).await;
     failed_optimistic_revision(&fixture, 6).await?;
-    fixture.session.write().await.startup.as_mut().expect("startup").first_data_timeout_ms = 25;
-    let failure = match fixture.serve(None).await {
+    let failure = match elapse_revision_wait(&fixture, fixture.serve(None)).await {
         HlsResourceServeOutcome::Failure(failure) => failure,
         HlsResourceServeOutcome::Ready(_) => panic!("retry must wait"),
     };

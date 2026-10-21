@@ -300,7 +300,6 @@ fn install_fast_start(session: &mut HlsSession) {
     };
     session.startup = Some(crate::HlsSessionStartup {
         config: config.clone(),
-        first_data_timeout_ms: 1_000,
         worker: std::sync::Weak::new(),
         access_leases: Arc::new(RwLock::new(HlsAccessLeaseStore::default())),
         revisions: std::collections::BTreeMap::new(),

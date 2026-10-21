@@ -396,7 +396,7 @@ async fn expired_acceptance_deadline_still_completes_first_beast_burst_without_f
         .expect("deadline test origin entry");
     request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
     let target_url = request.origin_entry.url().clone();
-    let mut context = manifest_fetch_context(&request);
+    let mut context = manifest_fetch_context(&request, None);
     let mut expired_after_full_burst = test_recovery_timing_policy(0);
     expired_after_full_burst.evaluation_eta = HlsRecoveryEtaMs::default();
     expired_after_full_burst.commit_eta = HlsRecoveryEtaMs::default();
@@ -582,7 +582,7 @@ async fn material_reduced_retry_timeline_change_starts_one_new_complete_configur
     let target_url =
         Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).expect("requalification target");
     let attempts = request.retry_policy.attempt_count();
-    let context = manifest_fetch_context(&request);
+    let context = manifest_fetch_context(&request, None);
 
     let result = retry_hls_origin_manifest_recovery_chain(
         &context,
@@ -633,7 +633,7 @@ async fn material_change_in_last_reduced_slot_still_runs_new_episode_full_burst(
     request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
     let target_url = Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url))
         .expect("last-slot requalification target");
-    let context = manifest_fetch_context(&request);
+    let context = manifest_fetch_context(&request, None);
 
     let result = retry_hls_origin_manifest_recovery_chain(
         &context,
@@ -793,7 +793,7 @@ async fn critical_single_alternative_full_acceptance_commits_verified_new_origin
 
     let plan = request.manifest_recovery_burst.level.plan();
     let target_url = request.origin_entry.url().clone();
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
     let committed = retry_hls_origin_manifest_recovery_chain(
         &fetch_context,
         test_manifest_origin_binding(target_url.clone()),

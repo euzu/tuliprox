@@ -27,7 +27,8 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tuliprox_parser::hls::origin_manifest::{
-    parse_origin_manifest_timeline, parse_origin_media_manifest, OriginManifestParseOutcome, ParsedOriginManifest,
+    parse_manifest_semantics, parse_origin_manifest_timeline, parse_origin_media_manifest, OriginManifestParseOutcome,
+    ParsedOriginManifest,
 };
 use url::Url;
 
@@ -141,22 +142,40 @@ fn deterministic_conflict_receipt_is_current_for_session(
         && receipt.pinned_host_generation == session.origin_epoch
 }
 
+pub(super) struct HlsManifestCandidateFingerprint {
+    pub(super) timeline: HlsManifestTimelineFingerprint,
+    pub(super) has_switch_segment: bool,
+    pub(super) emergency_evidence: HlsEmergencyAcceptanceEvidence,
+    pub(super) target_duration_secs: Option<u32>,
+}
+
 pub(super) fn build_manifest_timeline_fingerprint(
     body: &str,
     final_manifest_url: &str,
-) -> (HlsManifestTimelineFingerprint, bool, HlsEmergencyAcceptanceEvidence) {
+) -> HlsManifestCandidateFingerprint {
     match parse_origin_media_manifest(body, final_manifest_url) {
         OriginManifestParseOutcome::Normal(manifest) => {
-            let has_switch_segment = !manifest.segments.is_empty();
-            let emergency_evidence = emergency_manifest_evidence(&manifest);
-            (fingerprint_parsed_manifest(&manifest, body, final_manifest_url), has_switch_segment, emergency_evidence)
+            let target_duration_secs = (!parse_manifest_semantics(body).window_policy().preserves_full_manifest())
+                .then_some(manifest.target_duration.filter(|duration| *duration > 0))
+                .flatten();
+            HlsManifestCandidateFingerprint {
+                timeline: fingerprint_parsed_manifest(&manifest, body, final_manifest_url),
+                has_switch_segment: !manifest.segments.is_empty(),
+                emergency_evidence: emergency_manifest_evidence(&manifest),
+                target_duration_secs,
+            }
         }
         OriginManifestParseOutcome::TransientPassthrough { .. } => {
             let (fingerprint, _has_media_uri) = fingerprint_transient_manifest(body, final_manifest_url);
             // Cross-host transient manifests cannot use the normal typed timeline/MAP staging contract. They remain
             // valid on the pinned host, but an alternative host is not acceptance-ready until a dedicated typed
             // transient receipt exists.
-            (fingerprint, false, HlsEmergencyAcceptanceEvidence::INCOMPATIBLE)
+            HlsManifestCandidateFingerprint {
+                timeline: fingerprint,
+                has_switch_segment: false,
+                emergency_evidence: HlsEmergencyAcceptanceEvidence::INCOMPATIBLE,
+                target_duration_secs: None,
+            }
         }
     }
 }

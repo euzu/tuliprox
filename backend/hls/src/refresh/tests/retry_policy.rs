@@ -1472,7 +1472,7 @@ async fn shared_initial_manifest_caps_retry_after_at_half_target_duration() {
         request.origin_entry =
             LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url)).expect("entry url");
         request.use_manual_redirects = use_manual_redirects;
-        let context = super::manifest_fetch_context(&request);
+        let context = super::manifest_fetch_context(&request, None);
         let started_at = std::time::Instant::now();
 
         let fetched = tokio::time::timeout(

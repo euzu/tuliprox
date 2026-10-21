@@ -62,6 +62,7 @@ struct HlsLeaseCutoverStateSnapshot {
     media_readiness_generation: u64,
     last_media_progress_at_ms: Option<u64>,
     target_duration_ms: u64,
+    session_target_duration: Option<u32>,
     observed_latency: HlsObservedRecoveryLatency,
 }
 
@@ -117,7 +118,11 @@ fn evaluate_lease_terminal_cutover(
             now_ms.saturating_sub(last_progress_at_ms) >= publication_late_after_ms(state.target_duration_ms)
         });
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
-    let pressure_policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let pressure_policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        state.session_target_duration,
+    );
     let recovery_trigger_budget =
         recovery_trigger_budget(pressure_policy, manifest.target_duration_ms, workload, state.observed_latency);
     let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
@@ -352,6 +357,7 @@ async fn snapshot_lease_cutover_state(
         media_readiness_generation: session.activity.media_readiness_generation,
         last_media_progress_at_ms: session.origin_control.last_media_progress_at_ms,
         target_duration_ms: session.origin_control.target_duration_snapshot_ms.unwrap_or(manifest_target_duration_ms),
+        session_target_duration: session.target_duration,
         observed_latency: session.origin_control.recovery_samples.latency_snapshot(),
     }
 }

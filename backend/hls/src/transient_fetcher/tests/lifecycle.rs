@@ -145,6 +145,13 @@ async fn dropping_direct_segment_body_is_client_abort_without_state_transition()
     assert_eq!(fixture.resource.access.active_readers(), 1);
 
     drop(response);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.resource.access.active_readers() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("producer releases the aborted origin independently");
 
     assert_eq!(fixture.segment_failure_count().await, 1);
     assert_eq!(fixture.resource.access.active_readers(), 0);
@@ -232,10 +239,9 @@ async fn direct_stream_decoder_failure_aborts_body_without_origin_retry() {
 }
 
 #[tokio::test]
-async fn direct_stream_refreshes_origin_body_idle_deadline_after_each_chunk() {
+async fn direct_stream_chunks_do_not_extend_absolute_origin_deadline() {
     const BODY_IDLE_TIMEOUT_MS: u64 = 500;
     let chunks = [b"slow-".to_vec(), b"but-".to_vec(), b"continuous-".to_vec(), b"body".to_vec()];
-    let expected = chunks.concat();
     let origin = spawn_test_origin_in_chunks(
         "200 OK",
         vec![("Content-Type", "application/octet-stream")],
@@ -253,10 +259,7 @@ async fn direct_stream_refreshes_origin_body_idle_deadline_after_each_chunk() {
     .expect("direct response setup succeeds");
     let response = direct_client_response(decoded, TransientResourceKind::Key);
 
-    assert_eq!(
-        to_bytes(response.into_body(), usize::MAX).await.expect("progressing body outlives total timeout"),
-        expected
-    );
+    assert!(to_bytes(response.into_body(), usize::MAX).await.is_err(), "chunks must not reset the deadline");
     assert_eq!(origin.requests.lock().await.len(), 1);
 }
 
@@ -364,4 +367,21 @@ async fn transient_origin_io_guard_drop_under_lock_contention_decrements_work() 
         1,
         "deferred cleanup must decrement active_origin_work_count under contention"
     );
+}
+
+#[tokio::test]
+async fn direct_stream_deadline_releases_origin_without_downstream_polling() {
+    let origin =
+        spawn_test_origin("200 OK", vec![("Content-Type", "application/octet-stream")], vec![b'x'; 512 * 1024]).await;
+    let url = format!("{}/segment.ts", origin.base_url);
+    let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, url.clone());
+    let decoded = fetch_direct_decoded_with_timeout(url, TransientResourceKind::Segment, None, 250).await.unwrap();
+    let response = fixture.response(decoded);
+    // Deliberately retain an unpolled body. Bounded backpressure must not retain
+    // the origin reader, its provider guard or its lifecycle slot past timeout.
+    fixture.wait_for_segment_failure_count(1).await;
+    assert_eq!(fixture.resource.access.active_readers(), 0);
+    assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
+    assert_eq!(fixture.segment_failure_count().await, 1);
+    assert_eq!(origin.requests.lock().await.len(), 1);
 }

@@ -7,7 +7,7 @@
 
 use super::{
     current_time_millis,
-    fingerprint::build_manifest_timeline_fingerprint,
+    fingerprint::{build_manifest_timeline_fingerprint, HlsManifestCandidateFingerprint},
     recovery::{
         acceptance_attempt_may_start, HlsManifestRecoveryAttemptPlan, HlsManifestRecoveryCandidate,
         HlsManifestRequalificationWindow,
@@ -67,6 +67,21 @@ pub(super) async fn begin_manifest_acceptance_episode(
         session.origin_control.qualification =
             crate::short_manifest::HlsOriginQualification::Checking { basis, generation, target: plan.binding.clone() };
         return Some(generation);
+    }
+    // A recovery that starts after an earlier qualification is itself the next
+    // shared check. Reuse its burst for duration selection, including ordinary
+    // redirect/transport recovery, before adopting a changed origin foundation.
+    if let Some(previous) =
+        session.origin_control.target_duration_qualification.as_ref().filter(|check| check.result.is_some())
+    {
+        let config = context.app_config.config.load();
+        let minimum = config
+            .reverse_proxy
+            .as_ref()
+            .and_then(|proxy| proxy.hls_cache.as_ref())
+            .map_or(previous.minimum, |hls| hls.min_origin_target_duration_secs);
+        session.origin_control.target_duration_qualification =
+            Some(crate::short_manifest::HlsTargetDurationQualification::new(&session, minimum));
     }
     let started_at_ms = current_time_millis();
     let timing = acceptance_episode_timing(context, &session, started_at_ms, burst_plan);
@@ -340,8 +355,12 @@ pub(super) fn manifest_candidate_observation(
         HlsManifestOriginRelation::Initial => HlsCandidateHostRelation::InitialBaseline,
         HlsManifestOriginRelation::UnknownHost => HlsCandidateHostRelation::Unknown,
     };
-    let (timeline_fingerprint, has_switch_segment, emergency_evidence) =
-        build_manifest_timeline_fingerprint(&candidate.fetched.body, &candidate.fetched.final_manifest_url);
+    let HlsManifestCandidateFingerprint {
+        timeline: timeline_fingerprint,
+        has_switch_segment,
+        emergency_evidence,
+        target_duration_secs,
+    } = build_manifest_timeline_fingerprint(&candidate.fetched.body, &candidate.fetched.final_manifest_url);
     let resource_timeline_evidence =
         candidate_resource_timeline_evidence(&timeline_fingerprint, published_resource_identities);
     let committed_content_anchor = timeline_fingerprint
@@ -377,6 +396,7 @@ pub(super) fn manifest_candidate_observation(
         .flatten(),
         resource_timeline_evidence,
         timeline_fingerprint,
+        target_duration_secs,
         manifest_fetch_elapsed_ms: candidate.fetch_elapsed_ms,
         switch_segment_readiness: if has_switch_segment {
             HlsSwitchSegmentReadiness::RequiresStaging

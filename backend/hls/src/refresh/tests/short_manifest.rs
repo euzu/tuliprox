@@ -37,7 +37,6 @@ async fn configure_first_ready(request: &OriginRefreshRequest) {
     };
     request.session.write().await.startup = Some(crate::HlsSessionStartup {
         config: config.clone(),
-        first_data_timeout_ms: 10_000,
         worker: Arc::downgrade(&request.segment_worker_pool),
         access_leases: Arc::new(tokio::sync::RwLock::new(crate::HlsAccessLeaseStore::default())),
         revisions: std::collections::BTreeMap::new(),
@@ -302,14 +301,17 @@ async fn short_qualification_rejects_stale_epoch_binding_and_acceptance_generati
     }
 }
 
-struct QualificationLogger(std::sync::Mutex<Vec<String>>);
+pub(super) struct QualificationLogger(std::sync::Mutex<Vec<String>>);
 
 impl log::Log for QualificationLogger {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool { metadata.level() == log::Level::Warn }
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool { metadata.level() <= log::Level::Info }
     fn log(&self, record: &log::Record<'_>) {
         if self.enabled(record.metadata()) {
             let message = record.args().to_string();
-            if message.starts_with("HLS short origin window qualified:") {
+            if message.starts_with("HLS short origin window qualified:")
+                || message.starts_with("HLS origin target duration")
+                || message.starts_with("HLS origin manifest refresh completed:")
+            {
                 self.0.lock().unwrap().push(message);
             }
         }
@@ -317,11 +319,42 @@ impl log::Log for QualificationLogger {
     fn flush(&self) {}
 }
 
+static LOGGER: QualificationLogger = QualificationLogger(std::sync::Mutex::new(Vec::new()));
+pub(super) fn init_qualification_logger() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Info);
+    });
+}
+pub(super) fn qualification_messages(proxy_session: &str) -> Vec<String> {
+    LOGGER
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|message| message.contains(&format!("proxy_session={proxy_session}")))
+        .filter(|message| !message.starts_with("HLS origin manifest refresh completed:"))
+        .cloned()
+        .collect()
+}
+
+pub(super) fn refresh_completion_message(proxy_session: &str) -> Option<String> {
+    LOGGER
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|message| {
+            message.starts_with("HLS origin manifest refresh completed:")
+                && message.contains(&format!("proxy_session={proxy_session}"))
+        })
+        .cloned()
+}
+
 #[tokio::test]
 async fn short_window_warning_occurs_once_per_qualification_across_new_leases() {
-    static LOGGER: QualificationLogger = QualificationLogger(std::sync::Mutex::new(Vec::new()));
-    log::set_logger(&LOGGER).unwrap();
-    log::set_max_level(log::LevelFilter::Warn);
+    init_qualification_logger();
     let head = Arc::new(AtomicUsize::new(100));
     let origin_head = Arc::clone(&head);
     let server = spawn_test_origin(Arc::new(move |_| {
@@ -342,16 +375,7 @@ async fn short_window_warning_occurs_once_per_qualification_across_new_leases() 
         assert!(trigger_origin_refresh_sync(request.clone()).await);
     }
     let proxy_session = crate::safe_proxy_session_id(&request.session.read().await.proxy_session_id);
-    let warnings = || {
-        LOGGER
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|message| message.contains(&format!("proxy_session={proxy_session}")))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+    let warnings = || qualification_messages(&proxy_session);
     let first = warnings();
     assert_eq!(first.len(), 1);
     assert!(first[0].contains("RFC 8216 section 6.2.2"));

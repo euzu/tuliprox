@@ -41,12 +41,12 @@ pub enum HlsSegmentFetchWorkload {
 }
 
 /// Runtime policy for bounded live HLS segment origin fetches.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SegmentFetchPolicy {
     pub max_global_segment_fetches: usize,
     pub max_session_segment_fetches: usize,
     pub max_prefetch_queue_depth: usize,
-    pub origin_segment_timeout_ms: u64,
+    pub timeouts: crate::HlsOriginTimeoutPolicy,
     pub effective_repair_postprocess_timeout_ms: u64,
     pub retry_delays_ms: [u64; 5],
     pub retry_jitter_max_ms: u64,

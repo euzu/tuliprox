@@ -146,7 +146,6 @@ async fn optimistic_successor_without_a_retry_ends_only_its_lease() -> std::io::
     let revisions = std::collections::BTreeMap::from([(head_seq, head), (seq, successor.clone())]);
     fixture.session.write().await.startup = Some(crate::HlsSessionStartup {
         config: config.clone(),
-        first_data_timeout_ms: 1000,
         worker: Weak::new(),
         access_leases: Arc::clone(fixture.manager.access_leases()),
         revisions: revisions.clone(),

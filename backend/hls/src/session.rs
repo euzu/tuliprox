@@ -121,6 +121,7 @@ pub struct HlsSessionOriginControl {
     pub acceptance_episode: Option<HlsManifestAcceptanceEpisode>,
     pub recovery_samples: HlsBoundedRecoverySamples,
     pub(crate) qualification: crate::short_manifest::HlsOriginQualification,
+    pub(crate) target_duration_qualification: Option<crate::short_manifest::HlsTargetDurationQualification>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +149,7 @@ impl Default for HlsSessionOriginControl {
             acceptance_episode: None,
             recovery_samples: HlsBoundedRecoverySamples::default(),
             qualification: crate::short_manifest::HlsOriginQualification::default(),
+            target_duration_qualification: None,
         }
     }
 }

@@ -308,8 +308,8 @@ the old location.
 | HLS cache GC interval | 30 seconds | Periodic cleanup cadence for cache objects and stale runtime state. |
 | Temporary file retention | 30 seconds | Retention window for temporary HLS cache files. |
 | Failed segment retention | 10 seconds | Short retention for failed segment state. |
-| Origin manifest timeout | `hls_cache.origin_manifest_timeout_ms` | Upstream manifest fetch timeout. Default: 3000 ms. |
-| Origin segment timeout | `hls_cache.origin_segment_timeout_ms` | Upstream segment fetch timeout. Default: 10000 ms. |
+| Origin manifest timeout | `hls_cache.origin_manifest_timeout_ms` | Upstream manifest, Key and MAP fetch timeout. Default: 3000 ms. |
+| Origin segment timeout | `hls_cache.origin_segment_timeout_ms` | Per-attempt Segment/Part timeout. Default AUTO: full shared-session target duration, fallback 10000 ms if missing/zero. |
 
 ## Implementation map
 

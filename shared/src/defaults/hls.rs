@@ -1,7 +1,7 @@
 //! HLS-cache defaults: path, size budgets, timeouts, segment-repair knobs,
 //! corrupt-segment watchdog, session TTLs, manifest-recovery burst sizes.
 
-use crate::model::{ByteSize, Millis, Secs};
+use crate::model::{ByteSize, HlsSegmentTimeout, Millis, Secs};
 
 default_eq_fns!(
     default_hls_session_ttl_secs, is_default_hls_session_ttl_secs, u64, 15;
@@ -19,7 +19,8 @@ pub const fn default_hls_max_segments_prefetch() -> usize { 6 }
 pub const fn default_hls_max_concurrent_segment_fetches_per_session() -> usize { 2 }
 pub const fn default_hls_max_concurrent_segment_fetches_global() -> usize { 64 }
 pub const fn default_hls_origin_manifest_timeout_ms() -> Millis { Millis::new(3_000) }
-pub const fn default_hls_origin_segment_timeout_ms() -> Millis { Millis::new(10_000) }
+pub const fn default_hls_min_origin_target_duration_secs() -> Secs { Secs::new(0) }
+pub const fn default_hls_origin_segment_timeout_ms() -> HlsSegmentTimeout { HlsSegmentTimeout::Auto }
 pub const fn default_hls_initial_manifest_wait_timeout_secs() -> Secs { Secs::new(90) }
 pub const fn default_hls_session_idle_timeout() -> Secs { Secs::new(300) }
 pub const fn default_hls_segment_repair_apply_to_first_segments() -> u8 { 1 }
