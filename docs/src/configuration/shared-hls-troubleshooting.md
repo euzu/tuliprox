@@ -88,11 +88,19 @@ Fix:
 
 ## Symptom: custom video `channel_unavailable`
 
-For an established live lease, an availability failure may publish `channel_unavailable` only after known reserve is completely consumed and the origin remains degraded. Preparation and recovery may begin earlier. The canonical manifest returns HTTP `200` with the last live segment of the lease's previous client manifest, the CSV tail and `ENDLIST`. That live URI and its bound bytes remain available through GC.
+For an established live lease, an availability failure may publish `channel_unavailable` only after known reserve is
+completely consumed and the origin remains degraded. Preparation and recovery may begin earlier. The canonical manifest
+returns HTTP `200` with the last live segment of the lease's previous client manifest, the CSV tail and `ENDLIST`. That
+live URI and its bound bytes remain available through GC.
 
-There is no CSV-only fallback after the old splice deadline. Missing transfer evidence does not prove reserve exhaustion. Disabled, missing or invalid custom media, an unavailable base, incompatible MAP/key/container/track state, expired authorization or exhausted commit capacity retain a concrete error response.
+There is no CSV-only fallback after the old splice deadline. Missing transfer evidence does not prove reserve
+exhaustion. Disabled, missing or invalid custom media, an unavailable base, incompatible MAP/key/container/track state,
+expired authorization or exhausted commit capacity retain a concrete error response.
 
-The playback clock begins at the first nonempty qualified segment body chunk and advances at 1x; EOF separately proves completion. Session age alone adds no reserve penalty. Recovery/ETA decisions are capped at 1.5 session target durations, independently of media reserve and HTTP timeouts. Inspect `HLS terminal reserve decision` and `HLS recovery decision budget` for anchor, position, reserve, snapshot generation and raw/effective budgets.
+The playback clock begins at the first nonempty qualified segment body chunk and advances at 1x; EOF separately proves
+completion. Session age alone adds no reserve penalty. Recovery/ETA decisions are capped at 1.5 session target
+durations, independently of media reserve and HTTP timeouts. Inspect `HLS terminal reserve decision` and
+`HLS recovery decision budget` for anchor, position, reserve, snapshot generation and raw/effective budgets.
 
 Possible causes:
 

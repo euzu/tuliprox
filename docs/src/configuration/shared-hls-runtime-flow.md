@@ -190,7 +190,8 @@ origin epoch with a discontinuity when required.
 
 `PublicationLate` begins at `1.5 * TARGETDURATION`, but it is only an observation that the origin is publishing late. The
 runtime starts recovery and closes startup admission only when lease-specific READY reserve, full-burst recovery ETA, and
-transition margin require it. For availability failures, CSV is published only after the lease's known media reserve is completely consumed and the origin remains degraded. Manifest request counts never
+transition margin require it. For availability failures, CSV is published only after the lease's known media reserve is
+completely consumed and the origin remains degraded. Manifest request counts never
 terminalize a lease, and initial strip contributes only the READY media actually available to that lease and its measured
 start distance.
 
@@ -221,15 +222,31 @@ The terminal tail uses this prepared bundle while preserving the lease's live ba
 
 ## Warm terminal-tail response
 
-A live lease starts its playback clock at the first nonempty body chunk of a qualified whole-segment GET (including a full `206 bytes=0-` response). Its estimated position advances at exactly 1x from that segment's EXTINF media start. EOF separately proves complete delivery; an aborted or in-flight body does not become completed playback history. Manifest polls, prefetch and ordinary successor requests do not restart the clock. A valid seek starts a new playback section. Without a transfer/media-time anchor the position is unknown, which does not prove exhaustion.
+A live lease starts its playback clock at the first nonempty body chunk of a qualified whole-segment GET (including a
+full `206 bytes=0-` response). Its estimated position advances at exactly 1x from that segment's EXTINF media start. EOF
+separately proves complete delivery; an aborted or in-flight body does not become completed playback history. Manifest
+polls, prefetch and ordinary successor requests do not restart the clock. A valid seek starts a new playback section.
+Without a transfer/media-time anchor the position is unknown, which does not prove exhaustion.
 
-Contiguous READY media, completed delivery history and required MAP/key readiness determine the available horizon. This media reserve is not capped. Recovery trigger and ETA budgets are separately limited to `ceil(1.5 * session TARGETDURATION)` after workload and P95/P99 estimates. HTTP operation timeouts stay independent. An acceptance episode retains its original deadline; subsequent ETA evaluations cannot move its completion estimate beyond it.
+Contiguous READY media, completed delivery history and required MAP/key readiness determine the available horizon. This
+media reserve is not capped. Recovery trigger and ETA budgets are separately limited to
+`ceil(1.5 * session TARGETDURATION)` after workload and P95/P99 estimates. HTTP operation timeouts stay independent.
+An acceptance episode retains its original deadline; subsequent ETA evaluations cannot move its completion estimate beyond it.
 
-Recovery and bundle preparation may start early, including inside the transition margin and acquisition window. Positive reserve never authorizes availability CSV publication. Immediate policy cutovers (for example preemption, maintenance or account blocking) retain their separate rules. The independent terminal observer wakes at reserve exhaustion or on new evidence, including while an origin retry is in flight and without another player poll.
+Recovery and bundle preparation may start early, including inside the transition margin and acquisition window. Positive
+reserve never authorizes availability CSV publication. Immediate policy cutovers (for example preemption, maintenance or
+account blocking) retain their separate rules. The independent terminal observer wakes at reserve exhaustion or on new
+evidence, including while an origin retry is in flight and without another player poll.
 
-At proven exhaustion with a still-degraded origin, Tuliprox evaluates the prepared bundle against the last client manifest committed to that lease. The safe suffix must include that exact manifest's last live segment, with its URI, EXTINF and bound revision unchanged. Its metadata, dependencies and revision bytes remain protected during the live lease; terminal publication atomically transfers protection to the immutable tail. A successor publication or lease end releases the previous mandatory anchor protection.
+At proven exhaustion with a still-degraded origin, Tuliprox evaluates the prepared bundle against the last client
+manifest committed to that lease. The safe suffix must include that exact manifest's last live segment, with its URI,
+EXTINF and bound revision unchanged. Its metadata, dependencies and revision bytes remain protected during the live
+lease; terminal publication atomically transfers protection to the immutable tail. A successor publication or lease end
+releases the previous mandatory anchor protection.
 
-MPEG-TS terminal media still requires a compatible TS container, inactive `EXT-X-MAP`, compatible track layout, and a safe key transition. A required encryption reset is announced with `#EXT-X-KEY:METHOD=NONE`. Missing bases, invalid assets and incompatible media retain their explicit failure reason.
+MPEG-TS terminal media still requires a compatible TS container, inactive `EXT-X-MAP`, compatible track layout, and a
+safe key transition. A required encryption reset is announced with `#EXT-X-KEY:METHOD=NONE`. Missing bases, invalid
+assets and incompatible media retain their explicit failure reason.
 
 The canonical manifest URL then returns HTTP `200` without `Location`. Its immutable body contains the safe live tail,
 the optional key reset, `#EXT-X-DISCONTINUITY`, twelve finite terminal segment references, and `#EXT-X-ENDLIST`:
@@ -238,7 +255,11 @@ the optional key reset, `#EXT-X-DISCONTINUITY`, twelve finite terminal segment r
 /hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/terminal/<generation>/<index>.ts
 ```
 
-The former pre-exhaustion splice deadline does not authorize an earlier commit or a standalone CSV fallback. A published live lease retains its last live segment even if that deadline has elapsed. The first eligible terminal submission starts one bounded CAS/retry budget; repeated playlist requests cannot renew it. Lease, manifest/cursor generations, origin progress, asset identity and bound revisions are revalidated at commit. Recovery or a newer client manifest supersedes a stale decision. A successful terminal publication stays immutable on replay and asset reload.
+The former pre-exhaustion splice deadline does not authorize an earlier commit or a standalone CSV fallback. A published
+live lease retains its last live segment even if that deadline has elapsed. The first eligible terminal submission
+starts one bounded CAS/retry budget; repeated playlist requests cannot renew it. Lease, manifest/cursor generations,
+origin progress, asset identity and bound revisions are revalidated at commit. Recovery or a newer client manifest
+supersedes a stale decision. A successful terminal publication stays immutable on replay and asset reload.
 
 Only the lease- and generation-bound terminal route serves the live-tail splice's prepared terminal bytes and finite
 full/range responses. Existing
