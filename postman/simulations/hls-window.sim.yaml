@@ -1,5 +1,0 @@
-simulation: hls-window
-routing: path
-mocks:
-  - routeKey: origin
-    path: ../mocks/hls-window/config.yaml
