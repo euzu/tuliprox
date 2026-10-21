@@ -188,6 +188,7 @@ pub enum HlsLeaseManifestPublicationRejectReason {
     LeaseNotLive,
     SourceRegressive,
     ManifestGenerationUnavailable,
+    SnapshotChanged,
     RevisionConflict,
     SnapshotGenerationExhausted,
 }

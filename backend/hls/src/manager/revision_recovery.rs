@@ -19,6 +19,55 @@ pub(crate) struct HlsLeaseRuntime {
     pub(super) terminal_commit_retries: Arc<crate::terminal_commit::HlsTerminalCommitRetryCoordinator>,
 }
 
+fn validate_retained_live_window(
+    leases: &mut crate::HlsAccessLeaseStore,
+    session: &crate::HlsSession,
+    lease_id: &HlsAccessLeaseId,
+    snapshot: &crate::media_reserve::HlsLeaseManifestSnapshot,
+    options: crate::manifest_commit::HlsCachedManifestOptions,
+    started_at_ms: u64,
+    now_ms: u64,
+) -> Result<(), crate::lease::HlsLeaseManifestPublicationRejectReason> {
+    use crate::lease::HlsLeaseManifestPublicationRejectReason as Reject;
+    let Some(lease) = leases.response_snapshot(lease_id, &session.proxy_session_id, now_ms) else {
+        return Err(Reject::LeaseUnavailable);
+    };
+    if lease.last_manifest_snapshot.as_ref() != Some(snapshot) {
+        return Err(Reject::SnapshotChanged);
+    }
+    if now_ms > snapshot.delivered_at_ms.saturating_add(snapshot.playlist_duration_ms)
+        || lease.state != crate::HlsAccessLeaseState::Activated
+        || options.requires_newer_manifest()
+        || session.fresh_manifest_commit_required.is_some()
+        || !crate::manifest_commit::hls_live_window_origin_allowed_for_request(session, options, started_at_ms, now_ms)
+    {
+        return Err(Reject::ManifestGenerationUnavailable);
+    }
+    let Some(publication) = snapshot.startup_revisions.as_ref() else {
+        return Err(Reject::RevisionConflict);
+    };
+    if publication
+        .window_plan
+        .as_ref()
+        .is_none_or(|window| window.plan.origin_work_generation != session.activity.origin_work_generation)
+    {
+        return Err(Reject::ManifestGenerationUnavailable);
+    }
+    // GC can prune a snapshot's revision map. Every advertised URI must
+    // still resolve to the exact lease binding before recovery runs.
+    if snapshot.visible_segments.is_empty()
+        || snapshot.visible_proxy_seqs().any(|seq| {
+            publication
+                .revisions
+                .get(&seq)
+                .is_none_or(|revision| leases.published_segment_revision(lease_id, seq).as_ref() != Some(revision))
+        })
+    {
+        return Err(Reject::RevisionConflict);
+    }
+    Ok(())
+}
+
 impl HlsProxyManager {
     pub(super) fn revision_recovery_runtime(&self) -> HlsLeaseRuntime {
         HlsLeaseRuntime {
@@ -38,6 +87,37 @@ impl HlsProxyManager {
         let _ = self.segment_worker_pool.revision_recovery.set(Arc::new(self.revision_recovery_runtime()));
     }
 
+    /// Reuses the publication transaction, fencing a retained response to the
+    /// session handle and request freshness policy that selected it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn republish_access_lease_live_window(
+        &self,
+        session: &crate::HlsSessionHandle,
+        lease_id: &HlsAccessLeaseId,
+        session_id: &ProxySessionId,
+        expected: crate::lease::HlsLeaseManifestPublicationGuard,
+        snapshot: crate::media_reserve::HlsLeaseManifestSnapshot,
+        options: crate::manifest_commit::HlsCachedManifestOptions,
+        started_at_ms: u64,
+        now_ms: u64,
+    ) -> crate::lease::HlsLeaseManifestPublicationOutcome {
+        self.commit_recovered_startup_manifest(
+            lease_id,
+            session_id,
+            expected,
+            snapshot,
+            crate::HlsPublishedTransientResourceIds::default(),
+            now_ms,
+            Some((session, options, started_at_ms)),
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "Keep generation checks, revision recovery and publication under the same transaction locks."
+    )]
     pub(super) async fn commit_recovered_startup_manifest(
         &self,
         lease_id: &HlsAccessLeaseId,
@@ -46,6 +126,7 @@ impl HlsProxyManager {
         mut snapshot: crate::media_reserve::HlsLeaseManifestSnapshot,
         resources: crate::HlsPublishedTransientResourceIds,
         now_ms: u64,
+        retained_request: Option<(&crate::HlsSessionHandle, crate::manifest_commit::HlsCachedManifestOptions, u64)>,
     ) -> crate::lease::HlsLeaseManifestPublicationOutcome {
         use crate::lease::{
             HlsLeaseManifestPublicationOutcome as Outcome, HlsLeaseManifestPublicationRejectReason as Reject,
@@ -53,8 +134,15 @@ impl HlsProxyManager {
         let Some(current) = self.sessions.hold_current_proxy_session(session_id).await else {
             return Outcome::Rejected(Reject::SessionMismatch);
         };
+        if retained_request.is_some_and(|(expected_session, _, _)| !Arc::ptr_eq(current.session(), expected_session)) {
+            return Outcome::Rejected(Reject::SessionMismatch);
+        }
         let mut leases = self.access_leases.write().await;
         let mut session = current.session().write().await;
+        // A retained request may have waited for these locks. Recheck its
+        // deadline at the transaction without moving behind the request observation.
+        let now_ms =
+            if retained_request.is_some() { now_ms.max(tuliprox_core::utils::current_time_millis()) } else { now_ms };
         if !leases.media_identity_is_current(lease_id, session_id, expected.media_identity(), now_ms)
             || session.is_gc_marked_for_removal()
         {
@@ -69,6 +157,19 @@ impl HlsProxyManager {
                 .and_then(|lease| lease.last_manifest_snapshot)
                 .as_ref()
                 == Some(&snapshot);
+        if let Some((_, options, started_at_ms)) = retained_request {
+            if let Err(reason) = validate_retained_live_window(
+                &mut leases,
+                &session,
+                lease_id,
+                &snapshot,
+                options,
+                started_at_ms,
+                now_ms,
+            ) {
+                return Outcome::Rejected(reason);
+            }
+        }
         if let Some(publication) = snapshot.startup_revisions.as_mut() {
             if let Some(window) = &publication.window_plan {
                 let plan = &window.plan;
@@ -109,6 +210,16 @@ impl HlsProxyManager {
                     return Outcome::Rejected(Reject::RevisionConflict);
                 }
             }
+        }
+        if retained_request.is_some()
+            && snapshot.startup_revisions.as_ref().is_none_or(|publication| {
+                publication
+                    .revisions
+                    .get(&snapshot.first_proxy_seq)
+                    .is_none_or(|head| !head.revision().is_startup_head_ready(publication.mode))
+            })
+        {
+            return Outcome::Rejected(Reject::RevisionConflict);
         }
         let published = snapshot
             .startup_revisions

@@ -137,7 +137,9 @@ pub mod api {
         lease::{
             new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId,
             HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsAccessLeaseTiming, HlsAccessLeaseTouch,
-            HlsFreshManifestRequiredReason, HlsLeaseStartupAdmissionState, HlsMediaLeaseIdentity, HlsPlaybackFamilyKey,
+            HlsFreshManifestRequiredReason, HlsLeaseManifestPublicationOutcome,
+            HlsLeaseManifestPublicationRejectReason, HlsLeaseStartupAdmissionState, HlsMediaLeaseIdentity,
+            HlsPlaybackFamilyKey,
         },
         lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey},
         live_window::{HlsLiveWindowPlan, HlsLiveWindowView},
@@ -185,7 +187,7 @@ pub mod api {
             cold_start_retry_after_seconds, maybe_trigger_origin_refresh_with_outcome, trigger_origin_refresh_sync,
             HlsManifestCommitRequirement, HlsOriginRefreshTriggerOutcome, HlsPostRefreshRuntime, OriginRefreshRequest,
         },
-        renderer::{HlsManifestRenderer, RenderedManifest},
+        renderer::{HlsManifestRenderer, RenderError, RenderedManifest},
         resource_fetch::{
             retry_after_secs_from_ms, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsResourceFetchAttempt,
         },

@@ -494,6 +494,7 @@ impl HlsProxyManager {
                     snapshot,
                     published_transient_resource_ids,
                     now_ms,
+                    None,
                 )
                 .await;
         }
