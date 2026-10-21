@@ -641,7 +641,9 @@ async fn fetch_hls_origin_resource_response_with_timeout(
         let response = transport::send(client, request, timeout, &mut deadline).await?;
         if !clients.use_manual_redirects || !response.status().is_redirection() {
             let response = classify_hls_origin_resource_response(response, target.byte_range_expectation)?;
-            return Ok((response, deadline.expect("transport returned a connection deadline")));
+            let deadline = deadline
+                .ok_or_else(|| HlsOriginResourceFetchError::Transport("HLS connection deadline unavailable".into()))?;
+            return Ok((response, deadline));
         }
         if remaining_redirects == 0 {
             return Err(HlsOriginResourceFetchError::Redirect);

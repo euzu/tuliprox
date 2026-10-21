@@ -81,7 +81,6 @@ impl HlsEstimatedRecoveryCompletionAtMs {
 }
 
 impl HlsLeaseExhaustionAtMs {
-    #[cfg(any(test, feature = "test-support"))]
     pub const fn as_millis_since_epoch(self) -> u64 { self.0 }
 }
 

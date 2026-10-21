@@ -34,7 +34,8 @@ pub(super) async fn send(
             }
         }
     }
-    let deadline = deadline.expect("successful connection establishes the deadline");
+    let deadline =
+        deadline.ok_or_else(|| HlsOriginResourceFetchError::Transport("HLS connection deadline unavailable".into()))?;
     tokio::time::timeout_at(deadline.deadline(), response)
         .await
         .map_err(|_| HlsOriginResourceFetchError::Timeout)?
