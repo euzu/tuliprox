@@ -1129,6 +1129,10 @@
 
 ## 🐛 Fixes
 
+- **Emby, Jellyfin and Plex playback no longer ends with "This channel is currently unavailable".** Provider
+  selection rejected the internal `media-server://` stream reference of media-server inputs as an unmapped provider
+  URL (`reason=unmapped_provider_url`) before the media-server stream handler could open it. The reference is now
+  accepted for media-server inputs.
 - **Long Telegram and ntfy notifications are no longer rejected.** Telegram accepts at most 4096 characters (UTF-16
   units) and ntfy 4096 bytes per message; neither channel had a limit, so a large watch or statistics notification
   failed and landed in the dead letter queue. Telegram now cuts the final text, after `MarkdownV2` escaping, and drops
