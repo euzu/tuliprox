@@ -192,6 +192,12 @@
 
 ## 🌟 New Features
 
+- **Plex, Emby and Jellyfin libraries become separate categories.** Every imported media server library is now its
+  own playlist group named after the library (for example `Movies 1`, `Movies 2`), so it shows up as a separate
+  category in Xtream, M3U and every other output instead of one `Media Server Movies` / `Media Server Series` group.
+  Libraries sharing a name on one input are merged into one group. Mappings, filters and `sort` rules that matched
+  the old `Media Server Movies` / `Media Server Series` group names must use the library names instead.
+
 - **Logs is a standalone Web UI view.** The live log console moved out of the Stats view into its own sidebar entry
   (Dashboard, Stats, Streams, Logs) for both the expanded sidebar and the collapsed/mobile icon bar. It fills the full
   page height, shrinks down to a minimum height and then scrolls. It requires the same `system:read` permission as

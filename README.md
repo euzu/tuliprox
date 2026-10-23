@@ -76,7 +76,8 @@ Use different upstream technologies without forcing every downstream player to u
 - **M3U/M3U8** — remote or local playlists with headers, credentials, EPG sources, and CSV batch inputs
 - **Stalker & Ministra** — full portal catalogs with MAC, credential or combined authentication, configurable MAG profiles,  
   `create_link` playback resolution, resumable refreshes, and per-alias configuration
-- **Plex, Emby & Jellyfin** — import selected movie and TV libraries and resolve protected playback and artwork through Tuliprox
+- **Plex, Emby & Jellyfin** — import selected movie and TV libraries, each as its own category, and resolve protected playback  
+  and artwork through Tuliprox
 - **Local Media Library** — scan movies and series from disk and enrich them with NFO or TMDB metadata
 - **Staged Sources** — overlay a prepared Live, VOD, or Series catalog while keeping the original provider responsible for  
   actual stream delivery
