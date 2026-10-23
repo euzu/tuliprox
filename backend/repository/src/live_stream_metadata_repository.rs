@@ -249,51 +249,15 @@ mod tests {
         LiveBitratePersistenceOutcome,
     };
     use crate::{
-        build_input_storage_path, get_input_m3u_playlist_file_path, xtream_get_file_path, BPlusTree, BPlusTreeQuery,
+        build_input_storage_path, get_input_m3u_playlist_file_path, test_config::app_config_in, xtream_get_file_path,
+        BPlusTree, BPlusTreeQuery,
     };
-    use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
-        ConfigPaths, InputType, LiveStreamProperties, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-        StreamProperties, XtreamCluster,
+        InputType, LiveStreamProperties, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties,
+        XtreamCluster,
     };
     use std::sync::Arc;
-    use tuliprox_core::{
-        model::{
-            ApiProxyConfig, AppConfig, Config, ConfigInput, CustomStreamResponse, HdHomeRunConfig,
-            MediaToolCapabilities, SourcesConfig,
-        },
-        utils::FileLockManager,
-    };
-
-    fn test_app_config(storage_dir: &str) -> Arc<AppConfig> {
-        Arc::new(AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config {
-                storage_dir: storage_dir.to_string(),
-                ..Config::default()
-            })),
-            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-            hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
-            api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                home_path: String::new(),
-                config_path: String::new(),
-                storage_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            })),
-            custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
-            access_token_secret: [0; 32],
-            encrypt_secret: [0; 16],
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-        })
-    }
+    use tuliprox_core::model::ConfigInput;
 
     fn playlist_item(input: &ConfigInput, stream_ref: &str, bitrate: u32) -> PlaylistItem {
         PlaylistItem {
@@ -315,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn loads_positive_xtream_and_m3u_live_bitrate_and_normalizes_zero() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let app_config = test_app_config(temp.path().to_string_lossy().as_ref());
+        let app_config = app_config_in(temp.path());
 
         let xtream_input =
             ConfigInput { name: Arc::from("xtream-input"), input_type: InputType::Xtream, ..ConfigInput::default() };
@@ -354,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn missing_invalid_or_unsupported_input_metadata_is_unknown() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let app_config = test_app_config(temp.path().to_string_lossy().as_ref());
+        let app_config = app_config_in(temp.path());
         let xtream_input =
             ConfigInput { name: Arc::from("missing-xtream"), input_type: InputType::Xtream, ..ConfigInput::default() };
         let unsupported_input =
@@ -374,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn persists_only_higher_positive_live_bitrate_and_preserves_metadata() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let app_config = test_app_config(temp.path().to_string_lossy().as_ref());
+        let app_config = app_config_in(temp.path());
         let xtream_input =
             ConfigInput { name: Arc::from("xtream-input"), input_type: InputType::Xtream, ..ConfigInput::default() };
         let xtream_storage = build_input_storage_path(&xtream_input.name, temp.path().to_string_lossy().as_ref());
@@ -449,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn persistence_distinguishes_missing_database_and_stream_item() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let app_config = test_app_config(temp.path().to_string_lossy().as_ref());
+        let app_config = app_config_in(temp.path());
         let input =
             ConfigInput { name: Arc::from("xtream-input"), input_type: InputType::Xtream, ..ConfigInput::default() };
 
@@ -475,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn persistence_distinguishes_permanently_inapplicable_inputs_and_metadata() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let app_config = test_app_config(temp.path().to_string_lossy().as_ref());
+        let app_config = app_config_in(temp.path());
         let xtream_input =
             ConfigInput { name: Arc::from("xtream-input"), input_type: InputType::Xtream, ..ConfigInput::default() };
         let unsupported_input =

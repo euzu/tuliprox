@@ -1,8 +1,11 @@
-use crate::model::{
-    config::{favourites::ConfigFavourites, trakt::TraktConfig},
-    macros,
-    mapping::CompiledMapping,
-    ConfigRename, ConfigSort, CurationConfig,
+use crate::{
+    model::{
+        config::{favourites::ConfigFavourites, trakt::TraktConfig},
+        macros,
+        mapping::CompiledMapping,
+        ConfigRename, ConfigSort, CurationConfig,
+    },
+    utils::EpgIdOutputCase,
 };
 use arc_swap::ArcSwapOption;
 use shared::{
@@ -398,6 +401,10 @@ impl ConfigTarget {
 
     pub fn has_output(&self, tt: TargetType) -> bool { self.output.iter().any(|o| TargetType::from(o) == tt) }
 
+    pub fn epg_id_case(&self) -> EpgIdOutputCase {
+        EpgIdOutputCase::from_lowercase(self.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids))
+    }
+
     pub fn is_force_redirect(&self, item_type: PlaylistItemType) -> bool {
         if item_type.is_local() {
             return false;
@@ -497,6 +504,21 @@ mod tests {
         assert!(!target.effective_curation().unwrap().enabled);
         assert!(target.effective_curation().unwrap().catalog_selection.is_curated());
         assert_eq!(TargetOutputDto::from(&target.output[0]), dto.output[0]);
+    }
+
+    #[test]
+    fn epg_id_case_follows_lowercase_epg_ids_option() {
+        let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+        target.options = None;
+        assert_eq!(target.epg_id_case(), EpgIdOutputCase::Preserve);
+
+        target.options = Some(ConfigTargetOptions::default());
+        assert_eq!(target.epg_id_case(), EpgIdOutputCase::Preserve);
+
+        let mut options = ConfigTargetOptions::default();
+        options.epg_output.lowercase_ids = true;
+        target.options = Some(options);
+        assert_eq!(target.epg_id_case(), EpgIdOutputCase::LowercaseAscii);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{
-    fixed_refresh_paths, preserve_details_with_injected_operation_failure, target_writer_config, target_writer_group,
-    test_app_config, write_detail_preservation_fixture, xtream_write_playlist,
+    app_config_in, fixed_refresh_paths, preserve_details_with_injected_operation_failure, target_writer_config,
+    target_writer_group, write_detail_preservation_fixture, xtream_write_playlist,
     xtream_write_playlist_with_injected_empty_replacement_failure, DetailPreservationOperation,
     TargetEmptyReplacementFailure,
 };
@@ -17,7 +17,7 @@ async fn target_force_empty_failures_restore_database_index_and_categories() -> 
         TargetEmptyReplacementFailure::Publication,
     ] {
         let directory = tempfile::tempdir()?;
-        let app_config = test_app_config(directory.path());
+        let app_config = app_config_in(directory.path());
         let target = target_writer_config();
         let mut baseline = vec![
             target_writer_group(XtreamCluster::Live, 1, 101),

@@ -34,7 +34,7 @@ fn complete_curation_empty_authorization_is_projection_and_cluster_scoped() {
 #[tokio::test]
 async fn intentional_empty_curation_never_authorizes_empty_live_cluster_replacement() {
     let directory = tempdir().expect("tempdir");
-    let app_config = target_test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let target = ConfigTarget::from(&ConfigTargetDto {
         name: "curated-live-retention-test".to_string(),
         output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto::default())],

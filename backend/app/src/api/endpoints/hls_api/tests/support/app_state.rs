@@ -210,7 +210,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_inputs(
 pub(in crate::api::endpoints::hls_api::tests) fn enable_hls_cache(app_state: &Arc<AppState>) {
     let config = Config {
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
-            hls_cache: Some(HlsCacheConfigDto::default()),
+            hls_cache: Some(app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto::default())),
             ..Default::default()
         })),
         ..Default::default()
@@ -274,6 +274,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,

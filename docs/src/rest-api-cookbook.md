@@ -393,7 +393,10 @@ Notes:
 
 - Sources are addressed by **name** (`target` or `input`, exactly one for `/playlist/items`), not by id.
 - `cluster` is `live`, `video` or `series`. `offset`/`limit` page the matches (default 50, max 500); the response has
-  `total_matched`, `returned`, `has_more` and `limit_clamped`.
+  `total_matched`, `skipped_records` (stored records that could not be read and are missing from the listing, with a
+  `note` when greater than `0`), `returned`, `has_more` and `limit_clamped`. `/playlist/epg/channels` has the same
+  paging fields plus `skipped_playlist_records` (stored playlist records that could not be read, so
+  `referenced_by_playlist` and the `unreferenced` filter may be wrong for channels used only by them; a `note` says so).
 - Repeatable parameters (`search_field`, `fields`, `epg_status`, `issue`) are given as repeated keys, not `key[]`.
 - `search_field` accepts `name`, `title`, `group`, `epg_channel_id`, `provider_id`, `input_name`. `epg_status` is
   `missing_id`, `unmatched` or `matched` and works for targets with an EPG database only.

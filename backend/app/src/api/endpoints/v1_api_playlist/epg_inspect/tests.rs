@@ -1,29 +1,49 @@
 use super::{
-    format_rfc3339, insert_canonical_id, load_epg_keys, parse_output, parse_window, programmes_in_window,
-    resolve_epg_db, scan_epg_db, summarize, target_epg_case, truncate_chars, ChannelSummary, EpgDb, EpgIssue,
-    EpgOutput, MAX_PROGRAMME_DESC_CHARS,
+    collect_referenced_ids, format_rfc3339, insert_canonical_id, load_epg_keys, parse_output, parse_window,
+    playlist_reference_note, programmes_in_window, resolve_epg_db, scan_epg_db, summarize, truncate_chars,
+    with_epg_query, ChannelSummary, ChannelsPage, EpgChannelsResponse, EpgDb, EpgIssue, EpgOutput, ReferencedIds,
+    MAX_PROGRAMME_DESC_CHARS,
 };
 use crate::{
-    api::endpoints::v1_api_playlist::inspect_common::CaseInsensitiveNeedle,
+    api::{
+        endpoints::v1_api_playlist::{
+            inspect_common::{CaseInsensitiveNeedle, PageWindow},
+            items::tests::{m3u_item, stream_with_skips},
+        },
+        model::{EpgScanCoordinator, EPG_KEY_CACHE_ENTRIES, EPG_SCAN_PERMITS},
+    },
     model::{
         Config, ConfigTarget, M3uTargetOutput, StrmTargetFlagsSet, StrmTargetOutput, TargetOutput,
         XtreamTargetFlagsSet, XtreamTargetOutput,
     },
     repository::{
         get_target_storage_path, m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target,
-        xtream_get_storage_path, BPlusTree,
+        xtream_get_storage_path, BPlusTree, BPlusTreeQuery,
     },
     utils::{canonicalize_output_epg_id, canonicalize_untrusted_epg_id, EpgIdOutputCase, FileLockManager},
 };
 use arc_swap::ArcSwapOption;
 use shared::{
+    error::TuliproxError,
     foundation::Filter,
     model::{
         ConfigTargetOptions, EpgCategory, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder, TargetType,
     },
     utils::Internable,
 };
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{
+    collections::HashSet,
+    fmt::Write as _,
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver},
+        Arc,
+    },
+    time::Duration,
+};
+use strum::IntoEnumIterator;
+use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
 
 const NOW: i64 = 1_000_000;
 
@@ -225,6 +245,21 @@ fn issue_and_output_name_lists_are_consistent() {
     assert!(parse_output(Some("strm")).unwrap_err().message().contains("xtream, m3u"));
 }
 
+#[test]
+fn output_names_are_pinned() {
+    let expected = [
+        (TargetType::Xtream, "xtream"),
+        (TargetType::M3u, "m3u"),
+        (TargetType::Strm, "strm"),
+        (TargetType::HdHomeRun, "hdhomerun"),
+    ];
+    assert_eq!(expected.len(), TargetType::iter().count(), "every output variant is pinned");
+    for (output, name) in expected {
+        assert_eq!(output.as_str(), name);
+        assert_eq!(serde_json::to_value(output).unwrap(), serde_json::json!(name), "JSON `output` field");
+    }
+}
+
 fn target(name: &str, outputs: Vec<TargetOutput>, lowercase_ids: bool) -> ConfigTarget {
     ConfigTarget {
         curation: None,
@@ -299,8 +334,8 @@ fn config_with_storage(dir: &tempfile::TempDir) -> Config {
 
 #[test]
 fn epg_case_follows_the_target_lowercase_ids_option() {
-    assert_eq!(target_epg_case(&target("t", vec![xtream_output()], false)), EpgIdOutputCase::Preserve);
-    assert_eq!(target_epg_case(&target("t", vec![xtream_output()], true)), EpgIdOutputCase::LowercaseAscii);
+    assert_eq!(target("t", vec![xtream_output()], false).epg_id_case(), EpgIdOutputCase::Preserve);
+    assert_eq!(target("t", vec![xtream_output()], true).epg_id_case(), EpgIdOutputCase::LowercaseAscii);
 }
 
 #[test]
@@ -328,6 +363,69 @@ fn insert_canonical_id_folds_like_the_epg_keys_and_deduplicates() {
         insert_canonical_id(&mut preserved, id, EpgIdOutputCase::Preserve);
     }
     assert_eq!(preserved.len(), 2);
+}
+
+#[tokio::test]
+async fn referenced_ids_use_the_target_case_and_report_skipped_records() {
+    let entries = || {
+        vec![
+            Ok(m3u_item(1, "p1", "A", "g", Some("BBC.One"))),
+            Ok(m3u_item(2, "p2", "B", "g", Some(" bbc.one "))),
+            Ok(m3u_item(3, "p3", "C", "g", None)),
+            Ok(m3u_item(4, "p4", "D", "g", Some("  "))),
+        ]
+    };
+
+    let folded =
+        collect_referenced_ids(stream_with_skips(entries(), 2), EpgIdOutputCase::LowercaseAscii).await.unwrap();
+    assert_eq!(folded.ids, HashSet::from(["bbc.one".intern()]));
+    assert_eq!(folded.skipped_records, 2);
+
+    let preserved = collect_referenced_ids(stream_with_skips(entries(), 0), EpgIdOutputCase::Preserve).await.unwrap();
+    assert_eq!(preserved.ids, HashSet::from(["BBC.One".intern(), "bbc.one".intern()]));
+    assert_eq!(preserved.skipped_records, 0, "a healthy stream skips nothing");
+}
+
+#[tokio::test]
+async fn referenced_ids_abort_on_a_stream_error() {
+    let entries =
+        vec![Ok(m3u_item(1, "p1", "A", "g", Some("a"))), Err(TuliproxError::RepositoryM3u("boom".to_string()))];
+    assert!(collect_referenced_ids(stream_with_skips(entries, 0), EpgIdOutputCase::Preserve).await.is_err());
+}
+
+#[test]
+fn playlist_reference_note_distinguishes_unstored_and_unreadable_playlists() {
+    let healthy = ReferencedIds::default();
+    assert_eq!(playlist_reference_note("news", Some(&healthy)), None);
+
+    let unstored = playlist_reference_note("news", None).unwrap();
+    assert!(unstored.contains("'news'") && unstored.contains("not stored"), "{unstored}");
+
+    let damaged = ReferencedIds { skipped_records: 3, ..ReferencedIds::default() };
+    assert_eq!(
+        playlist_reference_note("news", Some(&damaged)).unwrap(),
+        "3 stored playlist record(s) could not be read, so referenced_by_playlist and the unreferenced filter may be \
+         wrong for channels used only by those records."
+    );
+}
+
+#[test]
+fn channels_response_always_serializes_skipped_playlist_records() {
+    let window = PageWindow::resolve(None, None, 50, 500);
+    let page = ChannelsPage::default();
+
+    let healthy =
+        serde_json::to_value(EpgChannelsResponse::new("news", Some(TargetType::Xtream), window, &page, 0, None))
+            .unwrap();
+    assert_eq!(healthy["skipped_playlist_records"], 0);
+    assert!(healthy.get("note").is_none());
+
+    let note = playlist_reference_note("news", Some(&ReferencedIds { skipped_records: 4, ..ReferencedIds::default() }));
+    let damaged =
+        serde_json::to_value(EpgChannelsResponse::new("news", Some(TargetType::Xtream), window, &page, 4, note))
+            .unwrap();
+    assert_eq!(damaged["skipped_playlist_records"], 4);
+    assert!(damaged["note"].as_str().unwrap().starts_with("4 stored playlist record(s) could not be read"));
 }
 
 #[test]
@@ -370,7 +468,7 @@ fn resolve_epg_db_rejects_an_output_the_target_does_not_have_and_handles_epg_les
 #[test]
 fn missing_database_note_names_the_output_and_never_reads_as_healthy() {
     let missing = EpgDb::Missing(TargetType::Xtream);
-    assert_eq!(missing.output(), Some("xtream"));
+    assert_eq!(missing.output(), Some(TargetType::Xtream));
     let note = missing.missing_note("news").unwrap();
     assert!(note.contains("xtream") && note.contains("news") && note.contains("does not mean"), "{note}");
     assert!(EpgDb::Available(TargetType::M3u, "/x".into()).missing_note("t").is_none());
@@ -381,21 +479,429 @@ async fn load_epg_keys_returns_every_channel_id() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sub").join("epg.db");
     write_epg_db(&path, &[epg_channel("a"), epg_channel("b"), epg_channel("c")]);
-    let keys = load_epg_keys(&FileLockManager::default(), &path).await.unwrap();
-    let mut keys: Vec<_> = keys.into_iter().collect();
+    let keys = load_epg_keys(&EpgScanCoordinator::default(), &FileLockManager::default(), &path).await.unwrap();
+    let mut keys: Vec<_> = keys.iter().cloned().collect();
     keys.sort();
     assert_eq!(keys, vec!["a".intern(), "b".intern(), "c".intern()]);
+}
+
+/// A channel whose encoded value is far beyond the inline limit even after compression: every programme carries
+/// pseudo-random, distinct title and description text.
+fn overflow_channel(id: &str) -> EpgChannel {
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut random_text = || {
+        let mut text = String::new();
+        for _ in 0..24 {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            write!(text, "{state:016x}").unwrap();
+        }
+        text
+    };
+    let programmes = (0..200_i64)
+        .map(|index| {
+            let mut programme = EpgProgramme::new(index * 60, index * 60 + 60, id.intern());
+            programme.title = Some(random_text().intern());
+            programme.desc = Some(random_text().intern());
+            programme
+        })
+        .collect();
+    EpgChannel { id: id.intern(), title: Some(id.intern()), icon: None, programmes }
+}
+
+#[tokio::test]
+async fn load_epg_keys_returns_the_ids_of_channels_stored_in_overflow_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a"), overflow_channel("big"), epg_channel("z")]);
+    let db_len = std::fs::metadata(&path).unwrap().len();
+    assert!(db_len > 64 * 1024, "the big channel must span overflow pages, database is {db_len} bytes");
+
+    let keys = load_epg_keys(&EpgScanCoordinator::default(), &FileLockManager::default(), &path).await.unwrap();
+    let mut keys: Vec<_> = keys.iter().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["a".intern(), "big".intern(), "z".intern()]);
+}
+
+#[tokio::test]
+async fn load_epg_keys_reports_an_unreadable_database_as_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope.db");
+    let err = load_epg_keys(&EpgScanCoordinator::default(), &FileLockManager::default(), &missing).await.unwrap_err();
+    assert!(err.to_string().contains("Cannot open EPG database"), "{err}");
+
+    let garbage = dir.path().join("garbage.db");
+    std::fs::write(&garbage, b"not a b+tree database at all, just bytes").unwrap();
+    let result = load_epg_keys(&EpgScanCoordinator::default(), &FileLockManager::default(), &garbage).await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn scan_epg_db_reports_an_unreadable_database_as_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nope.db");
-    let result = scan_epg_db(&FileLockManager::default(), &missing, 0_usize, |count, _, _| *count += 1).await;
+    let result =
+        scan_epg_db(&EpgScanCoordinator::default(), &FileLockManager::default(), &missing, 0_usize, |count, _, _| {
+            *count += 1;
+        })
+        .await;
     assert!(result.is_err());
 
     let garbage = dir.path().join("garbage.db");
     std::fs::write(&garbage, b"not a b+tree database at all, just bytes").unwrap();
-    let result = scan_epg_db(&FileLockManager::default(), &garbage, 0_usize, |count, _, _| *count += 1).await;
+    let result =
+        scan_epg_db(&EpgScanCoordinator::default(), &FileLockManager::default(), &garbage, 0_usize, |count, _, _| {
+            *count += 1;
+        })
+        .await;
     assert!(result.is_err());
+}
+
+/// Upper bound for every wait on a background thread; a healthy run never gets near it.
+const WAIT: Duration = Duration::from_secs(10);
+
+/// Takes every scan slot, which succeeds only once each blocking scan has ended and released its permit.
+async fn assert_scans_idle(scans: &EpgScanCoordinator) {
+    let mut held = Vec::new();
+    for _ in 0..EPG_SCAN_PERMITS {
+        held.push(timeout(WAIT, scans.acquire()).await.expect("scan slot released").unwrap());
+    }
+    assert_eq!(scans.available_permits(), 0);
+}
+
+/// Starts a scan that reports its `id` on entering and then waits for `gate`.
+fn gated_scan(
+    scans: &Arc<EpgScanCoordinator>,
+    locks: &Arc<FileLockManager>,
+    path: &Path,
+    entered: tokio::sync::mpsc::UnboundedSender<usize>,
+    id: usize,
+    gate: Receiver<()>,
+) -> JoinHandle<()> {
+    let (scans, locks, path) = (Arc::clone(scans), Arc::clone(locks), path.to_path_buf());
+    tokio::spawn(async move {
+        with_epg_query(&scans, &locks, &path, move |_, _, _| {
+            entered.send(id).ok();
+            gate.recv_timeout(WAIT).ok();
+            Ok(())
+        })
+        .await
+        .expect("gated scan succeeds");
+    })
+}
+
+#[tokio::test]
+async fn cancelled_scan_stops_and_releases_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a")]);
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (observed_tx, observed_rx) = oneshot::channel();
+
+    let mut scan = Box::pin(with_epg_query(&scans, &locks, &path, move |_, _, cancel| {
+        started_tx.send(()).ok();
+        while !cancel.is_cancelled() {
+            std::thread::yield_now();
+        }
+        observed_tx.send(()).ok();
+        Ok(())
+    }));
+    tokio::select! {
+        _ = &mut scan => panic!("the scan must keep running until it is cancelled"),
+        started = timeout(WAIT, started_rx) => started.expect("scan started").unwrap(),
+    }
+    assert_eq!(scans.available_permits(), EPG_SCAN_PERMITS - 1);
+
+    drop(scan);
+    timeout(WAIT, observed_rx).await.expect("blocking scan saw the cancellation").unwrap();
+    assert_scans_idle(&scans).await;
+    drop(timeout(WAIT, locks.write_lock(&path)).await.expect("file lock released"));
+}
+
+#[tokio::test]
+async fn scans_are_limited_to_the_permit_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a")]);
+    let scans = Arc::new(EpgScanCoordinator::default());
+    let locks = Arc::new(FileLockManager::default());
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut gates = Vec::new();
+    let mut tasks = Vec::new();
+    for id in 0..=EPG_SCAN_PERMITS {
+        let (gate_tx, gate_rx) = mpsc::channel();
+        gates.push(gate_tx);
+        tasks.push(gated_scan(&scans, &locks, &path, entered_tx.clone(), id, gate_rx));
+    }
+
+    for _ in 0..EPG_SCAN_PERMITS {
+        timeout(WAIT, entered_rx.recv()).await.expect("scan entered").unwrap();
+    }
+    // A scan reports itself only after taking its slot, so with all slots taken the last one cannot be inside.
+    assert_eq!(scans.available_permits(), 0);
+    assert!(entered_rx.try_recv().is_err());
+
+    gates[0].send(()).unwrap();
+    timeout(WAIT, entered_rx.recv()).await.expect("waiting scan entered after a slot was freed").unwrap();
+
+    for gate in &gates {
+        gate.send(()).ok();
+    }
+    for task in tasks {
+        timeout(WAIT, task).await.expect("scan finished").unwrap();
+    }
+    assert_scans_idle(&scans).await;
+}
+
+#[tokio::test]
+async fn dropped_waiter_does_not_consume_a_permit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a")]);
+    let scans = Arc::new(EpgScanCoordinator::default());
+    let locks = Arc::new(FileLockManager::default());
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut gates = Vec::new();
+    let mut tasks = Vec::new();
+    for id in 0..EPG_SCAN_PERMITS {
+        let (gate_tx, gate_rx) = mpsc::channel();
+        gates.push(gate_tx);
+        tasks.push(gated_scan(&scans, &locks, &path, entered_tx.clone(), id, gate_rx));
+    }
+    for _ in 0..EPG_SCAN_PERMITS {
+        timeout(WAIT, entered_rx.recv()).await.expect("scan entered").unwrap();
+    }
+
+    let ran = Arc::new(AtomicUsize::new(0));
+    let ran_in_scan = Arc::clone(&ran);
+    let mut waiter = Box::pin(with_epg_query(&scans, &locks, &path, move |_, _, _| {
+        ran_in_scan.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }));
+    tokio::select! {
+        biased;
+        _ = &mut waiter => panic!("the waiter must wait for a slot"),
+        () = std::future::ready(()) => {}
+    }
+    drop(waiter);
+
+    for gate in &gates {
+        gate.send(()).unwrap();
+    }
+    for task in tasks {
+        timeout(WAIT, task).await.expect("scan finished").unwrap();
+    }
+    assert_scans_idle(&scans).await;
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn load_epg_keys_is_cached_until_the_database_is_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    write_epg_db(&path, &[epg_channel("a"), epg_channel("b")]);
+
+    let first = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    let second = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+
+    let identity_before = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).unwrap().snapshot_identity();
+    write_epg_db(&path, &[epg_channel("a"), epg_channel("c")]);
+    let identity_after = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).unwrap().snapshot_identity();
+    assert_ne!(identity_before, identity_after, "a rewritten database must get a new identity");
+
+    let third = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &third));
+    let mut keys: Vec<_> = third.iter().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["a".intern(), "c".intern()]);
+    let fourth = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    assert!(Arc::ptr_eq(&third, &fourth));
+}
+
+#[tokio::test]
+async fn load_epg_keys_failure_is_not_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+
+    for _ in 0..2 {
+        let err = load_epg_keys(&scans, &locks, &path).await.unwrap_err();
+        assert!(err.to_string().contains("Cannot open EPG database"), "{err}");
+    }
+    assert_eq!(scans.key_cache().len(), 0);
+
+    write_epg_db(&path, &[epg_channel("a")]);
+    let keys = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(scans.key_cache().len(), 1);
+}
+
+#[tokio::test]
+async fn cached_key_set_eviction_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+
+    let mut last = None;
+    for index in 0..EPG_KEY_CACHE_ENTRIES + 3 {
+        let path = dir.path().join(format!("epg-{index}.db"));
+        write_epg_db(&path, &[epg_channel("a")]);
+        load_epg_keys(&scans, &locks, &path).await.unwrap();
+        assert!(scans.key_cache().len() <= EPG_KEY_CACHE_ENTRIES);
+        last = Some(path);
+    }
+    assert_eq!(scans.key_cache().len(), EPG_KEY_CACHE_ENTRIES);
+
+    let last = last.unwrap();
+    let cached = load_epg_keys(&scans, &locks, &last).await.unwrap();
+    let again = load_epg_keys(&scans, &locks, &last).await.unwrap();
+    assert!(Arc::ptr_eq(&cached, &again), "the most recently cached entry is never the one evicted");
+}
+
+#[tokio::test]
+async fn eviction_drops_the_least_recently_used_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    let paths: Vec<_> = (0..=EPG_KEY_CACHE_ENTRIES).map(|index| dir.path().join(format!("epg-{index}.db"))).collect();
+    for path in &paths[..EPG_KEY_CACHE_ENTRIES] {
+        write_epg_db(path, &[epg_channel("a")]);
+        load_epg_keys(&scans, &locks, path).await.unwrap();
+    }
+    // The oldest entry is read again, so the second oldest becomes the eviction candidate.
+    load_epg_keys(&scans, &locks, &paths[0]).await.unwrap();
+
+    write_epg_db(&paths[EPG_KEY_CACHE_ENTRIES], &[epg_channel("a")]);
+    load_epg_keys(&scans, &locks, &paths[EPG_KEY_CACHE_ENTRIES]).await.unwrap();
+
+    let cache = scans.key_cache();
+    assert_eq!(cache.len(), EPG_KEY_CACHE_ENTRIES);
+    assert!(cache.contains(&paths[0]), "a recently read entry survives");
+    assert!(!cache.contains(&paths[1]), "the least recently used entry is evicted");
+    assert!(cache.contains(&paths[EPG_KEY_CACHE_ENTRIES]));
+}
+
+/// Takes every scan slot through the coordinator and keeps them until dropped.
+async fn hold_all_scan_slots(scans: &EpgScanCoordinator) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+    let mut held = Vec::new();
+    for _ in 0..EPG_SCAN_PERMITS {
+        held.push(timeout(WAIT, scans.acquire()).await.expect("scan slot free").unwrap());
+    }
+    assert_eq!(scans.available_permits(), 0);
+    held
+}
+
+#[tokio::test]
+async fn cache_hit_skips_the_scan_slot_and_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a"), epg_channel("b")]);
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    let first = load_epg_keys(&scans, &locks, &path).await.unwrap();
+
+    let _slots = hold_all_scan_slots(&scans).await;
+    let _write_lock = timeout(WAIT, locks.write_lock(&path)).await.expect("file lock free");
+    let second = timeout(Duration::from_secs(2), load_epg_keys(&scans, &locks, &path))
+        .await
+        .expect("a cache hit needs neither a scan slot nor the file lock")
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
+async fn rewritten_database_misses_the_fast_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a"), epg_channel("b")]);
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    let first = load_epg_keys(&scans, &locks, &path).await.unwrap();
+
+    write_epg_db(&path, &[epg_channel("c"), epg_channel("d")]);
+    let second = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    let mut keys: Vec<_> = second.iter().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["c".intern(), "d".intern()]);
+
+    // The rewrite is cached under its own stamp, so the next call is a hit again.
+    let _slots = hold_all_scan_slots(&scans).await;
+    let third =
+        timeout(Duration::from_secs(2), load_epg_keys(&scans, &locks, &path)).await.expect("fast path").unwrap();
+    assert!(Arc::ptr_eq(&second, &third));
+}
+
+#[tokio::test]
+async fn same_snapshot_with_a_new_file_stamp_is_refreshed_without_a_rescan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a")]);
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    let first = load_epg_keys(&scans, &locks, &path).await.unwrap();
+
+    // A byte-identical copy published by rename has the same header identity but another inode.
+    let copy = dir.path().join("copy.db");
+    std::fs::copy(&path, &copy).unwrap();
+    std::fs::rename(&copy, &path).unwrap();
+
+    let second = load_epg_keys(&scans, &locks, &path).await.unwrap();
+    assert!(Arc::ptr_eq(&first, &second), "the header identity is unchanged, so the set is reused");
+
+    let _slots = hold_all_scan_slots(&scans).await;
+    let third =
+        timeout(Duration::from_secs(2), load_epg_keys(&scans, &locks, &path)).await.expect("fast path").unwrap();
+    assert!(Arc::ptr_eq(&first, &third), "the refreshed stamp makes the next lookup a fast hit");
+}
+
+#[tokio::test]
+async fn deleted_database_is_not_served_from_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    write_epg_db(&path, &[epg_channel("a")]);
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    load_epg_keys(&scans, &locks, &path).await.unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    let err = load_epg_keys(&scans, &locks, &path).await.unwrap_err();
+    assert!(err.to_string().contains("Cannot open EPG database"), "{err}");
+}
+
+#[tokio::test]
+async fn scan_epg_db_stops_on_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epg.db");
+    let channels: Vec<_> = (0..5).map(|index| epg_channel(&format!("c{index}"))).collect();
+    write_epg_db(&path, &channels);
+    let scans = EpgScanCoordinator::default();
+    let locks = FileLockManager::default();
+    let visited = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (gate_tx, gate_rx) = mpsc::channel::<()>();
+
+    let visited_in_scan = Arc::clone(&visited);
+    let mut scan = Box::pin(scan_epg_db(&scans, &locks, &path, (), move |(), _, _| {
+        visited_in_scan.fetch_add(1, Ordering::SeqCst);
+        entered_tx.send(()).ok();
+        gate_rx.recv_timeout(WAIT).ok();
+    }));
+    tokio::select! {
+        _ = &mut scan => panic!("the scan is blocked on the first channel"),
+        entered = timeout(WAIT, entered_rx.recv()) => entered.expect("scan visited a channel").unwrap(),
+    }
+
+    drop(scan);
+    gate_tx.send(()).unwrap();
+    assert_scans_idle(&scans).await;
+    drop(timeout(WAIT, locks.write_lock(&path)).await.expect("file lock released"));
+    assert_eq!(visited.load(Ordering::SeqCst), 1, "no channel is visited after the caller is gone");
 }

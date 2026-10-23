@@ -231,8 +231,16 @@ async fn persist_playlist_views_with_mode(
                 };
                 if !pl.is_empty() || allows_empty_output {
                     let epg_pl: &[PlaylistGroup] = pl;
-                    if let Err(err) =
-                        epg_write_for_target(config, target, &target_path, epg, output, Some(epg_pl)).await
+                    if let Err(err) = epg_write_for_target(
+                        config,
+                        &app_config.file_locks,
+                        target,
+                        &target_path,
+                        epg,
+                        output,
+                        Some(epg_pl),
+                    )
+                    .await
                     {
                         errors.push(err);
                     }

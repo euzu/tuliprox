@@ -1,10 +1,12 @@
 use super::{
-    cluster_name, collect_page, field_value, parse_cluster, project, sanitized_additional_properties,
-    visible_in_target_listing, EpgLookup, EpgStatus, ItemField, ItemFilter, ItemSearchField, ItemsQuery, SourceName,
-    StoredPlaylistRecord, ValidatedItemsQuery, DEFAULT_ITEM_FIELDS, DEFAULT_SEARCH_FIELDS,
+    cluster_name, collect_page, drain_records, field_value, parse_cluster, project, read_stored,
+    sanitized_additional_properties, skipped_records_note, visible_in_target_listing, EpgLookup, EpgStatus, ItemField,
+    ItemFilter, ItemRow, ItemSearchField, ItemsQuery, ItemsResponse, SourceName, StoredPlaylistRecord,
+    ValidatedItemsQuery, DEFAULT_ITEM_FIELDS, DEFAULT_SEARCH_FIELDS, NO_STORED_PLAYLIST_NOTE,
 };
 use crate::{
     api::endpoints::v1_api_playlist::inspect_common::{CaseInsensitiveNeedle, PageWindow},
+    repository::LockedReceiverStream,
     utils::{canonicalize_untrusted_epg_id, EpgIdOutputCase},
 };
 use shared::{
@@ -17,7 +19,13 @@ use shared::{
     },
     utils::Internable,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 /// A provider URL as stored on records: the credentials sit in the path.
 pub(in crate::api::endpoints::v1_api_playlist) const SECRET_URL: &str =
@@ -94,15 +102,32 @@ fn no_filter<'a>() -> ItemFilter<'a> {
 }
 
 fn lookup(keys: &[&str], case: EpgIdOutputCase) -> EpgLookup {
-    EpgLookup::new(keys.iter().map(|key| Arc::<str>::from(*key)).collect(), case)
+    EpgLookup::new(Arc::new(keys.iter().map(|key| Arc::<str>::from(*key)).collect()), case)
 }
 
-fn stream_of<R>(records: Vec<R>) -> impl tokio_stream::Stream<Item = Result<R, TuliproxError>> + Unpin {
-    tokio_stream::iter(records.into_iter().map(Ok))
+/// A finished record stream: the channel is pre-filled and its sender dropped, so the stream ends after `entries`.
+/// `skipped` presets the skip counter the real reader increments for unreadable records.
+pub(in crate::api::endpoints::v1_api_playlist) fn stream_with_skips<R>(
+    entries: Vec<Result<R, TuliproxError>>,
+    skipped: usize,
+) -> LockedReceiverStream<Result<R, TuliproxError>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(entries.len().max(1));
+    for entry in entries {
+        assert!(tx.try_send(entry).is_ok(), "the channel holds every entry");
+    }
+    drop(tx);
+    LockedReceiverStream::new_empty(rx).with_skip_counter(Arc::new(AtomicUsize::new(skipped)))
 }
+
+fn stream_of<R>(records: Vec<R>) -> LockedReceiverStream<Result<R, TuliproxError>> {
+    stream_with_skips(records.into_iter().map(Ok).collect(), 0)
+}
+
+/// The row as the JSON object a client receives.
+fn row_json(row: &ItemRow) -> serde_json::Value { serde_json::to_value(row).expect("a row serializes") }
 
 fn names(page: &super::ItemPage) -> Vec<String> {
-    page.items.iter().map(|item| item["name"].as_str().unwrap_or_default().to_string()).collect()
+    page.items.iter().map(|item| row_json(item)["name"].as_str().unwrap_or_default().to_string()).collect()
 }
 
 fn playlist() -> Vec<M3uPlaylistItem> {
@@ -230,8 +255,84 @@ async fn collect_page_aborts_on_a_stream_error_instead_of_returning_a_partial_pa
         Ok(m3u_item(2, "p2", "B", "g", None)),
     ];
     let window = PageWindow::resolve(None, None, 50, 500);
-    let result = collect_page(tokio_stream::iter(records), |_| true, &no_filter(), &[ItemField::Name], window).await;
+    let result = collect_page(stream_with_skips(records, 0), |_| true, &no_filter(), &[ItemField::Name], window).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn collect_page_reports_the_records_the_reader_skipped() {
+    let window = PageWindow::resolve(None, Some(2), 50, 500);
+    let page = collect_page(
+        stream_with_skips::<M3uPlaylistItem>(vec![], 0),
+        |_| true,
+        &no_filter(),
+        &[ItemField::Name],
+        window,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.skipped_records, 0, "a healthy stream skips nothing");
+
+    let entries = playlist().into_iter().map(Ok).collect();
+    let page =
+        collect_page(stream_with_skips(entries, 2), |_| true, &no_filter(), &[ItemField::Name], window).await.unwrap();
+    assert_eq!((page.total_matched, page.skipped_records), (5, 2), "skipped records are not part of the total");
+
+    let page = collect_page(stream_with_skips::<M3uPlaylistItem>(vec![], 3), |_| true, &no_filter(), &[], window)
+        .await
+        .unwrap();
+    assert_eq!((page.total_matched, page.items.len(), page.skipped_records), (0, 0, 3));
+}
+
+#[tokio::test]
+async fn collect_page_reads_the_skip_count_after_the_stream_is_drained() {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let counter = Arc::new(AtomicUsize::new(0));
+    let stream = LockedReceiverStream::new_empty(rx).with_skip_counter(Arc::clone(&counter));
+    let producer = tokio::spawn(async move {
+        assert!(tx.send(Ok(m3u_item(1, "p1", "A", "g", None))).await.is_ok());
+        counter.fetch_add(1, Ordering::Release);
+        assert!(tx.send(Ok(m3u_item(2, "p2", "B", "g", None))).await.is_ok());
+        counter.fetch_add(1, Ordering::Release);
+    });
+    let window = PageWindow::resolve(None, None, 50, 500);
+    let page = collect_page(stream, |_| true, &no_filter(), &[ItemField::Name], window).await.unwrap();
+    producer.await.unwrap();
+    assert_eq!((page.total_matched, page.skipped_records), (2, 2));
+}
+
+fn response_json(page: Option<super::ItemPage>) -> serde_json::Value {
+    let query = ValidatedItemsQuery::parse(ItemsQuery {
+        target: Some("t".to_string()),
+        cluster: Some("live".to_string()),
+        ..ItemsQuery::default()
+    })
+    .expect("a target alone is a valid query");
+    serde_json::to_value(ItemsResponse::new("target", "t", &query, page)).expect("the response serializes")
+}
+
+#[test]
+fn items_response_always_carries_skipped_records_and_notes_only_incomplete_listings() {
+    let page = |skipped_records| super::ItemPage { total_matched: 1, skipped_records, items: Vec::new() };
+
+    let healthy = response_json(Some(page(0)));
+    assert_eq!(healthy["skipped_records"], 0);
+    assert!(healthy.get("note").is_none(), "a healthy page has no note");
+
+    let damaged = response_json(Some(page(4)));
+    assert_eq!(damaged["skipped_records"], 4);
+    assert_eq!(damaged["total_matched"], 1);
+    assert_eq!(damaged["note"], skipped_records_note(4).as_str());
+    assert_eq!(
+        damaged["note"],
+        "4 stored record(s) could not be read and are missing from this listing; total_matched does not include \
+         them (see the server log)."
+    );
+
+    let no_database = response_json(None);
+    assert_eq!(no_database["skipped_records"], 0);
+    assert_eq!(no_database["total_matched"], 0);
+    assert_eq!(no_database["note"], NO_STORED_PLAYLIST_NOTE);
 }
 
 #[test]
@@ -267,8 +368,8 @@ fn series_cluster_of_a_target_hides_episode_rows_like_the_web_ui_listing() {
 #[test]
 fn default_projection_is_compact_and_ordered() {
     let item = xtream_item(11, 22, "Name", "Group", Some("epg.id"));
-    let projected = project(&item, DEFAULT_ITEM_FIELDS, None);
-    let keys: Vec<&str> = projected.keys().map(String::as_str).collect();
+    let projected = row_json(&project(&item, DEFAULT_ITEM_FIELDS, None));
+    let keys: Vec<&str> = projected.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
         [
@@ -295,13 +396,13 @@ fn default_projection_is_compact_and_ordered() {
 #[test]
 fn projection_honors_requested_fields_and_order() {
     let item = xtream_item(11, 22, "Name", "Group", None);
-    let projected = project(&item, &[ItemField::SourceOrdinal, ItemField::InputName, ItemField::Logo], None);
-    let keys: Vec<&str> = projected.keys().map(String::as_str).collect();
+    let projected = row_json(&project(&item, &[ItemField::SourceOrdinal, ItemField::InputName, ItemField::Logo], None));
+    let keys: Vec<&str> = projected.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(keys, ["source_ordinal", "input_name", "logo"]);
     assert_eq!(projected["source_ordinal"], 7);
     assert_eq!(projected["input_name"], "input-a");
     assert_eq!(projected["logo"], "http://logo.example/a.png");
-    assert!(!projected.contains_key("epg_channel_id"), "unrequested field is absent");
+    assert!(projected.get("epg_channel_id").is_none(), "unrequested field is absent");
 }
 
 #[test]
@@ -342,7 +443,7 @@ fn url_is_never_returned_for_any_field_or_item_type() {
 
     assert!(!ItemField::NAMES.contains(&"url"));
     for projected in [project(&with_props, ItemField::ALL, None), project(&m3u, ItemField::ALL, None)] {
-        assert!(!projected.contains_key("url"));
+        assert!(row_json(&projected).get("url").is_none());
         let json = serde_json::to_string(&projected).unwrap();
         assert!(!json.contains("secret-user"), "{json}");
         assert!(!json.contains("secret-pass"), "{json}");
@@ -623,4 +724,159 @@ fn cluster_param_parsing() {
     assert_eq!(parse_cluster(Some("series")).unwrap(), XtreamCluster::Series);
     assert!(parse_cluster(Some("movie")).is_err());
     assert!(parse_cluster(Some("")).is_err());
+}
+
+#[tokio::test]
+async fn drain_records_visits_every_record_and_returns_the_skip_count_after_the_drain() {
+    let mut seen = Vec::new();
+    let skipped = drain_records(stream_with_skips(playlist().into_iter().map(Ok).collect(), 3), |record| {
+        seen.push(record.virtual_id());
+    })
+    .await
+    .unwrap();
+    assert_eq!((seen.len(), skipped), (5, 3));
+
+    let skipped = drain_records(stream_with_skips::<M3uPlaylistItem>(vec![], 0), |_| unreachable!()).await.unwrap();
+    assert_eq!(skipped, 0, "a healthy empty stream skips nothing");
+}
+
+#[tokio::test]
+async fn drain_records_propagates_a_stream_error_and_stops_visiting() {
+    let entries = vec![
+        Ok(m3u_item(1, "p1", "A", "g", None)),
+        Err(TuliproxError::RepositoryM3u("boom".to_string())),
+        Ok(m3u_item(2, "p2", "B", "g", None)),
+    ];
+    let mut visited = 0_usize;
+    let result = drain_records(stream_with_skips(entries, 1), |_| visited += 1).await;
+    assert!(result.is_err());
+    assert_eq!(visited, 1, "records behind the error are not visited");
+}
+
+#[tokio::test]
+async fn read_stored_is_none_without_a_stream_and_runs_the_reader_otherwise() {
+    let none = read_stored::<M3uPlaylistItem, usize, _>(None, |_| async { unreachable!() }).await.unwrap();
+    assert_eq!(none, None);
+
+    let counted = read_stored(Some(stream_with_skips(playlist().into_iter().map(Ok).collect(), 2)), |records| {
+        drain_records(records, |_| {})
+    })
+    .await
+    .unwrap();
+    assert_eq!(counted, Some(2));
+}
+
+/// The allocation-free provider id search of the filter.
+fn provider_id_matches(record: &impl StoredPlaylistRecord, needle: &CaseInsensitiveNeedle) -> bool {
+    record.with_provider_id(|provider_id| needle.is_in(provider_id))
+}
+
+fn needle(text: &str) -> CaseInsensitiveNeedle { CaseInsensitiveNeedle::new(Some(text)).expect("a non-blank needle") }
+
+#[test]
+fn xtream_provider_id_matches_substrings_of_the_decimal_id() {
+    let record = xtream_item(1, 1234, "n", "g", None);
+    assert!(provider_id_matches(&record, &needle("23")));
+    assert!(provider_id_matches(&record, &needle("1234")));
+    assert!(provider_id_matches(&record, &needle(" 4 ")), "the needle is trimmed");
+    assert!(!provider_id_matches(&record, &needle("13")), "digits must be adjacent");
+    assert!(!provider_id_matches(&record, &needle("x")), "non-digits never match");
+    assert!(!provider_id_matches(&record, &needle("12345")), "a needle longer than the id never matches");
+    assert!(!provider_id_matches(&record, &needle("+1234")), "the id has no sign");
+
+    assert!(provider_id_matches(&xtream_item(1, 0, "n", "g", None), &needle("0")), "id 0 has one digit");
+    assert!(!provider_id_matches(&xtream_item(1, 0, "n", "g", None), &needle("00")));
+
+    let max = xtream_item(1, u32::MAX, "n", "g", None);
+    assert!(provider_id_matches(&max, &needle("4294967295")), "all ten digits");
+    assert!(provider_id_matches(&max, &needle("967295")));
+    assert!(!provider_id_matches(&max, &needle("42949672950")), "eleven digits cannot match");
+}
+
+#[test]
+fn m3u_provider_id_matches_case_insensitively() {
+    let record = m3u_item(1, "Ab-12", "n", "g", None);
+    assert!(provider_id_matches(&record, &needle("b-1")));
+    assert!(provider_id_matches(&record, &needle("AB")));
+    assert!(!provider_id_matches(&record, &needle("ba")));
+    assert!(!provider_id_matches(&record, &needle("ab-123")));
+    assert!(provider_id_matches(&m3u_item(1, "Über", "n", "g", None), &needle("üBER")), "non-ASCII needle");
+    assert!(!provider_id_matches(&m3u_item(1, "", "n", "g", None), &needle("a")), "an empty id matches nothing");
+}
+
+#[test]
+fn provider_id_matches_agrees_with_the_materialized_provider_id() {
+    let mut ids = vec![0, 1, 9, 10, 99, 100, 999_999_999, 1_000_000_000, 4_294_967_290, u32::MAX - 1, u32::MAX];
+    let mut state = 0x9E37_79B9_u32;
+    for _ in 0..200 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        // Vary the digit count: shifting right yields ids of every length.
+        ids.push(state >> (state % 32));
+    }
+    let needles = ["0", "1", "5", "23", "99", "00", "10", "4294967295", "967", "x", "42949672950"];
+    for id in ids {
+        let record = xtream_item(1, id, "n", "g", None);
+        for text in needles {
+            let needle = needle(text);
+            assert_eq!(
+                provider_id_matches(&record, &needle),
+                needle.is_in(&record.provider_id()),
+                "id {id}, needle {text}"
+            );
+            assert_eq!(provider_id_matches(&record, &needle), id.to_string().contains(text.trim()), "id {id}, {text}");
+        }
+    }
+}
+
+#[test]
+fn filter_searches_the_provider_id_of_both_record_types() {
+    let by_provider_id = [ItemSearchField::ProviderId];
+    let needle = needle("42");
+    let filter = ItemFilter { needle: Some(&needle), search_fields: &by_provider_id, ..no_filter() };
+    assert!(filter.matches(&xtream_item(1, 1042, "n", "g", None)));
+    assert!(!filter.matches(&xtream_item(1, 1043, "n", "g", None)));
+    assert!(filter.matches(&m3u_item(1, "x42y", "n", "g", None)));
+    assert!(!filter.matches(&m3u_item(1, "p4", "n", "g", None)));
+}
+
+#[test]
+fn item_rows_serialize_as_objects_in_field_order() {
+    let item = xtream_item(11, 22, "Name", "Group", Some("epg.id"));
+    // Deliberately not alphabetical: the output follows the requested order.
+    let fields = [ItemField::Name, ItemField::VirtualId, ItemField::Group, ItemField::ProviderId, ItemField::Cluster];
+    let row = project(&item, &fields, None);
+    assert_eq!(
+        serde_json::to_string(&row).unwrap(),
+        r#"{"name":"Name","virtual_id":11,"group":"Group","provider_id":"22","cluster":"live"}"#
+    );
+    assert_eq!(serde_json::to_string(&project(&item, &[], None)).unwrap(), "{}");
+}
+
+#[test]
+fn item_rows_serialize_like_the_former_string_keyed_map() {
+    let item = xtream_item(11, 22, "Name", "Group", Some("epg.id"));
+    let former = |fields: &[ItemField]| -> serde_json::Map<String, serde_json::Value> {
+        fields.iter().map(|field| (field.name().to_string(), field_value(&item, *field, None))).collect()
+    };
+    for fields in [DEFAULT_ITEM_FIELDS, ItemField::ALL, &[ItemField::SourceOrdinal, ItemField::Name]] {
+        assert_eq!(
+            serde_json::to_string(&project(&item, fields, None)).unwrap(),
+            serde_json::to_string(&former(fields)).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn items_response_carries_the_rows_in_field_order() {
+    let fields = [ItemField::Name, ItemField::ProviderId, ItemField::Group];
+    let window = PageWindow::resolve(None, Some(2), 50, 500);
+    let page = collect_page(stream_of(playlist()), |_| true, &no_filter(), &fields, window).await.unwrap();
+    let query = ValidatedItemsQuery::parse(target_query()).unwrap();
+    let json = serde_json::to_string(&ItemsResponse::new("target", "t", &query, Some(page))).unwrap();
+    assert!(
+        json.contains(
+            r#""items":[{"name":"BBC One","provider_id":"p1","group":"UK"},{"name":"BBC Two","provider_id":"p2","group":"UK"}]"#
+        ),
+        "{json}"
+    );
 }

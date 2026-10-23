@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn intentional_empty_strm_cleanup_false_removes_indexed_files_but_keeps_unmanaged_files() {
     let directory = tempdir().expect("tempdir");
-    let app_config = target_test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let target = ConfigTarget::from(&ConfigTargetDto {
         name: "curated-strm-retention-test".to_string(),
         output: vec![TargetOutputDto::Strm(StrmTargetOutputDto {

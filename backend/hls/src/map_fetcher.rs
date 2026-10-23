@@ -328,6 +328,8 @@ async fn fetch_map_into_cache(
     snapshot: &MapFetchSnapshot,
     policy: &SegmentFetchPolicy,
 ) -> Result<MapFetchCommit, MapFetchError> {
+    // The first cache write scans the whole cache directory; do it before any per-attempt deadline starts.
+    context.segment_cache.prepare_capacity_accounting().await.map_err(|error| MapFetchError::cache_body(&error))?;
     fetch_map_with_retries_into_cache(context, snapshot, policy).await
 }
 

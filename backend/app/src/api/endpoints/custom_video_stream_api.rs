@@ -744,6 +744,7 @@ mod tests {
             shared_stream_manager,
             hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),
             stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+            epg_scans: crate::api::model::EpgScanCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,

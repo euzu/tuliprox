@@ -5,8 +5,9 @@ use tuliprox_core::model::HlsCacheConfig;
 
 #[tokio::test]
 async fn update_config_applies_hls_runtime_settings_to_existing_manager() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
     let initial_dto = HlsCacheConfigDto {
-        cache_path: Some("/tmp/tuliprox/hls-a".to_string()),
+        cache_path: Some(temp_dir.path().join("hls-a").to_string_lossy().into_owned()),
         max_segments_prefetch: 1,
         ..Default::default()
     };
@@ -54,7 +55,10 @@ async fn optional_hls_config_controls_runtime_enabled_state() {
         super::super::super::GarbageCollectionReport::default()
     );
 
-    let app_config = test_app_config(config_with_hls_cache(HlsCacheConfigDto::default()));
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let enabled_dto =
+        HlsCacheConfigDto { cache_path: Some(temp_dir.path().to_string_lossy().into_owned()), ..Default::default() };
+    let app_config = test_app_config(config_with_hls_cache(enabled_dto));
     manager.update_config(&app_config).await;
 
     assert!(manager.is_enabled());
@@ -147,6 +151,30 @@ fn managers_built_with_defaults_never_share_a_cache_directory() {
 }
 
 #[tokio::test]
+async fn private_cache_helpers_never_resolve_to_the_shared_default_path() {
+    let shared_default = std::path::PathBuf::from(tuliprox_core::model::default_hls_cache_path());
+
+    let manager = HlsProxyManager::with_private_cache(&HlsCacheConfigDto::default());
+    let private_path = manager.segment_cache().cache_path();
+    assert_ne!(private_path, shared_default);
+    assert_ne!(
+        private_path,
+        HlsProxyManager::with_private_cache(&HlsCacheConfigDto::default()).segment_cache().cache_path()
+    );
+
+    let kept = manager.keep_cache_path(HlsCacheConfigDto::default());
+    assert_eq!(kept.cache_path.as_deref().map(std::path::Path::new), Some(private_path.as_path()));
+    manager.update_config(&test_app_config(config_with_hls_cache(kept))).await;
+    assert_eq!(manager.segment_cache().cache_path(), private_path);
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let explicit =
+        HlsCacheConfigDto { cache_path: Some(temp_dir.path().to_string_lossy().into_owned()), ..Default::default() };
+    assert_eq!(manager.keep_cache_path(explicit.clone()).cache_path, explicit.cache_path);
+    assert_eq!(HlsProxyManager::with_private_cache(&explicit).segment_cache().cache_path(), temp_dir.path());
+}
+
+#[tokio::test]
 async fn default_manager_removes_its_private_cache_directory_on_drop() {
     let manager = HlsProxyManager::new();
     let cache_path = manager.segment_cache().cache_path();
@@ -155,4 +183,28 @@ async fn default_manager_removes_its_private_cache_directory_on_drop() {
     drop(manager);
 
     assert!(!cache_path.exists());
+}
+
+#[test]
+fn private_cache_dir_is_created_and_removed_by_its_owner() {
+    let dir = super::super::config::PrivateCacheDir::create().expect("create private cache dir");
+    let path = dir.0.clone();
+    assert!(path.is_dir());
+
+    drop(dir);
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn private_cache_dir_never_adopts_an_existing_directory() {
+    let first = super::super::config::PrivateCacheDir::create().expect("create private cache dir");
+    let first_path = first.0.clone();
+    std::fs::write(first_path.join("stale"), b"stale").expect("write stale file");
+
+    let second = super::super::config::PrivateCacheDir::create().expect("create private cache dir");
+
+    assert_ne!(second.0, first_path);
+    assert!(first_path.join("stale").exists(), "creating another directory must not touch an existing one");
+    assert!(std::fs::read_dir(&second.0).expect("read new dir").next().is_none());
 }

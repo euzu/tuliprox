@@ -32,7 +32,7 @@ async fn force_empty_output_filters_reject_m3u_and_strm_before_mutation() {
 
     for (target_name, output, artifact) in cases {
         let directory = tempdir().expect("temporary storage");
-        let app_config = test_app_config(directory.path());
+        let app_config = app_config_in(directory.path());
         let artifact_path = directory.path().join(artifact);
         tokio::fs::create_dir_all(artifact_path.parent().expect("artifact parent")).await.expect("artifact directory");
         tokio::fs::write(&artifact_path, b"previous-client-state").await.expect("previous client artifact");

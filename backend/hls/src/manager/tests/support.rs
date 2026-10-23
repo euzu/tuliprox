@@ -20,7 +20,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use shared::model::{ConfigPaths, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, ReverseProxyConfigDto};
 use std::sync::Arc;
 use tuliprox_core::{
-    model::{AppConfig, Config, HlsCacheConfig, MediaToolCapabilities, ReverseProxyConfig, SourcesConfig},
+    model::{AppConfig, Config, MediaToolCapabilities, ReverseProxyConfig, SourcesConfig},
     utils::FileLockManager,
 };
 use tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer;
@@ -250,8 +250,7 @@ pub(in crate::manager::tests) fn commit_terminal_plan(
 pub(in crate::manager::tests) async fn live_media_fixture(
     lease_name: &str,
 ) -> (HlsProxyManager, HlsSessionHandle, ProxySessionId, HlsAccessLeaseId, HlsMediaLeaseIdentity) {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     {
@@ -334,8 +333,7 @@ pub(in crate::manager::tests) async fn prepared_terminal_commit_fixture(
     super::super::super::lease::HlsTerminalTailPreparation,
     Arc<HlsTerminalTailPlan>,
 ) {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     manager.terminal_commit_clock.set_fixed_now_ms(2_000);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, lease_name), b"secret", 1_000).await;

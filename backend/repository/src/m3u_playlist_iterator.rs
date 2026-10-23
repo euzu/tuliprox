@@ -426,8 +426,10 @@ impl M3uPlaylistIterator {
         let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
         let m3u_path = m3u_get_file_path_for_db(&target_path);
 
-        let iter_lock = cfg.file_locks.read_lock(&m3u_path).await;
-        let bg_lock = cfg.file_locks.read_lock(&m3u_path).await;
+        // One read lock, shared by the stream (LockedReceiverStream) and the background reader.
+        // A second read lock on the same path would deadlock behind a queued writer.
+        let file_lock = Arc::new(cfg.file_locks.read_lock(&m3u_path).await);
+        let bg_lock = Arc::clone(&file_lock);
 
         let m3u_path = m3u_path.clone();
         let index_path = get_file_path_for_db_index(&m3u_path);
@@ -493,7 +495,7 @@ impl M3uPlaylistIterator {
         });
 
         Ok(Self {
-            inner: LockedReceiverStream::new(rx, iter_lock), // Save lock inside struct
+            inner: LockedReceiverStream::new_shared(rx, file_lock), // Save lock inside struct
         })
     }
 }
@@ -604,9 +606,14 @@ mod tests {
         M3uPlaylistIterator, M3uPlaylistIteratorFlags, M3uPlaylistIteratorFlagsSet, M3uPlaylistM3uTextIterator,
         ResourceRewrite, UrlRewriteContext,
     };
-    use crate::LockedReceiverStream;
+    use crate::{
+        bplustree::BPlusTree,
+        ensure_target_storage_path, m3u_get_file_path_for_db,
+        test_config::{app_config_in, target_with_output},
+        LockedReceiverStream,
+    };
     use base64::Engine;
-    use futures::StreamExt;
+    use futures::{poll, StreamExt};
     use shared::{
         model::{
             CatchupProperties, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, ProviderUrlSelectionPolicy,
@@ -617,9 +624,12 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{atomic::AtomicUsize, Arc},
+        time::Duration,
     };
-    use tokio::sync::mpsc;
-    use tuliprox_core::model::{ConfigInput, ConfigProvider, ProviderDnsCache};
+    use tokio::{sync::mpsc, time::timeout};
+    use tuliprox_core::model::{
+        ConfigInput, ConfigProvider, M3uTargetOutput, ProviderDnsCache, ProxyUserCredentials, TargetOutput,
+    };
 
     fn provider_input() -> Arc<ConfigInput> {
         Arc::new(ConfigInput {
@@ -1011,5 +1021,48 @@ mod tests {
         assert!(iterator.next().await.is_some_and(|entry| entry.is_ok()));
         assert!(iterator.next().await.is_some_and(|entry| entry.is_err()));
         assert!(iterator.next().await.is_none());
+    }
+
+    /// The iterator holds one read lock shared by its stream and its producer. The
+    /// old shape took two on the same path, which deadlocked behind a queued writer.
+    #[tokio::test]
+    async fn iterator_holds_one_shared_read_lock_until_it_is_dropped() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let app_config = app_config_in(temp.path());
+        let target = target_with_output(
+            "lock-target",
+            TargetOutput::M3u(M3uTargetOutput {
+                filename: None,
+                include_type_in_url: false,
+                mask_redirect_url: false,
+                filter: None,
+            }),
+        );
+        let target_path = ensure_target_storage_path(&app_config.config.load(), &target.name)
+            .await
+            .expect("target storage should be created");
+        let m3u_path = m3u_get_file_path_for_db(&target_path);
+        std::fs::create_dir_all(m3u_path.parent().expect("parent dir")).expect("storage dir should be created");
+        // More entries than the channel depth: the producer is still active while nothing is consumed.
+        let mut tree = BPlusTree::new();
+        for id in 1..=400u32 {
+            tree.insert(id, m3u_item("http://example.com/live/user/pass/1.ts"));
+        }
+        tree.store(&m3u_path).expect("m3u playlist should persist");
+
+        let mut iterator = M3uPlaylistIterator::new(&app_config, &target, &ProxyUserCredentials::default())
+            .await
+            .expect("iterator should open");
+        assert!(iterator.next().await.is_some_and(|entry| entry.is_ok()));
+
+        let mut write = Box::pin(app_config.file_locks.write_lock(&m3u_path));
+        assert!(poll!(&mut write).is_pending(), "writer must wait while the iterator is alive");
+
+        drop(iterator);
+        let guard = timeout(Duration::from_secs(5), write)
+            .await
+            .expect("queued writer must complete once iterator and producer are gone");
+        drop(guard);
+        assert!(app_config.file_locks.try_write_lock(&m3u_path).await.is_ok(), "no read guard may be left behind");
     }
 }

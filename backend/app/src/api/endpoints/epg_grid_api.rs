@@ -380,7 +380,7 @@ mod tests {
                 epg_group_index_write, epg_groups_path, epg_write_for_target, get_target_storage_path,
                 m3u_get_epg_file_path_for_target, xtream_get_epg_file_path_for_target, xtream_get_storage_path,
             },
-            utils::EpgIdOutputCase,
+            utils::{EpgIdOutputCase, FileLockManager},
         };
         use axum::{
             body::{to_bytes, Body},
@@ -471,10 +471,19 @@ mod tests {
                 .expect("create m3u dir");
             let xtream_storage = xtream_get_storage_path(&config, &target.name).expect("xtream storage path");
             std::fs::create_dir_all(&xtream_storage).expect("create xtream dir");
+            let file_locks = FileLockManager::default();
             for output in &target.output {
-                epg_write_for_target(&config, &target, &target_path, Some(&epg_for(output)), output, playlist)
-                    .await
-                    .expect("write target epg");
+                epg_write_for_target(
+                    &config,
+                    &file_locks,
+                    &target,
+                    &target_path,
+                    Some(&epg_for(output)),
+                    output,
+                    playlist,
+                )
+                .await
+                .expect("write target epg");
             }
             let app_state = create_test_app_state(config);
             app_state.app_config.sources.store(Arc::new(SourcesConfig {

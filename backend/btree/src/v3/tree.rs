@@ -144,7 +144,7 @@ use self::{
         StoredDatabase,
     },
     error::{invalid_data, invalid_input},
-    iterators::{record_page_visit, CursorState},
+    iterators::{record_page_visit, ChainGuard, CursorState},
     mutation::{
         checked_page_usage, locate_transaction_leaf, minimum_tree_key, overflow_chain_pages, push_child_visits,
         stage_delete, stage_upsert, validate_leaf_backlink, validated_overflow_chain_pages,

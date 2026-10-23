@@ -1,10 +1,13 @@
 mod app_state;
+mod epg_scan_coordinator;
 mod hls_playlist_handoff;
 mod hls_provisioning;
 mod proxy;
 mod stalker_resolve_coordinator;
 mod streams;
 
+#[cfg(test)]
+pub(crate) use self::epg_scan_coordinator::{EPG_KEY_CACHE_ENTRIES, EPG_SCAN_PERMITS};
 #[cfg(test)]
 pub(in crate::api) use self::hls_provisioning::{
     build_hls_custom_video_manifest_body, hls_panel_provisioning_manifest_path,
@@ -18,7 +21,11 @@ pub(in crate::api) use self::hls_provisioning::{
 pub use self::{
     app_state::*, hls_playlist_handoff::HlsPlaylistHandoffCache, hls_provisioning::HlsProvisioningState, proxy::*,
 };
-pub(crate) use self::{stalker_resolve_coordinator::StalkerResolveCoordinator, streams::*};
+pub(crate) use self::{
+    epg_scan_coordinator::{check_scan_cancelled, EpgFileStamp, EpgKeySet, EpgScanCoordinator},
+    stalker_resolve_coordinator::StalkerResolveCoordinator,
+    streams::*,
+};
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
 // Update semaphores moved to `model`; re-exported so `api` keeps its names.

@@ -30,12 +30,12 @@ mcp:
   max_response_bytes: 262144
 ```
 
-| Parameter            |       Type      | Default  | Technical Impact & Background                                                                                                                                                                                                            |
-|:---------------------|:---------------:|:---------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`            |       Bool      | `false`  | Mounts `POST {web_ui_path}/mcp`. When `false` (or the block is absent) no MCP route exists.                                                                                                                                              |
-| `read_only`          |       Bool      | `true`   | Hides write tools from `tools/list` and rejects them in `tools/call`. Set to `false` to expose `update_playlists` and `update_geoip`. Forced to `true` when Web UI authentication is disabled (see [Security model](#3-security-model)). |
-| `allowed_origins`    | List of Strings | `[]`     | Additional `Origin` values accepted besides the request `Host`, for example `https://claude.ai`. Entries are trimmed and a trailing `/` is removed.                                                                                      |
-| `max_response_bytes` |       Int       | `262144` | Tool results larger than this many bytes are truncated and end with an explicit marker. Must be at least `1024`, otherwise the configuration is rejected while loading.                                                                  |
+| Parameter            |      Type       | Default  | Technical Impact & Background                                                                                                                                                                                                                                                                                  |
+|:---------------------|:---------------:|:---------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`            |      Bool       | `false`  | Mounts `POST {web_ui_path}/mcp`. When `false` (or the block is absent) no MCP route exists.                                                                                                                                                                                                                    |
+| `read_only`          |      Bool       | `true`   | Hides write tools from `tools/list` and rejects them in `tools/call`. Set to `false` to expose `update_playlists` and `update_geoip`. Forced to `true` when Web UI authentication is disabled (see [Security model](#3-security-model)).                                                                       |
+| `allowed_origins`    | List of Strings | `[]`     | Additional `Origin` values accepted besides the request `Host`, for example `https://claude.ai`. Entries are trimmed and a trailing `/` is removed. Each entry must be an origin (`scheme://host[:port]`, custom schemes allowed) without path, query or fragment; anything else fails the configuration load. |
+| `max_response_bytes` |       Int       | `262144` | Tool results larger than this many bytes are truncated and end with an explicit marker. Must be at least `1024`, otherwise the configuration is rejected while loading.                                                                                                                                        |
 
 * Unknown keys inside `mcp:` are rejected while loading the configuration.
 * The same settings can be edited in the Web UI under **Config → MCP**. Saving a block that equals the defaults
@@ -195,7 +195,7 @@ Response:
 {
   "source": {"kind": "target", "name": "main"},
   "cluster": "live",
-  "total_matched": 1342, "offset": 0, "limit": 50, "limit_clamped": false,
+  "total_matched": 1342, "skipped_records": 0, "offset": 0, "limit": 50, "limit_clamped": false,
   "returned": 50, "has_more": true,
   "items": [{"virtual_id": 1001, "provider_id": "4711", "name": "Das Erste HD", "title": "Das Erste HD",
              "group": "DE | Public", "item_type": "live", "cluster": "live",
@@ -206,6 +206,10 @@ Response:
 `total_matched` counts every record matching the filter, not only the page; continue with `offset += returned` while
 `has_more` is true. The call makes one pass over the stored database, so its cost grows with the playlist size. A source
 that was never updated answers `total_matched: 0` plus a `note`.
+
+`skipped_records` is always present. It is `0` for a healthy database; a greater value is the number of stored records
+that could not be read and are therefore missing from the listing and not part of `total_matched`. The response then
+carries a `note` saying so, so a damaged database is not mistaken for a short playlist.
 
 ### 4.2 Finding EPG problems
 
@@ -233,8 +237,19 @@ connects it to the playlist:
    `start`, `stop`, `title`, `desc` (cut at 500 characters), `categories`, `is_live`, `is_new`. A programme belongs to
    the window when it ends after `from` and starts before `to`.
 
+The response of `query_target_epg_channels` also has `skipped_playlist_records`, always present: the number of stored
+playlist records that could not be read while collecting the EPG ids the playlist uses. It is `0` for a healthy
+database; a greater value means `referenced_by_playlist` and the `unreferenced` filter may be wrong for channels used
+only by those records, and the `note` says so. `referenced_by_playlist` is `null` and the `unreferenced` filter matches
+nothing when the playlist of the target is not stored (the `note` says that, too).
+
 A target without an EPG database answers `200` with `total_matched: 0` and a `note` that says why, so that "0" is not
 mistaken for "healthy". Only the processed per-target EPG is inspectable; the raw input EPG files are not.
+
+Scanning an EPG database is bounded: at most two scans run at the same time (further calls wait), a scan stops when the
+client disconnects, and the set of EPG channel ids behind `epg_status` is cached (the least recently used of up to eight
+databases is evicted) until the EPG database is rewritten (for example by the next playlist update). A cached set is
+answered without a scan slot or opening the database, so repeated `epg_status` queries are cheap.
 
 Typical debugging flow: `list_playlist_sources`, then `query_playlist_items` with `epg_status=unmatched`, then
 `query_target_epg_channels` with `issue=expired` or `unreferenced`, then `get_target_epg_channel` for a suspicious id.
@@ -248,8 +263,8 @@ Typical debugging flow: `list_playlist_sources`, then `query_playlist_items` wit
   credentials are removed. `logo` and `logo_small` become `null` when they contain credentials.
 * Results still pass the generic redaction and the `mcp.max_response_bytes` limit. A large `limit` combined with
   `additional_properties` can hit that limit and is then truncated with an explicit marker.
-* A stored record that cannot be decoded is skipped by the database reader (logged on the server) and therefore also
-  missing from the pages.
+* A stored record that cannot be decoded is skipped by the database reader and logged on the server. It is missing from
+  the pages, and the response reports how many were skipped in `skipped_records` together with a `note`.
 
 ## 5. Client setup
 

@@ -7,8 +7,10 @@ use super::{
     SegmentFetchPolicy, TransientResourceStore,
 };
 use arc_swap::ArcSwap;
+use log::warn;
 use std::{
     collections::HashMap,
+    io,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -63,13 +65,32 @@ impl HlsProxyRuntimeConfig {
 }
 
 /// Cache directory owned by one manager and removed together with it.
-pub(super) struct PrivateCacheDir(PathBuf);
+pub(super) struct PrivateCacheDir(pub(super) PathBuf);
+
+/// Names tried before giving up; a stale directory of a recycled process id only costs one skipped name.
+const PRIVATE_CACHE_DIR_ATTEMPTS: usize = 1024;
 
 impl PrivateCacheDir {
-    fn create() -> Self {
+    /// A name no other manager of this process uses; it may still exist on disk, e.g. left by a process with a
+    /// recycled id.
+    fn candidate_path() -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let name = format!("tuliprox-hls-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
-        Self(std::env::temp_dir().join(name))
+        std::env::temp_dir().join(name)
+    }
+
+    /// Creates the directory itself, so the name is reserved: an existing path is never adopted, and the returned
+    /// owner removes exactly the directory it created.
+    pub(super) fn create() -> io::Result<Self> {
+        for _ in 0..PRIVATE_CACHE_DIR_ATTEMPTS {
+            let path = Self::candidate_path();
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free private HLS cache directory name"))
     }
 }
 
@@ -82,16 +103,52 @@ impl HlsProxyManager {
     ///
     /// Sharing `DEFAULT_HLS_CACHE_PATH` between managers is unsafe: the orphan-session cleanup of one
     /// manager deletes the session directories of every other manager on that path.
-    pub fn new() -> Self {
-        let cache_dir = PrivateCacheDir::create();
-        let default_dto = shared::model::HlsCacheConfigDto {
-            cache_path: Some(cache_dir.0.to_string_lossy().into_owned()),
-            ..Default::default()
+    ///
+    /// When the temp directory is not writable the manager still gets a unique path of its own, which the cache
+    /// creates on demand, but nothing removes it on drop.
+    pub fn new() -> Self { Self::with_private_cache(&shared::model::HlsCacheConfigDto::default()) }
+
+    /// Creates a manager with the settings of `dto` and, unless `dto` names a `cache_path`, a cache directory of its
+    /// own (see [`HlsProxyManager::new`]).
+    ///
+    /// Tests build managers through this instead of `with_hls_cache_config(&HlsCacheConfig::from(&dto))`, which
+    /// falls back to the process-shared `DEFAULT_HLS_CACHE_PATH` for a `dto` without a path.
+    pub fn with_private_cache(dto: &shared::model::HlsCacheConfigDto) -> Self {
+        if dto.cache_path.is_some() {
+            return Self::with_hls_cache_config(&HlsCacheConfig::from(dto));
+        }
+        let (cache_path, cache_dir) = match PrivateCacheDir::create() {
+            Ok(dir) => (dir.0.clone(), Some(dir)),
+            Err(err) => {
+                warn!("Cannot create a private HLS cache directory in the temp dir: {err}");
+                (PrivateCacheDir::candidate_path(), None)
+            }
         };
-        let default_config = HlsCacheConfig::from(&default_dto);
-        let mut manager = Self::with_hls_cache_config(&default_config);
-        manager.private_cache_dir = Some(cache_dir);
+        let private_dto = shared::model::HlsCacheConfigDto {
+            cache_path: Some(cache_path.to_string_lossy().into_owned()),
+            ..dto.clone()
+        };
+        let mut manager = Self::with_hls_cache_config(&HlsCacheConfig::from(&private_dto));
+        manager.private_cache_dir = cache_dir;
         manager
+    }
+
+    /// Returns `dto` with the cache directory this manager currently uses, unless `dto` names one.
+    ///
+    /// Applying a `dto` without a `cache_path` through [`HlsProxyManager::update_config`] would switch the manager
+    /// to the process-shared `DEFAULT_HLS_CACHE_PATH`, which every test process and the real default share.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn keep_cache_path(&self, mut dto: shared::model::HlsCacheConfigDto) -> shared::model::HlsCacheConfigDto {
+        if dto.cache_path.is_none() {
+            let current = self.segment_cache.cache_path();
+            debug_assert_ne!(
+                current,
+                PathBuf::from(tuliprox_core::model::default_hls_cache_path()),
+                "the manager already uses the process-shared HLS cache path"
+            );
+            dto.cache_path = Some(current.to_string_lossy().into_owned());
+        }
+        dto
     }
 
     /// Initializes HLS workers with the same loaded connect setting as the HTTP clients.

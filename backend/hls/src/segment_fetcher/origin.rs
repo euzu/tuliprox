@@ -17,6 +17,8 @@ pub(super) async fn fetch_segment_into_cache(
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
 ) -> Result<SegmentFetchCommit, SegmentFetchError> {
+    // The first cache write scans the whole cache directory; do it before any per-attempt deadline starts.
+    context.segment_cache.prepare_capacity_accounting().await.map_err(|error| SegmentFetchError::cache_body(&error))?;
     ensure_segment_key_dependency_ready(context, snapshot, policy).await?;
     fetch_segment_with_retries_into_cache(context, snapshot, policy).await
 }

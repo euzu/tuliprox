@@ -153,8 +153,14 @@ fn build_epg_rename_map(
     build_epg_maps(playlist, output_case).0
 }
 
+/// Writes the EPG db (and group index) of one target output.
+///
+/// The write holds the file write lock of the EPG db: readers take the matching read lock, and the
+/// fair lock queue keeps a steady stream of readers from delaying the write indefinitely. Callers
+/// must not hold a read or write lock of the same EPG path.
 pub async fn epg_write_for_target(
     cfg: &Config,
+    file_locks: &FileLockManager,
     target: &ConfigTarget,
     target_path: &Path,
     epg: Option<&Epg>,
@@ -193,7 +199,11 @@ pub async fn epg_write_for_target(
         let target_name = target.name.clone();
         let target_name_err = target_name.clone();
         let epg_data = epg_data.clone();
+        // Acquired before the blocking task so the wait does not occupy a blocking thread; the guard
+        // moves into the task and is released only after the db and its index are written.
+        let file_lock = file_locks.write_lock(&epg_path).await;
         tokio::task::spawn_blocking(move || {
+            let _guard = file_lock;
             // The old index goes before the EPG db is replaced and the new one is published after
             // it, so a failure at any step leaves no index rather than one of another EPG db.
             // Readers treat a missing index as "not built yet". An empty EPG keeps the old db.
@@ -249,6 +259,7 @@ mod tests {
     use crate::BPlusTree;
     use arc_swap::ArcSwapOption;
     use shared::{
+        error::ErrorKind,
         model::{
             EpgCategory, EpgChannel, EpgProgramme, PlaylistItem, PlaylistItemHeader, ProcessingOrder, XtreamCluster,
         },
@@ -379,8 +390,9 @@ mod tests {
         std::fs::create_dir_all(m3u_path.parent().expect("m3u parent")).expect("create m3u storage");
         std::fs::create_dir_all(xtream_path.parent().expect("xtream parent")).expect("create xtream storage");
         let epg = epg_with_channels(&["a", "b"]);
+        let locks = FileLockManager::new();
         for output in &target.output {
-            epg_write_for_target(&config, &target, &target_path, Some(&epg), output, playlist)
+            epg_write_for_target(&config, &locks, &target, &target_path, Some(&epg), output, playlist)
                 .await
                 .expect("write target EPG");
         }
@@ -444,6 +456,7 @@ mod tests {
 
         let result = epg_write_for_target(
             &config,
+            &FileLockManager::new(),
             &target,
             &target_path,
             Some(&epg_with_channels(&["a"])),
@@ -498,8 +511,9 @@ mod tests {
         std::fs::create_dir_all(m3u_path.parent().expect("m3u parent")).expect("create m3u storage");
         std::fs::create_dir_all(xtream_path.parent().expect("xtream parent")).expect("create xtream storage");
 
+        let write_locks = FileLockManager::new();
         for output in &target.output {
-            epg_write_for_target(&config, &target, &target_path, Some(&epg), output, None)
+            epg_write_for_target(&config, &write_locks, &target, &target_path, Some(&epg), output, None)
                 .await
                 .expect("write target EPG");
         }
@@ -523,6 +537,137 @@ mod tests {
             assert!(!stored.programmes[0].is_live);
             assert!(!stored.programmes[0].is_new);
         }
+    }
+
+    /// Config, M3U-only target, its target path and EPG db path, with the storage directory created.
+    fn m3u_target_epg_fixture(tmp: &TempDir) -> (Config, ConfigTarget, std::path::PathBuf, std::path::PathBuf) {
+        let config = Config { storage_dir: tmp.path().to_string_lossy().into_owned(), ..Config::default() };
+        let mut target = target_with_m3u_and_xtream();
+        target.output.retain(|output| matches!(output, TargetOutput::M3u(_)));
+        let target_path = crate::get_target_storage_path(&config, &target.name).expect("target storage path");
+        let epg_path = m3u_get_epg_file_path_for_target(&target_path);
+        std::fs::create_dir_all(epg_path.parent().expect("epg parent")).expect("create epg storage");
+        (config, target, target_path, epg_path)
+    }
+
+    fn temporary_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read storage dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".v3.tmp"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn target_epg_write_waits_for_readers_and_blocks_later_readers() {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const PROBE: std::time::Duration = std::time::Duration::from_millis(20);
+
+        let tmp = TempDir::new().expect("temp dir created");
+        let (config, target, target_path, epg_path) = m3u_target_epg_fixture(&tmp);
+        let locks = Arc::new(FileLockManager::new());
+        let first_reader = locks.read_lock(&epg_path).await;
+
+        let writer = tokio::spawn({
+            let locks = Arc::clone(&locks);
+            async move {
+                let output = target.output.first().expect("m3u output");
+                epg_write_for_target(
+                    &config,
+                    &locks,
+                    &target,
+                    &target_path,
+                    Some(&epg_with_channels(&["a"])),
+                    output,
+                    None,
+                )
+                .await
+            }
+        });
+
+        // The write lock is queued once a NEW read lock is no longer granted next to the held one:
+        // the lock queue is fair, so later readers wait behind a queued writer.
+        tokio::time::timeout(WAIT, async {
+            while tokio::time::timeout(PROBE, locks.read_lock(&epg_path)).await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer queued behind the held read lock");
+        assert!(!writer.is_finished());
+        assert!(!epg_path.exists());
+
+        let late_reader = tokio::spawn({
+            let locks = Arc::clone(&locks);
+            let epg_path = epg_path.clone();
+            async move {
+                let _guard = locks.read_lock(&epg_path).await;
+                epg_path.exists()
+            }
+        });
+
+        drop(first_reader);
+        tokio::time::timeout(WAIT, writer)
+            .await
+            .expect("writer completes once the reader is gone")
+            .expect("writer task joined")
+            .expect("target EPG written");
+        let seen_written = tokio::time::timeout(WAIT, late_reader)
+            .await
+            .expect("queued reader is granted after the writer")
+            .expect("reader task joined");
+        assert!(seen_written, "the queued reader must only get the lock after the write finished");
+    }
+
+    #[tokio::test]
+    async fn target_epg_write_to_unwritable_destination_fails_cleanly() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let (config, target, target_path, epg_path) = m3u_target_epg_fixture(&tmp);
+        let output = target.output.first().expect("m3u output");
+        let locks = FileLockManager::new();
+
+        // A valid EPG db next to the destination must survive the failed write untouched.
+        let other_path = epg_path.with_file_name("other_epg.db");
+        epg_write_file(
+            "other",
+            &epg_with_channels(&["x", "y"]),
+            &other_path,
+            &HashMap::new(),
+            None,
+            &EpgOutputOptions::default(),
+        )
+        .expect("write unrelated EPG db");
+
+        // A non-empty directory cannot be replaced by a file, whoever runs the test.
+        std::fs::create_dir_all(&epg_path).expect("create blocking directory");
+        std::fs::write(epg_path.join("keep"), b"x").expect("fill blocking directory");
+
+        let result = epg_write_for_target(
+            &config,
+            &locks,
+            &target,
+            &target_path,
+            Some(&epg_with_channels(&["a"])),
+            output,
+            None,
+        )
+        .await;
+
+        let err = result.expect_err("write onto a non-empty directory must fail");
+        assert_eq!(err.kind(), ErrorKind::RepositoryEpg);
+        assert!(err.message().contains("Failed to write epg"), "unexpected message: {}", err.message());
+        let parent = epg_path.parent().expect("epg parent");
+        assert!(temporary_files(parent).is_empty(), "leftover temporary files: {:?}", temporary_files(parent));
+        let mut other =
+            BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&other_path).expect("unrelated EPG db readable");
+        assert_eq!(other.keys().count(), 2);
+        // The failed write released its lock.
+        drop(
+            tokio::time::timeout(std::time::Duration::from_secs(10), locks.write_lock(&epg_path))
+                .await
+                .expect("lock released after failed write"),
+        );
     }
 
     fn mixed_case_epg() -> Epg {

@@ -34,7 +34,10 @@ fn request(server: &TestOriginServer, level: HlsManifestRecoveryBurstLevel) -> O
     let mut config = request.app_config.config.load_full().as_ref().clone();
     config.reverse_proxy =
         Some(tuliprox_core::model::ReverseProxyConfig::from(&shared::model::ReverseProxyConfigDto {
-            hls_cache: Some(HlsCacheConfigDto { min_origin_target_duration_secs: Secs::new(4), ..Default::default() }),
+            hls_cache: Some(request.hls_proxy.keep_cache_path(HlsCacheConfigDto {
+                min_origin_target_duration_secs: Secs::new(4),
+                ..Default::default()
+            })),
             ..Default::default()
         }));
     request.app_config.config.store(Arc::new(config));
@@ -243,10 +246,11 @@ async fn policy_snapshot_survives_config_update_until_next_real_qualification() 
     assert_eq!(request.hls_proxy.min_origin_target_duration_secs(), Secs::new(6));
     assert_eq!(result(&request).await.0, Secs::new(4));
     let mut config = request.app_config.config.load_full().as_ref().clone();
-    let hls = tuliprox_core::model::HlsCacheConfig::from(&HlsCacheConfigDto {
-        min_origin_target_duration_secs: Secs::new(6),
-        ..Default::default()
-    });
+    let hls =
+        tuliprox_core::model::HlsCacheConfig::from(&request.hls_proxy.keep_cache_path(HlsCacheConfigDto {
+            min_origin_target_duration_secs: Secs::new(6),
+            ..Default::default()
+        }));
     config.reverse_proxy = Some(tuliprox_core::model::ReverseProxyConfig {
         hls_cache: Some(hls),
         ..config.reverse_proxy.unwrap_or_else(|| {

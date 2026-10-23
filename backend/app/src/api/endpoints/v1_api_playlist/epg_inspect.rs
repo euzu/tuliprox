@@ -6,10 +6,10 @@
 
 use super::{
     inspect_common::{
-        parse_enum, parse_enum_list, query_enum, CaseInsensitiveNeedle, InspectError, PageWindow, DEFAULT_PAGE_LIMIT,
-        MAX_PAGE_LIMIT,
+        non_empty, parse_enum, parse_enum_list, query_enum, respond, CaseInsensitiveNeedle, InspectError, PageWindow,
+        DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
     },
-    items::StoredPlaylistRecord,
+    items::{drain_records, read_stored, StoredPlaylistRecord},
     recording::find_target_by_name,
 };
 use crate::{
@@ -18,26 +18,30 @@ use crate::{
             extract_form_query::FormQuery,
             xmltv_api::{get_epg_path_and_type_for_target, get_epg_path_for_target_by_type},
         },
-        model::AppState,
+        model::{check_scan_cancelled, AppState, EpgFileStamp, EpgKeySet, EpgScanCoordinator},
     },
     model::{Config, ConfigTarget},
     repository::{
         epg_query_channels_by_storage_key, iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist,
-        BPlusTreeQuery,
+        BPlusTreeQuery, LockedReceiverStream,
     },
     utils::{canonicalize_untrusted_epg_id, with_folded_epg_id, EpgIdOutputCase, FileLockManager},
 };
-use axum::{extract::State, response::IntoResponse};
+use axum::extract::State;
 use chrono::{DateTime, SecondsFormat, Utc};
 use log::error;
 use serde::{Deserialize, Serialize};
 use shared::{
     error::TuliproxError,
-    model::{ConfigTargetOptions, EpgChannel, EpgProgramme, TargetType, XtreamCluster},
+    model::{EpgChannel, EpgProgramme, TargetType, XtreamCluster},
 };
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::task;
-use tokio_stream::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_PROGRAMME_LIMIT: u32 = 100;
 const MAX_PROGRAMME_LIMIT: u32 = 1000;
@@ -72,20 +76,6 @@ impl EpgOutput {
     }
 }
 
-const fn output_name(output: TargetType) -> &'static str {
-    match output {
-        TargetType::Xtream => "xtream",
-        TargetType::M3u => "m3u",
-        TargetType::Strm => "strm",
-        TargetType::HdHomeRun => "hdhomerun",
-    }
-}
-
-/// Casing the target writes EPG channel ids in, i.e. the casing of the keys in its EPG database.
-pub(super) fn target_epg_case(target: &ConfigTarget) -> EpgIdOutputCase {
-    EpgIdOutputCase::from_lowercase(target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids))
-}
-
 fn format_rfc3339(timestamp: i64) -> Option<String> {
     DateTime::<Utc>::from_timestamp(timestamp, 0).map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
@@ -98,11 +88,51 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// Runs `work` on the opened EPG database on a blocking thread, under a scan slot and the database read lock.
+///
+/// The slot is taken before the lock, so a queued scan holds nothing. Both are moved into the blocking thread and
+/// released only when it ends. Dropping the returned future cancels the [`CancellationToken`]; `work` is expected to check
+/// it once per entry and stop, which frees the slot, the lock and the thread promptly.
+async fn with_epg_query<R, F>(
+    scans: &EpgScanCoordinator,
+    file_locks: &FileLockManager,
+    epg_path: &Path,
+    work: F,
+) -> Result<R, TuliproxError>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut BPlusTreeQuery<Arc<str>, EpgChannel>, &Path, &CancellationToken) -> Result<R, TuliproxError>
+        + Send
+        + 'static,
+{
+    let permit = scans.acquire().await?;
+    let file_lock = file_locks.read_lock(epg_path).await;
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let epg_path = epg_path.to_path_buf();
+    task::spawn_blocking(move || {
+        let _permit = permit;
+        let _file_lock = file_lock;
+        let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path).map_err(|err| {
+            TuliproxError::RepositoryEpg(format!("Cannot open EPG database {}: {err}", epg_path.display()))
+        })?;
+        work(&mut query, &epg_path, &cancel)
+    })
+    .await
+    .map_err(|err| TuliproxError::RepositoryEpg(format!("EPG scan task failed: {err}")))?
+}
+
+fn epg_read_error(epg_path: &Path, err: impl std::fmt::Display) -> TuliproxError {
+    TuliproxError::RepositoryEpg(format!("Cannot read EPG database {}: {err}", epg_path.display()))
+}
+
 /// Scans every channel of an EPG database under its read lock, folding them into an accumulator.
 ///
-/// The b+tree offers no keys-only iteration, so each value is decoded; the cost is O(EPG size) and the memory is
-/// bounded by the accumulator. The lock is released before the result is returned.
+/// Each channel is decoded with all its programmes, so the cost is O(EPG size) and the memory is bounded by the
+/// accumulator. Scans that need only the channel ids use `load_epg_keys`. The scan stops at the next channel when the
+/// caller is gone. The lock is released before the result is returned.
 async fn scan_epg_db<A, F>(
+    scans: &EpgScanCoordinator,
     file_locks: &FileLockManager,
     epg_path: &Path,
     init: A,
@@ -112,33 +142,54 @@ where
     A: Send + 'static,
     F: FnMut(&mut A, Arc<str>, EpgChannel) + Send + 'static,
 {
-    let file_lock = file_locks.read_lock(epg_path).await;
-    let epg_path = epg_path.to_path_buf();
-    task::spawn_blocking(move || {
-        let _guard = file_lock;
-        let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path).map_err(|err| {
-            TuliproxError::RepositoryEpg(format!("Cannot open EPG database {}: {err}", epg_path.display()))
-        })?;
+    with_epg_query(scans, file_locks, epg_path, move |query, epg_path, cancel| {
         let mut accumulator = init;
         for entry in query.iter() {
-            let (key, channel) = entry.map_err(|err| {
-                TuliproxError::RepositoryEpg(format!("Cannot read EPG database {}: {err}", epg_path.display()))
-            })?;
+            check_scan_cancelled(cancel)?;
+            let (key, channel) = entry.map_err(|err| epg_read_error(epg_path, err))?;
             visit(&mut accumulator, key, channel);
         }
         Ok(accumulator)
     })
     .await
-    .map_err(|err| TuliproxError::RepositoryEpg(format!("EPG scan task failed: {err}")))?
 }
 
-/// The channel ids (storage keys) of an EPG database.
+/// The channel ids (storage keys) of an EPG database, read without decoding the channels.
+///
+/// The set is cached until the database is rewritten; a failed or cancelled scan caches nothing. A cache hit is
+/// answered from the file metadata alone: it takes no scan slot and no file lock and does not open the database. That
+/// is sound because the EPG database is published by renaming a staged file over the old one, which changes inode and
+/// modification time; a stamp that differs, or that cannot be read, falls through to the scan path, where the header
+/// identity of the opened snapshot decides.
 pub(super) async fn load_epg_keys(
+    scans: &EpgScanCoordinator,
     file_locks: &FileLockManager,
     epg_path: &Path,
-) -> Result<HashSet<Arc<str>>, TuliproxError> {
-    scan_epg_db(file_locks, epg_path, HashSet::new(), |keys: &mut HashSet<Arc<str>>, key, _channel| {
-        keys.insert(key);
+) -> Result<EpgKeySet, TuliproxError> {
+    let cache = scans.key_cache();
+    if let Some(keys) = tokio::fs::metadata(epg_path)
+        .await
+        .ok()
+        .and_then(|metadata| EpgFileStamp::from_metadata(&metadata))
+        .and_then(|stamp| cache.get_unchanged(epg_path, &stamp))
+    {
+        return Ok(keys);
+    }
+    with_epg_query(scans, file_locks, epg_path, move |query, epg_path, cancel| {
+        let identity = query.snapshot_identity();
+        // Read under the lock right after opening, so it describes the file that was opened.
+        let stamp = EpgFileStamp::read(epg_path);
+        if let Some(keys) = cache.get(epg_path, identity, stamp) {
+            return Ok(keys);
+        }
+        let mut keys = HashSet::with_capacity(cache.cached_len(epg_path));
+        for key in query.keys() {
+            check_scan_cancelled(cancel)?;
+            keys.insert(key.map_err(|err| epg_read_error(epg_path, err))?);
+        }
+        let keys = Arc::new(keys);
+        cache.insert(epg_path, identity, stamp, Arc::clone(&keys));
+        Ok(keys)
     })
     .await
 }
@@ -242,14 +293,14 @@ enum EpgDb {
     NoEpgOutput,
     /// The output exists, but its EPG database has not been written yet.
     Missing(TargetType),
-    Available(TargetType, std::path::PathBuf),
+    Available(TargetType, PathBuf),
 }
 
 impl EpgDb {
-    fn output(&self) -> Option<&'static str> {
+    fn output(&self) -> Option<TargetType> {
         match self {
             Self::NoEpgOutput => None,
-            Self::Missing(output) | Self::Available(output, _) => Some(output_name(*output)),
+            Self::Missing(output) | Self::Available(output, _) => Some(*output),
         }
     }
 
@@ -262,7 +313,7 @@ impl EpgDb {
             Self::Missing(output) => Some(format!(
                 "No EPG database exists yet for the {} output of target '{target}' (the target was never updated or \
                  no EPG source is configured); an empty result does not mean the EPG is fine.",
-                output_name(*output)
+                output.as_str()
             )),
             Self::Available(..) => None,
         }
@@ -276,7 +327,7 @@ fn resolve_epg_db(config: &Config, target: &ConfigTarget, requested: Option<EpgO
             return Err(InspectError::bad_request(format!(
                 "Target '{}' has no {} output",
                 target.name,
-                output_name(output)
+                output.as_str()
             )));
         }
         return Ok(match get_epg_path_for_target_by_type(config, target, output) {
@@ -308,19 +359,26 @@ fn insert_canonical_id(ids: &mut HashSet<Arc<str>>, id: &str, case: EpgIdOutputC
     }
 }
 
-async fn collect_referenced_ids<R, S>(mut records: S, case: EpgIdOutputCase) -> Result<HashSet<Arc<str>>, TuliproxError>
-where
-    R: StoredPlaylistRecord,
-    S: Stream<Item = Result<R, TuliproxError>> + Unpin,
-{
+/// The EPG ids a target's live playlist refers to, and how many stored records could not be read to find them.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReferencedIds {
+    ids: HashSet<Arc<str>>,
+    /// Stored playlist records the database reader skipped; channels used only by those records look unreferenced.
+    skipped_records: usize,
+}
+
+async fn collect_referenced_ids<R: StoredPlaylistRecord>(
+    records: LockedReceiverStream<Result<R, TuliproxError>>,
+    case: EpgIdOutputCase,
+) -> Result<ReferencedIds, TuliproxError> {
     let mut ids = HashSet::new();
-    while let Some(entry) = records.next().await {
-        let record = entry?;
+    let skipped_records = drain_records(records, |record| {
         if let Some(id) = record.epg_channel_id().map(str::trim).filter(|id| !id.is_empty()) {
             insert_canonical_id(&mut ids, id, case);
         }
-    }
-    Ok(ids)
+    })
+    .await?;
+    Ok(ReferencedIds { ids, skipped_records })
 }
 
 /// EPG ids the target's live playlist refers to, canonicalized like the EPG keys; `None` without a stored playlist.
@@ -328,27 +386,36 @@ async fn load_referenced_epg_ids(
     app_state: &Arc<AppState>,
     target: &ConfigTarget,
     output: TargetType,
-) -> Result<Option<HashSet<Arc<str>>>, InspectError> {
-    let case = target_epg_case(target);
+) -> Result<Option<ReferencedIds>, InspectError> {
+    let case = target.epg_id_case();
     let app_config = &app_state.app_config;
-    let ids = match output {
-        TargetType::Xtream => match iter_raw_xtream_target_playlist(app_config, target, XtreamCluster::Live).await {
-            Some(records) => collect_referenced_ids(records, case).await,
-            None => return Ok(None),
-        },
-        _ => match iter_raw_m3u_target_playlist(app_config, target, Some(XtreamCluster::Live)).await {
-            Some(records) => collect_referenced_ids(records, case).await,
-            None => return Ok(None),
-        },
+    let referenced = if output == TargetType::Xtream {
+        let records = iter_raw_xtream_target_playlist(app_config, target, XtreamCluster::Live).await;
+        read_stored(records, |records| collect_referenced_ids(records, case)).await
+    } else {
+        let records = iter_raw_m3u_target_playlist(app_config, target, Some(XtreamCluster::Live)).await;
+        read_stored(records, |records| collect_referenced_ids(records, case)).await
     };
-    ids.map(Some).map_err(|err| {
+    referenced.map_err(|err| {
         error!("Failed to read the stored playlist of target '{}': {err}", target.name);
         InspectError::internal("Failed to read the stored playlist database; see the server log")
     })
 }
 
-fn non_empty(value: Option<String>) -> Option<String> {
-    value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+/// Explains what limits `referenced_by_playlist`: an unstored playlist (unknown) or unreadable records (maybe wrong).
+fn playlist_reference_note(target: &str, referenced: Option<&ReferencedIds>) -> Option<String> {
+    // Without a stored playlist nothing can have been skipped, so at most one of the two notes applies.
+    match referenced {
+        None => Some(format!(
+            "The playlist of target '{target}' is not stored, so referenced_by_playlist is unknown (null) and the \
+             unreferenced filter matches nothing."
+        )),
+        Some(ReferencedIds { skipped_records, .. }) if *skipped_records > 0 => Some(format!(
+            "{skipped_records} stored playlist record(s) could not be read, so referenced_by_playlist and the \
+             unreferenced filter may be wrong for channels used only by those records."
+        )),
+        Some(_) => None,
+    }
 }
 
 fn require_target(value: Option<String>) -> Result<String, InspectError> {
@@ -386,8 +453,10 @@ pub(super) struct EpgChannelsQuery {
 #[derive(Serialize)]
 struct EpgChannelsResponse<'a> {
     target: &'a str,
-    output: Option<&'static str>,
+    output: Option<TargetType>,
     total_matched: usize,
+    /// Stored playlist records that could not be read; `referenced_by_playlist` may be wrong because of them.
+    skipped_playlist_records: usize,
     offset: usize,
     limit: usize,
     limit_clamped: bool,
@@ -396,6 +465,32 @@ struct EpgChannelsResponse<'a> {
     channels: Vec<EpgChannelRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
+}
+
+impl<'a> EpgChannelsResponse<'a> {
+    fn new(
+        target: &'a str,
+        output: Option<TargetType>,
+        window: PageWindow,
+        page: &ChannelsPage,
+        skipped_playlist_records: usize,
+        note: Option<String>,
+    ) -> Self {
+        let returned = page.channels.len();
+        Self {
+            target,
+            output,
+            total_matched: page.total_matched,
+            skipped_playlist_records,
+            offset: window.offset,
+            limit: window.limit,
+            limit_clamped: window.limit_clamped,
+            returned,
+            has_more: window.has_more(page.total_matched, returned),
+            channels: page.channels.iter().map(EpgChannelRow::from).collect(),
+            note,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -417,22 +512,19 @@ async fn run_epg_channels_query(
     let target = lookup_target(app_state, &target_name)?;
     let db = resolve_epg_db(&app_state.app_config.config.load(), &target, output)?;
 
-    let (page, note) = match &db {
+    let (page, note, skipped_playlist_records) = match &db {
         EpgDb::Available(db_output, epg_path) => {
             let referenced = load_referenced_epg_ids(app_state, &target, *db_output).await?;
-            let note = referenced.is_none().then(|| {
-                format!(
-                    "The playlist of target '{target_name}' is not stored, so referenced_by_playlist is unknown (null) \
-                     and the unreferenced filter matches nothing."
-                )
-            });
+            let note = playlist_reference_note(&target_name, referenced.as_ref());
+            let skipped_playlist_records = referenced.as_ref().map_or(0, |referenced| referenced.skipped_records);
             let now = Utc::now().timestamp();
             let page = scan_epg_db(
+                &app_state.epg_scans,
                 &app_state.app_config.file_locks,
                 epg_path,
                 ChannelsPage::default(),
                 move |page: &mut ChannelsPage, key, channel| {
-                    let is_referenced = referenced.as_ref().map(|ids| ids.contains(&key));
+                    let is_referenced = referenced.as_ref().map(|referenced| referenced.ids.contains(&key));
                     let summary = summarize(key, &channel, now, is_referenced);
                     if !summary.matches_search(needle.as_ref()) || !summary.has_any_issue(&issues, now) {
                         return;
@@ -445,24 +537,12 @@ async fn run_epg_channels_query(
             )
             .await
             .map_err(|err| epg_failure(&target_name, &err))?;
-            (page, note)
+            (page, note, skipped_playlist_records)
         }
-        EpgDb::NoEpgOutput | EpgDb::Missing(_) => (ChannelsPage::default(), db.missing_note(&target_name)),
+        EpgDb::NoEpgOutput | EpgDb::Missing(_) => (ChannelsPage::default(), db.missing_note(&target_name), 0),
     };
 
-    let returned = page.channels.len();
-    let response = EpgChannelsResponse {
-        target: &target_name,
-        output: db.output(),
-        total_matched: page.total_matched,
-        offset: window.offset,
-        limit: window.limit,
-        limit_clamped: window.limit_clamped,
-        returned,
-        has_more: window.has_more(page.total_matched, returned),
-        channels: page.channels.iter().map(EpgChannelRow::from).collect(),
-        note,
-    };
+    let response = EpgChannelsResponse::new(&target_name, db.output(), window, &page, skipped_playlist_records, note);
     serde_json::to_value(response).map_err(|err| InspectError::internal(format!("Failed to encode response: {err}")))
 }
 
@@ -471,10 +551,7 @@ pub(super) async fn query_target_epg_channels(
     State(app_state): State<Arc<AppState>>,
     FormQuery(query): FormQuery<EpgChannelsQuery>,
 ) -> axum::response::Response {
-    match run_epg_channels_query(&app_state, query).await {
-        Ok(response) => axum::Json(response).into_response(),
-        Err(err) => err.into_response(),
-    }
+    respond(run_epg_channels_query(&app_state, query).await)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -548,7 +625,7 @@ fn programmes_in_window(channel: &EpgChannel, from: i64, to: i64, limit: usize) 
 #[derive(Serialize)]
 struct EpgChannelResponse<'a> {
     target: &'a str,
-    output: Option<&'static str>,
+    output: Option<TargetType>,
     channel: Option<EpgChannelMeta>,
     from: Option<String>,
     to: Option<String>,
@@ -591,7 +668,7 @@ async fn run_epg_channel_query(
     };
 
     if let EpgDb::Available(_, epg_path) = &db {
-        let storage_key = canonicalize_untrusted_epg_id(&channel_id, target_epg_case(&target));
+        let storage_key = canonicalize_untrusted_epg_id(&channel_id, target.epg_id_case());
         let found = epg_query_channels_by_storage_key(
             &app_state.app_config.file_locks,
             epg_path,
@@ -620,10 +697,7 @@ pub(super) async fn get_target_epg_channel(
     State(app_state): State<Arc<AppState>>,
     FormQuery(query): FormQuery<EpgChannelQuery>,
 ) -> axum::response::Response {
-    match run_epg_channel_query(&app_state, query).await {
-        Ok(response) => axum::Json(response).into_response(),
-        Err(err) => err.into_response(),
-    }
+    respond(run_epg_channel_query(&app_state, query).await)
 }
 
 #[cfg(test)]

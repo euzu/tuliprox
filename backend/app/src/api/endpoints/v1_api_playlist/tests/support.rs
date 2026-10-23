@@ -161,6 +161,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_state_with_man
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,

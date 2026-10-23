@@ -1,52 +1,18 @@
 use super::XtreamRefreshPaths;
 use crate::BPlusTreeUpdate;
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwapOption;
 use shared::{
     model::{
-        ConfigPaths, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-        ProcessingOrder, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+        LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProcessingOrder,
+        StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::Internable,
 };
 use std::{path::Path, sync::Arc};
-use tuliprox_core::{
-    model::{
-        ApiProxyConfig, AppConfig, Config, ConfigTarget, CustomStreamResponse, HdHomeRunConfig, MediaToolCapabilities,
-        SourcesConfig, StagedFilter, TargetExecutionPlan, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
-    },
-    utils::FileLockManager,
+use tuliprox_core::model::{
+    ConfigTarget, StagedFilter, TargetExecutionPlan, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
 };
 use uuid::Uuid;
-
-pub(in crate::xtream_repository::tests) fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
-    Arc::new(AppConfig {
-        config: Arc::new(ArcSwap::from_pointee(Config {
-            storage_dir: storage_dir.to_string_lossy().into_owned(),
-            ..Config::default()
-        })),
-        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-        hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
-        api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
-        file_locks: Arc::new(FileLockManager::default()),
-        paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-            home_path: String::new(),
-            config_path: String::new(),
-            storage_path: String::new(),
-            config_file_path: String::new(),
-            sources_file_path: String::new(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        })),
-        custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
-        access_token_secret: [0; 32],
-        encrypt_secret: [0; 16],
-        media_tools: Arc::new(MediaToolCapabilities::new()),
-    })
-}
 
 pub(in crate::xtream_repository::tests) fn target_writer_config() -> ConfigTarget {
     ConfigTarget {

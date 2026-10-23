@@ -4,37 +4,37 @@
 //! returned: provider URLs carry credentials in their path, which no redaction downstream can recognize.
 
 use super::{
-    epg_inspect::{load_epg_keys, target_epg_case},
+    epg_inspect::load_epg_keys,
     inspect_common::{
-        parse_enum_list, query_enum, CaseInsensitiveNeedle, InspectError, PageWindow, DEFAULT_PAGE_LIMIT,
-        MAX_PAGE_LIMIT,
+        non_empty, parse_enum_list, query_enum, respond, CaseInsensitiveNeedle, InspectError, PageWindow,
+        DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
     },
     recording::find_target_by_name,
 };
 use crate::{
     api::{
         endpoints::{extract_form_query::FormQuery, xmltv_api::get_epg_path_for_target_by_type},
-        model::AppState,
+        model::{AppState, EpgKeySet},
     },
     model::{ConfigInput, ConfigTarget},
     repository::{
         iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist,
-        iter_raw_xtream_target_playlist,
+        iter_raw_xtream_target_playlist, LockedReceiverStream,
     },
     utils::{with_folded_epg_id, EpgIdOutputCase},
 };
 use axum::{extract::State, response::IntoResponse};
 use log::error;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value;
 use shared::{
     error::TuliproxError,
     model::{
         InputType, M3uPlaylistItem, PlaylistItemType, StreamProperties, TargetType, XtreamCluster, XtreamPlaylistItem,
     },
 };
-use std::{borrow::Cow, collections::HashSet, sync::Arc};
-use tokio_stream::{Stream, StreamExt};
+use std::{borrow::Cow, future::Future, sync::Arc};
+use tokio_stream::StreamExt;
 
 query_enum! {
     /// Record fields a client can project with `fields`.
@@ -126,9 +126,11 @@ fn parse_cluster(value: Option<&str>) -> Result<XtreamCluster, InspectError> {
 ///
 /// Implementors only map their own field layout onto these accessors; filtering and projection are written once
 /// against the trait.
-pub(super) trait StoredPlaylistRecord {
+pub(in crate::api::endpoints) trait StoredPlaylistRecord {
     fn virtual_id(&self) -> u32;
     fn provider_id(&self) -> Cow<'_, str>;
+    /// Runs `visit` on the provider id without allocating; the search path calls it for every scanned record.
+    fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T;
     fn name(&self) -> &str;
     fn title(&self) -> &str;
     fn group(&self) -> &str;
@@ -161,6 +163,8 @@ impl StoredPlaylistRecord for XtreamPlaylistItem {
 
     fn provider_id(&self) -> Cow<'_, str> { Cow::Owned(self.provider_id.to_string()) }
 
+    fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { with_decimal(self.provider_id, visit) }
+
     fn epg_channel_id(&self) -> Option<&str> { self.epg_channel_id.as_deref() }
 
     fn item_type(&self) -> PlaylistItemType { self.item_type }
@@ -183,6 +187,8 @@ impl StoredPlaylistRecord for M3uPlaylistItem {
 
     fn provider_id(&self) -> Cow<'_, str> { Cow::Borrowed(&self.provider_id) }
 
+    fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { visit(&self.provider_id) }
+
     fn epg_channel_id(&self) -> Option<&str> { self.epg_channel_id.as_deref() }
 
     fn item_type(&self) -> PlaylistItemType { self.item_type }
@@ -196,6 +202,24 @@ impl StoredPlaylistRecord for M3uPlaylistItem {
     fn source_ordinal(&self) -> u32 { self.source_ordinal }
 
     fn additional_properties(&self) -> Option<&StreamProperties> { self.additional_properties.as_ref() }
+}
+
+/// Runs `visit` on the decimal form of `value`, which is formatted into a stack buffer.
+fn with_decimal<T>(value: u32, visit: impl FnOnce(&str) -> T) -> T {
+    // `u32::MAX` has 10 decimal digits.
+    let mut buffer = [b'0'; 10];
+    let mut rest = value;
+    let mut digits = 0_usize;
+    for slot in buffer.iter_mut().rev() {
+        *slot = b'0' + u8::try_from(rest % 10).unwrap_or_default();
+        rest /= 10;
+        digits += 1;
+        if rest == 0 {
+            break;
+        }
+    }
+    let text = buffer.get(buffer.len() - digits..).and_then(|digits| std::str::from_utf8(digits).ok());
+    visit(text.unwrap_or_default())
 }
 
 /// Members of `additional_properties` that are never returned, wherever they occur.
@@ -262,12 +286,12 @@ fn visible_text(text: &str) -> Value {
 
 /// The EPG channel ids of a target's EPG database, for classifying playlist items.
 pub(super) struct EpgLookup {
-    keys: HashSet<Arc<str>>,
+    keys: EpgKeySet,
     case: EpgIdOutputCase,
 }
 
 impl EpgLookup {
-    pub(super) fn new(keys: HashSet<Arc<str>>, case: EpgIdOutputCase) -> Self { Self { keys, case } }
+    pub(super) fn new(keys: EpgKeySet, case: EpgIdOutputCase) -> Self { Self { keys, case } }
 
     /// The id is canonicalized like the keys of the EPG database are written (the target's output casing).
     pub(super) fn classify(&self, epg_channel_id: Option<&str>) -> EpgStatus {
@@ -314,19 +338,32 @@ fn field_value<R: StoredPlaylistRecord>(record: &R, field: ItemField, epg: Optio
     }
 }
 
-/// The record as a JSON object holding exactly `fields`, in that order.
-fn project<R: StoredPlaylistRecord>(record: &R, fields: &[ItemField], epg: Option<&EpgLookup>) -> Map<String, Value> {
-    fields.iter().map(|field| (field.name().to_string(), field_value(record, *field, epg))).collect()
+/// One projected record: the requested fields in request order, keyed by their static wire names.
+///
+/// Serialized as a JSON object; keeping the keys as `&'static str` spares a `String` per field and record.
+#[derive(Debug, PartialEq)]
+struct ItemRow(Vec<(&'static str, Value)>);
+
+impl Serialize for ItemRow {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(key, value)| (*key, value)))
+    }
 }
 
-fn search_text<R: StoredPlaylistRecord>(record: &R, field: ItemSearchField) -> Cow<'_, str> {
+/// The record as a JSON object holding exactly `fields`, in that order.
+fn project<R: StoredPlaylistRecord>(record: &R, fields: &[ItemField], epg: Option<&EpgLookup>) -> ItemRow {
+    ItemRow(fields.iter().map(|field| (field.name(), field_value(record, *field, epg))).collect())
+}
+
+/// Whether `needle` occurs in the `field` text of the record, without allocating.
+fn search_matches<R: StoredPlaylistRecord>(record: &R, field: ItemSearchField, needle: &CaseInsensitiveNeedle) -> bool {
     match field {
-        ItemSearchField::Name => Cow::Borrowed(record.name()),
-        ItemSearchField::Title => Cow::Borrowed(record.title()),
-        ItemSearchField::Group => Cow::Borrowed(record.group()),
-        ItemSearchField::EpgChannelId => Cow::Borrowed(record.epg_channel_id().unwrap_or_default()),
-        ItemSearchField::ProviderId => record.provider_id(),
-        ItemSearchField::InputName => Cow::Borrowed(record.input_name()),
+        ItemSearchField::Name => needle.is_in(record.name()),
+        ItemSearchField::Title => needle.is_in(record.title()),
+        ItemSearchField::Group => needle.is_in(record.group()),
+        ItemSearchField::EpgChannelId => needle.is_in(record.epg_channel_id().unwrap_or_default()),
+        ItemSearchField::ProviderId => record.with_provider_id(|provider_id| needle.is_in(provider_id)),
+        ItemSearchField::InputName => needle.is_in(record.input_name()),
     }
 }
 
@@ -345,7 +382,7 @@ impl ItemFilter<'_> {
             return false;
         }
         if let Some(needle) = self.needle {
-            if !self.search_fields.iter().any(|field| needle.is_in(&search_text(record, *field))) {
+            if !self.search_fields.iter().any(|field| search_matches(record, *field, needle)) {
                 return false;
             }
         }
@@ -361,18 +398,52 @@ impl ItemFilter<'_> {
 
 /// A target lists a series cluster without the episode rows, like the Web UI playlist does
 /// (`get_playlist_for_target`), so counts match what the UI shows.
-fn visible_in_target_listing<R: StoredPlaylistRecord>(cluster: XtreamCluster, record: &R) -> bool {
+pub(in crate::api::endpoints) fn visible_in_target_listing<R: StoredPlaylistRecord>(
+    cluster: XtreamCluster,
+    record: &R,
+) -> bool {
     !cluster.is_series() || !record.item_type().is_series()
 }
 
 struct ItemPage {
     total_matched: usize,
-    items: Vec<Map<String, Value>>,
+    /// Stored records the database reader could not decode; they are in neither `total_matched` nor `items`.
+    skipped_records: usize,
+    items: Vec<ItemRow>,
+}
+
+/// Drains a record stream, calls `visit` for every record and returns how many stored records the reader could not
+/// decode and skipped.
+///
+/// The skip count is complete only once the stream is exhausted, so it is read after the loop. A stream error aborts
+/// the drain: a partial result must not be mistaken for a complete one.
+pub(super) async fn drain_records<R>(
+    mut records: LockedReceiverStream<Result<R, TuliproxError>>,
+    mut visit: impl FnMut(R),
+) -> Result<usize, TuliproxError> {
+    while let Some(entry) = records.next().await {
+        visit(entry?);
+    }
+    Ok(records.skipped_records())
+}
+
+/// Runs `read` on the optional record stream of a source; `None` when no database is stored.
+pub(super) async fn read_stored<R, T, F>(
+    records: Option<LockedReceiverStream<Result<R, TuliproxError>>>,
+    read: impl FnOnce(LockedReceiverStream<Result<R, TuliproxError>>) -> F,
+) -> Result<Option<T>, TuliproxError>
+where
+    F: Future<Output = Result<T, TuliproxError>>,
+{
+    match records {
+        Some(records) => read(records).await.map(Some),
+        None => Ok(None),
+    }
 }
 
 /// One pass over the stored records: counts every match and keeps only the requested window.
-async fn collect_page<R, S>(
-    mut records: S,
+async fn collect_page<R>(
+    records: LockedReceiverStream<Result<R, TuliproxError>>,
     visible: impl Fn(&R) -> bool,
     filter: &ItemFilter<'_>,
     fields: &[ItemField],
@@ -380,21 +451,34 @@ async fn collect_page<R, S>(
 ) -> Result<ItemPage, TuliproxError>
 where
     R: StoredPlaylistRecord,
-    S: Stream<Item = Result<R, TuliproxError>> + Unpin,
 {
     let mut total_matched = 0_usize;
     let mut items = Vec::with_capacity(window.limit.min(DEFAULT_PAGE_LIMIT as usize));
-    while let Some(entry) = records.next().await {
-        let record = entry?;
+    let skipped_records = drain_records(records, |record| {
         if !visible(&record) || !filter.matches(&record) {
-            continue;
+            return;
         }
         if window.contains(total_matched) {
             items.push(project(&record, fields, filter.epg));
         }
         total_matched += 1;
-    }
-    Ok(ItemPage { total_matched, items })
+    })
+    .await?;
+    Ok(ItemPage { total_matched, skipped_records, items })
+}
+
+/// [`collect_page`] over the optional record stream of a source; `None` when no database is stored.
+async fn collect_stored_page<R>(
+    records: Option<LockedReceiverStream<Result<R, TuliproxError>>>,
+    visible: impl Fn(&R) -> bool,
+    filter: &ItemFilter<'_>,
+    fields: &[ItemField],
+    window: PageWindow,
+) -> Result<Option<ItemPage>, TuliproxError>
+where
+    R: StoredPlaylistRecord,
+{
+    read_stored(records, |records| collect_page(records, visible, filter, fields, window)).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -432,7 +516,6 @@ struct ValidatedItemsQuery {
 
 impl ValidatedItemsQuery {
     fn parse(query: ItemsQuery) -> Result<Self, InspectError> {
-        let non_empty = |value: Option<String>| value.map(|value| value.trim().to_string()).filter(|v| !v.is_empty());
         let source = match (non_empty(query.target), non_empty(query.input)) {
             (Some(target), None) => SourceName::Target(target),
             (None, Some(input)) => SourceName::Input(input),
@@ -483,32 +566,46 @@ struct ItemsResponse<'a> {
     source: SourceRef<'a>,
     cluster: &'static str,
     total_matched: usize,
+    skipped_records: usize,
     offset: usize,
     limit: usize,
     limit_clamped: bool,
     returned: usize,
     has_more: bool,
-    items: Vec<Map<String, Value>>,
+    items: Vec<ItemRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<&'static str>,
+    note: Option<String>,
 }
 
 const NO_STORED_PLAYLIST_NOTE: &str =
     "No stored playlist database exists yet for this source (it was never updated); total_matched 0 does not mean the \
      source is empty.";
 
+fn skipped_records_note(skipped_records: usize) -> String {
+    format!(
+        "{skipped_records} stored record(s) could not be read and are missing from this listing; total_matched does \
+         not include them (see the server log)."
+    )
+}
+
 /// Outcome of reading one source: the records' page, or `None` when no database is stored.
 type SourcePage = Option<ItemPage>;
 
 impl<'a> ItemsResponse<'a> {
     fn new(kind: &'static str, name: &'a str, query: &ValidatedItemsQuery, page: SourcePage) -> Self {
-        let note = page.is_none().then_some(NO_STORED_PLAYLIST_NOTE);
-        let page = page.unwrap_or(ItemPage { total_matched: 0, items: Vec::new() });
+        // Without a database nothing can have been skipped, so at most one of the two notes applies.
+        let note = match &page {
+            None => Some(NO_STORED_PLAYLIST_NOTE.to_string()),
+            Some(page) if page.skipped_records > 0 => Some(skipped_records_note(page.skipped_records)),
+            Some(_) => None,
+        };
+        let page = page.unwrap_or(ItemPage { total_matched: 0, skipped_records: 0, items: Vec::new() });
         let returned = page.items.len();
         Self {
             source: SourceRef { kind, name },
             cluster: cluster_name(query.cluster),
             total_matched: page.total_matched,
+            skipped_records: page.skipped_records,
             offset: query.window.offset,
             limit: query.window.limit,
             limit_clamped: query.window.limit_clamped,
@@ -551,35 +648,28 @@ async fn read_target_page(
     };
     let cluster = query.cluster;
     let app_config = &app_state.app_config;
-    let page = match output {
-        TargetType::Xtream => match iter_raw_xtream_target_playlist(app_config, target, cluster).await {
-            Some(records) => {
-                collect_page(
-                    records,
-                    |record: &XtreamPlaylistItem| visible_in_target_listing(cluster, record),
-                    &filter,
-                    &query.fields,
-                    query.window,
-                )
-                .await
-            }
-            None => return Ok(None),
-        },
-        _ => match iter_raw_m3u_target_playlist(app_config, target, Some(cluster)).await {
-            Some(records) => {
-                collect_page(
-                    records,
-                    |record: &M3uPlaylistItem| visible_in_target_listing(cluster, record),
-                    &filter,
-                    &query.fields,
-                    query.window,
-                )
-                .await
-            }
-            None => return Ok(None),
-        },
+    let page = if output == TargetType::Xtream {
+        let records = iter_raw_xtream_target_playlist(app_config, target, cluster).await;
+        collect_stored_page(
+            records,
+            |record: &XtreamPlaylistItem| visible_in_target_listing(cluster, record),
+            &filter,
+            &query.fields,
+            query.window,
+        )
+        .await
+    } else {
+        let records = iter_raw_m3u_target_playlist(app_config, target, Some(cluster)).await;
+        collect_stored_page(
+            records,
+            |record: &M3uPlaylistItem| visible_in_target_listing(cluster, record),
+            &filter,
+            &query.fields,
+            query.window,
+        )
+        .await
     };
-    page.map(Some).map_err(|err| read_failure(&format!("target '{}'", target.name), &err))
+    page.map_err(|err| read_failure(&format!("target '{}'", target.name), &err))
 }
 
 async fn read_input_page(
@@ -597,23 +687,15 @@ async fn read_input_page(
     let cluster = query.cluster;
     let app_config = &app_state.app_config;
     let page = if input.input_type.is_xtream() {
-        match iter_raw_xtream_input_playlist(app_config, input, cluster).await {
-            Some(records) => {
-                collect_page(records, |_: &XtreamPlaylistItem| true, &filter, &query.fields, query.window).await
-            }
-            None => return Ok(None),
-        }
+        let records = iter_raw_xtream_input_playlist(app_config, input, cluster).await;
+        collect_stored_page(records, |_: &XtreamPlaylistItem| true, &filter, &query.fields, query.window).await
     } else if input.input_type.is_m3u() {
-        match iter_raw_m3u_input_playlist(app_config, input, Some(cluster)).await {
-            Some(records) => {
-                collect_page(records, |_: &M3uPlaylistItem| true, &filter, &query.fields, query.window).await
-            }
-            None => return Ok(None),
-        }
+        let records = iter_raw_m3u_input_playlist(app_config, input, Some(cluster)).await;
+        collect_stored_page(records, |_: &M3uPlaylistItem| true, &filter, &query.fields, query.window).await
     } else {
         return Err(InspectError::bad_request(unsupported_input_message(input)));
     };
-    page.map(Some).map_err(|err| read_failure(&format!("input '{}'", input.name), &err))
+    page.map_err(|err| read_failure(&format!("input '{}'", input.name), &err))
 }
 
 fn unsupported_input_message(input: &ConfigInput) -> String {
@@ -636,11 +718,12 @@ async fn load_epg_lookup(
             target.name
         )));
     };
-    let keys = load_epg_keys(&app_state.app_config.file_locks, &epg_path).await.map_err(|err| {
-        error!("Failed to read the EPG database of target '{}': {err}", target.name);
-        InspectError::internal("Failed to read the EPG database; see the server log")
-    })?;
-    Ok(EpgLookup::new(keys, target_epg_case(target)))
+    let keys =
+        load_epg_keys(&app_state.epg_scans, &app_state.app_config.file_locks, &epg_path).await.map_err(|err| {
+            error!("Failed to read the EPG database of target '{}': {err}", target.name);
+            InspectError::internal("Failed to read the EPG database; see the server log")
+        })?;
+    Ok(EpgLookup::new(keys, target.epg_id_case()))
 }
 
 async fn run_items_query(app_state: &Arc<AppState>, query: ItemsQuery) -> Result<serde_json::Value, InspectError> {
@@ -677,10 +760,7 @@ pub(super) async fn query_playlist_items(
     State(app_state): State<Arc<AppState>>,
     FormQuery(query): FormQuery<ItemsQuery>,
 ) -> axum::response::Response {
-    match run_items_query(&app_state, query).await {
-        Ok(response) => axum::Json(response).into_response(),
-        Err(err) => err.into_response(),
-    }
+    respond(run_items_query(&app_state, query).await)
 }
 
 #[derive(Serialize)]

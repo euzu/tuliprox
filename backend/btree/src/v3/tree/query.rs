@@ -4,8 +4,8 @@ use super::{
     decompress_value_in_place, decompress_value_into, invalid_data, invalid_input, overflow_payload, record_page_visit,
     recover_pending, recovery_required, wal_path, wal_temporary_path, BPlusTreeDiskIterator,
     BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeMetadata, BPlusTreeQuery, BPlusTreeRangeIterator,
-    Compression, DatabaseHeader, InternalCellRef, InternalPreamble, LeafCellRef, LeafValueRef, Locator, PageType,
-    PageValidation, SharedSidecarGuard, SlottedPage, PAGE_SIZE,
+    ChainGuard, Compression, DatabaseHeader, InternalCellRef, InternalPreamble, LeafCellRef, LeafValueRef, Locator,
+    PageType, PageValidation, SharedSidecarGuard, SlottedPage, PAGE_SIZE,
 };
 use crate::{
     codec::binary_deserialize,
@@ -407,9 +407,9 @@ impl<K, V> BPlusTreeQuery<K, V> {
         self.value_scratch
             .try_reserve(stored_len)
             .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
-        let mut chain = HashSet::new();
+        let mut chain = ChainGuard::default();
         while page_id != 0 {
-            record_page_visit(&mut chain, page_id, "overflow chain contains a cycle")?;
+            chain.visit(page_id, self.header.next_page_id, "overflow chain contains a cycle")?;
             if let Some(pages) = owned_pages.as_deref_mut() {
                 record_page_visit(pages, page_id, "overflow page is owned by multiple values")?;
             }
@@ -776,7 +776,7 @@ where
     pub(crate) fn collect_with_locators(&mut self) -> io::Result<Vec<(K, V, Locator)>> {
         let mut result = Vec::new();
         let mut page_id = self.header.root_page_id;
-        let mut visited = HashSet::new();
+        let mut visited = ChainGuard::default();
         let mut descending = true;
         let mut descent_depth = 0u64;
         loop {
@@ -815,7 +815,7 @@ where
                 continue;
             }
             descending = false;
-            record_page_visit(&mut visited, page_id, "right sibling chain contains a cycle")?;
+            visited.visit(page_id, self.header.next_page_id, "right sibling chain contains a cycle")?;
             result.try_reserve(locators.len()).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
             for (locator, range) in locators {
                 let entry = self
@@ -851,8 +851,8 @@ where
     fn query_le_io(&mut self, key: &K) -> io::Result<Option<V>> {
         let mut leaf_id = self.locate_leaf(key)?;
         let mut first = true;
-        let mut visited = HashSet::new();
-        record_page_visit(&mut visited, leaf_id, "left sibling chain contains a cycle")?;
+        let mut visited = ChainGuard::default();
+        visited.visit(leaf_id, self.header.next_page_id, "left sibling chain contains a cycle")?;
         loop {
             let (left, count, start) = self.with_slotted_page(leaf_id, |page, _| {
                 if page.header().page_type != PageType::Leaf {
@@ -881,7 +881,7 @@ where
                 return Ok(None);
             }
             let current = leaf_id;
-            record_page_visit(&mut visited, left, "left sibling chain contains a cycle")?;
+            visited.visit(left, self.header.next_page_id, "left sibling chain contains a cycle")?;
             leaf_id = left;
             self.with_slotted_page(leaf_id, |page, _| {
                 if page.header().page_type != PageType::Leaf || page.header().right != current {
@@ -896,8 +896,8 @@ where
     pub fn len(&mut self) -> Result<usize, BPlusTreeError> {
         let result: io::Result<usize> = (|| {
             let mut page_id = self.leftmost_leaf()?;
-            let mut visited = HashSet::new();
-            record_page_visit(&mut visited, page_id, "right sibling chain contains a cycle")?;
+            let mut visited = ChainGuard::default();
+            visited.visit(page_id, self.header.next_page_id, "right sibling chain contains a cycle")?;
             let mut total = 0usize;
             loop {
                 let next_page_id = self.header.next_page_id;
@@ -919,7 +919,7 @@ where
                 if right == 0 {
                     return Ok(total);
                 }
-                record_page_visit(&mut visited, right, "right sibling chain contains a cycle")?;
+                visited.visit(right, next_page_id, "right sibling chain contains a cycle")?;
                 self.with_page(right, |bytes, _| {
                     let page = SlottedPage::open(bytes, right, next_page_id)?;
                     if page.header().page_type != PageType::Leaf || page.header().left != page_id {
@@ -933,9 +933,10 @@ where
         result.map_err(Into::into)
     }
 
+    /// Whether the snapshot holds no live entry. Only the first live key is decoded: a corrupt first *value* does not
+    /// make this fail (use [`Self::iter`] to validate values); a corrupt key or a structural error still does.
     pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
-        let mut iterator = self.iter();
-        match iterator.next() {
+        match self.keys().next() {
             None => Ok(true),
             Some(Ok(_)) => Ok(false),
             Some(Err(err)) => Err(BPlusTreeError::Io(err)),

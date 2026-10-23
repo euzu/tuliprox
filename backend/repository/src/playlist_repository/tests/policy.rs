@@ -35,7 +35,7 @@ async fn target_empty_replacement_failures_leave_the_memory_cache_unchanged() {
         crate::TargetEmptyReplacementFailure::Publication,
     ] {
         let directory = tempdir().expect("temporary storage");
-        let app_config = test_app_config(directory.path());
+        let app_config = app_config_in(directory.path());
         let playlist_state = Arc::new(PlaylistStorageState::new());
         let target = xtream_target(&format!("empty-persist-{failure:?}"), true);
         seed_memory_cached_xtream_target(&app_config, &playlist_state, &target).await;

@@ -54,6 +54,29 @@ async fn assert_playback_reserve_preserved(
     assert!(reserve_at(&current).guaranteed_reserve_ms > 0);
 }
 
+/// Waits until background segment fetches of the session no longer hold its origin account I/O slot.
+///
+/// A fetch of the old generation that is still running keeps the old slot occupied after the explicitly held guard is
+/// released, so the retry of the pending clients would keep being denied for as long as that fetch takes.
+async fn wait_for_origin_io_idle(session: &HlsSessionHandle) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let idle = session
+                .read()
+                .await
+                .origin_account_io_lease
+                .as_ref()
+                .is_none_or(|lease| !lease.is_active_or_acquiring());
+            if idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("background origin I/O settles");
+}
+
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "Keep the real active playback, two pending clients and I/O gate together.")]
 async fn pending_clients_share_reservation_retry_without_consuming_active_playback_reserve_all_modes() {
@@ -133,10 +156,29 @@ async fn pending_clients_share_reservation_retry_without_consuming_active_playba
             account_runtime: None,
         };
         let old_binding = session.read().await.origin_account_binding.clone().unwrap();
-        let old_guard =
-            tuliprox_hls::api::begin_hls_origin_account_io_bounded(&io, &session, &old_binding, Duration::from_secs(1))
+        // The held guard must be the only old-generation I/O: a background fetch that joined the same slot would
+        // outlive the release and keep denying the pending clients.
+        let old_guard = loop {
+            wait_for_origin_io_idle(&session).await;
+            let guard = tuliprox_hls::api::begin_hls_origin_account_io_bounded(
+                &io,
+                &session,
+                &old_binding,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            let sole_holder = session
+                .read()
                 .await
-                .unwrap();
+                .origin_account_io_lease
+                .as_ref()
+                .is_some_and(|lease| lease.active_io_count.load(Ordering::Acquire) == 1);
+            if sole_holder {
+                break guard;
+            }
+            drop(guard);
+        };
         session.write().await.origin_account_binding = Some(tuliprox_hls::api::HlsOriginAccountBinding::rebound(
             old_binding.input_name,
             old_binding.account_name,
@@ -181,7 +223,6 @@ async fn pending_clients_share_reservation_retry_without_consuming_active_playba
                 tokio::task::yield_now().await;
             };
             assert!(!attempt.is_closed());
-            assert_eq!(attempt.logical_attempts(), 1, "one real old-generation I/O denial");
             assert_eq!(manifest_hits.load(Ordering::SeqCst), before_hits, "no HTTP through the blocked binding");
             {
                 let state = session.read().await;
@@ -196,8 +237,11 @@ async fn pending_clients_share_reservation_retry_without_consuming_active_playba
             // Only a real advancing origin response may requalify new entry;
             // the local denial itself must not create media progress.
             manifest_head.store(101, Ordering::SeqCst);
+            // The shared retry keeps denying (and counting) on its real-time backoff while the old binding is
+            // held, so the number of denials depends on how long this gate takes on a loaded machine.
+            let denials = attempt.logical_attempts();
             tuliprox_hls::api::finish_hls_origin_account_io(&io, &session, old_guard, false).await;
-            attempt
+            (attempt, denials)
         };
         let outcomes = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
@@ -235,12 +279,13 @@ async fn pending_clients_share_reservation_retry_without_consuming_active_playba
                 state.origin_refresh.attempt.as_ref().map(|a| (a.logical_attempts(), a.is_closed(), a.failed()))
             );
         }
-        let (first, second, attempt) = outcomes.expect("both pending clients finish through the shared retry");
+        let (first, second, (attempt, denials)) =
+            outcomes.expect("both pending clients finish through the shared retry");
         for response in [first, second] {
             assert_eq!(response.status(), StatusCode::OK, "{mode:?}");
             assert!(!String::from_utf8(response_body(response).await.to_vec()).unwrap().contains("#EXT-X-ENDLIST"));
         }
-        assert_eq!(attempt.logical_attempts(), 2, "one denial plus one shared fetch");
+        assert_eq!(attempt.logical_attempts(), denials + 1, "the denials while blocked plus one shared fetch");
         assert!(attempt.is_closed() && !attempt.failed());
         assert_eq!(manifest_hits.load(Ordering::SeqCst), before_hits + 1);
         assert_playback_reserve_preserved(&app, &session, &active).await;

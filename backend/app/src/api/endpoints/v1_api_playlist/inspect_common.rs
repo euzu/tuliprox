@@ -78,6 +78,19 @@ impl IntoResponse for InspectError {
     }
 }
 
+/// Renders the outcome of an inspection query: the serialized value, or the JSON error response.
+pub(super) fn respond<T: serde::Serialize>(result: Result<T, InspectError>) -> axum::response::Response {
+    match result {
+        Ok(value) => axum::Json(value).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+/// Trims a text parameter; `None` when it is absent or blank.
+pub(super) fn non_empty(value: Option<String>) -> Option<String> {
+    value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
 /// The page asked for, after applying defaults and the hard maximum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PageWindow {
@@ -162,7 +175,9 @@ impl CaseInsensitiveNeedle {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_enum, parse_enum_list, CaseInsensitiveNeedle, PageWindow};
+    use super::{non_empty, parse_enum, parse_enum_list, respond, CaseInsensitiveNeedle, InspectError, PageWindow};
+    use axum::http::StatusCode;
+    use serde_json::json;
 
     query_enum! {
         enum Sample {
@@ -246,5 +261,35 @@ mod tests {
         assert!(needle.is_in("DER ÜBERFALL"));
         assert!(needle.is_in("über"));
         assert!(!needle.is_in("uber"));
+    }
+
+    #[tokio::test]
+    async fn respond_renders_the_value_or_the_error_body() {
+        let ok = respond(Ok(json!({ "total_matched": 3 })));
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(ok.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), json!({ "total_matched": 3 }));
+
+        let not_found = respond::<serde_json::Value>(Err(InspectError::not_found("Unknown target 'x'")));
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(not_found.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({ "error": "Unknown target 'x'" })
+        );
+
+        let internal = respond::<serde_json::Value>(Err(InspectError::internal("boom")));
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bad_request = respond::<serde_json::Value>(Err(InspectError::bad_request("bad")));
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn non_empty_trims_and_drops_blank_values() {
+        assert_eq!(non_empty(None), None);
+        assert_eq!(non_empty(Some(String::new())), None);
+        assert_eq!(non_empty(Some(" \t ".to_string())), None);
+        assert_eq!(non_empty(Some("  news ".to_string())), Some("news".to_string()));
+        assert_eq!(non_empty(Some("a b".to_string())), Some("a b".to_string()));
     }
 }

@@ -54,6 +54,10 @@ impl HlsSegmentCache {
         Ok(())
     }
 
+    pub(crate) fn capacity_scan_count(&self) -> u64 {
+        self.capacity_scan_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn fail_next_cache_deletes(&self, path: PathBuf, attempts: usize) {
         self.delete_test_failures.lock_unpoisoned().insert(path, attempts);
     }

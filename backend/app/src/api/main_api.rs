@@ -383,6 +383,7 @@ async fn create_shared_data(
         shared_stream_manager,
         hls: HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),
@@ -1217,6 +1218,7 @@ mod tests {
                 shared_stream_manager,
                 hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),
                 stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+                epg_scans: crate::api::model::EpgScanCoordinator::default(),
                 active_users,
                 active_provider,
                 connection_manager,

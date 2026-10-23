@@ -4425,6 +4425,7 @@ dependencies = [
  "libc",
  "log",
  "lol_html",
+ "lru",
  "mime",
  "mime_guess",
  "notify",

@@ -37,7 +37,8 @@ Playlist workflow: call list_playlist_sources first (targets and inputs are addr
 for one target or input and one cluster (live, video, series). Reading is always safe: only stored data is read and no \
 provider is contacted.
 Paging: results carry total_matched (all matches), returned and has_more. Request the next page with \
-offset = offset + returned while has_more is true. limit is clamped (items 500). Narrow with search, group, fields.
+offset = offset + returned while has_more is true. limit is clamped (items 500). Narrow with search, group, fields. \
+skipped_records > 0 means unreadable stored records are missing from the listing.
 Secrets: provider URLs and credentials are never returned and any secret-like value is redacted.
 Debug EPG: query_playlist_items with epg_status=unmatched (or missing_id) finds items whose EPG id is not in the EPG \
 database; query_target_epg_channels with issue=unreferenced, expired, no_programmes, not_current or no_title finds broken \

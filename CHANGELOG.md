@@ -207,11 +207,11 @@
   permissions decide what is allowed: a missing or expired token is a real HTTP `401`, a missing permission surfaces as
   an `isError` tool result. Without Web UI authentication the server is forced read-only and logs a warning. Browser
   requests are protected against DNS rebinding by an `Origin` check (`mcp.allowed_origins` for reverse proxies that
-  rewrite `Host`), and tool results are truncated at `mcp.max_response_bytes`. The `get_config` tool redacts passwords,
-  secrets, tokens and user names before the result leaves the server. Clients that only speak stdio use the
-  built-in bridge `tuliprox --mcp-stdio --mcp-url <base-url>`, which logs in with `TULIPROX_MCP_USER` and
-  `TULIPROX_MCP_PASSWORD`. The block can also be edited in the Web UI on the new **MCP** config page. See
-  [MCP server](docs/src/operator/mcp.md).
+  rewrite `Host`; entries are validated as `scheme://host[:port]` origins at load time), and tool results are
+  truncated at `mcp.max_response_bytes`. The `get_config` tool redacts passwords, secrets, tokens and user names
+  before the result leaves the server. Clients that only speak stdio use the built-in bridge
+  `tuliprox --mcp-stdio --mcp-url <base-url>`, which logs in with `TULIPROX_MCP_USER` and `TULIPROX_MCP_PASSWORD`. The block can also be edited in the
+  Web UI on the new **MCP** config page. See [MCP server](docs/src/operator/mcp.md).
 - **MCP tools to read stored playlists and debug EPG.** New read-only tools `list_playlist_sources`,
   `query_playlist_items`, `query_target_epg_channels` and `get_target_epg_channel` (REST: `GET /playlist/sources`,
   `/playlist/items`, `/playlist/epg/channels`, `/playlist/epg/channel`, permission `playlist.read`). A client lists the
@@ -221,6 +221,13 @@
   (`epg_status`). Only stored data is read, provider URLs are never returned, and the tool schemas plus the new
   `initialize` `instructions` tell the client every parameter and field. See
   [MCP server](docs/src/operator/mcp.md).
+- **Unreadable stored records are reported by the playlist items endpoint.** `GET /playlist/items` and the MCP tool
+  `query_playlist_items` now return `skipped_records` (always present, `0` for a healthy database). When stored records
+  could not be decoded they are missing from the listing and from `total_matched`, and a `note` states that the
+  listing is incomplete; before, they were only logged. `GET /playlist/epg/channels` and the MCP tool
+  `query_target_epg_channels` return the same kind of hint as `skipped_playlist_records` (always present): when stored
+  playlist records could not be read, `referenced_by_playlist` and the `unreferenced` filter may be wrong for channels
+  used only by those records, and the `note` says so.
 - **Emby and Jellyfin inputs import their libraries.** `type: emby` and `type: jellyfin` inputs now import the selected
   movie and TV libraries like Plex inputs do, and Tuliprox proxies direct playback (with `Range` support) and artwork
   without exposing server URLs or tokens to clients. Credentials are resolved from `media_server.token`, then
@@ -1156,7 +1163,33 @@
   `Vec` on every render. Backend and frontend share one `CapacityGroup`/`build_group_lookup` implementation in
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
+- **Keys-only B+Tree iteration; EPG status inspection no longer decodes every EPG channel.** `BPlusTreeQuery` gained
+  `keys()`, an iterator that yields the keys in order without decompressing or deserializing values and without reading
+  overflow pages (inline values are still checksum-verified). `epg_status` on the playlist items endpoint (and the MCP
+  `query_playlist_items` tool) only needs the EPG channel ids and now collects them this way, instead of decoding every
+  channel with all its programmes. That makes the call faster and shortens the time the EPG database read lock is held.
+
+- **EPG scans are limited, cancellable and cached.** Full scans of a per-target EPG database (`epg_status` on the
+  playlist items endpoint and the MCP `query_playlist_items` tool, and the EPG channel inspection behind
+  `query_target_epg_channels`) now run at most two at a time; further requests wait without holding a thread or a file
+  lock, so a burst of calls can no longer pile up blocking threads. A scan stops at the next entry when the client
+  disconnects and then releases its slot and the EPG database read lock. The set of EPG channel ids used by
+  `epg_status` is cached per EPG database (up to 8, the least recently used set is evicted) and reused until the
+  database is rewritten, so repeated `epg_status` queries no longer rescan it. A cache hit is answered from the file
+  metadata alone: it takes no scan slot and no file lock and does not open the database.
+
 ## 🐛 Fixes
+
+- **First HLS segment after a restart no longer times out on a large cache.** The first cache write scans the whole
+  HLS cache directory to account its size, and that scan ran inside the per-attempt segment write deadline. With many
+  cached files the scan alone exceeded the deadline, so the first attempt failed, was retried and could delay or fail
+  the client's first segment. The scan now runs before the deadline starts, and concurrent writers share one scan
+  instead of each walking the directory.
+
+- **EPG database writes take the EPG file lock.** A playlist update wrote the target EPG database without the file
+  lock that XMLTV, EPG inspection and the EPG grid hold while reading it, so a steady stream of EPG reads could delay
+  the update indefinitely. The write now queues on that lock, which also holds back new readers until it is done. The
+  Web UI EPG listing also no longer takes the lock twice, which could deadlock against a queued write.
 
 - **Stream history search honours the selected fields again.** `GET /api/v1/stream-history` rejected the
   `search_field` query parameter that the Web UI sends (`search_field=title&search_field=group`) with `400`, because

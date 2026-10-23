@@ -39,13 +39,20 @@ impl Default for McpConfigDto {
 
 impl McpConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        self.allowed_origins = self
+        let allowed_origins: Vec<String> = self
             .allowed_origins
             .iter()
             .map(|origin| origin.trim().trim_end_matches('/'))
             .filter(|origin| !origin.is_empty())
             .map(str::to_owned)
             .collect();
+        if let Some(invalid) = allowed_origins.iter().find(|origin| !is_origin(origin)) {
+            return Err(TuliproxError::ConfigBase(format!(
+                "`mcp.allowed_origins` entry `{invalid}` is not an origin; expected `scheme://host[:port]` without \
+                 path, query or fragment"
+            )));
+        }
+        self.allowed_origins = allowed_origins;
         if self.max_response_bytes < MIN_MCP_MAX_RESPONSE_BYTES {
             return Err(TuliproxError::ConfigBase(format!(
                 "`mcp.max_response_bytes` must be >= {MIN_MCP_MAX_RESPONSE_BYTES}, got {}",
@@ -54,6 +61,13 @@ impl McpConfigDto {
         }
         Ok(())
     }
+}
+
+/// Whether `value` is a `scheme://host[:port]` origin. Custom schemes are accepted; a path, query or fragment is not.
+fn is_origin(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| {
+        url.host_str().is_some() && matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_none()
+    })
 }
 
 #[cfg(test)]
@@ -103,5 +117,39 @@ mod tests {
 
         dto.max_response_bytes = 10;
         assert!(dto.prepare().is_err());
+    }
+
+    fn prepare_origins(origins: &[&str]) -> Result<McpConfigDto, TuliproxError> {
+        let mut dto = McpConfigDto {
+            allowed_origins: origins.iter().map(|origin| (*origin).to_string()).collect(),
+            ..McpConfigDto::default()
+        };
+        dto.prepare().map(|()| dto)
+    }
+
+    #[test]
+    fn prepare_rejects_origins_without_scheme_or_with_a_path_query_or_fragment() {
+        for invalid in
+            ["claude.ai", "localhost:3000", "https://a.example/app", "https://a.example?x=1", "https://a.example#top"]
+        {
+            let err = prepare_origins(&["https://ok.example", invalid]).unwrap_err().to_string();
+            assert!(err.contains(invalid), "{invalid}: {err}");
+        }
+    }
+
+    #[test]
+    fn prepare_accepts_custom_scheme_and_port_origins() {
+        let dto = prepare_origins(&["vscode-webview://abc123", "http://localhost:3000/", "https://claude.ai"]).unwrap();
+        assert_eq!(dto.allowed_origins, ["vscode-webview://abc123", "http://localhost:3000", "https://claude.ai"]);
+    }
+
+    #[test]
+    fn prepare_keeps_the_origins_when_validation_fails() {
+        let mut dto = McpConfigDto {
+            allowed_origins: vec![" https://a.example/ ".to_string(), "bad".to_string()],
+            ..McpConfigDto::default()
+        };
+        assert!(dto.prepare().is_err());
+        assert_eq!(dto.allowed_origins, [" https://a.example/ ", "bad"]);
     }
 }

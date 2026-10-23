@@ -79,6 +79,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,

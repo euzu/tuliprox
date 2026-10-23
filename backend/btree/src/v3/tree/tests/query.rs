@@ -1230,6 +1230,107 @@ fn keys_on_empty_tree_yield_nothing() -> io::Result<()> {
 }
 
 #[test]
+fn is_empty_decodes_only_the_first_key_not_the_value() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("is-empty-undecodable-value.db");
+    let mut tree = BPlusTree::new();
+    tree.insert(1u32, String::from("value"));
+    tree.insert(2u32, String::from("other"));
+    tree.store(&path)?;
+
+    let mut query = BPlusTreeQuery::<u32, UndecodableValue>::try_new(&path)?;
+    assert!(query.iter().next().is_some_and(|item| item.is_err()));
+    assert!(!query.is_empty().map_err(BPlusTreeError::to_io)?);
+    Ok(())
+}
+
+#[test]
+fn is_empty_reports_empty_and_tombstoned_only_trees() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let empty_path = dir.path().join("is-empty-empty.db");
+    BPlusTree::<u32, String>::new().store(&empty_path)?;
+    let mut empty = BPlusTreeQuery::<u32, String>::try_new(&empty_path)?;
+    assert!(empty.is_empty().map_err(BPlusTreeError::to_io)?);
+
+    let deleted_path = dir.path().join("is-empty-tombstoned.db");
+    let mut tree = BPlusTree::new();
+    for key in 0..300u32 {
+        tree.insert(key, format!("value-{key}"));
+    }
+    tree.store(&deleted_path)?;
+    let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&deleted_path)?;
+    updater.set_flush_policy(FlushPolicy::Batch);
+    for key in 0..300u32 {
+        assert!(updater.delete(&key)?);
+    }
+    updater.commit()?;
+    drop(updater);
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&deleted_path)?;
+    assert_eq!(stored_value_kind(&mut query, 0)?, "tombstone");
+    assert!(query.is_empty().map_err(BPlusTreeError::to_io)?);
+    Ok(())
+}
+
+#[test]
+fn is_empty_still_fails_on_structural_corruption() -> io::Result<()> {
+    let (mut database, _, first, _, _) = stored_tree_fixture()?;
+    let byte = page_range(first)?.start + 100;
+    *database.get_mut(byte).ok_or_else(|| io::Error::other("test corruption byte missing"))? ^= 1;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("is-empty-corrupt-leaf.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    assert!(query.is_empty().is_err());
+    Ok(())
+}
+
+#[test]
+fn len_and_locator_scan_detect_leaf_cycle() -> io::Result<()> {
+    let (mut database, _, first, second, _) = stored_tree_fixture()?;
+    set_page_reference(&mut database, second, 16, first)?;
+    set_page_reference(&mut database, first, 8, second)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("len-cycle.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let error = query.len().err().ok_or_else(|| io::Error::other("len accepted a leaf cycle"))?.to_io();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("right sibling chain contains a cycle"));
+    let error = query.collect_with_locators().err().ok_or_else(|| io::Error::other("locator scan accepted a cycle"))?;
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("right sibling chain contains a cycle"));
+    Ok(())
+}
+
+#[test]
+fn bounded_iterator_rejects_leaf_cycle_before_yielding_duplicates() -> io::Result<()> {
+    let (mut database, _, first, second, _) = stored_tree_fixture()?;
+    set_page_reference(&mut database, second, 16, first)?;
+    set_page_reference(&mut database, first, 8, second)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("bounded-cycle.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let mut seen = HashSet::new();
+    let mut errors = 0usize;
+    for item in query.range_iter(std::ops::Bound::Included(&1_100), std::ops::Bound::Unbounded) {
+        match item {
+            Ok((key, _)) => assert!(seen.insert(key), "range iterator yielded key {key} twice"),
+            Err(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                errors += 1;
+            }
+        }
+    }
+    assert_eq!(errors, 1);
+    Ok(())
+}
+
+#[test]
 fn keys_never_deserialize_values() -> io::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("keys-undecodable.db");

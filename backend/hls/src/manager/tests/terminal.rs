@@ -16,12 +16,10 @@ use crate::{
     HlsManifestAcceptanceExhaustionReason, HlsSegmentFailureObject, HlsSessionKey, HlsSessionStoreOutcome,
     HlsTerminalAssetIdentity, HlsTerminalTailCompatibility, HlsTerminalTailGeneration, ProxySessionId,
 };
-use shared::model::HlsCacheConfigDto;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tuliprox_core::model::HlsCacheConfig;
 
 #[tokio::test]
 async fn late_live_completion_after_terminal_transition_updates_neither_cursor_nor_session_activity() {
@@ -115,8 +113,7 @@ async fn current_terminal_identity_waits_for_lock_contention_and_marks_activity(
 
 #[tokio::test]
 async fn hls_terminal_commit_missing_acceptance_exact_ready_bundle_commits_tail() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     manager.terminal_commit_clock.set_fixed_now_ms(2_000);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "missing-acceptance"), b"secret", 1_000).await;
@@ -199,8 +196,7 @@ fn hls_cutover_policy_manager_uses_only_matching_acceptance_work_as_recovery_evi
 
 #[tokio::test]
 async fn repeated_segment_failure_counter_does_not_terminalize_access_lease() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -229,8 +225,7 @@ async fn repeated_segment_failure_counter_does_not_terminalize_access_lease() {
 
 #[tokio::test]
 async fn hls_cutover_policy_media_progress_supersedes_prepared_plan() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -278,8 +273,7 @@ async fn hls_cutover_policy_media_progress_supersedes_prepared_plan() {
 
 #[tokio::test]
 async fn hls_cutover_policy_matching_acceptance_commit_without_media_progress_terminalizes_lease() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -329,8 +323,7 @@ async fn hls_cutover_policy_matching_acceptance_commit_without_media_progress_te
 
 #[tokio::test]
 async fn hls_cutover_policy_new_acceptance_episode_without_media_progress_does_not_supersede_cutover() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -418,8 +411,7 @@ async fn hls_terminal_commit_retry_asset_change_autonomously_fails_closed() {
 
 #[tokio::test]
 async fn hls_terminal_commit_retry_lock_busy_without_a_second_client_request() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     manager.terminal_commit_clock.set_fixed_now_ms(2_000);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
@@ -862,8 +854,7 @@ async fn hls_terminal_commit_lease_end_before_retry_cancels_owner_without_mutati
 
 #[tokio::test]
 async fn hls_terminal_commit_new_media_generation_supersedes_prepared_plan() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -907,8 +898,7 @@ async fn hls_terminal_commit_new_media_generation_supersedes_prepared_plan() {
 
 #[tokio::test]
 async fn hls_terminal_commit_lease_end_prevents_commit_and_gc_protection() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -984,8 +974,7 @@ pub(in crate::manager::tests) async fn assert_terminal_and_live_lease_modes(
 
 #[tokio::test]
 async fn hls_cutover_policy_terminal_commit_uses_lease_deadline_and_keeps_farther_lease_live() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1067,8 +1056,7 @@ async fn hls_cutover_policy_terminal_commit_uses_lease_deadline_and_keeps_farthe
 
 #[tokio::test]
 async fn resource_denial_does_not_destroy_existing_terminal_tail() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1122,8 +1110,7 @@ async fn resource_denial_does_not_destroy_existing_terminal_tail() {
 
 #[tokio::test]
 async fn terminal_tail_protection_is_retained_until_bounded_lease_removal() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1158,8 +1145,7 @@ async fn terminal_tail_protection_is_retained_until_bounded_lease_removal() {
 
 #[tokio::test]
 async fn terminal_unavailable_protection_is_retained_until_bounded_lease_removal() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1199,8 +1185,7 @@ async fn terminal_unavailable_protection_is_retained_until_bounded_lease_removal
 
 #[tokio::test]
 async fn hls_terminal_commit_protection_capacity_has_typed_unavailable_outcome() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();

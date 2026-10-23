@@ -1,6 +1,8 @@
 mod error_macros;
 mod storage;
 mod target_id_mapping;
+#[cfg(test)]
+pub(crate) mod test_config;
 // A B+Tree-backed IPv4 lookup and a CLI dumper for the repository's databases.
 // Both read repository storage directly, so they belong here rather than in
 // `utils`, which must not depend on this layer.

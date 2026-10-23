@@ -20,7 +20,7 @@ pub(super) struct CursorState<K, T> {
     pub(super) start: Bound<K>,
     pub(super) initialized: bool,
     pub(super) finished: bool,
-    pub(super) visited_leaves: HashSet<u64>,
+    pub(super) chain: ChainGuard,
     pub(super) pending: Option<T>,
 }
 
@@ -36,7 +36,7 @@ impl<K, T> CursorState<K, T> {
             start,
             initialized: false,
             finished: false,
-            visited_leaves: HashSet::new(),
+            chain: ChainGuard::default(),
             pending: None,
         }
     }
@@ -69,6 +69,35 @@ fn load_cursor_page<K, V, T>(query: &mut BPlusTreeQuery<K, V>, state: &mut Curso
     Ok(())
 }
 
+/// O(1)-memory cycle guard for a chain walk (sibling or overflow links). Walks that validate the backlink of every
+/// step (`expected_left_sibling`) can only revisit the first page, which `visit` rejects immediately, so no entry is
+/// ever produced twice; walks without a backlink check are bounded by the number of pages that can exist.
+#[derive(Default)]
+pub(super) struct ChainGuard {
+    first: u64,
+    visited: u64,
+}
+
+impl ChainGuard {
+    /// Records the arrival at `page_id`; the first call defines the start of the walk. Fails when the walk returned to
+    /// its first page or visited more pages than `page_limit` (the exclusive upper bound of page ids, which is
+    /// `header.next_page_id`).
+    pub(super) fn visit(&mut self, page_id: u64, page_limit: u64, cycle_error: &'static str) -> io::Result<()> {
+        if self.visited == 0 {
+            self.first = page_id;
+        } else if page_id == self.first {
+            return Err(invalid_data(cycle_error));
+        }
+        self.visited = self.visited.saturating_add(1);
+        if self.visited > page_limit {
+            return Err(invalid_data(cycle_error));
+        }
+        Ok(())
+    }
+}
+
+/// Set-based duplicate detection for walks that must also report pages seen by earlier walks (free list, overflow page
+/// ownership across values).
 pub(super) fn record_page_visit(visited: &mut HashSet<u64>, page_id: u64, cycle_error: &'static str) -> io::Result<()> {
     visited.try_reserve(1).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     if !visited.insert(page_id) {
@@ -101,7 +130,8 @@ where
                 Bound::Included(key) | Bound::Excluded(key) => query.locate_leaf(key)?,
                 Bound::Unbounded => query.leftmost_leaf()?,
             };
-            record_page_visit(&mut state.visited_leaves, state.leaf_page_id, "right sibling chain contains a cycle")?;
+            state.chain = ChainGuard::default();
+            state.chain.visit(state.leaf_page_id, query.header.next_page_id, "right sibling chain contains a cycle")?;
             if let Bound::Included(key) | Bound::Excluded(key) = &state.start {
                 let page_id = state.leaf_page_id;
                 let next_page_id = query.header.next_page_id;
@@ -137,7 +167,7 @@ where
             if right == 0 {
                 return Ok(None);
             }
-            record_page_visit(&mut state.visited_leaves, right, "right sibling chain contains a cycle")?;
+            state.chain.visit(right, query.header.next_page_id, "right sibling chain contains a cycle")?;
             state.expected_left_sibling = Some(page_id);
             state.leaf_page_id = right;
             state.slot_index = 0;
@@ -158,6 +188,19 @@ where
     }
 }
 
+/// Turns the first item of a cursor into an emptiness answer; a produced item is parked in `pending` so the next
+/// `next()` call yields it again.
+fn peek_is_empty<T>(first: Option<io::Result<T>>, pending: &mut Option<T>) -> io::Result<bool> {
+    match first {
+        None => Ok(true),
+        Some(Ok(entry)) => {
+            *pending = Some(entry);
+            Ok(false)
+        }
+        Some(Err(err)) => Err(err),
+    }
+}
+
 impl<'a, K, V> BPlusTreeDiskIterator<'a, K, V> {
     pub(super) fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
         Self { query, state: CursorState::new(Bound::Unbounded) }
@@ -173,16 +216,7 @@ where
     K: Ord + for<'de> Deserialize<'de>,
     V: for<'de> Deserialize<'de>,
 {
-    pub fn try_is_empty(&mut self) -> io::Result<bool> {
-        match self.next() {
-            None => Ok(true),
-            Some(Ok(entry)) => {
-                self.state.pending = Some(entry);
-                Ok(false)
-            }
-            Some(Err(err)) => Err(err),
-        }
-    }
+    pub fn try_is_empty(&mut self) -> io::Result<bool> { peek_is_empty(self.next(), &mut self.state.pending) }
 }
 
 impl<K, V> Iterator for BPlusTreeDiskIterator<'_, K, V>
@@ -223,16 +257,7 @@ where
     K: Ord + for<'de> Deserialize<'de>,
     V: for<'de> Deserialize<'de>,
 {
-    pub fn try_is_empty(&mut self) -> io::Result<bool> {
-        match self.next() {
-            None => Ok(true),
-            Some(Ok(entry)) => {
-                self.state.pending = Some(entry);
-                Ok(false)
-            }
-            Some(Err(err)) => Err(err),
-        }
-    }
+    pub fn try_is_empty(&mut self) -> io::Result<bool> { peek_is_empty(self.next(), &mut self.state.pending) }
 }
 
 impl<K, V> Iterator for BPlusTreeDiskIteratorOwned<K, V>

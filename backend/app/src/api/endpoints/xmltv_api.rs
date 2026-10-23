@@ -16,7 +16,7 @@ use crate::{
     repository::{
         epg_query_channels_by_storage_key, get_file_path_for_db_index, get_target_storage_path,
         m3u_get_epg_file_path_for_target, open_playlist_reader, storage_const, xtream_get_epg_file_path_for_target,
-        xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
+        xtream_get_storage_path, BPlusTreeQuery, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -160,7 +160,8 @@ pub async fn serve_epg_web_ui(
         let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
         let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
         let encrypt_secret = app_state.get_encrypt_secret();
-        let iter_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
+        // A single read lock, held by the producer until it has read the db. A second read lock on
+        // the same path could wait behind a queued EPG writer while this one is held (deadlock).
         let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
         let epg_path = epg_path.to_path_buf();
         let target_name = target.name.clone();
@@ -214,7 +215,7 @@ pub async fn serve_epg_web_ui(
             }
         });
 
-        let stream = LockedReceiverStream::new(rx, iter_lock).map(move |result| {
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |result| {
             result.map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel))
         });
         return stream_json_or_bin_response_try_stream(accept, stream);
@@ -678,8 +679,7 @@ pub async fn serve_short_epg(
     limit: u32,
     has_archive: bool,
 ) -> axum::response::Response {
-    let lowercase_ids = target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids);
-    let output_case = EpgIdOutputCase::from_lowercase(lowercase_ids);
+    let output_case = target.epg_id_case();
     let storage_key = canonicalize_output_epg_id(channel_id, output_case);
     let response_channel_id = Arc::clone(&storage_key);
     let short_epg = {
@@ -888,9 +888,7 @@ pub(crate) async fn stream_epg_api(
         let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
-        let output_case = EpgIdOutputCase::from_lowercase(
-            target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids),
-        );
+        let output_case = target.epg_id_case();
         let prepared = prepare_stream_epg_request(&items, output_case);
 
         let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {

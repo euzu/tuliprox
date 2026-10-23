@@ -1236,19 +1236,19 @@ mod tests {
         build_provider_resolve_url, get_credentials_and_server_info, prepare_strm_files, resolve_strm_source_url,
         strip_tmdb_markers, strm_contains_tmdb_marker, StrmFile, StrmItemInfo,
     };
-    use arc_swap::{ArcSwap, ArcSwapOption};
+    use crate::test_config::{app_config_from, empty_paths};
     use shared::model::{
-        ConfigPaths, ConfigProviderDto, InputType, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        ConfigProviderDto, InputType, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
         ProviderUrlSelectionPolicy, ProxyType, SeriesStreamProperties, StreamProperties, StrmExportStyle,
         VideoStreamDetailProperties, VideoStreamProperties, VirtualId, XtreamCluster,
     };
     use std::{collections::HashMap, sync::Arc};
     use tuliprox_core::{
         model::{
-            ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigProvider, MediaToolCapabilities,
-            ProxyUserCredentials, SourcesConfig, StrmTargetFlags, StrmTargetFlagsSet, StrmTargetOutput, TargetUser,
+            ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigProvider, ProxyUserCredentials,
+            StrmTargetFlags, StrmTargetFlagsSet, StrmTargetOutput, TargetUser,
         },
-        utils::{decode_provider_resolve_token, FileLockManager, ProviderResolveToken, PROVIDER_RESOLVE_ROUTE_PREFIX},
+        utils::{decode_provider_resolve_token, ProviderResolveToken, PROVIDER_RESOLVE_ROUTE_PREFIX},
     };
 
     fn make_strm_item(url: &str, input_name: &str) -> StrmItemInfo {
@@ -1306,37 +1306,6 @@ mod tests {
         user.password = "secret".to_string();
         user.proxy = proxy;
         user
-    }
-
-    fn empty_paths() -> ConfigPaths {
-        ConfigPaths {
-            home_path: String::new(),
-            config_path: String::new(),
-            storage_path: String::new(),
-            config_file_path: String::new(),
-            sources_file_path: String::new(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        }
-    }
-
-    fn test_app_config(api_proxy: Option<ApiProxyConfig>) -> AppConfig {
-        AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
-            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-            hdhomerun: Arc::new(ArcSwapOption::default()),
-            api_proxy: Arc::new(ArcSwapOption::new(api_proxy.map(Arc::new))),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(empty_paths())),
-            custom_stream_response: Arc::new(ArcSwapOption::default()),
-            access_token_secret: [0; 32],
-            encrypt_secret: [0; 16],
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-        }
     }
 
     #[test]
@@ -1423,7 +1392,7 @@ mod tests {
 
     #[test]
     fn explicit_strm_username_fails_when_user_is_missing() {
-        let app_config = test_app_config(None);
+        let app_config = app_config_from(Config::default(), empty_paths(), None);
 
         let result = get_credentials_and_server_info(&app_config, Some("missing"));
 
@@ -1433,11 +1402,15 @@ mod tests {
     #[test]
     fn explicit_strm_username_fails_when_server_is_missing() {
         let user = Arc::new(make_user(ProxyType::Reverse(None)));
-        let app_config = test_app_config(Some(ApiProxyConfig {
-            user: vec![TargetUser { target: "target".to_string(), credentials: vec![user] }],
-            server: Vec::new(),
-            ..Default::default()
-        }));
+        let app_config = app_config_from(
+            Config::default(),
+            empty_paths(),
+            Some(ApiProxyConfig {
+                user: vec![TargetUser { target: "target".to_string(), credentials: vec![user] }],
+                server: Vec::new(),
+                ..Default::default()
+            }),
+        );
 
         let result = get_credentials_and_server_info(&app_config, Some("alice"));
 

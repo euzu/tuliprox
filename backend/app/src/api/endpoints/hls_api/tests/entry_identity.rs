@@ -350,7 +350,7 @@ async fn legacy_hls_token_route_renders_channel_unavailable_inline_when_target_h
     app_state.app_config.config.store(Arc::new(Config {
         custom_stream_response_enabled: true,
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
-            hls_cache: Some(HlsCacheConfigDto::default()),
+            hls_cache: Some(app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto::default())),
             ..Default::default()
         })),
         ..Default::default()

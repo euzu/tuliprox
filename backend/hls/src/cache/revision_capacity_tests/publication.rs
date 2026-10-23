@@ -502,3 +502,55 @@ async fn shrinking_replacement_keeps_old_bytes_charged_until_rename_finishes() -
     drop(released);
     Ok(())
 }
+
+#[tokio::test]
+async fn concurrent_callers_share_one_inventory_scan() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(directory.path()));
+    let key = SegmentCacheKey::new(ProxySessionId("single-flight".into()), 0, "ts");
+    cache.write_bytes_and_commit(&key, &[1; 8]).await?;
+    cache.invalidate_capacity_accounting();
+    let scans_before = cache.capacity_scan_count();
+    let (reached, resume) = cache.pause_startup_write(StartupWritePhase::AfterInventorySnapshot);
+    let spawn_usage = |cache: &Arc<HlsSegmentCache>| {
+        let cache = Arc::clone(cache);
+        let id = key.proxy_session_id().clone();
+        tokio::spawn(async move { cache.capacity_usage(&id).await })
+    };
+    let first = spawn_usage(&cache);
+    tokio::time::timeout(std::time::Duration::from_secs(2), reached).await.unwrap().unwrap();
+    let second = spawn_usage(&cache);
+    let third = spawn_usage(&cache);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(cache.capacity_scan_count() - scans_before, 1, "waiters must not start their own scan");
+    resume.send(()).unwrap();
+    for task in [first, second, third] {
+        let usage = tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap()?;
+        assert_eq!(usage.global_bytes, 8);
+    }
+    assert_eq!(cache.capacity_scan_count() - scans_before, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropped_inventory_scan_releases_the_slot_for_the_next_caller() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let cache = Arc::new(HlsSegmentCache::with_cache_path(directory.path()));
+    let key = SegmentCacheKey::new(ProxySessionId("scan-cancel".into()), 0, "ts");
+    cache.write_bytes_and_commit(&key, &[1; 8]).await?;
+    cache.invalidate_capacity_accounting();
+    let (reached, _resume) = cache.pause_startup_write(StartupWritePhase::AfterInventorySnapshot);
+    let scan_cache = Arc::clone(&cache);
+    let id = key.proxy_session_id().clone();
+    let scan = tokio::spawn(async move { scan_cache.capacity_usage(&id).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), reached).await.unwrap().unwrap();
+    let waiter_cache = Arc::clone(&cache);
+    let id = key.proxy_session_id().clone();
+    let waiter = tokio::spawn(async move { waiter_cache.capacity_usage(&id).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    scan.abort();
+    assert!(scan.await.unwrap_err().is_cancelled());
+    let usage = tokio::time::timeout(std::time::Duration::from_secs(2), waiter).await.unwrap().unwrap()?;
+    assert_eq!(usage.global_bytes, 8, "a dropped scan must not publish partial accounting");
+    Ok(())
+}

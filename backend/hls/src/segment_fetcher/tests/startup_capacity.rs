@@ -433,3 +433,35 @@ async fn processing_after_origin_eof_does_not_reuse_the_transfer_deadline() -> s
     assert!(temp_cache_files(directory.path()).is_empty(), "completed revision pins remain valid");
     Ok(())
 }
+
+#[tokio::test]
+async fn first_cache_inventory_scan_does_not_consume_the_segment_body_deadline() -> std::io::Result<()> {
+    let server = spawn_segment_server(0).await;
+    let directory = tempfile::tempdir()?;
+    let policy = SegmentFetchPolicy {
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(200, 1_000),
+        retry_delays_ms: [0; 5],
+        retry_jitter_max_ms: 0,
+        ..Default::default()
+    };
+    let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+    install_startup(&context, &worker, shared::model::HlsStartupMode::FirstReady).await;
+    clear_scheduled_prefetch(&context, &policy).await;
+    context.session.write().await.queue_segment_fetch_candidate(1, SegmentFetchPriority::Demand, 10);
+    let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.unwrap();
+    // A fresh cache has not accounted its directory yet: the first write triggers the full inventory scan.
+    let (entered, resume) = context.segment_cache.pause_startup_write(StartupWritePhase::AfterInventorySnapshot);
+    let task_context = context.clone();
+    let task =
+        tokio::spawn(async move { super::super::fetch_segment_into_cache(&task_context, &snapshot, &policy).await });
+    tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
+    // The held scan outlives the 200 ms attempt timeout; it must not be charged to any attempt.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    resume.send(()).unwrap();
+    let result = task.await.unwrap();
+    if let Err(error) = result {
+        panic!("slow first inventory scan failed the segment fetch: {error:?}");
+    }
+    assert_eq!(server.requests.lock().await.len(), 1, "the first attempt must succeed without a retry");
+    Ok(())
+}

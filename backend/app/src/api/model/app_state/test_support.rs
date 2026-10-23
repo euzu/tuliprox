@@ -72,6 +72,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         shared_stream_manager,
         hls: HlsState::new(Arc::new(HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
             Arc::clone(&active_provider),

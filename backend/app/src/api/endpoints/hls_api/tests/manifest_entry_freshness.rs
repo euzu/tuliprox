@@ -41,13 +41,19 @@ async fn spawn_moving_origin(head: Arc<AtomicU64>) -> TestSegmentOrigin {
     .await
 }
 
+/// Enables the HLS cache with `mode` and keeps the cache directory of the test manager.
+///
+/// A config without `cache_path` makes `update_config` switch the manager to the process-shared
+/// `DEFAULT_HLS_CACHE_PATH`. Switching to it makes every test scan everything other runs left there when the first
+/// segment is written, which exceeds the segment body deadline on a loaded machine and fails the first fetch attempt.
 pub(super) async fn enable_hls_cache_with_startup_mode(app_state: &Arc<AppState>, mode: HlsStartupMode) {
+    let hls_cache = app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto {
+        startup: HlsStartupConfigDto { mode, ..HlsStartupConfigDto::default() },
+        ..HlsCacheConfigDto::default()
+    });
     let config = Config {
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
-            hls_cache: Some(HlsCacheConfigDto {
-                startup: HlsStartupConfigDto { mode, ..HlsStartupConfigDto::default() },
-                ..HlsCacheConfigDto::default()
-            }),
+            hls_cache: Some(hls_cache),
             ..Default::default()
         })),
         ..Default::default()
@@ -119,6 +125,27 @@ async fn age_retained_session(app_state: &Arc<AppState>, session_key: &HlsSessio
         Some(if protected { now_ms } else { now_ms.saturating_sub(idle_ms) });
     session.origin_refresh.last_success_at_ms =
         session.origin_refresh.last_success_at_ms.map(|confirmed_at_ms| confirmed_at_ms.saturating_sub(idle_ms));
+}
+
+/// A config built by the shared helpers must never point the manager at the process-shared default cache path.
+#[tokio::test]
+async fn hls_cache_test_helpers_keep_the_private_cache_path() {
+    let shared_default = std::path::PathBuf::from(crate::model::default_hls_cache_path());
+    let app_state = test_app_state_with_inputs(Vec::new());
+    let private_path = app_state.hls.proxy.segment_cache().cache_path();
+    assert_ne!(private_path, shared_default);
+    let configured_path = |app_state: &Arc<AppState>| {
+        let config = app_state.app_config.config.load();
+        let hls_cache = config.reverse_proxy.as_ref().and_then(|proxy| proxy.hls_cache.as_ref());
+        hls_cache.map(|hls_cache| std::path::PathBuf::from(&hls_cache.cache_path))
+    };
+
+    super::enable_hls_cache(&app_state);
+    assert_eq!(configured_path(&app_state), Some(private_path.clone()));
+
+    enable_hls_cache_with_startup_mode(&app_state, HlsStartupMode::Progressive).await;
+    assert_eq!(configured_path(&app_state), Some(private_path.clone()));
+    assert_eq!(app_state.hls.proxy.segment_cache().cache_path(), private_path);
 }
 
 #[tokio::test]

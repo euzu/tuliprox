@@ -12,7 +12,7 @@ use crate::{
         HlsOriginAccountBindingMode, HlsPlaybackFamilyKey, HlsProxyManager, HlsSessionKey, HlsSessionMode,
         ProxySessionId,
     },
-    model::{ConfigInput, HlsCacheConfig, ProxyUserCredentials, StripConfig},
+    model::{ConfigInput, ProxyUserCredentials, StripConfig},
 };
 use axum::http::{header, StatusCode};
 use shared::model::{HlsCacheConfigDto, HlsSegmentRepairMode, HlsStripMode, UserConnectionPermission};
@@ -25,8 +25,7 @@ async fn hls_access_lease_validity_uses_session_idle_timeout_not_cache_duration(
         session_idle_timeout: shared::model::Secs::new(42),
         ..Default::default()
     };
-    let hls_config = HlsCacheConfig::from(&hls_dto);
-    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
+    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_private_cache(&hls_dto)));
 
     assert_eq!(super::super::hls_access_lease_ttl_ms(&app_state), 42_000);
 }
@@ -114,8 +113,7 @@ async fn hls_lifecycle_active_timer_moves_access_lease_to_idle() {
 async fn hls_lifecycle_validity_timer_removes_expired_access_lease() {
     let mut hls_cache = HlsCacheConfigDto::default();
     hls_cache.segment_repair.max_level = HlsSegmentRepairMode::Low;
-    let hls_config = HlsCacheConfig::from(&hls_cache);
-    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
+    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_private_cache(&hls_cache)));
     let now_ms = super::super::current_time_millis();
     let proxy_session_id = ProxySessionId("lifecycle-validity-proxy".to_string());
     let lease_id = HlsAccessLeaseId("lifecycle-validity-lease".to_string());
@@ -264,8 +262,7 @@ async fn hls_lifecycle_validity_timer_removes_expired_pending_access_lease() {
 async fn hls_lifecycle_session_idle_timer_removes_idle_session() {
     let mut hls_dto = HlsCacheConfigDto { session_idle_timeout: shared::model::Secs::new(1), ..Default::default() };
     hls_dto.segment_repair.max_level = HlsSegmentRepairMode::Low;
-    let hls_config = HlsCacheConfig::from(&hls_dto);
-    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
+    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_private_cache(&hls_dto)));
     let now_ms = super::super::current_time_millis();
     let key = HlsSessionKey::new(1, "expired-session");
     let (session, _) =
@@ -332,8 +329,7 @@ async fn hls_gc_session_removal_cleans_access_leases_and_repair_state() {
         ..Default::default()
     };
     hls_dto.segment_repair.max_level = HlsSegmentRepairMode::Low;
-    let hls_config = HlsCacheConfig::from(&hls_dto);
-    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
+    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_private_cache(&hls_dto)));
     let now_ms = super::super::current_time_millis();
     let key = HlsSessionKey::new(1, "gc-cleanup-session");
     let (session, _) =

@@ -471,6 +471,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,

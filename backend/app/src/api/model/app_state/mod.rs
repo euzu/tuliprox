@@ -1,6 +1,6 @@
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, PlaylistStorage,
+        ActiveProviderManager, ActiveUserManager, ConnectionManager, EpgScanCoordinator, EventManager, PlaylistStorage,
         PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
     },
     model::{
@@ -48,6 +48,8 @@ pub struct AppState {
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls: HlsState,
     pub(crate) stalker_resolve_coordinator: StalkerResolveCoordinator,
+    /// Limits and caches the full scans of the per-target EPG databases (EPG inspection).
+    pub(crate) epg_scans: EpgScanCoordinator,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,

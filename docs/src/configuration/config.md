@@ -1187,12 +1187,12 @@ mcp:
   max_response_bytes: 262144
 ```
 
-| Parameter            |       Type      | Default  | Technical Impact                                                                                                                                                                               |
-|:---------------------|:---------------:|:---------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`            |       Bool      | `false`  | Mounts the MCP endpoint at `{web_ui_path}/mcp`. When `false`, or when the block is absent, no route exists.                                                                                    |
-| `read_only`          |       Bool      | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes. |
-| `allowed_origins`    | List of Strings | `[]`     | Extra `Origin` values accepted besides the request `Host` (DNS-rebinding protection). Needed when a reverse proxy rewrites `Host`. Requests without an `Origin` header are always accepted.    |
-| `max_response_bytes` |       Int       | `262144` | Tool results larger than this are truncated with an explicit marker. Minimum `1024`.                                                                                                           |
+| Parameter            |      Type       | Default  | Technical Impact                                                                                                                                                                                                                                                                                           |
+|:---------------------|:---------------:|:---------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`            |      Bool       | `false`  | Mounts the MCP endpoint at `{web_ui_path}/mcp`. When `false`, or when the block is absent, no route exists.                                                                                                                                                                                                |
+| `read_only`          |      Bool       | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes.                                                                                                             |
+| `allowed_origins`    | List of Strings | `[]`     | Extra `Origin` values accepted besides the request `Host` (DNS-rebinding protection). Needed when a reverse proxy rewrites `Host`. Each entry must be an origin (`scheme://host[:port]`, custom schemes allowed) without path, query or fragment. Requests without an `Origin` header are always accepted. |
+| `max_response_bytes` |       Int       | `262144` | Tool results larger than this are truncated with an explicit marker. Minimum `1024`.                                                                                                                                                                                                                       |
 
 ### Technical Background
 

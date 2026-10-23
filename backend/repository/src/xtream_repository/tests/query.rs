@@ -1,8 +1,8 @@
 use super::{
-    fixed_refresh_paths, get_collection_path, make_live_item, preserve_details_input_xtream_playlist_cluster_to_disk,
-    preserve_details_with_injected_operation_failure, target_writer_config, target_writer_group, test_app_config,
-    write_detail_preservation_fixture, write_single_item, xtream_cluster_category_collection, xtream_write_playlist,
-    DetailPreservationOperation,
+    app_config_in, fixed_refresh_paths, get_collection_path, make_live_item,
+    preserve_details_input_xtream_playlist_cluster_to_disk, preserve_details_with_injected_operation_failure,
+    target_writer_config, target_writer_group, write_detail_preservation_fixture, write_single_item,
+    xtream_cluster_category_collection, xtream_write_playlist, DetailPreservationOperation,
 };
 use shared::model::{ClusterFlags, XtreamCluster};
 use std::fs;
@@ -11,7 +11,7 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn target_writer_creates_missing_empty_category_files_without_force() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let target = target_writer_config();
     let mut live_only = vec![target_writer_group(XtreamCluster::Live, 1, 101)];
 
@@ -32,7 +32,7 @@ async fn target_writer_creates_missing_empty_category_files_without_force() -> R
 #[tokio::test]
 async fn target_writer_preserves_an_unauthorized_empty_cluster() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let target = target_writer_config();
     let mut baseline = vec![
         target_writer_group(XtreamCluster::Live, 1, 101),

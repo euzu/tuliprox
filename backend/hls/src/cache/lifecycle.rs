@@ -44,6 +44,8 @@ impl HlsSegmentCache {
             #[cfg(test)]
             startup_test_checkpoint: StdMutex::new(None),
             #[cfg(test)]
+            capacity_scan_count: AtomicU64::new(0),
+            #[cfg(test)]
             delete_test_failures: StdMutex::new(std::collections::HashMap::new()),
         }
     }

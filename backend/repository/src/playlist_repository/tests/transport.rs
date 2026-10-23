@@ -4,7 +4,7 @@ use super::*;
 #[allow(clippy::too_many_lines)]
 async fn intentional_empty_output_views_clear_managed_artifacts_without_alias_leakage() {
     let directory = tempdir().expect("tempdir");
-    let app_config = target_test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let target = mixed_output_target();
     let playlist_state = Arc::new(crate::PlaylistStorageState::new());
     let mut standard =
