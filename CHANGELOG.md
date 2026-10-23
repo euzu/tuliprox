@@ -1129,6 +1129,17 @@
 
 ## 🐛 Fixes
 
+- **`--dbm` can dump input playlist databases again.** Input M3U databases (`m3u_<input>.db`, string keys) failed with
+  `wrong msgpack marker FixStr(..)` because the viewer committed to the `u32` key type before decoding any key and never
+  fell back to string keys. The first entry is now probed before output starts, and B+Tree decode failures are
+  logged at debug level since callers report them.
+
+- **Media-server stream pass-through is limited to media-server inputs.** During provider allocation, only
+  `media-server://` stream references of Emby, Jellyfin and Plex inputs are accepted as-is. Native URLs now go through
+  provider matching, and a `media-server://` reference on any other input type is rejected. Native URLs are matched
+  against the media server base URL, since media servers authenticate with tokens or API keys and not with credentials
+  in the stream URL.
+
 - **`file://` URLs are no longer mangled in sanitized log output.** With sanitizing enabled, a local path such as
   `file:///home/user/data/epg.xml.gz` was logged as `file://***/home/user/data/epg.xml.gz`. Local file URLs carry no
   host or credentials, so they are now logged unchanged.

@@ -22,11 +22,11 @@ mod support;
 use self::support::{
     create_test_app_config, create_test_app_state, create_test_app_state_for_config,
     create_test_app_state_with_stream_config, create_test_dual_provider_app_config,
-    create_test_dual_provider_app_state, create_test_fingerprint, create_test_live_channel, create_test_local_channel,
-    create_test_provider_app_config, create_test_provider_app_state, create_test_shared_target, load_test_channel,
-    load_test_rss_kib, load_test_session, load_test_user, mock_geoip, spawn_controlled_fake_origin,
-    spawn_legacy_hls_test_origin, spawn_load_test_origin, spawn_range_aware_test_origin, user_with_network_access,
-    validate_load_response, FakeOriginMode,
+    create_test_dual_provider_app_state, create_test_dual_provider_app_state_with_type, create_test_fingerprint,
+    create_test_live_channel, create_test_local_channel, create_test_provider_app_config,
+    create_test_provider_app_state, create_test_shared_target, load_test_channel, load_test_rss_kib, load_test_session,
+    load_test_user, mock_geoip, spawn_controlled_fake_origin, spawn_legacy_hls_test_origin, spawn_load_test_origin,
+    spawn_range_aware_test_origin, user_with_network_access, validate_load_response, FakeOriginMode,
 };
 
 mod admission_eviction_policy;

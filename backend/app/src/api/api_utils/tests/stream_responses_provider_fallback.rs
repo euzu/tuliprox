@@ -1,8 +1,9 @@
 use super::{
     create_stream_response_details, create_test_app_state_for_config, create_test_dual_provider_app_config,
-    create_test_dual_provider_app_state, create_test_fingerprint, create_test_live_channel,
-    force_provider_stream_response, get_stream_options, load_test_user, resolve_streaming_strategy,
-    spawn_legacy_hls_test_origin, ForceStreamRequestContext, StreamResponseMode, StreamingAcquireOptions,
+    create_test_dual_provider_app_state, create_test_dual_provider_app_state_with_type, create_test_fingerprint,
+    create_test_live_channel, force_provider_stream_response, get_stream_options, load_test_user,
+    resolve_streaming_strategy, spawn_legacy_hls_test_origin, ForceStreamRequestContext, StreamResponseMode,
+    StreamingAcquireOptions,
 };
 use crate::{
     api::model::{ProviderStreamCustomReason, ProviderStreamState},
@@ -436,7 +437,7 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
 
 #[tokio::test]
 async fn resolve_streaming_strategy_accepts_media_server_stream_ref_without_requested_flag() {
-    let app_state = create_test_dual_provider_app_state();
+    let app_state = create_test_dual_provider_app_state_with_type(InputType::Jellyfin);
     let input_name = "provider_1".intern();
     let input =
         app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());

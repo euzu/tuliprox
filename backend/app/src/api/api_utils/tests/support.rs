@@ -359,10 +359,16 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_config() -> App
 }
 
 pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config() -> AppConfig {
+    create_test_dual_provider_app_config_with_type(InputType::Xtream)
+}
+
+pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config_with_type(
+    input_type: InputType,
+) -> AppConfig {
     let input = Arc::new(ConfigInput {
         id: 1,
         name: "provider_1".intern(),
-        input_type: InputType::Xtream,
+        input_type,
         headers: HashMap::default(),
         url: "http://provider-1.example".to_string(),
         username: Some("user1".to_string()),
@@ -422,7 +428,13 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_state() -> Arc<
 }
 
 pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_state() -> Arc<AppState> {
-    create_test_app_state_for_config(Arc::new(create_test_dual_provider_app_config()))
+    create_test_dual_provider_app_state_with_type(InputType::Xtream)
+}
+
+pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_state_with_type(
+    input_type: InputType,
+) -> Arc<AppState> {
+    create_test_app_state_for_config(Arc::new(create_test_dual_provider_app_config_with_type(input_type)))
 }
 
 pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {

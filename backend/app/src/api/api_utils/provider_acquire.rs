@@ -1,7 +1,7 @@
 use super::{
     activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
     cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
-    detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options, is_media_server_playback_url,
+    detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
     is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
     no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering, probe_catchup_payload,
     record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
@@ -219,10 +219,10 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
                 // If a forced/pinned provider was requested but allocation fell back to another account,
                 // the session's stream_url still points to the old provider and cannot be accepted as-is;
                 // it must be resolved or rewritten for the newly allocated provider account.
-                // Media-server stream refs are virtual and never match a provider host or alias.
+                // Media-server stream refs of media-server inputs are accepted by `select_provider_stream_url`
+                // itself; native media-server URLs are no longer accepted unchecked and must match the provider.
                 let accept_requested_stream_url = (options.accept_requested_stream_url
-                    || input.input_type.is_stalker()
-                    || is_media_server_playback_url(input, stream_url))
+                    || input.input_type.is_stalker())
                     && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
