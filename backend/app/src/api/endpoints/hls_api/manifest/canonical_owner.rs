@@ -166,6 +166,7 @@ pub(in crate::api::endpoints::hls_api) fn hls_canonical_owner_failed(
 
 pub(in crate::api::endpoints::hls_api) struct HlsCanonicalOwnerHandoffContext<'a> {
     pub(in crate::api::endpoints::hls_api) app_state: &'a Arc<AppState>,
+    pub(in crate::api::endpoints::hls_api) fingerprint: Option<&'a crate::model::Fingerprint>,
     pub(in crate::api::endpoints::hls_api) proxy_session_id: &'a ProxySessionId,
     pub(in crate::api::endpoints::hls_api) access_lease_id: &'a HlsAccessLeaseId,
     pub(in crate::api::endpoints::hls_api) expected_lease_issued_at_ms: Option<u64>,
@@ -248,6 +249,7 @@ pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_han
         );
         if let Some(response) = try_hls_cached_manifest_response(
             context.app_state,
+            context.fingerprint,
             current_session,
             context.access_lease_id,
             lease.state,

@@ -75,6 +75,21 @@ impl HlsGarbageCollector {
                 continue;
             };
             let id = session.proxy_session_id.clone();
+            if let Some(leases) = &mut lease_guard {
+                session.live_window_demands.retain(|lease_id, demand| {
+                    leases.response_snapshot(lease_id, &id, tuliprox_core::utils::current_time_millis()).is_some_and(
+                        |lease| {
+                            lease.issued_at_ms == demand.issued_at_ms
+                                && matches!(
+                                    lease.state,
+                                    crate::HlsAccessLeaseState::Pending
+                                        | crate::HlsAccessLeaseState::Activated
+                                        | crate::HlsAccessLeaseState::Idle
+                                )
+                        },
+                    )
+                });
+            }
             let floor = session.segments.first_key_value().map_or(u64::MAX, |(seq, _)| *seq);
             let crate::HlsSession { startup, segments, .. } = &mut *session;
             if let Some(startup) = startup {

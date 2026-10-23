@@ -77,6 +77,7 @@ pub struct HlsProxyManager {
     transient_resources: Arc<TransientResourceStore>,
     access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
     lifecycle: Arc<HlsLifecycleManager>,
+    lease_completion: Arc<lease_completion::HlsLeaseCompletion>,
     account_overlap_cooldowns: Arc<RwLock<HashMap<HlsAccountOverlapCooldownKey, HlsAccountOverlapCooldown>>>,
     metrics: Arc<HlsCacheMetrics>,
     qos: Arc<HlsQosRegistry>,
@@ -153,8 +154,10 @@ mod account_overlap;
 mod activity;
 mod cleanup;
 mod config;
+mod lease_completion;
 mod lifecycle;
 mod publication;
+mod revision_recovery;
 mod terminal;
 
 pub use self::lifecycle::exec_hls_lifecycle;
@@ -162,6 +165,7 @@ pub use self::lifecycle::exec_hls_lifecycle;
 use self::lifecycle::hls_session_idle_protection_retry_at;
 #[cfg(test)]
 use self::publication::HlsRecoveryExecutionState;
+pub(crate) use self::revision_recovery::HlsLeaseRuntime;
 use self::{
     account_overlap::{HlsAccountOverlapCooldown, HlsAccountOverlapCooldownKey},
     activity::hls_key_readiness_evidence_is_current,

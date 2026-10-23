@@ -158,12 +158,27 @@ Fix:
 A `503` with `Retry-After` can be normal during short origin/cache waits, especially near startup or when a requested
 segment is known but not ready yet.
 
+An optimistic segment whose origin download failed before any bytes were exposed to a client stays temporarily
+unavailable while its retry chain is active. Its existing URI returns `503` with `Retry-After` during that wait,
+instead of a permanent `404`. After a successful retry, the same lease and URI serve the complete replacement;
+the player does not need to refresh the playlist first. Internally buffered prefix bytes do not count as exposure.
+If a failed revision was already exposed, Tuliprox ends only the affected lease and its old routes return `404`.
+A new playback entry can use the shared session. Completed revisions and already exposed bytes are never replaced.
+The first authorized full segment GET of each lease can claim progressive delivery, including for a published
+successor. HEAD and partial ranges do not consume that opportunity; subsequent GETs wait for complete bytes.
+See [startup modes](./shared-hls-configuration.md#optional-startup-modes) for the shared policy.
+
+The degraded-origin admission check still applies: a retryable manifest failure disables accelerated admission,
+and an unchanged successful manifest does not clear that condition. Media progress is required to clear it.
+
 Investigate when it repeats for too long:
 
 | Log signal | Interpretation |
 | :--- | :--- |
 | `HLS segment demand fetch skipped by backpressure` | The session or global fetch limit is saturated. |
 | `HLS segment temporary failure counted` | The origin segment fetch is failing temporarily. |
+| `HLS revision recovery` | `replacement_bound` repairs an unexposed failed binding; `reentry_required` ends that exact lease. Includes anonymized identity, revision, sequence, generation, prefix size, and exposure. |
+| `HLS playlist wait` | A changed wait reason: `fresh_render_required`, `missing_revision_or_head_readiness`, or `admission_rejected`. Includes head readiness and degraded-origin state; repeated identical polls are not logged. |
 | `HLS manifest marked fresh-commit required after hard fetch failure` | Manifest refresh had a hard failure and needs a fresh commit. |
 | `HLS terminal manifest failed closed` | A typed lease-local terminal decision could not safely serve live or terminal media. The reason identifies state, bundle, deadline, capacity, or retry failure. |
 | `HLS terminal commit retry owner failed closed` | The bounded autonomous commit worker reached a typed terminal failure; inspect the reason and preceding recovery/bundle events. |

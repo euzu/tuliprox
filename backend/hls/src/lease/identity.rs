@@ -26,6 +26,12 @@ pub(super) enum HlsMediaLeasePlaybackIdentity {
 
 impl HlsLeaseManifestPublicationGuard {
     pub(crate) const fn lease_issued_at_ms(self) -> u64 { self.issued_at_ms }
+    pub(crate) const fn media_identity(self) -> HlsMediaLeaseIdentity {
+        HlsMediaLeaseIdentity {
+            issued_at_ms: self.issued_at_ms,
+            playback: HlsMediaLeasePlaybackIdentity::Live { admission_generation: self.admission_generation },
+        }
+    }
 }
 
 impl HlsAccessLease {

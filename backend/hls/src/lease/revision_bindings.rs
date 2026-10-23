@@ -1,6 +1,6 @@
 use super::{
-    HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseStore, HlsLeaseManifestSnapshot, HlsLeasePlaybackMode,
-    ProxySessionId,
+    lease_state_allows_use, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseStore, HlsLeaseManifestSnapshot,
+    HlsLeasePlaybackMode, ProxySessionId,
 };
 use std::sync::Arc;
 
@@ -50,14 +50,19 @@ impl HlsAccessLeaseStore {
     ) -> Option<super::super::SegmentRevisionGuard> {
         self.by_lease_id.get(lease_id)?.revision_bindings.as_ref()?.revisions.get(&seq).cloned()
     }
+    /// Reserves the lease's single startup opportunity for its first authorized
+    /// full-segment request, including a cache hit. The caller excludes partial
+    /// ranges and holds this lock across lease-identity validation and lookup.
+    /// Bindings include still-retained URIs from earlier published windows.
     pub fn try_claim_progressive_startup(&mut self, lease_id: &HlsAccessLeaseId, seq: u64, now_ms: u64) -> bool {
         let Some(lease) = self.by_lease_id.get_mut(lease_id) else {
             return false;
         };
-        if lease.playback_mode != HlsLeasePlaybackMode::Live
+        if !lease_state_allows_use(lease.state)
+            || lease.playback_mode != HlsLeasePlaybackMode::Live
             || lease.progressive_startup_claimed
             || lease.validity_due_at_ms() <= now_ms
-            || lease.last_manifest_snapshot.as_ref().is_none_or(|snapshot| snapshot.first_proxy_seq != seq)
+            || lease.revision_bindings.as_ref().is_none_or(|bindings| !bindings.revisions.contains_key(&seq))
         {
             return false;
         }
@@ -74,7 +79,9 @@ pub(super) fn commit_lease_revision_bindings(lease: &mut HlsAccessLease, snapsho
                 || current.is_some_and(|current| {
                     current.retired_through.is_some_and(|retired| *seq <= retired)
                         || current.revisions.get(seq).is_some_and(|bound| {
-                            bound != revision && !bound.revision().is_replaceable_in(publication.mode)
+                            bound != revision
+                                && (!bound.revision().is_replaceable_in(publication.mode)
+                                    || revision.revision().id() <= bound.revision().id())
                         })
                 })
         }) {

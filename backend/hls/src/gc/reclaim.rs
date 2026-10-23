@@ -4,8 +4,9 @@ use super::{
     selection::{
         capacity_reclamation_evidence, collect_projected_session_reclamation, duration_expired_head_segment,
         fifo_head_size_candidate, oldest_global_fifo_head_candidate, oldest_global_transient_object_candidate,
-        remove_map_entry, remove_obsolete_deferred_heads, remove_segment_entry, remove_stale_queue_entries,
-        session_cache_size, take_expired_transient_objects, unprotected_unreferenced_map_ids,
+        remove_map_entry, remove_obsolete_deferred_heads, remove_obsolete_segment_metadata, remove_segment_entry,
+        remove_stale_queue_entries, session_cache_size, take_expired_transient_objects,
+        unprotected_unreferenced_map_ids,
     },
     CacheDeletionBatch, GarbageCollectionPolicy, GarbageCollectionReport, HlsCacheCapacityReclaimOutcome,
     HlsCacheCapacityReclaimRequest, HlsGarbageCollector, HlsSegmentCache, HlsSession, HlsSessionHandle,
@@ -203,6 +204,7 @@ impl HlsGarbageCollector {
         report.stale_queue_entries_removed =
             report.stale_queue_entries_removed.saturating_add(remove_stale_queue_entries(session));
 
+        remove_obsolete_segment_metadata(session, &protected_set_for_cache_reclamation(session, cache, None, None));
         remove_obsolete_deferred_heads(session, cache, None, None, deletions);
         let transient_before = session.transient.resources.len();
         let protected = protected_set_for_cache_reclamation(session, cache, None, None);

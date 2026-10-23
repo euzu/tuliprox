@@ -62,6 +62,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn try_test_hls_cached_manif
     }
     super::super::super::try_hls_cached_manifest_response(
         app_state,
+        None,
         session,
         access_lease_id,
         access_lease_state,

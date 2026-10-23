@@ -111,7 +111,7 @@ impl HlsProxyManager {
         gc.install_revision_store(&revision_store);
         segment_cache.install_revision_metrics(&metrics);
         let availability_reevaluations = Arc::new(HlsAvailabilityReevaluationCoordinator::default());
-        Self {
+        let manager = Self {
             sessions,
             segment_cache,
             segment_repair,
@@ -135,6 +135,7 @@ impl HlsProxyManager {
             transient_resources: Arc::new(TransientResourceStore::new()),
             access_leases,
             lifecycle,
+            lease_completion: Arc::new(super::lease_completion::HlsLeaseCompletion::default()),
             account_overlap_cooldowns,
             metrics,
             qos,
@@ -146,7 +147,9 @@ impl HlsProxyManager {
             availability_reevaluations,
             terminal_commit_clock: Arc::new(HlsTerminalCommitClock::default()),
             startup_observability: Arc::new(HlsStartupObservability::default()),
-        }
+        };
+        manager.install_worker_revision_recovery();
+        manager
     }
 
     pub fn segment_fetch_policy(&self) -> SegmentFetchPolicy { self.runtime_config.load().segment_fetch_policy.clone() }
@@ -198,10 +201,9 @@ impl HlsProxyManager {
             self.clear_runtime_cache_state_for_cache_path_change().await;
         }
         for session in self.sessions.list_sessions().await {
-            session
-                .write()
-                .await
-                .configure_segment_prefetch_queue(runtime_config.segment_fetch_policy.max_prefetch_queue_depth);
+            let mut session = session.write().await;
+            session.configure_segment_prefetch_queue(runtime_config.segment_fetch_policy.max_prefetch_queue_depth);
+            session.live_window_strip.clone_from(&runtime_config.strip);
         }
         self.segment_repair.update_config(hls_config.segment_repair.clone());
         let global_fetch_semaphore =

@@ -1109,6 +1109,7 @@ async fn resource_denial_does_not_destroy_existing_terminal_tail() {
     );
     assert!(session.read().await.terminal_tail_protection(&lease_id).is_some());
 
+    manager.bind_lease_user_accounting(&crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users);
     manager.remove_access_lease(&lease_id).await;
     assert!(session.read().await.terminal_tail_protection(&lease_id).is_none());
     assert_eq!(
@@ -1148,6 +1149,7 @@ async fn terminal_tail_protection_is_retained_until_bounded_lease_removal() {
     );
 
     assert!(session.read().await.terminal_tail_protection(&lease_id).is_some());
+    manager.bind_lease_user_accounting(&crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users);
     manager.remove_access_lease(&lease_id).await;
     assert!(session.read().await.terminal_tail_protection(&lease_id).is_none());
 }
@@ -1188,6 +1190,7 @@ async fn terminal_unavailable_protection_is_retained_until_bounded_lease_removal
     assert_eq!(denied.state, HlsAccessLeaseState::Denied);
     assert!(matches!(denied.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
     assert!(session.read().await.terminal_tail_protection(&lease_id).is_some());
+    manager.bind_lease_user_accounting(&crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users);
     manager.remove_access_lease(&lease_id).await;
     assert!(session.read().await.terminal_tail_protection(&lease_id).is_none());
 }

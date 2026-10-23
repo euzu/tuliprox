@@ -29,6 +29,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_segment(
     fingerprint: Fingerprint,
     axum::extract::Path(params): axum::extract::Path<HlsProxySegmentPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    method: Method,
     headers: HeaderMap,
 ) -> axum::response::Response {
     let proxy_session_id = ProxySessionId(params.proxy_session_id);
@@ -83,6 +84,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_segment(
         &access_context,
         &fingerprint,
         &headers,
+        &method,
         segment_file,
         now_ms,
     )
@@ -162,12 +164,17 @@ pub(in crate::api::endpoints::hls_api) async fn demand_fetch_hls_live_segment(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Retains request method and headers alongside the validated lease context."
+)]
 pub(in crate::api::endpoints::hls_api) async fn serve_hls_segment_for_current_lease(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
     access_context: &HlsAccessContext,
     fingerprint: &Fingerprint,
     headers: &HeaderMap,
+    method: &Method,
     segment_file: HlsSegmentFile,
     now_ms: u64,
 ) -> axum::response::Response {
@@ -181,7 +188,9 @@ pub(in crate::api::endpoints::hls_api) async fn serve_hls_segment_for_current_le
     let Some(lease_identity) = current_lease.media_identity() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let response_context = hls_cache_response_context(app_state, session, access_context, lease_identity, now_ms).await;
+    let mut response_context =
+        hls_cache_response_context(app_state, session, access_context, lease_identity, now_ms).await;
+    response_context.request_method = method.clone();
     let response = hls_resource_serve_outcome_response(
         app_state,
         access_context,

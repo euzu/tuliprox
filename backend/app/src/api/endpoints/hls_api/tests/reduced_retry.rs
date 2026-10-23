@@ -99,7 +99,9 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
     let _initial = open_manifest_for_new_lease(&app, &input, &url, lease).await;
     let key = super::super::build_hls_origin_source(&input, "12345").session_key();
     let session = app.hls.proxy.sessions().get_by_key(&key).await.unwrap();
-    ready(&app, &session, &[0, 1, 2, 3, 4, 5]).await;
+    let baseline_sequences: &[u64] =
+        if mode == HlsStartupMode::Conservative { &[0, 1, 2, 3, 4, 5] } else { &[3, 4, 5] };
+    ready(&app, &session, baseline_sequences).await;
     let response = try_test_hls_cached_manifest_response(
         &app,
         &session,
@@ -113,7 +115,7 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
     .expect("complete baseline is published to the playback lease");
     assert_eq!(response.status(), StatusCode::OK);
     let first = String::from_utf8(response_body(response).await.to_vec()).unwrap();
-    deliver(&app, &session, &first, &[1000]).await;
+    deliver(&app, &session, &first, &[1000 + baseline_sequences[0]]).await;
     tokio::time::timeout(WAIT, async {
         let proxy_id = session.read().await.proxy_session_id.clone();
         loop {
@@ -123,7 +125,7 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
                 .access_lease_response_snapshot(&HlsAccessLeaseId(lease.to_string()), &proxy_id, current_time_millis())
                 .await
                 .unwrap();
-            if snapshot.playback_cursor.highest_contiguous_completed_proxy_seq == Some(0) {
+            if snapshot.playback_cursor.highest_contiguous_completed_proxy_seq == Some(baseline_sequences[0]) {
                 break;
             }
             tokio::task::yield_now().await;

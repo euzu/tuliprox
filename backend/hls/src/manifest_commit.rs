@@ -112,6 +112,35 @@ pub fn hls_committed_manifest_body_for_request(
     })
 }
 
+/// The accelerated lease view is rendered from an origin commit, independently
+/// of whether the shared session's older window can still be rendered.
+pub fn hls_live_window_origin_allowed_for_request(
+    session: &HlsSession,
+    options: HlsCachedManifestOptions,
+    started_at_ms: u64,
+    now_ms: u64,
+) -> bool {
+    let Some(identity) = session.live_window_source_identity() else { return false };
+    let duration = session.origin_window_durations_ms.iter().fold(0_u64, |sum, duration| sum.saturating_add(*duration));
+    let candidate = HlsCommittedManifestCandidate {
+        body: HlsCommittedManifestBody::Normal(String::new()),
+        rendered_at_ms: identity.rendered_at_ms(),
+        valid_until_ms: Some(identity.rendered_at_ms().saturating_add(duration)),
+        finalized: false,
+    };
+    session.uses_fast_start_live_window()
+        && can_serve_committed_manifest(
+            session,
+            &candidate,
+            session.account_binding_protection(now_ms),
+            options.policy,
+            candidate.rendered_at_ms >= started_at_ms,
+            now_ms,
+        )
+        && manifest_rendered_after_required_boundary(Some(candidate.rendered_at_ms), options)
+        && options.after_origin_manifest_commits.is_none_or(|commits| session.origin_manifest_commits() > commits)
+}
+
 pub fn hls_should_wait_for_initial_manifest_commit(
     session: &HlsSession,
     selected_committed_body: bool,

@@ -239,6 +239,7 @@ async fn hls_provider_exhausted_without_provisioning_returns_custom_manifest() {
 
     let response = super::super::hls_shared_provisioning_or_provider_exhausted_response(
         &app_state,
+        None,
         &session,
         "hls-user",
         &input,
@@ -282,6 +283,7 @@ async fn shared_provisioning_timeline_manifest_uses_canonical_hls_session_segmen
 
     let response = super::super::hls_shared_provisioning_timeline_manifest_response(
         &app_state,
+        None,
         &session,
         &access_lease_id,
         HlsAccessLeaseState::Activated,
@@ -315,6 +317,7 @@ async fn shared_provisioning_timeline_manifest_uses_canonical_hls_session_segmen
 
     let response = super::super::hls_shared_provisioning_timeline_manifest_response(
         &app_state,
+        None,
         &session,
         &access_lease_id,
         HlsAccessLeaseState::Activated,
@@ -342,6 +345,7 @@ async fn stale_provisioning_segments_do_not_trigger_canonical_handoff() {
 
     super::super::hls_shared_provisioning_timeline_manifest_response(
         &app_state,
+        None,
         &session,
         &initial_lease_id,
         HlsAccessLeaseState::Activated,
@@ -404,6 +408,7 @@ async fn shared_provisioning_handoff_continues_proxy_sequence_for_origin_segment
     let strip = app_state.hls.proxy.strip();
     super::super::hls_shared_provisioning_timeline_manifest_response(
         &app_state,
+        None,
         &session,
         &access_lease_id,
         HlsAccessLeaseState::Activated,

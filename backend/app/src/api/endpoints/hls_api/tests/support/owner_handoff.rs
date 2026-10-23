@@ -68,6 +68,7 @@ impl CanonicalOwnerHandoffFixture {
     ) -> super::super::super::HlsCanonicalOwnerHandoffContext<'_> {
         let (lease_id, issued_at_ms) = &self.leases[lease_index];
         super::super::super::HlsCanonicalOwnerHandoffContext {
+            fingerprint: None,
             app_state: &self.app_state,
             proxy_session_id: &self.proxy_session_id,
             access_lease_id: lease_id,

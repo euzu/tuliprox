@@ -51,8 +51,6 @@ impl HlsProxyManager {
     }
 
     pub(super) async fn remove_access_lease(&self, lease_id: &HlsAccessLeaseId) {
-        self.terminal_pending.cancel_lease(lease_id);
-        self.terminal_commit_retries.cancel_lease(lease_id);
         let Some(preparation) = self.access_leases.read().await.prepare_access_lease_removal(lease_id) else {
             return;
         };
@@ -65,65 +63,15 @@ impl HlsProxyManager {
         }
     }
 
-    /// Removes one exact lease incarnation before releasing any media
-    /// protection owned by it. A stale preparation is intentionally
-    /// non-destructive because the replacement lease may reuse the same ID.
+    /// Complete one exact lease incarnation in the shared, request-independent
+    /// runtime. The lease is retired after accounting and media protection are
+    /// released; stale preparations cannot affect a replacement with the same ID.
     pub(super) async fn remove_prepared_access_lease(
         &self,
         lease_id: &HlsAccessLeaseId,
         preparation: &HlsAccessLeaseRemovalPreparation,
     ) -> bool {
-        let removed =
-            self.access_leases.write().await.remove_access_lease_if_preparation_matches(lease_id, preparation);
-        if removed.is_none() {
-            return false;
-        }
-        if let Some(session) = self.sessions.get_by_proxy_session_id(&preparation.proxy_session_id).await {
-            let mut session = session.write().await;
-            let finalized_manifest_released =
-                session.transient.release_finalized_manifest_generations(lease_id, preparation.issued_at_ms);
-            if finalized_manifest_released {
-                debug!(
-                    "HLS finalized transient manifest generation released: lease={} proxy_session={} reason=lease_removed",
-                    super::super::safe_hls_access_lease_id(lease_id),
-                    safe_proxy_session_id(&preparation.proxy_session_id)
-                );
-            }
-            if let Some(generation) = preparation.terminal_protection_generation {
-                let removal = session.remove_terminal_tail_protection_after_lease_end(lease_id, generation);
-                match removal {
-                    HlsTerminalTailProtectionRemoval::Removed => {
-                        debug!(
-                            "HLS terminal-tail protection released: lease={} proxy_session={} generation={} reason=lease_removed",
-                            super::super::safe_hls_access_lease_id(lease_id),
-                            safe_proxy_session_id(&preparation.proxy_session_id),
-                            generation.0
-                        );
-                    }
-                    HlsTerminalTailProtectionRemoval::Missing => {}
-                    HlsTerminalTailProtectionRemoval::RemovedStaleGeneration { actual } => {
-                        debug!(
-                            "HLS stale terminal-tail protection released: lease={} proxy_session={} expected_generation={} actual_generation={} reason=lease_removed",
-                            super::super::safe_hls_access_lease_id(lease_id),
-                            safe_proxy_session_id(&preparation.proxy_session_id),
-                            generation.0,
-                            actual.0
-                        );
-                    }
-                }
-            } else if session.remove_terminal_tail_protection(lease_id).is_some() {
-                debug!(
-                    "HLS untracked terminal-tail protection released: lease={} proxy_session={} reason=lease_removed",
-                    super::super::safe_hls_access_lease_id(lease_id),
-                    safe_proxy_session_id(&preparation.proxy_session_id)
-                );
-            }
-        }
-        self.standalone_custom_access.remove(lease_id);
-        self.segment_repair.remove_access_lease_window(lease_id).await;
-        self.startup_observability.remove_access_lease(lease_id);
-        self.qos.remove_access_lease(lease_id).await;
-        true
+        self.revision_recovery_runtime().remove_prepared_access_lease(lease_id, preparation).await
     }
 
     pub(super) async fn schedule_access_lease_activity(&self, lease: &HlsAccessLease) {
@@ -205,6 +153,7 @@ impl HlsProxyManager {
         event: HlsLifecycleEvent,
         now_ms: u64,
     ) {
+        self.bind_lease_user_accounting(active_users);
         if !self.is_enabled() {
             return;
         }
@@ -214,7 +163,8 @@ impl HlsProxyManager {
                 let mut should_sync_session = false;
                 if let Some(snapshot) = self.access_lease_lifecycle_snapshot(&lease_id, now_ms).await {
                     should_sync_session = true;
-                    if let Some(release) = &snapshot.idle_release {
+                    let ending = matches!(snapshot.state, HlsAccessLeaseState::Expired | HlsAccessLeaseState::Denied);
+                    if let Some(release) = snapshot.idle_release.as_ref().filter(|_| !ending) {
                         active_users
                             .release_session_streams_and_counted_reservation(
                                 &release.username,
@@ -228,7 +178,7 @@ impl HlsProxyManager {
                             super::super::safe_user_session_token(&release.user_session_token)
                         );
                     }
-                    if matches!(snapshot.state, HlsAccessLeaseState::Expired | HlsAccessLeaseState::Denied) {
+                    if ending {
                         self.remove_access_lease(&snapshot.lease_id).await;
                         debug!(
                             "HLS access lease removed: lease={} proxy_session={} state={}",
@@ -385,6 +335,7 @@ impl HlsProxyManager {
 }
 
 pub fn exec_hls_lifecycle(ctx: &HlsCtx, cancel_token: &CancellationToken) {
+    ctx.attach_lease_user_accounting();
     let hls_proxy = Arc::clone(&ctx.hls_proxy);
     let active_users = Arc::clone(&ctx.active_users);
     let active_provider = Arc::clone(&ctx.active_provider);

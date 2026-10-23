@@ -26,6 +26,108 @@ use tuliprox_hls::api::{
     ProxySessionId,
 };
 
+#[allow(clippy::too_many_arguments)]
+async fn prepare_live_window_response(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    view: &HlsCachedManifestViewContext<'_>,
+    fingerprint: Option<&crate::model::Fingerprint>,
+    options: HlsCachedManifestOptions,
+    started_at_ms: u64,
+) -> Option<(HlsMaterializedSharedManifest, HlsLeaseManifestSnapshot, HlsPublishedTransientResourceIds, u64)> {
+    let now_ms = current_time_millis();
+    let lease =
+        app_state.hls.proxy.access_lease_response_snapshot(view.access_lease_id, view.proxy_session_id, now_ms).await?;
+    let (prepared, queued) = {
+        let mut state = session.write().await;
+        state.live_window_strip = app_state.hls.proxy.strip();
+        if !tuliprox_hls::api::hls_live_window_origin_allowed_for_request(&state, options, started_at_ms, now_ms) {
+            return None;
+        }
+        // Keep ordinary forward session commits current when their own window
+        // is ready. A lease's independent entry never depends on this attempt.
+        let _ = state.render_and_store_manifest(now_ms);
+        let desired = state.plan_live_window(tuliprox_hls::api::HlsLiveWindowView::for_lease(&lease))?;
+        if let Some(previous) = lease
+            .last_manifest_snapshot
+            .as_ref()
+            .filter(|previous| desired.visible.first().is_some_and(|first| *first < previous.first_proxy_seq))
+        {
+            if now_ms > previous.delivered_at_ms.saturating_add(previous.playlist_duration_ms) {
+                return None;
+            }
+            let published = previous.startup_revisions.as_ref()?.window_plan.as_ref()?;
+            return Some((
+                HlsMaterializedSharedManifest {
+                    body: published.body.to_string(),
+                    mode: "normal",
+                    initial_strip_outcome: None,
+                },
+                previous.clone(),
+                HlsPublishedTransientResourceIds::default(),
+                now_ms,
+            ));
+        }
+        let plan = state.plan_live_window_for_lease(&lease)?;
+        let backpressure = app_state.hls.proxy.segment_worker_pool().classify_backpressure_for_session(&state);
+        let report = state.queue_manifest_fetch_candidates(now_ms, backpressure.allows_prefetch());
+        let queued = report.render_window_queued + report.prefetch_queued > 0;
+        let prepared = tuliprox_hls::api::HlsManifestRenderer::render_live_window(&state, &plan, now_ms).ok().and_then(
+            |rendered| {
+                // An explicit planned view bypasses generic strip. PreserveFullManifest
+                // continues to mean the origin's protected manifest semantics only.
+                let materialized = HlsMaterializedSharedManifest {
+                    body: super::materialize_hls_access_manifest(
+                        &rendered.body,
+                        view.access_lease_id,
+                        view.server_path,
+                    ),
+                    mode: "normal",
+                    initial_strip_outcome: hls_access_manifest_uses_startup_view(lease.state).then_some(
+                        tuliprox_hls::initial_strip::HlsInitialStripOutcome::Applied {
+                            mode: match view.strip.mode {
+                                shared::model::HlsStripMode::Segments => "segments",
+                                shared::model::HlsStripMode::Seconds => "seconds",
+                            },
+                            configured: view.strip.value,
+                            effective: plan.effective_strip_segments,
+                            visible_segments: plan.visible.len(),
+                        },
+                    ),
+                };
+                let snapshot = observe_hls_lease_manifest_snapshot_derivation(
+                    app_state,
+                    view.proxy_session_id,
+                    view.access_lease_id,
+                    derive_hls_lease_manifest_snapshot(
+                        &HlsLeaseManifestSnapshotInput::FastStartWindow {
+                            session: &state,
+                            plan: &plan,
+                            rendered: &rendered,
+                            materialized_body: &materialized.body,
+                        },
+                        now_ms,
+                    ),
+                )
+                .ok()??;
+                Some((materialized, snapshot, HlsPublishedTransientResourceIds::default(), now_ms))
+            },
+        );
+        (prepared, queued)
+    };
+    if queued {
+        if let Some(fingerprint) = fingerprint {
+            let context =
+                super::super::build_hls_segment_fetch_context(app_state, session, None, fingerprint, None).await;
+            let worker = Arc::clone(app_state.hls.proxy.segment_worker_pool());
+            tokio::spawn(async move {
+                worker.wake_scheduler(context, current_time_millis()).await;
+            });
+        }
+    }
+    prepared
+}
+
 pub(in crate::api::endpoints::hls_api) struct HlsCachedManifestRead {
     pub(in crate::api::endpoints::hls_api) transient_body: Option<HlsCachedTransientManifestRead>,
     pub(in crate::api::endpoints::hls_api) rendered_body: Option<String>,
@@ -252,6 +354,7 @@ pub(in crate::api::endpoints::hls_api) fn observe_hls_lease_manifest_snapshot_de
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response(
     app_state: &Arc<AppState>,
+    fingerprint: Option<&crate::model::Fingerprint>,
     session: &HlsSessionHandle,
     access_lease_id: &HlsAccessLeaseId,
     access_lease_state: HlsAccessLeaseState,
@@ -279,10 +382,27 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         server_path,
         bandwidth_learning,
     );
+    let mut last_wait_reason = None;
     loop {
         let cached = read_hls_cached_manifest(session, options, started_at_ms).await;
-        if !cached.wait_for_initial_commit {
-            let prepared = if let Some(transient) = cached.transient_body {
+        let fast_start = session.read().await.uses_fast_start_live_window();
+        if cached.wait_for_initial_commit || (cached.rendered_body.is_none() && cached.transient_body.is_none()) {
+            log_hls_manifest_wait_transition(&mut last_wait_reason, "fresh_render_required", session, access_lease_id)
+                .await;
+        }
+        if fast_start || !cached.wait_for_initial_commit {
+            let prepared = if fast_start {
+                let prepared =
+                    prepare_live_window_response(app_state, session, &view, fingerprint, options, started_at_ms).await;
+                if prepared.is_none() {
+                    if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
+                        continue;
+                    }
+                    return (access_lease_state != HlsAccessLeaseState::Pending)
+                        .then(hls_cached_manifest_temporarily_unavailable);
+                }
+                prepared
+            } else if let Some(transient) = cached.transient_body {
                 let materialized = view.materialize(&transient.body, "transient", transient.window_policy);
                 let published_resource_ids = if transient.window_policy.preserves_full_manifest() {
                     transient.published_resource_ids.clone()
@@ -348,6 +468,13 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                     if access_lease_state != HlsAccessLeaseState::Pending {
                         return None;
                     }
+                    log_hls_manifest_wait_transition(
+                        &mut last_wait_reason,
+                        "missing_revision_or_head_readiness",
+                        session,
+                        access_lease_id,
+                    )
+                    .await;
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
                         continue;
                     }
@@ -362,6 +489,13 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                     && !hls_startup_admission_allows_snapshot(&app_state.hls_ctx(), session, &snapshot, delivered_at_ms)
                         .await
                 {
+                    log_hls_manifest_wait_transition(
+                        &mut last_wait_reason,
+                        "admission_rejected",
+                        session,
+                        access_lease_id,
+                    )
+                    .await;
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
                         continue;
                     }
@@ -381,6 +515,12 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         admission_at_ms,
                     )
                     .await;
+                if fast_start && !outcome.is_committed() {
+                    if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
+                        continue;
+                    }
+                    return Some(hls_cached_manifest_temporarily_unavailable());
+                }
                 if let Some(snapshot_generation) = outcome.snapshot_generation() {
                     let published_at_ms = current_time_millis();
                     let first_startup_publication =
@@ -431,4 +571,29 @@ pub(in crate::api::endpoints::hls_api) async fn wait_for_hls_startup_evidence(
     }
     tokio::time::sleep(wait_timeout.saturating_sub(elapsed).min(Duration::from_millis(25))).await;
     true
+}
+
+/// Per-request state prevents a 25-ms polling loop from repeating diagnostics.
+async fn log_hls_manifest_wait_transition(
+    previous: &mut Option<(&'static str, bool, bool)>,
+    reason: &'static str,
+    session: &HlsSessionHandle,
+    lease_id: &HlsAccessLeaseId,
+) {
+    let session = session.read().await;
+    let degraded = session.origin_control.path_condition.is_degraded();
+    let head = session.publishable_origin_head_proxy_seq.and_then(|seq| session.startup.as_ref()?.revisions.get(&seq));
+    let head_ready = head.is_some_and(|head| head.revision().is_startup_head_ready(session.startup_mode()));
+    let state = (reason, degraded, head_ready);
+    if *previous == Some(state) {
+        return;
+    }
+    *previous = Some(state);
+    debug!(
+        "HLS playlist wait: lease={} proxy_session={} reason={reason} degraded={degraded} head_ready={head_ready} origin_generation={} readiness_generation={} head_revision={:?} head_prefix={}",
+        safe_hls_access_lease_id(lease_id), safe_proxy_session_id(&session.proxy_session_id),
+        session.activity.origin_work_generation, session.activity.media_readiness_generation,
+        head.map(|head| head.revision().id()),
+        head.map_or(0, |head| head.revision().prefix_available.load(std::sync::atomic::Ordering::Acquire)),
+    );
 }

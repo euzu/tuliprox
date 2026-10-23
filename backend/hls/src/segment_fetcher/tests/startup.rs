@@ -250,3 +250,114 @@ async fn optimistic_successor_replay_rejection_keeps_the_session_policy() -> std
     assert!(prepared_head.raw);
     Ok(())
 }
+
+#[tokio::test]
+async fn optimistic_binding_renders_cold_and_retained_sessions_in_both_event_orders() -> std::io::Result<()> {
+    for (retained, head_first) in [(false, false), (false, true), (true, false), (true, true)] {
+        // All origin input is supplied in memory; this probe opens no HTTP connection.
+        let server = super::TestSegmentServer {
+            base_url: "http://127.0.0.1:9".into(),
+            requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            task: tokio::spawn(async {}),
+        };
+        let directory = tempfile::tempdir()?;
+        let policy = SegmentFetchPolicy { max_session_segment_fetches: 3, ..Default::default() };
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut session = context.session.write().await;
+            if retained {
+                for entry in session.segments.values_mut() {
+                    entry.status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 1 };
+                }
+                session.render_and_store_manifest(1).unwrap();
+                assert_eq!(session.last_rendered_manifest.as_ref().unwrap().first_proxy_seq, 1);
+            }
+            session.apply_origin_manifest(&super::normal_manifest(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:4\n#EXTINF:4,\n4.ts\n#EXTINF:4,\n5.ts\n#EXTINF:4,\n6.ts\n"
+            )).unwrap();
+            while session.segment_prefetch_queue.pop_next().is_some() {}
+            for entry in session.segments.values_mut() {
+                if matches!(entry.status, SegmentCacheStatus::Queued { .. }) {
+                    entry.status = SegmentCacheStatus::Discovered;
+                }
+            }
+            for seq in [4, 5, 6] {
+                assert!(session.queue_segment_fetch_candidate(seq, SegmentFetchPriority::Demand, 10));
+            }
+        }
+        install_startup(&context, &worker, shared::model::HlsStartupMode::Optimistic).await;
+        context.session.write().await.startup.as_mut().unwrap().worker = std::sync::Weak::new();
+        let mut snapshots = std::collections::BTreeMap::new();
+        for _ in 0..3 {
+            let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.unwrap();
+            snapshots.insert(snapshot.proxy_seq, snapshot);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let head = super::super::prepare_startup_fill(&context, &snapshots[&4], Some(2), deadline)
+            .await
+            .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+        if head_first {
+            head.observed.lock().await.observe(b"a").await?;
+        }
+        let mut successors = Vec::new();
+        for seq in [5, 6] {
+            let successor = super::super::prepare_startup_fill(&context, &snapshots[&seq], Some(2), deadline)
+                .await
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+            successors.push(successor);
+        }
+        if !head_first {
+            let session = context.session.read().await;
+            assert_eq!(
+                session.last_rendered_manifest.as_ref().map(|manifest| manifest.first_proxy_seq),
+                retained.then_some(1)
+            );
+            drop(session);
+            head.observed.lock().await.observe(b"a").await?;
+        }
+        {
+            let session = context.session.read().await;
+            assert_eq!(crate::HlsManifestRenderer::render(&session, 20).unwrap().first_proxy_seq, 4);
+            let stored = session.last_rendered_manifest.as_ref().unwrap().first_proxy_seq;
+            assert_eq!(stored, 4, "retained={retained} head_first={head_first}");
+            assert!(session
+                .startup
+                .as_ref()
+                .unwrap()
+                .revisions
+                .values()
+                .all(|owner| matches!(owner.revision().state(), crate::SegmentRevisionState::Pending)));
+        }
+        // A second body chunk is not another render event.
+        let rendered_at = context.session.read().await.last_rendered_manifest.as_ref().unwrap().rendered_at_ms;
+        head.observed.lock().await.observe(b"b").await?;
+        assert_eq!(context.session.read().await.last_rendered_manifest.as_ref().unwrap().rendered_at_ms, rendered_at);
+        assert!(server.requests.lock().await.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn retired_generation_cannot_bind_or_render_an_optimistic_revision() -> std::io::Result<()> {
+    let server = spawn_sequence_response_server(Vec::new()).await;
+    let directory = tempfile::tempdir()?;
+    let policy = SegmentFetchPolicy::default();
+    let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+    install_startup(&context, &worker, shared::model::HlsStartupMode::Optimistic).await;
+    let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.expect("snapshot");
+    context.session.write().await.activity.origin_work_generation += 1;
+    let result = super::super::prepare_startup_fill(
+        &context,
+        &snapshot,
+        Some(2),
+        tokio::time::Instant::now() + Duration::from_secs(1),
+    )
+    .await;
+    assert!(result.is_err());
+    let session = context.session.read().await;
+    assert!(session.startup.as_ref().expect("startup").revisions.is_empty());
+    assert!(session.last_rendered_manifest.is_none());
+    assert_eq!(context.segment_cache.remaining_revision_bytes(&session.proxy_session_id), 0);
+    assert_eq!(super::temp_cache_files(directory.path()).len(), 0);
+    Ok(())
+}

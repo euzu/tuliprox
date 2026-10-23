@@ -71,24 +71,16 @@ async fn prepare_hls_revision_response(
         (Duration::from_secs(startup.config.max_progressive_reader_lifetime_secs.get()), startup.first_data_timeout_ms)
     };
     let deadline = deadline.min(remaining_wait_deadline(context.now_ms, wait_ms));
-    let (revision, progressive) = {
-        let mut leases = marker.manager.access_leases().write().await;
-        let Some(revision) = leases.published_segment_revision(&context.hls_access_lease_id, segment_file.proxy_seq)
-        else {
-            return HlsResourceServeOutcome::Failure(HlsResourceServeFailure::Missing);
-        };
-        let full_request = range.is_none_or(|range| range.as_bytes() == b"bytes=0-");
-        let progressive = revision.revision().key.kind == super::super::SegmentRevisionKind::Raw
-            && full_request
-            && leases.try_claim_progressive_startup(
-                &context.hls_access_lease_id,
-                segment_file.proxy_seq,
-                context.now_ms,
-            );
-        (revision, progressive)
-    };
-    let metadata = match revision_metadata(revision.revision(), progressive, deadline).await {
-        Ok(metadata) => metadata,
+    let (revision, metadata) = match resolve_revision_metadata(
+        marker,
+        segment_file,
+        range,
+        context.request_method == axum::http::Method::GET,
+        deadline,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
         Err(failure) => return HlsResourceServeOutcome::Failure(failure),
     };
     let authorized_at_ms = current_time_millis();
@@ -154,6 +146,95 @@ fn remaining_wait_deadline(requested_at_ms: u64, wait_ms: u64) -> tokio::time::I
     tokio::time::Instant::now() + Duration::from_millis(wait_ms.saturating_sub(elapsed_ms))
 }
 
+async fn resolve_revision_metadata(
+    marker: &super::HlsMediaActivityMarker,
+    segment_file: &HlsSegmentFile,
+    range: Option<&HeaderValue>,
+    is_get: bool,
+    deadline: tokio::time::Instant,
+) -> Result<(crate::SegmentRevisionGuard, Option<CachedSegmentMetadata>), HlsResourceServeFailure> {
+    use crate::lease::HlsRevisionRecoveryOutcome;
+    // Reserve before waiting for recovery or the first body bytes. A concurrent
+    // request must not steal the opportunity from a headers-only first request.
+    let startup_claimed = {
+        let mut leases = marker.manager.access_leases().write().await;
+        let now_ms = current_time_millis();
+        if !leases.media_identity_is_current(&marker.lease_id, &marker.proxy_session_id, marker.lease_identity, now_ms)
+        {
+            return Err(HlsResourceServeFailure::Expired);
+        }
+        if leases.published_segment_revision(&marker.lease_id, segment_file.proxy_seq).is_none() {
+            return Err(HlsResourceServeFailure::Missing);
+        }
+        let full_request = is_get && range.is_none_or(|range| range.as_bytes() == b"bytes=0-");
+        full_request && leases.try_claim_progressive_startup(&marker.lease_id, segment_file.proxy_seq, now_ms)
+    };
+    let mut last_outcome = None;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(HlsResourceServeFailure::TemporaryUnavailable { retry_after_ms: 1000 });
+        }
+        let now_ms = current_time_millis();
+        let outcome = marker
+            .manager
+            .recover_access_lease_revision(
+                &marker.lease_id,
+                &marker.proxy_session_id,
+                marker.lease_identity,
+                segment_file.proxy_seq,
+                now_ms,
+            )
+            .await;
+        if outcome == HlsRevisionRecoveryOutcome::ReentryRequired {
+            return Err(HlsResourceServeFailure::Missing);
+        }
+        let (revision, progressive) = {
+            let mut leases = marker.manager.access_leases().write().await;
+            if !leases.media_identity_is_current(
+                &marker.lease_id,
+                &marker.proxy_session_id,
+                marker.lease_identity,
+                now_ms,
+            ) {
+                return Err(HlsResourceServeFailure::Expired);
+            }
+            let revision = leases
+                .published_segment_revision(&marker.lease_id, segment_file.proxy_seq)
+                .ok_or(HlsResourceServeFailure::Missing)?;
+            if outcome == HlsRevisionRecoveryOutcome::RetryPending {
+                if last_outcome != Some(outcome) {
+                    let session = marker.session.read().await;
+                    log::debug!(
+                        "HLS revision recovery: lease={} seq={} generation={} revision={:?} prefix={} exposed={} outcome=retry_pending",
+                        crate::safe_hls_access_lease_id(&marker.lease_id), segment_file.proxy_seq,
+                        session.activity.origin_work_generation, revision.revision().id(),
+                        revision.revision().prefix_available.load(std::sync::atomic::Ordering::Acquire),
+                        revision.revision().was_exposed(),
+                    );
+                }
+                last_outcome = Some(outcome);
+                drop(leases);
+                tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(25))).await;
+                continue;
+            }
+            let progressive = startup_claimed && revision.revision().key.kind == crate::SegmentRevisionKind::Raw;
+            (revision, progressive)
+        };
+        match revision_metadata(revision.revision(), progressive, deadline).await {
+            Ok(metadata) => return Ok((revision, metadata)),
+            Err(HlsResourceServeFailure::PermanentFailed { .. }) => {
+                // A pending revision may fail while this request waits for EOF.
+                // Re-resolve through the same fenced transaction and deadline.
+                if !matches!(revision.revision().state(), SegmentRevisionState::Failed) {
+                    return Err(HlsResourceServeFailure::PermanentFailed { status: None });
+                }
+                tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(25))).await;
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+}
+
 /// A progressive claim streams a publishable pending revision; every other
 /// request waits for the complete revision file.
 async fn revision_metadata(
@@ -162,11 +243,26 @@ async fn revision_metadata(
     deadline: tokio::time::Instant,
 ) -> Result<Option<CachedSegmentMetadata>, HlsResourceServeFailure> {
     if progressive {
-        return match revision.state() {
-            SegmentRevisionState::Complete(metadata) => Ok(Some(metadata)),
-            SegmentRevisionState::Pending if revision.is_publishable() => Ok(None),
-            _ => Err(HlsResourceServeFailure::PermanentFailed { status: None }),
-        };
+        let mut changes = revision.subscribe();
+        loop {
+            let state = changes.borrow_and_update().clone();
+            match state {
+                SegmentRevisionState::Complete(metadata) => return Ok(Some(metadata)),
+                SegmentRevisionState::Failed => {
+                    return Err(HlsResourceServeFailure::PermanentFailed { status: None });
+                }
+                SegmentRevisionState::Pending if revision.can_expose() => return Ok(None),
+                SegmentRevisionState::Pending => {}
+            }
+            // Optimistic successors can be listed before any body byte arrives.
+            // Without replay (or after replay exhaustion) wait for the complete
+            // immutable file instead; never expose a missing prefix as a 404.
+            match tokio::time::timeout_at(deadline, changes.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return Err(HlsResourceServeFailure::PermanentFailed { status: None }),
+                Err(_) => return Err(HlsResourceServeFailure::TemporaryUnavailable { retry_after_ms: 1000 }),
+            }
+        }
     }
     match revision.wait_complete(deadline).await {
         Ok(metadata) => Ok(Some(metadata)),

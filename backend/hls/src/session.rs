@@ -279,6 +279,13 @@ pub struct HlsSession {
     pub origin_control: HlsSessionOriginControl,
     pub render_policy: RenderPolicy,
     pub startup: Option<super::HlsSessionStartup>,
+    /// None before an origin commit; Some(empty) is an explicitly empty origin window.
+    pub(crate) origin_window_proxy_seqs: Option<Vec<u64>>,
+    pub(crate) origin_window_durations_ms: Vec<u64>,
+    pub(crate) live_window_origin_commit_identity: Option<HlsManifestCommitIdentity>,
+    pub(crate) live_window_origin_work_generation: Option<u64>,
+    pub live_window_strip: tuliprox_core::model::StripConfig,
+    pub(crate) live_window_demands: HashMap<super::HlsAccessLeaseId, super::live_window::HlsLiveWindowDemand>,
     pub last_rendered_manifest: Option<RenderedManifest>,
     manifest_commit_generation: u64,
     /// Origin manifests committed into this session.
@@ -359,6 +366,15 @@ impl HlsSession {
             last_effective_manifest_host: None,
             origin_refresh: OriginRefreshState::default(),
             origin_control: HlsSessionOriginControl::default(),
+            origin_window_proxy_seqs: None,
+            origin_window_durations_ms: Vec::new(),
+            live_window_origin_commit_identity: None,
+            live_window_origin_work_generation: None,
+            live_window_strip: tuliprox_core::model::StripConfig {
+                mode: shared::model::HlsStripMode::Segments,
+                value: 0,
+            },
+            live_window_demands: HashMap::new(),
             render_policy: RenderPolicy::default(),
             startup: None,
             last_rendered_manifest: None,
@@ -426,6 +442,16 @@ impl HlsSession {
 
     pub(crate) fn record_origin_manifest_commit(&mut self) {
         self.origin_manifest_commits = self.origin_manifest_commits.saturating_add(1);
+    }
+
+    pub(crate) fn record_live_window_origin_commit(&mut self, now_ms: u64) {
+        if self.uses_fast_start_live_window() {
+            if let Some(identity) = self.next_manifest_commit_identity(now_ms) {
+                self.manifest_commit_generation = identity.commit_generation();
+                self.live_window_origin_commit_identity = Some(identity);
+                self.live_window_origin_work_generation = Some(self.activity.origin_work_generation);
+            }
+        }
     }
 
     /// Whether the committed manifest was stored after an origin commit newer
@@ -916,6 +942,12 @@ impl fmt::Debug for HlsSession {
             .field("last_normal_manifest_commit_identity", &self.last_normal_manifest_commit_identity)
             .field("published_live_origin_baseline", &self.published_live_origin_baseline)
             .field("longest_rendered_playlist_duration_ms", &self.longest_rendered_playlist_duration_ms)
+            .field("origin_window_proxy_seqs", &self.origin_window_proxy_seqs)
+            .field("origin_window_durations_ms", &self.origin_window_durations_ms)
+            .field("live_window_origin_commit_identity", &self.live_window_origin_commit_identity)
+            .field("live_window_origin_work_generation", &self.live_window_origin_work_generation)
+            .field("live_window_strip", &self.live_window_strip)
+            .field("live_window_demands", &self.live_window_demands)
             .field("initial_prefetch_gap_segments", &self.initial_prefetch_gap_segments)
             .field("segment_prefetch_queue_len", &self.segment_prefetch_queue.len())
             .field("active_segment_fetches", &self.active_segment_fetches)

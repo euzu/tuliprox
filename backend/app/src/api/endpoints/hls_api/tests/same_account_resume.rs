@@ -104,7 +104,12 @@ async fn deliver_origin_segment(app: &Arc<AppState>, session: &HlsSessionHandle,
     let origin_url = {
         let s = session.read().await;
         let segment = &s.segments[&seq];
-        assert!((head..head + 6).contains(&segment.origin_key.host_local_sequence), "current origin window");
+        assert!(
+            (head..head + 6).contains(&segment.origin_key.host_local_sequence),
+            "current origin window: expected {head}..{}; got {} at proxy {seq}; manifest={manifest}",
+            head + 6,
+            segment.origin_key.host_local_sequence
+        );
         segment.origin_fetch_ref.as_ref().unwrap().resolved_origin_url.clone()
     };
     let path = reqwest::Url::parse(&origin_url).unwrap().path().to_string();

@@ -92,3 +92,116 @@ use self::support::{
     StaleSwitchGeneration, TestOriginServer, CRITICAL_HANDOFF_MANIFEST_BODY, CRITICAL_HANDOFF_TS_BODY, SWITCH_MAP_BODY,
     SWITCH_SEGMENT_BODY,
 };
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keeps the degraded admission and unchanged-success counterprobe in one scenario."
+)]
+async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_media_progress() -> std::io::Result<()> {
+    use crate::{
+        media_reserve::{
+            evaluate_startup_admission, HlsReadyTimelineSnapshot, HlsStartupAdmissionDecision,
+            HlsStartupAdmissionInput, HlsStartupAdmissionOriginState,
+        },
+        origin_progress::HlsOriginPathCondition,
+    };
+    use std::sync::Arc;
+    let session = test_session();
+    let context = HlsOriginManifestFetchContext {
+        app_config: test_app_config(),
+        session: Arc::clone(&session),
+        availability_runtime: None,
+        origin_entry: LiveHlsOriginEntry::parse("http://127.0.0.1:9/index.m3u8").unwrap(),
+        headers: axum::http::HeaderMap::new(),
+        client: reqwest::Client::new(),
+        no_redirect_client: reqwest::Client::new(),
+        use_manual_redirects: false,
+        origin_manifest_timeout_ms: 1000,
+        manifest_recovery_burst: tuliprox_core::model::HlsManifestRecoveryBurstConfig::default(),
+        retry_policy: RetryPolicy::default(),
+        recovery_timing_policy: test_recovery_timing_policy(100),
+        acceptance_timing_seed: None,
+    };
+    let manifest = fetched_manifest("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4,\n0.ts\n#EXTINF:4,\n1.ts\n#EXTINF:4,\n2.ts\n");
+    let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(origin) =
+        tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(
+            &manifest.body,
+            &manifest.final_manifest_url,
+        )
+    else {
+        panic!("normal");
+    };
+    let snapshot = {
+        let mut session = session.write().await;
+        session.apply_origin_manifest(&origin).unwrap();
+        session.origin_control.record_media_progress(10, 4000);
+        let config = tuliprox_core::model::HlsStartupConfig {
+            mode: shared::model::HlsStartupMode::Optimistic,
+            ..Default::default()
+        };
+        let store = Arc::new(crate::SegmentRevisionStore::default());
+        let mut revisions = std::collections::BTreeMap::new();
+        for seq in 0..3 {
+            revisions
+                .insert(seq, store.create(session.proxy_session_id.clone(), seq, crate::SegmentRevisionKind::Raw)?);
+        }
+        revisions[&0].revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
+        session.startup = Some(crate::HlsSessionStartup {
+            config: config.clone(),
+            first_data_timeout_ms: 10000,
+            worker: std::sync::Weak::new(),
+            access_leases: Arc::new(tokio::sync::RwLock::new(crate::HlsAccessLeaseStore::default())),
+            revisions,
+            policy_fixed: true,
+            store,
+            budget: crate::ProgressiveBudgetManager::new(config),
+        });
+        let rendered = session.render_and_store_manifest(10).unwrap();
+        crate::api::derive_hls_lease_manifest_snapshot(
+            &crate::api::HlsLeaseManifestSnapshotInput::NormalCacheTimeline {
+                session: &session,
+                committed_body: &rendered.body,
+                materialized_body: &rendered.body,
+                stripped_tail_segments: 0,
+            },
+            10,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let evaluate = |origin_state| {
+        evaluate_startup_admission(HlsStartupAdmissionInput {
+            manifest: &snapshot,
+            ready_timeline: &HlsReadyTimelineSnapshot { units: Arc::from([]) },
+            origin_state,
+            recovery_trigger_budget: crate::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(0),
+        })
+        .decision
+    };
+    assert_eq!(evaluate(HlsStartupAdmissionOriginState::Healthy), HlsStartupAdmissionDecision::Admit);
+    let generation = session.read().await.origin_control.progress_generation;
+    crate::availability::record_retryable_manifest_attempt_failure(
+        &context,
+        generation,
+        &OriginManifestFetchError::RetryableStatus(axum::http::StatusCode::BAD_GATEWAY, None),
+        11,
+    )
+    .await;
+    assert_eq!(session.read().await.origin_control.path_condition, HlsOriginPathCondition::RetryableFetchFailure);
+    assert!(matches!(evaluate(HlsStartupAdmissionOriginState::Degraded), HlsStartupAdmissionDecision::Reject(_)));
+    {
+        let mut session = session.write().await;
+        let timing = build_manifest_refresh_timing(Some(4000), Some(4000), HlsManifestProgress::Unchanged);
+        record_committed_manifest_media_progress(
+            &mut session.origin_control,
+            HlsManifestCommitProgressEvidence::CacheTimeline(timing),
+            Some(4),
+            12,
+        );
+        assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::RetryableFetchFailure);
+        session.origin_control.record_media_progress(13, 4000);
+        assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::ProgressExpected);
+    }
+    Ok(())
+}

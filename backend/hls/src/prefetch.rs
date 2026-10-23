@@ -204,6 +204,50 @@ impl HlsSession {
         if self.is_gc_marked_for_removal() {
             return report;
         }
+        if self.uses_fast_start_live_window() {
+            let plans = self.required_live_windows();
+            let required = plans.iter().flat_map(|plan| plan.visible.iter().copied()).collect::<BTreeSet<_>>();
+            let obsolete = self
+                .segment_prefetch_queue
+                .proxy_seqs()
+                .into_iter()
+                .filter(|seq| {
+                    !required.contains(seq)
+                        && self.segments.get(seq).is_some_and(|entry| {
+                            matches!(
+                                entry.status,
+                                SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, .. }
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            for seq in obsolete {
+                self.segment_prefetch_queue.remove(seq);
+                if let Some(entry) = self.segments.get_mut(&seq) {
+                    entry.status = SegmentCacheStatus::Discovered;
+                }
+            }
+            for seq in required {
+                if self.queue_segment_fetch_candidate(seq, SegmentFetchPriority::RenderWindow, now_ms) {
+                    report.render_window_queued += 1;
+                }
+            }
+            let reserve = plans.iter().flat_map(|plan| plan.hidden_tail.iter().copied()).collect::<BTreeSet<_>>();
+            for seq in reserve {
+                if allow_prefetch {
+                    if self.queue_segment_fetch_candidate(seq, SegmentFetchPriority::Prefetch, now_ms) {
+                        report.prefetch_queued += 1;
+                    }
+                } else if self
+                    .segments
+                    .get(&seq)
+                    .is_some_and(|entry| matches!(entry.status, SegmentCacheStatus::Discovered))
+                {
+                    report.prefetch_skipped += 1;
+                }
+            }
+            return report;
+        }
         let Some(tail_proxy_seq) = self.publishable_origin_tail_proxy_seq else {
             return report;
         };

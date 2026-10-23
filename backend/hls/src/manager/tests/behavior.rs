@@ -194,6 +194,7 @@ async fn finalized_signed_url_generations_follow_published_lease_lifetime() {
         .await
         .expect("expired lease remains available for lifecycle cleanup");
     assert_eq!(expired_a.state, HlsAccessLeaseState::Expired);
+    manager.bind_lease_user_accounting(&crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users);
     manager.remove_access_lease(&lease_a_id).await;
     let mut session = session.write().await;
     assert_eq!(session.transient.finalized_manifest_generation_count(), 1);
@@ -309,6 +310,7 @@ async fn same_lease_retains_every_published_finalized_generation_until_removal()
             .is_some());
     }
 
+    manager.bind_lease_user_accounting(&crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users);
     manager.remove_access_lease(&lease_id).await;
     let session = session.read().await;
     assert_eq!(session.transient.finalized_manifest_lease_binding_count(), 0);
@@ -434,6 +436,7 @@ async fn lease_reconciliation_cannot_resurrect_a_concurrently_removed_binding() 
         )
     };
     wait_until_access_lease_store_is_write_locked(&manager).await;
+    manager.bind_lease_user_accounting(&crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users);
     let removal_task = {
         let manager = Arc::clone(&manager);
         let lease_id = lease_id.clone();

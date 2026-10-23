@@ -11,20 +11,31 @@ async fn startup_failure_and_cancellation_close_each_commit_transition() -> std:
         StartupWritePhase::AfterPublication,
     ] {
         for cancel in [false, true] {
-            startup_transition_round(phase, cancel).await?;
+            for head in [1, 3] {
+                startup_transition_round(phase, cancel, head).await?;
+            }
         }
     }
     Ok(())
 }
 
-async fn startup_transition_round(phase: StartupWritePhase, cancel: bool) -> std::io::Result<()> {
+async fn startup_transition_round(phase: StartupWritePhase, cancel: bool, head: u64) -> std::io::Result<()> {
     let server = spawn_segment_server(0).await;
     let directory = tempfile::tempdir()?;
     let policy = SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..Default::default() };
     let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+    if head == 3 {
+        let mut body = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n".to_string();
+        for seq in 1..=6 {
+            writeln!(body, "#EXTINF:4,\n{}/{seq}.ts", server.base_url).unwrap();
+        }
+        let mut session = context.session.write().await;
+        session.apply_origin_manifest(&normal_manifest(&body)).unwrap();
+        session.live_window_strip.value = 1;
+    }
     install_startup(&context, &worker, shared::model::HlsStartupMode::FirstReady).await;
     clear_scheduled_prefetch(&context, &policy).await;
-    context.session.write().await.queue_segment_fetch_candidate(1, SegmentFetchPriority::Demand, 10);
+    context.session.write().await.queue_segment_fetch_candidate(head, SegmentFetchPriority::Demand, 10);
     let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.unwrap();
     let (entered, resume) = context.segment_cache.pause_startup_write(phase);
     let task_context = context.clone();
@@ -34,7 +45,7 @@ async fn startup_transition_round(phase: StartupWritePhase, cancel: bool) -> std
         super::super::fetch_segment_into_cache(&task_context, &task_snapshot, &task_policy).await
     });
     tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
-    let revision = context.session.read().await.startup.as_ref().unwrap().revisions[&1].clone();
+    let revision = context.session.read().await.startup.as_ref().unwrap().revisions[&head].clone();
     if cancel {
         task.abort();
         assert!(matches!(task.await, Err(error) if error.is_cancelled()));
@@ -68,7 +79,7 @@ async fn startup_transition_round(phase: StartupWritePhase, cancel: bool) -> std
     if phase == StartupWritePhase::AfterPublication {
         for _ in 0..2 {
             let metadata = revision.revision().wait_complete(tokio::time::Instant::now()).await?;
-            assert_eq!(tokio::fs::read(metadata.path).await?, b"body:/1.ts");
+            assert_eq!(tokio::fs::read(metadata.path).await?, format!("body:/{head}.ts").as_bytes());
         }
     }
     Ok(())

@@ -92,12 +92,6 @@ app_state_views! {
         app_config, recordings, events <- event_manager, http_clients, recording_capacity,
     }
 
-    /// The handles the HLS proxy needs: itself, plus provider allocation and
-    /// session accounting.
-    hls_ctx => crate::api::model::hls_cache::HlsCtx {
-        app_config, hls_proxy <- hls.proxy, active_provider, connection_manager, active_users,
-    }
-
     /// The handles admission reads: it decides over connections and users.
     admission_ctx => tuliprox_session::admission::AdmissionCtx {
         app_config, active_users, connection_manager,
@@ -115,4 +109,24 @@ app_state_views! {
         update_guard <- playlist_updates.update_guard, http_clients,
         maintenance as std::sync::Arc<dyn tuliprox_core::model::MaintenanceGate>,
     }
+}
+
+impl AppStateView for crate::api::model::hls_cache::HlsCtx {
+    fn from_app_state(state: &AppState) -> Self {
+        let ctx = Self {
+            app_config: state.app_config.clone(),
+            hls_proxy: state.hls.proxy.clone(),
+            active_provider: state.active_provider.clone(),
+            connection_manager: state.connection_manager.clone(),
+            active_users: state.active_users.clone(),
+        };
+        ctx.attach_lease_user_accounting();
+        ctx
+    }
+}
+
+impl AppState {
+    /// The HLS runtime and its authoritative session-accounting owner.
+    #[must_use]
+    pub fn hls_ctx(&self) -> crate::api::model::hls_cache::HlsCtx { self.view() }
 }

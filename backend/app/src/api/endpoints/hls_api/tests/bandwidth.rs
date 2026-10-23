@@ -154,6 +154,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn hls_runtime_bandwidth_man
 
     let response = super::super::try_hls_cached_manifest_response(
         &app_state,
+        None,
         &session,
         &access_lease_id,
         HlsAccessLeaseState::Pending,

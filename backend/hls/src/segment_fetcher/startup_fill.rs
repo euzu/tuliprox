@@ -447,12 +447,13 @@ async fn bind_startup_revision(
         )));
     }
     let decides_policy = startup_fill_decides_policy(&session, snapshot.proxy_seq);
+    revision.revision().bind_origin(&session);
     let Some(startup) = &mut session.startup else { return Ok(()) };
     startup.policy_fixed |= decides_policy;
     startup.revisions.insert(snapshot.proxy_seq, revision.clone());
     // An optimistic window may become complete when its last successor is
     // accepted, after the head already has bytes.
-    if startup.config.mode.publishes_pending_successors() && session.last_rendered_manifest.is_none() {
+    if startup.config.mode.publishes_pending_successors() {
         if let Err(error) = session.render_and_store_manifest(current_time_millis()) {
             debug!(
                 "HLS optimistic startup render after successor binding failed: proxy_seq={} error={error:?}",
@@ -467,6 +468,9 @@ async fn bind_startup_revision(
 /// fill may fix the session policy or fall back to `first_ready`. A successor
 /// without replay stays raw and is delivered once complete.
 fn startup_fill_decides_policy(session: &super::super::HlsSession, proxy_seq: u64) -> bool {
+    if session.uses_fast_start_live_window() {
+        return session.live_window_heads().contains(&proxy_seq);
+    }
     !session.startup_mode().publishes_pending_successors()
         || session.publishable_origin_head_proxy_seq == Some(proxy_seq)
 }

@@ -895,6 +895,7 @@ fn commit_normal_manifest(
     session.record_origin_manifest_commit();
     session.transient.upsert_resources(key_resources);
     session.initial_prefetch_gap_segments = initial_prefetch_gap_segments;
+    session.record_live_window_origin_commit(rendered_at_ms);
     if provisioning_handoff {
         limit_publishable_normal_provisioning_handoff_tail(session, &request.strip, manifest.segments.len());
     }

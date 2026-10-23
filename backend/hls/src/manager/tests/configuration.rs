@@ -41,6 +41,7 @@ async fn update_config_applies_hls_runtime_settings_to_existing_manager() {
     assert_eq!(manager.strip().mode, HlsStripMode::Seconds);
     assert_eq!(manager.strip().value, 7);
     assert_eq!(session.read().await.segment_prefetch_queue.max_prefetch_depth(), 4);
+    assert_eq!(session.read().await.live_window_strip, manager.strip());
 }
 
 #[tokio::test]

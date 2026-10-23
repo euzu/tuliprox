@@ -548,6 +548,7 @@ async fn hls_provider_exhausted_grace_hold_waits_for_grace_period_before_retry()
     let strip = app_state.hls.proxy.strip();
     let resolution = super::super::hls_provider_connections_exhausted_manifest_resolution(
         &app_state,
+        None,
         &session,
         "hls-user",
         &input,
@@ -599,6 +600,7 @@ async fn provider_grace_expiry_commits_lease_bound_provider_exhausted_tail() {
 
     let grace = super::super::hls_provider_connections_exhausted_manifest_resolution(
         &fixture.app_state,
+        None,
         &session,
         "hls-user",
         &input,
@@ -614,6 +616,7 @@ async fn provider_grace_expiry_commits_lease_bound_provider_exhausted_tail() {
 
     let response = super::super::hls_provider_connections_exhausted_manifest_resolution(
         &fixture.app_state,
+        None,
         &session,
         "hls-user",
         &input,
@@ -635,6 +638,7 @@ async fn provider_grace_expiry_commits_lease_bound_provider_exhausted_tail() {
     assert_eq!(plan.segment_duration_ms, 10_027);
     let replay = super::super::hls_provider_connections_exhausted_manifest_resolution(
         &fixture.app_state,
+        None,
         &session,
         "hls-user",
         &input,

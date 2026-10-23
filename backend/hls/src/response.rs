@@ -84,6 +84,8 @@ pub struct HlsCacheResponseContext {
     pub segment_repair: Arc<HlsSegmentRepairManager>,
     pub qos_meter: Arc<ArcSwapOption<StreamMeterHandle>>,
     pub media_activity_marker: Option<HlsMediaActivityMarker>,
+    /// Only GET may reserve a lease's progressive opportunity; HEAD waits for metadata.
+    pub request_method: axum::http::Method,
     pub now_ms: u64,
 }
 

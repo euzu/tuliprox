@@ -15,6 +15,12 @@ use std::sync::Arc;
 
 /// Exact manifest delivery from which lease-local playback evidence is derived.
 pub enum HlsLeaseManifestSnapshotInput<'a> {
+    FastStartWindow {
+        session: &'a HlsSession,
+        plan: &'a crate::live_window::HlsLiveWindowPlan,
+        rendered: &'a crate::renderer::RenderedManifest,
+        materialized_body: &'a str,
+    },
     NormalCacheTimeline {
         session: &'a HlsSession,
         committed_body: &'a str,
@@ -91,6 +97,12 @@ pub fn derive_hls_lease_manifest_snapshot(
     delivered_at_ms: u64,
 ) -> Result<Option<HlsLeaseManifestSnapshot>, HlsManifestLimitViolation> {
     match input {
+        HlsLeaseManifestSnapshotInput::FastStartWindow { session, plan, rendered, materialized_body } => {
+            if !plan.is_current(session) || rendered.segment_proxy_seqs != plan.visible {
+                return Ok(None);
+            }
+            derive_rendered_snapshot(session, rendered, materialized_body, 0, delivered_at_ms, Some((*plan).clone()))
+        }
         HlsLeaseManifestSnapshotInput::NormalCacheTimeline {
             session,
             committed_body,
@@ -155,7 +167,22 @@ fn derive_normal_snapshot(
     if rendered.body != committed_body {
         return Ok(None);
     }
-    let Some(source_commit_identity) = session.last_normal_manifest_commit_identity() else {
+    derive_rendered_snapshot(session, rendered, materialized_body, stripped_tail_segments, delivered_at_ms, None)
+}
+
+fn derive_rendered_snapshot(
+    session: &HlsSession,
+    rendered: &crate::renderer::RenderedManifest,
+    materialized_body: &str,
+    stripped_tail_segments: usize,
+    delivered_at_ms: u64,
+    window_plan: Option<crate::live_window::HlsLiveWindowPlan>,
+) -> Result<Option<HlsLeaseManifestSnapshot>, HlsManifestLimitViolation> {
+    let Some(source_commit_identity) = window_plan
+        .as_ref()
+        .and_then(|plan| plan.source_commit_identity)
+        .or_else(|| session.last_normal_manifest_commit_identity())
+    else {
         return Ok(None);
     };
     let Some(parsed) = parse_lease_manifest(materialized_body)? else {
@@ -210,6 +237,10 @@ fn derive_normal_snapshot(
                 .map(|seq| Some((*seq, startup.revisions.get(seq)?.clone())))
                 .collect::<Option<std::collections::BTreeMap<_, _>>>()?;
             snapshot.startup_revisions = Some(Arc::new(super::HlsManifestRevisions {
+                window_plan: window_plan.map(|plan| crate::live_window::HlsLiveWindowPublication {
+                    plan,
+                    body: Arc::from(materialized_body),
+                }),
                 mode: startup.config.mode,
                 retained_start_seq: session.segments.first_key_value().map_or(first_proxy_seq, |(seq, _)| *seq),
                 revisions,

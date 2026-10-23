@@ -335,6 +335,7 @@ struct TimelineDraft {
     origin_version: Option<u16>,
     target_duration: Option<u32>,
     independent_segments: bool,
+    origin_window_proxy_seqs: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -383,6 +384,7 @@ impl From<&HlsSession> for TimelineDraft {
             origin_version: session.origin_version,
             target_duration: session.target_duration,
             independent_segments: session.independent_segments,
+            origin_window_proxy_seqs: session.live_origin_sequences().to_vec(),
         }
     }
 }
@@ -502,6 +504,12 @@ impl HlsSession {
         self.origin_version = draft.origin_version;
         self.target_duration = draft.target_duration;
         self.independent_segments = draft.independent_segments;
+        self.origin_window_durations_ms = draft
+            .origin_window_proxy_seqs
+            .iter()
+            .filter_map(|seq| self.segments.get(seq).map(|entry| entry.duration_ms))
+            .collect();
+        self.origin_window_proxy_seqs = Some(draft.origin_window_proxy_seqs);
     }
 
     /// Captures the contiguous timeline beginning at the lease's first advertised sequence.
@@ -591,6 +599,7 @@ impl TimelineDraft {
         mode: TimelineApplyMode,
     ) -> Result<TimelineApplyResult, TimelineMapError> {
         let candidate_plan = self.candidate_timeline_plan(manifest, effective_host_id, mode)?;
+        self.origin_window_proxy_seqs.clear();
         if candidate_plan.segments.is_empty() {
             return Ok(TimelineApplyResult::default());
         }
@@ -644,6 +653,7 @@ impl TimelineDraft {
 
         self.publishable_origin_head_proxy_seq = handoff_publishable_head_proxy_seq.or(manifest_head_proxy_seq);
         self.publishable_origin_tail_proxy_seq = manifest_tail_proxy_seq;
+        self.origin_window_proxy_seqs.clone_from(&result.segment_proxy_seqs);
         Ok(result)
     }
 

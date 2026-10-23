@@ -327,11 +327,13 @@ mod identity;
 mod lifecycle;
 mod publication;
 mod revision_bindings;
+mod revision_recovery;
 mod runtime_policy;
 mod terminal;
 mod timing;
 
 pub use self::identity::new_hls_access_lease_id;
+pub(crate) use self::revision_recovery::{HlsRevisionRecoveryGuard, HlsRevisionRecoveryOutcome};
 use self::{
     error::HlsAvailabilityEvidenceAdvanceError,
     identity::HlsMediaLeasePlaybackIdentity,

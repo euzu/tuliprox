@@ -76,7 +76,6 @@ impl HlsManifestCommitIdentity {
 
     pub const fn commit_generation(self) -> u64 { self.commit_generation }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub const fn rendered_at_ms(self) -> u64 { self.rendered_at_ms }
 }
 
@@ -1010,6 +1009,7 @@ mod tests {
             );
         }
         manifest.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            window_plan: None,
             mode: shared::model::HlsStartupMode::FirstReady,
             retained_start_seq: 0,
             revisions: owners,
@@ -1055,6 +1055,7 @@ mod tests {
             );
         }
         manifest.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            window_plan: None,
             mode: shared::model::HlsStartupMode::Progressive,
             retained_start_seq: 0,
             revisions: owners,
@@ -1092,6 +1093,7 @@ mod tests {
             );
         }
         manifest.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+            window_plan: None,
             mode: shared::model::HlsStartupMode::Optimistic,
             retained_start_seq: 0,
             revisions: owners,

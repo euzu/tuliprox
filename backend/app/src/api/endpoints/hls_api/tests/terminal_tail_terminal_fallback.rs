@@ -78,6 +78,7 @@ async fn completed_owner_resolves_new_lease_standalone_without_reusing_old_termi
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 0 };
     let mut response = Box::pin(super::super::join_hls_canonical_manifest_owner(
         super::super::HlsCanonicalOwnerHandoffContext {
+            fingerprint: None,
             app_state: &app_state,
             proxy_session_id: &proxy_session_id,
             access_lease_id: &new_lease_id,

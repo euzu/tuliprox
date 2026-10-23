@@ -67,6 +67,7 @@ async fn live_media_marker(
 struct CachedSegmentFixture {
     _temp_dir: tempfile::TempDir,
     manager: Arc<HlsProxyManager>,
+    active_users: Arc<tuliprox_session::ActiveUserManager>,
     segment_cache: Arc<HlsSegmentCache>,
     session: HlsSessionHandle,
     proxy_session_id: ProxySessionId,
@@ -80,8 +81,15 @@ struct CachedSegmentFixture {
 
 impl CachedSegmentFixture {
     async fn new(bytes: Vec<u8>) -> Self {
+        let fixture = Self::without_lease_user_accounting(bytes).await;
+        fixture.manager.bind_lease_user_accounting(&fixture.active_users);
+        fixture
+    }
+
+    async fn without_lease_user_accounting(bytes: Vec<u8>) -> Self {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let manager = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
+        let active_users = crate::HlsCtx::for_test(tuliprox_core::model::Config::default()).active_users;
         let segment_cache = Arc::clone(manager.segment_cache());
         let session = manager.get_or_create_session(HlsSessionKey::new(1, "range-stream"), b"secret", 1_000).await;
         let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -137,6 +145,7 @@ impl CachedSegmentFixture {
         Self {
             _temp_dir: temp_dir,
             manager,
+            active_users,
             segment_cache,
             session,
             proxy_session_id,
@@ -202,6 +211,7 @@ async fn publish_revision_fixture(
         fixture.segment_file.proxy_seq,
         if raw { crate::SegmentRevisionKind::Raw } else { crate::SegmentRevisionKind::Processed },
     )?;
+    revision.revision().bind_origin(&*fixture.session.read().await);
     if raw {
         let mut replay =
             crate::progressive_startup::ProgressiveReplay::new(&budget).ok_or_else(|| std::io::Error::other("slot"))?;
@@ -243,6 +253,7 @@ async fn publish_revision_fixture(
     });
     let snapshot = crate::HlsLeaseManifestSnapshot {
         startup_revisions: Some(Arc::new(crate::HlsManifestRevisions {
+            window_plan: None,
             mode: config.mode,
             retained_start_seq: fixture.segment_file.proxy_seq,
             revisions,
@@ -283,8 +294,10 @@ async fn publish_revision_fixture(
 }
 
 mod admission;
+mod first_requested;
 mod http;
 mod lifecycle;
 mod policy;
 mod recovery;
+mod revision_recovery;
 mod terminal;

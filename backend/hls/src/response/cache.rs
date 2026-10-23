@@ -69,6 +69,7 @@ impl HlsCacheResponseContext {
             segment_repair,
             qos_meter: Arc::new(ArcSwapOption::from(qos_meter)),
             media_activity_marker,
+            request_method: axum::http::Method::GET,
             now_ms,
         }
     }

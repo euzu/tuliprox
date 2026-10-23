@@ -20,6 +20,7 @@ pub struct HlsSessionStartup {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsManifestRevisions {
+    pub window_plan: Option<crate::live_window::HlsLiveWindowPublication>,
     pub mode: HlsStartupMode,
     pub retained_start_seq: u64,
     pub revisions: BTreeMap<u64, SegmentRevisionGuard>,

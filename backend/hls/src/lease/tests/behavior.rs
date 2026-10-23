@@ -532,6 +532,7 @@ fn published_uri_rejects_a_new_attempt_before_the_first_media_request() -> std::
     }
     let mut first = manifest_snapshot(10);
     first.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+        window_plan: None,
         mode: shared::model::HlsStartupMode::Progressive,
         retained_start_seq: 40,
         revisions: [(40, published.clone()), (41, tail.clone())].into_iter().collect(),
@@ -545,6 +546,7 @@ fn published_uri_rejects_a_new_attempt_before_the_first_media_request() -> std::
     next.revision().prefix_available.store(8, std::sync::atomic::Ordering::Release);
     let mut retry = manifest_snapshot(11);
     retry.startup_revisions = Some(Arc::new(crate::HlsManifestRevisions {
+        window_plan: None,
         mode: shared::model::HlsStartupMode::Progressive,
         retained_start_seq: 40,
         revisions: [(40, next), (41, tail)].into_iter().collect(),

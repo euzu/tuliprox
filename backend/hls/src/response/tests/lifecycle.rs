@@ -131,7 +131,7 @@ async fn dropped_full_range_segment_body_records_request_without_completion() {
 }
 
 #[tokio::test]
-async fn optimistic_successor_that_fails_after_publication_is_a_permanent_segment_failure() -> std::io::Result<()> {
+async fn optimistic_successor_without_a_retry_ends_only_its_lease() -> std::io::Result<()> {
     let fixture = CachedSegmentFixture::new(b"canonical-body".to_vec()).await;
     let seq = fixture.segment_file.proxy_seq;
     let head_seq = seq.checked_sub(1).ok_or_else(|| std::io::Error::other("fixture head"))?;
@@ -164,6 +164,7 @@ async fn optimistic_successor_that_fails_after_publication_is_a_permanent_segmen
     };
     let snapshot = crate::HlsLeaseManifestSnapshot {
         startup_revisions: Some(Arc::new(crate::HlsManifestRevisions {
+            window_plan: None,
             mode: config.mode,
             retained_start_seq: head_seq,
             revisions,
@@ -195,12 +196,17 @@ async fn optimistic_successor_that_fails_after_publication_is_a_permanent_segmen
             .commit_manifest_publication(&fixture.lease_id, &fixture.proxy_session_id, guard, snapshot, now)
             .is_committed());
     }
-    // Listing does not expose a revision; only streaming bytes does. The origin
-    // failing a listed successor therefore fails just that one segment.
+    // Listing does not expose bytes. With no usable retry and a terminal fetch
+    // state, the controlled failure transition retires this lease.
     successor.revision().fail();
     assert!(matches!(
         fixture.serve(None).await,
-        HlsResourceServeOutcome::Failure(HlsResourceServeFailure::PermanentFailed { .. })
+        HlsResourceServeOutcome::Failure(HlsResourceServeFailure::Missing | HlsResourceServeFailure::Expired)
     ));
+    assert!(fixture
+        .manager
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis(),)
+        .await
+        .is_none());
     Ok(())
 }

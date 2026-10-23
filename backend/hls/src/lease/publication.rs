@@ -202,4 +202,6 @@ impl HlsAccessLeaseStore {
 
 fn manifest_source_is_regressive(current: &HlsLeaseManifestSnapshot, candidate: &HlsLeaseManifestSnapshot) -> bool {
     candidate.source_commit_identity.commit_generation() < current.source_commit_identity.commit_generation()
+        || (candidate.startup_revisions.as_ref().is_some_and(|publication| publication.window_plan.is_some())
+            && candidate.first_proxy_seq < current.first_proxy_seq)
 }

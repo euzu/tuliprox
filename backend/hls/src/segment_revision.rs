@@ -58,8 +58,21 @@ pub struct SegmentRevision {
     pub prefix_available: AtomicU64,
     state: watch::Sender<SegmentRevisionState>,
     exposed: AtomicBool,
+    origin_binding: Mutex<Option<RevisionOriginBinding>>,
     pub(crate) file_pin: Mutex<Option<super::HlsRevisionFilePin>>,
     pub(crate) replay: Mutex<Option<super::progressive_startup::ProgressiveReplay>>,
+}
+
+/// The origin mapping which produced these bytes, independent of the attempt's
+/// mutable Fetching/Ready status. A retained startup map alone is not proof that
+/// a revision still belongs to the session's current origin generation.
+#[derive(Debug, Clone)]
+struct RevisionOriginBinding {
+    generation: u64,
+    origin_key: crate::OriginSegmentKey,
+    cache_key: SegmentCacheKey,
+    fetch_ref: Option<crate::OriginSegmentFetchRef>,
+    encryption: Option<crate::HlsSegmentEncryption>,
 }
 
 impl fmt::Debug for SegmentRevision {
@@ -74,6 +87,32 @@ impl fmt::Debug for SegmentRevision {
 
 impl SegmentRevision {
     pub fn id(&self) -> SegmentRevisionId { self.key.id }
+    pub(crate) fn was_exposed(&self) -> bool { self.exposed.load(Ordering::Acquire) }
+
+    pub(crate) fn bind_origin(&self, session: &crate::HlsSession) {
+        if let Some(entry) = session.segments.get(&self.key.proxy_seq) {
+            *self.origin_binding.lock_unpoisoned() = Some(RevisionOriginBinding {
+                generation: session.activity.origin_work_generation,
+                origin_key: entry.origin_key,
+                cache_key: entry.cache_key.clone(),
+                fetch_ref: entry.origin_fetch_ref.clone(),
+                encryption: entry.encryption.clone(),
+            });
+        }
+    }
+
+    pub(crate) fn origin_binding_is_current(&self, session: &crate::HlsSession) -> bool {
+        self.key.proxy_session_id() == &session.proxy_session_id
+            && self.origin_binding.lock_unpoisoned().as_ref().is_some_and(|binding| {
+                binding.generation == session.activity.origin_work_generation
+                    && session.segments.get(&self.key.proxy_seq).is_some_and(|entry| {
+                        entry.origin_key == binding.origin_key
+                            && entry.cache_key == binding.cache_key
+                            && entry.origin_fetch_ref == binding.fetch_ref
+                            && entry.encryption == binding.encryption
+                    })
+            })
+    }
     #[cfg(test)]
     pub(crate) fn pin_count(&self) -> usize { self.pins.load(Ordering::Acquire) }
 
@@ -117,13 +156,12 @@ impl SegmentRevision {
         exposed
     }
 
-    /// An optimistic successor is listed before its body arrives. If it fails
-    /// before receiving any byte, a new attempt may take over its URI.
+    /// Only client exposure makes failed bytes immutable. Internally buffered
+    /// prefix bytes do not prevent an optimistic retry from taking over the URI.
     pub(crate) fn is_replaceable_in(&self, mode: HlsStartupMode) -> bool {
         mode.publishes_pending_successors()
             && matches!(*self.state.borrow(), SegmentRevisionState::Failed)
             && !self.exposed.load(Ordering::Acquire)
-            && self.prefix_available.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn replay_exhausted(&self) {
@@ -164,8 +202,9 @@ impl SegmentRevision {
     }
 
     /// Whether this revision may be listed in a startup window. Optimistic
-    /// startup lists a successor as soon as the origin accepted it; delivery
-    /// of a successor always waits for its complete body.
+    /// startup lists a successor as soon as the origin accepted it. The lease's
+    /// first full request may stream it once replay bytes arrive; subsequent
+    /// requests wait for its complete body.
     pub fn is_window_publishable(&self, mode: HlsStartupMode) -> bool {
         if mode.publishes_pending_successors() {
             !matches!(*self.state.borrow(), SegmentRevisionState::Failed)
@@ -261,6 +300,7 @@ impl SegmentRevisionStore {
             prefix_available: AtomicU64::new(0),
             state: watch::channel(SegmentRevisionState::Pending).0,
             exposed: AtomicBool::new(false),
+            origin_binding: Mutex::new(None),
             file_pin: Mutex::new(None),
             replay: Mutex::new(None),
         });

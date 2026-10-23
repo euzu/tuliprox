@@ -51,6 +51,7 @@ mod ids;
 mod late_custom_response;
 mod lease;
 mod lifecycle;
+mod live_window;
 mod manager;
 mod manifest_acceptance;
 mod manifest_commit;
@@ -124,7 +125,7 @@ pub mod api {
             HlsTerminalResolution,
         },
         availability_reevaluation::{HlsAvailabilityReevaluationObservation, HlsAvailabilityReevaluationRegistration},
-        cache::{SegmentCacheKey, TransientObjectCacheKey},
+        cache::{CachedSegmentMetadata, SegmentCacheKey, TransientObjectCacheKey},
         deadline::hls_object_body_deadline,
         gc::exec_hls_cache_gc,
         headers::{
@@ -139,11 +140,12 @@ pub mod api {
             HlsFreshManifestRequiredReason, HlsLeaseStartupAdmissionState, HlsMediaLeaseIdentity, HlsPlaybackFamilyKey,
         },
         lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey},
+        live_window::{HlsLiveWindowPlan, HlsLiveWindowView},
         manager::{exec_hls_lifecycle, HlsMediaActivityCommitOutcome, HlsProxyManager},
         manifest_commit::{
             hls_cached_manifest_options_for_requirement, hls_committed_manifest_body_for_request,
-            hls_manifest_commit_requirement, hls_should_wait_for_initial_manifest_commit, HlsCachedManifestOptions,
-            HlsCommittedManifestBody,
+            hls_live_window_origin_allowed_for_request, hls_manifest_commit_requirement,
+            hls_should_wait_for_initial_manifest_commit, HlsCachedManifestOptions, HlsCommittedManifestBody,
         },
         manifest_fetch::{LiveHlsOriginEntry, RetryPolicy},
         manifest_limits::{HlsManifestLimitViolation, MAX_HLS_MANIFEST_BYTES},
@@ -183,7 +185,7 @@ pub mod api {
             cold_start_retry_after_seconds, maybe_trigger_origin_refresh_with_outcome, trigger_origin_refresh_sync,
             HlsManifestCommitRequirement, HlsOriginRefreshTriggerOutcome, HlsPostRefreshRuntime, OriginRefreshRequest,
         },
-        renderer::RenderedManifest,
+        renderer::{HlsManifestRenderer, RenderedManifest},
         resource_fetch::{
             retry_after_secs_from_ms, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsResourceFetchAttempt,
         },

@@ -91,7 +91,43 @@ enum RenderTailPolicy {
 }
 
 impl HlsManifestRenderer {
+    pub fn render_live_window(
+        session: &HlsSession,
+        plan: &crate::live_window::HlsLiveWindowPlan,
+        rendered_at_ms: u64,
+    ) -> Result<RenderedManifest, RenderError> {
+        if !plan.is_current(session) {
+            return Err(RenderError::InvalidState);
+        }
+        let minimum = if session.allows_short_origin_windows() { 1 } else { MIN_VISIBLE_SEGMENTS };
+        let startup = session.startup.as_ref().ok_or(RenderError::InvalidState)?;
+        let head = plan.visible.first().ok_or(RenderError::NoRenderableWindow)?;
+        if plan.visible.len() < minimum
+            || !startup
+                .revisions
+                .get(head)
+                .is_some_and(|revision| revision.revision().is_startup_head_ready(startup.config.mode))
+            || !plan
+                .visible
+                .iter()
+                .all(|seq| session.segments.get(seq).is_some_and(|entry| is_renderable(entry, session)))
+        {
+            return Err(RenderError::NoRenderableWindow);
+        }
+        render_window(session, &plan.visible, plan.effective_strip_segments, rendered_at_ms)
+    }
+
     pub fn render(session: &HlsSession, rendered_at_ms: u64) -> Result<RenderedManifest, RenderError> {
+        if session.uses_fast_start_live_window() {
+            let view = session
+                .last_rendered_manifest
+                .as_ref()
+                .map_or(crate::live_window::HlsLiveWindowView::Entry, |previous| {
+                    crate::live_window::HlsLiveWindowView::Active { first_published: previous.first_proxy_seq }
+                });
+            let plan = session.plan_live_window(view).ok_or(RenderError::NoRenderableWindow)?;
+            return Self::render_live_window(session, &plan, rendered_at_ms);
+        }
         for render_gap_segments in 0..=session.render_policy.initial_render_gap_segments {
             let Some(window) = select_window(session, render_gap_segments, RenderTailPolicy::TruncateUnavailableTail)
             else {
@@ -196,6 +232,14 @@ impl HlsSession {
 }
 
 pub fn renderer_candidate_window_proxy_seqs(session: &HlsSession) -> Vec<u64> {
+    if session.uses_fast_start_live_window() {
+        return session
+            .required_live_windows()
+            .into_iter()
+            .flat_map(|plan| plan.visible)
+            .chain(session.live_window_demands.values().flat_map(|demand| demand.published.iter().copied()))
+            .collect();
+    }
     if session.startup.is_some() {
         let Some((head, tail)) =
             session.publishable_origin_head_proxy_seq.zip(session.publishable_origin_tail_proxy_seq)
@@ -352,6 +396,14 @@ fn retain_published_predecessors(session: &HlsSession, window: &mut Vec<u64>) {
     else {
         return;
     };
+    retain_published_predecessors_from(session, window, previous_first_proxy_seq);
+}
+
+pub(crate) fn retain_published_predecessors_from(
+    session: &HlsSession,
+    window: &mut Vec<u64>,
+    previous_first_proxy_seq: u64,
+) {
     let Some(&first_proxy_seq) = window.first() else {
         return;
     };

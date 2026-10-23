@@ -26,6 +26,8 @@ pub struct HlsCtx {
 }
 
 impl HlsCtx {
+    /// Give request-independent lease completion its authoritative user registry.
+    pub fn attach_lease_user_accounting(&self) { self.hls_proxy.bind_lease_user_accounting(&self.active_users); }
     /// The subset admission reads: it decides over connections and users, not
     /// over the cache.
     pub fn admission_ctx(&self) -> tuliprox_session::admission::AdmissionCtx {
@@ -38,6 +40,7 @@ impl HlsCtx {
 
     /// A weak handle, for state the proxy itself owns.
     pub fn downgrade(&self) -> WeakHlsCtx {
+        self.attach_lease_user_accounting();
         WeakHlsCtx {
             app_config: Arc::clone(&self.app_config),
             hls_proxy: Arc::downgrade(&self.hls_proxy),
@@ -130,12 +133,14 @@ impl HlsCtx {
             None,
         ));
 
-        Self {
+        let ctx = Self {
             hls_proxy: Arc::new(crate::manager::HlsProxyManager::new()),
             app_config: Arc::clone(&app_config),
             active_provider,
             connection_manager,
             active_users,
-        }
+        };
+        ctx.attach_lease_user_accounting();
+        ctx
     }
 }

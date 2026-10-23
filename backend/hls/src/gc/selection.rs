@@ -147,13 +147,36 @@ pub(super) fn remove_stale_queue_entries(session: &mut HlsSession) -> usize {
     removed
 }
 
+/// Fast-start origin mappings are needed only while their origin window or an
+/// existing publication, reader or cache mutation still owns them.
+pub(super) fn remove_obsolete_segment_metadata(session: &mut HlsSession, protected: &ProtectedSet) {
+    if !session.uses_fast_start_live_window() {
+        return;
+    }
+    let Some(origin) = session.origin_window_proxy_seqs.as_ref() else { return };
+    let origin = origin.iter().copied().collect::<HashSet<_>>();
+    let obsolete = session
+        .segments
+        .iter()
+        .filter_map(|(seq, entry)| {
+            (matches!(entry.status, SegmentCacheStatus::Discovered)
+                && !origin.contains(seq)
+                && !protected.segment_proxy_seqs.contains(seq))
+            .then_some(*seq)
+        })
+        .collect::<Vec<_>>();
+    for seq in obsolete {
+        let _ = remove_segment_entry(session, seq);
+    }
+}
+
 pub(super) fn duration_expired_head_segment(
     session: &HlsSession,
     protected: &ProtectedSet,
     policy: &GarbageCollectionPolicy,
     now_ms: u64,
 ) -> Option<u64> {
-    let (proxy_seq, segment) = session.segments.iter().next()?;
+    let (proxy_seq, segment) = fifo_head_segment(session)?;
     if protected.segment_proxy_seqs.contains(proxy_seq) {
         return None;
     }
@@ -177,7 +200,7 @@ pub(super) fn fifo_head_size_candidate(
     session: &HlsSession,
     protected: &ProtectedSet,
 ) -> Option<SegmentDeleteCandidate> {
-    let (proxy_seq, segment) = session.segments.iter().next()?;
+    let (proxy_seq, segment) = fifo_head_segment(session)?;
     if protected.segment_proxy_seqs.contains(proxy_seq) {
         return None;
     }
@@ -189,6 +212,12 @@ pub(super) fn fifo_head_size_candidate(
         content_length,
         last_relevant_at_ms: segment_last_relevant_at_ms(segment).unwrap_or_default(),
     })
+}
+
+/// Origin mappings without cache objects are not FIFO barriers. All other
+/// statuses retain the existing protection and expiry checks at the media head.
+fn fifo_head_segment(session: &HlsSession) -> Option<(&u64, &super::super::SegmentEntry)> {
+    session.segments.iter().find(|(_, segment)| !matches!(segment.status, SegmentCacheStatus::Discovered))
 }
 
 fn segment_last_relevant_at_ms(segment: &super::super::SegmentEntry) -> Option<u64> {
@@ -276,19 +305,30 @@ pub(super) fn capacity_reclamation_evidence(
 
 pub(super) fn remove_segment_entry(session: &mut HlsSession, proxy_seq: u64) -> Option<SegmentCacheKey> {
     let segment = session.segments.remove(&proxy_seq)?;
+    // Media outside the selected window can be evicted, but the current
+    // origin's mapping must survive until its next slide. Otherwise an older,
+    // unselected URI is appended anew ahead of already published overlaps.
+    let retain_origin_metadata =
+        session.uses_fast_start_live_window() && session.live_origin_sequences().contains(&proxy_seq);
     if let Some(startup) = &mut session.startup {
         startup.revisions.remove(&proxy_seq);
     }
     let removed_ready_media = matches!(segment.status, SegmentCacheStatus::Ready { .. });
     session.segment_prefetch_queue.remove(proxy_seq);
-    session.origin_to_proxy.retain(|_, mapped_seq| *mapped_seq != proxy_seq);
-    if segment.discontinuity_before {
+    if retain_origin_metadata {
+        let mut metadata = segment.clone();
+        metadata.status = SegmentCacheStatus::Discovered;
+        session.segments.insert(proxy_seq, metadata);
+    } else {
+        session.origin_to_proxy.retain(|_, mapped_seq| *mapped_seq != proxy_seq);
+    }
+    if segment.discontinuity_before && !retain_origin_metadata {
         session.discontinuity_sequence = session.discontinuity_sequence.saturating_add(1);
     }
     if removed_ready_media {
         session.advance_media_readiness_generation();
     }
-    if session.publishable_origin_head_proxy_seq == Some(proxy_seq) {
+    if session.publishable_origin_head_proxy_seq == Some(proxy_seq) && !retain_origin_metadata {
         session.publishable_origin_head_proxy_seq = session
             .segments
             .range(proxy_seq.saturating_add(1)..)

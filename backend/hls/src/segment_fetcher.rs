@@ -87,6 +87,7 @@ pub enum HlsSwitchResourceKind {
 /// Bounded scheduler for live HLS segment demand fetches and prefetches.
 pub struct HlsSegmentWorkerPool {
     runtime: ArcSwap<SegmentWorkerRuntime>,
+    pub(crate) revision_recovery: std::sync::OnceLock<Arc<crate::manager::HlsLeaseRuntime>>,
     access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
     metrics: Arc<HlsCacheMetrics>,
     availability_reevaluations: Option<Arc<super::availability_reevaluation::HlsAvailabilityReevaluationCoordinator>>,
