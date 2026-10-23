@@ -228,6 +228,7 @@ impl HlsProxyManager {
             availability_reevaluations,
             terminal_commit_clock: Arc::new(HlsTerminalCommitClock::default()),
             startup_observability: Arc::new(HlsStartupObservability::default()),
+            private_cache_dir: None,
         };
         manager.install_worker_revision_recovery();
         manager

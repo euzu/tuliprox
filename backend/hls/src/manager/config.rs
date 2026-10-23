@@ -11,7 +11,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -62,11 +62,36 @@ impl HlsProxyRuntimeConfig {
     }
 }
 
+/// Cache directory owned by one manager and removed together with it.
+pub(super) struct PrivateCacheDir(PathBuf);
+
+impl PrivateCacheDir {
+    fn create() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let name = format!("tuliprox-hls-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        Self(std::env::temp_dir().join(name))
+    }
+}
+
+impl Drop for PrivateCacheDir {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
 impl HlsProxyManager {
+    /// Creates a manager with the default cache settings and a cache directory of its own.
+    ///
+    /// Sharing `DEFAULT_HLS_CACHE_PATH` between managers is unsafe: the orphan-session cleanup of one
+    /// manager deletes the session directories of every other manager on that path.
     pub fn new() -> Self {
-        let default_dto = shared::model::HlsCacheConfigDto::default();
+        let cache_dir = PrivateCacheDir::create();
+        let default_dto = shared::model::HlsCacheConfigDto {
+            cache_path: Some(cache_dir.0.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
         let default_config = HlsCacheConfig::from(&default_dto);
-        Self::with_hls_cache_config(&default_config)
+        let mut manager = Self::with_hls_cache_config(&default_config);
+        manager.private_cache_dir = Some(cache_dir);
+        manager
     }
 
     /// Initializes HLS workers with the same loaded connect setting as the HTTP clients.
@@ -174,6 +199,7 @@ impl HlsProxyManager {
             availability_reevaluations,
             terminal_commit_clock: Arc::new(HlsTerminalCommitClock::default()),
             startup_observability: Arc::new(HlsStartupObservability::default()),
+            private_cache_dir: None,
         };
         manager.install_worker_revision_recovery();
         manager

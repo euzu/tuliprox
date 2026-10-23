@@ -2,8 +2,8 @@ use shared::{
     error::TuliproxError,
     model::{
         ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
-        MainConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
-        SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
+        MainConfigDto, McpConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto,
+        ReverseProxyConfigDto, SchedulesConfigDto, SourcesConfigDto, VideoConfigDto, WebUiConfigDto,
     },
 };
 use std::{fmt, str::FromStr};
@@ -18,6 +18,7 @@ pub const LABEL_REVERSE_PROXY_CONFIG: &str = "LABEL.REVERSE_PROXY_CONFIG";
 pub const LABEL_HDHOMERUN_CONFIG: &str = "LABEL.HDHOMERUN_CONFIG";
 pub const LABEL_PROXY_CONFIG: &str = "LABEL.PROXY_CONFIG";
 pub const LABEL_IP_CHECK_CONFIG: &str = "LABEL.IP_CHECK_CONFIG";
+pub const LABEL_MCP_CONFIG: &str = "LABEL.MCP_CONFIG";
 pub const LABEL_RECORDING_CONFIG: &str = "LABEL.RECORDING_CONFIG";
 pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL_CONFIG";
 pub const LABEL_LIBRARY_CONFIG: &str = "LABEL.LIBRARY_CONFIG";
@@ -33,6 +34,7 @@ const REVERSE_PROXY_PAGE: &str = "reverse_proxy";
 const HDHOMERUN_PAGE: &str = "hdhomerun";
 const PROXY_PAGE: &str = "proxy";
 const IPCHECK_PAGE: &str = "ipcheck";
+const MCP_PAGE: &str = "mcp";
 const RECORDING_PAGE: &str = "recording";
 const METADATA_UPDATE_PAGE: &str = "metadata_update";
 const PANEL_PAGE: &str = "panel";
@@ -52,6 +54,7 @@ pub enum ConfigPage {
     HdHomerun,
     Proxy,
     IpCheck,
+    Mcp,
     Panel,
     Library,
 }
@@ -73,6 +76,7 @@ impl FromStr for ConfigPage {
             HDHOMERUN_PAGE => Ok(ConfigPage::HdHomerun),
             PROXY_PAGE => Ok(ConfigPage::Proxy),
             IPCHECK_PAGE => Ok(ConfigPage::IpCheck),
+            MCP_PAGE => Ok(ConfigPage::Mcp),
             PANEL_PAGE => Ok(ConfigPage::Panel),
             LIBRARY_PAGE => Ok(ConfigPage::Library),
             _ => Err(TuliproxError::Config(format!("Unknown config page: {s}"))),
@@ -95,6 +99,7 @@ impl fmt::Display for ConfigPage {
             ConfigPage::HdHomerun => HDHOMERUN_PAGE,
             ConfigPage::Proxy => PROXY_PAGE,
             ConfigPage::IpCheck => IPCHECK_PAGE,
+            ConfigPage::Mcp => MCP_PAGE,
             ConfigPage::Panel => PANEL_PAGE,
             ConfigPage::Library => LIBRARY_PAGE,
         };
@@ -122,6 +127,7 @@ pub enum ConfigForm {
     HdHomerun(bool, HdHomeRunConfigDto),
     Proxy(bool, ProxyConfigDto),
     IpCheck(bool, IpCheckConfigDto),
+    Mcp(bool, McpConfigDto),
     Panel(bool, SourcesConfigDto),
     Library(bool, LibraryConfigDto),
 }
@@ -143,6 +149,7 @@ impl ConfigForm {
                 | ConfigForm::HdHomerun(true, _)
                 | ConfigForm::Proxy(true, _)
                 | ConfigForm::IpCheck(true, _)
+                | ConfigForm::Mcp(true, _)
                 | ConfigForm::Panel(true, _)
                 | ConfigForm::Library(true, _)
         )
@@ -164,6 +171,7 @@ pub struct ConfigFormSlots {
     pub hd_homerun: Option<ConfigForm>,
     pub proxy: Option<ConfigForm>,
     pub ipcheck: Option<ConfigForm>,
+    pub mcp: Option<ConfigForm>,
     pub panel: Option<ConfigForm>,
     pub library: Option<ConfigForm>,
 }
@@ -186,12 +194,13 @@ impl ConfigFormSlots {
             ConfigForm::HdHomerun(_, _) => Self::set_form_slot(&mut self.hd_homerun, form),
             ConfigForm::Proxy(_, _) => Self::set_form_slot(&mut self.proxy, form),
             ConfigForm::IpCheck(_, _) => Self::set_form_slot(&mut self.ipcheck, form),
+            ConfigForm::Mcp(_, _) => Self::set_form_slot(&mut self.mcp, form),
             ConfigForm::Panel(_, _) => Self::set_form_slot(&mut self.panel, form),
             ConfigForm::Library(_, _) => Self::set_form_slot(&mut self.library, form),
         }
     }
 
-    pub fn all_slots(&self) -> [&Option<ConfigForm>; 15] {
+    pub fn all_slots(&self) -> [&Option<ConfigForm>; 16] {
         [
             &self.main,
             &self.api,
@@ -206,6 +215,7 @@ impl ConfigFormSlots {
             &self.hd_homerun,
             &self.proxy,
             &self.ipcheck,
+            &self.mcp,
             &self.panel,
             &self.library,
         ]

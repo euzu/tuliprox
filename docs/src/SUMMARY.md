@@ -29,5 +29,6 @@
   - [Secrets & Environment Variables](./configuration/secrets.md)
 - [Operations & Debugging (CLI & DB Dumps)](./operations-debugging.md)
 - [DVR Operator Reference](./operator/dvr.md)
+- [MCP Server](./operator/mcp.md)
 - [Examples,Recipes & Ecosystem Stacks](./examples-recipes.md)
 - [Troubleshooting & Resilience](./troubleshooting.md)

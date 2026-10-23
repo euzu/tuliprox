@@ -1,5 +1,9 @@
 use crate::{
-    api::{api_utils::json_or_bin_response, endpoints::extract_accept_header::ExtractAcceptHeader, model::AppState},
+    api::{
+        api_utils::json_or_bin_response,
+        endpoints::{extract_accept_header::ExtractAcceptHeader, extract_form_query::FormQuery},
+        model::AppState,
+    },
     model::StreamHistoryRecord,
     repository::{
         discover_files, resolve_time_range, CompiledFilter, QosSnapshotRecord, QosSnapshotRepository,
@@ -432,7 +436,7 @@ fn paginate_aggregated_records(
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn stream_history_page_query(
     State(app_state): State<Arc<AppState>>,
-    Query(params): Query<StreamHistoryPageRequestDto>,
+    FormQuery(params): FormQuery<StreamHistoryPageRequestDto>,
 ) -> Response {
     let Some(history_dir) = get_history_directory(&app_state) else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Stream history is not enabled");
@@ -859,6 +863,29 @@ fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn page_route_accepts_the_search_field_query_the_web_ui_sends() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let router = axum::Router::new()
+            .route("/stream-history", axum::routing::get(stream_history_page_query))
+            .with_state(app_state);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/stream-history?search=abc&search_field=title&search_field=group")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Stream history is not configured here; the point is that the query is no longer rejected with 400.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
     use crate::{
         model::{QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig},
         repository::{QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow},

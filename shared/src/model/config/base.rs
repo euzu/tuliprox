@@ -10,9 +10,9 @@ use crate::{
         is_false, is_none_or_empty_metadata_update, is_true, is_zero_u32,
     },
     model::{
-        ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
-        MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto,
-        WebUiConfigDto,
+        ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, McpConfigDto,
+        MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto,
+        VideoConfigDto, WebUiConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -107,6 +107,8 @@ pub struct ConfigDto {
     pub ipcheck: Option<IpCheckConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<LibraryConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpConfigDto>,
 }
 
 impl Default for ConfigDto {
@@ -145,6 +147,7 @@ impl Default for ConfigDto {
             proxy: None,
             ipcheck: None,
             library: None,
+            mcp: None,
         }
     }
 }
@@ -221,6 +224,8 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             ipcheck: Option<IpCheckConfigDto>,
             #[serde(default)]
             library: Option<LibraryConfigDto>,
+            #[serde(default)]
+            mcp: Option<McpConfigDto>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -259,6 +264,7 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             proxy: raw.proxy,
             ipcheck: raw.ipcheck,
             library: raw.library,
+            mcp: raw.mcp,
         })
     }
 }

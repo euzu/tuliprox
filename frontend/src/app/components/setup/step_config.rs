@@ -7,8 +7,9 @@ use crate::{
         components::{
             config::{
                 ApiConfigView, ConfigForm, ConfigViewContext, HdHomerunConfigView, IpCheckConfigView,
-                LibraryConfigView, LogConfigView, MainConfigView, MessagingConfigView, MetadataUpdateConfigView,
-                ProxyConfigView, RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView, WebUiConfigView,
+                LibraryConfigView, LogConfigView, MainConfigView, McpConfigView, MessagingConfigView,
+                MetadataUpdateConfigView, ProxyConfigView, RecordingConfigView, ReverseProxyConfigView,
+                SchedulesConfigView, WebUiConfigView,
             },
             Card, SetupContext, SetupStep, TextButton,
         },
@@ -39,6 +40,7 @@ fn render_config_page(step: SetupStep) -> Html {
         SetupStep::MetadataUpdate => html! { <MetadataUpdateConfigView/> },
         SetupStep::HdHomerun => html! { <HdHomerunConfigView/> },
         SetupStep::Library => html! { <LibraryConfigView/> },
+        SetupStep::Mcp => html! { <McpConfigView/> },
         SetupStep::Schedules => html! { <SchedulesConfigView/> },
         _ => html! {},
     }
@@ -74,6 +76,7 @@ pub fn ConfigStep(props: &ConfigStepProps) -> Html {
                 ConfigForm::HdHomerun(_, _) => setup_ctx.config_forms.slots.hd_homerun.as_ref(),
                 ConfigForm::Proxy(_, _) => setup_ctx.config_forms.slots.proxy.as_ref(),
                 ConfigForm::IpCheck(_, _) => setup_ctx.config_forms.slots.ipcheck.as_ref(),
+                ConfigForm::Mcp(_, _) => setup_ctx.config_forms.slots.mcp.as_ref(),
                 ConfigForm::Panel(_, _) => setup_ctx.config_forms.slots.panel.as_ref(),
                 ConfigForm::Library(_, _) => setup_ctx.config_forms.slots.library.as_ref(),
             };

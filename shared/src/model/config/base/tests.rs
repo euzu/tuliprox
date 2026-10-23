@@ -318,3 +318,34 @@ fn is_recording_enabled_matches_nested_config() {
     cfg.video.as_mut().unwrap().recording.as_mut().unwrap().enabled = false;
     assert!(!cfg.is_recording_enabled());
 }
+
+#[test]
+fn absent_mcp_block_stays_absent_through_round_trip() {
+    let raw = json!({ "api": { "host": "127.0.0.1", "port": 8901, "web_root": "./web" } });
+    let cfg: ConfigDto = serde_json::from_value(raw).expect("config without mcp should deserialize");
+    assert!(cfg.mcp.is_none());
+
+    let serialized = serde_json::to_value(&cfg).expect("config should serialize");
+    assert!(serialized.get("mcp").is_none());
+}
+
+#[test]
+fn mcp_block_deserializes_with_defaults_and_overrides() {
+    let raw = json!({
+        "api": { "host": "127.0.0.1", "port": 8901, "web_root": "./web" },
+        "mcp": { "enabled": true, "allowed_origins": ["https://claude.ai"] }
+    });
+    let cfg: ConfigDto = serde_json::from_value(raw).expect("config with mcp should deserialize");
+    let mcp = cfg.mcp.expect("mcp block");
+    assert!(mcp.enabled);
+    assert!(mcp.read_only);
+    assert_eq!(mcp.allowed_origins, vec!["https://claude.ai".to_string()]);
+    assert_eq!(mcp.max_response_bytes, 262_144);
+}
+
+#[test]
+fn prepare_rejects_too_small_mcp_response_limit() {
+    let mut cfg =
+        ConfigDto { mcp: Some(McpConfigDto { max_response_bytes: 1, ..Default::default() }), ..Default::default() };
+    assert!(cfg.prepare(false).is_err());
+}

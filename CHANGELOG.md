@@ -192,6 +192,20 @@
 
 ## 🌟 New Features
 
+- **MCP server for AI assistants.** A new `mcp:` block in `config.yml` mounts a Model Context Protocol endpoint
+  (`POST {web_ui_path}/mcp`, Streamable HTTP with plain JSON responses) that lets MCP clients such as Claude Desktop,
+  Cursor or ChatGPT inspect Tuliprox through tools (status, active streams, effective config, playlist update status,
+  stream history, QoS snapshots, event stats, public IP). It is off by default (`mcp.enabled: false`) and read-only by
+  default (`mcp.read_only: true`); with `read_only: false` the `update_playlists` and `update_geoip` tools become
+  available. Tools are thin adapters over the existing `/api/v1` routes, so the caller's Web UI token and RBAC
+  permissions decide what is allowed: a missing or expired token is a real HTTP `401`, a missing permission surfaces as
+  an `isError` tool result. Without Web UI authentication the server is forced read-only and logs a warning. Browser
+  requests are protected against DNS rebinding by an `Origin` check (`mcp.allowed_origins` for reverse proxies that
+  rewrite `Host`), and tool results are truncated at `mcp.max_response_bytes`. The `get_config` tool redacts passwords,
+  secrets, tokens and user names before the result leaves the server. Clients that only speak stdio use the
+  built-in bridge `tuliprox --mcp-stdio --mcp-url <base-url>`, which logs in with `TULIPROX_MCP_USER` and
+  `TULIPROX_MCP_PASSWORD`. The block can also be edited in the Web UI on the new **MCP** config page. See
+  [MCP server](docs/src/operator/mcp.md).
 - **Emby and Jellyfin inputs import their libraries.** `type: emby` and `type: jellyfin` inputs now import the selected
   movie and TV libraries like Plex inputs do, and Tuliprox proxies direct playback (with `Range` support) and artwork
   without exposing server URLs or tokens to clients. Credentials are resolved from `media_server.token`, then
@@ -1128,6 +1142,11 @@
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
 ## 🐛 Fixes
+
+- **Stream history search honours the selected fields again.** `GET /api/v1/stream-history` rejected the
+  `search_field` query parameter that the Web UI sends (`search_field=title&search_field=group`) with `400`, because
+  the query extractor cannot read repeated keys into a list. The endpoint now accepts one or several `search_field`
+  values.
 
 - **`--dbm` can dump input playlist databases again.** Input M3U databases (`m3u_<input>.db`, string keys) failed with
   `wrong msgpack marker FixStr(..)` because the viewer committed to the `u32` key type before decoding any key and never

@@ -131,3 +131,28 @@ async fn initial_and_reloaded_connect_budgets_use_the_loaded_config() {
         assert_eq!(manager.map_worker_pool().policy().timeouts.config().connect_ms, 45_000);
     }
 }
+
+#[test]
+fn managers_built_with_defaults_never_share_a_cache_directory() {
+    // Managers created in parallel tests used to share `DEFAULT_HLS_CACHE_PATH`; the orphan-session
+    // GC of one then deleted the segment files of another.
+    let first = HlsProxyManager::new();
+    let second = HlsProxyManager::new();
+    let first_path = first.segment_cache().cache_path();
+    let second_path = second.segment_cache().cache_path();
+
+    assert_ne!(first_path, second_path);
+    assert_ne!(first_path, std::path::PathBuf::from(crate::cache::DEFAULT_HLS_CACHE_PATH));
+    assert_ne!(second_path, std::path::PathBuf::from(crate::cache::DEFAULT_HLS_CACHE_PATH));
+}
+
+#[tokio::test]
+async fn default_manager_removes_its_private_cache_directory_on_drop() {
+    let manager = HlsProxyManager::new();
+    let cache_path = manager.segment_cache().cache_path();
+    tokio::fs::create_dir_all(cache_path.join("session")).await.expect("create session dir");
+
+    drop(manager);
+
+    assert!(!cache_path.exists());
+}

@@ -406,6 +406,9 @@ Tuliprox includes its own storage engine for playlist and runtime data.
 - Panel API integration for provider account provisioning/renewal workflows
 - Dependency-aware parallel input processing
 - Management REST API for configuration, processing, transfers, recordings, status, stream history, QoS, and system information
+- Optional MCP server (read-only by default) so AI assistants such as Claude Desktop or Cursor can inspect status,
+  streams, stream history, QoS, and configuration under the REST API's own authentication and permissions;
+  configurable in the Web UI
 - JSON and CBOR responses on supported endpoints
 - CLI one-shot processing for scripts and CI/CD
 
@@ -578,6 +581,7 @@ Main entry points:
   - [Mapping & Templates](docs/src/configuration/template.md)
 - [Examples & Recipes](docs/src/examples-recipes.md)
 - [Operations & Debugging](docs/src/operations-debugging.md)
+- [MCP Server](docs/src/operator/mcp.md)
 - [Troubleshooting & Resilience](docs/src/troubleshooting.md)
 
 ### Documentation Strategy

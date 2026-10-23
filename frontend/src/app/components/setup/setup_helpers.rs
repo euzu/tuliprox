@@ -1,5 +1,8 @@
 use crate::app::{
-    components::{config::ConfigForm, SetupConfigFormState, SetupContext, SetupStep},
+    components::{
+        config::{update_mcp_field, ConfigForm},
+        SetupConfigFormState, SetupContext, SetupStep,
+    },
     ConfigContext,
 };
 use shared::{
@@ -194,6 +197,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
             ConfigForm::HdHomerun(_, hdhr_cfg) => apply_setup_hdhomerun_form(config, hdhr_cfg),
             ConfigForm::Proxy(_, proxy_cfg) => config.proxy = Some(proxy_cfg),
             ConfigForm::IpCheck(_, ipcheck_cfg) => config.ipcheck = Some(ipcheck_cfg),
+            ConfigForm::Mcp(_, mcp_cfg) => update_mcp_field(config, mcp_cfg),
             ConfigForm::Library(_, library_cfg) => apply_setup_library_form(config, library_cfg),
             ConfigForm::Panel(_, _) => {}
             ConfigForm::ApiProxy(_, _) => {}
@@ -524,6 +528,22 @@ mod tests {
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
 
         assert_eq!(app_cfg.config.library, Some(library));
+    }
+
+    #[test]
+    fn setup_mcp_form_is_stored_only_when_it_differs_from_the_default() {
+        let config_ctx = ConfigContext { config: Some(Rc::new(AppConfigDto::default())), api_proxy: None };
+
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::Mcp(true, shared::model::McpConfigDto::default()));
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        assert_eq!(app_cfg.config.mcp, None);
+
+        let enabled = shared::model::McpConfigDto { enabled: true, ..Default::default() };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::Mcp(true, enabled.clone()));
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        assert_eq!(app_cfg.config.mcp, Some(enabled));
     }
 
     #[test]

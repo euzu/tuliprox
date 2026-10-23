@@ -592,6 +592,12 @@
       "USER_CONFIG_DIR": "Directory path where user-specific overrides and configuration files are stored.",
       "STORAGE_DIR": "The primary directory where Tuliprox stores its data files and databases."
     },
+    "MCP_CONFIG": {
+      "ALLOWED_ORIGINS": "Additional `Origin` values accepted besides the request host, e.g. `https://claude.ai`. Needed behind a reverse proxy that rewrites the `Host` header.",
+      "ENABLED": "Mounts the MCP endpoint at `{web_ui_path}/mcp` so AI assistants can query this instance. Requires a restart.",
+      "MAX_RESPONSE_BYTES": "Tool results larger than this many bytes are truncated. Minimum 1024, default 262144.",
+      "READ_ONLY": "Hides and rejects tools that change state. Forced to read-only when Web UI authentication is disabled."
+    },
     "MESSAGING_CONFIG": {
       "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
       "REST_HEADERS": "Custom HTTP headers sent with REST notification requests (JSON format).",
@@ -905,6 +911,8 @@
     }
   },
   "INFO": {
+    "MCP_READ_ONLY_FORCED": "Web UI authentication is disabled, so the MCP endpoint is forced to read-only mode regardless of this setting.",
+    "MCP_RESTART_REQUIRED": "The MCP endpoint is mounted at startup. Restart Tuliprox to apply changes to these settings.",
     "PROCESS_PARALLEL": "Process Parallel: If you have multiple providers, you can enable it. Accessing your provider in parallel can cause a ban.",
     "RESTART_TO_APPLY_CHANGES": "You need to restart to apply changes.",
     "SCHEDULE_EXAMPLE": "Schedule example",
@@ -922,6 +930,8 @@
     "HLS_STARTUP_MODE_FIRST_READY": "First ready",
     "HLS_STARTUP_MODE_PROGRESSIVE": "Progressive",
     "HLS_STARTUP_MODE_OPTIMISTIC": "Optimistic",
+    "ADD_ORIGIN": "Add origin",
+    "ALLOWED_ORIGINS": "Allowed origins",
     "ALL_TARGETS": "All targets",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Accept Insecure SSL Certificates",
     "ACTIVE": "Active",
@@ -974,6 +984,8 @@
     "ALIAS_NAME": "Alias Name",
     "ALL": "All",
     "DESELECTED": "Deselected",
+    "MAX_RESPONSE_BYTES": "Max response bytes",
+    "MCP_CONFIG": "MCP",
     "MOVE_UP": "Move up",
     "MOVE_DOWN": "Move down",
     "NOT_AVAILABLE": "n/a",
@@ -1096,6 +1108,7 @@
     "DNS_SCHEME_HTTPS": "HTTPS",
     "DNS_SCHEMES": "DNS Schemes",
     "DOWNLOAD": "Download",
+    "READ_ONLY": "Read only",
     "RECORDING_TRANSFERRED": "Downloaded",
     "RECORDING_FILE_SIZE": "File size",
     "RECORDING_QUEUE": "Queue",
@@ -2220,6 +2233,7 @@
       "HDHOMERUN": "Configure HDHomeRun settings.",
       "IP_CHECK": "Configure IP check settings.",
       "LIBRARY": "Configure library settings.",
+      "MCP": "Configure the MCP server for AI assistants.",
       "LOG": "Configure logging settings.",
       "MAIN": "Configure main application settings.",
       "METADATA_UPDATE": "Configure metadata update and queue behavior.",
@@ -2242,6 +2256,7 @@
       "HDHOMERUN": "HdHomerun",
       "IP_CHECK": "IpCheck",
       "LIBRARY": "Library",
+      "MCP": "MCP",
       "LOG": "Log",
       "MAIN": "Main",
       "METADATA_UPDATE": "Metadata Update",

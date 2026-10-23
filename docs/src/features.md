@@ -58,6 +58,8 @@ Tuliprox also includes:
 - provider failover and DNS-aware connection rotation
 - integrated download and recording manager with provider-aware fairness, retries, and RBAC
 - notifications and monitoring hooks
+- optional [MCP server](./operator/mcp.md) (off and read-only by default) so AI assistants can inspect status, streams and
+  history, with the same authentication and permissions as the REST API
 - **Web UI** with monitoring and web-based configuration ability
 
 ## Access control

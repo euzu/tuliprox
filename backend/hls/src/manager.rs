@@ -92,6 +92,8 @@ pub struct HlsProxyManager {
     revision_store: Arc<super::SegmentRevisionStore>,
     revision_reconciliation_pending: AtomicBool,
     progressive_budget: Arc<super::ProgressiveBudgetManager>,
+    /// Declared last so the cache directory is removed after the cache itself is gone.
+    private_cache_dir: Option<config::PrivateCacheDir>,
 }
 
 pub struct HlsTerminalTailPreparationRequest<'a> {

@@ -4,15 +4,15 @@ use crate::{
             config::{
                 config_page::{
                     ConfigForm, ConfigFormSlots, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG,
-                    LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG,
+                    LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MCP_CONFIG,
                     LABEL_MESSAGING_CONFIG, LABEL_METADATA_UPDATE_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG,
                     LABEL_RECORDING_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_WEB_UI_CONFIG,
                 },
                 config_update::apply_and_prepare_config,
                 config_view_context::ConfigViewContext,
                 ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
-                MainConfigView, MessagingConfigView, MetadataUpdateConfigView, PanelConfigView, ProxyConfigView,
-                RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView, WebUiConfigView,
+                MainConfigView, McpConfigView, MessagingConfigView, MetadataUpdateConfigView, PanelConfigView,
+                ProxyConfigView, RecordingConfigView, ReverseProxyConfigView, SchedulesConfigView, WebUiConfigView,
             },
             input::Input,
             validate_credentials, Card, NoSubmitForm, TabItem, TabSet, TextButton,
@@ -60,6 +60,7 @@ fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
         ConfigForm::HdHomerun(_, _) => ConfigPage::HdHomerun,
         ConfigForm::Proxy(_, _) => ConfigPage::Proxy,
         ConfigForm::IpCheck(_, _) => ConfigPage::IpCheck,
+        ConfigForm::Mcp(_, _) => ConfigPage::Mcp,
         ConfigForm::Panel(_, _) => ConfigPage::Panel,
         ConfigForm::Library(_, _) => ConfigPage::Library,
     }
@@ -126,6 +127,7 @@ pub fn ConfigView() -> Html {
                 (ConfigPage::HdHomerun, LABEL_HDHOMERUN_CONFIG, html! { <HdHomerunConfigView/> }, "HdHomerunConfig"),
                 (ConfigPage::Proxy, LABEL_PROXY_CONFIG, html! { <ProxyConfigView/> }, "ProxyConfig"),
                 (ConfigPage::IpCheck, LABEL_IP_CHECK_CONFIG, html! { <IpCheckConfigView/> }, "IpCheckConfig"),
+                (ConfigPage::Mcp, LABEL_MCP_CONFIG, html! { <McpConfigView/> }, "Nodes"),
                 (ConfigPage::Panel, LABEL_PANEL_CONFIG, html! { <PanelConfigView/> }, "Settings"),
                 (ConfigPage::Recording, LABEL_RECORDING_CONFIG, html! { <RecordingConfigView/> }, "Record"),
                 (

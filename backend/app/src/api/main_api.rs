@@ -7,6 +7,7 @@ use crate::{
             hls_api::hls_api_register,
             log_ws_api::log_ws_api_register,
             m3u_api::m3u_api_register,
+            mcp_api::mcp_api_register_if_enabled,
             provider_resolve_api::provider_resolve_api_register,
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
@@ -736,11 +737,21 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             .nest_service(
                 &concat_path_leading_slash(&web_ui_path, "assets"),
                 tower_http::services::ServeDir::new(web_dir_path.join("assets")),
-            )
-            .merge(v1_api_register(web_auth_enabled, &shared_data, web_ui_path.as_str()));
+            );
+        let v1_router = v1_api_register(web_auth_enabled, &shared_data, web_ui_path.as_str());
+        if let Some(mcp_router) =
+            mcp_api_register_if_enabled(&v1_router, &shared_data, web_auth_enabled, web_ui_path.as_str())
+        {
+            router = router.merge(mcp_router);
+        }
+        router = router.merge(v1_router);
         if !web_ui_path.is_empty() {
             router = router.merge(index_register_with_path(&web_dir_path, web_ui_path.as_str()));
         }
+    }
+
+    if !web_ui_enabled && cfg.mcp.as_ref().is_some_and(|mcp| mcp.enabled) {
+        warn!("mcp.enabled is ignored because web_ui is disabled: the MCP endpoint is served by the web UI router");
     }
 
     let mut api_router = axum::Router::new()

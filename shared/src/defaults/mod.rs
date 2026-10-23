@@ -78,6 +78,7 @@ mod epg;
 mod hdhomerun;
 mod hls;
 mod library;
+mod mcp;
 mod media_server;
 mod metadata;
 mod monitoring;
@@ -90,15 +91,15 @@ mod tmdb;
 mod trakt;
 
 pub use self::{
-    auth::*, epg::*, hdhomerun::*, hls::*, library::*, media_server::*, metadata::*, monitoring::*, network::*,
+    auth::*, epg::*, hdhomerun::*, hls::*, library::*, mcp::*, media_server::*, metadata::*, monitoring::*, network::*,
     paths::*, primitives::*, qos::*, stream_history::*, tmdb::*, trakt::*,
 };
 
-/// Streaming-side defaults (auth, hls, hdhomerun, library, `media_server`).
+/// Streaming-side defaults (auth, hls, hdhomerun, library, mcp, `media_server`).
 /// Re-exports the flat items under a logical group so callers asking
 /// "what is the default for HLS?" can grep one place.
 pub mod config {
-    pub use super::{auth::*, hdhomerun::*, hls::*, library::*, media_server::*};
+    pub use super::{auth::*, hdhomerun::*, hls::*, library::*, mcp::*, media_server::*};
 }
 
 /// External-service defaults (epg, metadata, tmdb, trakt).
