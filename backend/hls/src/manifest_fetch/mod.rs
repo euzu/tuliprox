@@ -28,10 +28,11 @@ pub use self::{
         deterministic_timeline_conflict_from_rejection,
     },
     model::{
-        fetched_effective_manifest_host, FetchedOriginManifest, HlsManifestCommitAcceptanceMode,
-        HlsManifestContinuityMode, HlsManifestFetchSelection, HlsManifestOriginQuality, HlsManifestOriginQualityScore,
-        HlsManifestOriginRelation, HlsManifestRecoveryCandidateScoreReport, HlsManifestSequenceRelation,
-        HlsOriginManifestFetchContext, LiveHlsOriginEntry, RetryPolicy, MAX_HLS_MANIFEST_BYTES,
+        fetched_effective_manifest_host, FetchedOriginManifest, HlsManifestAttemptContext,
+        HlsManifestCommitAcceptanceMode, HlsManifestContinuityMode, HlsManifestFetchSelection,
+        HlsManifestOriginQuality, HlsManifestOriginQualityScore, HlsManifestOriginRelation,
+        HlsManifestRecoveryCandidateScoreReport, HlsManifestSequenceRelation, HlsOriginManifestFetchContext,
+        LiveHlsOriginEntry, RetryPolicy, MAX_HLS_MANIFEST_BYTES,
     },
     quality::{
         evaluate_manifest_origin_quality_with_mode, next_committed_origin_highwater,
@@ -46,6 +47,9 @@ use self::{
         request_hls_session_idle_timeout_secs_from_config, DEFAULT_HLS_TARGET_DURATION_SECS,
         HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT,
     },
+};
+pub(crate) use self::{
+    model::HlsManifestRecoveryDiagnostics, recovery::retry_hls_origin_manifest_recovery_chain_with_diagnostics,
 };
 #[cfg(test)]
 use crate::timeline::TimelineMapError;

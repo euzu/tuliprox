@@ -310,7 +310,8 @@ reverse_proxy:
     max_concurrent_segment_fetches_per_session: 2
     max_concurrent_segment_fetches_global: 64
     origin_manifest_timeout_ms: 3000
-    origin_segment_timeout_ms: 10000
+    min_origin_target_duration_secs: 0
+    origin_segment_timeout_ms: auto
     session_idle_timeout: 300
     segment_repair:
       max_level: "off"
@@ -344,8 +345,8 @@ windows, media readiness, lease validity, and resource retention rules still app
 | `max_segments_prefetch` | Int | `6` | Maximum session-local segment prefetch queue depth. |
 | `max_concurrent_segment_fetches_per_session` | Int | `2` | Maximum concurrent future segment fetches for one HLS session. |
 | `max_concurrent_segment_fetches_global` | Int | `64` | Maximum concurrent future segment fetches across all HLS sessions. |
-| `origin_manifest_timeout_ms` | Milliseconds | `3000` | Timeout for future Origin manifest fetches. |
-| `origin_segment_timeout_ms` | Milliseconds | `10000` | Timeout for future Origin segment fetches. |
+| `origin_manifest_timeout_ms` | Milliseconds | `3000` | Timeout for Origin manifest, Key and MAP fetches. |
+| `origin_segment_timeout_ms` | `auto` or positive milliseconds | `auto` | Segment/Part timeout per attempt; AUTO uses the full shared-session target duration, or 10000 ms if missing/zero. |
 | `initial_manifest_wait_timeout_secs` | Seconds | `90` | How long a client may wait for the initial manifest decision (session bootstrap window). Lower values fail unhealthy sessions faster; higher values tolerate slow providers. |
 | `session_idle_timeout` | Seconds | `300` | Idle timeout before a future HLS cache session may be collected. |
 | `segment_repair.max_level` | String | `off` | Maximum repair level allowed by the codec-aware MPEG-TS segment repair policy (`off`, `low`, `medium`, `high`). |

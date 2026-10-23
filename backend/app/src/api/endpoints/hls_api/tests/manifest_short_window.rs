@@ -141,20 +141,25 @@ async fn wait_for_shared_first_ready_refresh(
     fixture: &ShortWindowFixture,
     session: &HlsSessionHandle,
     previous_requests: usize,
+    expected_generation: u64,
 ) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if fixture.origin.manifest_request_count() > previous_requests
-                && !session.read().await.origin_refresh.in_flight
-            {
+            let refresh_in_flight = {
+                let session = session.read().await;
+                // Later leases may start another ordinary freshness fetch after a fast
+                // response; they must still share the completed qualification.
+                assert_eq!(session.origin_control.acceptance_generation.0, expected_generation);
+                session.origin_refresh.in_flight
+            };
+            if fixture.origin.manifest_request_count() > previous_requests && !refresh_in_flight {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("additional leases complete one shared freshness request");
-    assert_eq!(fixture.origin.manifest_request_count(), previous_requests + 1);
+    .expect("additional leases complete freshness checks without requalification");
 }
 
 async fn assert_first_ready_lease_media(
@@ -217,7 +222,7 @@ async fn first_ready_leases_share_qualification_while_first_segment_is_loading()
         let fixture = Arc::clone(&fixture);
         leases.spawn(async move { open_short_lease(&fixture, &format!("first-ready-{lease}")).await });
     }
-    wait_for_shared_first_ready_refresh(&fixture, &session, 3).await;
+    wait_for_shared_first_ready_refresh(&fixture, &session, 3, generation.0).await;
     assert!(session.read().await.last_rendered_manifest.is_none());
     assert_eq!(session.read().await.origin_control.acceptance_generation, generation);
     gate.close();
@@ -316,7 +321,7 @@ async fn first_ready_revalidation_keeps_its_qualification_while_new_media_is_loa
         let fixture = Arc::clone(&fixture);
         leases.spawn(async move { open_short_lease(&fixture, &format!("revalidation-waiting-{lease}")).await });
     }
-    wait_for_shared_first_ready_refresh(&fixture, &session, 5).await;
+    wait_for_shared_first_ready_refresh(&fixture, &session, 5, 2).await;
     assert_eq!(session.read().await.origin_control.acceptance_generation.0, 2);
     assert_eq!(session.read().await.last_normal_manifest_commit_identity(), Some(previous_commit));
     gate.close();

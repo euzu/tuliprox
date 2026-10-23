@@ -451,7 +451,7 @@ async fn critical_handoff_uses_endangered_lease_base_when_session_tail_is_incomp
     request.now_ms = now_ms;
     let plan = request.manifest_recovery_burst.level.plan();
     let target_url = request.origin_entry.url().clone();
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
 
     let committed = retry_hls_origin_manifest_recovery_chain(
         &fetch_context,
@@ -517,7 +517,7 @@ async fn critical_handoff_manifest_supersession_during_candidate_io_rolls_back_s
     let task_request = Arc::clone(&request);
     let target_url = task_request.origin_entry.url().clone();
     let commit_task = tokio::spawn(async move {
-        let fetch_context = manifest_fetch_context(&task_request);
+        let fetch_context = manifest_fetch_context(&task_request, None);
         retry_hls_origin_manifest_recovery_chain(
             &fetch_context,
             test_manifest_origin_binding(target_url),

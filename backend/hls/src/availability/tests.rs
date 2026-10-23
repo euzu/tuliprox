@@ -225,7 +225,8 @@ mod terminal_fixtures;
 use terminal_fixtures::{
     assert_post_refresh_registration_failure_leaves_no_unowned_live_lease,
     assert_terminal_pending_registration_failure_commits_unavailable, terminal_base_without_timestamps,
-    terminal_pending_commit_fixture, terminal_pending_commit_fixture_with_base, terminal_pending_commit_reserve,
+    terminal_pending_commit_fixture, terminal_pending_commit_fixture_with_base,
+    terminal_pending_commit_fixture_with_cache, terminal_pending_commit_reserve,
 };
 mod pressure_fixtures;
 use pressure_fixtures::{

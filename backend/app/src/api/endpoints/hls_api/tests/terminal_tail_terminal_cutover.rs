@@ -86,7 +86,7 @@ async fn terminal_lease_manifest_is_inline_immutable_endlist_on_canonical_path()
 }
 
 #[tokio::test]
-async fn commits_prepared_terminal_tail_once_before_splice_deadline_after_exhausted_recovery() {
+async fn commits_prepared_terminal_tail_once_after_complete_reserve_consumption() {
     let fixture = prepared_terminal_cutover_fixture().await;
     let directive = terminal_cutover_acceptance_directive(&fixture).await;
     let pressured_lease = exhaust_terminal_cutover_recovery(&fixture, directive).await;
@@ -96,7 +96,7 @@ async fn commits_prepared_terminal_tail_once_before_splice_deadline_after_exhaus
 }
 
 #[tokio::test]
-async fn warm_fmp4_without_ready_reserve_uses_custom_response_after_missed_splice_deadline() {
+async fn warm_fmp4_at_exhaustion_preserves_the_explicit_incompatible_media_error() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300)));
     enable_channel_unavailable_custom_response(&app_state);
@@ -143,39 +143,41 @@ async fn warm_fmp4_without_ready_reserve_uses_custom_response_after_missed_splic
     };
     publish_test_manifest_and_exhaust_configured_acceptance(&app_state, &proxy_session_id, &lease_id, snapshot, now_ms)
         .await;
+    let manager = &app_state.hls.proxy;
+    let session = manager.sessions().get_by_proxy_session_id(&proxy_session_id).await.unwrap();
+    let identity = manager
+        .access_lease_response_snapshot(&lease_id, &proxy_session_id, now_ms)
+        .await
+        .unwrap()
+        .media_identity()
+        .unwrap();
+    let started_at = now_ms - 120_000;
+    let token = manager
+        .record_access_lease_segment_request_started_if_identity_matches(
+            &lease_id,
+            &proxy_session_id,
+            identity,
+            base_proxy_seq,
+            started_at,
+        )
+        .await
+        .unwrap();
+    let _ = manager
+        .mark_delivered_media_for_lease(&session, &lease_id, &proxy_session_id, identity, Some(token), started_at)
+        .await;
     let manifest_uri = format!("/hls/shared/live/{}/{}/manifest.m3u8", proxy_session_id.0, lease_id.0);
 
     let response = get_response(Arc::clone(&app_state), &manifest_uri, None).await;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(!response.headers().contains_key(header::LOCATION));
-    let body = String::from_utf8(response_body(response).await.to_vec()).expect("late custom manifest");
-    assert!(body.ends_with("#EXT-X-ENDLIST\n"));
-    assert!(body.contains("/cvs/hls/"));
-    assert!(!body.contains("#EXT-X-MAP"));
-    assert!(!body.contains("/hls/shared/live/"));
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response_body(response).await.is_empty());
     let lease = app_state
         .hls
         .proxy
         .access_lease_response_snapshot(&lease_id, &proxy_session_id, super::super::current_time_millis())
         .await
-        .expect("late custom lease snapshot");
-    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalCustomResponse(_)));
-    let repeated = get_response(Arc::clone(&app_state), &manifest_uri, None).await;
-    assert_eq!(repeated.status(), StatusCode::OK);
-    assert_eq!(response_body(repeated).await, body.as_bytes());
-    let repeated_lease = app_state
-        .hls
-        .proxy
-        .access_lease_response_snapshot(&lease_id, &proxy_session_id, super::super::current_time_millis())
-        .await
-        .expect("stable terminal custom lease");
-    assert_eq!(repeated_lease.playback_mode, lease.playback_mode);
-    let terminal_uri = format!("/hls/shared/live/{}/{}/terminal/1/0.ts", proxy_session_id.0, lease_id.0);
-    let terminal_response = get_response(app_state, &terminal_uri, None).await;
-    assert_eq!(terminal_response.status(), StatusCode::NOT_FOUND);
-    assert!(!terminal_response.headers().contains_key(header::LOCATION));
-    assert!(response_body(terminal_response).await.is_empty());
+        .unwrap();
+    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalUnavailable { .. }));
 }
 
 #[tokio::test]

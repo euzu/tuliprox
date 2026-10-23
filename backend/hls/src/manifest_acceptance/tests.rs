@@ -63,6 +63,7 @@ fn observation(index: usize, host: &str, relation: HlsCandidateHostRelation) -> 
             .then_some(HlsHostLocalSequenceRelation::Next),
         resource_timeline_evidence: HlsResourceTimelineEvidence::Eligible,
         timeline_fingerprint: fingerprint(1),
+        target_duration_secs: Some(4),
         manifest_fetch_elapsed_ms: 10,
         switch_segment_readiness: HlsSwitchSegmentReadiness::RequiresStaging,
         committed_content_anchor: HlsCommittedContentAnchorEvidence::Unavailable,
@@ -76,6 +77,8 @@ fn evaluate(
     trigger: HlsManifestAcceptanceTrigger,
 ) -> HlsManifestCommitPlan {
     evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+        preferred_min_target_duration_secs: None,
+        excluded_candidates: &[],
         full_burst_completed: true,
         current_burst_is_full_plan: true,
         trigger,

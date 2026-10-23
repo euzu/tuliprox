@@ -162,8 +162,11 @@ pub(super) async fn log_manifest_retry_scheduled(
         safe_session_key(&session.key)
     };
     let status = manifest_retry_status_label(retry_kind, reject_reason, fetch_error);
+    let used = context.attempt.as_ref().map_or(attempt_index + 1, |attempt| attempt.logical_attempts());
+    let remaining =
+        context.attempt.as_ref().map_or(attempts.saturating_sub(used), |attempt| attempt.remaining_attempts());
     warn!(
-        "Manifest '{}' retry scheduled: status {} attempt {} of {} next_delay_ms={delay_ms}",
+        "Manifest '{}' retry scheduled: status {} attempt {} of {} used={used} remaining={remaining} completion=retry next_delay_ms={delay_ms}",
         session_label,
         status,
         attempt_index + 1,

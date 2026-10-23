@@ -15,6 +15,7 @@ FROM rust:1.95 AS workspace-skeleton
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/reqwest ./vendor/reqwest/
 COPY shared ./shared/
 COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
 COPY backend/app/Cargo.toml backend/app/build.rs ./backend/app/

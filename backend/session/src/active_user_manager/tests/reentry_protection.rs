@@ -227,7 +227,7 @@ async fn arm_eviction_protection_protects_all_users_on_addr() {
         .await
         .expect("register user_b");
 
-    manager.mark_recent_eviction_guard_for_addr(&addr, protected_addr, Duration::from_secs(60)).await;
+    manager.mark_recent_eviction_guard_for_addr(&addr, protected_addr, Duration::from_mins(1)).await;
 
     let connections = manager.connections.read().await;
     let key_a = create_socket_reentry_guard_key("user_a", "192.168.1.100", shared::model::VirtualId::new(2001));

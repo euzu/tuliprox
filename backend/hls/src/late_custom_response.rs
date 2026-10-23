@@ -1,5 +1,8 @@
-//! Finite custom media published after the live splice deadline has elapsed.
+//! Legacy standalone lease-plan shape. Published live leases reject this plan;
+//! its constructors exist only for regression tests. Unpublished standalone
+//! responses remain owned by `runtime_custom_tail`.
 
+#[cfg(test)]
 use crate::{
     hls_ctx::HlsCtx,
     lease::{HlsAccessLeaseId, HlsTerminalTailPreparation},
@@ -12,7 +15,17 @@ use crate::{
     terminal_tail::{HlsLeasePlaybackMode, HlsTerminalTailCompatibility, HlsTerminalTailGeneration},
     HlsAccessLeaseState, ProxySessionId,
 };
-use std::{fmt, fmt::Write, sync::Arc};
+#[cfg(not(test))]
+use crate::{
+    lease::HlsAccessLeaseId,
+    runtime_custom_tail::{standalone_custom_asset_fingerprint, HlsStandaloneCustomPlan, HlsStandaloneCustomPlanKey},
+    terminal_tail::HlsTerminalTailGeneration,
+    ProxySessionId,
+};
+use std::fmt;
+#[cfg(test)]
+use std::{fmt::Write, sync::Arc};
+#[cfg(test)]
 use tuliprox_core::utils::{format_hls_duration_ms, hls_target_duration_secs};
 
 /// Immutable, lease-bound custom playlist that does not consume a live splice base.
@@ -69,11 +82,13 @@ impl PartialEq for HlsLateCustomResponsePlan {
 
 impl Eq for HlsLateCustomResponsePlan {}
 
+#[cfg(test)]
 pub(crate) enum HlsLateCustomResponseError {
     Superseded,
     Unavailable(HlsTerminalTailCompatibility),
 }
 
+#[cfg(test)]
 pub(crate) async fn prepare_late_custom_response(
     ctx: &HlsCtx,
     proxy_session_id: &ProxySessionId,
@@ -144,6 +159,7 @@ pub(crate) async fn prepare_late_custom_response(
 }
 
 // Keeping the layout separate makes the publication boundary testable without a live origin or cache.
+#[cfg(test)]
 fn render_late_manifest(
     first_proxy_seq: u64,
     discontinuity_sequence: u64,

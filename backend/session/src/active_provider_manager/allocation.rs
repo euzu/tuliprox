@@ -327,9 +327,17 @@ impl ActiveProviderManager {
         else {
             return true;
         };
-        max_connections > 0
+        let blocked = max_connections > 0
             && idle_foreign_reservations > 0
-            && current_connections.saturating_add(idle_foreign_reservations) >= max_connections
+            && current_connections.saturating_add(idle_foreign_reservations) >= max_connections;
+        if blocked {
+            log::debug!(
+                "Provider admission rejected: reason=ReservedForOther conflict=provider-capacity account={} owner={} active_connections={current_connections} limit={max_connections} idle_foreign_reserved_slots={idle_foreign_reservations}",
+                sanitize_sensitive_info(provider_name.as_ref()),
+                sanitize_sensitive_info(session_owner.unwrap_or("<none>")),
+            );
+        }
+        blocked
     }
 
     pub(super) fn reserved_provider_names_for_other(

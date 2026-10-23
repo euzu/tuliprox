@@ -7,7 +7,7 @@ use super::{
     availability_reevaluation::{HlsAvailabilityReevaluationOwnership, HlsAvailabilityReevaluationRegistration},
     hls_ctx::HlsCtx,
     media_reserve::HlsLeaseReserveSnapshot,
-    recovery_timing::{HlsLeaseCutoverTiming, HlsTerminalCommitAcquisitionBudgetMs},
+    recovery_timing::HlsLeaseCutoverTiming,
     refresh::HlsPostRefreshAvailabilityAction,
     HlsAccessLeaseId, HlsSessionHandle, ProxySessionId,
 };
@@ -27,6 +27,7 @@ pub(super) enum HlsPostRefreshTerminalEvaluation {
     PendingOwnerRegistered,
     TerminalCommitted,
     ReevaluateNow,
+    AwaitingEvidence,
     FailedClosed(HlsTerminalFailedClosedReason),
 }
 
@@ -137,17 +138,13 @@ pub(super) fn live_reserve_deadline(
     reserve: HlsLeaseReserveSnapshot,
     cutover_timing: HlsLeaseCutoverTiming,
 ) -> Option<HlsLiveReserveDeadline> {
-    let trigger_reserve_ms = reserve
-        .transition_margin
-        .as_millis()
-        .saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis());
-    let next_reevaluation_at_ms =
-        now_ms.saturating_add(reserve.guaranteed_reserve_ms.saturating_sub(trigger_reserve_ms));
-    let latest_safe_terminal_commit_at_ms = cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch();
-    let latest_wake_at_ms = latest_safe_terminal_commit_at_ms.checked_sub(1)?;
+    if !reserve.playback_position_known || reserve.guaranteed_reserve_ms == 0 {
+        return None;
+    }
+    let exhaustion_at_ms = cutover_timing.lease_exhaustion_at.as_millis_since_epoch();
     Some(HlsLiveReserveDeadline {
-        next_reevaluation_at_ms: next_reevaluation_at_ms.min(latest_wake_at_ms),
-        latest_safe_terminal_commit_at_ms,
+        next_reevaluation_at_ms: exhaustion_at_ms.max(now_ms.saturating_add(1)),
+        latest_safe_terminal_commit_at_ms: exhaustion_at_ms,
     })
 }
 
@@ -157,7 +154,7 @@ pub(super) async fn evaluate_active_terminal_leases_for_reevaluation(
     proxy_session_id: &ProxySessionId,
     now_ms: u64,
 ) -> HlsPostRefreshTerminalEvaluation {
-    let leases = ctx.hls_proxy.active_live_playback_snapshots_for_session(proxy_session_id, now_ms).await;
+    let leases = ctx.hls_proxy.terminal_playback_snapshots_for_session(proxy_session_id, now_ms).await;
     if leases.is_empty() {
         return HlsPostRefreshTerminalEvaluation::NoLiveLease;
     }
@@ -204,7 +201,7 @@ pub(super) async fn evaluate_active_terminal_leases_for_reevaluation(
     } else if recovered_live {
         let path_degraded = session.read().await.origin_control.path_condition.is_degraded();
         if path_degraded {
-            HlsPostRefreshTerminalEvaluation::ReevaluateNow
+            HlsPostRefreshTerminalEvaluation::AwaitingEvidence
         } else {
             HlsPostRefreshTerminalEvaluation::RecoveredLive
         }
@@ -233,7 +230,7 @@ pub(super) async fn evaluate_owner_failure_fallback(
     proxy_session_id: &ProxySessionId,
     now_ms: u64,
 ) -> HlsPostRefreshFallbackAggregate {
-    let leases = ctx.hls_proxy.active_live_playback_snapshots_for_session(proxy_session_id, now_ms).await;
+    let leases = ctx.hls_proxy.terminal_playback_snapshots_for_session(proxy_session_id, now_ms).await;
     let mut aggregate = HlsPostRefreshFallbackAggregate::default();
     for lease in &leases {
         let HlsDetailedTerminalResolution { resolution, live_reserve_deadline } =

@@ -3,8 +3,9 @@ use crate::{
         default_hls_cache_bytes, default_hls_cache_bytes_per_session, default_hls_cache_duration,
         default_hls_initial_manifest_wait_timeout_secs, default_hls_max_concurrent_segment_fetches_global,
         default_hls_max_concurrent_segment_fetches_per_session, default_hls_max_segments_prefetch,
-        default_hls_origin_manifest_timeout_ms, default_hls_origin_segment_timeout_ms,
-        default_hls_session_idle_timeout, DEFAULT_HLS_CACHE_BYTES, DEFAULT_HLS_CACHE_BYTES_PER_SESSION,
+        default_hls_min_origin_target_duration_secs, default_hls_origin_manifest_timeout_ms,
+        default_hls_origin_segment_timeout_ms, default_hls_session_idle_timeout, DEFAULT_HLS_CACHE_BYTES,
+        DEFAULT_HLS_CACHE_BYTES_PER_SESSION,
     },
     error::TuliproxError,
     model::{
@@ -65,8 +66,11 @@ pub struct HlsCacheConfigDto {
     pub max_concurrent_segment_fetches_global: usize,
     #[serde(default = "default_hls_origin_manifest_timeout_ms")]
     pub origin_manifest_timeout_ms: Millis,
+    /// Minimum preferred origin target duration; zero disables the duration check.
+    #[serde(default = "default_hls_min_origin_target_duration_secs")]
+    pub min_origin_target_duration_secs: Secs,
     #[serde(default = "default_hls_origin_segment_timeout_ms")]
-    pub origin_segment_timeout_ms: Millis,
+    pub origin_segment_timeout_ms: HlsSegmentTimeout,
     /// How long a client may wait for the initial manifest decision before the session bootstraps time out.
     #[serde(default = "default_hls_initial_manifest_wait_timeout_secs")]
     pub initial_manifest_wait_timeout_secs: Secs,
@@ -91,6 +95,7 @@ impl Default for HlsCacheConfigDto {
             max_concurrent_segment_fetches_per_session: default_hls_max_concurrent_segment_fetches_per_session(),
             max_concurrent_segment_fetches_global: default_hls_max_concurrent_segment_fetches_global(),
             origin_manifest_timeout_ms: default_hls_origin_manifest_timeout_ms(),
+            min_origin_target_duration_secs: default_hls_min_origin_target_duration_secs(),
             origin_segment_timeout_ms: default_hls_origin_segment_timeout_ms(),
             initial_manifest_wait_timeout_secs: default_hls_initial_manifest_wait_timeout_secs(),
             session_idle_timeout: default_hls_session_idle_timeout(),
@@ -158,7 +163,13 @@ impl HlsCacheConfigDto {
         )?;
         Self::ensure_min_usize("max_concurrent_segment_fetches_global", self.max_concurrent_segment_fetches_global, 1)?;
         Self::ensure_min_millis("origin_manifest_timeout_ms", self.origin_manifest_timeout_ms, Millis::new(1))?;
-        Self::ensure_min_millis("origin_segment_timeout_ms", self.origin_segment_timeout_ms, Millis::new(1))?;
+        if let HlsSegmentTimeout::Fixed(value) = self.origin_segment_timeout_ms {
+            Self::ensure_min_millis(
+                "origin_segment_timeout_ms (auto or positive milliseconds)",
+                value,
+                Millis::new(1),
+            )?;
+        }
         Self::ensure_min_secs(
             "initial_manifest_wait_timeout_secs",
             self.initial_manifest_wait_timeout_secs,
@@ -211,3 +222,6 @@ pub use repair::{
 pub use startup::{
     HlsStartupConfigDto, HlsStartupMode, DEFAULT_HLS_PROGRESSIVE_BYTES_PER_SEGMENT, DEFAULT_HLS_PROGRESSIVE_BYTES_TOTAL,
 };
+
+mod timeout;
+pub use timeout::HlsSegmentTimeout;

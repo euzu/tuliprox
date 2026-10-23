@@ -335,6 +335,7 @@ pub(in crate::api::endpoints::hls_api) async fn validate_hls_proxy_access_reques
         return Err(HlsAccessLeaseValidationError::AvailabilityPending);
     }
     match app_state.hls.proxy.activate_access_lease(&context.lease_id, proxy_session_id, now_ms, timing).await {
+        HlsAccessLeaseActivation::AvailabilityPending => Err(HlsAccessLeaseValidationError::AvailabilityPending),
         HlsAccessLeaseActivation::Activated { .. } => {
             debug!(
                 "HLS access lease accepted: lease={} proxy_session={} user_session={} request={request_kind}",

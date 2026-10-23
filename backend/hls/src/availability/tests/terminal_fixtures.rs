@@ -19,10 +19,8 @@ impl HlsTerminalPendingCommitFixture {
             reason: self.expected_asset.reason,
             bundle_key: self.bundle_key,
             latest_safe_commit_at_ms: self
-                .preparation
-                .cutover_timing
-                .latest_safe_terminal_commit_at
-                .as_millis_since_epoch(),
+                .now_ms
+                .saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis()),
         }
     }
 
@@ -69,19 +67,18 @@ impl HlsTerminalPendingCommitFixture {
 
 pub(super) fn terminal_pending_commit_reserve() -> HlsLeaseReserveSnapshot {
     let transition_margin = HlsTransitionMarginMs::from_millis(12_000);
-    let guaranteed_reserve_ms = transition_margin
-        .as_millis()
-        .saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis());
+    let guaranteed_reserve_ms = 0;
     HlsLeaseReserveSnapshot {
         availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
         guaranteed_media_horizon_ms: guaranteed_reserve_ms,
         conservative_playback_position_ms: 0,
+        playback_position_known: true,
         guaranteed_reserve_ms,
         initial_hidden_ready_duration_ms: 0,
         transition_margin,
         key_readiness_valid_until_ms: None,
         recovery_required: true,
-        cutover_required: false,
+        cutover_required: true,
     }
 }
 
@@ -137,6 +134,7 @@ pub(super) async fn install_terminal_pending_ready_base(
         .await
         .expect("READY terminal-base bytes commit");
     let mut session = session.write().await;
+    session.origin_control.path_condition = crate::HlsOriginPathCondition::HardFetchFailure;
     let origin_epoch = session.origin_control.origin_epoch;
     session.segments.insert(
         40,
@@ -214,7 +212,25 @@ pub(super) async fn terminal_pending_commit_fixture_with_base(
     name: &str,
     base_segment_bytes: &[u8],
 ) -> HlsTerminalPendingCommitFixture {
-    let hls_ctx = crate::HlsCtx::for_test(Config { custom_stream_response_enabled: true, ..Config::default() });
+    let ctx = crate::HlsCtx::for_test(Config { custom_stream_response_enabled: true, ..Config::default() });
+    terminal_pending_commit_fixture_with_ctx(name, base_segment_bytes, ctx).await
+}
+
+pub(super) async fn terminal_pending_commit_fixture_with_cache(
+    name: &str,
+    path: &std::path::Path,
+) -> HlsTerminalPendingCommitFixture {
+    let mut ctx = crate::HlsCtx::for_test(Config { custom_stream_response_enabled: true, ..Config::default() });
+    ctx.hls_proxy = Arc::new(crate::HlsProxyManager::with_cache_settings(path, 300));
+    ctx.attach_lease_user_accounting();
+    terminal_pending_commit_fixture_with_ctx(name, TERMINAL_ASSET_BYTES, ctx).await
+}
+
+async fn terminal_pending_commit_fixture_with_ctx(
+    name: &str,
+    base_segment_bytes: &[u8],
+    hls_ctx: HlsCtx,
+) -> HlsTerminalPendingCommitFixture {
     let ctx = &hls_ctx;
     let terminal_buffer = TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
     let asset = snapshot_terminal_media_asset(&terminal_buffer).expect("valid terminal asset fixture");
@@ -333,6 +349,10 @@ pub(super) async fn assert_terminal_pending_registration_failure_commits_unavail
     ));
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Full reserve exhaustion and owner-failure lifecycle share this terminal fixture."
+)]
 pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_live_lease(
     failure: HlsAvailabilityReevaluationRegistration,
     name: &str,
@@ -385,6 +405,65 @@ pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_l
         )
         .await
         .is_activated());
+    let lease = fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .unwrap();
+    let identity = lease.media_identity().unwrap();
+    let started_at_ms = fixture.now_ms - 100_000;
+    let token = fixture
+        .ctx
+        .hls_proxy
+        .record_access_lease_segment_request_started_if_identity_matches(
+            &fixture.lease_id,
+            &fixture.proxy_session_id,
+            identity,
+            40,
+            started_at_ms,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .ctx
+            .hls_proxy
+            .mark_delivered_media_for_lease(
+                &fixture.session,
+                &fixture.lease_id,
+                &fixture.proxy_session_id,
+                identity,
+                Some(token),
+                started_at_ms
+            )
+            .await,
+        crate::manager::HlsMediaActivityCommitOutcome::Committed
+    );
+    assert_eq!(
+        fixture
+            .ctx
+            .hls_proxy
+            .record_access_lease_segment_request_completed_and_mark_media_if_identity_matches(
+                &fixture.session,
+                &fixture.lease_id,
+                &fixture.proxy_session_id,
+                identity,
+                token,
+                started_at_ms
+            )
+            .await,
+        crate::manager::HlsMediaActivityCommitOutcome::Committed
+    );
+    assert!(fixture
+        .ctx
+        .hls_proxy
+        .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .await
+        .unwrap()
+        .playback_cursor
+        .first_segment_started_at_ms
+        .is_some());
     let outcome = commit_post_refresh_terminal_fallback(
         fixture.ctx.clone(),
         Arc::clone(&fixture.session),
@@ -397,7 +476,32 @@ pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_l
     )
     .await;
 
-    assert_eq!(outcome, HlsPostRefreshFallbackOutcome::TerminalCommitted);
+    assert!(matches!(
+        outcome,
+        HlsPostRefreshFallbackOutcome::TerminalCommitted | HlsPostRefreshFallbackOutcome::PendingOwnerRegistered
+    ));
+    if outcome == HlsPostRefreshFallbackOutcome::PendingOwnerRegistered {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let lease = fixture
+                    .ctx
+                    .hls_proxy
+                    .access_lease_response_snapshot(
+                        &fixture.lease_id,
+                        &fixture.proxy_session_id,
+                        fixture.ctx.hls_proxy.now_ms(),
+                    )
+                    .await
+                    .unwrap();
+                if lease.playback_mode != HlsLeasePlaybackMode::Live {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("owned terminal decision finishes");
+    }
     let lease = fixture
         .ctx
         .hls_proxy
@@ -406,6 +510,6 @@ pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_l
         .expect("fallback lease remains stored");
     assert!(matches!(
         lease.playback_mode,
-        HlsLeasePlaybackMode::TerminalUnavailable { reason: HlsTerminalTailCompatibility::TerminalMediaNotReady, .. }
+        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalUnavailable { .. }
     ));
 }

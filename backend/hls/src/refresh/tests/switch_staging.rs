@@ -257,6 +257,8 @@ async fn different_host_single_candidate_retries_do_not_prove_acceptance() {
     install_published_recovery_binding(&session, &candidate_entry_url, None).await;
     let entry = LiveHlsOriginEntry::parse(&candidate_entry_url).expect("entry url");
     let request = OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: test_app_config(),
         session: Arc::clone(&session),
         origin_entry: entry.clone(),
@@ -294,7 +296,8 @@ async fn different_host_single_candidate_retries_do_not_prove_acceptance() {
 
     let candidate_requests =
         candidate.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-    assert_eq!(candidate_requests, 6);
+    // Initial sampling and recovery rounds share the five logical attempts.
+    assert_eq!(candidate_requests, 5);
     let session = session.read().await;
     assert_eq!(session.origin_seq_highwater, Some(100));
     assert_eq!(session.origin_epoch, 0);
@@ -363,7 +366,7 @@ fn manifest_recovery_candidate_score_prefers_same_host_next_sequence() {
     session.last_effective_manifest_host = Some("origin.example.com".to_string());
     session.mark_authorized_media_access(super::super::current_time_millis());
     let request = test_origin_refresh_request(test_session());
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
     let same_host_unchanged =
         fetched_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n100.ts\n");
     let same_host_next =
@@ -457,6 +460,8 @@ async fn host_switch_conflict_runs_one_full_plan_then_only_bounded_follow_ups() 
     install_published_recovery_binding(&session, &candidate_entry_url, None).await;
     let entry = LiveHlsOriginEntry::parse(&candidate_entry_url).expect("entry url");
     let request = OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: test_app_config(),
         session: Arc::clone(&session),
         origin_entry: entry.clone(),
@@ -492,7 +497,7 @@ async fn host_switch_conflict_runs_one_full_plan_then_only_bounded_follow_ups() 
 
     assert!(trigger_origin_refresh_sync(request).await);
 
-    assert_eq!(candidate_hits.load(Ordering::SeqCst), 6);
+    assert_eq!(candidate_hits.load(Ordering::SeqCst), 5);
     let session = session.read().await;
     assert_eq!(session.origin_seq_highwater, Some(100));
     let episode = session.origin_control.acceptance_episode.as_ref().expect("held acceptance episode");

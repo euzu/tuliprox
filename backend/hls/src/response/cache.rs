@@ -375,7 +375,7 @@ where
     mark_response_as_uncompressed(&mut response);
     if object.is_media {
         if let Some(marker) = &context.media_activity_marker {
-            response = marker.confirm_media_response(response);
+            response = cursor_marker.as_ref().unwrap_or(marker).confirm_media_response(response);
         }
     }
     Ok(response)

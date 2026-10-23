@@ -28,6 +28,7 @@ struct Fixture {
     origin: tokio::task::JoinHandle<()>,
     release: watch::Sender<bool>,
     release_retry: watch::Sender<bool>,
+    retry_started: watch::Receiver<bool>,
     attempts: Arc<AtomicUsize>,
     _scenario: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -64,6 +65,7 @@ impl Fixture {
         let attempts = Arc::new(AtomicUsize::new(0));
         let (release, released) = watch::channel(false);
         let (release_retry, retry_released) = watch::channel(false);
+        let (retry_started, started_retry) = watch::channel(false);
         let counted = attempts.clone();
         let origin = tokio::spawn(async move {
             let mut children = tokio::task::JoinSet::new();
@@ -74,6 +76,7 @@ impl Fixture {
                         let catalog = catalog.clone(); let manifest = manifest.clone();
                         let attempts = counted.clone(); let mut released = released.clone();
                         let mut retry_released = retry_released.clone();
+                        let retry_started = retry_started.clone();
                         children.spawn(async move {
                             let mut reader = BufReader::new(socket);
                             let mut request = String::new();
@@ -98,11 +101,12 @@ impl Fixture {
                             socket.write_all(headers.as_bytes()).await.unwrap();
                             if failed_attempt {
                                 socket.write_all(b"stale-prefix").await.unwrap();
-                                // Hold an incomplete 200 open beyond the configured body idle timeout.
+                                // Hold an incomplete 200 open beyond the configured transfer timeout.
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 return;
                             }
                             if path == "/104.ts" {
+                                retry_started.send_replace(true);
                                 while !*retry_released.borrow_and_update() {
                                     if retry_released.changed().await.is_err() { return; }
                                 }
@@ -148,6 +152,7 @@ impl Fixture {
             origin,
             release,
             release_retry,
+            retry_started: started_retry,
             attempts,
             _scenario: scenario,
         }
@@ -201,22 +206,23 @@ async fn incomplete_origin_200_recovers_same_segment_uri_without_a_playlist_refr
     assert_eq!(head.status(), 200, "head must stream before EOF: {}", fixture.log());
     fixture.release.send_replace(true);
     assert_eq!(head.bytes().await.unwrap().as_ref(), BODY);
-    let waiting = client.get(&segment).send().await.unwrap();
-    assert_eq!(waiting.status(), 503, "retry must be temporary: {}", fixture.log());
-    assert!(waiting.headers().contains_key("retry-after"));
-    // Make the pending response independent of the origin retry's timing.
-    fixture.release_retry.send_replace(true);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let response = client.get(&segment).send().await.unwrap();
-        if response.status() == 200 {
-            assert_eq!(response.bytes().await.unwrap().as_ref(), BODY);
-            break;
+    let waiting = client.get(&segment).send();
+    tokio::pin!(waiting);
+    let mut retry_started = fixture.retry_started.clone();
+    // The request may wait through the failed attempt and its backoff. Release
+    // the retry at a server barrier instead of expecting the old 300ms startup cap.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            response = &mut waiting => panic!("GET finished before the retry origin was released: {response:?}: {}", fixture.log()),
+            started = retry_started.wait_for(|started| *started) => { started.unwrap(); }
         }
-        assert_eq!(response.status(), 503, "same URI must not become 404 during recovery: {}", fixture.log());
-        assert!(tokio::time::Instant::now() < deadline, "retry never recovered: {}", fixture.log());
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("retry origin was never requested: {}", fixture.log()));
+    fixture.release_retry.send_replace(true);
+    let recovered = waiting.await.unwrap();
+    assert_eq!(recovered.status(), 200, "same GET must recover after the origin retry: {}", fixture.log());
+    assert_eq!(recovered.bytes().await.unwrap().as_ref(), BODY);
     assert!(fixture.attempts.load(Ordering::Acquire) >= 2);
     let refreshed = client.get(&variant).send().await.unwrap();
     assert_eq!(refreshed.status(), 200, "recovered binding must not conflict: {}", fixture.log());

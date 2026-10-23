@@ -50,6 +50,9 @@ impl HlsAccessLease {
         preparation: &HlsTerminalTailPreparation,
         now_ms: u64,
     ) -> Result<(), HlsTerminalCommitOutcome> {
+        if !preparation.trigger.is_runtime_policy() && !preparation.reserve.is_exhausted() {
+            return Err(HlsTerminalCommitOutcome::CutoverNoLongerRequired);
+        }
         match preparation.runtime_policy_revocation.as_ref() {
             Some(revocation) => {
                 self.runtime_policy_tail_commit_preconditions_match(proxy_session_id, preparation, revocation)
@@ -256,6 +259,19 @@ impl HlsAccessLeaseStore {
     ) -> HlsTerminalCommitOutcome {
         if !plan.matches_route(proxy_session_id, lease_id)
             || plan.generation.0 != preparation.decision_generation
+            || (!preparation.trigger.is_runtime_policy()
+                && (plan.base_manifest.last_proxy_seq != preparation.manifest_snapshot.last_proxy_seq
+                    || plan
+                        .base_manifest
+                        .visible_segments
+                        .last()
+                        .zip(preparation.manifest_snapshot.visible_segments.last())
+                        .is_none_or(|(actual, expected)| {
+                            actual.proxy_seq != expected.proxy_seq
+                                || actual.uri != expected.uri
+                                || actual.duration_ms != expected.duration_ms
+                                || actual.encryption != expected.encryption
+                        })))
             || plan.base_manifest.snapshot_generation != preparation.manifest_snapshot_generation
         {
             return HlsTerminalCommitOutcome::SupersededGeneration;
@@ -298,40 +314,15 @@ impl HlsAccessLeaseStore {
         proxy_session_id: &ProxySessionId,
         preparation: &HlsTerminalTailPreparation,
         now_ms: u64,
-        plan: std::sync::Arc<crate::late_custom_response::HlsLateCustomResponsePlan>,
+        plan: &crate::late_custom_response::HlsLateCustomResponsePlan,
     ) -> HlsTerminalCommitOutcome {
-        if !plan.matches_route(proxy_session_id, lease_id)
-            || plan.generation.0 != preparation.decision_generation
-            || plan.manifest_snapshot_generation != preparation.manifest_snapshot_generation
-            || preparation.trigger.is_runtime_policy()
-        {
-            return HlsTerminalCommitOutcome::SupersededGeneration;
-        }
-        if self.refresh_access_lease_validity(lease_id, now_ms).is_err() {
-            return HlsTerminalCommitOutcome::SupersededGeneration;
-        }
-        let Some(lease) = self.by_lease_id.get_mut(lease_id) else {
+        let Some(lease) = self.response_snapshot(lease_id, proxy_session_id, now_ms) else {
             return HlsTerminalCommitOutcome::LeaseNoLongerEligible;
         };
-        if let Some(outcome) = terminal_commit_existing_outcome(lease, proxy_session_id, preparation, now_ms) {
-            return outcome;
-        }
-        if let Err(outcome) = lease.terminal_decision_commit_preconditions_match(proxy_session_id, preparation, now_ms)
-        {
-            return outcome;
-        }
-        if self.availability_evidence_can_advance().is_err() {
+        if lease.issued_at_ms != preparation.lease_issued_at_ms || !plan.matches_route(proxy_session_id, lease_id) {
             return HlsTerminalCommitOutcome::SupersededGeneration;
         }
-        let Some(lease) = self.by_lease_id.get_mut(lease_id) else {
-            return HlsTerminalCommitOutcome::LeaseNoLongerEligible;
-        };
-        lease.admission_generation = preparation.decision_generation;
-        lease.playback_mode = HlsLeasePlaybackMode::TerminalCustomResponse(plan);
-        if self.advance_availability_evidence(proxy_session_id).is_err() {
-            return HlsTerminalCommitOutcome::SupersededGeneration;
-        }
-        HlsTerminalCommitOutcome::Committed
+        HlsTerminalCommitOutcome::BundleIncompatible
     }
 
     pub(crate) fn late_custom_segment_access(

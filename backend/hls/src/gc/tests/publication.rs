@@ -223,6 +223,7 @@ fn garbage_collection_preserves_playback_reserve_and_cutover_deadline() {
     for seq in 0..8 {
         let token = cursor.record_request_started(seq, 1_000 + seq * 10_000);
         let token = cursor.bind_request_timing(token, &session.segments[&seq]);
+        cursor.record_transfer_started(token, 1_000 + seq * 10_000);
         let _ = cursor.record_request_completed(token, 1_000 + seq * 10_000);
     }
     let manifest = HlsLeaseManifestSnapshot {
@@ -261,7 +262,6 @@ fn garbage_collection_preserves_playback_reserve_and_cutover_deadline() {
             cursor: &cursor,
             ready_timeline: &timeline,
             now_ms: 71_000,
-            playback_rate_guard_milli: 1_050,
             recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(4_000),
             origin_path_degraded: true,
             recovery_committed: false,
@@ -269,7 +269,7 @@ fn garbage_collection_preserves_playback_reserve_and_cutover_deadline() {
         (timeline.units.len(), reserve)
     };
     let (before_units, before) = evaluate(&session);
-    assert_eq!(before.guaranteed_reserve_ms, 34_500);
+    assert_eq!(before.guaranteed_reserve_ms, 38_000);
     assert!(!ProtectedSet::from_session(&session).segment_proxy_seqs.contains(&0));
     // Run the actual metadata-removal function used by garbage collection.
     assert!(remove_segment_entry(&mut session, 0).is_some());
@@ -282,7 +282,7 @@ fn garbage_collection_preserves_playback_reserve_and_cutover_deadline() {
     assert_eq!(after, before);
     let timing =
         HlsLeaseCutoverTiming::from_reserve(71_000, after.guaranteed_reserve_ms, after.transition_margin, None);
-    assert_eq!(timing.latest_safe_terminal_commit_at.as_millis_since_epoch(), 93_500);
+    assert_eq!(timing.latest_safe_terminal_commit_at.as_millis_since_epoch(), 97_000);
     // Removing the entire historical prefix must keep exactly the same media clock.
     for seq in 1..4 {
         assert!(remove_segment_entry(&mut session, seq).is_some());
@@ -290,7 +290,7 @@ fn garbage_collection_preserves_playback_reserve_and_cutover_deadline() {
     assert_eq!(evaluate(&session).1, before);
     // A real hole in the current READY span must still shorten the reserve.
     assert!(remove_segment_entry(&mut session, 7).is_some());
-    assert_eq!(evaluate(&session).1.guaranteed_reserve_ms, 10_500);
+    assert_eq!(evaluate(&session).1.guaranteed_reserve_ms, 26_000);
 }
 
 fn install_fast_start(session: &mut HlsSession) {
@@ -300,7 +300,6 @@ fn install_fast_start(session: &mut HlsSession) {
     };
     session.startup = Some(crate::HlsSessionStartup {
         config: config.clone(),
-        first_data_timeout_ms: 1_000,
         worker: std::sync::Weak::new(),
         access_leases: Arc::new(RwLock::new(HlsAccessLeaseStore::default())),
         revisions: std::collections::BTreeMap::new(),
@@ -510,6 +509,10 @@ async fn obsolete_metadata_is_removed_only_after_publication_and_reader_protecti
                 view: crate::live_window::HlsLiveWindowView::Entry,
                 published: vec![1],
             },
+        );
+        assert!(
+            ProtectedSet::from_session_for_capacity(&state, Some(u64::MAX)).segment_proxy_seqs.contains(&1),
+            "capacity recovery must retain the lease's last live anchor"
         );
         state.install_terminal_tail_protection(
             lease_id.clone(),

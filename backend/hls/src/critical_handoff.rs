@@ -9,7 +9,7 @@ use super::{
         HlsTerminalTailCompatibilityInput,
     },
     HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseStore, HlsCriticalHandoffStateAccess, HlsLeaseReserveInput,
-    HlsMediaLeaseIdentity, HlsSession, HlsTsTrackSignature, SegmentCacheStatus, HLS_PLAYBACK_RATE_GUARD_MILLI,
+    HlsMediaLeaseIdentity, HlsSession, HlsTsTrackSignature, SegmentCacheStatus,
 };
 use log::{debug, warn};
 use std::{future::Future, sync::Arc};
@@ -88,10 +88,6 @@ struct HlsCriticalHandoffCandidate {
     media_exhaustion_deadline_ms: u64,
 }
 
-fn guarded_playback_wall_time_ms(media_time_ms: u64) -> u64 {
-    media_time_ms.saturating_mul(1_000) / u64::from(HLS_PLAYBACK_RATE_GUARD_MILLI.max(1))
-}
-
 pub(super) fn select_critical_handoff_lease(
     session: &HlsSession,
     leases: &[HlsAccessLease],
@@ -119,7 +115,6 @@ pub(super) fn select_critical_handoff_lease(
                 cursor: &lease.playback_cursor,
                 ready_timeline: &ready_timeline,
                 now_ms,
-                playback_rate_guard_milli: HLS_PLAYBACK_RATE_GUARD_MILLI,
                 recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(0),
                 origin_path_degraded: true,
                 recovery_committed: false,
@@ -131,10 +126,9 @@ pub(super) fn select_critical_handoff_lease(
                 entry.proxy_file_ext.eq_ignore_ascii_case("ts")
                     && matches!(&entry.status, SegmentCacheStatus::Ready { .. })
             })?;
-            let media_exhaustion_deadline_ms =
-                now_ms.saturating_add(guarded_playback_wall_time_ms(reserve.guaranteed_reserve_ms));
-            let safe_cutover_deadline_ms = media_exhaustion_deadline_ms
-                .saturating_sub(guarded_playback_wall_time_ms(reserve.transition_margin.as_millis()));
+            let media_exhaustion_deadline_ms = now_ms.saturating_add(reserve.guaranteed_reserve_ms);
+            let safe_cutover_deadline_ms =
+                media_exhaustion_deadline_ms.saturating_sub(reserve.transition_margin.as_millis());
             Some(HlsCriticalHandoffCandidate {
                 lease: lease.clone(),
                 snapshot: HlsCriticalHandoffSnapshot {

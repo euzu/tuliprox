@@ -1,12 +1,35 @@
 use super::{
-    alternative_cohorts_with_history, evidence::HlsManifestWindowClass, HlsAlternativeOriginCohort,
-    HlsCandidateHostRelation, HlsCommittedContentAnchorEvidence, HlsCrossHostAcceptanceEvidence,
-    HlsHostLocalSequenceRelation, HlsManifestAcceptanceInput, HlsManifestAcceptanceTrigger,
-    HlsManifestCandidateObservation, HlsManifestCommitKind, HlsManifestCommitPlan, HlsSwitchSegmentReadiness,
+    cohorts::alternative_cohorts_with_history_for_selection, evidence::HlsManifestWindowClass,
+    HlsAlternativeOriginCohort, HlsCandidateHostRelation, HlsCommittedContentAnchorEvidence,
+    HlsCrossHostAcceptanceEvidence, HlsHostLocalSequenceRelation, HlsManifestAcceptanceInput,
+    HlsManifestAcceptanceTrigger, HlsManifestCandidateObservation, HlsManifestCommitKind, HlsManifestCommitPlan,
+    HlsSwitchSegmentReadiness,
 };
 
 pub fn evaluate_manifest_acceptance(input: HlsManifestAcceptanceInput<'_>) -> HlsManifestCommitPlan {
-    let pinned = preferred_pinned_candidate(input);
+    if input.preferred_min_target_duration_secs.is_some() {
+        let preferred = evaluate_with_preference(input, true);
+        if matches!(preferred, HlsManifestCommitPlan::Commit { .. } | HlsManifestCommitPlan::StageAlternative { .. }) {
+            return preferred;
+        }
+    }
+    evaluate_with_preference(input, false)
+}
+
+fn candidate_selectable(
+    input: HlsManifestAcceptanceInput<'_>,
+    candidate: &HlsManifestCandidateObservation,
+    preferred_only: bool,
+) -> bool {
+    !input.excluded_candidates.contains(&candidate.candidate_index)
+        && (!preferred_only
+            || input.preferred_min_target_duration_secs.is_none_or(|minimum| {
+                candidate.target_duration_secs.is_some_and(|duration| u64::from(duration) >= minimum.get())
+            }))
+}
+
+fn evaluate_with_preference(input: HlsManifestAcceptanceInput<'_>, preferred_only: bool) -> HlsManifestCommitPlan {
+    let pinned = preferred_pinned_candidate(input, preferred_only);
     if let Some(candidate) =
         pinned.filter(|candidate| candidate.timeline_fingerprint.window_class() == HlsManifestWindowClass::Regular)
     {
@@ -21,21 +44,23 @@ pub fn evaluate_manifest_acceptance(input: HlsManifestAcceptanceInput<'_>) -> Hl
         };
     }
 
-    let cohorts = alternative_cohorts_with_history(
+    let cohorts = alternative_cohorts_with_history_for_selection(
         input.observations,
         input.previous_alternative,
         input.current_burst_is_full_plan,
+        preferred_only.then_some(input.preferred_min_target_duration_secs).flatten(),
+        input.excluded_candidates,
     );
     // Exhaust all existing evidence rules for regular windows before considering
     // short fallbacks. Short observations remain available as timeline anchors.
     for window_class in [HlsManifestWindowClass::Regular, HlsManifestWindowClass::Short] {
-        if let Some(initial) = initial_baseline_candidate(input.observations, window_class) {
+        if let Some(initial) = initial_baseline_candidate(input, window_class, preferred_only) {
             return pinned_commit(initial);
         }
         if let Some(candidate) = pinned.filter(|_| window_class == HlsManifestWindowClass::Short) {
             return pinned_commit(candidate);
         }
-        if let Some(plan) = qualified_alternative_plan(input, &cohorts, window_class) {
+        if let Some(plan) = qualified_alternative_plan(input, &cohorts, window_class, preferred_only) {
             return plan;
         }
     }
@@ -50,10 +75,19 @@ fn qualified_alternative_plan(
     input: HlsManifestAcceptanceInput<'_>,
     cohorts: &[HlsAlternativeOriginCohort],
     window_class: HlsManifestWindowClass,
+    preferred_only: bool,
 ) -> Option<HlsManifestCommitPlan> {
+    let selectable = |cohort: &HlsAlternativeOriginCohort| {
+        cohort.window.fingerprint.window_class() == window_class
+            && input
+                .observations
+                .iter()
+                .find(|candidate| candidate.candidate_index == cohort.best_candidate_index)
+                .is_some_and(|candidate| candidate_selectable(input, candidate, preferred_only))
+    };
     if let Some(cohort) = cohorts
         .iter()
-        .filter(|cohort| cohort.window.fingerprint.window_class() == window_class)
+        .filter(|cohort| selectable(cohort))
         .find(|cohort| matches!(cohort.evidence, HlsCrossHostAcceptanceEvidence::StrongTimelineAnchor { .. }))
     {
         return Some(alternative_plan(
@@ -69,6 +103,7 @@ fn qualified_alternative_plan(
             input
                 .observations
                 .iter()
+                .filter(|candidate| candidate_selectable(input, candidate, preferred_only))
                 .filter(|candidate| candidate.host_relation == HlsCandidateHostRelation::OtherHost)
                 .filter(|candidate| candidate.timeline_fingerprint.window_class() == window_class)
                 .filter(|candidate| candidate.resource_timeline_evidence.permits_acceptance())
@@ -89,12 +124,10 @@ fn qualified_alternative_plan(
     }
 
     if input.trigger.recovery_required() {
-        if let Some(cohort) =
-            cohorts.iter().filter(|cohort| cohort.window.fingerprint.window_class() == window_class).find(|cohort| {
-                matches!(cohort.evidence, HlsCrossHostAcceptanceEvidence::BurstConsensusNewEpoch { .. })
-                    || cohort.consecutive_confirmed_full_bursts >= 2
-            })
-        {
+        if let Some(cohort) = cohorts.iter().filter(|cohort| selectable(cohort)).find(|cohort| {
+            matches!(cohort.evidence, HlsCrossHostAcceptanceEvidence::BurstConsensusNewEpoch { .. })
+                || cohort.consecutive_confirmed_full_bursts >= 2
+        }) {
             return Some(alternative_plan(
                 input.observations,
                 cohort.best_candidate_index,
@@ -104,8 +137,8 @@ fn qualified_alternative_plan(
     }
 
     if input.trigger == HlsManifestAcceptanceTrigger::Critical {
-        if let Some(cohort) = critical_single_candidate_cohort(cohorts, input.observations)
-            .filter(|cohort| cohort.window.fingerprint.window_class() == window_class)
+        if let Some(cohort) =
+            critical_single_candidate_cohort(cohorts, input.observations).filter(|cohort| selectable(cohort))
         {
             return Some(alternative_plan(
                 input.observations,
@@ -158,17 +191,19 @@ fn alternative_plan(
     }
 }
 
-fn best_pinned_candidates(
-    observations: &[HlsManifestCandidateObservation],
-    full_burst_completed: bool,
-) -> (Option<&HlsManifestCandidateObservation>, Option<&HlsManifestCandidateObservation>) {
+fn best_pinned_candidates<'a>(
+    observations: &'a [HlsManifestCandidateObservation],
+    input: HlsManifestAcceptanceInput<'_>,
+    preferred_only: bool,
+) -> (Option<&'a HlsManifestCandidateObservation>, Option<&'a HlsManifestCandidateObservation>) {
     let mut progressed = None;
     let mut unchanged = None;
     for candidate in observations.iter().filter(|candidate| {
-        candidate.host_relation == HlsCandidateHostRelation::PinnedHost
+        candidate_selectable(input, candidate, preferred_only)
+            && candidate.host_relation == HlsCandidateHostRelation::PinnedHost
             && candidate.resource_timeline_evidence.permits_acceptance()
             && candidate.timeline_fingerprint.window_class() != HlsManifestWindowClass::Empty
-            && (full_burst_completed
+            && (input.full_burst_completed
                 || candidate.timeline_fingerprint.window_class() == HlsManifestWindowClass::Regular)
     }) {
         match candidate.local_sequence_relation {
@@ -223,21 +258,27 @@ fn has_stageable_alternative(observations: &[HlsManifestCandidateObservation]) -
 }
 
 fn initial_baseline_candidate(
-    observations: &[HlsManifestCandidateObservation],
+    input: HlsManifestAcceptanceInput<'_>,
     window_class: HlsManifestWindowClass,
+    preferred_only: bool,
 ) -> Option<&HlsManifestCandidateObservation> {
-    observations
+    input
+        .observations
         .iter()
         .filter(|candidate| {
-            candidate.host_relation == HlsCandidateHostRelation::InitialBaseline
+            candidate_selectable(input, candidate, preferred_only)
+                && candidate.host_relation == HlsCandidateHostRelation::InitialBaseline
                 && candidate.resource_timeline_evidence.permits_acceptance()
                 && candidate.timeline_fingerprint.window_class() == window_class
         })
         .min_by_key(|candidate| (candidate.manifest_fetch_elapsed_ms, candidate.candidate_index))
 }
 
-fn preferred_pinned_candidate(input: HlsManifestAcceptanceInput<'_>) -> Option<&HlsManifestCandidateObservation> {
-    let (progressed_pinned, unchanged_pinned) = best_pinned_candidates(input.observations, input.full_burst_completed);
+fn preferred_pinned_candidate(
+    input: HlsManifestAcceptanceInput<'_>,
+    preferred_only: bool,
+) -> Option<&HlsManifestCandidateObservation> {
+    let (progressed_pinned, unchanged_pinned) = best_pinned_candidates(input.observations, input, preferred_only);
     let eligible_unchanged = (!input.trigger.recovery_required()).then_some(unchanged_pinned).flatten();
     progressed_pinned
         .filter(|candidate| candidate.timeline_fingerprint.window_class() == HlsManifestWindowClass::Regular)

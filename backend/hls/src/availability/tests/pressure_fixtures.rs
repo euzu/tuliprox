@@ -69,7 +69,6 @@ pub(super) fn evaluated_pressure(
         cursor: &HlsLeasePlaybackCursor::default(),
         ready_timeline: &ready_timeline,
         now_ms: 100,
-        playback_rate_guard_milli: HLS_PLAYBACK_RATE_GUARD_MILLI,
         recovery_trigger_budget,
         origin_path_degraded: true,
         recovery_committed: false,

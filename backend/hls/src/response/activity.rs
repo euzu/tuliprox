@@ -33,6 +33,7 @@ impl HlsMediaActivityMarker {
                             &marker.lease_id,
                             &marker.proxy_session_id,
                             marker.lease_identity,
+                            marker.completed_segment,
                             current_time_millis(),
                         )
                         .await;

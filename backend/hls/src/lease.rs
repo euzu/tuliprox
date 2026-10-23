@@ -98,6 +98,7 @@ pub enum HlsAccessLeaseDenialOutcome {
 /// Explains why a canonical HLS request required a newly committed manifest.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsFreshManifestRequiredReason {
+    OriginReserveExhausted,
     ColdStart,
     ExpiredRevalidation,
     PreviousHardManifestFailure,
@@ -121,6 +122,7 @@ pub enum HlsAccessLeasePendingDeadline {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsAccessLease {
+    pub manifest_start_attempt: Option<Arc<crate::manifest_fetch::HlsManifestAttemptContext>>,
     pub lease_id: HlsAccessLeaseId,
     pub family_key: HlsPlaybackFamilyKey,
     pub proxy_session_id: ProxySessionId,
@@ -188,6 +190,7 @@ pub enum HlsLeaseManifestPublicationRejectReason {
     LeaseNotLive,
     SourceRegressive,
     ManifestGenerationUnavailable,
+    SnapshotChanged,
     RevisionConflict,
     SnapshotGenerationExhausted,
 }
@@ -269,6 +272,7 @@ pub struct HlsAccessLeaseRemovalPreparation {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum HlsAccessLeaseActivation {
+    AvailabilityPending,
     Activated { lease: Box<HlsAccessLease>, previous_state: HlsAccessLeaseState },
     Expired,
     Denied,

@@ -101,7 +101,7 @@ async fn accepted_manifest_commit_stores_provider_session_cookie_separately() {
 
 #[tokio::test]
 async fn provider_failover_status_does_not_count_as_hls_retry() {
-    let first = spawn_test_origin(Arc::new(|_path| (407, Vec::new(), "rotate".to_string()))).await;
+    let first = spawn_test_origin(Arc::new(|_path| (503, Vec::new(), "rotate".to_string()))).await;
     let second = spawn_test_origin(Arc::new(|_path| (200, Vec::new(), three_segment_manifest_body(100)))).await;
     let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
         name: "demo".into(),
@@ -119,6 +119,8 @@ async fn provider_failover_status_does_not_count_as_hls_retry() {
     .expect("provider entry url");
     let segment_worker_pool = Arc::new(HlsSegmentWorkerPool::default());
     let request = OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: test_app_config(),
         session: Arc::clone(&session),
         origin_entry: entry.clone(),
@@ -280,7 +282,7 @@ async fn recovery_binding_supersession_is_discarded_without_failure_signal() {
     assert_eq!(origin.requests.lock().await.len(), requests_before_supersession);
 
     let Err(error) = super::super::recover_manifest_for_request(
-        &manifest_fetch_context(&verification_request),
+        &manifest_fetch_context(&verification_request, None),
         &verification_request,
         super::super::HlsManifestRecoveryPath {
             binding: baseline_binding,
@@ -300,7 +302,7 @@ async fn recovery_binding_supersession_is_discarded_without_failure_signal() {
 
 #[tokio::test]
 async fn provider_failover_initial_success_commits_without_hls_host_retry_when_unpinned() {
-    let first = spawn_test_origin(Arc::new(|_path| (407, Vec::new(), "rotate".to_string()))).await;
+    let first = spawn_test_origin(Arc::new(|_path| (503, Vec::new(), "rotate".to_string()))).await;
     let second_hits = Arc::new(AtomicUsize::new(0));
     let second_hits_for_handler = Arc::clone(&second_hits);
     let second = spawn_test_origin(Arc::new(move |_path| {
@@ -332,6 +334,8 @@ async fn provider_failover_initial_success_commits_without_hls_host_retry_when_u
     )
     .expect("provider entry url");
     let request = OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: test_app_config(),
         session: Arc::clone(&session),
         origin_entry: entry.clone(),

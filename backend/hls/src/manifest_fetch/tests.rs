@@ -11,7 +11,7 @@ use super::{
     fetch::cap_manifest_retry_after_ms,
     fingerprint::{
         build_manifest_timeline_fingerprint, deterministic_conflict_fingerprint,
-        deterministic_timeline_conflict_from_rejection,
+        deterministic_timeline_conflict_from_rejection, HlsManifestCandidateFingerprint,
     },
     http::{
         fetch_origin_manifest_once, origin_manifest_content_coding_error, origin_manifest_fetch_error_from_io_error,
@@ -66,22 +66,42 @@ fn hls_recovery_timing_deadline_never_abandons_started_full_burst_but_blocks_lat
 }
 
 #[test]
-fn requalification_in_last_retry_slot_reserves_exactly_one_mandatory_full_burst() {
-    assert_eq!(attempt_limit_for_started_requalification(5, 1), 5);
-    assert_eq!(attempt_limit_for_started_requalification(5, 4), 6);
-    assert_eq!(attempt_limit_for_started_requalification(usize::MAX, usize::MAX), usize::MAX);
+fn requalification_full_burst_never_extends_the_logical_budget() {
+    assert_eq!(attempt_limit_for_started_requalification(2, 1, 5), 3);
+    assert_eq!(attempt_limit_for_started_requalification(5, 1, 5), 5);
+    assert_eq!(attempt_limit_for_started_requalification(5, 4, 5), 5);
+    assert_eq!(attempt_limit_for_started_requalification(usize::MAX, usize::MAX, 5), 5);
 }
 
 #[test]
 fn encrypted_normal_candidate_is_not_critical_emergency_handoff_evidence() {
     let encrypted =
         "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n";
-    let (_, has_switch_segment, evidence) =
+    let HlsManifestCandidateFingerprint { has_switch_segment, emergency_evidence: evidence, .. } =
         build_manifest_timeline_fingerprint(encrypted, "http://origin.example/live/index.m3u8");
 
     assert!(has_switch_segment);
     assert_eq!(evidence.live_handoff, HlsEmergencyLiveHandoffCompatibility::Incompatible);
     assert_eq!(evidence.terminal_alternative, HlsTerminalAlternativeCompatibility::TerminalTailPreferred);
+}
+
+#[test]
+fn candidate_fingerprint_carries_only_positive_normal_rolling_target_duration() {
+    let manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:0.640,\nsegment.ts\n";
+    for (body, expected) in [
+        (manifest.to_string(), Some(6)),
+        (manifest.replace("DURATION:6", "DURATION:0"), None),
+        (manifest.replace("DURATION:6", "DURATION:invalid"), None),
+        (manifest.replace("#EXT-X-TARGETDURATION:6\n", ""), None),
+        (format!("{manifest}#EXT-X-ENDLIST\n"), None),
+        (format!("{manifest}#EXT-X-PLAYLIST-TYPE:EVENT\n"), None),
+        (format!("{manifest}#EXT-X-PLAYLIST-TYPE:VOD\n"), None),
+        (format!("{manifest}#EXT-X-PLAYLIST-TYPE:UNKNOWN\n"), None),
+        (manifest.replace("#EXTINF:0.640,", "#EXT-X-GAP\n#EXTINF:0.640,"), None),
+    ] {
+        let fingerprint = build_manifest_timeline_fingerprint(&body, "https://origin.example/live/index.m3u8");
+        assert_eq!(fingerprint.target_duration_secs, expected, "{body}");
+    }
 }
 
 #[test]
@@ -105,9 +125,9 @@ fn timeline_fingerprint_is_structured_and_ignores_origin_host_and_query_tokens()
         .replace("secret-a", "secret-b")
         .replace("#EXT-X-TARGETDURATION:4", "#EXT-X-TARGETDURATION:9");
 
-    let (fingerprint_a, has_media_a, _) =
+    let HlsManifestCandidateFingerprint { timeline: fingerprint_a, has_switch_segment: has_media_a, .. } =
         build_manifest_timeline_fingerprint(manifest_a, "https://origin-a.example/live/index.m3u8");
-    let (fingerprint_b, has_media_b, _) =
+    let HlsManifestCandidateFingerprint { timeline: fingerprint_b, has_switch_segment: has_media_b, .. } =
         build_manifest_timeline_fingerprint(&manifest_b, "https://origin-b.example/live/index.m3u8");
 
     assert!(has_media_a);
@@ -145,8 +165,8 @@ fn rotating_volatile_parent_has_one_semantic_conflict_fingerprint() {
         deterministic_conflict_fingerprint(&parsed_b, &body_b, "https://origin-b.example/live/index.m3u8")
     );
     assert_ne!(
-        build_manifest_timeline_fingerprint(body_a, "https://origin-a.example/live/index.m3u8").0,
-        build_manifest_timeline_fingerprint(&body_b, "https://origin-b.example/live/index.m3u8").0,
+        build_manifest_timeline_fingerprint(body_a, "https://origin-a.example/live/index.m3u8").timeline,
+        build_manifest_timeline_fingerprint(&body_b, "https://origin-b.example/live/index.m3u8").timeline,
         "ordinary origin-acceptance fingerprint remains exact-path based"
     );
 }
@@ -175,7 +195,7 @@ fn resource_timeline_evidence_rejects_replay_after_new_even_with_forward_sequenc
     let replay_only = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n484.ts\n";
     let prefix_then_new = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n484.ts\n#EXTINF:4,\n490.ts\n";
     let new_then_replay = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n490.ts\n#EXTINF:4,\n484.ts\n";
-    let fingerprint = |body| build_manifest_timeline_fingerprint(body, "https://new.example/live/index.m3u8").0;
+    let fingerprint = |body| build_manifest_timeline_fingerprint(body, "https://new.example/live/index.m3u8").timeline;
 
     assert_eq!(
         candidate_resource_timeline_evidence(&fingerprint(replay_only), &[published]),
@@ -253,12 +273,14 @@ fn timeline_fingerprint_distinguishes_technical_state_and_keeps_compatible_aes_m
     let mapped = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n\
         #EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\n1.m4s\n";
 
-    let (clear, _, _) = build_manifest_timeline_fingerprint(clear_ts, "https://origin.example/live/index.m3u8");
-    let (discontinuous, _, _) =
+    let HlsManifestCandidateFingerprint { timeline: clear, .. } =
+        build_manifest_timeline_fingerprint(clear_ts, "https://origin.example/live/index.m3u8");
+    let HlsManifestCandidateFingerprint { timeline: discontinuous, .. } =
         build_manifest_timeline_fingerprint(discontinuous_ts, "https://origin.example/live/index.m3u8");
-    let (encrypted, encrypted_has_media, _) =
+    let HlsManifestCandidateFingerprint { timeline: encrypted, has_switch_segment: encrypted_has_media, .. } =
         build_manifest_timeline_fingerprint(encrypted_ts, "https://origin.example/live/index.m3u8");
-    let (mapped, _, _) = build_manifest_timeline_fingerprint(mapped, "https://origin.example/live/index.m3u8");
+    let HlsManifestCandidateFingerprint { timeline: mapped, .. } =
+        build_manifest_timeline_fingerprint(mapped, "https://origin.example/live/index.m3u8");
 
     assert_ne!(clear.discontinuity_pattern_hash, discontinuous.discontinuity_pattern_hash);
     assert_ne!(clear.map_and_encryption_hash, encrypted.map_and_encryption_hash);

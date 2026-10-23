@@ -45,6 +45,7 @@ where
         },
     };
     let clients = HlsOriginResourceClients {
+        session: Some(context.session.clone()),
         client: context.client.clone(),
         no_redirect_client: context.no_redirect_client.clone(),
         use_manual_redirects: context.use_manual_redirects,

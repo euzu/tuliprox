@@ -5,7 +5,7 @@
 //! timing seed the acceptance episode starts from. Committed back onto the
 //! session under a CAS loop, so a concurrent refresh cannot lose the decision.
 
-use super::{hls_recovery_timing_policy, HLS_PLAYBACK_RATE_GUARD_MILLI};
+use super::hls_recovery_timing_policy;
 use crate::{
     hls_ctx::HlsCtx,
     lease::HlsAccessLeaseStore,
@@ -89,10 +89,11 @@ pub(super) fn recovery_trigger_budget(
 pub(super) fn hls_recovery_pressure_policy(
     manager: &HlsProxyManager,
     origin_manifest_timeout_ms: u64,
+    target_duration: Option<u32>,
 ) -> HlsRecoveryPressurePolicy {
     HlsRecoveryPressurePolicy {
         burst_plan: manager.manifest_recovery_burst().level.plan(),
-        timing: hls_recovery_timing_policy(manager, origin_manifest_timeout_ms),
+        timing: hls_recovery_timing_policy(manager, origin_manifest_timeout_ms, target_duration),
     }
 }
 
@@ -206,13 +207,12 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
             now_ms,
         );
         let recovery_trigger_budget =
-            recovery_trigger_budget(policy, manifest.target_duration_ms, workload, observed_latency);
+            recovery_trigger_budget(policy, publication_target_duration_ms, workload, observed_latency);
         let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
             manifest,
             cursor: &lease.playback_cursor,
             ready_timeline: &ready_timeline,
             now_ms,
-            playback_rate_guard_milli: HLS_PLAYBACK_RATE_GUARD_MILLI,
             recovery_trigger_budget,
             origin_path_degraded: effective_origin_degraded,
             recovery_committed: false,
@@ -226,7 +226,7 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
             reserve,
             cursor: lease.playback_cursor.clone(),
             workload,
-            target_duration_ms: manifest.target_duration_ms,
+            target_duration_ms: publication_target_duration_ms,
             latest_safe_terminal_commit_at: cutover_timing.latest_safe_terminal_commit_at,
             recovery_boundary_slack_ms: HlsRecoveryBoundarySlackMs::from_reserve_and_boundary(
                 reserve.guaranteed_reserve_ms,

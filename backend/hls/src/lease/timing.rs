@@ -29,6 +29,7 @@ impl HlsAccessLease {
         valid_window_ms: u64,
     ) -> Self {
         Self {
+            manifest_start_attempt: None,
             lease_id,
             family_key,
             proxy_session_id,

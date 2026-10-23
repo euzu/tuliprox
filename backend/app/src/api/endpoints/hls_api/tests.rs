@@ -92,6 +92,7 @@ mod late_custom_response;
 mod lease_lifecycle;
 mod manifest_entry_freshness;
 mod manifest_live_window;
+mod manifest_reservation_retry;
 mod manifest_revision_recovery;
 mod manifest_short_window;
 mod manifest_startup;

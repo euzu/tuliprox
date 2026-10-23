@@ -560,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn early_process_exit_does_not_wait_for_the_readiness_deadline() {
         let config = BootstrapConfig {
-            command: "/bin/false".to_owned(),
+            command: "false".to_owned(),
             arguments: Vec::new(),
             readiness_url: "http://127.0.0.1:1/ready".to_owned(),
             readiness_timeout_millis: 5_000,

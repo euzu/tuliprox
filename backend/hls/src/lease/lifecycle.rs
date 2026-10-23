@@ -88,6 +88,10 @@ impl HlsAccessLease {
 
     pub(super) fn end_playback(&mut self) {
         self.runtime_policy_revocation = None;
+        self.revision_bindings = None;
+        if let Some(snapshot) = self.last_manifest_snapshot.as_mut() {
+            snapshot.startup_revisions = None;
+        }
         let release_generation = match std::mem::replace(&mut self.playback_mode, HlsLeasePlaybackMode::Ended) {
             HlsLeasePlaybackMode::TerminalTail(plan) => Some(plan.generation),
             HlsLeasePlaybackMode::TerminalUnavailable { decision_generation, .. } => {
@@ -108,6 +112,51 @@ impl HlsAccessLeaseActivation {
 }
 
 impl HlsAccessLeaseStore {
+    pub(crate) fn manifest_attempt_context(
+        &mut self,
+        lease_id: Option<&HlsAccessLeaseId>,
+        requirement: crate::HlsManifestCommitRequirement,
+        current: Option<std::sync::Arc<crate::manifest_fetch::HlsManifestAttemptContext>>,
+        revalidation_generation: Option<u64>,
+        now_ms: u64,
+    ) -> std::sync::Arc<crate::manifest_fetch::HlsManifestAttemptContext> {
+        let lease = lease_id.and_then(|id| self.by_lease_id.get_mut(id));
+        let active_live = lease.as_ref().is_some_and(|lease| {
+            lease.state == HlsAccessLeaseState::Activated
+                && lease.active_until_ms.is_some_and(|until| until > now_ms)
+                && lease.playback_mode == HlsLeasePlaybackMode::Live
+                && lease.last_manifest_snapshot.is_some()
+        });
+        if let Some(attempt) = lease
+            .as_ref()
+            .filter(|_| !active_live)
+            .and_then(|lease| lease.manifest_start_attempt.as_ref())
+            .filter(|attempt| attempt.failed() || !attempt.is_closed())
+        {
+            return std::sync::Arc::clone(attempt);
+        }
+        let attempt = current
+            .filter(|attempt| {
+                !attempt.is_closed()
+                    && (requirement == crate::HlsManifestCommitRequirement::CommittedManifestAllowed
+                        || attempt.requirement != crate::HlsManifestCommitRequirement::CommittedManifestAllowed)
+                    && (attempt.requirement != crate::HlsManifestCommitRequirement::CommittedManifestAllowed
+                        || attempt.active_live_playback == active_live)
+                    && attempt.revalidation_generation == revalidation_generation
+            })
+            .unwrap_or_else(|| {
+                std::sync::Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+                    requirement,
+                    active_live,
+                    revalidation_generation,
+                ))
+            });
+        if let Some(lease) = lease.filter(|_| !active_live) {
+            lease.manifest_start_attempt = Some(std::sync::Arc::clone(&attempt));
+        }
+        attempt
+    }
+
     pub fn repair_prewarm_is_current(
         &self,
         lease_id: &HlsAccessLeaseId,
@@ -341,6 +390,31 @@ impl HlsAccessLeaseStore {
             .collect()
     }
 
+    /// A valid idle lease can still be consuming its previously available
+    /// media. The terminal observer must survive a pause in playlist polls.
+    pub(crate) fn terminal_playback_snapshots_for_session(
+        &mut self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Vec<HlsAccessLease> {
+        if self.refresh_access_lease_validities_for_session(proxy_session_id, now_ms).is_err() {
+            return Vec::new();
+        }
+        self.by_lease_id
+            .values()
+            .filter(|lease| {
+                lease.proxy_session_id == *proxy_session_id
+                    && ((lease.state == HlsAccessLeaseState::Activated
+                        && lease.active_until_ms.is_some_and(|until| until > now_ms))
+                        || (matches!(lease.state, HlsAccessLeaseState::Activated | HlsAccessLeaseState::Idle)
+                            && lease.playback_cursor.first_segment_started_at_ms.is_some()))
+                    && lease.playback_mode == HlsLeasePlaybackMode::Live
+                    && lease.last_manifest_snapshot.is_some()
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn record_segment_request_started_if_identity_matches(
         &mut self,
         lease_id: &HlsAccessLeaseId,
@@ -388,6 +462,31 @@ impl HlsAccessLeaseStore {
             requested_at_ms,
         )?;
         Some(self.by_lease_id.get_mut(lease_id)?.playback_cursor.bind_request_timing(token, segment))
+    }
+
+    pub fn record_segment_transfer_started_if_identity_matches(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        expected: HlsMediaLeaseIdentity,
+        token: HlsPlaybackRequestToken,
+        started_at_ms: u64,
+    ) -> Option<bool> {
+        if !expected.is_live() || !self.media_identity_is_current(lease_id, proxy_session_id, expected, started_at_ms) {
+            return None;
+        }
+        let mut cursor = self.by_lease_id.get(lease_id)?.playback_cursor.clone();
+        let previous_generation = cursor.cursor_generation;
+        if !cursor.record_transfer_started(token, started_at_ms) {
+            return None;
+        }
+        let changed = cursor.cursor_generation != previous_generation;
+        if changed {
+            self.availability_evidence_can_advance().ok()?;
+            self.by_lease_id.get_mut(lease_id)?.playback_cursor = cursor;
+            self.advance_availability_evidence(proxy_session_id).ok()?;
+        }
+        Some(changed)
     }
 
     pub fn record_segment_request_completed_if_identity_matches(
@@ -488,6 +587,11 @@ impl HlsAccessLeaseStore {
         };
         if new_lease.state == HlsAccessLeaseState::Expired {
             return HlsAccessLeaseActivation::Expired;
+        }
+        if new_lease.playback_mode == HlsLeasePlaybackMode::Live
+            && new_lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+        {
+            return HlsAccessLeaseActivation::AvailabilityPending;
         }
         let previous_state = new_lease.state;
         let active_until_ms = Some(now_ms.saturating_add(timing.active_window_ms));

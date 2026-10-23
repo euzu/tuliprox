@@ -1,4 +1,4 @@
-use super::error::{HlsManifestAcceptanceRejectReason, HlsManifestRejectLogReason};
+use super::error::{HlsManifestAcceptanceRejectReason, HlsManifestRejectLogReason, OriginManifestFetchError};
 use crate::{
     recovery_timing::{HlsAcceptanceEpisodeTimingSeed, HlsRecoveryTimingPolicy},
     session_store::HlsSessionHandle,
@@ -7,11 +7,99 @@ use crate::{
 use axum::http::{HeaderMap, StatusCode};
 use reqwest::Client;
 use shared::model::InputFetchMethod;
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tuliprox_core::model::{AppConfig, ConfigProvider, HlsManifestRecoveryBurstConfig, InputSource, ProviderConfig};
 use url::Url;
 
 pub(super) const DEFAULT_HLS_TARGET_DURATION_SECS: u32 = 15;
+
+/// One logical client attempt, shared by fetch, qualification and availability owners.
+/// Its original playback contract cannot be weakened by a later qualification.
+#[derive(Debug)]
+pub struct HlsManifestAttemptContext {
+    pub requirement: crate::HlsManifestCommitRequirement,
+    pub active_live_playback: bool,
+    pub revalidation_generation: Option<u64>,
+    attempts: AtomicUsize,
+    closed: AtomicBool,
+    failed: AtomicBool,
+    admission_backoff_paid: AtomicBool,
+}
+
+impl PartialEq for HlsManifestAttemptContext {
+    fn eq(&self, other: &Self) -> bool { std::ptr::eq(self, other) }
+}
+impl Eq for HlsManifestAttemptContext {}
+
+impl HlsManifestAttemptContext {
+    pub fn new(
+        requirement: crate::HlsManifestCommitRequirement,
+        active_live_playback: bool,
+        revalidation_generation: Option<u64>,
+    ) -> Self {
+        Self {
+            requirement,
+            active_live_playback,
+            revalidation_generation,
+            attempts: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            admission_backoff_paid: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_closed(&self) -> bool { self.closed.load(Ordering::Acquire) }
+    pub fn failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
+    pub fn finish(&self, failed: bool) {
+        self.failed.store(failed, Ordering::Release);
+        self.closed.store(true, Ordering::Release);
+    }
+    pub fn permits_407_retry(&self) -> bool {
+        self.requirement == crate::HlsManifestCommitRequirement::CommittedManifestAllowed && self.active_live_playback
+    }
+    pub fn logical_attempts(&self) -> usize { self.attempts.load(Ordering::Acquire) }
+
+    pub fn remaining_attempts(&self) -> usize {
+        RetryPolicy::default().attempt_count().saturating_sub(self.logical_attempts())
+    }
+
+    pub(crate) fn begin_logical_attempt(&self) -> bool {
+        let started = !self.is_closed()
+            && self
+                .attempts
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    (used < RetryPolicy::default().attempt_count()).then_some(used + 1)
+                })
+                .is_ok();
+        if started {
+            self.admission_backoff_paid.store(false, Ordering::Release);
+        }
+        started
+    }
+    pub(crate) fn mark_admission_backoff_paid(&self) { self.admission_backoff_paid.store(true, Ordering::Release); }
+    pub(super) fn admission_backoff_paid(&self) -> bool { self.admission_backoff_paid.load(Ordering::Acquire) }
+    pub(crate) fn classify_error(&self, error: OriginManifestFetchError) -> OriginManifestFetchError {
+        let error = match error {
+            OriginManifestFetchError::RetryableStatus(StatusCode::PROXY_AUTHENTICATION_REQUIRED, _)
+                if !self.permits_407_retry() =>
+            {
+                OriginManifestFetchError::NonRetryableStatus(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+            }
+            error => error,
+        };
+        if crate::refresh::failure::manifest_hard_fetch_error(&error) {
+            self.finish(true);
+        }
+        error
+    }
+}
 
 const DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
 pub(super) const HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT: usize = 64;
@@ -187,6 +275,35 @@ pub enum HlsManifestFetchSelection {
     Burst,
 }
 
+/// Work performed by a recovery chain, including chains that selected no manifest.
+#[derive(Default)]
+pub(crate) struct HlsManifestRecoveryDiagnostics {
+    attempts: usize,
+    candidate_requests: usize,
+    selection: Option<HlsManifestFetchSelection>,
+}
+
+impl HlsManifestRecoveryDiagnostics {
+    pub(super) const fn candidate_requests(&self) -> usize { self.candidate_requests }
+
+    pub(super) fn record_attempt(&mut self, attempts: usize, candidate_requests: usize, burst: bool) {
+        self.attempts = attempts;
+        self.candidate_requests = self.candidate_requests.saturating_add(candidate_requests);
+        self.selection =
+            Some(if burst { HlsManifestFetchSelection::Burst } else { HlsManifestFetchSelection::Recovery });
+    }
+
+    pub(crate) fn include_initial_fetch(&self, initial: &FetchedOriginManifest, selected: &mut FetchedOriginManifest) {
+        selected.attempts = if self.selection.is_some() {
+            self.attempts.saturating_add(initial.attempts.saturating_sub(1))
+        } else {
+            initial.attempts
+        };
+        selected.candidate_requests = self.candidate_requests.saturating_add(initial.candidate_requests);
+        selected.selection = self.selection.unwrap_or(initial.selection);
+    }
+}
+
 impl HlsManifestFetchSelection {
     pub const fn as_log_value(self) -> &'static str {
         match self {
@@ -238,6 +355,9 @@ impl FetchedOriginManifest {
 
 #[derive(Clone)]
 pub struct HlsOriginManifestFetchContext {
+    /// Identity captured by the refresh owner; retries must not send an obsolete entry URL.
+    pub origin_account_snapshot: Option<crate::origin_account_runtime::HlsOriginAccountSnapshot>,
+    pub attempt: Option<Arc<HlsManifestAttemptContext>>,
     pub app_config: Arc<AppConfig>,
     pub session: HlsSessionHandle,
     /// Availability owner used to react to failed attempts while the logical fetch is still in flight.
@@ -256,6 +376,33 @@ pub struct HlsOriginManifestFetchContext {
     /// Lease-specific pressure evidence captured before refresh scheduling.
     /// Each started generation freezes its own timing from this seed.
     pub acceptance_timing_seed: Option<HlsAcceptanceEpisodeTimingSeed>,
+}
+
+impl HlsOriginManifestFetchContext {
+    pub(crate) async fn classify_current_error(&self, error: OriginManifestFetchError) -> OriginManifestFetchError {
+        let session = self.session.read().await;
+        if self.origin_account_snapshot.as_ref().is_some_and(|snapshot| !snapshot.matches_session_identity(&session)) {
+            return OriginManifestFetchError::RecoveryUnavailable {
+                reason: super::error::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+            };
+        }
+        // A hard failure closes the shared attempt while its binding is still current.
+        // A handoff cannot interleave between the identity check and that close.
+        match self.attempt.as_ref() {
+            Some(attempt) => attempt.classify_error(error),
+            None => error,
+        }
+    }
+    pub(crate) async fn ensure_current_origin(&self) -> Result<(), OriginManifestFetchError> {
+        if let Some(snapshot) = self.origin_account_snapshot.as_ref() {
+            if !snapshot.matches_session_identity(&*self.session.read().await) {
+                return Err(OriginManifestFetchError::RecoveryUnavailable {
+                    reason: super::error::HlsManifestRecoveryUnavailableReason::BindingSuperseded,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

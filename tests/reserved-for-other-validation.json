@@ -1,0 +1,515 @@
+{
+  "objective": "GOAL.md: begrenzte Erholung nach lokaler HLS-Reservierungsablehnung",
+  "worktree": "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother",
+  "branch": "fix/shls-reserved-for-other",
+  "baseline_head": "7d46aa4b096ad75207a33648f6f8ed58851fb6fa",
+  "validated_at_utc": "2026-10-22T21:57:35.088815+00:00",
+  "status": "review_findings_fixed_and_worker_validation_passed",
+  "design": {
+    "budget": "Ein HlsManifestAttemptContext zählt maximal fünf logische Versuche. Jede lokale Ablehnung zählt einmal. Erfolgreiche Zuteilung zählt nicht; der folgende Fetch oder die Recovery-Burstrunde zählt einmal. Einzelne Burst-Kandidaten und Provider-URL-Failover bleiben innerhalb dieses logischen Versuchs. Initial-Sampling und spätere Recovery teilen ebenfalls die Grenze; zwei Bestandstests erwarten deshalb fünf statt zuvor sechs Anfragen.",
+    "backoff": "Initial-HTTP und Recovery verwenden den gemeinsamen Verbrauch als Policy-Index. Recovery berechnet den nächsten Verzögerungswert einschließlich Jitter genau einmal, protokolliert ihn und verwendet denselben Wert beim folgenden Versuch. Bereits im Provider-Vorlauf bezahlter Backoff wird nicht doppelt gewartet; kein Retry-Log nach Budgetende.",
+    "deadline": "Der Refresh erfasst vor der lokalen Zuteilung eine absolute Tokio-Deadline aus dem bestehenden Manifest-Acquire-Timeout. Weitere Zuteilungen erhalten nur die verbleibende Zeit; Backoff wird an dieser Deadline abgeschnitten.",
+    "ownership_and_cleanup": "Ein beim Markieren des Refresh synchron installierter RAII-Owner schützt Work-Zähler und Singleflight auch bei Abbruch vor dem ersten Poll. Counter-Abschluss und Refresh-Abschluss werden separat quittiert. I/O-/Pending-Acquire-/Managed-Handle-Guards geben ausschließlich eigene Belegungen und Cleanup-Permits frei. Bindungs-/Arbeitsgeneration wird vor Wiederholungen und HTTP sowie unter Session-Lock vor dem Schließen eines harten Fehlers geprüft. Überholte Completion schließt keinen Nachfolger.",
+    "fallback": "Ein fehlender Publication-Guard wird für bereits gescheiterte unveröffentlichte Pending-Leases erneut gegen den aktuellen Lease-Snapshot geprüft. Beide Zeitabläufe verwenden den vorhandenen lease-spezifischen Video-/404-Pfad. Aktive/veröffentlichte/abgelaufene Leases behalten ihre Regeln.",
+    "requalification": "Eine neue Acceptance-Episode wird nur eröffnet, wenn ihr vollständiger Burst noch in das gemeinsame Fünferbudget passt. Der lokale Resume-Rahmen darf dieses Budget nicht verlängern. Bei Änderung im letzten Slot bleibt die vorherige vollständige Episode erhalten; ein späterer zulässiger Refresh kann die Landschaft neu vollständig qualifizieren."
+  },
+  "red_before_production_changes": {
+    "log": "/tmp/tuliprox-reserved-red-final.log",
+    "result": "0 passed; 2 failed",
+    "failures": [
+      {
+        "test": "api::endpoints::hls_api::tests::manifest_reservation_retry::transient_real_provider_reservation_recovers_same_request_all_modes",
+        "observed": 404,
+        "expected": 200,
+        "fixture": "Echte bestätigte Provider-Reservierung; Freigabe nach sichtbarer erster Ablehnung."
+      },
+      {
+        "test": "api::endpoints::hls_api::tests::manifest_reservation_retry::failed_start_before_and_after_publication_have_identical_fallback",
+        "phase": "Conservative, kein Fehlervideo, Fehler vor Guard-Vorbereitung",
+        "observed": 503,
+        "expected": 404
+      }
+    ],
+    "green_result": "Beide Regressionstests sowie die zusätzliche vollständige Matrix bestehen im finalen hls-api-Lauf."
+  },
+  "acceptance_criteria": [
+    {
+      "id": "AK1",
+      "result": "passed",
+      "tests": [
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::transient_real_provider_reservation_recovers_same_request_all_modes"
+      ],
+      "evidence": "Eine echte bestätigte fremde Reservierung bei Limit 1 wird erst nach sichtbarer Ablehnung freigegeben. Der bereits laufende Request veröffentlicht auf reserved-start ein Live-Manifest; der erste Medienrequest derselben Lease liefert 200 und Bytes. Alle vier Startup-Modi."
+    },
+    {
+      "id": "AK2",
+      "result": "passed",
+      "tests": [
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::transient_real_provider_reservation_recovers_same_request_all_modes"
+      ],
+      "evidence": "Die Variante io_conflict=true hält einen real erworbenen alten I/O-Guard, bindet denselben Account mit Generation +1 und prüft vor Freigabe die unveränderte Arc-Identität des blockierenden I/O-Lease. Erst finish_hls_origin_account_io gibt ihn frei; derselbe neue Manifestrequest und sein erster Medienrequest liefern 200. Alle vier Modi."
+    },
+    {
+      "id": "AK3",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::persistent_real_reservation_exhausts_five_without_http_or_progress",
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::persistent_reservation_closes_once_and_new_master_can_restart_all_modes"
+      ],
+      "evidence": "Echte fremde Provider-Reservierung: genau fünf lokale Ablehnungen, null Manifest-/Segment-HTTP, geschlossener fehlgeschlagener Versuch. Die fremde Reservierung bleibt bestehen. Die Endpunktmatrix prüft den definierten Video-/404-Abschluss."
+    },
+    {
+      "id": "AK4",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::local_denials_and_http_share_five_attempts"
+      ],
+      "evidence": "Variante (2 lokale Ablehnungen, 2 echte HTTP 503, HTTP 200): exakt fünf logische Versuche, drei HTTP-Anfragen, erfolgreicher Abschluss. Die erfolgreiche Zuteilung zählt nicht zusätzlich."
+    },
+    {
+      "id": "AK5",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::local_denials_and_http_share_five_attempts",
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::persistent_reservation_closes_once_and_new_master_can_restart_all_modes"
+      ],
+      "evidence": "Variante (4 lokale Ablehnungen, HTTP 503): exakt fünf logische Versuche und eine HTTP-Anfrage. Der Versuch ist geschlossen. Die Endpunktmatrix prüft zusätzlich, dass wiederholte Anfragen und Availability nach finalem Abschluss kein Budget eröffnen."
+    },
+    {
+      "id": "AK6",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::standard_retry_policy_including_maximum_jitter_stays_within_two_seconds",
+        "refresh::tests::reservation_retry::persistent_real_reservation_exhausts_five_without_http_or_progress",
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::persistent_reservation_closes_once_and_new_master_can_restart_all_modes"
+      ],
+      "evidence": "Maximale Standard-Backoffs einschließlich Jitter ergeben exakt 2000 ms. Mit pausierter Tokio-Uhr bleibt der echte Reservierungsfehler innerhalb dieses Budgets; alle acht Kombinationen aus Startup-Modus und Fehlervideo liefern ihre Fehlerantwort vor 3 Sekunden."
+    },
+    {
+      "id": "AK7",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::local_acquire_deadline_is_not_restarted_by_denials"
+      ],
+      "evidence": "Kontrollierte Tokio-Uhr: eine 120-ms-Acquire-Deadline beendet den Vorlauf nach zwei lokalen Ablehnungen bei exakt 120 ms; kein HTTP-Fetch und kein Zurücksetzen der Deadline."
+    },
+    {
+      "id": "AK8",
+      "result": "passed",
+      "tests": [
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::failed_start_before_and_after_publication_have_identical_fallback"
+      ],
+      "evidence": "Pausierte Uhr und explizites Poll-Gate vor dem Evidenz-Warten: vor/nach Guard-Vorbereitung identischer Fallback für alle vier Modi und beide Videokonfigurationen. Mit Video 200, ohne Video 404; kein 503."
+    },
+    {
+      "id": "AK9",
+      "result": "passed",
+      "tests": [
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::persistent_reservation_closes_once_and_new_master_can_restart_all_modes"
+      ],
+      "evidence": "Nach finalem Fehler eröffnet dieselbe Lease auch nach Freigabe des fremden Slots kein Budget und erzeugt kein Origin-HTTP. Ein real erzeugtes neues Master-Manifest liefert eine andere Lease; dessen kanonischer Router-Endpunkt startet erfolgreich Live-HLS. Alle vier Modi."
+    },
+    {
+      "id": "AK10",
+      "result": "passed",
+      "tests": [
+        "api::endpoints::hls_api::tests::manifest_reservation_retry::pending_clients_share_reservation_retry_without_consuming_active_playback_reserve_all_modes",
+        "refresh::tests::reservation_retry::concurrent_refresh_requests_share_one_budget_and_one_origin_allocation",
+        "api::endpoints::hls_api::tests::provider_admission_provider_lease_release::hls_access_lease_idle_releases_user_but_keeps_origin_binding_and_queues"
+      ],
+      "evidence": "In allen vier Modi: echte aktivierte Wiedergabe über Manifest- und Medienendpoint; zwei unterschiedliche Pending-Leases teilen dieselbe Attempt-Arc unter realem Konflikt mit alter I/O-Bindungsgeneration. Vor Freigabe kein Manifest-HTTP, danach ein gemeinsamer Fetch, insgesamt zwei logische Versuche, beide Antworten Live-200. Aktive Lease behält Snapshot, Cursor und positive Reserve ohne Terminalisierung. Der Origin schreitet erst nach dem lokalen Ablehnungsnachweis regulär fort."
+    },
+    {
+      "id": "AK11",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::abort_before_first_poll_releases_work_even_while_session_is_locked",
+        "refresh::tests::reservation_retry::cancellation_during_local_backoff_releases_work_and_cleanup_permits",
+        "refresh::tests::reservation_retry::abort_during_http_releases_real_provider_allocation_and_cleanup_permit",
+        "refresh::tests::reservation_retry::cancellation_after_counter_completion_still_releases_singleflight_without_double_decrement",
+        "refresh::tests::reservation_retry::binding_switch_during_local_backoff_preserves_successor_and_shared_attempt",
+        "refresh::tests::reservation_retry::late_old_http_error_cannot_fail_shared_successor_attempt_or_retain_allocation"
+      ],
+      "evidence": "Abbruch vor dem ersten Poll, im lokalen Backoff, während echter HTTP-I/O und nach Abschluss des Work-Zählers: kein Work-/Handle-/Permit-Leak und kein doppeltes Dekrement. Bindungswechsel und verspätetes altes HTTP 404 verändern weder Nachfolger-Identität noch dessen gemeinsam verwendeten Versuch; alte eigene Ressourcen werden freigegeben."
+    },
+    {
+      "id": "AK12",
+      "result": "passed",
+      "tests": [
+        "refresh::tests::reservation_retry::reservation_diagnostics_distinguish_real_capacity_and_io_conflicts",
+        "refresh::tests::retry_policy::permanent_404_does_not_retry",
+        "refresh::tests::retry_policy::manifest_attempt_407_uses_original_contract_for_response_and_reconstructed_status",
+        "refresh::tests::retry_policy::manifest_attempt_live_407_can_retry_and_next_client_can_start_again",
+        "refresh::tests::acceptance::recovery_retry_logs_and_waits_use_the_shared_attempt_index"
+      ],
+      "evidence": "Beide realen Ablehnungszweige erzeugen unterscheidbare sichere Logs. Keine Origin-Antwort und kein Medienfortschritt bei lokalen Ablehnungen. 404 bleibt hart; 407 folgt weiterhin dem ursprünglichen Live-/Fresh-Commit-Vertrag. Zusätzlich: Nach zwei verbrauchten lokalen Versuchen werden für Recovery 500 ms und 750 ms protokolliert und tatsächlich gewartet; nach Versuch fünf wird kein weiterer Retry gemeldet."
+    }
+  ],
+  "mandatory_checks": [
+    {
+      "id": "hls-session",
+      "command": "./bin/test.sh -p tuliprox-hls -p tuliprox-session --profile dev-slim -- --test-threads=4",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-hls-session.log",
+      "summary": [
+        "    Finished `dev-slim` profile [unoptimized + debuginfo] target(s) in 20.80s",
+        "test result: ok. 1305 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 43.37s",
+        "test result: ok. 381 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.32s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "id": "hls-api",
+      "command": "./bin/test.sh -p tuliprox --profile dev-slim api::endpoints::hls_api::tests -- --test-threads=4",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-app-hls.log",
+      "summary": [
+        "    Finished `dev-slim` profile [unoptimized + debuginfo] target(s) in 0.49s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s",
+        "test result: ok. 350 passed; 0 failed; 0 ignored; 0 measured; 766 filtered out; finished in 24.83s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "id": "format",
+      "command": "cargo +nightly fmt --all -- --check",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-fmt.log",
+      "summary": []
+    },
+    {
+      "id": "clippy",
+      "command": "cargo +nightly clippy --workspace --all-targets --profile dev-slim -- -D warnings",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-clippy.log",
+      "summary": [
+        "    Finished `dev-slim` profile [unoptimized + debuginfo] target(s) in 12.36s"
+      ]
+    },
+    {
+      "id": "architecture",
+      "command": "make architecture-check",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-architecture.log",
+      "summary": [
+        "check-workspace-deps-test: all cases pass",
+        "check-workspace-deps: all workspace edges are declared (77 edges)"
+      ]
+    },
+    {
+      "id": "diff",
+      "command": "git diff --check",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-diff-check.log",
+      "summary": []
+    },
+    {
+      "id": "build",
+      "command": "cargo +stable build -p tuliprox -p tuliprox-testkit --profile dev-slim",
+      "exit_code": 0,
+      "log": "/tmp/reservation-review-build.log",
+      "summary": [
+        "    Finished `dev-slim` profile [unoptimized + debuginfo] target(s) in 10.23s"
+      ]
+    }
+  ],
+  "separate_existing_regressions": [
+    {
+      "group": "published-windows",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox",
+        "--profile",
+        "dev-slim",
+        "manifest_live_window",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-published-windows.log",
+      "summary": [
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 1095 filtered out; finished in 0.27s"
+      ]
+    },
+    {
+      "group": "account-resume",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox",
+        "--profile",
+        "dev-slim",
+        "manifest_entry_freshness",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-account-resume.log",
+      "summary": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1111 filtered out; finished in 23.54s"
+      ]
+    },
+    {
+      "group": "account-rebind",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox",
+        "--profile",
+        "dev-slim",
+        "origin_account_rebind",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-account-rebind.log",
+      "summary": [
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 1093 filtered out; finished in 5.10s"
+      ]
+    },
+    {
+      "group": "generations",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox-hls",
+        "--profile",
+        "dev-slim",
+        "generation",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-generations.log",
+      "summary": [
+        "test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 1255 filtered out; finished in 1.27s"
+      ]
+    },
+    {
+      "group": "resource-retry",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox-hls",
+        "--profile",
+        "dev-slim",
+        "resource_fetch::tests",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-resource-retry.log",
+      "summary": [
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 1280 filtered out; finished in 0.96s"
+      ]
+    },
+    {
+      "group": "segment-retry",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox-hls",
+        "--profile",
+        "dev-slim",
+        "segment_fetcher::tests::retry",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-segment-retry.log",
+      "summary": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1296 filtered out; finished in 0.07s"
+      ]
+    },
+    {
+      "group": "diagnostics",
+      "command": [
+        "./bin/test.sh",
+        "-p",
+        "tuliprox-hls",
+        "--profile",
+        "dev-slim",
+        "reservation_diagnostics_distinguish_real_capacity_and_io_conflicts",
+        "--",
+        "--test-threads=4",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/tuliprox-reserved-diagnostics.log",
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1306 filtered out; finished in 0.09s"
+      ]
+    }
+  ],
+  "testkit": [
+    {
+      "mode": "conservative",
+      "command": [
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/target/dev-slim/tuliprox-testkit",
+        "controller",
+        "--scenario",
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/tests/scenarios/shared-hls-conservative-entry.yml",
+        "--report-directory",
+        "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/conservative",
+        "--run-id",
+        "reservation-review-conservative"
+      ],
+      "exit_code": 0,
+      "report_directory": "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/conservative",
+      "outcome": "passed",
+      "policy_hash": "6bfc808642e10130b851ec42d84ebff851f79c9bb8a461d320c3a1eb4f42fbbd",
+      "events": 7
+    },
+    {
+      "mode": "first_ready",
+      "command": [
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/target/dev-slim/tuliprox-testkit",
+        "controller",
+        "--scenario",
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/tests/scenarios/shared-hls-first_ready-entry.yml",
+        "--report-directory",
+        "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/first_ready",
+        "--run-id",
+        "reservation-review-first_ready"
+      ],
+      "exit_code": 0,
+      "report_directory": "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/first_ready",
+      "outcome": "passed",
+      "policy_hash": "1b95d6721035cb24dbb722142713e48afb60998ca89a3af10e83d7321747479e",
+      "events": 7
+    },
+    {
+      "mode": "progressive",
+      "command": [
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/target/dev-slim/tuliprox-testkit",
+        "controller",
+        "--scenario",
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/tests/scenarios/shared-hls-progressive-entry.yml",
+        "--report-directory",
+        "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/progressive",
+        "--run-id",
+        "reservation-review-progressive"
+      ],
+      "exit_code": 0,
+      "report_directory": "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/progressive",
+      "outcome": "passed",
+      "policy_hash": "1895076c0b614487197e7e407cc95adfd06b77166dcbc6874e0c90c7e0079451",
+      "events": 7
+    },
+    {
+      "mode": "optimistic",
+      "command": [
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/target/dev-slim/tuliprox-testkit",
+        "controller",
+        "--scenario",
+        "/Users/philippmielke/Coding/gitHub/tuliprox/fix-reservedforother/tests/scenarios/shared-hls-optimistic-entry.yml",
+        "--report-directory",
+        "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/optimistic",
+        "--run-id",
+        "reservation-review-optimistic"
+      ],
+      "exit_code": 0,
+      "report_directory": "/var/folders/7l/cbgz4h0s1nj3n5m6zpyxnp9r0000gp/T/reservation-review-testkit-mi3br4es/optimistic",
+      "outcome": "passed",
+      "policy_hash": "0b6396531c37f02d7ebe7557050697c0d0e391726ad6ba87a49264c8aff9dcaa",
+      "events": 7
+    }
+  ],
+  "diagnostic_examples_from_native_test": [
+    "Provider admission rejected: reason=ReservedForOther conflict=provider-capacity account=reserved-provider owner=hls-cache:HJZemo25efAhfcUdTCMPAI active_connections=0 limit=1 idle_foreign_reserved_slots=1",
+    "HLS origin admission rejected: reason=ReservedForOther conflict=io-binding requested_account=reserved-provider requested_owner=hls-cache:HJZemo25efAhfcUdTCMPAI requested_generation=1 blocking_account=reserved-provider blocking_owner=hls-cache:HJZemo25efAhfcUdTCMPAI blocking_generation=0 active_io_count=1 acquiring=false"
+  ],
+  "totals": {
+    "mandatory_native_passed": 2036,
+    "preexisting_ignored": 4,
+    "new_rust_tests": 17,
+    "testkit_scenarios_passed": 4
+  },
+  "limits": [
+    "Die konkrete ursprüngliche Reservierungsursache des v158-Vorfalls ist damit nicht rückwirkend bewiesen. Die neuen Diagnosen unterscheiden die beiden Auslöser beim nächsten Auftreten.",
+    "Die vier bereits vorhandenen ignorierten HLS-/Session-Tests bleiben ignoriert; keine neuen Tests wurden ignoriert."
+  ],
+  "source_sha256": {
+    "backend/app/src/api/endpoints/hls_api/manifest/cached.rs": "3262fcbd89ac944fb68e357f254bf9fe8cdbdac8d7f9f15449f9cf57aff842c6",
+    "backend/app/src/api/endpoints/hls_api/origin_refresh_request.rs": "319158ef0c0ee56e05bff9984e7bc822cd5c32b1224cc4f8a896b64f5cbdb7e2",
+    "backend/app/src/api/endpoints/hls_api/tests.rs": "b68d97ee8d0d684f1939525b32696c371535fb28e8050d51010920f95b12602b",
+    "backend/app/src/api/endpoints/hls_api/tests/manifest_entry_freshness.rs": "91598674aedda8345bb51b0b6504295ae6e053195bbf514bf4f5a77ba5e5df0e",
+    "backend/app/src/api/endpoints/hls_api/tests/manifest_reservation_retry.rs": "272ab79a8d8c80df77597c6a0edb4eaf628fb057714c54108423010f2ad4b3f4",
+    "backend/app/src/api/endpoints/hls_api/tests/terminal_tail.rs": "8d2e755ff9d68fcfd31d09bf5e2d436fd92902cf3f8f294ce0a3b7310f79e1f9",
+    "backend/hls/src/availability/tests/owner_fixtures.rs": "15aa46c65a9673649efd6aad1ff8fd0af1618004fe8fea56c83f56289cb48cbf",
+    "backend/hls/src/lib.rs": "75c18afc83887cde53a4f44c111634f0410069ebe3ed68cc12c1f700370690d2",
+    "backend/hls/src/manifest_fetch/fetch.rs": "430e15c921038a7ee246969fe4123229d83923c1bba0869a49c699e84d43cb85",
+    "backend/hls/src/manifest_fetch/model.rs": "3c4765a86b68e21530075a2de02153449ddf2ed5cea91d43557125634767aa4a",
+    "backend/hls/src/manifest_fetch/recovery.rs": "5e0fb953a88d54ba670fe74f1c1c56effe85d65546bf6489fd8807e6cb406fed",
+    "backend/hls/src/manifest_fetch/selection_log.rs": "a08543c41565094d07a5874e5659275d83195b6ffdb955f95828c21d97cdc824",
+    "backend/hls/src/manifest_fetch/tests.rs": "34dfeb09b0ec347b43d12b8f0d6bb820ac06b035e9af0d3f06be6a81acb1bf66",
+    "backend/hls/src/origin.rs": "ddd8b665e7f8df8c8068d54172f9d1db88b6b71531f789f19a2f101e53173caf",
+    "backend/hls/src/origin_account_runtime.rs": "c74c74837952664a0187c480bad3c2bae3d38ea1ff1cf1251e97e5770b8c292c",
+    "backend/hls/src/refresh/commit.rs": "b79766d1b6ca218ff157b0b24b829f1b93b946e896b93575b5ebb4254c218b63",
+    "backend/hls/src/refresh/mod.rs": "f28b01f2c5bc0777df38b141369b819f468c3fd63d77d33758488248fddc376f",
+    "backend/hls/src/refresh/provider.rs": "a62a070c7ca7a58ed3902054b3b719e71b4135da2ce84c723561ed6e3a4c840a",
+    "backend/hls/src/refresh/tests.rs": "fcffda6dffeec2652bd95d313efde6a1f4e79035312cce8c13b70ab871b3b8a0",
+    "backend/hls/src/refresh/tests/acceptance.rs": "a73c4080ef5daebcfd27bdc55a89acfb11abf24160f56f205d142decc7417071",
+    "backend/hls/src/refresh/tests/archive_master.rs": "b3f69a28f94e1fb01f30cbcc2205633bd8801261c947de530f027676713d36df",
+    "backend/hls/src/refresh/tests/headers_redirects.rs": "fac4e66fbecb3744699e30ab82396def45c30ca54689dbe20e18f6da2bd8c6e9",
+    "backend/hls/src/refresh/tests/origin_binding.rs": "46495b1c73b9828c7b95915ef86d50aebda07eec9b2c8afbc3ccd22cb5a2e209",
+    "backend/hls/src/refresh/tests/reservation_retry.rs": "0fddeb872f0fb0cf22564f5f0fbb4befc062513d9c00f0c17c933bd11d0b29c6",
+    "backend/hls/src/refresh/tests/retry_policy.rs": "0a6e2a83576ee4c8750c4d64439bb4f6c552cc69ac384a6377d7188304515c32",
+    "backend/hls/src/refresh/tests/short_manifest.rs": "eae9320203969bb46b3711c20df82c970f50f631770cf78f8b3ae867256ea053",
+    "backend/hls/src/refresh/tests/support.rs": "8709d4ca26b47262446936003a0408fa0c547693369464d2406fb0e61170d2cf",
+    "backend/hls/src/refresh/tests/switch_staging.rs": "fa047542efd1b5c6a3ef52c7d75ceb0722e2f23bc25cbff919214589f2ef9343",
+    "backend/hls/src/refresh/work_guard.rs": "e49515927cd22d8407917391d556e0a578590096b720efe12ae974ae20e9954f",
+    "backend/session/src/active_provider_manager/allocation.rs": "57058d62261c4d2ba4e5de36bdd1c2677b54570fbad106387f31993ae1f931dd"
+  },
+  "spec_sha256": "6720f51f343b49e66cd4a3b88495e1a7a7ca6ea05027f738211416da14ad4254",
+  "production_binary_freshness": {
+    "app_and_testkit_built_in_this_worktree": true,
+    "production_rust_sources_newer_than_app_binary": [],
+    "last_change_after_binary_build": "Anschließend nur native Test-Fixture und Validierungsnachweis aktualisiert. Alle vier bestehenden Testkit-Szenarien mit den frisch gebauten Binaries erneut bestanden."
+  },
+  "review_follow_up": {
+    "findings": [
+      {
+        "priority": "P2",
+        "finding": "Unvollständige Episode nach Requalifizierung im fünften logischen Versuch",
+        "status": "fixed",
+        "test": "refresh::tests::acceptance::material_change_in_last_shared_slot_defers_requalification_without_poisoning_next_refresh",
+        "red_log": "/tmp/reservation-review-requalification-red.log",
+        "before": "Realer HlsManifestAttemptContext erreicht fünf Versuche; die Episode wechselt trotzdem auf Generation 2 ohne verfügbaren Burst. Die neue Regression scheitert an erwarteter Generation 1 gegenüber tatsächlicher Generation 2.",
+        "after": "Mit null beziehungsweise zwei vorher verbrauchten lokalen Versuchen bleibt Generation 1 vollständig. Keine sechste Runde. Ein Folge-Refresh mit eigenem zulässigem Attempt requalifiziert Generation 2 in zwei Versuchen und beendet deren vollständigen Burst.",
+        "green_log": "/tmp/reservation-review-requalification-green.log",
+        "final_validation": "/tmp/reservation-review-hls-session.log"
+      },
+      {
+        "priority": "P2",
+        "finding": "AK10 ohne integrierte echte Pending-Leases und laufende Wiedergabe",
+        "status": "fixed",
+        "test": "api::endpoints::hls_api::tests::manifest_reservation_retry::pending_clients_share_reservation_retry_without_consuming_active_playback_reserve_all_modes",
+        "log": "/tmp/reservation-review-pending-clients.log",
+        "final_validation": "/tmp/reservation-review-app-hls.log",
+        "modes": [
+          "conservative",
+          "first_ready",
+          "progressive",
+          "optimistic"
+        ]
+      },
+      {
+        "priority": "P3",
+        "finding": "Recovery-Retry-Log verwendet lokalen statt gemeinsamem Budgetindex",
+        "status": "fixed",
+        "test": "refresh::tests::acceptance::recovery_retry_logs_and_waits_use_the_shared_attempt_index",
+        "log": "/tmp/reservation-review-retry-log.log",
+        "final_validation": "/tmp/reservation-review-hls-session.log",
+        "after": "Logs für used=3/remaining=2 und used=4/remaining=1 nennen 500 beziehungsweise 750 ms ohne Jitter. Die echten HTTP-Abstände prüfen diese Wartezeiten. Der gesampelte Verzögerungswert wird auch mit Jitter unverändert in den Ablauf übernommen."
+      }
+    ],
+    "kiss": "Provider-Retry entscheidet über einen booleschen Zustand statt über den Log-String retry. Keine neue Retry-Policy, Scheduler, Benutzeroptionen oder HTTP-Schnittstellen.",
+    "validation_note": "Die abschließenden vollständigen Pflichtsuiten und Workspace-Gates sind nach den Korrekturen grün. Frühere separate Bestandsläufe bleiben historische Nachweise; ihre Tests sind erneut in den vollständigen HLS-/Session-/Endpoint-Suiten enthalten."
+  }
+}

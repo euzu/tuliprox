@@ -37,16 +37,15 @@ pub enum HlsTerminalCutoverDecision {
 /// Decides terminal publication from one immutable lease/session snapshot.
 ///
 /// A cutover is authorized only by real media reserve and a current snapshot.
-/// Acceptance lifecycle states never stand in for media progress: once the
-/// the bounded terminal-acquisition window opens, missing, active, exhausted,
-/// and committed episodes all continue to terminal-capability evaluation. A structurally
-/// superseded snapshot is retried so reserve can be evaluated again.
-/// Publication lateness, request counts,
-/// recovery ETA, hard operation timeouts, and generic refresh activity are
-/// deliberately absent. Pre-cutover scheduling owns all waits; once the
-/// acquisition window opens, neither recovery nor terminal-media preparation
-/// may postpone the terminal decision beyond the unchanged safe deadline.
+/// Publication requires known reserve exhaustion. Acquisition windows and the
+/// transition margin may prepare recovery/media earlier, but never authorize CSV.
+/// Missing, active, exhausted and committed acceptance episodes can all reach
+/// capability evaluation at exhaustion; only a structurally superseded snapshot
+/// requires fresh reserve evidence. An in-flight retry cannot delay this decision.
 pub fn evaluate_terminal_cutover(input: &HlsTerminalCutoverInput) -> HlsTerminalCutoverDecision {
+    if !input.reserve.is_exhausted() {
+        return HlsTerminalCutoverDecision::NotRequired;
+    }
     match input.commit_window {
         HlsTerminalCommitWindow::NotDue => return HlsTerminalCutoverDecision::NotRequired,
         HlsTerminalCommitWindow::AcquisitionOpen | HlsTerminalCommitWindow::CutoverDue => {}
@@ -116,6 +115,7 @@ mod tests {
             availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
             guaranteed_media_horizon_ms: guaranteed_reserve_ms,
             conservative_playback_position_ms: 0,
+            playback_position_known: true,
             guaranteed_reserve_ms,
             initial_hidden_ready_duration_ms: 0,
             transition_margin,
@@ -127,7 +127,7 @@ mod tests {
 
     fn input(acceptance: HlsManifestAcceptanceEpisodeStatus) -> HlsTerminalCutoverInput {
         HlsTerminalCutoverInput {
-            reserve: degraded_reserve(10_000),
+            reserve: degraded_reserve(0),
             commit_window: HlsTerminalCommitWindow::CutoverDue,
             acceptance,
             required_terminal_media_key: Some(TERMINAL_KEY),
@@ -141,6 +141,22 @@ mod tests {
             generation: GENERATION,
             reason: HlsManifestAcceptanceExhaustionReason::NoCommittableCandidate,
         }
+    }
+
+    #[test]
+    fn positive_or_unknown_reserve_never_authorizes_csv_even_during_retries() {
+        let acquisition = crate::recovery_timing::HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis();
+        for reserve_ms in [10_000 + acquisition, 10_000, 1] {
+            for window in [HlsTerminalCommitWindow::AcquisitionOpen, HlsTerminalCommitWindow::CutoverDue] {
+                let mut candidate = input(HlsManifestAcceptanceEpisodeStatus::InFlight { generation: GENERATION });
+                candidate.reserve = degraded_reserve(reserve_ms);
+                candidate.commit_window = window;
+                assert_eq!(evaluate_terminal_cutover(&candidate), HlsTerminalCutoverDecision::NotRequired);
+            }
+        }
+        let mut unknown = input(exhausted());
+        unknown.reserve.playback_position_known = false;
+        assert_eq!(evaluate_terminal_cutover(&unknown), HlsTerminalCutoverDecision::NotRequired);
     }
 
     #[test]
@@ -250,13 +266,13 @@ mod tests {
     }
 
     #[test]
-    fn hls_cutover_policy_acquisition_window_can_commit_before_the_unchanged_margin() {
+    fn hls_cutover_policy_acquisition_window_cannot_publish_with_positive_reserve() {
         let mut acquisition = input(exhausted());
         acquisition.reserve = degraded_reserve(10_001);
         acquisition.commit_window = HlsTerminalCommitWindow::AcquisitionOpen;
 
         assert!(!acquisition.reserve.cutover_required);
-        assert_eq!(evaluate_terminal_cutover(&acquisition), HlsTerminalCutoverDecision::CommitTerminalTail);
+        assert_eq!(evaluate_terminal_cutover(&acquisition), HlsTerminalCutoverDecision::NotRequired);
     }
 
     #[test]

@@ -327,7 +327,7 @@ fn hls_session_recovery_pressure_new_urgent_lease_controls_atomic_commit() {
     .expect("urgent pressure");
 
     assert!(after.decision.evaluate_lease_cutovers);
-    assert_eq!(after.timing_seed.target_duration_ms, 10_000);
+    assert_eq!(after.timing_seed.target_duration_ms, 8_000);
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn hls_session_recovery_pressure_expired_controller_is_excluded_atomically() {
         atomic_pressure_policy(),
     )
     .expect("urgent pressure");
-    assert_eq!(urgent.timing_seed.target_duration_ms, 10_000);
+    assert_eq!(urgent.timing_seed.target_duration_ms, 8_000);
 
     let after_expiry = evaluate_and_commit_session_recovery_pressure(
         &mut leases,
@@ -403,7 +403,7 @@ async fn wait_for_terminal_mode(fixture: &PostRefreshTerminalFixture) -> HlsLeas
         }
     })
     .await
-    .expect("terminal decision before reserve is exhausted")
+    .expect("terminal decision at reserve exhaustion")
 }
 
 #[tokio::test]
@@ -414,7 +414,7 @@ async fn live_reserve_deadline_commits_without_another_client_poll_while_refresh
         &fixture.session,
         &fixture.proxy_session_id,
         &fixture.lease_id,
-        18_000,
+        33_000,
         fixture.now_ms,
     )
     .await;
@@ -440,11 +440,11 @@ async fn live_reserve_deadline_commits_without_another_client_poll_while_refresh
     assert_eq!(result, HlsTerminalResolution::LiveAllowed);
     assert_eq!(fixture.ctx.hls_proxy.availability_reevaluations().owner_count(), 1);
 
-    // R=17,100 ms and M=12,000 ms: the next six-second client poll would be too late.
+    // R=3,000 ms: the independent owner must wait for exhaustion, without another poll.
     // Only read the resulting state; do not issue another terminal/manifest request.
     let mode = wait_for_terminal_mode(&fixture).await;
     assert!(matches!(mode, HlsLeasePlaybackMode::TerminalTail(_)), "{mode:?}");
-    assert!(current_time_millis() < fixture.now_ms + 5_100);
+    assert!(fixture.ctx.hls_proxy.now_ms() >= fixture.now_ms + 3_000);
     assert!(fixture.session.read().await.origin_refresh.in_flight);
 }
 
@@ -457,7 +457,7 @@ async fn first_http_502_arms_cutover_before_retry_after_sleep_finishes() {
         &fixture.session,
         &fixture.proxy_session_id,
         &fixture.lease_id,
-        18_000,
+        33_000,
         fixture.now_ms,
     )
     .await;
@@ -505,7 +505,7 @@ async fn first_http_502_arms_cutover_before_retry_after_sleep_finishes() {
 
     let mode = wait_for_terminal_mode(&fixture).await;
     assert!(matches!(mode, HlsLeasePlaybackMode::TerminalTail(_)), "{mode:?}");
-    assert!(current_time_millis() < fixture.now_ms + 5_100);
+    assert!(fixture.ctx.hls_proxy.now_ms() >= fixture.now_ms + 3_000);
     assert_eq!(hits.load(Ordering::SeqCst), 1, "cutover must precede the capped six-second retry");
     assert!(fixture.session.read().await.origin_refresh.in_flight);
     assert!(tokio::time::timeout(Duration::from_secs(8), refresh)
@@ -523,7 +523,7 @@ async fn recovered_origin_cancels_the_retained_reserve_cutover() {
         &fixture.session,
         &fixture.proxy_session_id,
         &fixture.lease_id,
-        18_000,
+        33_000,
         fixture.now_ms,
     )
     .await;
@@ -558,14 +558,14 @@ async fn recovered_origin_cancels_the_retained_reserve_cutover() {
 }
 
 #[tokio::test]
-async fn expired_splice_deadline_finishes_custom_response_once_instead_of_leaving_a_live_lease() {
+async fn expired_splice_deadline_keeps_last_live_segment_when_reserve_is_exhausted() {
     let fixture = post_refresh_terminal_fixture_with_progress("expired-splice-unavailable", true, false).await;
     advance_post_refresh_fixture_playback(
         &fixture.ctx,
         &fixture.session,
         &fixture.proxy_session_id,
         &fixture.lease_id,
-        26_000,
+        36_000,
         fixture.now_ms,
     )
     .await;
@@ -592,7 +592,7 @@ async fn expired_splice_deadline_finishes_custom_response_once_instead_of_leavin
         .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
         .await
         .expect("terminal lease");
-    assert!(matches!(terminal.playback_mode, HlsLeasePlaybackMode::TerminalCustomResponse(_)));
+    assert!(matches!(terminal.playback_mode, HlsLeasePlaybackMode::TerminalTail(_)));
     assert_eq!(
         commit_terminal_tail_if_lease_reserve_requires_cutover(
             &fixture.ctx,
@@ -604,12 +604,21 @@ async fn expired_splice_deadline_finishes_custom_response_once_instead_of_leavin
         .await,
         HlsTerminalResolution::Committed
     );
-    assert!(!fixture.session.read().await.has_terminal_tail_protections());
+    assert!(fixture.session.read().await.has_terminal_tail_protections());
 }
 
 #[tokio::test(start_paused = true)]
 async fn post_refresh_recovery_request_replaces_a_reserve_only_worker_without_losing_refresh_work() {
     let fixture = post_refresh_terminal_fixture_with_progress("reserve-owner-recovery-upgrade", true, false).await;
+    advance_post_refresh_fixture_playback(
+        &fixture.ctx,
+        &fixture.session,
+        &fixture.proxy_session_id,
+        &fixture.lease_id,
+        0,
+        fixture.now_ms,
+    )
+    .await;
     fixture.session.write().await.origin_refresh.mark_started(fixture.now_ms);
     let lease = fixture
         .ctx
@@ -633,14 +642,14 @@ async fn post_refresh_recovery_request_replaces_a_reserve_only_worker_without_lo
 }
 
 #[tokio::test]
-async fn publication_late_origin_can_finish_custom_response_after_the_splice_deadline() {
+async fn publication_late_origin_keeps_live_base_after_the_splice_deadline() {
     let fixture = post_refresh_terminal_fixture_with_progress("publication-late-unavailable", true, false).await;
     advance_post_refresh_fixture_playback(
         &fixture.ctx,
         &fixture.session,
         &fixture.proxy_session_id,
         &fixture.lease_id,
-        26_000,
+        36_000,
         fixture.now_ms,
     )
     .await;
@@ -668,5 +677,5 @@ async fn publication_late_origin_can_finish_custom_response_after_the_splice_dea
         .access_lease_response_snapshot(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
         .await
         .expect("terminal lease");
-    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalCustomResponse(_)));
+    assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalTail(_)));
 }

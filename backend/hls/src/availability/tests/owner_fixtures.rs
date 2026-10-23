@@ -5,6 +5,8 @@ pub(super) fn post_refresh_owner_request(fixture: &PostRefreshTerminalFixture) -
         super::super::super::manifest_fetch::LiveHlsOriginEntry::parse("http://127.0.0.1:9/live/user/pass/12345.m3u8")
             .expect("test origin entry parses");
     OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: Arc::clone(&fixture.ctx.app_config),
         session: Arc::clone(&fixture.session),
         origin_entry,
@@ -338,7 +340,7 @@ pub(super) async fn post_refresh_terminal_fixture_with_bundle_state(
             &session,
             &proxy_session_id,
             &lease_id,
-            if terminal_asset { 22_000 } else { 7_000 },
+            if terminal_asset { 36_000 } else { 16_000 },
             now_ms,
         )
         .await;

@@ -66,8 +66,7 @@ pub(super) async fn register_terminal_pending_owner(
     let Some(owner_key) = terminal_pending_owner_key(context, expected_asset, bundle_key) else {
         return HlsTerminalResolution::Reevaluate;
     };
-    let latest_safe_commit_at_ms =
-        context.preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch();
+    let latest_safe_commit_at_ms = owner_key.latest_safe_commit_at_ms;
     let coordinator = context.ctx.hls_proxy.terminal_pending();
     let task_ctx = context.ctx.clone();
     let task_session = Arc::clone(context.session);
@@ -109,11 +108,11 @@ fn terminal_pending_owner_key(
         decision_generation: context.preparation.decision_generation,
         reason: expected_asset.reason,
         bundle_key,
-        latest_safe_commit_at_ms: context
-            .preparation
-            .cutover_timing
-            .latest_safe_terminal_commit_at
-            .as_millis_since_epoch(),
+        latest_safe_commit_at_ms: if context.preparation.trigger.is_runtime_policy() {
+            context.preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch()
+        } else {
+            context.now_ms.saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis())
+        },
     })
 }
 
@@ -388,9 +387,6 @@ pub(super) async fn terminal_resolution_with_failed_closed_fallback(
     if context.preparation.trigger.is_runtime_policy() {
         return resolution;
     }
-    if outcome == HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed {
-        return commit_late_custom_response(context).await;
-    }
     commit_prepared_terminal_unavailable_after_owner_failure(
         context.ctx,
         context.session,
@@ -400,44 +396,6 @@ pub(super) async fn terminal_resolution_with_failed_closed_fallback(
         context.now_ms,
         HlsTerminalTailCompatibility::TerminalMediaNotReady,
     )
-}
-
-pub(super) async fn commit_late_custom_response(context: HlsTerminalCommitContext<'_>) -> HlsTerminalResolution {
-    let prepared = crate::late_custom_response::prepare_late_custom_response(
-        context.ctx,
-        context.proxy_session_id,
-        context.lease_id,
-        context.preparation,
-        context.now_ms,
-    )
-    .await;
-    let (plan, expected_asset) = match prepared {
-        Ok(prepared) => prepared,
-        Err(crate::late_custom_response::HlsLateCustomResponseError::Superseded) => {
-            return HlsTerminalResolution::Reevaluate
-        }
-        Err(crate::late_custom_response::HlsLateCustomResponseError::Unavailable(reason)) => {
-            return commit_prepared_terminal_unavailable_after_owner_failure(
-                context.ctx,
-                context.session,
-                context.proxy_session_id,
-                context.lease_id,
-                context.preparation,
-                context.now_ms,
-                reason,
-            )
-        }
-    };
-    let outcome = context.ctx.hls_proxy.commit_access_lease_terminal_if_generation_matches(HlsTerminalCommitRequest {
-        session: context.session,
-        lease_id: context.lease_id,
-        proxy_session_id: context.proxy_session_id,
-        preparation: context.preparation,
-        now_ms: context.ctx.hls_proxy.terminal_commit_now_ms().max(context.now_ms),
-        payload: HlsTerminalCommitPayload::CustomResponse(plan),
-        asset_revision_guard: terminal_asset_revision_guard(context.ctx, expected_asset.reason, Some(expected_asset)),
-    });
-    terminal_resolution_for_commit_outcome(outcome, context.now_ms)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -8,6 +8,14 @@ use super::{
 };
 
 pub fn alternative_cohorts(observations: &[HlsManifestCandidateObservation]) -> Vec<HlsAlternativeOriginCohort> {
+    alternative_cohorts_for_selection(observations, None, &[])
+}
+
+fn alternative_cohorts_for_selection(
+    observations: &[HlsManifestCandidateObservation],
+    minimum: Option<shared::model::Secs>,
+    excluded: &[usize],
+) -> Vec<HlsAlternativeOriginCohort> {
     let pinned = observations
         .iter()
         .filter(|candidate| {
@@ -44,8 +52,10 @@ pub fn alternative_cohorts(observations: &[HlsManifestCandidateObservation]) -> 
         }
     }
 
-    let mut cohorts =
-        groups.into_iter().filter_map(|samples| build_alternative_cohort(&samples, &pinned)).collect::<Vec<_>>();
+    let mut cohorts = groups
+        .into_iter()
+        .filter_map(|samples| build_alternative_cohort(&samples, &pinned, minimum, excluded))
+        .collect::<Vec<_>>();
     cohorts.sort_by_key(|cohort| {
         (
             cohort.window.fingerprint.window_class(),
@@ -132,7 +142,17 @@ pub fn alternative_cohorts_with_history(
     previous: Option<&HlsAlternativeOriginCohort>,
     current_burst_is_full_plan: bool,
 ) -> Vec<HlsAlternativeOriginCohort> {
-    let mut cohorts = alternative_cohorts(observations);
+    alternative_cohorts_with_history_for_selection(observations, previous, current_burst_is_full_plan, None, &[])
+}
+
+pub(super) fn alternative_cohorts_with_history_for_selection(
+    observations: &[HlsManifestCandidateObservation],
+    previous: Option<&HlsAlternativeOriginCohort>,
+    current_burst_is_full_plan: bool,
+    minimum: Option<shared::model::Secs>,
+    excluded: &[usize],
+) -> Vec<HlsAlternativeOriginCohort> {
+    let mut cohorts = alternative_cohorts_for_selection(observations, minimum, excluded);
     if current_burst_is_full_plan {
         for cohort in &mut cohorts {
             merge_full_burst_cohort_history(cohort, previous);
@@ -197,6 +217,8 @@ fn same_alternative_cohort(left: &HlsAlternativeOriginCohort, right: &HlsAlterna
 fn build_alternative_cohort(
     samples: &[&HlsManifestCandidateObservation],
     pinned: &[&HlsManifestCandidateObservation],
+    minimum: Option<shared::model::Secs>,
+    excluded: &[usize],
 ) -> Option<HlsAlternativeOriginCohort> {
     let first = samples.first()?;
     let successful_samples = u16::try_from(samples.len()).unwrap_or(u16::MAX);
@@ -223,7 +245,15 @@ fn build_alternative_cohort(
         HlsCrossHostAcceptanceEvidence::Insufficient
     };
     let best = samples.iter().min_by_key(|sample| {
-        (sample.timeline_fingerprint.window_class(), sample.manifest_fetch_elapsed_ms, sample.candidate_index)
+        (
+            excluded.contains(&sample.candidate_index),
+            minimum.is_some_and(|minimum| {
+                sample.target_duration_secs.is_none_or(|duration| u64::from(duration) < minimum.get())
+            }),
+            sample.timeline_fingerprint.window_class(),
+            sample.manifest_fetch_elapsed_ms,
+            sample.candidate_index,
+        )
     })?;
     let best_candidate_index = best.candidate_index;
     let effective_host = first.effective_host.clone()?;

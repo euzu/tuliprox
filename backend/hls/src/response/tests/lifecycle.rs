@@ -1,6 +1,29 @@
 use super::*;
 
 #[tokio::test]
+async fn empty_body_chunks_do_not_start_playback_but_the_first_data_chunk_does() {
+    let fixture = CachedSegmentFixture::new(vec![9; 512]).await;
+    let marker = fixture
+        .context
+        .media_activity_marker
+        .clone()
+        .unwrap()
+        .for_segment_request(fixture.segment_file.proxy_seq, current_time_millis())
+        .await
+        .unwrap();
+    let chunks = futures::stream::iter([Ok::<_, std::io::Error>(Bytes::new()), Ok(Bytes::from_static(b"media"))]);
+    let response = marker.confirm_media_response(axum::http::Response::new(axum::body::Body::from_stream(chunks)));
+    let mut body = response.into_body();
+    assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), Bytes::new());
+    assert_eq!(fixture.cursor().await.first_segment_started_at_ms, None);
+    assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), Bytes::from_static(b"media"));
+    let cursor = fixture.cursor().await;
+    assert!(cursor.first_segment_started_at_ms.is_some());
+    assert_eq!(cursor.first_segment_completed_at_ms, None);
+    assert_eq!(cursor.highest_contiguous_completed_proxy_seq, None);
+}
+
+#[tokio::test]
 async fn progressive_http_drop_errors_without_content_length_or_cursor_completion() -> std::io::Result<()> {
     let fixture = CachedSegmentFixture::new(b"canonical-body".to_vec()).await;
     let owner = publish_revision_fixture(&fixture, true).await?;
@@ -105,6 +128,7 @@ async fn dropped_full_range_segment_body_records_request_without_completion() {
     assert_eq!(requested.first_requested_proxy_seq, Some(12));
     assert_eq!(requested.last_requested_proxy_seq, Some(12));
     assert_eq!(requested.highest_contiguous_completed_proxy_seq, None);
+    assert_eq!(requested.first_segment_started_at_ms, None);
     assert!(fixture.session.read().await.activity.last_authorized_media_at_ms.is_some());
 
     let mut body = response.into_body();
@@ -126,6 +150,7 @@ async fn dropped_full_range_segment_body_records_request_without_completion() {
     assert_eq!(dropped.last_requested_proxy_seq, Some(12));
     assert_eq!(dropped.highest_contiguous_completed_proxy_seq, None);
     assert_eq!(dropped.first_segment_completed_at_ms, None);
+    assert!(dropped.first_segment_started_at_ms.is_some());
     assert_eq!(fixture.meter.bytes_total(), u64::try_from(first_chunk.len()).expect("first chunk size"));
     assert_eq!(fixture.access.active_readers(), 0);
 }
@@ -146,7 +171,6 @@ async fn optimistic_successor_without_a_retry_ends_only_its_lease() -> std::io::
     let revisions = std::collections::BTreeMap::from([(head_seq, head), (seq, successor.clone())]);
     fixture.session.write().await.startup = Some(crate::HlsSessionStartup {
         config: config.clone(),
-        first_data_timeout_ms: 1000,
         worker: Weak::new(),
         access_leases: Arc::clone(fixture.manager.access_leases()),
         revisions: revisions.clone(),

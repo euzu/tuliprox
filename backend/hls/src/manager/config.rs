@@ -16,7 +16,7 @@ use std::{
     },
 };
 use tokio::sync::{RwLock, Semaphore};
-use tuliprox_core::model::{AppConfig, HlsCacheConfig, HlsManifestRecoveryBurstConfig, StripConfig};
+use tuliprox_core::model::{AppConfig, Config, HlsCacheConfig, HlsManifestRecoveryBurstConfig, StripConfig};
 
 #[derive(Debug, Clone)]
 pub(super) struct HlsProxyRuntimeConfig {
@@ -25,6 +25,7 @@ pub(super) struct HlsProxyRuntimeConfig {
     pub(super) cache_duration_seconds: u64,
     pub(super) strip: StripConfig,
     pub(super) origin_manifest_timeout_ms: u64,
+    pub(super) min_origin_target_duration_secs: shared::model::Secs,
     pub(super) initial_manifest_wait_timeout_secs: u64,
     pub(super) manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     pub(super) transient_resource_ttl_ms: u64,
@@ -35,16 +36,22 @@ pub(super) struct HlsProxyRuntimeConfig {
 
 impl HlsProxyRuntimeConfig {
     pub(super) fn from_config(config: &HlsCacheConfig, rewrite_secret: &[u8]) -> Self {
-        Self::from_config_with_enabled(config, rewrite_secret, true)
+        Self::from_config_with_enabled(config, rewrite_secret, true, shared::defaults::default_connect_timeout_secs())
     }
 
-    pub(super) fn from_config_with_enabled(config: &HlsCacheConfig, rewrite_secret: &[u8], enabled: bool) -> Self {
+    pub(super) fn from_config_with_enabled(
+        config: &HlsCacheConfig,
+        rewrite_secret: &[u8],
+        enabled: bool,
+        connect_timeout_secs: u32,
+    ) -> Self {
         Self {
             enabled,
-            segment_fetch_policy: SegmentFetchPolicy::from_config(config),
+            segment_fetch_policy: SegmentFetchPolicy::from_config_with_connect_timeout(config, connect_timeout_secs),
             cache_duration_seconds: config.cache_duration.get(),
             strip: config.strip.clone(),
             origin_manifest_timeout_ms: config.origin_manifest_timeout_ms.get(),
+            min_origin_target_duration_secs: config.min_origin_target_duration_secs,
             initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs.get(),
             manifest_recovery_burst: config.manifest_recovery_burst.clone(),
             transient_resource_ttl_ms: config.cache_duration.as_millis().get(),
@@ -62,11 +69,30 @@ impl HlsProxyManager {
         Self::with_hls_cache_config(&default_config)
     }
 
+    /// Initializes HLS workers with the same loaded connect setting as the HTTP clients.
+    pub fn from_config(config: &Config, default_rewrite_secret: &[u8]) -> Self {
+        let proxy = config.reverse_proxy.as_ref();
+        let secret = proxy.map_or(default_rewrite_secret, |proxy| proxy.rewrite_secret.as_slice());
+        Self::from_hls_cache_settings(
+            proxy.and_then(|proxy| proxy.hls_cache.as_ref()),
+            secret,
+            config.connect_timeout_secs,
+        )
+    }
+
     pub fn from_hls_cache_config(config: Option<&HlsCacheConfig>) -> Self {
         Self::from_hls_cache_config_and_secret(config, &[])
     }
 
     pub fn from_hls_cache_config_and_secret(config: Option<&HlsCacheConfig>, rewrite_secret: &[u8]) -> Self {
+        Self::from_hls_cache_settings(config, rewrite_secret, shared::defaults::default_connect_timeout_secs())
+    }
+
+    fn from_hls_cache_settings(
+        config: Option<&HlsCacheConfig>,
+        rewrite_secret: &[u8],
+        connect_timeout_secs: u32,
+    ) -> Self {
         let default_config;
         let (config, enabled) = if let Some(config) = config {
             (config, true)
@@ -74,7 +100,7 @@ impl HlsProxyManager {
             default_config = HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default());
             (&default_config, false)
         };
-        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, enabled)
+        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, enabled, connect_timeout_secs)
     }
 
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
@@ -97,7 +123,8 @@ impl HlsProxyManager {
         let lifecycle = Arc::new(HlsLifecycleManager::new());
         let account_overlap_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let gc_policy = GarbageCollectionPolicy::from_config(&default_config);
-        let runtime_config = HlsProxyRuntimeConfig::from_config(&default_config, &[]);
+        let mut runtime_config = HlsProxyRuntimeConfig::from_config(&default_config, &[]);
+        runtime_config.segment_fetch_policy.timeouts = segment_fetch_policy.timeouts.clone();
         let gc = Arc::new(HlsGarbageCollector::new_with_metrics(
             Arc::clone(&sessions),
             Arc::clone(&segment_cache),
@@ -164,6 +191,40 @@ impl HlsProxyManager {
 
     pub fn origin_manifest_timeout_ms(&self) -> u64 { self.runtime_config.load().origin_manifest_timeout_ms }
 
+    pub fn min_origin_target_duration_secs(&self) -> shared::model::Secs {
+        self.runtime_config.load().min_origin_target_duration_secs
+    }
+
+    /// Applies the validated preference for future qualifications. Existing
+    /// session snapshots retain the threshold with which they started.
+    pub fn update_min_origin_target_duration_secs(&self, minimum: shared::model::Secs) {
+        self.runtime_config.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.min_origin_target_duration_secs = minimum;
+            Arc::new(next)
+        });
+    }
+
+    /// Applies validated HLS preferences to future attempts without replacing worker slots.
+    pub fn update_origin_preferences(
+        &self,
+        minimum: shared::model::Secs,
+        segment: shared::model::HlsSegmentTimeout,
+        manifest_ms: u64,
+    ) {
+        let policy = self.segment_fetch_policy();
+        let mut timeouts = policy.timeouts.config();
+        timeouts.segment = segment;
+        timeouts.manifest_ms = manifest_ms;
+        policy.timeouts.update(timeouts);
+        self.runtime_config.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.min_origin_target_duration_secs = minimum;
+            next.origin_manifest_timeout_ms = manifest_ms;
+            Arc::new(next)
+        });
+    }
+
     pub fn initial_manifest_wait_timeout_secs(&self) -> u64 {
         self.runtime_config.load().initial_manifest_wait_timeout_secs
     }
@@ -179,7 +240,7 @@ impl HlsProxyManager {
     pub fn rewrite_secret_fingerprint(&self) -> String { self.runtime_config.load().rewrite_secret_fingerprint.clone() }
 
     pub async fn update_config(&self, app_config: &AppConfig) {
-        let (hls_config, rewrite_secret, enabled) = {
+        let (hls_config, rewrite_secret, enabled, connect_timeout_secs) = {
             let config = app_config.config.load();
             let rewrite_secret = config
                 .reverse_proxy
@@ -190,9 +251,18 @@ impl HlsProxyManager {
             let enabled = hls_config.is_some();
             let hls_config =
                 hls_config.unwrap_or_else(|| HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()));
-            (hls_config, rewrite_secret, enabled)
+            (hls_config, rewrite_secret, enabled, config.connect_timeout_secs)
         };
-        let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(&hls_config, &rewrite_secret, enabled);
+        let mut runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(
+            &hls_config,
+            &rewrite_secret,
+            enabled,
+            connect_timeout_secs,
+        );
+        let shared_timeouts = self.segment_fetch_policy().timeouts;
+        let next_timeouts = runtime_config.segment_fetch_policy.timeouts.config();
+        shared_timeouts.update(next_timeouts);
+        runtime_config.segment_fetch_policy.timeouts = shared_timeouts;
         let cache_path_changed = self.gc.update_cache_path(PathBuf::from(&hls_config.cache_path)).await;
         self.progressive_budget.update_limits(hls_config.startup.clone());
         self.segment_cache.update_cache_limits(hls_config.cache_bytes.get(), hls_config.cache_bytes_per_session.get());

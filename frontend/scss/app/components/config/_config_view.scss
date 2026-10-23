@@ -137,6 +137,12 @@
   }
 }
 
+.tp__hls-cache {
+  .tp__form-field__number > .tp__input {
+    width: 100%;
+  }
+}
+
 .tp__hls-cache-segment-repair {
   &__box {
     > .tp__titled-card {

@@ -656,7 +656,7 @@ async fn tmdb_batch_deadline_blocks_admission_with_matching_prefix_and_completed
 
 #[tokio::test(start_paused = true)]
 async fn tmdb_budget_clock_uses_absolute_not_sliding_deadlines() {
-    let budget = AcquisitionBudget::new(Duration::from_secs(60), 32, 8 * BODY_LIMIT);
+    let budget = AcquisitionBudget::new(Duration::from_mins(1), 32, 8 * BODY_LIMIT);
     tokio::time::advance(Duration::from_secs(59)).await;
     budget.admit().unwrap();
     tokio::time::advance(Duration::from_secs(1)).await;

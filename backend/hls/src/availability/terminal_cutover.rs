@@ -8,12 +8,10 @@
 use super::{
     recovery_pressure::{hls_recovery_pressure_policy, recovery_trigger_budget},
     terminal_pending_owner::{
-        commit_late_custom_response, commit_prepared_terminal_unavailable_after_owner_failure,
         commit_terminal_unavailable, register_ready_terminal_pending_owner, register_terminal_pending_owner,
         terminal_asset_revision_guard, terminal_resolution_with_failed_closed_fallback,
     },
     HlsDetailedTerminalResolution, HlsTerminalDecisionPurpose, HlsTerminalFailedClosedReason, HlsTerminalResolution,
-    HLS_PLAYBACK_RATE_GUARD_MILLI,
 };
 use crate::{
     hls_ctx::HlsCtx,
@@ -62,6 +60,7 @@ struct HlsLeaseCutoverStateSnapshot {
     media_readiness_generation: u64,
     last_media_progress_at_ms: Option<u64>,
     target_duration_ms: u64,
+    session_target_duration: Option<u32>,
     observed_latency: HlsObservedRecoveryLatency,
 }
 
@@ -84,7 +83,6 @@ struct HlsLeaseTerminalDecisionContext<'a> {
     state: &'a HlsLeaseCutoverStateSnapshot,
     evaluation: HlsLeaseTerminalCutoverEvaluation,
     now_ms: u64,
-    purpose: HlsTerminalDecisionPurpose,
 }
 
 impl<'a> HlsLeaseTerminalDecisionContext<'a> {
@@ -117,22 +115,54 @@ fn evaluate_lease_terminal_cutover(
             now_ms.saturating_sub(last_progress_at_ms) >= publication_late_after_ms(state.target_duration_ms)
         });
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
-    let pressure_policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let pressure_policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        state.session_target_duration,
+    );
     let recovery_trigger_budget =
-        recovery_trigger_budget(pressure_policy, manifest.target_duration_ms, workload, state.observed_latency);
+        recovery_trigger_budget(pressure_policy, state.target_duration_ms, workload, state.observed_latency);
     let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
         manifest,
         cursor: &lease.playback_cursor,
         ready_timeline: &state.ready_timeline,
         now_ms,
-        playback_rate_guard_milli: HLS_PLAYBACK_RATE_GUARD_MILLI,
         recovery_trigger_budget,
         origin_path_degraded,
         recovery_committed: false,
     });
     let cutover_timing =
         HlsLeaseCutoverTiming::from_reserve(now_ms, reserve.guaranteed_reserve_ms, reserve.transition_margin, None);
-    let safe_deadline = live_reserve_deadline(now_ms, reserve, cutover_timing);
+    let mut safe_deadline = live_reserve_deadline(now_ms, reserve, cutover_timing);
+    if let Some(deadline) = &mut safe_deadline {
+        let recovery_delta = reserve
+            .guaranteed_reserve_ms
+            .saturating_sub(recovery_trigger_budget.as_millis().saturating_add(reserve.transition_margin.as_millis()));
+        if !reserve.recovery_required && recovery_delta > 0 {
+            deadline.next_reevaluation_at_ms =
+                deadline.next_reevaluation_at_ms.min(now_ms.saturating_add(recovery_delta));
+        }
+        let position = reserve.conservative_playback_position_ms;
+        for pair in state.ready_timeline.units.windows(2) {
+            let end = pair[0].start_ms.saturating_add(pair[0].duration_ms);
+            if end > position && end < reserve.guaranteed_media_horizon_ms && pair[0].duration_ms != pair[1].duration_ms
+            {
+                deadline.next_reevaluation_at_ms =
+                    deadline.next_reevaluation_at_ms.min(now_ms.saturating_add(end - position));
+                break;
+            }
+        }
+        for boundary in [
+            reserve.key_readiness_valid_until_ms.map(|valid_until| valid_until.saturating_add(1)),
+            Some(manifest.delivered_at_ms.saturating_add(manifest.playlist_duration_ms).saturating_add(1)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|at| *at > now_ms)
+        {
+            deadline.next_reevaluation_at_ms = deadline.next_reevaluation_at_ms.min(boundary);
+        }
+    }
     let commit_window = cutover_timing.terminal_commit_window(
         origin_path_degraded,
         false,
@@ -158,39 +188,14 @@ fn evaluate_lease_terminal_cutover(
     }
 }
 
-async fn resolve_terminal_cutover_before_commit_window(
+fn resolve_terminal_cutover_before_commit_window(
     context: &HlsLeaseTerminalDecisionContext<'_>,
 ) -> HlsDetailedTerminalResolution {
     if !context.evaluation.origin_path_degraded {
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
     }
-    if matches!(context.purpose, HlsTerminalDecisionPurpose::AutonomousOwnerFailureFallback) {
-        let Some(preparation) = context
-            .ctx
-            .hls_proxy
-            .prepare_access_lease_terminal_unavailable_after_owner_failure(context.preparation_request())
-            .await
-        else {
-            return HlsDetailedTerminalResolution::with_deadline(
-                HlsTerminalResolution::Reevaluate,
-                context.evaluation.safe_deadline,
-            );
-        };
-        return HlsDetailedTerminalResolution::with_deadline(
-            commit_prepared_terminal_unavailable_after_owner_failure(
-                context.ctx,
-                context.session,
-                context.proxy_session_id,
-                &context.lease.lease_id,
-                &preparation,
-                context.now_ms,
-                HlsTerminalTailCompatibility::TerminalMediaNotReady,
-            ),
-            context.evaluation.safe_deadline,
-        );
-    }
     let Some(live_reserve_deadline) = context.evaluation.safe_deadline else {
-        return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::Reevaluate);
+        return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
     };
     HlsDetailedTerminalResolution {
         resolution: HlsTerminalResolution::LiveAllowed,
@@ -301,6 +306,12 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
     }
     let evaluation = evaluate_lease_terminal_cutover(ctx, lease, manifest, &state, now_ms);
+    log::debug!("HLS terminal reserve decision: proxy_session={} lease={} start_at_ms={:?} position_known={} position_ms={} reserve_ms={} session_target_duration_ms={} snapshot_generation={} may_publish={}",
+        crate::safe_proxy_session_id(proxy_session_id), crate::safe_hls_access_lease_id(&lease.lease_id),
+        lease.playback_cursor.first_segment_started_at_ms, evaluation.reserve.playback_position_known,
+        evaluation.reserve.conservative_playback_position_ms, evaluation.reserve.guaranteed_reserve_ms,
+        state.target_duration_ms, manifest.snapshot_generation,
+        evaluation.origin_path_degraded && evaluation.reserve.is_exhausted());
     {
         let mut session = session.write().await;
         if session.origin_control.progress_generation == state.progress_generation
@@ -315,7 +326,7 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
             );
         }
     }
-    let commit_window = evaluation.commit_window;
+    let may_publish = evaluation.origin_path_degraded && evaluation.reserve.is_exhausted();
     let decision_context = HlsLeaseTerminalDecisionContext {
         ctx,
         session,
@@ -325,12 +336,11 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
         state: &state,
         evaluation,
         now_ms,
-        purpose,
     };
-    if commit_window == HlsTerminalCommitWindow::NotDue {
-        resolve_terminal_cutover_before_commit_window(&decision_context).await
-    } else {
+    if may_publish {
         commit_terminal_cutover(&decision_context).await
+    } else {
+        resolve_terminal_cutover_before_commit_window(&decision_context)
     }
 }
 
@@ -351,7 +361,12 @@ async fn snapshot_lease_cutover_state(
         progress_generation: session.origin_control.progress_generation,
         media_readiness_generation: session.activity.media_readiness_generation,
         last_media_progress_at_ms: session.origin_control.last_media_progress_at_ms,
-        target_duration_ms: session.origin_control.target_duration_snapshot_ms.unwrap_or(manifest_target_duration_ms),
+        target_duration_ms: session
+            .origin_control
+            .target_duration_snapshot_ms
+            .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
+            .unwrap_or(manifest_target_duration_ms),
+        session_target_duration: session.target_duration,
         observed_latency: session.origin_control.recovery_samples.latency_snapshot(),
     }
 }
@@ -364,19 +379,6 @@ async fn commit_prepared_terminal_decision(
     preparation: &HlsTerminalTailPreparation,
     now_ms: u64,
 ) -> HlsTerminalResolution {
-    if !preparation.trigger.is_runtime_policy()
-        && now_ms >= preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch()
-    {
-        return commit_late_custom_response(HlsTerminalCommitContext {
-            ctx,
-            session,
-            proxy_session_id,
-            lease_id,
-            preparation,
-            now_ms,
-        })
-        .await;
-    }
     let reason = preparation.trigger.reason();
     let asset = match snapshot_hls_runtime_custom_tail_asset(ctx, reason) {
         Ok(asset) => asset,
@@ -402,11 +404,7 @@ pub async fn commit_prepared_runtime_custom_tail(
     if preparation.trigger.reason() != asset.reason {
         return HlsTerminalResolution::Reevaluate;
     }
-    if !preparation.trigger.is_runtime_policy()
-        && now_ms >= preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch()
-    {
-        return commit_late_custom_response(context).await;
-    }
+
     let expected_asset = HlsRuntimeCustomTailAssetIdentity::from_asset(&asset);
     let media_asset = asset.asset;
     let static_incompatibility = if preparation.manifest_snapshot.delivery_mode

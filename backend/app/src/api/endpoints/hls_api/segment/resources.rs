@@ -254,6 +254,7 @@ pub(in crate::api::endpoints::hls_api) async fn serve_hls_live_transient_resourc
                 resource_file: context.resource_file,
                 range_header: context.range_header,
                 notifier,
+                resource_kind: resource.kind,
             })
             .await;
         }
