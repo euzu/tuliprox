@@ -1132,14 +1132,17 @@
 - **`file://` URLs are no longer mangled in sanitized log output.** With sanitizing enabled, a local path such as
   `file:///home/user/data/epg.xml.gz` was logged as `file://***/home/user/data/epg.xml.gz`. Local file URLs carry no
   host or credentials, so they are now logged unchanged.
+
 - **Playback of Emby, Jellyfin and Plex inputs no longer fails with an unavailable-channel clip.** The provider
   allocation compared the virtual `media-server://` stream reference with the provider host and rejected it as an
   unmapped provider URL, so the media-server stream was never opened. Media-server references are now accepted as-is
   for the allocated provider.
+
 - **Long Telegram and ntfy notifications are no longer rejected.** Telegram accepts at most 4096 characters (UTF-16
   units) and ntfy 4096 bytes per message; neither channel had a limit, so a large watch or statistics notification
   failed and landed in the dead letter queue. Telegram now cuts the final text, after `MarkdownV2` escaping, and drops
   an escape that the cut separated from its character; ntfy bodies are truncated like Pushover's.
+
 - **Short EPG and player guides stay empty when playlist and XMLTV ids differ only in case.** A live channel whose
   EPG id matches a guide channel case-insensitively (for example `usa4k.us` against `<channel id="USA4K.us">`) now
   adopts the guide's spelling, so the playlist `tvg-id` / `epg_channel_id`, the XMLTV `<channel id>` and the EPG db

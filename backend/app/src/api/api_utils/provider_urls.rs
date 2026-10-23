@@ -1,4 +1,4 @@
-use super::resolve_request_url_for_logging;
+use super::{is_media_server_stream_ref_url, resolve_request_url_for_logging};
 use crate::{
     api::model::{AppState, ProviderConfig},
     model::{AppConfig, ConfigInput, InputUserInfo},
@@ -480,7 +480,9 @@ pub(crate) async fn select_provider_stream_url(
     accept_requested_stream_url: bool,
     app_config: &Arc<AppConfig>,
 ) -> Option<(Arc<str>, String)> {
-    if accept_requested_stream_url {
+    // Media-server stream refs are not provider URLs; the media-server client resolves them from the input.
+    if accept_requested_stream_url || (input.input_type.is_media_server() && is_media_server_stream_ref_url(stream_url))
+    {
         return Some((provider_cfg.name.clone(), stream_url.to_string()));
     }
 

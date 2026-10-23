@@ -1133,3 +1133,47 @@ async fn get_query_path_strips_extension_for_live_with_flag() {
     assert_eq!(extension, "");
     assert_eq!(query_path, "1");
 }
+
+#[tokio::test]
+async fn select_provider_stream_url_accepts_media_server_stream_ref_for_media_server_input() {
+    let app_config = Arc::new(create_test_app_config());
+    for input_type in [InputType::Jellyfin, InputType::Emby, InputType::Plex] {
+        let input = ConfigInput {
+            name: "media".intern(),
+            url: "http://media.example:8096".to_string(),
+            input_type,
+            ..ConfigInput::default()
+        };
+        let provider = test_runtime_provider_with_type("http://media.example:8096", "user", "pass", input_type);
+        let stream_url = "media-server://jellyfin/server-1/item-1?media_source_id=source-1";
+
+        let selected = select_provider_stream_url(stream_url, &input, &provider, false, &app_config).await;
+
+        assert_eq!(selected, Some((provider.name.clone(), stream_url.to_string())), "{input_type:?}");
+    }
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_rejects_media_server_stream_ref_for_other_input_types() {
+    let app_config = Arc::new(create_test_app_config());
+    let input = ConfigInput {
+        name: "xt".intern(),
+        url: "http://provider.example".to_string(),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        input_type: InputType::Xtream,
+        ..ConfigInput::default()
+    };
+    let provider = test_runtime_provider("http://provider.example", "user", "pass");
+
+    let selected = select_provider_stream_url(
+        "media-server://jellyfin/server-1/item-1?media_source_id=source-1",
+        &input,
+        &provider,
+        false,
+        &app_config,
+    )
+    .await;
+
+    assert_eq!(selected, None);
+}
