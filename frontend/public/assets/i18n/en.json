@@ -525,7 +525,7 @@
       "ACCOUNT_TOKEN": "Optional account token used by media-server integrations that require an account-scoped authentication token.",
       "ALLOW_RELAY": "Allows the media server to use relay connections when direct access is not available.",
       "API_KEY": "API key or token used to authenticate requests against the media server API.",
-      "LIBRARIES": "Comma-separated list of media libraries to use from this server. Leave empty to include all available libraries.",
+      "LIBRARIES": "Comma-separated list of media libraries to import from this server (Jellyfin, Emby, Plex). At least one library is required (e.g. Movies, Series).",
       "PREFER_HTTPS": "Prefers HTTPS URLs when the media server exposes both HTTP and HTTPS connection options.",
       "SERVER_ID": "Optional unique server identifier used when the integration needs a specific server from an account.",
       "SERVER_NAME": "Optional server display name used to select or label the media server connection.",

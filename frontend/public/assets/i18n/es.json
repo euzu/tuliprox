@@ -525,7 +525,7 @@
       "ACCOUNT_TOKEN": "Token de cuenta opcional utilizado por las integraciones de servidor multimedia que requieren un token de autenticación a nivel de cuenta.",
       "ALLOW_RELAY": "Permite que el servidor multimedia utilice conexiones de retransmisión cuando el acceso directo no está disponible.",
       "API_KEY": "Clave API o token utilizado para autenticar solicitudes contra la API del servidor multimedia.",
-      "LIBRARIES": "Lista separada por comas de bibliotecas multimedia a utilizar de este servidor. Déjela vacía para incluir todas las bibliotecas disponibles.",
+      "LIBRARIES": "Lista separada por comas de bibliotecas multimedia a importar de este servidor (Jellyfin, Emby, Plex). Se requiere al menos una biblioteca (p. ej. Películas, Series).",
       "PREFER_HTTPS": "Prefiere URL HTTPS cuando el servidor multimedia expone opciones de conexión HTTP y HTTPS.",
       "SERVER_ID": "Identificador de servidor único opcional utilizado cuando la integración necesita un servidor específico de una cuenta.",
       "SERVER_NAME": "Nombre para mostrar de servidor opcional utilizado para seleccionar o etiquetar la conexión del servidor multimedia.",
