@@ -192,6 +192,15 @@
 
 ## 🌟 New Features
 
+- **Resizable panes in the Web UI.** The new `SplitPane` component splits an area horizontally or vertically with a
+  divider that is dragged with the mouse or moved with the arrow keys; the size is remembered per browser. The
+  failover groups editor uses it for the group list / detail split and shows the groups and the candidate panel as
+  separate tabs. Its group search uses the common search field with regular expression support, the group filter is a
+  select, and the candidate panel picks its target group in a field whose list has the common search field. The candidate search takes a regular
+  expression as well (`regex=true` on `GET /api/v1/failover/candidates`). The `Select` component gained a `searchable`
+  option for long lists. The EPG group list uses `SplitPane` too and replaces the former shrink panel; its remembered
+  width is kept.
+
 - **Failover groups with stream failover.** A target with `options.failover_groups.enabled` collapses equal live
   channels from several inputs (matched by caption, name, title or EPG id) into one channel. A start picks the best
   member by QoS history, probed quality and free provider capacity and moves on to the next member when one fails.

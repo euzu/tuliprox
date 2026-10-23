@@ -356,9 +356,20 @@ contacted while you edit.
   input, title, resolution, codec, bitrate, QoS (24 h / 7 d), the status of the member (including pauses of
   the [circuit breaker](#how-a-source-is-selected)) and the used and maximum connections of its input. They are loaded
   from in-memory data for the selected group only.
-- **Candidate panel.** Search all channels of the target and filter them by *Ungrouped*, *Grouped* or *Excluded*.
-  Add channels to the selected group, move them out of another group, or create a **new group from the
-  selection**.
+- **Candidate panel** (own tab *Add channels* next to *Groups*). Search all channels of the target (plain text, or a
+  regular expression with the **Regexp** button) and filter them by *Ungrouped*, *Grouped* or *Excluded*.
+  The **Target group** field at the top picks the group that receives channels. Its list has the common search field (plain text or
+  **Regexp**) and shares the selection with the *Groups* tab. **Enter** in
+  the search field picks the first matching group. The button of a row adds that one channel to the target group, or moves it there
+  when another group holds it; with the checkboxes and **Add selected** you add several at once. You can also
+  create a **new group from the selection**.
+
+The group search uses the common search field: plain text matches the group name case-insensitively, and the
+**Regexp** button switches to a regular expression (an invalid expression shows no group).
+
+The group list and the group detail are separated by a divider. Drag it with the mouse or move it with the arrow keys
+to change the width of the group list. The width is remembered in the browser. On narrow screens the list and the
+detail are shown one after the other and the divider is hidden.
 
 ### What an action writes
 
@@ -386,6 +397,14 @@ and writes nothing. It shows the effect on groups and members; it does not tell 
 contains it.
 
 ### Save and apply
+
+The buttons of the header (each one has a tooltip) work like this:
+
+| Button           | What it does                                                                      | Enabled                 |
+| :--------------- | :-------------------------------------------------------------------------------- | :---------------------- |
+| **Save**         | Writes the draft to the failover file. It does not rebuild the playlist.          | with unsaved changes    |
+| **Apply**        | Queues a playlist update for the target, so the saved changes reach the playlist. | without unsaved changes |
+| **Save & apply** | Saves, then queues the playlist update.                                           | with unsaved changes    |
 
 - **Save** writes the YAML file. If the change only affects order or policy of existing groups, it is applied at once
   ("Saved and applied"), also when another channel becomes the first member. Running streams keep their member; new

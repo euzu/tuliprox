@@ -503,6 +503,16 @@ async fn candidates_paged_and_filtered() {
     assert_eq!(query.total, 2);
     assert!(query.items.iter().all(|item| item.title.starts_with("ZDF")));
 
+    let regex: CandidatePageDto =
+        get_json(&router, "/failover/candidates?target=Main&regex=true&q=%5EZDF%20.*D%24").await;
+    assert_eq!(regex.total, 1);
+    assert_eq!(regex.items[0].title, "ZDF HD");
+    // a regular expression is case sensitive, a plain query is not
+    let regex_case: CandidatePageDto = get_json(&router, "/failover/candidates?target=Main&regex=true&q=zdf").await;
+    assert_eq!(regex_case.total, 0);
+    let (status, _) = call(&router, "GET", "/failover/candidates?target=Main&regex=true&q=%28", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     let page: CandidatePageDto = get_json(&router, "/failover/candidates?target=Main&offset=1&limit=2").await;
     assert_eq!(page.total, 5);
     assert_eq!(

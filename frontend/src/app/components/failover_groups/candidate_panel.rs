@@ -3,28 +3,27 @@
 use super::{
     dialogs::NameDialog,
     draft::{random_id_suffix, DraftOp, GroupRef},
-    group_list::{find_group, group_ref_of},
+    group_list::{find_group, group_ref_of, GroupRow, RowState},
     navigation::NumberedChannel,
 };
 use crate::{
     app::components::{
-        define_table_columns, input::Input, make_translated_header_callback, AppIcon, PagedTable, RadioButtonGroup,
+        define_table_columns, make_translated_header_callback, popup_menu::PopupMenuWidth, select::Select,
+        selection_first, AppIcon, DropDownOption, DropDownSelection, IconButton, PagedTable, RadioButtonGroup, Search,
         TableDefinition, TextButton,
     },
     hooks::use_service_context,
     i18n::use_translation,
     services::FailoverService,
 };
-use gloo_timers::callback::Timeout;
 use shared::model::{
-    CandidateDto, CandidatePageDto, ChannelMemberRefDto, FailoverCandidateFilter, FailoverGroupListDto,
+    CandidateDto, CandidatePageDto, ChannelMemberRefDto, FailoverCandidateFilter, FailoverGroupListDto, SearchRequest,
     TargetFailoverOverridesDto,
 };
 use std::{collections::HashMap, rc::Rc};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-const SEARCH_DEBOUNCE_MS: u32 = 300;
 const DEFAULT_PAGE_SIZE: u16 = 100;
 
 define_table_columns! {
@@ -106,6 +105,13 @@ const fn filter_id(filter: FailoverCandidateFilter) -> &'static str {
     }
 }
 
+fn group_option_id(group: &GroupRef) -> String {
+    match group {
+        GroupRef::Auto(key) => format!("auto:{key}"),
+        GroupRef::Manual(key) => format!("manual:{key}"),
+    }
+}
+
 fn filter_from_id(id: &str) -> Option<FailoverCandidateFilter> {
     [
         FailoverCandidateFilter::Ungrouped,
@@ -161,6 +167,9 @@ pub struct CandidatePanelProps {
     pub reload_key: Option<String>,
     pub selected_group: Option<GroupRef>,
     pub selected_group_name: Option<String>,
+    /// Groups to choose the target group from.
+    pub groups: Rc<Vec<GroupRow>>,
+    pub on_select_group: Callback<GroupRef>,
     pub membership: Rc<Membership>,
     pub excluded: Rc<Vec<ChannelMemberRefDto>>,
     pub read_only: bool,
@@ -175,7 +184,8 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let query = use_state(String::new);
-    let shown_query = use_state(String::new);
+    let regex = use_state(|| false);
+    let search_value = use_state(|| None::<String>);
     let focused_member = use_mut_ref(|| None::<ChannelMemberRefDto>);
     let filter = use_state(|| FailoverCandidateFilter::Ungrouped);
     let page = use_state(|| 1_u32);
@@ -185,7 +195,6 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
     let selection = use_state(Selection::new);
     let show_name_dialog = use_state(|| false);
     let generation = use_mut_ref(|| 0_u64);
-    let search_timer = use_mut_ref(|| None::<Timeout>);
     let columns = use_memo((), |()| CandidateColumn::columns());
     let membership = props.membership.clone();
 
@@ -196,21 +205,27 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
         let services = services.clone();
         let translate = translate.clone();
         use_effect_with(
-            (props.target.clone(), (*query).clone(), *filter, *page, *page_size, props.reload_key.clone()),
-            move |(target, query, filter, page, page_size, _)| {
+            (props.target.clone(), (*query).clone(), *regex, *filter, *page, *page_size, props.reload_key.clone()),
+            move |(target, query, regex, filter, page, page_size, _)| {
                 let ticket = {
                     let mut current = generation.borrow_mut();
                     *current += 1;
                     *current
                 };
                 status.set(FetchStatus::Loading);
-                let (target, query, filter, page, page_size) =
-                    (target.clone(), query.clone(), *filter, *page, *page_size);
+                let (target, query, regex, filter, page, page_size) =
+                    (target.clone(), query.clone(), *regex, *filter, *page, *page_size);
                 spawn_local(async move {
                     let offset = usize::try_from(page.saturating_sub(1)).unwrap_or(0) * usize::from(page_size);
-                    let outcome =
-                        FailoverService::search_candidates(&target, &query, filter, offset, usize::from(page_size))
-                            .await;
+                    let outcome = FailoverService::search_candidates(
+                        &target,
+                        &query,
+                        regex,
+                        filter,
+                        offset,
+                        usize::from(page_size),
+                    )
+                    .await;
                     if *generation.borrow() != ticket {
                         return;
                     }
@@ -238,7 +253,8 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
 
     {
         let query = query.clone();
-        let shown_query = shown_query.clone();
+        let regex = regex.clone();
+        let search_value = search_value.clone();
         let filter = filter.clone();
         let page = page.clone();
         let status = status.clone();
@@ -250,6 +266,7 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
                 let text = focus.channel.query().to_string();
                 let member = focus.channel.member_ref.clone();
                 let unchanged = *query == text
+                    && !*regex
                     && *filter == FailoverCandidateFilter::All
                     && *page == 1
                     && *status == FetchStatus::Ready;
@@ -257,8 +274,9 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
                     select_listed(&selection, result.as_deref(), &member);
                 } else {
                     *focused_member.borrow_mut() = Some(member);
-                    shown_query.set(text.clone());
+                    search_value.set(Some(text.clone()));
                     query.set(text);
+                    regex.set(false);
                     filter.set(FailoverCandidateFilter::All);
                     page.set(1);
                 }
@@ -284,17 +302,17 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
 
     let on_search = {
         let query = query.clone();
-        let shown_query = shown_query.clone();
+        let regex = regex.clone();
         let page = page.clone();
-        let search_timer = search_timer.clone();
-        Callback::from(move |text: String| {
-            shown_query.set(text.clone());
-            let query = query.clone();
-            let page = page.clone();
-            *search_timer.borrow_mut() = Some(Timeout::new(SEARCH_DEBOUNCE_MS, move || {
-                query.set(text.trim().to_string());
-                page.set(1);
-            }));
+        Callback::from(move |request: SearchRequest| {
+            let (text, is_regex) = match request {
+                SearchRequest::Clear => (String::new(), false),
+                SearchRequest::Text(text, _) => (text.trim().to_string(), false),
+                SearchRequest::Regexp(pattern, _) => (pattern, true),
+            };
+            query.set(text);
+            regex.set(is_regex);
+            page.set(1);
         })
     };
 
@@ -389,7 +407,6 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
         let translate = translate.clone();
         let toggle = toggle.clone();
         let add_one = add_one.clone();
-        let group_name = group_name.clone();
         let selected_group = props.selected_group.clone();
         let read_only = props.read_only;
         Callback::<(usize, usize, Rc<CandidateRow>), Html>::from(
@@ -400,7 +417,7 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
                         let toggle = toggle.clone();
                         let candidate = candidate.clone();
                         html! {
-                            <button type="button" class="tp__icon-button" aria-pressed={row.selected.to_string()}
+                            <button type="button" class="tp__icon-button tp__failover-groups__candidate-select" aria-pressed={row.selected.to_string()}
                                 aria-label={translate.t("LABEL.FAILOVER_GROUPS_COL_SELECT")}
                                 onclick={Callback::from(move |_| toggle.emit(candidate.clone()))}>
                                 <AppIcon name={if row.selected { "Checked" } else { "Unchecked" }}/>
@@ -433,9 +450,9 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
                         } else {
                             "LABEL.FAILOVER_GROUPS_ADD_TO_GROUP"
                         };
+                        let title = translate.t(key);
                         html! {
-                            <TextButton name="add" icon="Add" class="tertiary"
-                                title={translate.t(key).replace("{group}", &group_name)}
+                            <IconButton class="tp__failover-groups__candidate-add" name="add" icon="Add" hint={title.clone()} aria_label={Some(title)}
                                 onclick={Callback::from(move |_| add_one.emit((candidate.clone(), current.clone())))}/>
                         }
                     }
@@ -504,16 +521,48 @@ pub fn CandidatePanel(props: &CandidatePanelProps) -> Html {
     };
     let selected_count = selection.len();
 
+    let group_ids = Rc::new(
+        props
+            .groups
+            .iter()
+            .filter(|row| row.state != RowState::Dissolved)
+            .map(|row| (group_option_id(&row.group), row))
+            .collect::<Vec<_>>(),
+    );
+    let group_options = Rc::new(
+        group_ids
+            .iter()
+            .map(|(id, row)| {
+                DropDownOption::new(id, html! { row.name.as_str() }, props.selected_group.as_ref() == Some(&row.group))
+            })
+            .collect::<Vec<_>>(),
+    );
+    let on_group_select = {
+        let on_select_group = props.on_select_group.clone();
+        let groups = props.groups.clone();
+        Callback::from(move |(_, selection): (String, DropDownSelection)| {
+            let found =
+                selection_first(&selection).and_then(|id| groups.iter().find(|row| group_option_id(&row.group) == id));
+            if let Some(row) = found {
+                on_select_group.emit(row.group.clone());
+            }
+        })
+    };
+
     html! {
         <section class="tp__failover-groups__candidates" aria-label={translate.t("LABEL.FAILOVER_GROUPS_ADD_CHANNELS")}>
             <h3>{ translate.t("LABEL.FAILOVER_GROUPS_ADD_CHANNELS") }</h3>
+            if !props.read_only {
+                <div class="tp__failover-groups__candidates-target">
+                    <span class="tp__failover-groups__candidates-target-label">
+                        { translate.t("LABEL.FAILOVER_GROUPS_TARGET_GROUP") }
+                    </span>
+                    <Select name="failover_candidate_target_group" multi_select={false} searchable={true}
+                        popup_width={PopupMenuWidth::MatchAnchor} on_select={on_group_select} options={group_options}/>
+                </div>
+            }
             <div class="tp__failover-groups__candidates-toolbar">
-                <Input name="failover_candidate_search"
-                    field_id={Some("FAILOVER_CANDIDATE.SEARCH".to_string())}
-                    placeholder={Some(translate.t("LABEL.FAILOVER_GROUPS_SEARCH_CHANNELS"))}
-                    icon={Some("Search".to_string())}
-                    value={(*shown_query).clone()}
-                    on_change={Some(on_search)}/>
+                <Search min_length={1} value={(*search_value).clone()} onsearch={Some(on_search)}/>
                 <RadioButtonGroup multi_select={false} none_allowed={false} wrap={true} options={options}
                     labels={Some(labels)} selected={Rc::new(vec![filter_id(*filter).to_string()])} on_select={on_filter}/>
                 if !props.read_only {

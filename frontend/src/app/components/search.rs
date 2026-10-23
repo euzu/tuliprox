@@ -12,7 +12,8 @@ use yew::prelude::*;
 
 const DEBOUNCE_TIMEOUT_MS: u32 = 500;
 
-type SearchEmitter = Rc<dyn Fn(Option<Rc<Vec<String>>>)>;
+/// Emits the search of the field; the flag marks an explicit submit (Enter).
+type SearchEmitter = Rc<dyn Fn(Option<Rc<Vec<String>>>, bool)>;
 
 enum RegexState {
     Active,
@@ -27,10 +28,17 @@ pub struct SearchProps {
     #[prop_or_default]
     pub options: Option<Rc<Vec<DropDownOption>>>,
     pub onsearch: Option<Callback<SearchRequest>>,
+    /// Called, besides `onsearch`, with the request of an explicit submit (Enter) of a valid, non-empty search.
+    #[prop_or_default]
+    pub on_submit: Option<Callback<SearchRequest>>,
     #[prop_or_default]
     pub on_fields_change: Option<Callback<Option<Rc<Vec<String>>>>>,
     #[prop_or(3)]
     pub min_length: usize,
+    /// Text put into the field, with the regular expression mode off, whenever this prop changes (for
+    /// example by a deep link). Typing is not affected by it.
+    #[prop_or_default]
+    pub value: Option<String>,
 }
 
 #[component]
@@ -65,6 +73,18 @@ pub fn Search(props: &SearchProps) -> Html {
         });
     }
 
+    {
+        let input = input_ref.clone();
+        let regex_active = regex_active.clone();
+        use_effect_with(props.value.clone(), move |value| {
+            if let (Some(value), Some(input)) = (value, input.cast::<HtmlInputElement>()) {
+                input.set_value(value);
+                regex_active.set(RegexState::Inactive);
+            }
+            || ()
+        });
+    }
+
     let handle_regex_click = {
         let regex_active = regex_active.clone();
         let input = input_ref.clone();
@@ -90,23 +110,31 @@ pub fn Search(props: &SearchProps) -> Html {
 
     let emit_search: SearchEmitter = {
         let on_search = props.onsearch.clone();
+        let on_submit = props.on_submit.clone();
         let min_length = props.min_length;
         let invalid_search = invalid_search.clone();
         let input = input_ref.clone();
         let regex = regex_active.clone();
-        Rc::new(move |selected_fields: Option<Rc<Vec<String>>>| {
+        Rc::new(move |selected_fields: Option<Rc<Vec<String>>>, submit: bool| {
             invalid_search.set(false);
             if let Some(cb_search) = on_search.as_ref() {
                 if let Some(input) = input.cast::<HtmlInputElement>() {
                     let text = input.value();
                     if text.len() >= min_length {
-                        if matches!(*regex, RegexState::Inactive) {
-                            cb_search.emit(SearchRequest::Text(text, selected_fields));
+                        let request = if matches!(*regex, RegexState::Inactive) {
+                            Some(SearchRequest::Text(text, selected_fields))
                         } else if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
                             regex.set(RegexState::Active);
-                            cb_search.emit(SearchRequest::Regexp(text, selected_fields));
+                            Some(SearchRequest::Regexp(text, selected_fields))
                         } else {
                             regex.set(RegexState::Invalid);
+                            None
+                        };
+                        if let Some(request) = request {
+                            if let Some(on_submit) = on_submit.as_ref().filter(|_| submit) {
+                                on_submit.emit(request.clone());
+                            }
+                            cb_search.emit(request);
                         }
                     } else if text.is_empty() {
                         cb_search.emit(SearchRequest::Clear);
@@ -127,12 +155,12 @@ pub fn Search(props: &SearchProps) -> Html {
             }
 
             if e.code() == "Enter" {
-                emit_search((*search_fields).clone());
+                emit_search((*search_fields).clone(), true);
             } else {
                 let emit_search = emit_search.clone();
                 let selected_fields = (*search_fields).clone();
                 *debounce_timeout.borrow_mut() = Some(Timeout::new(DEBOUNCE_TIMEOUT_MS, move || {
-                    emit_search(selected_fields);
+                    emit_search(selected_fields, false);
                 }));
             }
         })
@@ -152,7 +180,7 @@ pub fn Search(props: &SearchProps) -> Html {
             if let Some(cb_fields) = on_fields_change.as_ref() {
                 cb_fields.emit(selected.clone());
             }
-            emit_search(selected);
+            emit_search(selected, false);
         })
     };
 

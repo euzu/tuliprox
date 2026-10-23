@@ -5,7 +5,7 @@ use crate::{
                 ensure_recording_available, epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput,
                 PaddingBounds, RecordingForm,
             },
-            EpgSourceSelector, HorizontalShrinkPanel, NoContent, Search,
+            EpgSourceSelector, NoContent, Search, SplitPane,
         },
         context::ConfigContext,
     },
@@ -1260,29 +1260,15 @@ pub fn EpgView() -> Html {
 
     // Group list of a target source; outside the scroll container, so the viewport math of the
     // grid is unaffected. Its width change only needs a viewport recompute.
-    let group_panel = if is_hosted_epg && !groups.is_empty() {
-        let recompute = recompute.clone();
-        html! {
-            <HorizontalShrinkPanel
-                class="tp__epg__group-panel"
-                shrink_width="4.5rem"
-                default_width="14rem"
-                max_width="24rem"
-                storage_key="tp-epg-group-panel-width"
-                start_shrunk={is_mobile_viewport()}
-                on_width_change={Callback::from(move |_| recompute())}
-            >
-                <EpgGroupList
-                    title={translate.t("LABEL.EPG_GROUPS")}
-                    groups={(*groups).clone()}
-                    selected={(*selected_group).as_ref().map(|(_, name)| Arc::clone(name))}
-                    disabled={!*groups_ready}
-                    on_select={handle_select_group}
-                />
-            </HorizontalShrinkPanel>
-        }
-    } else {
-        html! {}
+    let show_groups = is_hosted_epg && !groups.is_empty();
+    let group_panel = html! {
+        <EpgGroupList
+            title={translate.t("LABEL.EPG_GROUPS")}
+            groups={(*groups).clone()}
+            selected={(*selected_group).as_ref().map(|(_, name)| Arc::clone(name))}
+            disabled={!*groups_ready}
+            on_select={handle_select_group}
+        />
     };
 
     html! {
@@ -1294,12 +1280,23 @@ pub fn EpgView() -> Html {
                 </div>
             </div>
             <EpgSourceSelector on_select={handle_select_source} />
-            <div class="tp__epg__main">
-                { group_panel }
-                <div class="tp__epg__body" ref={container_ref}>
-                    { body }
-                </div>
-            </div>
+            <SplitPane
+                class="tp__epg__main"
+                first_class="tp__epg__group-panel"
+                first={group_panel}
+                second={html! {
+                    <div class="tp__epg__body" ref={container_ref}>
+                        { body }
+                    </div>
+                }}
+                first_hidden={!show_groups}
+                initial_size="14rem"
+                min_size="4.5rem"
+                max_size="24rem"
+                collapsible={true}
+                start_collapsed={is_mobile_viewport()}
+                storage_key="tp-epg-group-panel-width"
+                on_resize={Callback::from(move |_| recompute())}/>
         </div>
     }
 }

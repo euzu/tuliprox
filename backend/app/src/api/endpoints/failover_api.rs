@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use regex::Regex;
 use serde::Serialize;
 use shared::model::{
     permission::Permission, CandidateDto, CandidatePageDto, ChannelMemberRefDto, FailoverCandidateFilter,
@@ -67,6 +68,9 @@ struct TargetQuery {
 struct CandidateQuery {
     target: String,
     q: Option<String>,
+    /// `q` is a regular expression instead of a case-insensitive substring.
+    #[serde(default)]
+    regex: bool,
     #[serde(default)]
     filter: FailoverCandidateFilter,
     offset: Option<usize>,
@@ -353,15 +357,38 @@ fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
     haystack.to_lowercase().contains(needle_lower)
 }
 
+/// Title test of a candidate search.
+enum TitleMatcher {
+    /// Case-insensitive substring; the needle is already lowercase.
+    Text(String),
+    Regex(Regex),
+}
+
+impl TitleMatcher {
+    fn new(query: &str, regex: bool) -> Result<Self, regex::Error> {
+        if regex && !query.is_empty() {
+            Regex::new(query).map(Self::Regex)
+        } else {
+            Ok(Self::Text(query.trim().to_lowercase()))
+        }
+    }
+
+    fn matches(&self, title: &str) -> bool {
+        match self {
+            Self::Text(needle) => contains_ignore_case(title, needle),
+            Self::Regex(regex) => regex.is_match(title),
+        }
+    }
+}
+
 fn search_catalog(
     catalog: &[CatalogRecord],
     stored: &FailoverGroupTargetData,
     excluded: &[ChannelMemberRefDto],
     filter: FailoverCandidateFilter,
-    query: &str,
+    matcher: &TitleMatcher,
     (offset, limit): (usize, usize),
 ) -> CandidatePageDto {
-    let needle = query.trim().to_lowercase();
     let excluded: HashSet<&ChannelMemberRefDto> = excluded.iter().collect();
     let group_of: HashMap<(&str, &str), &str> = stored
         .groups
@@ -386,7 +413,7 @@ fn search_catalog(
             FailoverCandidateFilter::Grouped => group_key.is_some(),
             FailoverCandidateFilter::Excluded => is_excluded,
         };
-        if !selected || !contains_ignore_case(&record.title, &needle) {
+        if !selected || !matcher.matches(&record.title) {
             continue;
         }
         if total >= offset && items.len() < limit {
@@ -417,9 +444,11 @@ async fn candidates_response(state: &AppState, query: CandidateQuery) -> ApiResu
     let stored = load_stored(state, &target).await;
     let section = state.app_config.failover_section(&target.name);
     let window = page_window(query.offset, query.limit);
+    let matcher = TitleMatcher::new(query.q.as_deref().unwrap_or_default(), query.regex)
+        .map_err(|err| error_response(StatusCode::BAD_REQUEST, format!("Invalid regular expression: {err}")))?;
     run_off_runtime(move || {
         let excluded = section.as_ref().map_or(&[][..], |entry| entry.overrides.excluded.as_slice());
-        search_catalog(&catalog, &stored, excluded, query.filter, query.q.as_deref().unwrap_or_default(), window)
+        search_catalog(&catalog, &stored, excluded, query.filter, &matcher, window)
     })
     .await
 }

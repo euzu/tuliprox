@@ -1,11 +1,13 @@
-//! Master list of the failover groups of one target: filter chips, search and one row per group.
+//! Master list of the failover groups of one target: filter select, search and one row per group.
 
 use super::draft::GroupRef;
 use crate::{
-    app::components::{input::Input, AppIcon, Chip, RadioButtonGroup},
+    app::components::{select::Select, selection_first, AppIcon, Chip, DropDownOption, DropDownSelection, Search},
     i18n::use_translation,
 };
-use shared::model::{FailoverGroupDto, FailoverGroupListDto, FailoverGroupOrigin, TargetFailoverOverridesDto};
+use shared::model::{
+    FailoverGroupDto, FailoverGroupListDto, FailoverGroupOrigin, SearchRequest, TargetFailoverOverridesDto,
+};
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -156,13 +158,10 @@ pub const fn origin_label_key(origin: FailoverGroupOrigin) -> &'static str {
     }
 }
 
-/// Rows that pass the filter and the (case insensitive) name search.
-pub fn visible_rows<'a>(rows: &'a [GroupRow], filter: GroupFilter, search: &str) -> Vec<&'a GroupRow> {
-    let needle = search.trim().to_lowercase();
-    rows.iter()
-        .filter(|row| filter.matches(row))
-        .filter(|row| needle.is_empty() || row.name.to_lowercase().contains(&needle))
-        .collect()
+/// Rows that pass the filter and the name search.
+pub fn visible_rows<'a>(rows: &'a [GroupRow], filter: GroupFilter, search: &SearchRequest) -> Vec<&'a GroupRow> {
+    let matches_name = search.name_matcher();
+    rows.iter().filter(|row| filter.matches(row)).filter(|row| matches_name(&row.name)).collect()
 }
 
 #[derive(Properties, PartialEq)]
@@ -170,34 +169,33 @@ pub struct GroupListProps {
     pub rows: Rc<Vec<GroupRow>>,
     pub selected: Option<GroupRef>,
     pub filter: GroupFilter,
-    pub search: String,
+    pub search: SearchRequest,
+    /// Text shown in the search field, changed by deep links only.
+    pub search_value: Option<String>,
     pub problem_count: usize,
     pub on_filter: Callback<GroupFilter>,
-    pub on_search: Callback<String>,
+    pub on_search: Callback<SearchRequest>,
     pub on_select: Callback<GroupRef>,
 }
 
 #[component]
 pub fn GroupList(props: &GroupListProps) -> Html {
     let translate = use_translation();
-    let options = Rc::new(GroupFilter::ALL.iter().map(|filter| filter.id().to_string()).collect::<Vec<_>>());
-    let labels = Rc::new(
+    let options = Rc::new(
         GroupFilter::ALL
             .iter()
             .map(|filter| {
                 let label = translate.t(filter.label_key());
-                if *filter == GroupFilter::Problems {
-                    format!("{label} ({})", props.problem_count)
-                } else {
-                    label
-                }
+                let label =
+                    if *filter == GroupFilter::Problems { format!("{label} ({})", props.problem_count) } else { label };
+                DropDownOption::new(filter.id(), html! { label }, *filter == props.filter)
             })
             .collect::<Vec<_>>(),
     );
     let on_filter = {
         let on_filter = props.on_filter.clone();
-        Callback::from(move |selection: Rc<Vec<String>>| {
-            if let Some(filter) = selection.first().and_then(|id| GroupFilter::from_id(id)) {
+        Callback::from(move |(_, selection): (String, DropDownSelection)| {
+            if let Some(filter) = selection_first(&selection).and_then(GroupFilter::from_id) {
                 on_filter.emit(filter);
             }
         })
@@ -207,23 +205,8 @@ pub fn GroupList(props: &GroupListProps) -> Html {
     html! {
         <div class="tp__failover-groups__list">
             <div class="tp__failover-groups__list-toolbar">
-                <Input
-                    name="failover_group_search"
-                    field_id={Some("FAILOVER_GROUP_LIST.SEARCH".to_string())}
-                    placeholder={Some(translate.t("LABEL.FAILOVER_GROUPS_SEARCH_GROUPS"))}
-                    icon={Some("Search".to_string())}
-                    value={props.search.clone()}
-                    on_change={Some(props.on_search.clone())}
-                />
-                <RadioButtonGroup
-                    multi_select={false}
-                    none_allowed={false}
-                    wrap={true}
-                    options={options}
-                    labels={Some(labels)}
-                    selected={Rc::new(vec![props.filter.id().to_string()])}
-                    on_select={on_filter}
-                />
+                <Search min_length={1} value={props.search_value.clone()} onsearch={Some(props.on_search.clone())}/>
+                <Select name="failover_group_filter" multi_select={false} on_select={on_filter} options={options}/>
             </div>
             <ul class="tp__failover-groups__list-items" aria-label={translate.t("LABEL.FAILOVER_GROUPS")}>
                 { for visible.iter().map(|row| {

@@ -14,7 +14,7 @@ use crate::{
     app::{
         components::{
             select::Select, selection_first, Chip, ConfirmDialog, DropDownOption, FieldLabel, LoadingIndicator,
-            NoContent, TextButton,
+            NoContent, SplitPane, TabItem, TabSet, TextButton,
         },
         context::FailoverGroupsNavigation,
     },
@@ -29,13 +29,15 @@ use gloo_timers::callback::Timeout;
 use shared::model::{
     permission::Permission, FailoverGroupHealthDto, FailoverGroupListDto, FailoverGroupTargetStatusDto,
     FailoverGroupTargetsDto, FailoverTargetState, OverrideValidationError, PlaylistUpdateRunStateEvent,
-    PlaylistUpdateState,
+    PlaylistUpdateState, SearchRequest,
 };
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
 const PREVIEW_DEBOUNCE_MS: u32 = 300;
+const TAB_GROUPS: &str = "groups";
+const TAB_CANDIDATES: &str = "candidates";
 const SHARED_FILE_NOTICE_KEY: &str = "tp_failover_shared_file_notice";
 
 /// Where the target stands relative to the failover files and the last playlist update.
@@ -160,7 +162,8 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
     let loaded = use_state(|| false);
     let no_catalog = use_state(|| false);
     let filter = use_state(GroupFilter::default);
-    let search = use_state(String::new);
+    let search = use_state(|| SearchRequest::Clear);
+    let search_value = use_state(|| None::<String>);
     let health = use_state(|| None::<Rc<FailoverGroupHealthDto>>);
     let findings = use_state(Vec::<OverrideValidationError>::new);
     let save_guard = use_mut_ref(|| false);
@@ -169,6 +172,7 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
     let confirm = use_state(|| None::<PendingConfirm>);
     let show_new_group = use_state(|| false);
     let candidate_focus = use_state(|| None::<Rc<NumberedChannel>>);
+    let active_tab = use_state(|| TAB_GROUPS.to_string());
     let applied_preselect = use_mut_ref(|| 0_u32);
     let latest_seq = use_mut_ref(|| 0_u64);
     *latest_seq.borrow_mut() = editor.preview_seq;
@@ -210,8 +214,10 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
     {
         let dispatcher = editor.dispatcher();
         let search = search.clone();
+        let search_value = search_value.clone();
         let filter = filter.clone();
         let candidate_focus = candidate_focus.clone();
+        let active_tab = active_tab.clone();
         let applied_preselect = applied_preselect.clone();
         let on_applied = props.on_preselect_applied.clone();
         use_effect_with((props.preselect.clone(), *loaded), move |(preselect, loaded)| {
@@ -223,11 +229,18 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
                     }
                     if request.group.is_some() || request.group_search.is_some() {
                         filter.set(GroupFilter::default());
-                        search.set(request.group_search.clone().unwrap_or_default());
+                        let text = request.group_search.clone().unwrap_or_default();
+                        search.set(if text.is_empty() {
+                            SearchRequest::Clear
+                        } else {
+                            SearchRequest::Text(text.clone(), None)
+                        });
+                        search_value.set(Some(text));
                     }
                     if let Some(channel) = request.channel.clone() {
                         let seq = numbered.map_or(0, |numbered| numbered.seq);
                         candidate_focus.set(Some(Rc::new(NumberedChannel { seq, channel })));
+                        active_tab.set(TAB_CANDIDATES.to_string());
                     }
                     if let Some(numbered) = numbered {
                         on_applied.emit(numbered.seq);
@@ -545,6 +558,10 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
         let dispatcher = editor.dispatcher();
         Callback::from(move |group: GroupRef| dispatcher.dispatch(FailoverGroupsEditorAction::Select(Some(group))))
     };
+    let on_tab_change = {
+        let active_tab = active_tab.clone();
+        Callback::from(move |tab: String| active_tab.set(tab))
+    };
     let on_back = {
         let dispatcher = editor.dispatcher();
         Callback::from(move |()| dispatcher.dispatch(FailoverGroupsEditorAction::Select(None)))
@@ -555,7 +572,7 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
     };
     let on_search = {
         let search = search.clone();
-        Callback::from(move |text: String| search.set(text))
+        Callback::from(move |request: SearchRequest| search.set(request))
     };
     let on_new_group = {
         let show = show_new_group.clone();
@@ -579,6 +596,92 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
     let sent_group_name =
         selected_dto.as_ref().map(|dto| dto.name.clone()).or_else(|| selected_row.as_ref().map(|row| row.name.clone()));
 
+    let tabs = Rc::new(vec![
+        TabItem {
+            id: TAB_GROUPS.to_string(),
+            title: translate.t("LABEL.GROUPS"),
+            icon: "Failover".to_string(),
+            children: html! {
+            <SplitPane
+                class={classes!("tp__failover-groups__body", selected.is_some().then_some("tp__failover-groups__body--detail"))}
+                initial_size="26rem"
+                min_size="14rem"
+                max_size="60rem"
+                min_other_size="20rem"
+                storage_key="tp-failover-groups-list-width"
+                stack_on_mobile={true}
+                first={html! {
+                    <GroupList
+                        rows={rows.clone()}
+                        selected={selected.clone()}
+                        filter={*filter}
+                        search={(*search).clone()}
+                        search_value={(*search_value).clone()}
+                        problem_count={problems}
+                        on_filter={on_filter}
+                        on_search={on_search}
+                        on_select={on_select.clone()}/>
+                }}
+                second={html! {
+                    <div class="tp__failover-groups__pane">
+                        if *filter == GroupFilter::Problems {
+                            <DiagnosticsPanel
+                                diagnostics={diagnostics}
+                                findings={all_findings}
+                                draft={Rc::new(editor.draft.clone())}
+                                orphans={orphans}
+                                disabled={disabled}
+                                assignable={editable_targets(&props.targets)}
+                                read_only={read_only}
+                                on_op={on_op.clone()}
+                                on_select={on_select.clone()}
+                                on_assign={props.on_assign.clone()}
+                                on_delete_orphan={props.on_delete_orphan.clone()}/>
+                        }
+                        if let Some(group) = selected.clone() {
+                            <GroupDetail
+                                group={group}
+                                row={selected_row}
+                                dto={selected_dto.map(Rc::new)}
+                                draft={Rc::new(editor.draft.clone())}
+                                health={(*health).clone()}
+                                rows={rows.clone()}
+                                read_only={read_only}
+                                busy={stale}
+                                on_op={on_op.clone()}
+                                on_back={on_back}/>
+                        } else if *filter != GroupFilter::Problems {
+                            <p class="tp__failover-groups__notice">{ translate.t("MESSAGES.FAILOVER_GROUPS_SELECT_GROUP") }</p>
+                        }
+                    </div>
+                }}/>
+            },
+            active_class: None,
+            inactive_class: None,
+        },
+        TabItem {
+            id: TAB_CANDIDATES.to_string(),
+            title: translate.t("LABEL.FAILOVER_GROUPS_ADD_CHANNELS"),
+            icon: "Search".to_string(),
+            children: html! {
+            <CandidatePanel
+                target={target.clone()}
+                reload_key={server_etag}
+                selected_group={selected}
+                selected_group_name={sent_group_name}
+                groups={rows.clone()}
+                on_select_group={on_select}
+                focus={(*candidate_focus).clone()}
+                membership={membership}
+                excluded={Rc::new(editor.draft.excluded.clone())}
+                read_only={read_only}
+                on_op={on_op}/>
+            },
+            active_class: None,
+            inactive_class: None,
+        },
+    ]);
+
     html! {
         <div class="tp__failover-groups__editor">
             <div class="tp__failover-groups__statusbar">
@@ -600,22 +703,22 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
             </div>
             <div class="tp__failover-groups__toolbar">
                 if can_edit {
-                    <TextButton name="new_group" icon="Add" class="tertiary" title={translate.t("LABEL.FAILOVER_GROUPS_NEW_GROUP")}
+                    <TextButton name="new_group" icon="Add" class="tertiary" title={translate.t("LABEL.FAILOVER_GROUPS_NEW_GROUP")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_NEW_GROUP"))}
                         onclick={on_new_group}/>
                 }
-                <TextButton name="refresh" icon="Refresh" class="tertiary" title={translate.t("LABEL.FAILOVER_GROUPS_REFRESH_PREVIEW")}
+                <TextButton name="refresh" icon="Refresh" class="tertiary" title={translate.t("LABEL.FAILOVER_GROUPS_REFRESH_PREVIEW")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_REFRESH_PREVIEW"))}
                     onclick={on_refresh}/>
                 if can_edit {
-                    <TextButton name="undo" icon="Back" class="tertiary" title={translate.t("LABEL.FAILOVER_GROUPS_UNDO")}
+                    <TextButton name="undo" icon="Back" class="tertiary" title={translate.t("LABEL.FAILOVER_GROUPS_UNDO")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_UNDO"))}
                         disabled={editor.undo.is_empty()} onclick={on_undo}/>
-                    <TextButton name="discard" icon="Cancel" class="secondary" title={translate.t("LABEL.FAILOVER_GROUPS_DISCARD")}
+                    <TextButton name="discard" icon="Cancel" class="secondary" title={translate.t("LABEL.FAILOVER_GROUPS_DISCARD")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_DISCARD"))}
                         disabled={!editor.dirty} onclick={on_discard}/>
-                    <TextButton name="save" icon="Save" class="primary" title={translate.t("LABEL.SAVE")}
-                        disabled={!editor.dirty || editor.saving} onclick={on_save(false)}/>
-                    <TextButton name="save_apply" icon="Rocket" class="primary" title={translate.t("LABEL.FAILOVER_GROUPS_SAVE_AND_APPLY")}
-                        disabled={!editor.dirty || editor.saving} onclick={on_save(true)}/>
-                    <TextButton name="apply" icon="Play" class={apply_class} title={translate.t("LABEL.FAILOVER_GROUPS_APPLY")}
+                    <TextButton name="apply" icon="Play" class={apply_class} title={translate.t("LABEL.FAILOVER_GROUPS_APPLY")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_APPLY"))}
                         disabled={editor.dirty || editor.saving} onclick={on_apply}/>
+                    <TextButton name="save" icon="Save" class="primary" title={translate.t("LABEL.SAVE")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_SAVE"))}
+                        disabled={!editor.dirty || editor.saving} onclick={on_save(false)}/>
+                    <TextButton name="save_apply" icon="Rocket" class="primary" title={translate.t("LABEL.FAILOVER_GROUPS_SAVE_AND_APPLY")} hint={Some(translate.t("LABEL.FAILOVER_GROUPS_HINT_SAVE_AND_APPLY"))}
+                        disabled={!editor.dirty || editor.saving} onclick={on_save(true)}/>
                 }
             </div>
             if let Some(message) = locked.as_ref() {
@@ -636,58 +739,8 @@ fn TargetEditor(props: &TargetEditorProps) -> Html {
             if !*loaded {
                 <LoadingIndicator loading={true}/>
             }
-            <div class={classes!("tp__failover-groups__body", selected.is_some().then_some("tp__failover-groups__body--detail"))}>
-                <GroupList
-                    rows={rows.clone()}
-                    selected={selected.clone()}
-                    filter={*filter}
-                    search={(*search).clone()}
-                    problem_count={problems}
-                    on_filter={on_filter}
-                    on_search={on_search}
-                    on_select={on_select.clone()}/>
-                <div class="tp__failover-groups__pane">
-                    if *filter == GroupFilter::Problems {
-                        <DiagnosticsPanel
-                            diagnostics={diagnostics}
-                            findings={all_findings}
-                            draft={Rc::new(editor.draft.clone())}
-                            orphans={orphans}
-                            disabled={disabled}
-                            assignable={editable_targets(&props.targets)}
-                            read_only={read_only}
-                            on_op={on_op.clone()}
-                            on_select={on_select}
-                            on_assign={props.on_assign.clone()}
-                            on_delete_orphan={props.on_delete_orphan.clone()}/>
-                    }
-                    if let Some(group) = selected.clone() {
-                        <GroupDetail
-                            group={group}
-                            row={selected_row}
-                            dto={selected_dto.map(Rc::new)}
-                            draft={Rc::new(editor.draft.clone())}
-                            health={(*health).clone()}
-                            rows={rows.clone()}
-                            read_only={read_only}
-                            busy={stale}
-                            on_op={on_op.clone()}
-                            on_back={on_back}/>
-                    } else if *filter != GroupFilter::Problems {
-                        <p class="tp__failover-groups__notice">{ translate.t("MESSAGES.FAILOVER_GROUPS_SELECT_GROUP") }</p>
-                    }
-                </div>
-            </div>
-            <CandidatePanel
-                target={target.clone()}
-                reload_key={server_etag}
-                selected_group={selected}
-                selected_group_name={sent_group_name}
-                focus={(*candidate_focus).clone()}
-                membership={membership}
-                excluded={Rc::new(editor.draft.excluded.clone())}
-                read_only={read_only}
-                on_op={on_op}/>
+            <TabSet tabs={tabs} class="tp__failover-groups__tabset" active_tab={Some((*active_tab).clone())}
+                on_tab_change={on_tab_change}/>
             if conflict_open {
                 { in_body(html! {
                     <ConfirmDialog title={translate.t("MESSAGES.FAILOVER_GROUPS_CHANGED_ELSEWHERE")}

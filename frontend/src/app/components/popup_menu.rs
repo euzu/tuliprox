@@ -1,4 +1,4 @@
-use crate::hooks::use_key_down;
+use crate::hooks::{is_text_input_focused, use_key_down};
 use std::{cell::Cell, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, Event, HtmlElement, KeyboardEvent, MouseEvent};
@@ -202,6 +202,10 @@ pub struct PopupMenuProps {
     /// ARIA role of the option list, e.g. `listbox` for select-style popups.
     #[prop_or_else(|| "menu".to_string())]
     pub list_role: String,
+    /// Fixed content above the scrolling list, for example a filter field. The first input in it,
+    /// else the first button of the menu, takes the focus when the menu opens.
+    #[prop_or_default]
+    pub header: Option<Html>,
     pub children: Children,
 }
 
@@ -278,7 +282,7 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
 
                             // Repositioning must not steal focus from the current menu item.
                             if first_position.replace(false) {
-                                if let Ok(Some(first)) = popup.query_selector("button") {
+                                if let Ok(Some(first)) = popup.query_selector(".tp__popup-menu__header input, button") {
                                     if let Ok(button) = first.dyn_into::<HtmlElement>() {
                                         let _ = button.focus();
                                     }
@@ -376,6 +380,10 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
                 on_close.emit(());
                 return;
             }
+            // Home and End move the caret while a filter field has the focus.
+            if matches!(key.as_str(), "Home" | "End") && is_text_input_focused(event) {
+                return;
+            }
             let Some(popup) = popup_ref.cast::<HtmlElement>() else {
                 return;
             };
@@ -411,6 +419,9 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
             (props.width == PopupMenuWidth::MatchAnchor).then_some("tp__popup-menu--match-anchor"),
             (*style).clone()
         )} ref={popup_ref}>
+            if let Some(header) = props.header.as_ref() {
+                <div class="tp__popup-menu__header">{ header.clone() }</div>
+            }
             <ul role={props.list_role.clone()}>
                 { for props.children.iter().map(|child| html! { <li role="none">{child.clone()}</li> }) }
             </ul>

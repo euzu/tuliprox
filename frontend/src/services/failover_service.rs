@@ -123,6 +123,7 @@ impl FailoverService {
     pub async fn search_candidates(
         target: &str,
         query: &str,
+        regex: bool,
         filter: FailoverCandidateFilter,
         offset: usize,
         limit: usize,
@@ -135,6 +136,7 @@ impl FailoverService {
             &[
                 ("target", target),
                 ("q", query),
+                ("regex", if regex { "true" } else { "false" }),
                 ("filter", filter.as_deref().unwrap_or("all")),
                 ("offset", &offset),
                 ("limit", &limit),

@@ -24,6 +24,9 @@ pub struct SelectProps {
     pub options: Rc<Vec<DropDownOption>>,
     #[prop_or_default]
     pub multi_select: bool,
+    /// Shows a filter field in the popup.
+    #[prop_or_default]
+    pub searchable: bool,
     #[prop_or_default]
     pub required: bool,
     #[prop_or_default]
@@ -82,6 +85,7 @@ pub fn Select(props: &SelectProps) -> Html {
                      popup_placement={props.popup_placement}
                      width_anchor_ref={Some(field_ref)}
                      multi_select={props.multi_select}
+                     searchable={props.searchable}
                      options={props.options.clone()}
                      name={props.name.clone()}
                      icon={props.icon.as_ref().map_or_else(|| "Popup".to_owned(), std::clone::Clone::clone)}

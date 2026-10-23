@@ -41,7 +41,6 @@ $epg-border-size: 4px;
 
   &__group-panel {
     height: 100%;
-    border-right: 1px solid var(--border-color);
   }
 
   &__groups {
@@ -111,7 +110,7 @@ $epg-border-size: 4px;
     font-size: var(--font-size-sm);
   }
 
-  .tp__shrink-panel--shrunk &__group-count {
+  .tp__split-pane--collapsed &__group-count {
     display: none;
   }
 

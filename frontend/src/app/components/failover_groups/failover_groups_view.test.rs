@@ -9,8 +9,8 @@ use crate::app::components::failover_groups::{
 use shared::model::{
     AutoGroupOverrideDto, ChannelMemberRefDto, FailoverGroupDto, FailoverGroupListDto, FailoverGroupMemberDto,
     FailoverGroupOrigin, FailoverGroupPolicy, FailoverOverrideDiagnosticsDto, FailoverTargetState,
-    InactiveManualGroupDto, ManualFailoverGroupDto, MemberHealthDto, ScoreBreakdown, TargetFailoverOverridesDto,
-    UnresolvedRefDto, VirtualId,
+    InactiveManualGroupDto, ManualFailoverGroupDto, MemberHealthDto, ScoreBreakdown, SearchRequest,
+    TargetFailoverOverridesDto, UnresolvedRefDto, VirtualId,
 };
 
 fn member(input: &str, stream_id: &str) -> ChannelMemberRefDto {
@@ -166,7 +166,8 @@ fn filters_select_rows_by_origin_state_and_problem() {
     let inactive = row("lonely", FailoverGroupOrigin::Manual, RowState::Inactive, true);
     let dissolved = row("arte", FailoverGroupOrigin::AutoEdited, RowState::Dissolved, false);
     let rows = vec![auto, edited, manual, inactive, dissolved];
-    let names = |filter| visible_rows(&rows, filter, "").iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    let names =
+        |filter| visible_rows(&rows, filter, &SearchRequest::Clear).iter().map(|r| r.name.clone()).collect::<Vec<_>>();
 
     assert_eq!(names(GroupFilter::All), ["zdf", "rtl", "sport", "lonely"]);
     assert_eq!(names(GroupFilter::Auto), ["zdf"]);
@@ -174,7 +175,9 @@ fn filters_select_rows_by_origin_state_and_problem() {
     assert_eq!(names(GroupFilter::Manual), ["sport", "lonely"]);
     assert_eq!(names(GroupFilter::Dissolved), ["arte"]);
     assert_eq!(names(GroupFilter::Problems), ["rtl", "lonely"]);
-    assert_eq!(visible_rows(&rows, GroupFilter::All, " SP ").len(), 1);
+    assert_eq!(visible_rows(&rows, GroupFilter::All, &SearchRequest::Text(" SP ".to_string(), None)).len(), 1);
+    assert_eq!(visible_rows(&rows, GroupFilter::All, &SearchRequest::Regexp("^(zdf|rtl)$".to_string(), None)).len(), 2);
+    assert_eq!(visible_rows(&rows, GroupFilter::All, &SearchRequest::Regexp("(".to_string(), None)).len(), 0);
     assert!(GroupFilter::ALL.iter().all(|filter| GroupFilter::from_id(filter.id()) == Some(*filter)));
     assert_eq!(GroupFilter::from_id("nope"), None);
 }

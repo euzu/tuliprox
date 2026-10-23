@@ -25,9 +25,15 @@
     max-width: calc(100vw - 1rem);
   }
 
+  &__header {
+    flex: none;
+    padding-bottom: var(--padding-mini);
+  }
+
   ul {
     margin: 0;
     padding: 0;
+    min-height: 0;
     max-height: inherit;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;

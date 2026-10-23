@@ -165,10 +165,7 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
                 (access.user_read || access.user_write, NavEntry::new(ViewType::Users, "UserOutline", "LABEL.USER")),
                 (access.config_read, NavEntry::new(ViewType::Plans, "Group", "LABEL.PLANS")),
                 (access.source_read, NavEntry::new(ViewType::SourceEditor, "SourceEditor", "LABEL.SOURCE_EDITOR")),
-                (
-                    access.source_read || access.playlist_read,
-                    NavEntry::new(ViewType::PlaylistSettings, "PlayArrowOutline", "LABEL.PLAYLIST"),
-                ),
+                (access.playlist_read, NavEntry::new(ViewType::FailoverGroups, "Failover", "LABEL.FAILOVER_GROUPS")),
             ],
         ),
         nav_section(
@@ -176,8 +173,11 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
             &[
                 (access.playlist_write, NavEntry::new(ViewType::PlaylistUpdate, "Refresh", "LABEL.UPDATE")),
                 (access.playlist_read, NavEntry::new(ViewType::PlaylistExplorer, "Live", "LABEL.PLAYLIST_VIEWER")),
-                (access.playlist_read, NavEntry::new(ViewType::FailoverGroups, "Group", "LABEL.FAILOVER_GROUPS")),
                 (access.epg_read, NavEntry::new(ViewType::PlaylistEpg, "Epg", "LABEL.PLAYLIST_EPG")),
+                (
+                    access.source_read || access.playlist_read,
+                    NavEntry::new(ViewType::PlaylistSettings, "PlayArrowOutline", "LABEL.PLAYLIST_OVERVIEW"),
+                ),
             ],
         ),
         nav_section(

@@ -146,11 +146,13 @@ mod locale_file_tests {
     use serde::de::{Deserializer, MapAccess, Visitor};
     use std::{collections::BTreeSet, fmt};
 
-    const LOCALES: [(&str, &str); 4] = [
+    const LOCALES: [(&str, &str); 6] = [
         ("en", include_str!("../public/assets/i18n/en.json")),
         ("ru", include_str!("../public/assets/i18n/ru.json")),
         ("ar", include_str!("../public/assets/i18n/ar.json")),
         ("es", include_str!("../public/assets/i18n/es.json")),
+        ("de", include_str!("../public/assets/i18n/de.json")),
+        ("tr", include_str!("../public/assets/i18n/tr.json")),
     ];
 
     /// The dotted key of every translated string, refusing a key that appears

@@ -77,11 +77,65 @@
     }
   }
 
+  // The split pane sizes to its content; shrinking it would cut the divider short of the cards.
   &__body {
-    display: grid;
-    grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr);
-    gap: var(--gap-default);
-    align-items: start;
+    flex-shrink: 0;
+  }
+
+  &__body {
+    align-items: flex-start;
+  }
+
+  // Page tabs: flat with an underline, so they do not look like the action buttons above them.
+  &__tabset {
+    margin-top: var(--gap-default);
+    height: auto;
+
+    .tp__tab-set__header {
+      flex-flow: row nowrap;
+      gap: 0;
+      padding: 0;
+      border-bottom: 2px solid var(--border-color);
+    }
+
+    // Neighbouring tabs share one border; the active tab lies on top of them.
+    .tp__tab-set__tab {
+      margin-bottom: -2px;
+
+      + .tp__tab-set__tab {
+        margin-inline-start: -1px;
+      }
+
+      &--active {
+        z-index: 1;
+      }
+
+      .tp__text-button,
+      .tp__text-button:not(.active) {
+        min-height: 2.75rem;
+        border: 1px solid var(--border-color);
+        border-bottom: 3px solid transparent;
+        border-radius: var(--border-radius) var(--border-radius) 0 0;
+        background-color: transparent;
+        color: var(--modest-text-color);
+        fill: currentColor;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+      }
+
+      .tp__text-button.active,
+      &--active .tp__text-button,
+      &--active .tp__text-button:not(.active) {
+        border-color: var(--tab-active-border-color);
+        border-bottom-color: var(--primary-color);
+        background-color: var(--tab-active-background-color);
+        color: var(--tab-active-color);
+      }
+    }
+
+    .tp__tab-set__body {
+      padding-top: var(--padding-default);
+    }
   }
 
   &__list,
@@ -355,6 +409,36 @@
       align-items: center;
       gap: var(--gap-default);
     }
+
+    // The row buttons of the table are read from a distance; the stock icon size is too small there.
+    .tp__failover-groups__candidate-select .svg-icon {
+      width: 1.6rem;
+      height: 1.6rem;
+    }
+
+    .tp__failover-groups__candidate-add .svg-icon {
+      width: 1.95rem;
+      height: 1.95rem;
+    }
+
+    &-target {
+      display: flex;
+      flex-flow: row nowrap;
+      align-items: center;
+      gap: var(--gap-default);
+      max-width: 32rem;
+
+      .tp__select {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+    }
+
+    &-target-label {
+      flex: none;
+      color: var(--modest-text-color);
+      font-size: var(--font-size-sm);
+    }
   }
 
   &__selection-count {
@@ -396,7 +480,7 @@
 
   @media (max-width: size.$mobile-breakpoint) {
     &__body {
-      grid-template-columns: minmax(0, 1fr);
+      align-items: stretch;
     }
 
     // The detail opens over the list; the back button returns to it.

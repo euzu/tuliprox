@@ -302,7 +302,7 @@ pub fn MemberTable(props: &MemberTableProps) -> Html {
                                     )
                                 };
                                 html! {
-                                    <DropDownIconButton name={format!("member-actions-{index}")} icon="Dots"
+                                    <DropDownIconButton name={format!("member-actions-{index}")} icon="Popup"
                                         aria_label={Some(translate.t("LABEL.FAILOVER_GROUPS_COL_ACTIONS"))}
                                         options={options} on_select={on_select}/>
                                 }

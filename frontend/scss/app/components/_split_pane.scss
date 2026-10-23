@@ -1,0 +1,133 @@
+@use '../../size';
+
+.tp__split-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+
+  &--horizontal {
+    flex-flow: row;
+  }
+
+  &--vertical {
+    flex-flow: column;
+  }
+
+  &__pane {
+    display: flex;
+    flex-flow: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    box-sizing: border-box;
+  }
+
+  &--horizontal > &__pane--sized {
+    flex: 0 1 var(--tp-split-size);
+    min-width: var(--tp-split-min);
+    max-width: var(--tp-split-max, none);
+  }
+
+  &--horizontal > &__pane--other {
+    flex: 1 1 0;
+    min-width: var(--tp-split-min-other);
+  }
+
+  &--vertical > &__pane--sized {
+    flex: 0 1 var(--tp-split-size);
+    min-height: var(--tp-split-min);
+    max-height: var(--tp-split-max, none);
+  }
+
+  &--vertical > &__pane--other {
+    flex: 1 1 auto;
+    min-height: var(--tp-split-min-other);
+  }
+
+  &__divider {
+    position: relative;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    align-self: stretch;
+    box-sizing: border-box;
+    background-color: color-mix(in srgb, var(--border-color) 35%, transparent);
+    color: var(--modest-text-color);
+    touch-action: none;
+    user-select: none;
+
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        background-color 160ms ease,
+        color 160ms ease;
+    }
+
+    &:hover,
+    &:focus-visible {
+      background-color: color-mix(in srgb, var(--primary-color) 45%, transparent);
+      color: var(--text-color);
+      outline: none;
+    }
+  }
+
+  &--horizontal > &__divider {
+    width: var(--gap-default);
+    cursor: col-resize;
+  }
+
+  &--vertical > &__divider {
+    height: var(--gap-default);
+    cursor: row-resize;
+  }
+
+  &__grip {
+    display: block;
+    flex: none;
+    width: var(--gap-large);
+    height: var(--gap-large);
+    pointer-events: none;
+
+    // The global icon width would push the dots off the center of the grip.
+    .svg-icon {
+      width: 100%;
+      height: 100%;
+    }
+  }
+
+  &--vertical > &__divider > &__grip {
+    transform: rotate(90deg);
+  }
+
+  // Panes may hold nested split panes, so every rule above addresses direct children only.
+  // Keep the text of the panes from being selected, and iframes from stealing the pointer, while dragging.
+  &--dragging > &__pane {
+    pointer-events: none;
+    user-select: none;
+  }
+
+  &--first-hidden > &__divider,
+  &--first-hidden > &__pane:first-child {
+    display: none;
+  }
+
+  @media (max-width: size.$mobile-breakpoint) {
+    &--stack-mobile {
+      flex-flow: column;
+      align-items: stretch;
+    }
+
+    &--stack-mobile > &__divider {
+      display: none;
+    }
+
+    &--stack-mobile > &__pane {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 0;
+      max-width: none;
+      max-height: none;
+    }
+  }
+}
