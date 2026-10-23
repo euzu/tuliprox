@@ -51,8 +51,11 @@ mod tests;
 
 mod content;
 mod epg;
+pub(in crate::api::endpoints) mod epg_inspect;
 mod error;
 mod filter_preview;
+mod inspect_common;
+pub(in crate::api::endpoints) mod items;
 mod recording;
 mod resources;
 mod routes;
@@ -86,8 +89,10 @@ use self::update::resolve_manual_playlist_update_targets;
 use self::{
     content::{playlist_content, playlist_episode_item, playlist_series_info},
     epg::playlist_epg,
+    epg_inspect::{get_target_epg_channel, query_target_epg_channels},
     error::ManualUpdateEnqueueError,
     filter_preview::playlist_filter_preview,
+    items::{list_playlist_sources, query_playlist_items},
     recording::playlist_recording_stream,
     resources::{
         create_config_input_for_m3u, create_config_input_for_xtream, playlist_resolve_url, playlist_resource,

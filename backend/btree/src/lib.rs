@@ -55,9 +55,9 @@ pub use v3::migration as typed_migration;
 // --- Staged publication ----------------------------------------------------
 pub use v3::{publish_staged_database, BPlusTreeStagingArtifacts};
 pub use v3::{
-    BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeMetadata, BPlusTreeQuery,
-    BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy, RecoveryIdentity, MAGIC,
-    STORAGE_VERSION,
+    BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeMetadata,
+    BPlusTreeQuery, BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy, RecoveryIdentity,
+    MAGIC, STORAGE_VERSION,
 };
 
 // --- Test support ----------------------------------------------------------

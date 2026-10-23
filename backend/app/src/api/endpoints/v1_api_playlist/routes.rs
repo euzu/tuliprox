@@ -1,7 +1,8 @@
 use super::{
-    playlist_content_live, playlist_content_series, playlist_content_vod, playlist_epg, playlist_episode_item,
-    playlist_filter_preview, playlist_recording_stream, playlist_resolve_url, playlist_resource, playlist_series_info,
-    playlist_update, playlist_update_status, playlist_webplayer_stream,
+    get_target_epg_channel, list_playlist_sources, playlist_content_live, playlist_content_series,
+    playlist_content_vod, playlist_epg, playlist_episode_item, playlist_filter_preview, playlist_recording_stream,
+    playlist_resolve_url, playlist_resource, playlist_series_info, playlist_update, playlist_update_status,
+    playlist_webplayer_stream, query_playlist_items, query_target_epg_channels,
 };
 use crate::api::{
     auth_middleware::permission_layer,
@@ -21,6 +22,10 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
         .route("/playlist/epg/stream", axum::routing::post(stream_epg_api))
         .route("/playlist/epg/groups", axum::routing::post(epg_grid_api::playlist_epg_groups))
         .route("/playlist/epg/grid", axum::routing::post(epg_grid_api::playlist_epg_grid))
+        .route("/playlist/sources", axum::routing::get(list_playlist_sources))
+        .route("/playlist/items", axum::routing::get(query_playlist_items))
+        .route("/playlist/epg/channels", axum::routing::get(query_target_epg_channels))
+        .route("/playlist/epg/channel", axum::routing::get(get_target_epg_channel))
         .route("/playlist/live", axum::routing::post(playlist_content_live))
         .route("/playlist/vod", axum::routing::post(playlist_content_vod))
         .route("/playlist/series", axum::routing::post(playlist_content_series))
@@ -45,6 +50,10 @@ pub fn v1_api_playlist_register_with_permissions(
 ) -> axum::Router<Arc<AppState>> {
     let read_routes = Router::new()
         .route("/update/status", axum::routing::get(playlist_update_status))
+        .route("/sources", axum::routing::get(list_playlist_sources))
+        .route("/items", axum::routing::get(query_playlist_items))
+        .route("/epg/channels", axum::routing::get(query_target_epg_channels))
+        .route("/epg/channel", axum::routing::get(get_target_epg_channel))
         .route("/live", axum::routing::post(playlist_content_live))
         .route("/vod", axum::routing::post(playlist_content_vod))
         .route("/series", axum::routing::post(playlist_content_series))

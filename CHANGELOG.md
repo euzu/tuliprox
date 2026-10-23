@@ -212,6 +212,15 @@
   built-in bridge `tuliprox --mcp-stdio --mcp-url <base-url>`, which logs in with `TULIPROX_MCP_USER` and
   `TULIPROX_MCP_PASSWORD`. The block can also be edited in the Web UI on the new **MCP** config page. See
   [MCP server](docs/src/operator/mcp.md).
+- **MCP tools to read stored playlists and debug EPG.** New read-only tools `list_playlist_sources`,
+  `query_playlist_items`, `query_target_epg_channels` and `get_target_epg_channel` (REST: `GET /playlist/sources`,
+  `/playlist/items`, `/playlist/epg/channels`, `/playlist/epg/channel`, permission `playlist.read`). A client lists the
+  stored records of a target or input per cluster with paging (`offset`, `limit` up to 500), substring search, group
+  filter and field projection, and inspects the processed per-target EPG: channels without programmes, expired or
+  currently empty channels, EPG ids that no playlist item uses, and playlist items whose EPG id is missing or unmatched
+  (`epg_status`). Only stored data is read, provider URLs are never returned, and the tool schemas plus the new
+  `initialize` `instructions` tell the client every parameter and field. See
+  [MCP server](docs/src/operator/mcp.md).
 - **Emby and Jellyfin inputs import their libraries.** `type: emby` and `type: jellyfin` inputs now import the selected
   movie and TV libraries like Plex inputs do, and Tuliprox proxies direct playback (with `Range` support) and artwork
   without exposing server URLs or tokens to clients. Credentials are resolved from `media_server.token`, then

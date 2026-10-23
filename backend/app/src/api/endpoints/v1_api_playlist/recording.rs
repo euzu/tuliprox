@@ -133,7 +133,10 @@ pub(in crate::api) async fn resolve_target_recording_source(
 }
 
 /// `SourcesConfigDto::prepare` rejects duplicate target names across sources.
-fn find_target_by_name(app_config: &crate::model::AppConfig, target_name: &str) -> Option<Arc<ConfigTarget>> {
+pub(super) fn find_target_by_name(
+    app_config: &crate::model::AppConfig,
+    target_name: &str,
+) -> Option<Arc<ConfigTarget>> {
     app_config
         .sources
         .load()

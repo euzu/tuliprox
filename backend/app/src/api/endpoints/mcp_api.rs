@@ -30,6 +30,21 @@ use tower::ServiceExt;
 const MCP_PATH: &str = "mcp";
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// `InitializeResult.instructions`: a short usage guide shown to the client.
+const MCP_INSTRUCTIONS: &str = "\
+Tuliprox is an IPTV playlist proxy and processor. These tools inspect its configuration, streams and stored playlists.
+Playlist workflow: call list_playlist_sources first (targets and inputs are addressed by NAME), then query_playlist_items \
+for one target or input and one cluster (live, video, series). Reading is always safe: only stored data is read and no \
+provider is contacted.
+Paging: results carry total_matched (all matches), returned and has_more. Request the next page with \
+offset = offset + returned while has_more is true. limit is clamped (items 500). Narrow with search, group, fields.
+Secrets: provider URLs and credentials are never returned and any secret-like value is redacted.
+Debug EPG: query_playlist_items with epg_status=unmatched (or missing_id) finds items whose EPG id is not in the EPG \
+database; query_target_epg_channels with issue=unreferenced, expired, no_programmes, not_current or no_title finds broken \
+EPG channels; get_target_epg_channel shows the programmes of one channel. An empty EPG result with a `note` means no \
+EPG data exists, not that everything is fine.
+The server is read-only by default; update tools are listed only when write access is enabled.";
+
 const PARSE_ERROR: i32 = -32700;
 const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
@@ -201,6 +216,7 @@ fn initialize_result(params: Option<&Value>) -> Value {
         "protocolVersion": negotiate_protocol_version(requested),
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "tuliprox", "version": VERSION },
+        "instructions": MCP_INSTRUCTIONS,
     })
 }
 
@@ -423,7 +439,16 @@ fn encode_path_segment(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        api::{endpoints::v1_api::v1_api_register, model::create_test_app_state},
+        api::{
+            endpoints::{
+                v1_api::v1_api_register,
+                v1_api_playlist::{
+                    epg_inspect::{EpgIssue, EpgOutput},
+                    items::{EpgStatus, ItemField, ItemSearchField},
+                },
+            },
+            model::create_test_app_state,
+        },
         auth::create_jwt_web_user,
         model::{Config, WebAuthConfig, WebUiUser},
     };
@@ -650,6 +675,172 @@ mod tests {
         assert_eq!(listed, expected);
     }
 
+    const PLAYLIST_TOOLS: [&str; 4] =
+        ["list_playlist_sources", "query_playlist_items", "query_target_epg_channels", "get_target_epg_channel"];
+
+    /// Enum values of a schema property, looking through `items` for array properties.
+    fn schema_enum(tool_name: &str, property: &str) -> Vec<String> {
+        let schema = tool(tool_name).schema();
+        let property = &schema["properties"][property];
+        let values = property.get("enum").or_else(|| property["items"].get("enum")).expect("enum");
+        values.as_array().unwrap().iter().map(|value| value.as_str().unwrap().to_owned()).collect()
+    }
+
+    #[test]
+    fn playlist_tools_are_listed_read_only_with_redaction() {
+        let names: Vec<_> = tools_list(true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
+        for name in PLAYLIST_TOOLS {
+            assert!(names.contains(&name.to_string()), "{name} missing in read-only tools/list");
+            let tool = tool(name);
+            assert_eq!(tool.kind, McpToolKind::Read, "{name}");
+            assert_eq!(tool.method, McpToolMethod::Get, "{name}");
+            assert!(tool.redact_secrets, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_schema_is_strict_with_unique_names_and_enums() {
+        for tool in MCP_TOOLS {
+            let schema: Value = serde_json::from_str(tool.input_schema).expect("schema is JSON");
+            assert_eq!(schema["type"], "object", "{}", tool.name);
+            assert_eq!(schema["additionalProperties"], false, "{}", tool.name);
+            let properties = schema["properties"].as_object().expect("properties");
+            for name in properties.keys() {
+                // a duplicated key would silently collapse during JSON parsing
+                let declaration = format!("\"{name}\":{{");
+                assert_eq!(tool.input_schema.matches(&declaration).count(), 1, "{} declares {name} twice", tool.name);
+            }
+            let required: Vec<&str> = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let unique: std::collections::HashSet<_> = required.iter().collect();
+            assert_eq!(unique.len(), required.len(), "{} has duplicate required entries", tool.name);
+            for property in properties.values() {
+                let enums = property.get("enum").into_iter().chain(property["items"].get("enum"));
+                for list in enums.filter_map(Value::as_array) {
+                    let unique: std::collections::HashSet<_> = list.iter().map(Value::to_string).collect();
+                    assert_eq!(unique.len(), list.len(), "{} has a duplicate enum value in {list:?}", tool.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn playlist_tool_schemas_document_every_property() {
+        for name in PLAYLIST_TOOLS {
+            let tool = tool(name);
+            assert!(tool.description.len() > 80, "{name} description too short");
+            let schema = tool.schema();
+            for (property, definition) in schema["properties"].as_object().unwrap() {
+                let description = definition["description"].as_str().unwrap_or_default();
+                assert!(!description.is_empty(), "{name}.{property} has no description");
+            }
+            let properties = &schema["properties"];
+            if !properties["limit"].is_null() {
+                let maximum = if name == "get_target_epg_channel" { 1000 } else { 500 };
+                assert_eq!(properties["limit"]["minimum"], 1, "{name}.limit");
+                assert_eq!(properties["limit"]["maximum"], maximum, "{name}.limit");
+            }
+            if !properties["offset"].is_null() {
+                assert_eq!(properties["offset"]["minimum"], 0, "{name}.offset");
+            }
+        }
+    }
+
+    #[test]
+    fn playlist_tool_schemas_expose_the_contract_parameters() {
+        let properties = |name: &str| -> Vec<String> {
+            tool(name).schema()["properties"].as_object().unwrap().keys().cloned().collect::<Vec<_>>()
+        };
+        let sorted = |mut names: Vec<String>| {
+            names.sort();
+            names
+        };
+        let expected = |names: &[&str]| sorted(names.iter().map(|name| (*name).to_owned()).collect());
+        assert_eq!(properties("list_playlist_sources").len(), 0);
+        assert_eq!(
+            sorted(properties("query_playlist_items")),
+            expected(&[
+                "target",
+                "input",
+                "cluster",
+                "offset",
+                "limit",
+                "search",
+                "search_field",
+                "group",
+                "fields",
+                "epg_status"
+            ])
+        );
+        assert_eq!(
+            sorted(properties("query_target_epg_channels")),
+            expected(&["target", "output", "offset", "limit", "search", "issue"])
+        );
+        assert_eq!(
+            sorted(properties("get_target_epg_channel")),
+            expected(&["target", "output", "channel_id", "from", "to", "limit"])
+        );
+        assert_eq!(tool("query_playlist_items").schema()["required"], json!(["cluster"]));
+        assert_eq!(tool("query_target_epg_channels").schema()["required"], json!(["target"]));
+        assert_eq!(tool("get_target_epg_channel").schema()["required"], json!(["target", "channel_id"]));
+    }
+
+    #[test]
+    fn playlist_tool_enums_list_the_contract_values() {
+        assert_eq!(schema_enum("query_playlist_items", "cluster"), ["live", "video", "series"]);
+        assert_eq!(schema_enum("query_playlist_items", "search_field"), ItemSearchField::NAMES);
+        assert_eq!(schema_enum("query_playlist_items", "fields"), ItemField::NAMES);
+        assert_eq!(schema_enum("query_playlist_items", "epg_status"), EpgStatus::NAMES);
+        assert_eq!(schema_enum("query_target_epg_channels", "issue"), EpgIssue::NAMES);
+        for name in ["query_target_epg_channels", "get_target_epg_channel"] {
+            assert_eq!(schema_enum(name, "output"), EpgOutput::NAMES);
+        }
+        let fields = schema_enum("query_playlist_items", "fields");
+        let description =
+            tool("query_playlist_items").schema()["properties"]["fields"]["description"].as_str().unwrap().to_owned();
+        for field in &fields {
+            assert!(description.contains(&format!("{field} = ")), "fields description lacks a meaning for {field}");
+        }
+        assert!(!fields.iter().any(|field| field == "url"), "url must never be selectable");
+    }
+
+    #[test]
+    fn playlist_array_arguments_become_repeated_query_keys() {
+        let request = build_tool_request(
+            tool("query_playlist_items"),
+            Some(&args(json!({
+                "target": "my target",
+                "cluster": "live",
+                "limit": 10,
+                "fields": ["name", "epg_status"],
+                "epg_status": ["unmatched", "missing_id"],
+            }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(
+            request.uri,
+            "/api/v1/playlist/items?target=my+target&cluster=live&limit=10&fields=name&fields=epg_status&epg_status=unmatched&epg_status=missing_id"
+        );
+        let err = build_tool_request(tool("query_playlist_items"), Some(&args(json!({ "target": "t" }))), "/api/v1")
+            .err()
+            .unwrap();
+        assert!(err.contains("cluster"), "{err}");
+        let err = build_tool_request(
+            tool("query_playlist_items"),
+            Some(&args(json!({ "cluster": "live", "url": "x" }))),
+            "/api/v1",
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("url"), "{err}");
+    }
+
     #[test]
     fn no_arguments_means_no_query() {
         let request = build_tool_request(tool("get_status"), None, "/api/v1").unwrap();
@@ -725,6 +916,29 @@ mod tests {
 
         let (_, reply) = post(&router, &rpc(2, "initialize", json!({ "protocolVersion": "9999" })), &[]).await;
         assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[tokio::test]
+    async fn initialize_carries_usage_instructions() {
+        let router = mcp_router(config_with_mcp(false, enabled(true)));
+        let (_, reply) = post(&router, &rpc(1, "initialize", json!({})), &[]).await;
+        let instructions = reply["result"]["instructions"].as_str().expect("instructions");
+        assert_eq!(instructions, MCP_INSTRUCTIONS);
+        assert_ne!(instructions.trim(), "");
+        assert!(instructions.len() <= 1300, "instructions are too long: {}", instructions.len());
+    }
+
+    #[test]
+    fn instructions_only_name_existing_tools() {
+        for name in PLAYLIST_TOOLS {
+            assert!(MCP_INSTRUCTIONS.contains(name), "instructions do not mention {name}");
+        }
+        for word in MCP_INSTRUCTIONS.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            let looks_like_tool = ["list_", "query_", "get_", "update_"].iter().any(|prefix| word.starts_with(prefix));
+            if looks_like_tool && !word.ends_with('_') {
+                assert!(find_tool(word).is_some(), "instructions name unknown tool {word}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1008,10 +1222,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redaction_applies_to_get_config_only() {
+    async fn redaction_applies_to_config_and_playlist_tools_only() {
         assert_eq!(
             MCP_TOOLS.iter().filter(|tool| tool.redact_secrets).map(|tool| tool.name).collect::<Vec<_>>(),
-            ["get_config"]
+            [
+                "get_config",
+                "list_playlist_sources",
+                "query_playlist_items",
+                "query_target_epg_channels",
+                "get_target_epg_channel"
+            ]
         );
         let reply = call_stub(&stub_state("{}", StatusCode::OK), "get_status").await;
         assert!(tool_text(&reply).contains("\"password\":\"pw\""), "{}", tool_text(&reply));

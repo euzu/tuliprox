@@ -115,6 +115,10 @@ The permission column names the permission the REST route requires (see `groups.
 | `get_qos_snapshot`           |  read | `GET /qos-snapshots/{key}`    | `system.read`                                                                                     | required `stream_identity_key`                                                                                                                                                                                |
 | `get_event_stats`            |  read | `GET /events/stats`           | `system.read`                                                                                     | none                                                                                                                                                                                                          |
 | `get_ip_info`                |  read | `GET /ipinfo`                 | `system.read`                                                                                     | none                                                                                                                                                                                                          |
+| `list_playlist_sources`      | read  | `GET /playlist/sources`       | `playlist.read`                                                                                   | none. Lists targets and inputs by name (see 4.1).                                                                                                                                                             |
+| `query_playlist_items`       | read  | `GET /playlist/items`         | `playlist.read`                                                                                   | required `cluster`, exactly one of `target`/`input`; optional paging, filter and field projection (see 4.1).                                                                                                  |
+| `query_target_epg_channels`  | read  | `GET /playlist/epg/channels`  | `playlist.read`                                                                                   | required `target`; optional `output`, paging, `search`, `issue` (see 4.2).                                                                                                                                    |
+| `get_target_epg_channel`     | read  | `GET /playlist/epg/channel`   | `playlist.read`                                                                                   | required `target`, `channel_id`; optional `output`, `from`, `to`, `limit` (see 4.2).                                                                                                                          |
 | `update_playlists`           | write | `POST /playlist/update`       | `playlist.write`                                                                                  | optional `targets` (list of target names; omit or leave empty to update all targets)                                                                                                                          |
 | `update_geoip`               | write | `GET /geoip/update`           | `system.write`                                                                                    | none                                                                                                                                                                                                          |
 
@@ -126,8 +130,126 @@ Notes:
   `isError` result.
 * `update_playlists` queues a playlist update (the REST route answers `202` with a run id). A second request while one
   is queued answers `409`.
+* The playlist and EPG tools read stored data only and never trigger provider traffic.
 * Tools declare `readOnlyHint` in their annotations, so clients can ask for confirmation before calling write tools.
 * Only the `tools` capability is implemented. Prompts and resources are not offered.
+
+### 4.1 Reading stored playlists
+
+How a client learns to use these tools: `tools/list` carries a description and a JSON Schema per tool (parameters, enums
+and one line per selectable field), and the `initialize` result carries an `instructions` text with the recommended
+workflow. The names below are exactly those enums.
+
+Start with `list_playlist_sources`. It returns the names that the other tools expect, never credentials or URLs:
+
+```json
+{
+  "targets": [{"id": 1, "name": "main", "outputs": ["xtream", "m3u"],
+               "epg": [{"output": "xtream", "available": true}, {"output": "m3u", "available": false}]}],
+  "inputs": [{"id": 1, "name": "provider-a", "input_type": "xtream", "clusters": ["live", "video", "series"]}]
+}
+```
+
+`clusters` is empty for input types without a stored playlist database (for example `stalker`); `epg.available` tells
+whether the processed EPG database of that output exists.
+
+`query_playlist_items` reads the **stored** records (the same data the Web UI lists) of one target or one input. No
+provider is contacted. Parameters:
+
+| Parameter        | Meaning                                                                                                                               |
+|:-----------------|:--------------------------------------------------------------------------------------------------------------------------------------|
+| `target`/`input` | Name of the source. Exactly one is required; both or neither answer an error.                                                         |
+| `cluster`        | Required. `live`, `video` or `series`. A target lists series without episode rows, like the Web UI.                                   |
+| `offset`         | Matching records to skip (default 0).                                                                                                 |
+| `limit`          | Page size, default 50, clamped to 500. The response echoes the applied `limit` and sets `limit_clamped`.                              |
+| `search`         | Case-insensitive substring, matched against `search_field`.                                                                           |
+| `search_field`   | List of `name`, `title`, `group`, `epg_channel_id`, `provider_id`, `input_name`. Default `name`, `title`, `group`; any one may match. |
+| `group`          | Exact (case-sensitive) group name, combined with `search` by AND.                                                                     |
+| `fields`         | List of fields to return (table below). Default: the first ten.                                                                       |
+| `epg_status`     | Targets only. List of `missing_id`, `unmatched`, `matched` (OR). See 4.2.                                                             |
+
+Selectable `fields`:
+
+| Field                   | Meaning                                                                                              |
+|:------------------------|:-----------------------------------------------------------------------------------------------------|
+| `virtual_id`            | Id of the item inside Tuliprox (default)                                                             |
+| `provider_id`           | Id at the provider, always a string (default)                                                        |
+| `name`, `title`         | Channel/stream name and display title (default)                                                      |
+| `group`                 | Group (category) name (default)                                                                      |
+| `item_type`             | `live`, `video`, `series`, `series_info`, `catchup` (default)                                        |
+| `cluster`               | `live`, `video` or `series` (default)                                                                |
+| `epg_channel_id`        | EPG id assigned to the item, `null` when none (default)                                              |
+| `category_id`           | Provider category id; `null` for M3U records (default)                                               |
+| `channel_no`            | Channel number (default)                                                                             |
+| `logo`, `logo_small`    | Logo references as stored                                                                            |
+| `parent_code`, `rec`    | Parental code and recording/catch-up flag                                                            |
+| `input_name`            | Name of the originating input                                                                        |
+| `input_stream_id`       | Stream id inside the originating input                                                               |
+| `source_ordinal`        | Position inside the source playlist                                                                  |
+| `additional_properties` | Provider specific extras (video/series details, can be large); URL-like members are removed          |
+| `epg_status`            | `missing_id`, `unmatched` or `matched` (targets with an EPG database only)                           |
+
+Response:
+
+```json
+{
+  "source": {"kind": "target", "name": "main"},
+  "cluster": "live",
+  "total_matched": 1342, "offset": 0, "limit": 50, "limit_clamped": false,
+  "returned": 50, "has_more": true,
+  "items": [{"virtual_id": 1001, "provider_id": "4711", "name": "Das Erste HD", "title": "Das Erste HD",
+             "group": "DE | Public", "item_type": "live", "cluster": "live",
+             "epg_channel_id": "daserste.de", "category_id": 12, "channel_no": 1}]
+}
+```
+
+`total_matched` counts every record matching the filter, not only the page; continue with `offset += returned` while
+`has_more` is true. The call makes one pass over the stored database, so its cost grows with the playlist size. A source
+that was never updated answers `total_matched: 0` plus a `note`.
+
+### 4.2 Finding EPG problems
+
+Every target with an `xtream` or `m3u` output has a processed EPG database. Two tools inspect it, and `epg_status`
+connects it to the playlist:
+
+1. `query_playlist_items` with `epg_status=missing_id` lists items without an EPG id, `epg_status=unmatched` lists items
+   whose id does not exist in the EPG database (a failed EPG mapping), `epg_status=matched` the healthy ones.
+2. `query_target_epg_channels` lists EPG channels as `{id, title, has_icon, programme_count, first_start, last_stop,
+   covers_now, referenced_by_playlist}` (timestamps RFC 3339 UTC, no raw programmes). Parameters: `target` (required),
+   `output` (`xtream` or `m3u`, default: the first output with an EPG database), `offset`, `limit` (default 50,
+   max 500), `search` (id or title substring) and `issue` (list, OR):
+
+   | `issue`         | Matches channels that                                                         |
+   |:----------------|:------------------------------------------------------------------------------|
+   | `no_programmes` | have no programme at all                                                      |
+   | `expired`       | have only programmes that ended in the past                                   |
+   | `not_current`   | have no programme covering the current time (includes channels without any)   |
+   | `no_title`      | have no title                                                                 |
+   | `unreferenced`  | are used by no playlist item of the target                                    |
+
+3. `get_target_epg_channel` shows the programmes of one channel: `target`, `channel_id` (exact EPG id, canonicalized
+   like the XMLTV output), optional `output`, `from`/`to` (RFC 3339, default now to now + 24 h) and `limit` (default
+   100, max 1000). The response has the channel metadata, `total_in_window`, `truncated` and `programmes` with
+   `start`, `stop`, `title`, `desc` (cut at 500 characters), `categories`, `is_live`, `is_new`. A programme belongs to
+   the window when it ends after `from` and starts before `to`.
+
+A target without an EPG database answers `200` with `total_matched: 0` and a `note` that says why, so that "0" is not
+mistaken for "healthy". Only the processed per-target EPG is inspectable; the raw input EPG files are not.
+
+Typical debugging flow: `list_playlist_sources`, then `query_playlist_items` with `epg_status=unmatched`, then
+`query_target_epg_channels` with `issue=expired` or `unreferenced`, then `get_target_epg_channel` for a suspicious id.
+
+### 4.3 What is never returned
+
+* The provider `url` of a record is not selectable and never returned; Xtream provider URLs carry credentials in their
+  path, which the generic redaction cannot detect.
+* In `additional_properties`, the members `direct_source`, catch-up `source` and `extra_attributes`, the binary probe
+  blobs `video` and `audio`, every key named `url` or ending in `_url`, and every string value that looks like
+  credentials are removed. `logo` and `logo_small` become `null` when they contain credentials.
+* Results still pass the generic redaction and the `mcp.max_response_bytes` limit. A large `limit` combined with
+  `additional_properties` can hit that limit and is then truncated with an explicit marker.
+* A stored record that cannot be decoded is skipped by the database reader (logged on the server) and therefore also
+  missing from the pages.
 
 ## 5. Client setup
 

@@ -1,5 +1,5 @@
 use super::{
-    invalid_data, search_leaf, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeQuery,
+    invalid_data, search_leaf, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeQuery,
     BPlusTreeRangeIterator, PageType, SlottedPage,
 };
 use serde::Deserialize;
@@ -9,7 +9,8 @@ use std::{
     ops::{Bound, Range},
 };
 
-pub(super) struct CursorState<K, V> {
+/// Cursor over the leaf chain; `T` is the item a cell decodes to, `(K, V)` for entries and `K` for keys.
+pub(super) struct CursorState<K, T> {
     pub(super) leaf_page_id: u64,
     pub(super) slot_index: usize,
     pub(super) cell_ranges: Vec<Range<usize>>,
@@ -20,10 +21,10 @@ pub(super) struct CursorState<K, V> {
     pub(super) initialized: bool,
     pub(super) finished: bool,
     pub(super) visited_leaves: HashSet<u64>,
-    pub(super) pending: Option<(K, V)>,
+    pub(super) pending: Option<T>,
 }
 
-impl<K, V> CursorState<K, V> {
+impl<K, T> CursorState<K, T> {
     pub(super) fn new(start: Bound<K>) -> Self {
         Self {
             leaf_page_id: 0,
@@ -41,7 +42,7 @@ impl<K, V> CursorState<K, V> {
     }
 }
 
-fn load_cursor_page<K, V>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorState<K, V>) -> io::Result<()> {
+fn load_cursor_page<K, V, T>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorState<K, T>) -> io::Result<()> {
     let page_id = state.leaf_page_id;
     let next_page_id = query.header.next_page_id;
     let expected_left = state.expected_left_sibling;
@@ -76,10 +77,16 @@ pub(super) fn record_page_visit(visited: &mut HashSet<u64>, page_id: u64, cycle_
     Ok(())
 }
 
-fn cursor_next<K, V>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorState<K, V>) -> Option<io::Result<(K, V)>>
+/// Advances the cursor to the next live cell. `decode` turns one leaf cell into an item and returns `None` for
+/// tombstones; entries and keys-only scans share this traversal and differ only in `decode`.
+fn cursor_advance<K, V, T, D>(
+    query: &mut BPlusTreeQuery<K, V>,
+    state: &mut CursorState<K, T>,
+    mut decode: D,
+) -> Option<io::Result<T>>
 where
     K: Ord + for<'de> Deserialize<'de>,
-    V: for<'de> Deserialize<'de>,
+    D: FnMut(&mut BPlusTreeQuery<K, V>, u64, Range<usize>) -> io::Result<Option<T>>,
 {
     if let Some(entry) = state.pending.take() {
         return Some(Ok(entry));
@@ -117,7 +124,7 @@ where
             while state.slot_index < state.cell_ranges.len() {
                 let index = state.slot_index;
                 state.slot_index += 1;
-                match query.decode_entry_range(page_id, state.cell_ranges[index].clone()) {
+                match decode(query, page_id, state.cell_ranges[index].clone()) {
                     Ok(Some(entry)) => return Ok(Some(entry)),
                     Ok(None) => {}
                     Err(error) => {
@@ -185,7 +192,26 @@ where
 {
     type Item = io::Result<(K, V)>;
 
-    fn next(&mut self) -> Option<Self::Item> { cursor_next(self.query, &mut self.state) }
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_advance(self.query, &mut self.state, BPlusTreeQuery::decode_entry_range)
+    }
+}
+
+impl<'a, K, V> BPlusTreeKeyIterator<'a, K, V> {
+    pub(super) fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
+        Self { query, state: CursorState::new(Bound::Unbounded) }
+    }
+}
+
+impl<K, V> Iterator for BPlusTreeKeyIterator<'_, K, V>
+where
+    K: Ord + for<'de> Deserialize<'de>,
+{
+    type Item = io::Result<K>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_advance(self.query, &mut self.state, BPlusTreeQuery::decode_key_range)
+    }
 }
 
 impl<K, V> BPlusTreeDiskIteratorOwned<K, V> {
@@ -216,7 +242,9 @@ where
 {
     type Item = io::Result<(K, V)>;
 
-    fn next(&mut self) -> Option<Self::Item> { cursor_next(&mut self.query, &mut self.state) }
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_advance(&mut self.query, &mut self.state, BPlusTreeQuery::decode_entry_range)
+    }
 }
 
 fn within_start<K: Ord>(key: &K, bound: &Bound<K>) -> bool {

@@ -90,16 +90,21 @@ fn get_epg_path_for_target_of_type(target_name: &str, epg_path: PathBuf) -> Opti
 }
 
 pub(in crate::api) fn get_epg_path_for_target(config: &Config, target: &ConfigTarget) -> Option<PathBuf> {
+    get_epg_path_and_type_for_target(config, target).map(|(_, epg_path)| epg_path)
+}
+
+/// First output (in configuration order) that has an EPG database, with the path of that database.
+pub(in crate::api) fn get_epg_path_and_type_for_target(
+    config: &Config,
+    target: &ConfigTarget,
+) -> Option<(TargetType, PathBuf)> {
     // TODO if we have multiple targets, first one serves, this can be problematic when
     // we use m3u playlist but serve xtream target epg
 
     // TODO if we share the same virtual_id for epg, can we store an epg file for the target ?
-    for output in &target.output {
-        if let Some(epg_path) = get_epg_path_for_target_by_type(config, target, TargetType::from(output)) {
-            return Some(epg_path);
-        }
-    }
-    None
+    target.output.iter().map(TargetType::from).find_map(|output_type| {
+        get_epg_path_for_target_by_type(config, target, output_type).map(|epg_path| (output_type, epg_path))
+    })
 }
 
 pub(in crate::api) fn get_epg_path_for_target_by_type(

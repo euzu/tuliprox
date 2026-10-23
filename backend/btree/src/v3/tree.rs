@@ -87,12 +87,17 @@ pub struct BPlusTreeQuery<K, V> {
 
 pub struct BPlusTreeDiskIterator<'a, K, V> {
     query: &'a mut BPlusTreeQuery<K, V>,
-    state: CursorState<K, V>,
+    state: CursorState<K, (K, V)>,
 }
 
 pub struct BPlusTreeDiskIteratorOwned<K, V> {
     query: BPlusTreeQuery<K, V>,
-    state: CursorState<K, V>,
+    state: CursorState<K, (K, V)>,
+}
+
+pub struct BPlusTreeKeyIterator<'a, K, V> {
+    query: &'a mut BPlusTreeQuery<K, V>,
+    state: CursorState<K, K>,
 }
 
 pub struct BPlusTreeRangeIterator<'a, K, V> {

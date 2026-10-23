@@ -349,6 +349,61 @@ Notes:
   are `null` for semantic errors without a source position (e.g. an invalid regex value).
 - The preview reads the target's already-processed playlist; it never contacts providers or triggers an update.
 
+## Example 12: Inspect stored playlists and find EPG problems
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+AUTH=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/json")
+
+# Which targets and inputs can be inspected?
+curl -s "${AUTH[@]}" "$BASE_URL/api/v1/playlist/sources" | jq .
+
+# First page of the live channels of a target whose name contains "ard"
+curl -s "${AUTH[@]}" -G "$BASE_URL/api/v1/playlist/items" \
+    --data-urlencode "target=main" --data-urlencode "cluster=live" \
+    --data-urlencode "search=ard" --data-urlencode "limit=20" | jq .
+
+# Items whose EPG id does not exist in the target's EPG database
+curl -s "${AUTH[@]}" -G "$BASE_URL/api/v1/playlist/items" \
+    --data-urlencode "target=main" --data-urlencode "cluster=live" \
+    --data-urlencode "epg_status=unmatched" --data-urlencode "fields=name" \
+    --data-urlencode "fields=group" --data-urlencode "fields=epg_channel_id" | jq .
+
+# EPG channels without programmes or already expired
+curl -s "${AUTH[@]}" -G "$BASE_URL/api/v1/playlist/epg/channels" \
+    --data-urlencode "target=main" --data-urlencode "issue=no_programmes" \
+    --data-urlencode "issue=expired" | jq .
+
+# Programmes of one EPG channel for the next 24 hours
+curl -s "${AUTH[@]}" -G "$BASE_URL/api/v1/playlist/epg/channel" \
+    --data-urlencode "target=main" --data-urlencode "channel_id=daserste.de" | jq .
+```
+
+Typical use:
+
+- check what a target really stored after processing, without downloading the whole playlist
+- find channels with a missing or unmatched EPG id, and EPG channels that no playlist item uses
+- the same routes back the MCP tools `list_playlist_sources`, `query_playlist_items`, `query_target_epg_channels` and
+  `get_target_epg_channel`
+
+Notes:
+
+- Sources are addressed by **name** (`target` or `input`, exactly one for `/playlist/items`), not by id.
+- `cluster` is `live`, `video` or `series`. `offset`/`limit` page the matches (default 50, max 500); the response has
+  `total_matched`, `returned`, `has_more` and `limit_clamped`.
+- Repeatable parameters (`search_field`, `fields`, `epg_status`, `issue`) are given as repeated keys, not `key[]`.
+- `search_field` accepts `name`, `title`, `group`, `epg_channel_id`, `provider_id`, `input_name`. `epg_status` is
+  `missing_id`, `unmatched` or `matched` and works for targets with an EPG database only.
+- The provider `url` is never returned; `additional_properties` must be requested through `fields` and has URL-like
+  members removed.
+- Only stored data is read, no provider is contacted. A source or target without a stored database answers `200` with
+  `total_matched: 0` and a `note`; unknown names answer `404`, invalid parameters `400`.
+- Field tables, EPG `issue` values and the response shapes are described in the
+  [MCP operator reference](operator/mcp.md#41-reading-stored-playlists).
+
 ## Maintenance mode
 
 An input can be taken out of service while its provider is down. While an input is in maintenance:
@@ -404,6 +459,9 @@ Every call answers with the complete state:
 ## Available `/api/v1` Endpoints
 
 This is a compact operator-oriented overview of the `/api/v1` REST API groups currently registered by the backend.
+
+The optional MCP endpoint (`POST {web_ui_path}/mcp`) is not an `/api/v1` route and is not listed below. It exposes
+several of these routes as tools for AI assistants; see the [MCP operator reference](./operator/mcp.md).
 
 ### System and diagnostics
 
@@ -517,6 +575,10 @@ form's scheduled interval, never as a hard block.
 | `POST` | `/api/v1/playlist/resolve_url` | Resolve provider-backed stream URLs |
 | `POST` | `/api/v1/playlist/update` | Trigger target updates |
 | `POST` | `/api/v1/playlist/epg` | Query EPG data for the Web UI |
+| `GET` | `/api/v1/playlist/sources` | Targets and inputs whose stored playlists can be inspected, with EPG availability (`playlist.read`) |
+| `GET` | `/api/v1/playlist/items` | Paged, filtered stored records of one target or input (`playlist.read`) |
+| `GET` | `/api/v1/playlist/epg/channels` | Paged EPG channels of a target with issue filters (`playlist.read`) |
+| `GET` | `/api/v1/playlist/epg/channel` | Programmes of one EPG channel of a target (`playlist.read`) |
 | `POST` | `/api/v1/playlist/series_info/{virtual_id}/{provider_id}` | Series metadata lookup |
 | `POST` | `/api/v1/playlist/series/episode/{virtual_id}` | Episode item lookup |
 | `POST` | `/api/v1/playlist/filter/preview` | Dry-run a filter DSL expression against a target's stored playlist |

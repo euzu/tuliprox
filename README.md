@@ -407,8 +407,8 @@ Tuliprox includes its own storage engine for playlist and runtime data.
 - Dependency-aware parallel input processing
 - Management REST API for configuration, processing, transfers, recordings, status, stream history, QoS, and system information
 - Optional MCP server (read-only by default) so AI assistants such as Claude Desktop or Cursor can inspect status,
-  streams, stream history, QoS, and configuration under the REST API's own authentication and permissions;
-  configurable in the Web UI
+  streams, stream history, QoS, configuration, stored playlists (paged, filtered) and per-target EPG diagnostics under
+  the REST API's own authentication and permissions; configurable in the Web UI
 - JSON and CBOR responses on supported endpoints
 - CLI one-shot processing for scripts and CI/CD
 
