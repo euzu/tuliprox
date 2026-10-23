@@ -1813,6 +1813,7 @@
     "VIEW_TYPE_DASHBOARD": "لوحة التحكم",
     "VIEW_TYPE_STATS": "الإحصائيات",
     "VIEW_TYPE_STREAMS": "تيارات البث",
+    "VIEW_TYPE_LOGS": "السجلات",
     "VIEW_TYPE_STREAM_HISTORY": "سجل البث",
     "VIEW_TYPE_USERS": "مستخدمو API",
     "VIEW_TYPE_CONFIG": "التكوين",

@@ -6,6 +6,7 @@ use strum_macros::EnumIter;
 const DASHBOARD: &str = "dashboard";
 const STATS: &str = "stats";
 const STREAMS: &str = "streams";
+const LOGS: &str = "logs";
 const USERS: &str = "users";
 const PLANS: &str = "plans";
 const CONFIG: &str = "config";
@@ -26,6 +27,7 @@ pub enum ViewType {
     Dashboard,
     Stats,
     Streams,
+    Logs,
     StreamHistory,
     Users,
     Plans,
@@ -48,6 +50,7 @@ impl ViewType {
             ViewType::Dashboard => DASHBOARD,
             ViewType::Stats => STATS,
             ViewType::Streams => STREAMS,
+            ViewType::Logs => LOGS,
             ViewType::StreamHistory => STREAM_HISTORY,
             ViewType::Users => USERS,
             ViewType::Plans => PLANS,
@@ -73,6 +76,7 @@ impl FromStr for ViewType {
             DASHBOARD => Ok(ViewType::Dashboard),
             STATS => Ok(ViewType::Stats),
             STREAMS => Ok(ViewType::Streams),
+            LOGS => Ok(ViewType::Logs),
             STREAM_HISTORY => Ok(ViewType::StreamHistory),
             USERS => Ok(ViewType::Users),
             PLANS => Ok(ViewType::Plans),
@@ -124,6 +128,12 @@ impl Serialize for ViewType {
 mod tests {
     use super::ViewType;
     use std::str::FromStr;
+
+    #[test]
+    fn logs_route_round_trips() {
+        assert_eq!(ViewType::Logs.as_str(), "logs");
+        assert_eq!(ViewType::from_str("logs").unwrap(), ViewType::Logs);
+    }
 
     #[test]
     fn standalone_downloads_route_is_removed() {

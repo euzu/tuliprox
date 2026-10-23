@@ -6,7 +6,7 @@ use crate::{
             config::{
                 add_admission_strategy_tag, admission_strategy_label, admission_strategy_tag_label,
                 admission_strategy_tags, available_admission_strategies,
-                config_page::{ConfigForm, LABEL_REVERSE_PROXY_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 displayed_admission_strategy_tags, filter_disabled_grace_strategies, move_admission_strategy_tag,
                 parse_admission_strategy_tags, remove_admission_strategy_tag, use_emit_mapped_option,
@@ -1726,7 +1726,7 @@ pub fn ReverseProxyConfigView() -> Html {
 
     html! {
         <div class="tp__reverse-proxy-config-view tp__config-view-page">
-        <div class="tp__config-view-page__title">{translate.t(LABEL_REVERSE_PROXY_CONFIG)}</div>
+        <div class="tp__config-view-page__title">{translate.t(ConfigPage::ReverseProxy.title_key())}</div>
             {
                 if *config_view_ctx.edit_mode {
                     render_edit_mode()

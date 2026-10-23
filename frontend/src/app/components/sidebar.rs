@@ -209,8 +209,11 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
                 <MenuItem class={if active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <MenuItem class={if active_menu == ViewType::Logs { "active" } else {""}} icon="Log" name={ViewType::Logs.to_string()} label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></MenuItem>
+            })}
             {html_if!(show_stream_history, {
-                <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Clock" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(
                 auth.has_any_permissions(
@@ -285,8 +288,11 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
              <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
             })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Logs, if active_menu == ViewType::Logs { " active" } else {""})} icon="Log" name={ViewType::Logs.to_string()} hint={translate.t("LABEL.LOGS")} aria_label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></IconButton>
+            })}
             {html_if!(show_stream_history, {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Clock" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(

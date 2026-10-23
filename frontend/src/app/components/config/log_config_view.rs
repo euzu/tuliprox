@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_LOG_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_config_form,
             },
@@ -147,7 +147,7 @@ pub fn LogConfigView() -> Html {
 
     html! {
       <div class="tp__log-config-view tp__config-view-page">
-        <div class="tp__config-view-page__title">{translate.t(LABEL_LOG_CONFIG)}</div>
+        <div class="tp__config-view-page__title">{translate.t(ConfigPage::Log.title_key())}</div>
         <div class="tp__log-config-view__body tp__config-view-page__body">
         {
            if *config_view_ctx.edit_mode {

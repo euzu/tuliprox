@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_SCHEDULES_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_config_form, HasFormData,
             },
@@ -446,7 +446,7 @@ pub fn SchedulesConfigView() -> Html {
 
     html! {
     <div class="tp__schedules-config-view tp__config-view-page">
-        <div class="tp__config-view-page__title">{translate.t(LABEL_SCHEDULES_CONFIG)}</div>
+        <div class="tp__config-view-page__title">{translate.t(ConfigPage::Schedules.title_key())}</div>
         <div class="tp__schedules-config-view__body">
         { if *config_view_ctx.edit_mode { render_edit_mode() } else { html!{} } }
         { render_view_mode(*config_view_ctx.edit_mode) }

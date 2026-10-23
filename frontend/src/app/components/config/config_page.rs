@@ -8,22 +8,6 @@ use shared::{
 };
 use std::{fmt, str::FromStr};
 
-pub const LABEL_MAIN_CONFIG: &str = "LABEL.MAIN_CONFIG";
-pub const LABEL_API_CONFIG: &str = "LABEL.API_CONFIG";
-pub const LABEL_LOG_CONFIG: &str = "LABEL.LOG_CONFIG";
-pub const LABEL_SCHEDULES_CONFIG: &str = "LABEL.SCHEDULES_CONFIG";
-pub const LABEL_MESSAGING_CONFIG: &str = "LABEL.MESSAGING_CONFIG";
-pub const LABEL_WEB_UI_CONFIG: &str = "LABEL.WEB_UI_CONFIG";
-pub const LABEL_REVERSE_PROXY_CONFIG: &str = "LABEL.REVERSE_PROXY_CONFIG";
-pub const LABEL_HDHOMERUN_CONFIG: &str = "LABEL.HDHOMERUN_CONFIG";
-pub const LABEL_PROXY_CONFIG: &str = "LABEL.PROXY_CONFIG";
-pub const LABEL_IP_CHECK_CONFIG: &str = "LABEL.IP_CHECK_CONFIG";
-pub const LABEL_MCP_CONFIG: &str = "LABEL.MCP_CONFIG";
-pub const LABEL_RECORDING_CONFIG: &str = "LABEL.RECORDING_CONFIG";
-pub const LABEL_PANEL_CONFIG: &str = "LABEL.PANEL_CONFIG";
-pub const LABEL_LIBRARY_CONFIG: &str = "LABEL.LIBRARY_CONFIG";
-pub const LABEL_METADATA_UPDATE_CONFIG: &str = "LABEL.METADATA_UPDATE_CONFIG";
-
 const MAIN_PAGE: &str = "main";
 const API_PAGE: &str = "api";
 const LOG_PAGE: &str = "log";
@@ -57,6 +41,67 @@ pub enum ConfigPage {
     Mcp,
     Panel,
     Library,
+}
+
+impl ConfigPage {
+    /// All pages in tab order.
+    pub const ALL: [ConfigPage; 15] = [
+        ConfigPage::Main,
+        ConfigPage::Api,
+        ConfigPage::Log,
+        ConfigPage::Schedules,
+        ConfigPage::Messaging,
+        ConfigPage::WebUi,
+        ConfigPage::ReverseProxy,
+        ConfigPage::HdHomerun,
+        ConfigPage::Proxy,
+        ConfigPage::IpCheck,
+        ConfigPage::Mcp,
+        ConfigPage::Panel,
+        ConfigPage::Recording,
+        ConfigPage::MetadataUpdate,
+        ConfigPage::Library,
+    ];
+
+    pub const fn title_key(self) -> &'static str {
+        match self {
+            ConfigPage::Main => "LABEL.MAIN_CONFIG",
+            ConfigPage::Api => "LABEL.API_CONFIG",
+            ConfigPage::Log => "LABEL.LOG_CONFIG",
+            ConfigPage::Schedules => "LABEL.SCHEDULES_CONFIG",
+            ConfigPage::Recording => "LABEL.RECORDING_CONFIG",
+            ConfigPage::MetadataUpdate => "LABEL.METADATA_UPDATE_CONFIG",
+            ConfigPage::Messaging => "LABEL.MESSAGING_CONFIG",
+            ConfigPage::WebUi => "LABEL.WEB_UI_CONFIG",
+            ConfigPage::ReverseProxy => "LABEL.REVERSE_PROXY_CONFIG",
+            ConfigPage::HdHomerun => "LABEL.HDHOMERUN_CONFIG",
+            ConfigPage::Proxy => "LABEL.PROXY_CONFIG",
+            ConfigPage::IpCheck => "LABEL.IP_CHECK_CONFIG",
+            ConfigPage::Mcp => "LABEL.MCP_CONFIG",
+            ConfigPage::Panel => "LABEL.PANEL_CONFIG",
+            ConfigPage::Library => "LABEL.LIBRARY_CONFIG",
+        }
+    }
+
+    pub const fn icon(self) -> &'static str {
+        match self {
+            ConfigPage::Main => "MainConfig",
+            ConfigPage::Api => "ApiConfig",
+            ConfigPage::Log => "Log",
+            ConfigPage::Schedules => "SchedulesConfig",
+            ConfigPage::Recording => "Record",
+            ConfigPage::MetadataUpdate => "Metadata",
+            ConfigPage::Messaging => "MessagingConfig",
+            ConfigPage::WebUi => "WebUiConfig",
+            ConfigPage::ReverseProxy => "ReverseProxyConfig",
+            ConfigPage::HdHomerun => "HdHomerunConfig",
+            ConfigPage::Proxy => "ProxyConfig",
+            ConfigPage::IpCheck => "IpCheckConfig",
+            ConfigPage::Mcp => "MCP",
+            ConfigPage::Panel => "Settings",
+            ConfigPage::Library => "VideoLibrary",
+        }
+    }
 }
 
 impl FromStr for ConfigPage {
@@ -133,6 +178,27 @@ pub enum ConfigForm {
 }
 
 impl ConfigForm {
+    /// The config page (tab) this form belongs to.
+    pub(crate) const fn page(&self) -> ConfigPage {
+        match self {
+            ConfigForm::Main(..) => ConfigPage::Main,
+            ConfigForm::Api(..) | ConfigForm::ApiProxy(..) => ConfigPage::Api,
+            ConfigForm::Log(..) => ConfigPage::Log,
+            ConfigForm::Schedules(..) => ConfigPage::Schedules,
+            ConfigForm::Recording(..) => ConfigPage::Recording,
+            ConfigForm::MetadataUpdate(..) => ConfigPage::MetadataUpdate,
+            ConfigForm::Messaging(..) => ConfigPage::Messaging,
+            ConfigForm::WebUi(..) => ConfigPage::WebUi,
+            ConfigForm::ReverseProxy(..) => ConfigPage::ReverseProxy,
+            ConfigForm::HdHomerun(..) => ConfigPage::HdHomerun,
+            ConfigForm::Proxy(..) => ConfigPage::Proxy,
+            ConfigForm::IpCheck(..) => ConfigPage::IpCheck,
+            ConfigForm::Mcp(..) => ConfigPage::Mcp,
+            ConfigForm::Panel(..) => ConfigPage::Panel,
+            ConfigForm::Library(..) => ConfigPage::Library,
+        }
+    }
+
     pub(crate) fn is_modified(&self) -> bool {
         matches!(
             self,

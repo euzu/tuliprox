@@ -1894,6 +1894,7 @@
     "VIEW_TYPE_DASHBOARD": "Dashboard",
     "VIEW_TYPE_STATS": "Stats",
     "VIEW_TYPE_STREAMS": "Streams",
+    "VIEW_TYPE_LOGS": "Logs",
     "VIEW_TYPE_STREAM_HISTORY": "Stream History",
     "VIEW_TYPE_USERS": "Api Users",
     "VIEW_TYPE_CONFIG": "Config",

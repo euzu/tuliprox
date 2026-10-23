@@ -2,12 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{
-                    ConfigForm, ConfigFormSlots, ConfigPage, LABEL_API_CONFIG, LABEL_HDHOMERUN_CONFIG,
-                    LABEL_IP_CHECK_CONFIG, LABEL_LIBRARY_CONFIG, LABEL_LOG_CONFIG, LABEL_MAIN_CONFIG, LABEL_MCP_CONFIG,
-                    LABEL_MESSAGING_CONFIG, LABEL_METADATA_UPDATE_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG,
-                    LABEL_RECORDING_CONFIG, LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_WEB_UI_CONFIG,
-                },
+                config_page::{ConfigForm, ConfigFormSlots, ConfigPage},
                 config_update::apply_and_prepare_config,
                 config_view_context::ConfigViewContext,
                 ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
@@ -45,24 +40,23 @@ const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPE
 const DEFAULT_SETUP_USERNAME: &str = "admin";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
-fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
-    match form {
-        ConfigForm::Main(_, _) => ConfigPage::Main,
-        ConfigForm::Api(_, _) => ConfigPage::Api,
-        ConfigForm::ApiProxy(_, _) => ConfigPage::Api,
-        ConfigForm::Log(_, _) => ConfigPage::Log,
-        ConfigForm::Schedules(_, _) => ConfigPage::Schedules,
-        ConfigForm::Recording(_, _) => ConfigPage::Recording,
-        ConfigForm::MetadataUpdate(_, _) => ConfigPage::MetadataUpdate,
-        ConfigForm::Messaging(_, _) => ConfigPage::Messaging,
-        ConfigForm::WebUi(_, _) => ConfigPage::WebUi,
-        ConfigForm::ReverseProxy(_, _) => ConfigPage::ReverseProxy,
-        ConfigForm::HdHomerun(_, _) => ConfigPage::HdHomerun,
-        ConfigForm::Proxy(_, _) => ConfigPage::Proxy,
-        ConfigForm::IpCheck(_, _) => ConfigPage::IpCheck,
-        ConfigForm::Mcp(_, _) => ConfigPage::Mcp,
-        ConfigForm::Panel(_, _) => ConfigPage::Panel,
-        ConfigForm::Library(_, _) => ConfigPage::Library,
+fn config_page_view(page: ConfigPage) -> Html {
+    match page {
+        ConfigPage::Main => html! { <MainConfigView/> },
+        ConfigPage::Api => html! { <ApiConfigView/> },
+        ConfigPage::Log => html! { <LogConfigView/> },
+        ConfigPage::Schedules => html! { <SchedulesConfigView/> },
+        ConfigPage::Messaging => html! { <MessagingConfigView/> },
+        ConfigPage::WebUi => html! { <WebUiConfigView/> },
+        ConfigPage::ReverseProxy => html! { <ReverseProxyConfigView/> },
+        ConfigPage::HdHomerun => html! { <HdHomerunConfigView/> },
+        ConfigPage::Proxy => html! { <ProxyConfigView/> },
+        ConfigPage::IpCheck => html! { <IpCheckConfigView/> },
+        ConfigPage::Mcp => html! { <McpConfigView/> },
+        ConfigPage::Panel => html! { <PanelConfigView/> },
+        ConfigPage::Recording => html! { <RecordingConfigView/> },
+        ConfigPage::MetadataUpdate => html! { <MetadataUpdateConfigView/> },
+        ConfigPage::Library => html! { <LibraryConfigView/> },
     }
 }
 
@@ -108,47 +102,19 @@ pub fn ConfigView() -> Html {
                 .collect_modified_forms()
                 .into_iter()
                 .filter(|form| !matches!(form, ConfigForm::ApiProxy(_, _)))
-                .map(|form| config_form_to_config_page(&form))
+                .map(|form| form.page())
                 .collect::<Vec<ConfigPage>>();
 
-            let tab_configs = vec![
-                (ConfigPage::Main, LABEL_MAIN_CONFIG, html! { <MainConfigView/> }, "MainConfig"),
-                (ConfigPage::Api, LABEL_API_CONFIG, html! { <ApiConfigView/> }, "ApiConfig"),
-                (ConfigPage::Log, LABEL_LOG_CONFIG, html! { <LogConfigView/> }, "Log"),
-                (ConfigPage::Schedules, LABEL_SCHEDULES_CONFIG, html! { <SchedulesConfigView/> }, "SchedulesConfig"),
-                (ConfigPage::Messaging, LABEL_MESSAGING_CONFIG, html! { <MessagingConfigView/> }, "MessagingConfig"),
-                (ConfigPage::WebUi, LABEL_WEB_UI_CONFIG, html! { <WebUiConfigView/> }, "WebUiConfig"),
-                (
-                    ConfigPage::ReverseProxy,
-                    LABEL_REVERSE_PROXY_CONFIG,
-                    html! { <ReverseProxyConfigView/> },
-                    "ReverseProxyConfig",
-                ),
-                (ConfigPage::HdHomerun, LABEL_HDHOMERUN_CONFIG, html! { <HdHomerunConfigView/> }, "HdHomerunConfig"),
-                (ConfigPage::Proxy, LABEL_PROXY_CONFIG, html! { <ProxyConfigView/> }, "ProxyConfig"),
-                (ConfigPage::IpCheck, LABEL_IP_CHECK_CONFIG, html! { <IpCheckConfigView/> }, "IpCheckConfig"),
-                (ConfigPage::Mcp, LABEL_MCP_CONFIG, html! { <McpConfigView/> }, "Nodes"),
-                (ConfigPage::Panel, LABEL_PANEL_CONFIG, html! { <PanelConfigView/> }, "Settings"),
-                (ConfigPage::Recording, LABEL_RECORDING_CONFIG, html! { <RecordingConfigView/> }, "Record"),
-                (
-                    ConfigPage::MetadataUpdate,
-                    LABEL_METADATA_UPDATE_CONFIG,
-                    html! { <MetadataUpdateConfigView/> },
-                    "Metadata",
-                ),
-                (ConfigPage::Library, LABEL_LIBRARY_CONFIG, html! { <LibraryConfigView/> }, "VideoLibrary"),
-            ];
-
             let editing = *editing;
-            tab_configs
+            ConfigPage::ALL
                 .into_iter()
-                .map(|(page, label, children, icon)| {
+                .map(|page| {
                     let is_modified = editing && modified_pages.contains(&page);
                     TabItem {
                         id: page.to_string(),
-                        title: translate.t(label),
-                        icon: icon.to_string(),
-                        children,
+                        title: translate.t(page.title_key()),
+                        icon: page.icon().to_string(),
+                        children: config_page_view(page),
                         active_class: if is_modified { Some("tp__tab__modified__active".to_string()) } else { None },
                         inactive_class: if is_modified {
                             Some("tp__tab__modified__inactive".to_string())

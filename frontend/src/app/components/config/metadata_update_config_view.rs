@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_METADATA_UPDATE_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_mapped,
             },
@@ -422,7 +422,7 @@ pub fn MetadataUpdateConfigView() -> Html {
 
     html! {
         <div class="tp__metadata-update-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{translate.t(LABEL_METADATA_UPDATE_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(ConfigPage::MetadataUpdate.title_key())}</div>
             <div class="tp__metadata-update-config-view__body tp__config-view-page__body">
                 {
                     if *config_view_ctx.edit_mode {

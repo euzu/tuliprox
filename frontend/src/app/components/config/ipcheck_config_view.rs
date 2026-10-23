@@ -1,7 +1,7 @@
 use crate::{
     app::{
         components::config::{
-            config_page::{ConfigForm, LABEL_IP_CHECK_CONFIG},
+            config_page::{ConfigForm, ConfigPage},
             config_view_context::ConfigViewContext,
             use_emit_config_form,
         },
@@ -104,7 +104,7 @@ pub fn IpCheckConfigView() -> Html {
 
     html! {
       <div class="tp__ipcheck-config-view tp__config-view-page">
-        <div class="tp__config-view-page__title">{translate.t(LABEL_IP_CHECK_CONFIG)}</div>
+        <div class="tp__config-view-page__title">{translate.t(ConfigPage::IpCheck.title_key())}</div>
         <div class="tp__ipcheck-config-view__body tp__config-view-page__body">
         {
            if *config_view_ctx.edit_mode {

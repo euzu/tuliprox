@@ -1894,6 +1894,7 @@
     "VIEW_TYPE_DASHBOARD": "Panel",
     "VIEW_TYPE_STATS": "Estadísticas",
     "VIEW_TYPE_STREAMS": "Streams",
+    "VIEW_TYPE_LOGS": "Registros",
     "VIEW_TYPE_STREAM_HISTORY": "Historial de streams",
     "VIEW_TYPE_USERS": "Usuarios de la API",
     "VIEW_TYPE_CONFIG": "Configuración",

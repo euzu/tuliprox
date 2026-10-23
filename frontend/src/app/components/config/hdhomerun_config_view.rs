@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_HDHOMERUN_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 hdhomerun_device_view::HdHomerunDeviceView,
                 use_emit_config_form,
@@ -141,7 +141,7 @@ pub fn HdHomerunConfigView() -> Html {
 
     html! {
         <div class="tp__hdhomerun-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{translate.t(LABEL_HDHOMERUN_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(ConfigPage::HdHomerun.title_key())}</div>
             <div class="tp__hdhomerun-config-view__header tp__config-view-page__header">
               {if  edit_mode {
                  html! {

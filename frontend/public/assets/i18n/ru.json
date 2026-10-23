@@ -1813,6 +1813,7 @@
     "VIEW_TYPE_DASHBOARD": "Дашборд",
     "VIEW_TYPE_STATS": "Статистика",
     "VIEW_TYPE_STREAMS": "Потоки",
+    "VIEW_TYPE_LOGS": "Логи",
     "VIEW_TYPE_STREAM_HISTORY": "История потоков",
     "VIEW_TYPE_USERS": "Пользователи API",
     "VIEW_TYPE_CONFIG": "Конфигурация",

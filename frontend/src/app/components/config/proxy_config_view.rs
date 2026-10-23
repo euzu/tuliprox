@@ -1,7 +1,7 @@
 use crate::{
     app::{
         components::config::{
-            config_page::{ConfigForm, LABEL_PROXY_CONFIG},
+            config_page::{ConfigForm, ConfigPage},
             config_view_context::ConfigViewContext,
             use_emit_config_form,
         },
@@ -77,7 +77,7 @@ pub fn ProxyConfigView() -> Html {
 
     html! {
         <div class="tp__proxy-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{translate.t(LABEL_PROXY_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(ConfigPage::Proxy.title_key())}</div>
             {
                 if *config_view_ctx.edit_mode {
                     render_edit_mode()

@@ -56,6 +56,10 @@ You can pass comma-separated module paths:
 URLs, and external client IPs in
 the logs with `***`. This is strongly recommended so you can safely share logs on GitHub or Discord!*
 
+**Live logs in the Web UI:** The **Logs** entry in the sidebar (below Dashboard, Stats and Streams) shows the live log
+stream with level filter, search, auto-scroll, copy and clear. It needs the `system:read` permission and can be set as
+`web_ui.landing_page: logs`. The log stream is only open while the view is active.
+
 ---
 
 ## 3. Database Dumps (B+Tree Analysis)
@@ -125,36 +129,36 @@ movie until `cooldown_until_ts` (e.g., 7 days in the future) to save API traffic
 The QoS snapshot DB is the condensed operational view built from raw stream history. It is intended to answer questions
 like:
 
-* Which stream is currently the most reliable?
-* Is a stream failing before startup, during first byte, or later during playback?
-* Is the problem likely provider instability, capacity pressure, or transient churn?
+- Which stream is currently the most reliable?
+- Is a stream failing before startup, during first byte, or later during playback?
+- Is the problem likely provider instability, capacity pressure, or transient churn?
 
 ### What a Snapshot Represents
 
 Each snapshot is keyed by a stable stream identity and stores rolling windows:
 
-* `24h` — recent behavior, best for spotting active incidents or current degradations
-* `7d` — medium-term stability, useful to smooth out one-off noise
-* `30d` — long-term baseline, useful to judge whether a stream is generally trustworthy
+- `24h` — recent behavior, best for spotting active incidents or current degradations
+- `7d` — medium-term stability, useful to smooth out one-off noise
+- `30d` — long-term baseline, useful to judge whether a stream is generally trustworthy
 
 Each window contains:
 
-* `score` — compact reliability score (`0-100`)
-* `confidence` — how much data the score is based on
-* startup counters
-* runtime abort counters
-* provider-close counters
-* reconnect burden
-* latency and session-duration averages
+- `score` — compact reliability score (`0-100`)
+- `confidence` — how much data the score is based on
+- startup counters
+- runtime abort counters
+- provider-close counters
+- reconnect burden
+- latency and session-duration averages
 
 ### How To Interpret `score`
 
 The score is a weighted operational quality estimate:
 
-* **High score (`80-100`)**: recent connects are successful, disconnects are rare, first-byte failures are low, and
+- **High score (`80-100`)**: recent connects are successful, disconnects are rare, first-byte failures are low, and
   reconnect burden is low
-* **Medium score (`50-79`)**: stream is usable, but shows noticeable instability or intermittent provider issues
-* **Low score (`0-49`)**: stream is currently risky; repeated startup failures, runtime aborts, or provider-side churn
+- **Medium score (`50-79`)**: stream is usable, but shows noticeable instability or intermittent provider issues
+- **Low score (`0-49`)**: stream is currently risky; repeated startup failures, runtime aborts, or provider-side churn
   are dominating
 
 The exact weighting is intentionally pragmatic, not academic. It is designed to provide a stable operational signal for
@@ -164,14 +168,14 @@ later failover ranking, not a mathematically "perfect" SLA model.
 
 `confidence` answers: "How much should I trust this score?"
 
-* **High confidence**: enough events were seen in the window to make the score meaningful
-* **Low confidence**: too little recent traffic; the score may be technically correct but statistically weak
+- **High confidence**: enough events were seen in the window to make the score meaningful
+- **Low confidence**: too little recent traffic; the score may be technically correct but statistically weak
 
 Operationally:
 
-* treat **high score + high confidence** as a strong candidate
-* treat **high score + low confidence** as promising but not yet proven
-* treat **low score + high confidence** as a real reliability warning
+- treat **high score + high confidence** as a strong candidate
+- treat **high score + low confidence** as promising but not yet proven
+- treat **low score + high confidence** as a real reliability warning
 
 ### Common Diagnosis Patterns
 
@@ -179,13 +183,13 @@ Operationally:
 
 Startup path is unstable. Look at:
 
-* `startup_capacity_failure_count`
-* `provider_open_failure_count`
+- `startup_capacity_failure_count`
+- `provider_open_failure_count`
 
 Interpretation:
 
-* high capacity failures => provider/user capacity is too tight
-* high provider-open failures => upstream is unstable before streaming even starts
+- high capacity failures => provider/user capacity is too tight
+- high provider-open failures => upstream is unstable before streaming even starts
 
 **2. Good startup, but high `first_byte_failure_count`**
 
@@ -215,16 +219,16 @@ Usually indicates recent recovery. Good sign, but wait for confidence to grow be
 
 Use **QoS snapshots** when you want a compact answer:
 
-* "Which streams are strong?"
-* "Which providers are degrading?"
-* "Is this a capacity problem or a runtime stability problem?"
+- "Which streams are strong?"
+- "Which providers are degrading?"
+- "Is this a capacity problem or a runtime stability problem?"
 
 Use **raw stream history** when you need event-level truth:
 
-* exact disconnect reasons
-* exact timestamps
-* per-session provider metadata
-* startup vs disconnect timeline reconstruction
+- exact disconnect reasons
+- exact timestamps
+- per-session provider metadata
+- startup vs disconnect timeline reconstruction
 
 The intended workflow is:
 
@@ -245,9 +249,9 @@ The intended workflow is:
 
 QoS snapshots are intentionally **operational summaries**, not a complete event archive:
 
-* they are ideal for ranking and triage
-* they are not a replacement for raw stream history
-* they are also not yet the failover engine itself
+- they are ideal for ranking and triage
+- they are not a replacement for raw stream history
+- they are also not yet the failover engine itself
 
 The future failover feature is expected to consume these snapshots, but the snapshots already stand on their own as a
 debugging and reliability-analysis tool.
@@ -446,14 +450,14 @@ The watchdog detects exactly that. It is **opt-in and off by default**.
 
 ### What it does
 
-* **Heartbeat (inside the runtime):** a small task records a monotonic timestamp every second and measures how late it
+- **Heartbeat (inside the runtime):** a small task records a monotonic timestamp every second and measures how late it
   was scheduled.
-* **Watchdog thread (outside the runtime):** a separate `std::thread` watches the heartbeat age. If the scheduler is
+- **Watchdog thread (outside the runtime):** a separate `std::thread` watches the heartbeat age. If the scheduler is
   wedged, the heartbeat stops advancing and the thread logs a diagnostic snapshot.
-* **On a stall** it logs (once, then every 30 s while it continues) the heartbeat age, runtime metrics (worker count,
+- **On a stall** it logs (once, then every 30 s while it continues) the heartbeat age, runtime metrics (worker count,
   alive tasks, global queue depth, per-worker park counts) and, on Linux, a `/proc/self/task` inventory with each
   thread's id, name, state and waiting channel.
-* **On recovery** it logs that the heartbeat is back.
+- **On recovery** it logs that the heartbeat is back.
 
 The watchdog itself only reports. In mode `2` it can additionally exit the process so a supervisor restarts it (see below).
 

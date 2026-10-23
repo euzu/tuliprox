@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_mapped, HasFormData,
             },
@@ -341,7 +341,7 @@ pub fn WebUiConfigView() -> Html {
 
     html! {
         <div class="tp__webui-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{translate.t(LABEL_WEB_UI_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(ConfigPage::WebUi.title_key())}</div>
             {
              html_if!(*config_view_ctx.edit_mode && config_view_ctx.show_restart_notice, {
                   <div class="tp__webui-config-view__info tp__config-view-page__info">

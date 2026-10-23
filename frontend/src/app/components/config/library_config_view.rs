@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_LIBRARY_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_mapped,
             },
@@ -571,7 +571,7 @@ pub fn LibraryConfigView() -> Html {
 
     html! {
         <div class="tp__library-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{translate.t(LABEL_LIBRARY_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(ConfigPage::Library.title_key())}</div>
             { if *config_view_ctx.edit_mode { render_edit_mode() } else { render_view_mode() } }
         </div>
     }

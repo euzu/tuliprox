@@ -192,6 +192,12 @@
 
 ## 🌟 New Features
 
+- **Logs is a standalone Web UI view.** The live log console moved out of the Stats view into its own sidebar entry
+  (Dashboard, Stats, Streams, Logs) for both the expanded sidebar and the collapsed/mobile icon bar. It fills the full
+  page height, shrinks down to a minimum height and then scrolls. It requires the same `system:read` permission as
+  Stats, can be selected as `web_ui.landing_page: logs`, and only streams logs while the view is open. The Stream
+  History entry now uses the `Clock` icon.
+
 - **MCP server for AI assistants.** A new `mcp:` block in `config.yml` mounts a Model Context Protocol endpoint
   (`POST {web_ui_path}/mcp`, Streamable HTTP with plain JSON responses) that lets MCP clients such as Claude Desktop,
   Cursor or ChatGPT inspect Tuliprox through tools (status, active streams, effective config, playlist update status,

@@ -3,8 +3,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::LABEL_RECORDING_CONFIG, config_view_context::ConfigViewContext, use_emit_mapped,
-                RecordingConfigCards,
+                config_page::ConfigPage, config_view_context::ConfigViewContext, use_emit_mapped, RecordingConfigCards,
             },
             Card, KeyValueEditor,
         },
@@ -168,7 +167,7 @@ pub fn RecordingConfigView() -> Html {
 
     html! {
         <div class="tp__recording-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{translate.t(LABEL_RECORDING_CONFIG)}</div>
+            <div class="tp__config-view-page__title">{translate.t(ConfigPage::Recording.title_key())}</div>
             <div class="tp__recording-config-view__body tp__config-view-page__body">
                 <RecordingConfigCards
                     recording={state.form.clone()}

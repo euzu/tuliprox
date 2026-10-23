@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_MCP_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_config_form,
             },
@@ -101,7 +101,7 @@ pub fn McpConfigView() -> Html {
 
     html! {
       <div class="tp__mcp-config-view tp__config-view-page">
-        <div class="tp__config-view-page__title">{translate.t(LABEL_MCP_CONFIG)}</div>
+        <div class="tp__config-view-page__title">{translate.t(ConfigPage::Mcp.title_key())}</div>
         { if config_view_ctx.show_restart_notice { render_hint(INFO_MCP_RESTART_REQUIRED) } else { html! {} } }
         { if config_view_ctx.show_restart_notice && !web_auth_enabled && !form_state.form.read_only { render_hint(INFO_MCP_READ_ONLY_FORCED) } else { html! {} } }
         <div class="tp__mcp-config-view__body tp__config-view-page__body">

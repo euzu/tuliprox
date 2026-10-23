@@ -3,6 +3,8 @@
 .tp__log-console {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
@@ -135,8 +137,8 @@
   }
 
   &__output {
-    height: 670px;
-    max-height: 800px;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: auto;
     background-color: var(--log-console-background-color);
