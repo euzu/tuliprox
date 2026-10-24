@@ -200,6 +200,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 )
                 .await;
             };
+            if selected_provider_config.is_account_blocked() {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             // URL acceptance follows the provider that produced the sealed URL, not the session:
             // entry URLs are re-resolved to the selected account on every fetch, child URLs
             // (often CDN URLs) are fetched as sealed and only from their origin provider.

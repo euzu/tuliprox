@@ -28,6 +28,16 @@ fn opened_with_body_owner(manager: &ActiveProviderManager, port: u16) -> Provide
     handle
 }
 
+async fn wait_for_no_connections(manager: &ActiveProviderManager) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while manager.get_provider_connections_count() != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("slot is released");
+}
+
 fn is_cancelled(token: Option<&CancellationToken>) -> bool { token.is_some_and(CancellationToken::is_cancelled) }
 
 #[tokio::test]
@@ -112,7 +122,7 @@ async fn eof_release_is_skipped_after_regular_release_started() {
     manager.release_handle(&first);
     assert_eq!(manager.get_provider_connections_count(), 1);
     first.completion_token.as_ref().expect("completion token").cancel();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    wait_for_no_connections(&manager).await;
 
     assert_eq!(manager.get_provider_connections_count(), 0, "released exactly once");
     let second = acquire(&manager, 51_032).expect("slot available");
@@ -142,8 +152,7 @@ async fn eof_release_for_unknown_allocation_is_a_noop() {
     let first = opened_with_body_owner(&manager, 51_051);
     manager.release_handle(&first);
     first.completion_token.as_ref().expect("completion token").cancel();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(manager.get_provider_connections_count(), 0);
+    wait_for_no_connections(&manager).await;
 
     // Allocation is gone: nothing to watch, nothing to release.
     manager.release_slot_on_clean_upstream_eof(first.allocation_id);

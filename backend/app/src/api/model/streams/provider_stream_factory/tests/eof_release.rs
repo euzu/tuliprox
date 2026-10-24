@@ -131,7 +131,6 @@ async fn open_and_let_upstream_finish(
     )
     .await
     .expect("body owner completes on upstream EOF");
-    tokio::time::sleep(Duration::from_millis(50)).await;
     (managed, stream)
 }
 
@@ -140,6 +139,14 @@ async fn hls_resource_frees_slot_on_upstream_eof_and_still_delivers_all_bytes() 
     let ctx = stream_ctx(&single_slot_app_config());
     let (managed, stream) = open_and_let_upstream_finish(&ctx, StreamResponseMode::HlsResource).await;
 
+    // The EOF release runs in a separately spawned task; wait for it instead of sleeping.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while ctx.active_provider.get_provider_connections_count() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("EOF release frees the slot");
     assert_eq!(ctx.active_provider.get_provider_connections_count(), 0, "slot is free before the client reads");
     assert_eq!(collect_stream(stream).await.expect("buffered segment streams"), SEGMENT_BODY);
 
