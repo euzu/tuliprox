@@ -1,5 +1,5 @@
 use super::{
-    invalid_data, search_leaf, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeQuery,
+    invalid_data, search_leaf, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeQuery,
     BPlusTreeRangeIterator, PageType, SlottedPage,
 };
 use serde::Deserialize;
@@ -9,7 +9,8 @@ use std::{
     ops::{Bound, Range},
 };
 
-pub(super) struct CursorState<K, V> {
+/// Cursor over the leaf chain; `T` is the item a cell decodes to, `(K, V)` for entries and `K` for keys.
+pub(super) struct CursorState<K, T> {
     pub(super) leaf_page_id: u64,
     pub(super) slot_index: usize,
     pub(super) cell_ranges: Vec<Range<usize>>,
@@ -19,11 +20,11 @@ pub(super) struct CursorState<K, V> {
     pub(super) start: Bound<K>,
     pub(super) initialized: bool,
     pub(super) finished: bool,
-    pub(super) visited_leaves: HashSet<u64>,
-    pub(super) pending: Option<(K, V)>,
+    pub(super) chain: ChainGuard,
+    pub(super) pending: Option<T>,
 }
 
-impl<K, V> CursorState<K, V> {
+impl<K, T> CursorState<K, T> {
     pub(super) fn new(start: Bound<K>) -> Self {
         Self {
             leaf_page_id: 0,
@@ -35,13 +36,13 @@ impl<K, V> CursorState<K, V> {
             start,
             initialized: false,
             finished: false,
-            visited_leaves: HashSet::new(),
+            chain: ChainGuard::default(),
             pending: None,
         }
     }
 }
 
-fn load_cursor_page<K, V>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorState<K, V>) -> io::Result<()> {
+fn load_cursor_page<K, V, T>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorState<K, T>) -> io::Result<()> {
     let page_id = state.leaf_page_id;
     let next_page_id = query.header.next_page_id;
     let expected_left = state.expected_left_sibling;
@@ -68,6 +69,35 @@ fn load_cursor_page<K, V>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorSt
     Ok(())
 }
 
+/// O(1)-memory cycle guard for a chain walk (sibling or overflow links). Walks that validate the backlink of every
+/// step (`expected_left_sibling`) can only revisit the first page, which `visit` rejects immediately, so no entry is
+/// ever produced twice; walks without a backlink check are bounded by the number of pages that can exist.
+#[derive(Default)]
+pub(super) struct ChainGuard {
+    first: u64,
+    visited: u64,
+}
+
+impl ChainGuard {
+    /// Records the arrival at `page_id`; the first call defines the start of the walk. Fails when the walk returned to
+    /// its first page or visited more pages than `page_limit` (the exclusive upper bound of page ids, which is
+    /// `header.next_page_id`).
+    pub(super) fn visit(&mut self, page_id: u64, page_limit: u64, cycle_error: &'static str) -> io::Result<()> {
+        if self.visited == 0 {
+            self.first = page_id;
+        } else if page_id == self.first {
+            return Err(invalid_data(cycle_error));
+        }
+        self.visited = self.visited.saturating_add(1);
+        if self.visited > page_limit {
+            return Err(invalid_data(cycle_error));
+        }
+        Ok(())
+    }
+}
+
+/// Set-based duplicate detection for walks that must also report pages seen by earlier walks (free list, overflow page
+/// ownership across values).
 pub(super) fn record_page_visit(visited: &mut HashSet<u64>, page_id: u64, cycle_error: &'static str) -> io::Result<()> {
     visited.try_reserve(1).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     if !visited.insert(page_id) {
@@ -76,10 +106,16 @@ pub(super) fn record_page_visit(visited: &mut HashSet<u64>, page_id: u64, cycle_
     Ok(())
 }
 
-fn cursor_next<K, V>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorState<K, V>) -> Option<io::Result<(K, V)>>
+/// Advances the cursor to the next live cell. `decode` turns one leaf cell into an item and returns `None` for
+/// tombstones; entries and keys-only scans share this traversal and differ only in `decode`.
+fn cursor_advance<K, V, T, D>(
+    query: &mut BPlusTreeQuery<K, V>,
+    state: &mut CursorState<K, T>,
+    mut decode: D,
+) -> Option<io::Result<T>>
 where
     K: Ord + for<'de> Deserialize<'de>,
-    V: for<'de> Deserialize<'de>,
+    D: FnMut(&mut BPlusTreeQuery<K, V>, u64, Range<usize>) -> io::Result<Option<T>>,
 {
     if let Some(entry) = state.pending.take() {
         return Some(Ok(entry));
@@ -94,7 +130,8 @@ where
                 Bound::Included(key) | Bound::Excluded(key) => query.locate_leaf(key)?,
                 Bound::Unbounded => query.leftmost_leaf()?,
             };
-            record_page_visit(&mut state.visited_leaves, state.leaf_page_id, "right sibling chain contains a cycle")?;
+            state.chain = ChainGuard::default();
+            state.chain.visit(state.leaf_page_id, query.header.next_page_id, "right sibling chain contains a cycle")?;
             if let Bound::Included(key) | Bound::Excluded(key) = &state.start {
                 let page_id = state.leaf_page_id;
                 let next_page_id = query.header.next_page_id;
@@ -117,7 +154,7 @@ where
             while state.slot_index < state.cell_ranges.len() {
                 let index = state.slot_index;
                 state.slot_index += 1;
-                match query.decode_entry_range(page_id, state.cell_ranges[index].clone()) {
+                match decode(query, page_id, state.cell_ranges[index].clone()) {
                     Ok(Some(entry)) => return Ok(Some(entry)),
                     Ok(None) => {}
                     Err(error) => {
@@ -130,7 +167,7 @@ where
             if right == 0 {
                 return Ok(None);
             }
-            record_page_visit(&mut state.visited_leaves, right, "right sibling chain contains a cycle")?;
+            state.chain.visit(right, query.header.next_page_id, "right sibling chain contains a cycle")?;
             state.expected_left_sibling = Some(page_id);
             state.leaf_page_id = right;
             state.slot_index = 0;
@@ -151,6 +188,19 @@ where
     }
 }
 
+/// Turns the first item of a cursor into an emptiness answer; a produced item is parked in `pending` so the next
+/// `next()` call yields it again.
+fn peek_is_empty<T>(first: Option<io::Result<T>>, pending: &mut Option<T>) -> io::Result<bool> {
+    match first {
+        None => Ok(true),
+        Some(Ok(entry)) => {
+            *pending = Some(entry);
+            Ok(false)
+        }
+        Some(Err(err)) => Err(err),
+    }
+}
+
 impl<'a, K, V> BPlusTreeDiskIterator<'a, K, V> {
     pub(super) fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
         Self { query, state: CursorState::new(Bound::Unbounded) }
@@ -166,16 +216,7 @@ where
     K: Ord + for<'de> Deserialize<'de>,
     V: for<'de> Deserialize<'de>,
 {
-    pub fn try_is_empty(&mut self) -> io::Result<bool> {
-        match self.next() {
-            None => Ok(true),
-            Some(Ok(entry)) => {
-                self.state.pending = Some(entry);
-                Ok(false)
-            }
-            Some(Err(err)) => Err(err),
-        }
-    }
+    pub fn try_is_empty(&mut self) -> io::Result<bool> { peek_is_empty(self.next(), &mut self.state.pending) }
 }
 
 impl<K, V> Iterator for BPlusTreeDiskIterator<'_, K, V>
@@ -185,7 +226,26 @@ where
 {
     type Item = io::Result<(K, V)>;
 
-    fn next(&mut self) -> Option<Self::Item> { cursor_next(self.query, &mut self.state) }
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_advance(self.query, &mut self.state, BPlusTreeQuery::decode_entry_range)
+    }
+}
+
+impl<'a, K, V> BPlusTreeKeyIterator<'a, K, V> {
+    pub(super) fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
+        Self { query, state: CursorState::new(Bound::Unbounded) }
+    }
+}
+
+impl<K, V> Iterator for BPlusTreeKeyIterator<'_, K, V>
+where
+    K: Ord + for<'de> Deserialize<'de>,
+{
+    type Item = io::Result<K>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_advance(self.query, &mut self.state, BPlusTreeQuery::decode_key_range)
+    }
 }
 
 impl<K, V> BPlusTreeDiskIteratorOwned<K, V> {
@@ -197,16 +257,7 @@ where
     K: Ord + for<'de> Deserialize<'de>,
     V: for<'de> Deserialize<'de>,
 {
-    pub fn try_is_empty(&mut self) -> io::Result<bool> {
-        match self.next() {
-            None => Ok(true),
-            Some(Ok(entry)) => {
-                self.state.pending = Some(entry);
-                Ok(false)
-            }
-            Some(Err(err)) => Err(err),
-        }
-    }
+    pub fn try_is_empty(&mut self) -> io::Result<bool> { peek_is_empty(self.next(), &mut self.state.pending) }
 }
 
 impl<K, V> Iterator for BPlusTreeDiskIteratorOwned<K, V>
@@ -216,7 +267,9 @@ where
 {
     type Item = io::Result<(K, V)>;
 
-    fn next(&mut self) -> Option<Self::Item> { cursor_next(&mut self.query, &mut self.state) }
+    fn next(&mut self) -> Option<Self::Item> {
+        cursor_advance(&mut self.query, &mut self.state, BPlusTreeQuery::decode_entry_range)
+    }
 }
 
 fn within_start<K: Ord>(key: &K, bound: &Bound<K>) -> bool {

@@ -7,10 +7,10 @@ use crate::{
             map_sources_to_playlist_rows,
             recording::{RecordingLibraryView, RecordingRulesView},
             theme::Theme,
-            AppIcon, DashboardView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, NoAccess, Panel,
-            ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup,
-            Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView,
-            WebsocketStatus,
+            AppIcon, DashboardView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, LogsView,
+            NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView,
+            RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
+            UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, StatusContext},
     },
@@ -87,6 +87,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
     match normalize_requested_home_view(view, access) {
         ViewType::Dashboard => true,
         ViewType::Stats => access.can_read_system_status,
+        ViewType::Logs => access.can_read_system_status,
         ViewType::StreamHistory => access.show_stream_history && access.can_read_system_status,
         ViewType::Streams => access.show_streams_page && access.can_read_system_status,
         ViewType::Users => access.can_read_users || access.can_write_users,
@@ -110,6 +111,7 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::Dashboard,
         ViewType::Stats,
         ViewType::Streams,
+        ViewType::Logs,
         ViewType::StreamHistory,
         ViewType::Config,
         ViewType::Users,
@@ -586,6 +588,13 @@ pub fn Home() -> Html {
                                               </ErrorBoundary>
                                             </Panel>
                                         })}
+                                        { html_if!(can_read_system_status, {
+                                            <Panel class="tp__full-width tp__full-height" value={ViewType::Logs.intern()} active={view_page.clone()}>
+                                                <ErrorBoundary name={translate.t("LABEL.LOGS")}>
+                                                  <LogsView active={view_page == ViewType::Logs.intern()}/>
+                                                </ErrorBoundary>
+                                            </Panel>
+                                        })}
                                         { html_if!(can_read_system_status && show_stream_history, {
                                             <Panel class="tp__full-width" value={ViewType::StreamHistory.intern()} active={view_page.clone()}>
                                                 <ErrorBoundary name={translate.t("LABEL.STREAM_HISTORY")}>
@@ -786,6 +795,15 @@ mod tests {
         let access = super::HomeViewAccess { setup_mode: true, ..full_access() };
         assert!(is_allowed_home_view(ViewType::Config, access));
         assert!(!is_allowed_home_view(ViewType::Dashboard, access));
+    }
+
+    #[test]
+    fn is_allowed_home_view_logs_requires_system_read() {
+        let mut access = full_access();
+        assert!(is_allowed_home_view(ViewType::Logs, access));
+
+        access.can_read_system_status = false;
+        assert!(!is_allowed_home_view(ViewType::Logs, access));
     }
 
     #[test]

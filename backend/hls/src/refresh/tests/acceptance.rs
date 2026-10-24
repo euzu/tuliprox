@@ -19,7 +19,6 @@ use crate::{
     HlsSegmentCache, HlsSession, HlsSessionKey, HlsSessionStore, OriginSegmentKey, RenderedManifest,
     RenderedManifestStoreOutcome, SegmentCacheKey, SegmentCacheStatus, SegmentEntry,
 };
-use axum::http::StatusCode;
 use shared::model::{ConfigProviderDto, HlsManifestRecoveryBurstLevel, ProviderUrlSelectionPolicy};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -310,14 +309,14 @@ async fn warm_retryable_initial_failure_does_not_open_acceptance_episode() {
 }
 
 #[tokio::test]
-async fn initial_provider_failover_does_not_leak_into_established_burst() {
+async fn initial_hard_provider_failover_does_not_start_established_burst() {
     let phase = Arc::new(AtomicUsize::new(0));
     let phase_for_first = Arc::clone(&phase);
     let first = spawn_test_origin(Arc::new(move |_path| {
         if phase_for_first.load(Ordering::SeqCst) == 0 {
             (200, Vec::new(), three_segment_manifest_body(100))
         } else {
-            (407, Vec::new(), "rotate".to_string())
+            (503, Vec::new(), "rotate".to_string())
         }
     }))
     .await;
@@ -357,15 +356,11 @@ async fn initial_provider_failover_does_not_leak_into_established_burst() {
     let Err(error) = fetch_and_commit_manifest_with_policy(&mut request).await else {
         panic!("hard initial provider cycle and fixed-target recovery must remain failed");
     };
-    assert!(matches!(error, OriginManifestFetchError::RetryableStatus(StatusCode::PROXY_AUTHENTICATION_REQUIRED, _)));
+    assert!(matches!(error, OriginManifestFetchError::NonRetryableStatus(status) if status.as_u16() == 461));
 
-    let plan = HlsManifestRecoveryBurstLevel::Friendly.plan();
     let first_requests = first.requests.lock().await;
     let second_requests = second.requests.lock().await;
-    assert!(
-        first_requests.len() >= 2_usize.saturating_add(plan.total_candidates()),
-        "baseline, ordinary provider attempt, and at least one full fixed-target burst are required"
-    );
+    assert_eq!(first_requests.len(), 2, "baseline and initial request; hard failure cannot start recovery");
     assert_eq!(second_requests.len(), 1, "only the ordinary provider cycle may reach URL index 1");
     assert!(first_requests.iter().all(|path| path == "/live/user/pass/12345.m3u8?token=fixed"));
     assert_eq!(second_requests[0], "/live/user/pass/12345.m3u8?token=fixed");
@@ -396,7 +391,7 @@ async fn expired_acceptance_deadline_still_completes_first_beast_burst_without_f
         .expect("deadline test origin entry");
     request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
     let target_url = request.origin_entry.url().clone();
-    let mut context = manifest_fetch_context(&request);
+    let mut context = manifest_fetch_context(&request, None);
     let mut expired_after_full_burst = test_recovery_timing_policy(0);
     expired_after_full_burst.evaluation_eta = HlsRecoveryEtaMs::default();
     expired_after_full_burst.commit_eta = HlsRecoveryEtaMs::default();
@@ -582,7 +577,7 @@ async fn material_reduced_retry_timeline_change_starts_one_new_complete_configur
     let target_url =
         Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).expect("requalification target");
     let attempts = request.retry_policy.attempt_count();
-    let context = manifest_fetch_context(&request);
+    let context = manifest_fetch_context(&request, None);
 
     let result = retry_hls_origin_manifest_recovery_chain(
         &context,
@@ -607,56 +602,152 @@ async fn material_reduced_retry_timeline_change_starts_one_new_complete_configur
 }
 
 #[tokio::test]
-async fn material_change_in_last_reduced_slot_still_runs_new_episode_full_burst() {
-    let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
-    let retry_policy = no_delay_policy();
-    let attempts = retry_policy.attempt_count();
-    let unchanged_candidate_count = plan.total_candidates().saturating_add(attempts.saturating_sub(2));
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_for_handler = Arc::clone(&hits);
-    let origin = spawn_test_origin(Arc::new(move |_path| {
-        let hit = hits_for_handler.fetch_add(1, Ordering::SeqCst);
-        let resource = if hit < unchanged_candidate_count { "old900.ts" } else { "new900.ts" };
-        (
-            200,
-            Vec::new(),
-            format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:900\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n{resource}\n"),
+async fn material_change_in_last_shared_slot_defers_requalification_without_poisoning_next_refresh() {
+    for local_denials in [0, 2] {
+        let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
+        let retry_policy = no_delay_policy();
+        let attempts = retry_policy.attempt_count();
+        let unchanged_candidate_count =
+            plan.total_candidates().saturating_add(attempts.saturating_sub(local_denials + 2));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let origin = spawn_test_origin(Arc::new(move |_path| {
+            let hit = hits_for_handler.fetch_add(1, Ordering::SeqCst);
+            let resource = if hit < unchanged_candidate_count { "old900.ts" } else { "new900.ts" };
+            (
+                200,
+                Vec::new(),
+                format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:900\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n{resource}\n"),
+            )
+        }))
+        .await;
+        let session = test_session();
+        prepare_cross_host_baseline(&session).await;
+        let cache_dir = tempfile::tempdir().expect("last-slot requalification cache tempdir");
+        let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
+        let mut request = switch_test_request(Arc::clone(&session), cache, &origin.base_url);
+        request.retry_policy = retry_policy;
+        request.manifest_recovery_burst =
+            HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
+        let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+            HlsManifestCommitRequirement::CommittedManifestAllowed,
+            true,
+            None,
+        ));
+        for _ in 0..local_denials {
+            assert!(attempt.begin_logical_attempt());
+        }
+        request.attempt = Some(Arc::clone(&attempt));
+        let target_url = Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url))
+            .expect("last-slot requalification target");
+        let context = manifest_fetch_context(&request, None);
+
+        let result = retry_hls_origin_manifest_recovery_chain(
+            &context,
+            test_manifest_origin_binding(target_url),
+            Some(HlsManifestRejectLogReason::PinnedHostRecoveryRejected),
+            None,
+            HlsManifestAcceptanceTrigger::Observe,
+            HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            |fetched, acceptance_mode| {
+                super::super::commit_manifest_recovery_candidate(&request, fetched, acceptance_mode)
+            },
         )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            unchanged_candidate_count + 1,
+            "the changed fifth logical attempt must not authorize a sixth"
+        );
+        assert_eq!(attempt.logical_attempts(), 5);
+        {
+            let mut state = session.write().await;
+            let episode = state.origin_control.acceptance_episode.as_ref().expect("original complete episode");
+            assert_eq!(episode.generation.0, 1, "no unserviceable successor episode may be opened");
+            assert!(episode.full_burst_completed);
+            state.origin_control.qualification.record_failure();
+        }
+        attempt.finish(true);
+        request.attempt = Some(Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+            HlsManifestCommitRequirement::CommittedManifestAllowed,
+            true,
+            None,
+        )));
+        let context = manifest_fetch_context(&request, None);
+        let _ = retry_hls_origin_manifest_recovery_chain(
+            &context,
+            test_manifest_origin_binding(
+                Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).unwrap(),
+            ),
+            Some(HlsManifestRejectLogReason::PinnedHostRecoveryRejected),
+            None,
+            HlsManifestAcceptanceTrigger::Observe,
+            HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            |fetched, acceptance_mode| {
+                super::super::commit_manifest_recovery_candidate(&request, fetched, acceptance_mode)
+            },
+        )
+        .await;
+        assert_eq!(request.attempt.as_ref().unwrap().logical_attempts(), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), unchanged_candidate_count + 2 + plan.total_candidates());
+        let state = session.read().await;
+        let episode = state.origin_control.acceptance_episode.as_ref().expect("follow-up requalified episode");
+        assert_eq!(episode.generation.0, 2);
+        assert!(episode.full_burst_completed, "the next refresh must finish the new full burst");
+        assert_eq!(episode.completed_burst_candidates, plan.total_candidates());
+    }
+}
+
+#[tokio::test]
+async fn recovery_retry_logs_and_waits_use_the_shared_attempt_index() {
+    super::short_manifest::init_qualification_logger();
+    let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hits = Arc::clone(&times);
+    let origin = spawn_test_origin(Arc::new(move |_| {
+        hits.lock().unwrap().push(tokio::time::Instant::now());
+        (503, Vec::new(), String::new())
     }))
     .await;
     let session = test_session();
-    prepare_cross_host_baseline(&session).await;
-    let cache_dir = tempfile::tempdir().expect("last-slot requalification cache tempdir");
+    session.write().await.key = HlsSessionKey::new(731, "shared-recovery-retry-log");
+    let label = crate::safe_session_key(&session.read().await.key);
+    let cache_dir = tempfile::tempdir().unwrap();
     let cache = Arc::new(HlsSegmentCache::with_cache_path(cache_dir.path()));
-    let mut request = switch_test_request(Arc::clone(&session), cache, &origin.base_url);
-    request.retry_policy = retry_policy;
-    request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
-    let target_url = Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url))
-        .expect("last-slot requalification target");
-    let context = manifest_fetch_context(&request);
-
+    let mut request = switch_test_request(session, cache, &origin.base_url);
+    request.retry_policy = super::RetryPolicy { jitter_max_ms: 0, ..Default::default() };
+    let attempt = Arc::new(crate::manifest_fetch::HlsManifestAttemptContext::new(
+        HlsManifestCommitRequirement::CommittedManifestAllowed,
+        true,
+        None,
+    ));
+    assert!(attempt.begin_logical_attempt());
+    assert!(attempt.begin_logical_attempt());
+    attempt.mark_admission_backoff_paid();
+    request.attempt = Some(Arc::clone(&attempt));
+    let context = manifest_fetch_context(&request, None);
     let result = retry_hls_origin_manifest_recovery_chain(
         &context,
-        test_manifest_origin_binding(target_url),
-        Some(HlsManifestRejectLogReason::PinnedHostRecoveryRejected),
+        test_manifest_origin_binding(Url::parse(&format!("{}/index.m3u8", origin.base_url)).unwrap()),
+        None,
         None,
         HlsManifestAcceptanceTrigger::Observe,
         HlsManifestCommitAcceptanceMode::StrictPinnedHost,
-        |fetched, acceptance_mode| super::super::commit_manifest_recovery_candidate(&request, fetched, acceptance_mode),
+        |_fetched, _mode| async { Ok::<_, super::super::super::manifest_fetch::HlsManifestCommitError>(()) },
     )
     .await;
-
     assert!(result.is_err());
-    assert_eq!(
-        hits.load(Ordering::SeqCst),
-        plan.total_candidates().saturating_mul(2).saturating_add(attempts.saturating_sub(1))
-    );
-    let session = session.read().await;
-    let episode = session.origin_control.acceptance_episode.as_ref().expect("last-slot requalified episode");
-    assert!(episode.generation.0 >= 2);
-    assert_eq!(episode.completed_burst_candidates, plan.total_candidates());
-    assert!(episode.full_burst_completed);
-    assert_eq!(episode.full_bursts_completed, 1);
+    assert_eq!(attempt.logical_attempts(), 5);
+    let messages = super::short_manifest::manifest_retry_messages(&label);
+    assert_eq!(messages.len(), 2, "no retry may be scheduled after the fifth logical attempt");
+    assert!(messages[0].contains("used=3 remaining=2 completion=retry next_delay_ms=500"));
+    assert!(messages[1].contains("used=4 remaining=1 completion=retry next_delay_ms=750"));
+    let times = times.lock().unwrap();
+    let first_follow_up = request.manifest_recovery_burst.level.plan().total_candidates();
+    assert_eq!(times.len(), first_follow_up + 2);
+    assert!(times[first_follow_up] - times[first_follow_up - 1] >= std::time::Duration::from_millis(499));
+    assert!(times[first_follow_up + 1] - times[first_follow_up] >= std::time::Duration::from_millis(749));
 }
 
 pub(in crate::refresh::tests) async fn assert_critical_handoff_evidence(
@@ -678,7 +769,6 @@ pub(in crate::refresh::tests) async fn assert_critical_handoff_evidence(
         cursor: &live_lease.playback_cursor,
         ready_timeline: &ready_timeline,
         now_ms,
-        playback_rate_guard_milli: super::super::super::HLS_PLAYBACK_RATE_GUARD_MILLI,
         recovery_trigger_budget: super::super::super::recovery_timing::HlsRecoveryTriggerBudgetMs::from_millis(0),
         origin_path_degraded: true,
         recovery_committed: false,
@@ -793,7 +883,7 @@ async fn critical_single_alternative_full_acceptance_commits_verified_new_origin
 
     let plan = request.manifest_recovery_burst.level.plan();
     let target_url = request.origin_entry.url().clone();
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
     let committed = retry_hls_origin_manifest_recovery_chain(
         &fetch_context,
         test_manifest_origin_binding(target_url.clone()),

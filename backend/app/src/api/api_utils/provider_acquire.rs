@@ -229,6 +229,8 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
                 // If a forced/pinned provider was requested but allocation fell back to another account,
                 // the session's stream_url still points to the old provider and cannot be accepted as-is;
                 // it must be resolved or rewritten for the newly allocated provider account.
+                // Media-server stream refs of media-server inputs are accepted by `select_provider_stream_url`
+                // itself; native media-server URLs are no longer accepted unchecked and must match the provider.
                 let accept_requested_stream_url = (options.accept_requested_stream_url
                     || input.input_type.is_stalker())
                     && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());

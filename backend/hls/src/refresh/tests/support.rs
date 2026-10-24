@@ -43,7 +43,7 @@ pub(in crate::refresh::tests) async fn retry_test_manifest_recovery_chain(
     target_url: Url,
     reject_reason: HlsManifestRejectLogReason,
 ) -> Result<super::super::CommittedOriginManifest, OriginManifestFetchError> {
-    let fetch_context = manifest_fetch_context(request);
+    let fetch_context = manifest_fetch_context(request, None);
     retry_hls_origin_manifest_recovery_chain(
         &fetch_context,
         test_manifest_origin_binding(target_url),
@@ -145,6 +145,8 @@ pub(in crate::refresh::tests) async fn refresh_session_with_origin_body(body: &'
     let entry = LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url))
         .expect("valid origin entry");
     let request = OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: test_app_config(),
         session: Arc::clone(&session),
         origin_entry: entry.clone(),
@@ -350,6 +352,8 @@ pub(in crate::refresh::tests) fn test_origin_refresh_request(session: Arc<RwLock
     let entry =
         LiveHlsOriginEntry::parse("http://origin.example.com/live/user/pass/12345.m3u8").expect("valid origin entry");
     OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: test_app_config(),
         session,
         origin_entry: entry.clone(),
@@ -741,7 +745,7 @@ pub(in crate::refresh::tests) fn switch_test_request(
     request.hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(segment_cache.cache_path(), 300));
     request.segment_cache = segment_cache;
     request.segment_worker_pool = Arc::new(HlsSegmentWorkerPool::new(SegmentFetchPolicy {
-        origin_segment_timeout_ms: 2_000,
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(2_000, 2_000),
         retry_delays_ms: [0; 5],
         retry_jitter_max_ms: 0,
         ..SegmentFetchPolicy::default()

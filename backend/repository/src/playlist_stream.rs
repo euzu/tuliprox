@@ -7,6 +7,10 @@ use std::{
     io,
     path::Path,
     pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 use tokio::sync::mpsc;
@@ -55,14 +59,24 @@ where
 }
 
 /// Stream wrapper that holds a file read lock for the lifetime of the stream.
+///
+/// The guard is shared (`Arc`) so the blocking producer feeding the stream can keep
+/// the very same read lock: taking a second read lock on one path in one task
+/// deadlocks as soon as a writer queues between the two (the lock is
+/// write-preferring), so the lock is acquired once and released when both the
+/// stream and the producer are done.
 pub struct LockedReceiverStream<T> {
     rx: ReceiverStream<T>,
-    _guard: Option<FileReadGuard>,
+    _guard: Option<Arc<FileReadGuard>>,
+    skipped: Option<Arc<AtomicUsize>>,
 }
 
 impl<T> LockedReceiverStream<T> {
-    pub fn new(rx: mpsc::Receiver<T>, guard: FileReadGuard) -> Self {
-        Self { rx: ReceiverStream::new(rx), _guard: Some(guard) }
+    pub fn new(rx: mpsc::Receiver<T>, guard: FileReadGuard) -> Self { Self::new_shared(rx, Arc::new(guard)) }
+
+    /// Creates a stream that shares `guard` with the producer feeding `rx`.
+    pub fn new_shared(rx: mpsc::Receiver<T>, guard: Arc<FileReadGuard>) -> Self {
+        Self::with_optional_shared_guard(rx, Some(guard))
     }
 
     /// Creates an intentionally empty stream without a `FileReadGuard`.
@@ -72,7 +86,9 @@ impl<T> LockedReceiverStream<T> {
     /// on-disk playlist. It is safe for ghost/closed channels where the stream
     /// is semantically empty from the start, for example
     /// `XtreamPlaylistIterator::empty()`.
-    pub fn new_empty(rx: mpsc::Receiver<T>) -> Self { Self { rx: ReceiverStream::new(rx), _guard: None } }
+    pub fn new_empty(rx: mpsc::Receiver<T>) -> Self {
+        Self { rx: ReceiverStream::new(rx), _guard: None, skipped: None }
+    }
 
     /// Creates a stream that holds `guard` for its whole lifetime when `Some`.
     ///
@@ -82,7 +98,30 @@ impl<T> LockedReceiverStream<T> {
     /// `PlaylistBackend::HOLD_ITER_LOCK`), which is why the choice is a
     /// parameter rather than baked in.
     pub fn with_optional_guard(rx: mpsc::Receiver<T>, guard: Option<FileReadGuard>) -> Self {
-        Self { rx: ReceiverStream::new(rx), _guard: guard }
+        Self::with_optional_shared_guard(rx, guard.map(Arc::new))
+    }
+
+    /// Like [`Self::with_optional_guard`], for a guard the producer shares.
+    pub fn with_optional_shared_guard(rx: mpsc::Receiver<T>, guard: Option<Arc<FileReadGuard>>) -> Self {
+        Self { rx: ReceiverStream::new(rx), _guard: guard, skipped: None }
+    }
+
+    /// Attaches the counter the producer increments for every record it could not
+    /// read and therefore never sent.
+    #[must_use]
+    pub fn with_skip_counter(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.skipped = Some(counter);
+        self
+    }
+
+    /// Number of unreadable records the producer skipped so far; `0` when the
+    /// stream has no skip counter.
+    ///
+    /// The count is complete once the stream returned `None`. Consumers reading
+    /// through this stream (for example `load_referenced_epg_ids`) are blind to
+    /// skipped records unless they check it.
+    pub fn skipped_records(&self) -> usize {
+        self.skipped.as_ref().map_or(0, |counter| counter.load(Ordering::Acquire))
     }
 }
 

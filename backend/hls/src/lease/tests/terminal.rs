@@ -1,12 +1,12 @@
 use super::{
-    build_terminal_tail_plan, lease, manifest_snapshot, publish_manifest_snapshot, snapshot_terminal_media_asset,
-    timing, HlsAccessLeaseDenialMode, HlsAccessLeaseDenialOutcome, HlsAccessLeaseId, HlsAccessLeaseState,
-    HlsAccessLeaseStore, HlsFiniteTailTrigger, HlsLeaseCutoverTiming, HlsLeaseManifestPublicationOutcome,
-    HlsLeaseManifestPublicationRejectReason, HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsLeasePlaybackMode,
-    HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot, HlsManifestAcceptanceGeneration,
-    HlsPlaybackCompletionOutcome, HlsRuntimeCustomTailAssetIdentity, HlsRuntimeCustomTailReason,
-    HlsRuntimePolicyRevocationOutcome, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
-    HlsTerminalBaseSegmentAvailability, HlsTerminalCommitOutcome, HlsTerminalCommitWindow,
+    build_terminal_tail_plan, lease, manifest_snapshot, publish_manifest_snapshot as publish_unrouted_manifest,
+    snapshot_terminal_media_asset, timing, HlsAccessLeaseDenialMode, HlsAccessLeaseDenialOutcome, HlsAccessLeaseId,
+    HlsAccessLeaseState, HlsAccessLeaseStore, HlsFiniteTailTrigger, HlsLeaseCutoverTiming,
+    HlsLeaseManifestPublicationOutcome, HlsLeaseManifestPublicationRejectReason, HlsLeaseManifestSegment,
+    HlsLeaseManifestSnapshot, HlsLeasePlaybackMode, HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot,
+    HlsManifestAcceptanceGeneration, HlsPlaybackCompletionOutcome, HlsRuntimeCustomTailAssetIdentity,
+    HlsRuntimeCustomTailReason, HlsRuntimePolicyRevocationOutcome, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState,
+    HlsTerminalBaseProtection, HlsTerminalBaseSegmentAvailability, HlsTerminalCommitOutcome, HlsTerminalCommitWindow,
     HlsTerminalMediaPreparationState, HlsTerminalMediaRequirementOrigin, HlsTerminalTailBuildInput,
     HlsTerminalTailCompatibility, HlsTerminalTailGeneration, HlsTerminalTailPlan, HlsTerminalTailPreparationInput,
     HlsTransitionMarginMs,
@@ -14,6 +14,19 @@ use super::{
 use crate::ProxySessionId;
 use std::sync::Arc;
 use tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer;
+
+fn publish_manifest_snapshot(
+    store: &mut HlsAccessLeaseStore,
+    lease_id: &HlsAccessLeaseId,
+    session: &ProxySessionId,
+    mut snapshot: HlsLeaseManifestSnapshot,
+    now_ms: u64,
+) -> HlsLeaseManifestPublicationOutcome {
+    for segment in Arc::make_mut(&mut snapshot.visible_segments) {
+        segment.uri = format!("/hls/shared/live/{}/{}/{}.ts", session.0, lease_id.0, segment.proxy_seq).into();
+    }
+    publish_unrouted_manifest(store, lease_id, session, snapshot, now_ms)
+}
 
 pub(in crate::lease::tests) const TERMINAL_ASSET_BYTES: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/channel_unavailable.ts"));
@@ -23,6 +36,7 @@ pub(in crate::lease::tests) fn cutover_reserve() -> HlsLeaseReserveSnapshot {
         availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
         guaranteed_media_horizon_ms: 12_000,
         conservative_playback_position_ms: 12_000,
+        playback_position_known: true,
         guaranteed_reserve_ms: 0,
         initial_hidden_ready_duration_ms: 0,
         transition_margin: HlsTransitionMarginMs::from_millis(12_000),
@@ -34,6 +48,40 @@ pub(in crate::lease::tests) fn cutover_reserve() -> HlsLeaseReserveSnapshot {
 
 pub(in crate::lease::tests) fn cutover_timing() -> HlsLeaseCutoverTiming {
     HlsLeaseCutoverTiming::from_reserve(2_000, 0, HlsTransitionMarginMs::from_millis(12_000), None)
+}
+
+#[test]
+fn terminal_monitor_keeps_started_idle_leases_until_validity_expires() {
+    let session = ProxySessionId("idle-terminal-monitor".into());
+    let lease_id = HlsAccessLeaseId("idle-terminal-monitor".into());
+    let mut leases = HlsAccessLeaseStore::default();
+    leases.prepare_access_lease(lease(lease_id.clone(), &session.0, 1_000));
+    assert!(publish_manifest_snapshot(&mut leases, &lease_id, &session, manifest_snapshot(1), 2_000).is_committed());
+    assert!(leases
+        .activate_access_lease(
+            &lease_id,
+            &session,
+            2_000,
+            crate::HlsAccessLeaseTiming { active_window_ms: 10, valid_window_ms: 60_000 }
+        )
+        .is_activated());
+    let identity = leases.response_snapshot(&lease_id, &session, 2_000).unwrap().media_identity().unwrap();
+    assert!(
+        leases.terminal_playback_snapshots_for_session(&session, 2_011).is_empty(),
+        "unstarted lease after active window"
+    );
+    let token =
+        leases.record_segment_request_started_if_identity_matches(&lease_id, &session, identity, 40, 2_001).unwrap();
+    assert_eq!(
+        leases.record_segment_transfer_started_if_identity_matches(&lease_id, &session, identity, token, 2_002),
+        Some(true)
+    );
+    assert_eq!(leases.active_live_playback_snapshots_for_session(&session, 2_011), Vec::new());
+    leases.by_lease_id.get_mut(&lease_id).unwrap().state = HlsAccessLeaseState::Idle;
+    let monitored = leases.terminal_playback_snapshots_for_session(&session, 2_011);
+    assert_eq!(monitored.len(), 1);
+    assert_eq!(monitored[0].state, HlsAccessLeaseState::Idle);
+    assert_eq!(leases.terminal_playback_snapshots_for_session(&session, 70_000), Vec::new());
 }
 
 pub(in crate::lease::tests) fn manifest_snapshot_for_route(
@@ -87,6 +135,15 @@ pub(in crate::lease::tests) fn terminal_plan_at(
 ) -> Arc<HlsTerminalTailPlan> {
     let mut base_manifest = manifest_snapshot_for_route(1, proxy_session_id, lease_id);
     base_manifest.snapshot_generation = 1;
+    terminal_plan_with_manifest(generation, base_manifest, created_at_ms, false)
+}
+
+fn terminal_plan_with_manifest(
+    generation: u64,
+    base_manifest: HlsLeaseManifestSnapshot,
+    created_at_ms: u64,
+    unavailable_prefix: bool,
+) -> Arc<HlsTerminalTailPlan> {
     let transport_stream = TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
     let asset = snapshot_terminal_media_asset(&transport_stream).expect("terminal asset");
     let expected_asset =
@@ -96,7 +153,11 @@ pub(in crate::lease::tests) fn terminal_plan_at(
             .visible_proxy_seqs()
             .map(|proxy_seq| HlsTerminalBaseSegmentAvailability {
                 proxy_seq,
-                media_state: HlsTerminalBaseMediaState::Ready,
+                media_state: if unavailable_prefix && proxy_seq != base_manifest.last_proxy_seq {
+                    HlsTerminalBaseMediaState::NotReady
+                } else {
+                    HlsTerminalBaseMediaState::Ready
+                },
                 required_map_ready: true,
                 required_key_ready: true,
                 protection: HlsTerminalBaseProtection::Protectable,
@@ -703,4 +764,35 @@ fn late_segment_completion_after_terminal_transition_does_not_advance_cursor() {
     let lease = store.response_snapshot(&lease_id, &proxy_session_id, 2_300).expect("terminal lease");
     assert_eq!(lease.playback_cursor.highest_contiguous_completed_proxy_seq, None);
     assert_eq!(lease.playback_cursor.first_segment_completed_at_ms, None);
+}
+
+#[test]
+fn terminal_suffix_keeps_last_live_identity_when_discontinuity_moves_into_the_sequence() {
+    let session = ProxySessionId("discontinuity-splice".into());
+    let id = HlsAccessLeaseId("discontinuity-splice".into());
+    let mut store = HlsAccessLeaseStore::default();
+    store.prepare_access_lease(lease(id.clone(), &session.0, 1_000));
+    let mut manifest = manifest_snapshot(1);
+    Arc::make_mut(&mut manifest.visible_segments).last_mut().unwrap().discontinuity_before = true;
+    assert!(publish_manifest_snapshot(&mut store, &id, &session, manifest, 2_000).is_committed());
+    let preparation = prepare_terminal(&mut store, &id, &session, 4, Some(2_000));
+    let plan = terminal_plan_with_manifest(
+        preparation.decision_generation,
+        preparation.manifest_snapshot.clone(),
+        3_000,
+        true,
+    );
+    assert_eq!(plan.base_manifest.visible_segments.len(), 1);
+    assert!(!plan.base_manifest.visible_segments[0].discontinuity_before);
+    assert_eq!(plan.base_manifest.discontinuity_sequence, preparation.manifest_snapshot.discontinuity_sequence + 1);
+    let mut wrong = (*plan).clone();
+    Arc::make_mut(&mut wrong.base_manifest.visible_segments)[0].uri = "/wrong-live.ts".into();
+    assert_eq!(
+        store.commit_terminal_tail_if_generation_matches(&id, &session, &preparation, 3_000, Arc::new(wrong)),
+        HlsTerminalCommitOutcome::SupersededGeneration
+    );
+    assert_eq!(
+        store.commit_terminal_tail_if_generation_matches(&id, &session, &preparation, 3_000, plan),
+        HlsTerminalCommitOutcome::Committed
+    );
 }

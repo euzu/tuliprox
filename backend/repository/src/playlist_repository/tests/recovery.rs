@@ -4,7 +4,7 @@ use super::*;
 async fn target_cache_reload_failures_return_errors_without_mutating_the_previous_cache() {
     for stage in [TargetCacheReloadStage::IdMapping, TargetCacheReloadStage::XtreamStorage] {
         let directory = tempdir().expect("temporary storage");
-        let app_config = test_app_config(directory.path());
+        let app_config = app_config_in(directory.path());
         let playlist_state = Arc::new(PlaylistStorageState::new());
         let target = xtream_target(&format!("cache-reload-{stage:?}"), true);
         seed_memory_cached_xtream_target(&app_config, &playlist_state, &target).await;
@@ -39,7 +39,7 @@ async fn target_cache_reload_failures_return_errors_without_mutating_the_previou
 #[tokio::test]
 async fn target_force_empty_reload_replaces_the_complete_memory_cache() {
     let directory = tempdir().expect("temporary storage");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let playlist_state = Arc::new(PlaylistStorageState::new());
     let target = xtream_target("force-empty-cache-success", true);
     seed_memory_cached_xtream_target(&app_config, &playlist_state, &target).await;

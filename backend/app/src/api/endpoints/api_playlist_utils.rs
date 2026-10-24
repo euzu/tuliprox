@@ -4,6 +4,7 @@ use crate::{
             empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream,
             stream_json_or_bin_response_try_stream,
         },
+        endpoints::v1_api_playlist::items::visible_in_target_listing,
         model::AppState,
     },
     iptv::{m3u, xtream},
@@ -17,7 +18,7 @@ use crate::{
 use axum::response::IntoResponse;
 use serde_json::json;
 use shared::{
-    model::{InputPersistence, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem},
+    model::{InputPersistence, TargetType, UiPlaylistItem, XtreamCluster},
     utils::{concat_path, concat_path_leading_slash, interner_gc, seal_web_ui_resource_url, Internable},
 };
 use std::sync::Arc;
@@ -59,13 +60,8 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             else {
                 return empty_json_list_response();
             };
-            let item_filter = if cluster == XtreamCluster::Series {
-                |pli: &XtreamPlaylistItem| !pli.item_type.is_series()
-            } else {
-                |_pli: &XtreamPlaylistItem| true
-            };
             let converted_stream = channel_iterator.filter_map(move |entry| match entry {
-                Ok(item) if item_filter(&item) => {
+                Ok(item) if visible_in_target_listing(cluster, &item) => {
                     Some(Ok(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item))))
                 }
                 Ok(_) => None,
@@ -78,14 +74,8 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             else {
                 return empty_json_list_response();
             };
-            let item_filter = if cluster == XtreamCluster::Series {
-                |pli: &M3uPlaylistItem| !pli.item_type.is_series()
-            } else {
-                |_pli: &M3uPlaylistItem| true
-            };
-
             let converted_stream = channel_iterator.filter_map(move |res| match res {
-                Ok(pli) if item_filter(&pli) => {
+                Ok(pli) if visible_in_target_listing(cluster, &pli) => {
                     Some(Ok(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(pli))))
                 }
                 Ok(_) => None,

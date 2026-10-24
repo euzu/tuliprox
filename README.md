@@ -76,7 +76,8 @@ Use different upstream technologies without forcing every downstream player to u
 - **M3U/M3U8** — remote or local playlists with headers, credentials, EPG sources, and CSV batch inputs
 - **Stalker & Ministra** — full portal catalogs with MAC, credential or combined authentication, configurable MAG profiles,  
   `create_link` playback resolution, resumable refreshes, and per-alias configuration
-- **Plex, Emby & Jellyfin** — import selected movie and TV libraries and resolve protected playback and artwork through Tuliprox
+- **Plex, Emby & Jellyfin** — import selected movie and TV libraries, each as its own category, and resolve protected playback  
+  and artwork through Tuliprox
 - **Local Media Library** — scan movies and series from disk and enrich them with NFO or TMDB metadata
 - **Staged Sources** — overlay a prepared Live, VOD, or Series catalog while keeping the original provider responsible for  
   actual stream delivery
@@ -412,6 +413,9 @@ Tuliprox includes its own storage engine for playlist and runtime data.
 - Panel API integration for provider account provisioning/renewal workflows
 - Dependency-aware parallel input processing
 - Management REST API for configuration, processing, transfers, recordings, status, stream history, QoS, and system information
+- Optional MCP server (read-only by default) so AI assistants such as Claude Desktop or Cursor can inspect status,
+  streams, stream history, QoS, configuration, stored playlists (paged, filtered) and per-target EPG diagnostics under
+  the REST API's own authentication and permissions; configurable in the Web UI
 - JSON and CBOR responses on supported endpoints
 - CLI one-shot processing for scripts and CI/CD
 
@@ -584,6 +588,7 @@ Main entry points:
   - [Mapping & Templates](docs/src/configuration/template.md)
 - [Examples & Recipes](docs/src/examples-recipes.md)
 - [Operations & Debugging](docs/src/operations-debugging.md)
+- [MCP Server](docs/src/operator/mcp.md)
 - [Troubleshooting & Resilience](docs/src/troubleshooting.md)
 
 ### Documentation Strategy

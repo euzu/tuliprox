@@ -22,7 +22,7 @@ use crate::{
         },
         model::AppState,
     },
-    processing::geoip::{update_geoip_db, GeoIpUpdateError},
+    processing::geoip::GeoIpUpdateError,
     utils::ip_checker::get_ips,
     VERSION,
 };
@@ -141,7 +141,7 @@ async fn streams(
 async fn geoip_update(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
-    match update_geoip_db(&app_state.app_config, &app_state.http_clients.default.load(), &app_state.geoip).await {
+    match app_state.update_geoip_db().await {
         Ok(()) => axum::http::StatusCode::OK.into_response(),
         Err(GeoIpUpdateError::Disabled | GeoIpUpdateError::DownloadFailed(_)) => {
             axum::http::StatusCode::BAD_REQUEST.into_response()

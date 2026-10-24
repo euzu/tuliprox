@@ -36,7 +36,9 @@
   &__cards {
     display: flex;
     flex: 1 1 auto;
-    flex-flow: column;
+    flex-flow: row wrap;
+    align-items: flex-start;
+    align-content: flex-start;
     gap: max(var(--gap-large), 1rem);
     box-sizing: border-box;
     width: 100%;
@@ -47,9 +49,11 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  // Content and actions panel need about 38rem side by side. A fixed basis keeps the intrinsic
+  // width of the wrapping body from forcing every card onto its own row.
   &__input-card {
     box-sizing: border-box;
-    width: 100%;
+    flex: 1 1 40rem;
     max-width: 100%;
     min-width: 0;
   }
@@ -87,15 +91,18 @@
     text-transform: capitalize;
   }
 
+  // The actions panel drops below the content once the card is too narrow for both.
   &__input-card-body {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 20rem;
+    display: flex;
+    flex-flow: row wrap;
+    align-items: flex-start;
     gap: max(var(--gap-large), 1rem);
     min-width: 0;
   }
 
   &__input-content {
     display: flex;
+    flex: 999 1 18rem;
     flex-flow: column;
     gap: max(var(--gap-large), 1rem);
     min-width: 0;
@@ -222,11 +229,14 @@
 
   &__input-actions {
     display: flex;
+    flex: 1 1 20rem;
     flex-flow: column;
     gap: max(var(--gap-large), 1rem);
+    box-sizing: border-box;
     min-width: 0;
-    padding-inline: var(--padding-large) calc(var(--padding-large) - var(--padding-default));
-    border-inline-start: 1px solid var(--border-color);
+    padding: var(--padding-default);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
   }
 
   &__policy-control {
@@ -278,9 +288,22 @@
 
   &__update-details-body {
     display: flex;
-    flex-flow: column;
+    flex-flow: row wrap;
+    align-items: flex-start;
     gap: max(var(--gap-large), 1rem);
     padding-block-end: var(--padding-default);
+    min-width: 0;
+
+    // Full-width sections; the per-cluster details below flow side by side.
+    > * {
+      flex: 1 1 100%;
+      min-width: 0;
+    }
+
+    > .tp__playlist-update-view__cluster-detail {
+      flex: 1 1 auto;
+      max-width: 100%;
+    }
   }
 
   &__run-context,
@@ -326,15 +349,19 @@
 
   &__target-details-list {
     display: flex;
-    flex-flow: column;
+    flex-flow: row wrap;
+    align-items: flex-start;
     gap: max(var(--gap-large), 1rem);
+    min-width: 0;
   }
 
   &__target-detail {
     display: flex;
+    flex: 0 1 auto;
     flex-flow: column;
     gap: max(var(--gap-default), 0.5rem);
     min-width: 0;
+    max-width: 100%;
     padding-inline-start: var(--gap-default);
     border-inline-start: 2px solid var(--border-color);
 
@@ -422,22 +449,6 @@
   .tp__playlist-update-view {
     &__input-card {
       padding: max(var(--padding-default), 0.75rem);
-    }
-
-    &__input-card-body {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
-    &__input-actions {
-      width: 100%;
-      padding-block-start: max(var(--padding-default), 1rem);
-      padding-inline: 0;
-      border-block-start: 1px solid var(--border-color);
-      border-inline-start: 0;
-    }
-
-    &__input-actions .tp__text-button {
-      width: 100%;
     }
 
     &__detail-row {

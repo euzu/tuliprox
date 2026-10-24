@@ -1,8 +1,8 @@
 use crate::{
     model::{
-        macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, MessagingConfig,
-        MetadataUpdateConfig, ProxyConfig, RecordingConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig,
-        ScheduleConfig, VideoConfig, WebUiConfig,
+        macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, McpConfig,
+        MessagingConfig, MetadataUpdateConfig, ProxyConfig, RecordingConfig, ReverseProxyConfig,
+        ReverseProxyDisabledHeaderConfig, ScheduleConfig, VideoConfig, WebUiConfig,
     },
     utils,
     utils::get_default_path_for_home,
@@ -117,6 +117,7 @@ pub struct Config {
     pub ipcheck: Option<IpCheckConfig>,
     pub library: Option<LibraryConfig>,
     pub failover_groups: FailoverGroupsConfig,
+    pub mcp: Option<McpConfig>,
 }
 
 /// Resolve a configured recording directory the way `Config::prepare` does:
@@ -371,6 +372,7 @@ impl From<&ConfigDto> for Config {
             ipcheck: dto.ipcheck.as_ref().map(Into::into),
             library: dto.library.as_ref().map(Into::into),
             failover_groups: dto.failover_groups.clone().unwrap_or_default(),
+            mcp: dto.mcp.as_ref().map(Into::into),
         }
     }
 }

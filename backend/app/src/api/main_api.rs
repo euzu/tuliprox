@@ -7,6 +7,7 @@ use crate::{
             hls_api::hls_api_register,
             log_ws_api::log_ws_api_register,
             m3u_api::m3u_api_register,
+            mcp_api::mcp_api_register_if_enabled,
             provider_resolve_api::provider_resolve_api_register,
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
@@ -371,12 +372,7 @@ async fn create_shared_data(
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     active_provider.bind_event_manager(&event_manager);
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    let rewrite_secret =
-        config.reverse_proxy.as_ref().map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
-    let hls_proxy = Arc::new(HlsProxyManager::from_hls_cache_config_and_secret(
-        config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
-        &rewrite_secret,
-    ));
+    let hls_proxy = Arc::new(HlsProxyManager::from_config(&config, &app_config.encrypt_secret));
     active_provider.set_shared_stream_manager(&shared_stream_manager);
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
@@ -422,16 +418,19 @@ async fn create_shared_data(
     let app_state = AppState {
         app_config: Arc::clone(app_config),
         http_clients,
-        recordings: Arc::new(recordings),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
         hls: HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
-        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-            Arc::clone(&active_provider),
-            Arc::clone(&connection_manager),
-            Arc::clone(&maintenance),
+        recording: crate::api::model::RecordingState::new(
+            Arc::new(recordings),
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+                Arc::clone(&maintenance),
+            ),
         ),
         active_provider,
         connection_manager,
@@ -788,11 +787,21 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             .nest_service(
                 &concat_path_leading_slash(&web_ui_path, "assets"),
                 tower_http::services::ServeDir::new(web_dir_path.join("assets")),
-            )
-            .merge(v1_api_register(web_auth_enabled, &shared_data, web_ui_path.as_str()));
+            );
+        let v1_router = v1_api_register(web_auth_enabled, &shared_data, web_ui_path.as_str());
+        if let Some(mcp_router) =
+            mcp_api_register_if_enabled(&v1_router, &shared_data, web_auth_enabled, web_ui_path.as_str())
+        {
+            router = router.merge(mcp_router);
+        }
+        router = router.merge(v1_router);
         if !web_ui_path.is_empty() {
             router = router.merge(index_register_with_path(&web_dir_path, web_ui_path.as_str()));
         }
+    }
+
+    if !web_ui_enabled && cfg.mcp.as_ref().is_some_and(|mcp| mcp.enabled) {
+        warn!("mcp.enabled is ignored because web_ui is disabled: the MCP endpoint is served by the web UI router");
     }
 
     let mut api_router = axum::Router::new()
@@ -1045,6 +1054,50 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[tokio::test]
+    async fn cold_start_applies_configured_connect_timeout_to_hls_workers() {
+        use crate::{
+            api::model::create_test_app_state,
+            model::{Config, ProcessTargets, ReverseProxyConfig},
+        };
+        use shared::model::{HlsCacheConfigDto, HlsSegmentTimeout, Millis, ReverseProxyConfigDto};
+        use std::{sync::Arc, time::Duration};
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            storage_dir: directory.path().join("storage").to_string_lossy().into_owned(),
+            backup_dir: Some(directory.path().join("backup").to_string_lossy().into_owned()),
+            connect_timeout_secs: 30,
+            reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                hls_cache: Some(HlsCacheConfigDto {
+                    cache_path: Some(directory.path().join("cache").to_string_lossy().into_owned()),
+                    origin_segment_timeout_ms: HlsSegmentTimeout::Fixed(Millis::new(2_000)),
+                    origin_manifest_timeout_ms: Millis::new(8_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&config.storage_dir).unwrap();
+        let app_config = Arc::clone(&create_test_app_state(config).app_config);
+        let targets =
+            Arc::new(ProcessTargets { enabled: false, inputs: vec![], targets: vec![], target_names: vec![] });
+        let (state, _) = super::create_shared_data(&app_config, &targets).await.unwrap();
+        let policies = [
+            state.hls.proxy.segment_fetch_policy(),
+            state.hls.proxy.segment_worker_pool().policy(),
+            state.hls.proxy.map_worker_pool().policy(),
+        ];
+        for policy in policies {
+            assert_eq!(
+                policy.timeouts.config().connect_ms,
+                30_000,
+                "configured connect timeout must apply before any reload"
+            );
+            assert_eq!(policy.demand_wait_timeout(), Duration::from_millis(405_200));
+        }
+    }
+
     fn temp_state_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
         let dir = std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}"));
@@ -1205,18 +1258,21 @@ mod tests {
             };
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
             Arc::new(AppState {
-                recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-                    Arc::clone(&active_provider),
-                    Arc::clone(&connection_manager),
-                    crate::api::model::create_test_maintenance(""),
+                recording: crate::api::model::RecordingState::new(
+                    Arc::new(RecordingQueue::new()),
+                    crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                        Arc::clone(&active_provider),
+                        Arc::clone(&connection_manager),
+                        crate::api::model::create_test_maintenance(""),
+                    ),
                 ),
                 app_config: app_cfg,
                 http_clients: Arc::default(),
-                recordings: Arc::new(RecordingQueue::new()),
                 cache: Arc::new(ArcSwapOption::default()),
                 shared_stream_manager,
                 hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),
                 stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+                epg_scans: crate::api::model::EpgScanCoordinator::default(),
                 active_users,
                 active_provider,
                 connection_manager,

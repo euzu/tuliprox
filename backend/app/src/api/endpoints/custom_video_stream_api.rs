@@ -10,7 +10,7 @@ use crate::{
             parse_hls_panel_provisioning_segment_route_name, AppState, CustomVideoStreamType, TransportStreamBuffer,
         },
     },
-    auth::{check_network_access_only, resolve_api_user_context, verify_access_token, Fingerprint},
+    auth::{verify_access_token, Fingerprint},
     model::{ConfigTarget, ProxyUserCredentials},
 };
 use axum::{
@@ -65,13 +65,7 @@ fn resolve_cvs_user_context(
         return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
     };
 
-    if let Err(e) = resolve_api_user_context(
-        user.clone(),
-        target.clone(),
-        fingerprint.clone(),
-        &app_state.app_config,
-        &app_state.geoip,
-    ) {
+    if let Err(e) = app_state.resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone()) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 
@@ -88,7 +82,7 @@ fn resolve_hls_cvs_user_context(
         return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
     };
 
-    if let Err(e) = check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
+    if let Err(e) = app_state.check_network_access(&user, fingerprint) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 
@@ -104,7 +98,7 @@ fn resolve_hls_cvs_access_user(
         return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
     };
 
-    if let Err(e) = check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
+    if let Err(e) = app_state.check_network_access(&user, fingerprint) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 
@@ -735,18 +729,21 @@ mod tests {
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
         Arc::new(AppState {
-            recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-                Arc::clone(&active_provider),
-                Arc::clone(&connection_manager),
-                crate::api::model::create_test_maintenance(""),
+            recording: crate::api::model::RecordingState::new(
+                Arc::new(RecordingQueue::new()),
+                crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                    Arc::clone(&active_provider),
+                    Arc::clone(&connection_manager),
+                    crate::api::model::create_test_maintenance(""),
+                ),
             ),
             app_config: app_cfg,
             http_clients: Arc::default(),
-            recordings: Arc::new(RecordingQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),
             stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+            epg_scans: crate::api::model::EpgScanCoordinator::default(),
             active_users,
             active_provider,
             connection_manager,

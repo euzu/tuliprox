@@ -3,8 +3,8 @@ use super::{
     empty_leaf, finish_writer, internal_key_decode_count, invalid_data, invalid_input, page_byte_range, random_value,
     read_leaf_value, reset_internal_key_decode_count, search_leaf, spawn_replacement_writer, try_exclusive_sidecar,
     used_leaf_bytes, validate_locator, verify_full, wait_for_exclusive_sidecar, BPlusTree, BPlusTreeQuery,
-    BPlusTreeUpdate, DatabaseHeader, InternalCellRef, LeafCellRef, LeafValueRef, Locator, NEXT_PAGE_ID, PAGE_ID,
-    SLOT_LEN,
+    BPlusTreeUpdate, DatabaseHeader, FlushPolicy, InternalCellRef, InternalPreamble, LeafCellRef, LeafValueRef,
+    Locator, NEXT_PAGE_ID, PAGE_ID, SLOT_LEN,
 };
 use crate::{
     codec::binary_serialize,
@@ -851,24 +851,9 @@ fn iterator_skips_corrupt_value_and_continues_with_next_cell() -> io::Result<()>
     }
     tree.store(&path)?;
 
-    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
-    let (page_id, range) = query.locate_cell(&2)?.ok_or_else(|| io::Error::other("test key missing"))?;
-    let next_page_id = query.header.next_page_id;
-    let stored_offset = query.with_page(page_id, |bytes, _| {
-        let cell = LeafCellRef::decode(
-            bytes.get(range).ok_or_else(|| io::Error::other("test cell range missing"))?,
-            page_id,
-            next_page_id,
-        )?;
-        let LeafValueRef::Inline { stored, .. } = cell.value else {
-            return Err(io::Error::other("test value is not inline"));
-        };
-        Ok(stored.as_ptr() as usize - bytes.as_ptr() as usize)
-    })?;
-    drop(query);
+    let (page_id, absolute) = inline_stored_offset(&path, 2)?;
 
     let mut database = fs::read(&path)?;
-    let absolute = page_range(page_id)?.start + stored_offset;
     *database.get_mut(absolute).ok_or_else(|| io::Error::other("test value byte missing"))? = 0xc1;
     rewrite_page_checksum(&mut database, page_id)?;
     fs::write(&path, database)?;
@@ -1105,4 +1090,412 @@ fn full_verifier_rejects_uncompressed_overflow_length_mismatch() -> io::Result<(
     fs::write(&path, database)?;
     let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
     invalid_data(verify_full(&mut query))
+}
+
+/// Value whose deserialization always fails, proving a scan never decodes values.
+struct UndecodableValue;
+
+impl<'de> Deserialize<'de> for UndecodableValue {
+    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("value must not be deserialized"))
+    }
+}
+
+type KeyOutcome = Result<u32, (io::ErrorKind, String)>;
+
+fn describe_error(error: &io::Error) -> (io::ErrorKind, String) { (error.kind(), error.to_string()) }
+
+fn iter_key_outcomes(path: &Path) -> io::Result<Vec<KeyOutcome>> {
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(path)?;
+    Ok(query.iter().map(|item| item.map(|(key, _)| key).map_err(|error| describe_error(&error))).collect())
+}
+
+fn keys_key_outcomes(path: &Path) -> io::Result<Vec<KeyOutcome>> {
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(path)?;
+    Ok(query.keys().map(|item| item.map_err(|error| describe_error(&error))).collect())
+}
+
+fn stored_value_kind<V>(query: &mut BPlusTreeQuery<u32, V>, key: u32) -> io::Result<&'static str> {
+    let (page_id, range) = query.locate_cell(&key)?.ok_or_else(|| io::Error::other("test key missing"))?;
+    let next_page_id = query.header.next_page_id;
+    query.with_page(page_id, |bytes, _| {
+        let cell = LeafCellRef::decode(
+            bytes.get(range).ok_or_else(|| io::Error::other("test cell range missing"))?,
+            page_id,
+            next_page_id,
+        )?;
+        Ok(match cell.value {
+            LeafValueRef::Inline { compression: Compression::None, .. } => "inline",
+            LeafValueRef::Inline { compression: Compression::Lz4, .. } => "lz4",
+            LeafValueRef::Overflow { .. } => "overflow",
+            LeafValueRef::Tombstone => "tombstone",
+        })
+    })
+}
+
+fn keys_of<V>(query: &mut BPlusTreeQuery<u32, V>) -> io::Result<Vec<u32>> { query.keys().collect() }
+
+#[test]
+fn keys_match_iter_keys_for_inline_lz4_and_overflow_values() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-mixed.db");
+    let mut tree = BPlusTree::new();
+    for key in 0..900u32 {
+        let value = match key % 3 {
+            _ if key % 97 == 5 => random_value(),
+            0 => vec![u8::try_from(key % 251).map_err(io::Error::other)?; 8],
+            1 => vec![7u8; 2_000],
+            _ => vec![9u8; 32],
+        };
+        tree.insert(key, value);
+    }
+    tree.store(&path)?;
+
+    let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
+    assert_eq!(stored_value_kind(&mut query, 0)?, "inline");
+    assert_eq!(stored_value_kind(&mut query, 1)?, "lz4");
+    assert_eq!(stored_value_kind(&mut query, 5)?, "overflow");
+    let root = query.header.root_page_id;
+    assert_ne!(root, query.leftmost_leaf()?, "test tree must have an internal level");
+
+    let expected = query.iter().map(|item| item.map(|(key, _)| key)).collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(expected.len(), 900);
+    assert_eq!(keys_of(&mut query)?, expected);
+    Ok(())
+}
+
+#[test]
+fn keys_match_iter_keys_in_a_multi_level_tree() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-multi-level.db");
+    let mut tree = BPlusTree::new();
+    for index in 0..40u32 {
+        tree.insert(long_split_key(index, '-'), index);
+    }
+    tree.store(&path)?;
+
+    let mut query = BPlusTreeQuery::<String, u32>::try_new(&path)?;
+    let next_page_id = query.header.next_page_id;
+    let root = query.header.root_page_id;
+    let child = query.with_page(root, |bytes, _| {
+        InternalPreamble::decode(bytes, root, next_page_id).map(|preamble| preamble.leftmost_child)
+    })?;
+    let child_type = query.with_page(child, |bytes, _| {
+        SlottedPage::open(bytes, child, next_page_id).map(|page| page.header().page_type)
+    })?;
+    assert_eq!(child_type, PageType::Internal, "test tree must have more than one internal level");
+    let expected = query.iter().map(|item| item.map(|(key, _)| key)).collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(expected.len(), 40);
+    assert_eq!(query.keys().collect::<io::Result<Vec<_>>>()?, expected);
+    Ok(())
+}
+
+#[test]
+fn keys_skip_tombstones() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-tombstones.db");
+    let mut tree = BPlusTree::new();
+    for key in 0..300u32 {
+        tree.insert(key, format!("value-{key}"));
+    }
+    tree.store(&path)?;
+
+    let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&path)?;
+    updater.set_flush_policy(FlushPolicy::Batch);
+    for key in (0..300u32).filter(|key| key % 3 == 0) {
+        assert!(updater.delete(&key)?);
+    }
+    updater.commit()?;
+    drop(updater);
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    assert_eq!(stored_value_kind(&mut query, 3)?, "tombstone");
+    let expected = (0..300u32).filter(|key| key % 3 != 0).collect::<Vec<_>>();
+    assert_eq!(keys_of(&mut query)?, expected);
+    assert_eq!(iter_key_outcomes(&path)?, expected.into_iter().map(Ok).collect::<Vec<_>>());
+    Ok(())
+}
+
+#[test]
+fn keys_on_empty_tree_yield_nothing() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-empty.db");
+    BPlusTree::<u32, String>::new().store(&path)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let mut keys = query.keys();
+    assert!(keys.next().is_none());
+    assert!(keys.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn is_empty_decodes_only_the_first_key_not_the_value() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("is-empty-undecodable-value.db");
+    let mut tree = BPlusTree::new();
+    tree.insert(1u32, String::from("value"));
+    tree.insert(2u32, String::from("other"));
+    tree.store(&path)?;
+
+    let mut query = BPlusTreeQuery::<u32, UndecodableValue>::try_new(&path)?;
+    assert!(query.iter().next().is_some_and(|item| item.is_err()));
+    assert!(!query.is_empty().map_err(BPlusTreeError::to_io)?);
+    Ok(())
+}
+
+#[test]
+fn is_empty_reports_empty_and_tombstoned_only_trees() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let empty_path = dir.path().join("is-empty-empty.db");
+    BPlusTree::<u32, String>::new().store(&empty_path)?;
+    let mut empty = BPlusTreeQuery::<u32, String>::try_new(&empty_path)?;
+    assert!(empty.is_empty().map_err(BPlusTreeError::to_io)?);
+
+    let deleted_path = dir.path().join("is-empty-tombstoned.db");
+    let mut tree = BPlusTree::new();
+    for key in 0..300u32 {
+        tree.insert(key, format!("value-{key}"));
+    }
+    tree.store(&deleted_path)?;
+    let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&deleted_path)?;
+    updater.set_flush_policy(FlushPolicy::Batch);
+    for key in 0..300u32 {
+        assert!(updater.delete(&key)?);
+    }
+    updater.commit()?;
+    drop(updater);
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&deleted_path)?;
+    assert_eq!(stored_value_kind(&mut query, 0)?, "tombstone");
+    assert!(query.is_empty().map_err(BPlusTreeError::to_io)?);
+    Ok(())
+}
+
+#[test]
+fn is_empty_still_fails_on_structural_corruption() -> io::Result<()> {
+    let (mut database, _, first, _, _) = stored_tree_fixture()?;
+    let byte = page_range(first)?.start + 100;
+    *database.get_mut(byte).ok_or_else(|| io::Error::other("test corruption byte missing"))? ^= 1;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("is-empty-corrupt-leaf.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    assert!(query.is_empty().is_err());
+    Ok(())
+}
+
+#[test]
+fn len_and_locator_scan_detect_leaf_cycle() -> io::Result<()> {
+    let (mut database, _, first, second, _) = stored_tree_fixture()?;
+    set_page_reference(&mut database, second, 16, first)?;
+    set_page_reference(&mut database, first, 8, second)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("len-cycle.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let error = query.len().err().ok_or_else(|| io::Error::other("len accepted a leaf cycle"))?.to_io();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("right sibling chain contains a cycle"));
+    let error = query.collect_with_locators().err().ok_or_else(|| io::Error::other("locator scan accepted a cycle"))?;
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("right sibling chain contains a cycle"));
+    Ok(())
+}
+
+#[test]
+fn bounded_iterator_rejects_leaf_cycle_before_yielding_duplicates() -> io::Result<()> {
+    let (mut database, _, first, second, _) = stored_tree_fixture()?;
+    set_page_reference(&mut database, second, 16, first)?;
+    set_page_reference(&mut database, first, 8, second)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("bounded-cycle.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let mut seen = HashSet::new();
+    let mut errors = 0usize;
+    for item in query.range_iter(std::ops::Bound::Included(&1_100), std::ops::Bound::Unbounded) {
+        match item {
+            Ok((key, _)) => assert!(seen.insert(key), "range iterator yielded key {key} twice"),
+            Err(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                errors += 1;
+            }
+        }
+    }
+    assert_eq!(errors, 1);
+    Ok(())
+}
+
+#[test]
+fn keys_never_deserialize_values() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-undecodable.db");
+    let mut tree = BPlusTree::new();
+    for key in 0..50u32 {
+        tree.insert(
+            key,
+            if key % 10 == 0 {
+                random_value()
+            } else {
+                vec![7u8; usize::try_from(key).map_err(io::Error::other)? * 40]
+            },
+        );
+    }
+    tree.store(&path)?;
+
+    let mut query = BPlusTreeQuery::<u32, UndecodableValue>::try_new(&path)?;
+    assert_eq!(stored_value_kind(&mut query, 0)?, "overflow");
+    assert_eq!(stored_value_kind(&mut query, 1)?, "inline");
+    assert_eq!(stored_value_kind(&mut query, 25)?, "lz4");
+    assert!(query.iter().all(|item| item.is_err()));
+    assert_eq!(keys_of(&mut query)?, (0..50u32).collect::<Vec<_>>());
+    Ok(())
+}
+
+#[test]
+fn keys_do_not_read_overflow_pages() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-overflow.db");
+    let mut tree = BPlusTree::new();
+    tree.insert(1u32, random_value());
+    tree.insert(2u32, vec![2u8; 16]);
+    tree.insert(3u32, random_value());
+    tree.store(&path)?;
+    let head = overflow_head(&path, 1)?;
+
+    let mut database = fs::read(&path)?;
+    let byte = page_range(head)?.start + 100;
+    *database.get_mut(byte).ok_or_else(|| io::Error::other("test corruption byte missing"))? ^= 1;
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
+    let entries = query.iter().collect::<Vec<_>>();
+    assert!(entries
+        .first()
+        .is_some_and(|entry| entry.as_ref().is_err_and(|err| err.kind() == io::ErrorKind::InvalidData)));
+    assert_eq!(keys_of(&mut query)?, vec![1, 2, 3]);
+    Ok(())
+}
+
+/// Absolute file offset of the first stored byte of an inline value.
+fn inline_stored_offset(path: &Path, key: u32) -> io::Result<(u64, usize)> {
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(path)?;
+    let (page_id, range) = query.locate_cell(&key)?.ok_or_else(|| io::Error::other("test key missing"))?;
+    let next_page_id = query.header.next_page_id;
+    let stored_offset = query.with_page(page_id, |bytes, _| {
+        let cell = LeafCellRef::decode(
+            bytes.get(range).ok_or_else(|| io::Error::other("test cell range missing"))?,
+            page_id,
+            next_page_id,
+        )?;
+        let LeafValueRef::Inline { stored, .. } = cell.value else {
+            return Err(io::Error::other("test value is not inline"));
+        };
+        Ok(stored.as_ptr() as usize - bytes.as_ptr() as usize)
+    })?;
+    Ok((page_id, page_range(page_id)?.start + stored_offset))
+}
+
+#[test]
+fn keys_report_inline_checksum_mismatch_like_iter() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-inline-checksum.db");
+    let mut tree = BPlusTree::new();
+    for key in 1..=3u32 {
+        tree.insert(key, format!("value-{key}"));
+    }
+    tree.store(&path)?;
+
+    let (page_id, absolute) = inline_stored_offset(&path, 2)?;
+    let mut database = fs::read(&path)?;
+    *database.get_mut(absolute).ok_or_else(|| io::Error::other("test value byte missing"))? ^= 1;
+    rewrite_page_checksum(&mut database, page_id)?;
+    fs::write(&path, database)?;
+
+    let from_keys = keys_key_outcomes(&path)?;
+    assert_eq!(from_keys.len(), 3);
+    assert_eq!(from_keys.first(), Some(&Ok(1)));
+    assert!(from_keys.get(1).is_some_and(|outcome| outcome.as_ref().is_err_and(|(kind, message)| *kind
+        == io::ErrorKind::InvalidData
+        && message.contains("stored value checksum mismatch"))));
+    assert_eq!(from_keys.get(2), Some(&Ok(3)));
+    assert_eq!(from_keys, iter_key_outcomes(&path)?);
+    Ok(())
+}
+
+#[test]
+fn keys_detect_leaf_cycle_like_iter() -> io::Result<()> {
+    let (mut database, _, first, second, _) = stored_tree_fixture()?;
+    set_page_reference(&mut database, second, 16, first)?;
+    set_page_reference(&mut database, first, 8, second)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-cycle.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let mut keys = query.keys();
+    let mut seen = HashSet::new();
+    let mut errors = 0usize;
+    for item in keys.by_ref() {
+        match item {
+            Ok(key) => assert!(seen.insert(key), "keys yielded key {key} twice"),
+            Err(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                errors += 1;
+            }
+        }
+    }
+    assert_eq!(errors, 1);
+    assert!(keys.next().is_none());
+    assert_eq!(keys_key_outcomes(&path)?, iter_key_outcomes(&path)?);
+    Ok(())
+}
+
+#[test]
+fn keys_detect_asymmetric_sibling_link_like_iter() -> io::Result<()> {
+    let (mut database, _, _, second, _) = stored_tree_fixture()?;
+    set_page_reference(&mut database, second, 8, 0)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-asymmetric.db");
+    fs::write(&path, database)?;
+
+    let from_keys = keys_key_outcomes(&path)?;
+    assert!(from_keys
+        .iter()
+        .any(|outcome| outcome.as_ref().is_err_and(|(_, message)| message.contains("asymmetric leaf sibling link"))));
+    assert_eq!(from_keys, iter_key_outcomes(&path)?);
+    Ok(())
+}
+
+#[test]
+fn keys_yield_second_leaf_corruption_once_then_fuse() -> io::Result<()> {
+    let (mut database, _, _, second, _) = stored_tree_fixture()?;
+    let byte = page_range(second)?.start + 100;
+    *database.get_mut(byte).ok_or_else(|| io::Error::other("test corruption byte missing"))? ^= 1;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("keys-corrupt-page.db");
+    fs::write(&path, database)?;
+
+    let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+    let mut keys = query.keys();
+    let mut yielded = 0usize;
+    let mut saw_error = false;
+    for item in keys.by_ref() {
+        match item {
+            Ok(_) => yielded += 1,
+            Err(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                saw_error = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_error, "corruption was hidden as end-of-stream");
+    assert!(keys.next().is_none());
+    assert!(yielded > 0);
+    Ok(())
 }

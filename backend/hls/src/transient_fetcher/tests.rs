@@ -258,6 +258,7 @@ async fn fetch_direct_decoded_with_timeout(
         resource_file: TransientResourceFile { resource_id: resource.id, extension: "bin".to_string() },
         resource_kind,
         clients: HlsOriginResourceClients {
+            session: None,
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -266,7 +267,7 @@ async fn fetch_direct_decoded_with_timeout(
             use_manual_redirects: false,
         },
         policy: SegmentFetchPolicy {
-            origin_segment_timeout_ms,
+            timeouts: crate::HlsOriginTimeoutPolicy::fixed(origin_segment_timeout_ms, origin_segment_timeout_ms),
             retry_delays_ms: [0; 5],
             retry_jitter_max_ms: 0,
             ..SegmentFetchPolicy::default()
@@ -446,6 +447,7 @@ impl TestTransientCacheFixture {
                 resource_file: self.resource_file.clone(),
                 resource_kind: self.resource.kind,
                 clients: HlsOriginResourceClients {
+                    session: None,
                     client: reqwest::Client::new(),
                     no_redirect_client: reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
@@ -454,7 +456,7 @@ impl TestTransientCacheFixture {
                     use_manual_redirects: false,
                 },
                 policy: SegmentFetchPolicy {
-                    origin_segment_timeout_ms: 1_000,
+                    timeouts: crate::HlsOriginTimeoutPolicy::fixed(1_000, 1_000),
                     retry_delays_ms: [0; 5],
                     retry_jitter_max_ms: 0,
                     ..SegmentFetchPolicy::default()

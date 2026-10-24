@@ -174,6 +174,16 @@ impl HlsProxyManager {
         }
     }
 
+    /// Runs the lazy cache usage scan ahead of the first request, so it is not charged to a segment fetch.
+    ///
+    /// A no-op while HLS is disabled and once the accounting of the current cache root is ready.
+    pub async fn prepare_cache_capacity_accounting(&self) -> io::Result<()> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
+        self.segment_cache.prepare_capacity_accounting().await
+    }
+
     pub async fn run_garbage_collection_once(&self, now_ms: u64) -> io::Result<super::super::GarbageCollectionReport> {
         if !self.is_enabled() {
             return Ok(super::super::GarbageCollectionReport::default());

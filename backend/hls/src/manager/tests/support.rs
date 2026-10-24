@@ -2,10 +2,9 @@ use super::{
     prepared_terminal_bundle_key, snapshot_terminal_media_asset, HlsAcceptanceEpisodeTiming,
     HlsAcceptanceEpisodeTimingInput, HlsLeaseCutoverTiming, HlsManifestAcceptanceGeneration,
     HlsObservedRecoveryLatency, HlsOperationTimeoutMs, HlsProxyManager, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy,
-    HlsRecoveryWorkload, HlsRuntimeCustomTailAssetIdentity, HlsTerminalAssetRevisionGuard,
-    HlsTerminalCommitAcquisitionBudgetMs, HlsTerminalCommitMediaGuard, HlsTerminalCommitOutcome,
-    HlsTerminalCommitPayload, HlsTerminalCommitRequest, HlsTerminalCommitWindow, HlsTerminalMediaPreparationState,
-    HlsTerminalTailPlan, HlsTerminalTailPreparationRequest, HlsTransitionMarginMs,
+    HlsRecoveryWorkload, HlsRuntimeCustomTailAssetIdentity, HlsTerminalAssetRevisionGuard, HlsTerminalCommitMediaGuard,
+    HlsTerminalCommitOutcome, HlsTerminalCommitPayload, HlsTerminalCommitRequest, HlsTerminalCommitWindow,
+    HlsTerminalMediaPreparationState, HlsTerminalTailPlan, HlsTerminalTailPreparationRequest, HlsTransitionMarginMs,
 };
 use crate::{
     build_terminal_tail_plan,
@@ -21,7 +20,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use shared::model::{ConfigPaths, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, ReverseProxyConfigDto};
 use std::sync::Arc;
 use tuliprox_core::{
-    model::{AppConfig, Config, HlsCacheConfig, MediaToolCapabilities, ReverseProxyConfig, SourcesConfig},
+    model::{AppConfig, Config, MediaToolCapabilities, ReverseProxyConfig, SourcesConfig},
     utils::FileLockManager,
 };
 use tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer;
@@ -31,19 +30,18 @@ pub(in crate::manager::tests) const TERMINAL_ASSET_BYTES: &[u8] =
 
 pub(in crate::manager::tests) fn cutover_reserve() -> HlsLeaseReserveSnapshot {
     let transition_margin = HlsTransitionMarginMs::from_millis(12_000);
-    let guaranteed_reserve_ms = transition_margin
-        .as_millis()
-        .saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis());
+    let guaranteed_reserve_ms = 0;
     HlsLeaseReserveSnapshot {
         availability_basis: HlsLeaseReserveAvailabilityBasis::ReadyCacheTimeline,
         guaranteed_media_horizon_ms: 12_000_u64.saturating_add(guaranteed_reserve_ms),
         conservative_playback_position_ms: 12_000,
+        playback_position_known: true,
         guaranteed_reserve_ms,
         initial_hidden_ready_duration_ms: 0,
         transition_margin,
         key_readiness_valid_until_ms: None,
         recovery_required: true,
-        cutover_required: false,
+        cutover_required: true,
     }
 }
 
@@ -165,6 +163,10 @@ pub(in crate::manager::tests) async fn publish_manifest_snapshot(
     snapshot: HlsLeaseManifestSnapshot,
     now_ms: u64,
 ) -> bool {
+    let mut snapshot = snapshot;
+    for segment in Arc::make_mut(&mut snapshot.visible_segments) {
+        segment.uri = format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq).into();
+    }
     let Some(guard) = manager.prepare_access_lease_manifest_publication(lease_id, proxy_session_id, now_ms).await
     else {
         return false;
@@ -250,8 +252,7 @@ pub(in crate::manager::tests) fn commit_terminal_plan(
 pub(in crate::manager::tests) async fn live_media_fixture(
     lease_name: &str,
 ) -> (HlsProxyManager, HlsSessionHandle, ProxySessionId, HlsAccessLeaseId, HlsMediaLeaseIdentity) {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     {
@@ -314,6 +315,7 @@ pub(in crate::manager::tests) fn complete_failed_acceptance_episode(
     session: &mut super::super::super::HlsSession,
     now_ms: u64,
 ) -> u64 {
+    session.origin_control.path_condition = crate::HlsOriginPathCondition::HardFetchFailure;
     let generation = begin_test_acceptance_episode(session, now_ms);
     let episode = session.origin_control.acceptance_episode.as_mut().expect("acceptance episode");
     assert_eq!(episode.generation, generation);
@@ -333,8 +335,7 @@ pub(in crate::manager::tests) async fn prepared_terminal_commit_fixture(
     super::super::super::lease::HlsTerminalTailPreparation,
     Arc<HlsTerminalTailPlan>,
 ) {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     manager.terminal_commit_clock.set_fixed_now_ms(2_000);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, lease_name), b"secret", 1_000).await;

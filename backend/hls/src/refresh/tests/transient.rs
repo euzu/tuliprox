@@ -180,7 +180,7 @@ async fn initial_transient_manifest_without_snapshot_template_is_rejected_locall
     let session = test_session();
     session.write().await.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
     let request = test_origin_refresh_request(Arc::clone(&session));
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
     let fetched = fetched_manifest(
         "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:1\n\
          #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n",
@@ -397,7 +397,6 @@ fn fast_start_transient_transition_is_allowed_only_before_publication() {
             let worker = Arc::new(HlsSegmentWorkerPool::default());
             session.startup = Some(crate::HlsSessionStartup {
                 config: config.clone(),
-                first_data_timeout_ms: 10000,
                 worker: Arc::downgrade(&worker),
                 access_leases: Arc::new(RwLock::new(HlsAccessLeaseStore::default())),
                 revisions: std::collections::BTreeMap::new(),

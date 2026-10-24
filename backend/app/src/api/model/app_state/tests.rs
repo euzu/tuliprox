@@ -295,3 +295,24 @@ async fn config_reload_applies_failover_group_circuit_settings() {
     assert!(state.set_config(config).await.is_ok());
     assert_eq!(*state.member_health.policy(), tuliprox_session::failover_group::CircuitPolicy::from(&circuit));
 }
+
+#[tokio::test]
+async fn recording_ctx_shares_the_queue_and_capacity_held_by_the_state() {
+    let state = super::create_test_app_state(Config::default());
+
+    let ctx = state.recording_ctx();
+
+    assert!(std::sync::Arc::ptr_eq(&ctx.recordings, &state.recording.queue));
+    assert!(std::sync::Arc::ptr_eq(&ctx.recording_capacity, &state.recording.capacity));
+}
+
+#[tokio::test]
+async fn network_access_checks_allow_a_user_without_network_rules() {
+    let state = super::create_test_app_state(Config::default());
+    let user = std::sync::Arc::new(crate::model::ProxyUserCredentials::default());
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
+    let fingerprint = crate::auth::Fingerprint::new("key".to_string(), "127.0.0.1".to_string(), addr);
+
+    assert!(state.check_network_access(&user, &fingerprint).is_ok());
+    assert!(state.try_check_network_access(&user, &fingerprint).is_ok());
+}

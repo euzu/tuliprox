@@ -89,6 +89,9 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
     let mut config = app.app_config.config.load_full().as_ref().clone();
     let hls = config.reverse_proxy.as_mut().unwrap().hls_cache.as_mut().unwrap();
     hls.startup = (&HlsStartupConfigDto { mode, ..Default::default() }).into();
+    // Keep this recovery-pressure scenario's original fixed budget; AUTO changes
+    // its reserve precondition independently of the retry behavior under test.
+    hls.origin_segment_timeout_ms = shared::model::HlsSegmentTimeout::Fixed(shared::model::Millis::new(10_000));
     hls.manifest_recovery_burst.level = HlsManifestRecoveryBurstLevel::Beast;
     app.app_config.config.store(Arc::new(config));
     enable_channel_unavailable_custom_response(&app);
@@ -150,6 +153,16 @@ async fn repaired_reduced_retry(mode: HlsStartupMode) {
         "{mode:?} baseline account={} binding_generation={} pinned_at_ms={} proxy_session={}",
         binding.account_name, binding.generation, binding.pinned_at_ms, proxy_id.0
     );
+    {
+        let mut leases = app.hls.proxy.access_leases().write().await;
+        let mut active = leases.remove_access_lease(&HlsAccessLeaseId(lease.to_string())).unwrap();
+        let start_seq = active.playback_cursor.first_segment_started_proxy_seq.unwrap();
+        let state = session.read().await;
+        let start = state.segments[&start_seq].media_start_ms;
+        let horizon = state.segments.values().map(|entry| entry.media_start_ms + entry.duration_ms).max().unwrap();
+        active.playback_cursor.first_segment_started_at_ms = Some(current_time_millis() - (horizon - start - 8_000));
+        leases.prepare_access_lease(active);
+    }
     session.write().await.origin_control.path_condition = tuliprox_hls::HlsOriginPathCondition::HardFetchFailure;
     let directive =
         match tuliprox_hls::api::hls_manifest_acceptance_directive_for_session(&app.hls_ctx(), &session, &proxy_id)

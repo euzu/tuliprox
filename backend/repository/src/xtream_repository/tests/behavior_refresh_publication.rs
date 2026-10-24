@@ -1,8 +1,9 @@
 use super::{
+    app_config_in,
     behavior::{json_reader, make_input_group, read_live_props, wait_for_child},
     count_input_xtream_cluster, fixed_refresh_paths, get_collection_path, load_input_xtream_playlist, make_live_item,
     persist_input_xtream_playlist, persist_input_xtream_playlist_cluster_to_disk, publish_staged_file_same_directory,
-    target_category_lock_path, target_writer_config, target_writer_group, test_app_config, write_single_item,
+    target_category_lock_path, target_writer_config, target_writer_group, write_single_item,
     xtream_cluster_category_collection, xtream_get_playlist_categories, xtream_write_playlist,
     xtream_write_playlist_with_mode, TargetEmptyPublicationHook, TargetEmptyReplacementMode,
 };
@@ -28,7 +29,7 @@ use tuliprox_core::model::ConfigInput;
 async fn target_force_empty_category_reader_waits_through_the_backup_window() -> Result<(), Box<dyn std::error::Error>>
 {
     let directory = tempfile::tempdir()?;
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let target = target_writer_config();
     let mut baseline = vec![
         target_writer_group(XtreamCluster::Live, 1, 101),
@@ -87,7 +88,7 @@ async fn target_force_empty_category_reader_waits_through_the_backup_window() ->
 #[tokio::test]
 async fn input_cluster_count_returns_none_for_missing_baseline() {
     let directory = tempdir().expect("temp directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = ConfigInput { name: "provider-a".intern(), input_type: InputType::Xtream, ..ConfigInput::default() };
 
     assert_eq!(
@@ -101,7 +102,7 @@ async fn input_cluster_count_returns_none_for_missing_baseline() {
 #[tokio::test]
 async fn input_cluster_count_reads_the_canonical_active_raw_cluster() {
     let directory = tempdir().expect("temp directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = ConfigInput { name: "provider-a".intern(), input_type: InputType::Xtream, ..ConfigInput::default() };
 
     let storage_path = get_input_storage_path(&input.name, directory.path().to_string_lossy().as_ref())
@@ -129,7 +130,7 @@ async fn input_cluster_count_reads_the_canonical_active_raw_cluster() {
 #[tokio::test]
 async fn in_memory_fallback_keeps_colliding_category_ids_separate_by_cluster() {
     let directory = tempdir().expect("temp directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let storage_path = get_input_storage_path("provider-a", directory.path().to_string_lossy().as_ref())
         .await
         .expect("canonical input storage");
@@ -317,7 +318,7 @@ fn xtream_refresh_end_to_end_child() -> io::Result<()> {
         return Ok(());
     };
     let storage_root = Path::new(&storage_root);
-    let app_config = test_app_config(storage_root);
+    let app_config = app_config_in(storage_root);
     let input = ConfigInput { name: "deadlock-test".intern(), input_type: InputType::Xtream, ..ConfigInput::default() };
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {

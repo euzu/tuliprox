@@ -6,6 +6,7 @@ mod documentation_action_card;
 mod github_action_card;
 mod ipinfo_action_card;
 mod log_console;
+mod logs_view;
 mod maintenance_action_card;
 mod maintenance_dialog;
 mod maintenance_state;
@@ -23,7 +24,7 @@ mod streams_view;
 
 pub use self::{
     action_card::*, credits_action_card::*, dashboard_view::*, discord_action_card::*, documentation_action_card::*,
-    github_action_card::*, ipinfo_action_card::*, log_console::*, maintenance_action_card::*, metrics_history::*,
-    playlist_progress_status_card::*, sparkline::*, stats_view::*, status_card::*, stream_display::*,
-    stream_history_view::*, streams_view::*, user_action_card::*, version_action_card::*,
+    github_action_card::*, ipinfo_action_card::*, log_console::*, logs_view::*, maintenance_action_card::*,
+    metrics_history::*, playlist_progress_status_card::*, sparkline::*, stats_view::*, status_card::*,
+    stream_display::*, stream_history_view::*, streams_view::*, user_action_card::*, version_action_card::*,
 };

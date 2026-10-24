@@ -27,7 +27,7 @@ use crate::{
         MapCacheStatus, MapEntry, OriginMapKey, ProxyMapId, ProxySessionId, RenderedManifest, SegmentCacheStatus,
     },
     auth::Fingerprint,
-    model::{ConfigInput, ConfigTarget, HlsCacheConfig, ProxyUserCredentials, StripConfig},
+    model::{ConfigInput, ConfigTarget, ProxyUserCredentials, StripConfig},
 };
 use axum::{
     body::Body,
@@ -105,11 +105,9 @@ async fn hls_manifest_channel_unavailable_falls_back_to_not_found_when_custom_re
 async fn legacy_hls_manifest_deadline_includes_full_body_read() {
     let origin = spawn_test_encoded_manifest_origin(None, b"#EXTM3U\n".to_vec(), Duration::from_millis(100)).await;
     let input = legacy_manifest_test_input(&origin);
-    let hls_config = HlsCacheConfig::from(&HlsCacheConfigDto {
-        origin_manifest_timeout_ms: shared::model::Millis::new(10),
-        ..Default::default()
-    });
-    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
+    let hls_dto =
+        HlsCacheConfigDto { origin_manifest_timeout_ms: shared::model::Millis::new(10), ..Default::default() };
+    let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_private_cache(&hls_dto)));
 
     let error = super::super::download_legacy_hls_manifest(&app_state, &input, &legacy_manifest_test_client_headers())
         .await
@@ -502,9 +500,8 @@ async fn hls_cache_manifest_cold_start_client_abort_does_not_leave_refresh_in_fl
     };
     let hls_dto =
         HlsCacheConfigDto { origin_manifest_timeout_ms: shared::model::Millis::new(1_000), ..Default::default() };
-    let hls_config = HlsCacheConfig::from(&hls_dto);
     let app_state = test_app_state_with_hls_proxy_and_inputs(
-        Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)),
+        Arc::new(HlsProxyManager::with_private_cache(&hls_dto)),
         vec![Arc::new(input.clone())],
     );
     enable_hls_cache(&app_state);

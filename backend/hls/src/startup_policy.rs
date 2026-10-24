@@ -9,7 +9,6 @@ pub(crate) const STARTUP_WINDOW_SUCCESSORS: u64 = 5;
 #[derive(Debug)]
 pub struct HlsSessionStartup {
     pub config: HlsStartupConfig,
-    pub first_data_timeout_ms: u64,
     pub worker: std::sync::Weak<super::HlsSegmentWorkerPool>,
     pub access_leases: Arc<tokio::sync::RwLock<super::HlsAccessLeaseStore>>,
     pub revisions: BTreeMap<u64, SegmentRevisionGuard>,

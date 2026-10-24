@@ -64,7 +64,7 @@ impl HlsCachedManifestOptions {
         self
     }
 
-    const fn requires_newer_manifest(self) -> bool {
+    pub const fn requires_newer_manifest(self) -> bool {
         self.newer_than_rendered_at_ms.is_some() || self.after_origin_manifest_commits.is_some()
     }
 }
@@ -163,6 +163,12 @@ pub async fn hls_manifest_commit_requirement(
     new_playback_entry: bool,
     now_ms: u64,
 ) -> HlsManifestCommitRequirement {
+    let session = session.read().await;
+    if new_playback_entry && session.live_entry_revalidation.required {
+        return HlsManifestCommitRequirement::FreshCommitRequired {
+            reason: HlsFreshManifestRequiredReason::OriginReserveExhausted,
+        };
+    }
     if handoff_previous_rendered_at_ms.is_some() {
         return HlsManifestCommitRequirement::FreshCommitRequired {
             reason: HlsFreshManifestRequiredReason::ProvisioningHandoff,
@@ -172,7 +178,6 @@ pub async fn hls_manifest_commit_requirement(
         return HlsManifestCommitRequirement::FreshCommitRequired { reason: HlsFreshManifestRequiredReason::ColdStart };
     }
 
-    let session = session.read().await;
     if let Some(reason) = session.fresh_manifest_commit_required {
         return HlsManifestCommitRequirement::FreshCommitRequired { reason };
     }

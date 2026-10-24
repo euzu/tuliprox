@@ -13,6 +13,17 @@ pub enum TargetType {
 }
 
 impl TargetType {
+    /// Lowercase wire name, identical to the `serde` representation (`xtream`, `m3u`, `strm`, `hdhomerun`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::M3u => "m3u",
+            Self::Xtream => "xtream",
+            Self::Strm => "strm",
+            Self::HdHomeRun => "hdhomerun",
+        }
+    }
+
     /// Single source of truth for the categorical capabilities of an output
     /// format.
     ///
@@ -59,4 +70,17 @@ pub struct TargetCapabilities {
     pub supports_epg: bool,
     /// Whether the format can be served from the in-memory playlist cache.
     pub supports_memory_cache: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TargetType;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn as_str_matches_the_serde_name_of_every_variant() {
+        for target_type in TargetType::iter() {
+            assert_eq!(serde_json::to_value(target_type).unwrap(), serde_json::json!(target_type.as_str()));
+        }
+    }
 }

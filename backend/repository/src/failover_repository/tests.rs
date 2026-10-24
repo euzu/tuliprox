@@ -1,39 +1,12 @@
 use super::*;
-use arc_swap::{ArcSwap, ArcSwapOption};
+use crate::test_config::{app_config_from, empty_paths};
 use shared::model::{ChannelMemberRefDto, ConfigPaths, FailoverFileDto, ManualFailoverGroupDto};
 use std::path::Path;
-use tuliprox_core::{
-    model::{Config, MediaToolCapabilities, SourcesConfig},
-    utils::FileLockManager,
-};
+use tuliprox_core::model::Config;
 
 fn test_app_config(config_path: &Path) -> AppConfig {
-    AppConfig {
-        config: Arc::new(ArcSwap::from_pointee(Config::default())),
-        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-        hdhomerun: Arc::new(ArcSwapOption::default()),
-        api_proxy: Arc::new(ArcSwapOption::default()),
-        file_locks: Arc::new(FileLockManager::default()),
-        paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-            home_path: String::new(),
-            config_path: config_path.to_string_lossy().into_owned(),
-            storage_path: String::new(),
-            config_file_path: String::new(),
-            sources_file_path: String::new(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            failover_file_path: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        })),
-        custom_stream_response: Arc::new(ArcSwapOption::default()),
-        access_token_secret: [0; 32],
-        encrypt_secret: [0; 16],
-        media_tools: Arc::new(MediaToolCapabilities::new()),
-        failover: Arc::default(),
-    }
+    let paths = ConfigPaths { config_path: config_path.to_string_lossy().into_owned(), ..empty_paths() };
+    app_config_from(Config::default(), paths, None)
 }
 
 /// App config whose snapshot was loaded from `source`, like the startup loader does.

@@ -279,6 +279,7 @@ async fn stage_segment_key_dependency(
         resource_file: resource_file.clone(),
         resource_kind: TransientResourceKind::Key,
         clients: HlsOriginResourceClients {
+            session: Some(context.session.clone()),
             client: context.client.clone(),
             no_redirect_client: context.no_redirect_client.clone(),
             use_manual_redirects: context.use_manual_redirects,
@@ -291,13 +292,13 @@ async fn stage_segment_key_dependency(
     };
     let resource_for_prepare = resource.clone();
     let prepare_context = context.clone();
-    let prepare_policy = policy.clone();
-    let response = fetch_hls_transient_origin_response_with_attempt_prepare(request, move |_attempt| {
+    let response = fetch_hls_transient_origin_response_with_attempt_prepare(request, move |attempt| {
         let context = prepare_context.clone();
-        let policy = prepare_policy.clone();
         let resource = resource_for_prepare.clone();
         async move {
-            let guard = prepare_segment_origin_attempt(context.clone(), policy, expected_generation).await?;
+            let guard =
+                prepare_segment_origin_attempt(context.clone(), attempt.timeout.effective_ms, expected_generation)
+                    .await?;
             if !context.session.read().await.transient.origin_resource_is_fetchable(&resource, current_time_millis()) {
                 finish_segment_origin_attempt(context, guard).await;
                 return Err(SegmentFetchError::Timeout);

@@ -7,7 +7,6 @@ use crate::api::{api_utils::try_unwrap_body, model::AppState};
 use axum::{http::StatusCode, response::IntoResponse};
 use log::{debug, warn};
 use std::{sync::Arc, time::Duration};
-use tuliprox_core::utils::current_time_millis;
 use tuliprox_hls::api::{
     cold_start_retry_after_seconds, hls_cached_manifest_options_for_requirement,
     maybe_trigger_origin_refresh_with_outcome, register_hls_availability_reevaluation, safe_hls_access_lease_id,
@@ -204,7 +203,7 @@ pub(in crate::api::endpoints::hls_api) fn hls_canonical_owner_request_deadline_m
 pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_handoff(
     context: &HlsCanonicalOwnerHandoffContext<'_>,
 ) -> HlsCanonicalOwnerEvaluation {
-    let now_ms = current_time_millis();
+    let now_ms = context.app_state.hls.proxy.now_ms();
     let Some(lease) = context
         .app_state
         .hls
@@ -230,6 +229,15 @@ pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_han
             return hls_canonical_owner_failed(HlsCanonicalOwnerFailureReason::LeaseUnavailable);
         }
         HlsLeasePlaybackMode::Live => {}
+    }
+    if lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()) {
+        let response = hls_unpublished_lease_channel_unavailable_response(
+            context.app_state,
+            context.proxy_session_id,
+            context.access_lease_id,
+        )
+        .await;
+        return HlsCanonicalOwnerEvaluation::Resolved(HlsCanonicalOwnerResolution::Standalone(response));
     }
     if matches!(
         lease.state,
@@ -311,7 +319,7 @@ pub(in crate::api::endpoints::hls_api) async fn join_hls_canonical_manifest_owne
             HlsCanonicalOwnerEvaluation::Resolved(resolution) => break resolution,
             HlsCanonicalOwnerEvaluation::Pending(pending) => pending,
         };
-        let now_ms = current_time_millis();
+        let now_ms = context.app_state.hls.proxy.now_ms();
         if now_ms >= pending.deadline_ms {
             break finalize_hls_canonical_owner_handoff(&context, pending, true).await;
         }
@@ -348,6 +356,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_direct_refresh_follow_up(
 ) -> Option<axum::response::Response> {
     match outcome {
         HlsOriginRefreshTriggerOutcome::Started
+        | HlsOriginRefreshTriggerOutcome::AttemptCompleted
         | HlsOriginRefreshTriggerOutcome::SessionUnavailable
         | HlsOriginRefreshTriggerOutcome::InFlight
         | HlsOriginRefreshTriggerOutcome::DebouncedUntil { .. } => return None,
@@ -402,7 +411,7 @@ pub(in crate::api::endpoints::hls_api) async fn trigger_hls_canonical_manifest_r
             // it must not bypass the lease-specific terminal decision. The
             // in-flight owner will still publish its eventual progress/failure.
             let _refresh_started = trigger_origin_refresh_sync(refresh_request).await;
-            let now_ms = current_time_millis();
+            let now_ms = app_state.hls.proxy.now_ms();
             let Some(lease) =
                 app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
             else {

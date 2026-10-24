@@ -149,6 +149,8 @@ fn alternative_cannot_commit_before_full_burst() {
 
     assert_eq!(
         evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+            preferred_min_target_duration_secs: None,
+            excluded_candidates: &[],
             full_burst_completed: false,
             current_burst_is_full_plan: false,
             trigger: HlsManifestAcceptanceTrigger::Critical,
@@ -167,6 +169,8 @@ fn configured_off_single_initial_candidate_uses_acceptance_pipeline() {
 
     assert_eq!(
         evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+            preferred_min_target_duration_secs: None,
+            excluded_candidates: &[],
             full_burst_completed: false,
             current_burst_is_full_plan: false,
             trigger: HlsManifestAcceptanceTrigger::RecoveryRequired,
@@ -400,6 +404,8 @@ fn two_matching_single_sample_full_bursts_may_stage_under_recovery_pressure() {
 
     assert_eq!(
         evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+            preferred_min_target_duration_secs: None,
+            excluded_candidates: &[],
             full_burst_completed: true,
             current_burst_is_full_plan: true,
             trigger: HlsManifestAcceptanceTrigger::RecoveryRequired,
@@ -490,6 +496,8 @@ fn short_initial_and_pinned_candidates_require_a_complete_burst() {
             candidate.timeline_fingerprint.segment_samples.truncate(usize::try_from(count).unwrap());
             assert_eq!(
                 evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+                    preferred_min_target_duration_secs: None,
+                    excluded_candidates: &[],
                     full_burst_completed: false,
                     current_burst_is_full_plan: true,
                     trigger: HlsManifestAcceptanceTrigger::Observe,
@@ -558,5 +566,96 @@ fn independently_qualified_regular_alternative_takes_priority_over_short_pinned_
     assert_eq!(
         evaluate(&[pinned, unstageable], HlsManifestAcceptanceTrigger::RecoveryRequired),
         HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
+    );
+}
+
+fn evaluate_duration(observations: &[HlsManifestCandidateObservation], excluded: &[usize]) -> HlsManifestCommitPlan {
+    evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+        preferred_min_target_duration_secs: Some(shared::model::Secs::new(4)),
+        excluded_candidates: excluded,
+        full_burst_completed: true,
+        current_burst_is_full_plan: true,
+        trigger: HlsManifestAcceptanceTrigger::RecoveryRequired,
+        previous_alternative: None,
+        observations,
+    })
+}
+
+#[test]
+fn duration_preference_keeps_all_anchor_evidence_and_overrides_fast_pinned_progress() {
+    let mut pinned = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    pinned.target_duration_secs = Some(2);
+    let mut alternative = observation(1, "origin-b", HlsCandidateHostRelation::OtherHost);
+    alternative.target_duration_secs = Some(6);
+    alternative.evidence = HlsCrossHostAcceptanceEvidence::StrongTimelineAnchor { overlapping_segments: 3 };
+    assert_eq!(
+        evaluate_duration(&[pinned, alternative], &[]),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 1,
+            kind: HlsManifestCommitKind::AnchoredAlternative,
+        }
+    );
+}
+
+#[test]
+fn duration_preference_cannot_override_compatibility_or_replay_rules() {
+    let mut pinned = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    pinned.target_duration_secs = Some(2);
+    let mut alternative = observation(1, "origin-b", HlsCandidateHostRelation::OtherHost);
+    alternative.target_duration_secs = Some(6);
+    // A single unanchored observation is not sufficient under ordinary recovery.
+    assert_eq!(
+        evaluate_duration(&[pinned.clone(), alternative.clone()], &[]),
+        HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
+    );
+    alternative.evidence = HlsCrossHostAcceptanceEvidence::StrongTimelineAnchor { overlapping_segments: 3 };
+    alternative.resource_timeline_evidence = HlsResourceTimelineEvidence::ReplayOnly;
+    assert_eq!(
+        evaluate_duration(&[pinned.clone(), alternative], &[]),
+        HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
+    );
+}
+
+#[test]
+fn suitable_duration_is_a_boolean_preference_and_failed_candidates_allow_existing_fallback() {
+    let mut pinned = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    pinned.target_duration_secs = Some(2);
+    let mut six = observation(1, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    six.target_duration_secs = Some(6);
+    let mut ten = observation(2, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    ten.target_duration_secs = Some(10);
+    ten.manifest_fetch_elapsed_ms = 100;
+    let observations = [pinned, six, ten];
+    assert_eq!(
+        evaluate_duration(&observations, &[]),
+        HlsManifestCommitPlan::Commit { candidate_index: 1, kind: HlsManifestCommitKind::Pinned }
+    );
+    assert_eq!(
+        evaluate_duration(&observations, &[1]),
+        HlsManifestCommitPlan::Commit { candidate_index: 2, kind: HlsManifestCommitKind::Pinned }
+    );
+    assert_eq!(
+        evaluate_duration(&observations, &[1, 2]),
+        HlsManifestCommitPlan::Commit { candidate_index: 0, kind: HlsManifestCommitKind::Pinned }
+    );
+}
+
+#[test]
+fn suitable_cohort_representative_uses_all_samples_for_consensus() {
+    let mut pinned = observation(0, "origin-a", HlsCandidateHostRelation::PinnedHost);
+    pinned.target_duration_secs = Some(2);
+    let mut fast = observation(1, "origin-b", HlsCandidateHostRelation::OtherHost);
+    fast.target_duration_secs = Some(2);
+    fast.manifest_fetch_elapsed_ms = 1;
+    let mut suitable = fast.clone();
+    suitable.candidate_index = 2;
+    suitable.target_duration_secs = Some(4);
+    suitable.manifest_fetch_elapsed_ms = 100;
+    assert_eq!(
+        evaluate_duration(&[pinned, fast, suitable], &[]),
+        HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 2,
+            kind: HlsManifestCommitKind::AlternativeAsNewEpoch,
+        }
     );
 }

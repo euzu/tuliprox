@@ -592,11 +592,11 @@ pub async fn user_get_bouquet_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arc_swap::{ArcSwap, ArcSwapAny};
+    use crate::test_config::{app_config_from, empty_paths};
     use shared::model::{ClusterFlags, ConfigPaths, ProxyType, ProxyUserStatus};
     use std::{env::temp_dir, sync::Arc};
     use tempfile::tempdir;
-    use tuliprox_core::{model::MediaToolCapabilities, utils::FileLockManager};
+    use tuliprox_core::model::Config;
 
     fn make_test_credential(username: &str, status: ProxyUserStatus) -> ProxyUserCredentials {
         ProxyUserCredentials {
@@ -658,32 +658,15 @@ mod tests {
             ],
         };
 
-        let cfg = AppConfig {
-            config: Arc::new(ArcSwapAny::default()),
-            sources: Arc::new(ArcSwapAny::default()),
-            hdhomerun: Arc::new(ArcSwapAny::default()),
-            api_proxy: Arc::new(ArcSwapAny::default()),
-            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
-                home_path: String::new(),
+        let cfg = app_config_from(
+            Config::default(),
+            ConfigPaths {
                 config_path: temp_dir().to_string_lossy().to_string(),
                 storage_path: temp_dir().to_string_lossy().to_string(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                failover_file_path: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            }))),
-            file_locks: Arc::new(FileLockManager::default()),
-            custom_stream_response: Arc::new(ArcSwapAny::default()),
-            access_token_secret: Default::default(),
-            encrypt_secret: Default::default(),
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-            failover: Arc::default(),
-        };
+                ..empty_paths()
+            },
+            None,
+        );
         let target_user = vec![user];
         store_api_user(&cfg, &target_user).await.expect("the users must be stored");
 
@@ -715,32 +698,15 @@ mod tests {
     #[test]
     fn the_recovery_history_lives_beside_the_database() {
         let dir = tempdir().expect("tempdir should succeed");
-        let cfg = AppConfig {
-            config: Arc::new(ArcSwapAny::default()),
-            sources: Arc::new(ArcSwapAny::default()),
-            hdhomerun: Arc::new(ArcSwapAny::default()),
-            api_proxy: Arc::new(ArcSwapAny::default()),
-            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
-                home_path: String::new(),
+        let cfg = app_config_from(
+            Config::default(),
+            ConfigPaths {
                 config_path: dir.path().to_string_lossy().to_string(),
                 storage_path: dir.path().to_string_lossy().to_string(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                failover_file_path: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            }))),
-            file_locks: Arc::new(FileLockManager::default()),
-            custom_stream_response: Arc::new(ArcSwapAny::default()),
-            access_token_secret: Default::default(),
-            encrypt_secret: Default::default(),
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-            failover: Arc::default(),
-        };
+                ..empty_paths()
+            },
+            None,
+        );
 
         let db_path = get_api_user_db_path(&cfg);
         let recovery_root = api_user_recovery_root(&cfg);
@@ -757,32 +723,7 @@ mod tests {
         let bouquet_path = user_get_live_bouquet_path(dir.path(), TargetType::Xtream);
         tokio::fs::write(&bouquet_path, "[]").await.expect("test bouquet file should be created");
 
-        let app_config = AppConfig {
-            config: Arc::new(ArcSwapAny::default()),
-            sources: Arc::new(ArcSwapAny::default()),
-            hdhomerun: Arc::new(ArcSwapAny::default()),
-            api_proxy: Arc::new(ArcSwapAny::default()),
-            paths: Arc::new(ArcSwap::from(Arc::new(ConfigPaths {
-                home_path: String::new(),
-                config_path: String::new(),
-                storage_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                failover_file_path: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            }))),
-            file_locks: Arc::new(FileLockManager::default()),
-            custom_stream_response: Arc::new(ArcSwapAny::default()),
-            access_token_secret: Default::default(),
-            encrypt_secret: Default::default(),
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-            failover: Arc::default(),
-        };
+        let app_config = app_config_from(Config::default(), empty_paths(), None);
 
         save_xtream_user_bouquet_for_target(&app_config, "target", dir.path(), XtreamCluster::Live, None)
             .await

@@ -78,6 +78,7 @@ async fn handoff_to_current_availability_reevaluation(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HlsAvailabilityAttemptSchedule {
     Backoff,
+    EvidenceOrDeadline,
     RefreshCompletion,
     DebouncedUntil { retry_at_ms: u64 },
 }
@@ -85,6 +86,7 @@ pub(super) enum HlsAvailabilityAttemptSchedule {
 impl HlsAvailabilityAttemptSchedule {
     pub(super) fn wake_at_ms(self, now_ms: u64, attempts_completed: u8, cycle_deadline_ms: u64) -> Option<u64> {
         match self {
+            Self::EvidenceOrDeadline => None,
             Self::Backoff => {
                 let retry_at_ms = now_ms.saturating_add(availability_reevaluation_backoff_ms(attempts_completed));
                 (retry_at_ms <= cycle_deadline_ms).then_some(retry_at_ms)
@@ -107,10 +109,15 @@ pub(super) const fn availability_refresh_trigger_decision(
     terminal_evaluation_pending: bool,
 ) -> HlsAvailabilityRefreshTriggerDecision {
     match outcome {
+        HlsOriginRefreshTriggerOutcome::AttemptCompleted if terminal_evaluation_pending => {
+            HlsAvailabilityRefreshTriggerDecision::Wait(HlsAvailabilityAttemptSchedule::EvidenceOrDeadline)
+        }
         HlsOriginRefreshTriggerOutcome::Started if terminal_evaluation_pending => {
             HlsAvailabilityRefreshTriggerDecision::Wait(HlsAvailabilityAttemptSchedule::RefreshCompletion)
         }
-        HlsOriginRefreshTriggerOutcome::Started => HlsAvailabilityRefreshTriggerDecision::FinishCycle,
+        HlsOriginRefreshTriggerOutcome::AttemptCompleted | HlsOriginRefreshTriggerOutcome::Started => {
+            HlsAvailabilityRefreshTriggerDecision::FinishCycle
+        }
         HlsOriginRefreshTriggerOutcome::InFlight => {
             HlsAvailabilityRefreshTriggerDecision::Wait(HlsAvailabilityAttemptSchedule::RefreshCompletion)
         }
@@ -196,9 +203,15 @@ async fn handle_evaluated_availability_directive(
     directive: HlsManifestAcceptanceDirective,
     terminal_evaluation_pending: bool,
 ) -> HlsAvailabilityWorkerDecision {
+    if refresh_request.attempt.is_none() {
+        refresh_request.attempt = ctx.hls_proxy.prepare_manifest_attempt(refresh_request).await;
+        if refresh_request.attempt.is_none() {
+            return HlsAvailabilityWorkerDecision::ContinueAttempts(HlsAvailabilityAttemptSchedule::Backoff);
+        }
+    }
     if !directive.trigger.starts_episode() {
         if terminal_evaluation_pending {
-            return HlsAvailabilityWorkerDecision::ContinueAttempts(HlsAvailabilityAttemptSchedule::Backoff);
+            return HlsAvailabilityWorkerDecision::ContinueAttempts(HlsAvailabilityAttemptSchedule::EvidenceOrDeadline);
         }
         return finish_availability_reevaluation_cycle(
             ownership,
@@ -240,6 +253,7 @@ struct HlsAvailabilityReevaluationCycle {
     live_reserve_deadline: Option<HlsLiveReserveDeadline>,
     retain_post_refresh_owner: bool,
     failed_closed_retry: Option<HlsTerminalFailedClosedReason>,
+    awaiting_evidence: bool,
 }
 
 impl HlsAvailabilityReevaluationCycle {
@@ -250,6 +264,7 @@ impl HlsAvailabilityReevaluationCycle {
             live_reserve_deadline: None,
             retain_post_refresh_owner: false,
             failed_closed_retry: None,
+            awaiting_evidence: false,
         }
     }
 
@@ -350,7 +365,14 @@ async fn evaluate_post_refresh_terminal_attempt(
     if matches!(mode, HlsAvailabilityReevaluationMode::RecoveryPressure) {
         return HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: false };
     }
+    cycle.awaiting_evidence = false;
     match evaluate_active_terminal_leases_for_reevaluation(ctx, session, &owner_key.proxy_session_id, now_ms).await {
+        HlsPostRefreshTerminalEvaluation::AwaitingEvidence => {
+            cycle.live_reserve_deadline = None;
+            cycle.retain_post_refresh_owner = true;
+            cycle.awaiting_evidence = true;
+            HlsTerminalReevaluationDecision::Continue { terminal_evaluation_pending: true }
+        }
         HlsPostRefreshTerminalEvaluation::ReevaluateNow => {
             cycle.live_reserve_deadline = None;
             cycle.retain_post_refresh_owner = true;
@@ -463,28 +485,58 @@ async fn run_hls_availability_reevaluation_attempt(
             HlsTerminalReevaluationDecision::RestartCycle => return HlsAvailabilityCycleDecision::RestartCycle,
             HlsTerminalReevaluationDecision::Stop => return HlsAvailabilityCycleDecision::Stop,
         };
-    let Some(refresh_request) = refresh_request.as_mut() else {
+    let schedule = if let Some(refresh_request) = refresh_request.as_mut() {
+        match evaluate_availability_refresh_attempt(
+            ctx,
+            session,
+            owner_key,
+            ownership,
+            refresh_request,
+            terminal_evaluation_pending,
+        )
+        .await
+        {
+            HlsAvailabilityCycleDecision::ContinueAttempts(schedule) => schedule,
+            decision => return decision,
+        }
+    } else if cycle.awaiting_evidence {
+        // No playback position or READY evidence supplies a future deadline.
+        // Keep this reserve-only owner parked until that evidence changes.
+        HlsAvailabilityAttemptSchedule::EvidenceOrDeadline
+    } else {
         return HlsAvailabilityCycleDecision::FinishCycle;
     };
-    let schedule = match evaluate_availability_refresh_attempt(
-        ctx,
-        session,
-        owner_key,
-        ownership,
-        refresh_request,
-        terminal_evaluation_pending,
-    )
-    .await
-    {
-        HlsAvailabilityCycleDecision::ContinueAttempts(schedule) => schedule,
-        decision => return decision,
-    };
+    let retry_from_ms = ctx.hls_proxy.now_ms();
+    if schedule != HlsAvailabilityAttemptSchedule::Backoff {
+        let work_at = match schedule {
+            HlsAvailabilityAttemptSchedule::DebouncedUntil { retry_at_ms } => Some(retry_at_ms),
+            _ => None,
+        };
+        let wake_at = cycle
+            .live_reserve_deadline
+            .map(|deadline| deadline.next_reevaluation_at_ms)
+            .map_or(work_at, |deadline| Some(work_at.map_or(deadline, |work| work.min(deadline))));
+        let outcome = if let Some(at_ms) = wake_at {
+            wait_for_availability_owner_signal(ownership, at_ms, retry_from_ms).await
+        } else {
+            tokio::select! {
+                () = ownership.cancelled() => HlsAvailabilityOwnerWaitOutcome::Cancelled,
+                () = ownership.wake_requested() => HlsAvailabilityOwnerWaitOutcome::Woken,
+            }
+        };
+        if outcome == HlsAvailabilityOwnerWaitOutcome::Cancelled {
+            ownership.discard_superseded(owner_key);
+            return HlsAvailabilityCycleDecision::Stop;
+        }
+        cycle.attempts_completed = 0;
+        cycle.deadline_ms = ctx.hls_proxy.now_ms().saturating_add(HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS);
+        return HlsAvailabilityCycleDecision::RestartCycle;
+    }
     cycle.attempts_completed = cycle.attempts_completed.saturating_add(1);
     if cycle.attempts_completed >= HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS {
         warn!("HLS availability reevaluation cycle stopped: reason=attempts_exhausted");
         return HlsAvailabilityCycleDecision::FinishCycle;
     }
-    let retry_from_ms = ctx.hls_proxy.now_ms();
     let Some(mut retry_at_ms) = schedule.wake_at_ms(retry_from_ms, cycle.attempts_completed, cycle.deadline_ms) else {
         warn!("HLS availability reevaluation cycle stopped: reason=deadline_elapsed");
         return HlsAvailabilityCycleDecision::FinishCycle;

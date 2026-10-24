@@ -1,8 +1,9 @@
 use super::{
     create_stream_response_details, create_test_app_state_for_config, create_test_dual_provider_app_config,
-    create_test_dual_provider_app_state, create_test_fingerprint, create_test_live_channel,
-    force_provider_stream_response, get_stream_options, load_test_user, resolve_streaming_strategy,
-    spawn_legacy_hls_test_origin, ForceStreamRequestContext, StreamResponseMode, StreamingAcquireOptions,
+    create_test_dual_provider_app_state, create_test_dual_provider_app_state_with_type, create_test_fingerprint,
+    create_test_live_channel, force_provider_stream_response, get_stream_options, load_test_user,
+    resolve_streaming_strategy, spawn_legacy_hls_test_origin, ForceStreamRequestContext, StreamResponseMode,
+    StreamingAcquireOptions,
 };
 use crate::{
     api::model::{ProviderStreamCustomReason, ProviderStreamState},
@@ -430,6 +431,43 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
         strategy.provider_stream_state,
         ProviderStreamState::Custom { reason: ProviderStreamCustomReason::UnmappedProviderUrl, .. }
     ));
+
+    app_state.active_provider.release_connection(&addr);
+}
+
+#[tokio::test]
+async fn resolve_streaming_strategy_accepts_media_server_stream_ref_without_requested_flag() {
+    let app_state = create_test_dual_provider_app_state_with_type(InputType::Jellyfin);
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let addr: SocketAddr = "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!());
+    let stream_ref = "media-server://jellyfin/server/item";
+    let strategy = resolve_streaming_strategy(
+        &app_state,
+        stream_ref,
+        &create_test_fingerprint(addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: None,
+            allow_forced_provider_fallback: false,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("vod-session"),
+            playback_kind: crate::model::PlaybackKind::Vod,
+            accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
+        },
+        None,
+    )
+    .await;
+
+    let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+        panic!("media-server stream ref must be accepted as-is for the allocated provider")
+    };
+    assert_eq!(provider.as_ref(), "provider_1");
+    assert_eq!(url.as_ref(), stream_ref);
 
     app_state.active_provider.release_connection(&addr);
 }

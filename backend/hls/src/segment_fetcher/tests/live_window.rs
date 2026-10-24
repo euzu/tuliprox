@@ -157,7 +157,10 @@ async fn live_window_short_empty_readiness_and_stale_plans_are_explicit() {
             state.activity.origin_work_generation += 1;
             assert!(!plan.is_current(&state));
             assert!(state.plan_live_window(HlsLiveWindowView::Entry).is_none());
-            assert!(HlsManifestRenderer::render_live_window(&state, &plan, 0).is_err());
+            assert_eq!(
+                HlsManifestRenderer::render_live_window(&state, &plan, 0),
+                Err(crate::renderer::RenderError::InvalidState),
+            );
         }
     }
 }

@@ -19,7 +19,7 @@ use crate::{
 use axum::response::IntoResponse;
 use log::{debug, error};
 use serde::Deserialize;
-use shared::model::{ConfigTargetOptions, PlaylistItemType, TargetType, VirtualId, XtreamCluster};
+use shared::model::{PlaylistItemType, TargetType, VirtualId, XtreamCluster};
 use std::{str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
 
@@ -133,7 +133,10 @@ pub(in crate::api) async fn resolve_target_recording_source(
 }
 
 /// `SourcesConfigDto::prepare` rejects duplicate target names across sources.
-fn find_target_by_name(app_config: &crate::model::AppConfig, target_name: &str) -> Option<Arc<ConfigTarget>> {
+pub(super) fn find_target_by_name(
+    app_config: &crate::model::AppConfig,
+    target_name: &str,
+) -> Option<Arc<ConfigTarget>> {
     app_config.sources.load().get_target_by_name(target_name).cloned()
 }
 
@@ -195,8 +198,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
     channel_name: Option<&str>,
 ) -> Option<ResolvedRecordingSource> {
     let target = find_target_by_name(app_config, target_name)?;
-    let output_case =
-        EpgIdOutputCase::from_lowercase(target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids));
+    let output_case = target.epg_id_case();
     let requested = canonicalize_untrusted_epg_id(epg_channel_id, output_case);
     let mut candidates = Vec::new();
     if target.has_output(TargetType::Xtream) {

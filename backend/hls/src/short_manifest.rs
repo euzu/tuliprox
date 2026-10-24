@@ -4,6 +4,30 @@ use crate::{
     manifest_acceptance::HlsManifestAcceptanceGeneration, manifest_origin_binding::HlsManifestOriginBinding,
     media_reserve::HlsManifestCommitIdentity, HlsSession,
 };
+use shared::model::Secs;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HlsTargetDurationQualificationResult {
+    SuitableOriginSelected,
+    NoSuitableOrigin,
+    NotApplicable,
+}
+
+/// A policy snapshot shared by every lease and reduced retry of one qualification.
+/// Configuration changes take effect only when the next qualification starts.
+#[derive(Clone, Debug)]
+pub(crate) struct HlsTargetDurationQualification {
+    pub(crate) basis: HlsOriginQualificationBasis,
+    pub(crate) minimum: Secs,
+    pub(crate) result: Option<HlsTargetDurationQualificationResult>,
+    pub(crate) warned: bool,
+}
+
+impl HlsTargetDurationQualification {
+    pub(crate) fn new(session: &HlsSession, minimum: Secs) -> Self {
+        Self { basis: HlsOriginQualificationBasis::capture(session), minimum, result: None, warned: false }
+    }
+}
 
 /// The validated origin foundation, deliberately independent of window movement and leases.
 #[derive(Clone, Debug, PartialEq, Eq)]

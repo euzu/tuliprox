@@ -154,7 +154,8 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
                     access.show_streams_page && access.system_read,
                     NavEntry::new(ViewType::Streams, "Streams", "LABEL.STREAMS"),
                 ),
-                (access.show_stream_history, NavEntry::new(ViewType::StreamHistory, "Log", "LABEL.STREAM_HISTORY")),
+                (access.system_read, NavEntry::new(ViewType::Logs, "Log", "LABEL.LOGS")),
+                (access.show_stream_history, NavEntry::new(ViewType::StreamHistory, "Clock", "LABEL.STREAM_HISTORY")),
             ],
         ),
         nav_section(
@@ -508,17 +509,18 @@ mod tests {
                 ViewType::Dashboard,
                 ViewType::Stats,
                 ViewType::Streams,
+                ViewType::Logs,
                 ViewType::StreamHistory,
                 ViewType::Rbac,
                 ViewType::Config,
                 ViewType::Users,
                 ViewType::Plans,
                 ViewType::SourceEditor,
-                ViewType::PlaylistSettings,
+                ViewType::FailoverGroups,
                 ViewType::PlaylistUpdate,
                 ViewType::PlaylistExplorer,
-                ViewType::FailoverGroups,
                 ViewType::PlaylistEpg,
+                ViewType::PlaylistSettings,
                 ViewType::RecordingLibrary,
                 ViewType::RecordingRules,
             ]
@@ -532,7 +534,7 @@ mod tests {
         let playlist_reader = NavAccess { playlist_read: true, ..NavAccess::default() };
         assert_eq!(
             views(&nav_sections(&playlist_reader)),
-            vec![ViewType::Dashboard, ViewType::PlaylistSettings, ViewType::PlaylistExplorer, ViewType::FailoverGroups]
+            vec![ViewType::Dashboard, ViewType::FailoverGroups, ViewType::PlaylistExplorer, ViewType::PlaylistSettings]
         );
 
         let epg_reader = NavAccess { epg_read: true, ..NavAccess::default() };

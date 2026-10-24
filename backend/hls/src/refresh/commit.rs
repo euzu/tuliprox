@@ -134,6 +134,9 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
     staged_switch: Option<&HlsStagedSwitchCommit>,
 ) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
     ensure_refresh_origin_work_generation_is_current(session, request)?;
+    let minimum_commit_generation = session
+        .next_manifest_commit_identity(fetch_finished_at_ms)
+        .map(crate::media_reserve::HlsManifestCommitIdentity::commit_generation);
     if !session
         .origin_control
         .qualification
@@ -187,12 +190,9 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
             },
         ),
     };
-    if result.is_ok() {
-        if matches!(session.mode, HlsSessionMode::TransientPassthrough { .. }) {
-            session.startup = None;
-            session.origin_control.qualification = crate::short_manifest::HlsOriginQualification::Unchecked;
-        }
-        clear_satisfied_fresh_manifest_requirement(session, request);
+    if result.is_ok() && matches!(session.mode, HlsSessionMode::TransientPassthrough { .. }) {
+        session.startup = None;
+        session.origin_control.qualification = crate::short_manifest::HlsOriginQualification::Unchecked;
     }
     let configured_target_duration = session.target_duration;
     if let Ok((progress_evidence, _, _)) = &result {
@@ -202,8 +202,58 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
             configured_target_duration,
             fetch_finished_at_ms,
         );
+        qualify_live_entry_revalidation(
+            session,
+            request,
+            *progress_evidence,
+            fetch_finished_at_ms,
+            minimum_commit_generation,
+        );
+        clear_satisfied_fresh_manifest_requirement(session, request);
     }
     result
+}
+
+fn qualify_live_entry_revalidation(
+    session: &mut crate::HlsSession,
+    request: &OriginRefreshRequest,
+    evidence: HlsManifestCommitProgressEvidence,
+    now_ms: u64,
+    minimum_commit_generation: Option<u64>,
+) {
+    let Some(generation) = session.live_entry_revalidation_generation() else { return };
+    let Some(minimum_commit_generation) = minimum_commit_generation else { return };
+    let qualified = match evidence {
+        HlsManifestCommitProgressEvidence::CacheTimeline(_) => session.origin_is_qualified(),
+        HlsManifestCommitProgressEvidence::Transient(_) => {
+            session.transient.last_manifest_template().is_some_and(|template| template.playlist_duration_ms() > 0)
+        }
+    };
+    if request.attempt.as_ref().and_then(|attempt| attempt.revalidation_generation) != Some(generation)
+        || !qualified
+        || session.origin_seq_highwater == session.live_entry_revalidation.origin_highwater
+    {
+        return;
+    }
+    let timing = evidence.refresh_timing();
+    if timing.progress == HlsManifestProgress::Unchanged {
+        if session.origin_epoch <= session.live_entry_revalidation.origin_epoch {
+            return;
+        }
+        if matches!(evidence, HlsManifestCommitProgressEvidence::CacheTimeline(_)) {
+            let Some(target) = session.target_duration else { return };
+            session.origin_control.record_media_progress(now_ms, u64::from(target).saturating_mul(1_000));
+        }
+    }
+    if matches!(evidence, HlsManifestCommitProgressEvidence::Transient(_)) {
+        // Acceptance proves a new origin window, not additional locally READY media.
+        session.origin_control.progress_generation = session.origin_control.progress_generation.saturating_add(1);
+        session.origin_control.path_condition = crate::origin_progress::HlsOriginPathCondition::ProgressExpected;
+        session.origin_control.progress_phase = crate::origin_progress::HlsOriginProgressPhase::Fresh;
+    }
+    session.live_entry_revalidation.required = false;
+    session.live_entry_revalidation.qualified_commit_generation = Some(minimum_commit_generation);
+    session.live_entry_revalidation.recovered_progress_generation = Some(session.origin_control.progress_generation);
 }
 
 pub(super) fn record_committed_manifest_media_progress(
@@ -268,6 +318,10 @@ fn commit_normal_fetched_manifest(
     update_origin_provider_session_headers(session, fetched);
     mark_manifest_acceptance_success(session, fetched, &quality, fetch_finished_at_ms);
     super::short_manifest::record_origin_qualification(session, manifest.segments.len());
+    super::short_manifest::record_target_duration_qualification(
+        session,
+        manifest.target_duration.filter(|duration| *duration > 0),
+    );
     queue_and_render_normal_manifest(session, request, fetch_finished_at_ms);
     Ok((HlsManifestCommitProgressEvidence::CacheTimeline(refresh_timing), true, true))
 }
@@ -374,11 +428,18 @@ fn commit_transient_fetched_manifest(
 }
 
 fn clear_satisfied_fresh_manifest_requirement(session: &mut crate::HlsSession, request: &OriginRefreshRequest) {
-    let (Some(reason), Some(generation)) =
+    let (Some(mut reason), Some(generation)) =
         (request.manifest_commit_requirement.fresh_reason(), request.fresh_manifest_requirement_generation)
     else {
         return;
     };
+    if reason == crate::HlsFreshManifestRequiredReason::OriginReserveExhausted {
+        if session.live_entry_revalidation.required {
+            return;
+        }
+        let Some(previous_reason) = session.fresh_manifest_commit_required else { return };
+        reason = previous_reason;
+    }
     session.clear_fresh_manifest_commit_requirement_if_current(reason, generation);
 }
 
@@ -389,7 +450,11 @@ pub(super) fn refresh_origin_work_generation_is_current(
     refresh_origin_work_generation_matches(
         session,
         request.origin_io.as_ref().and_then(|origin_io| origin_io.started_generation),
-    )
+    ) && request
+        .origin_io
+        .as_ref()
+        .and_then(|io| io.prepared_account.as_ref())
+        .is_none_or(|snapshot| snapshot.matches_session_identity(session))
 }
 
 pub(super) fn refresh_origin_work_generation_matches(
@@ -442,7 +507,7 @@ fn evaluate_manifest_acceptance_for_commit(
     now_ms: u64,
     mode: HlsManifestCommitAcceptanceMode,
 ) -> Result<HlsManifestOriginQuality, HlsManifestCommitError> {
-    let fetch_context = manifest_fetch_context(request);
+    let fetch_context = manifest_fetch_context(request, session.target_duration);
     match evaluate_manifest_acceptance(session, fetched, timeline, &fetch_context, now_ms, mode) {
         HlsManifestAcceptanceDecision::Accept { quality }
         | HlsManifestAcceptanceDecision::AcceptHostSwitch { quality } => Ok(quality),
@@ -801,6 +866,9 @@ fn commit_transient_manifest_refresh_timing(
     quality: &HlsManifestOriginQuality,
 ) -> HlsManifestRefreshTiming {
     let previous_highwater = session.origin_seq_highwater;
+    if quality.sequence_relation == HlsManifestSequenceRelation::Rebase {
+        session.origin_epoch = session.origin_epoch.saturating_add(1);
+    }
     if let Some(highwater) = timeline.origin_highwater() {
         session.origin_seq_highwater =
             Some(next_committed_origin_highwater(session.origin_seq_highwater, highwater, quality.sequence_relation));

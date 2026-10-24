@@ -19,6 +19,7 @@ const VIDEO: &str = "video";
 const METADATA_UPDATE: &str = "metadata_update";
 const HDHOMERUN: &str = "hdhomerun";
 const LIBRARY: &str = "library";
+const MCP: &str = "mcp";
 const SOURCES: &str = "sources";
 const API_USERS: &str = "api_users";
 const SCHEDULES: &str = "schedules";
@@ -39,6 +40,7 @@ pub enum SetupStep {
     MetadataUpdate,
     HdHomerun,
     Library,
+    Mcp,
     Sources,
     ApiUsers,
     Schedules,
@@ -47,7 +49,7 @@ pub enum SetupStep {
 
 impl SetupStep {
     #[cfg(test)]
-    pub const ALL_VARIANTS: [Self; 17] = [
+    pub const ALL_VARIANTS: [Self; 18] = [
         Self::Welcome,
         Self::Api,
         Self::WebUi,
@@ -61,13 +63,14 @@ impl SetupStep {
         Self::MetadataUpdate,
         Self::HdHomerun,
         Self::Library,
+        Self::Mcp,
         Self::Sources,
         Self::ApiUsers,
         Self::Schedules,
         Self::Finish,
     ];
 
-    pub const ORDER: [Self; 17] = [
+    pub const ORDER: [Self; 18] = [
         Self::Welcome,
         Self::Api,
         Self::WebUi,
@@ -81,6 +84,7 @@ impl SetupStep {
         Self::MetadataUpdate,
         Self::HdHomerun,
         Self::Library,
+        Self::Mcp,
         Self::Sources,
         Self::ApiUsers,
         Self::Schedules,
@@ -130,6 +134,7 @@ impl SetupStep {
             Self::MetadataUpdate => "SETUP.LABEL.METADATA_UPDATE",
             Self::HdHomerun => "SETUP.LABEL.HDHOMERUN",
             Self::Library => "SETUP.LABEL.LIBRARY",
+            Self::Mcp => "SETUP.LABEL.MCP",
             Self::Sources => "SETUP.LABEL.SOURCES",
             Self::ApiUsers => "SETUP.LABEL.API_USERS",
             Self::Schedules => "SETUP.LABEL.SCHEDULES",
@@ -152,6 +157,7 @@ impl SetupStep {
             Self::MetadataUpdate => "SETUP.DESC.METADATA_UPDATE",
             Self::HdHomerun => "SETUP.DESC.HDHOMERUN",
             Self::Library => "SETUP.DESC.LIBRARY",
+            Self::Mcp => "SETUP.DESC.MCP",
             Self::Sources => "SETUP.DESC.SOURCES",
             Self::ApiUsers => "SETUP.DESC.API_USERS",
             Self::Schedules => "SETUP.DESC.SCHEDULES",
@@ -173,6 +179,7 @@ impl SetupStep {
             Self::MetadataUpdate => Some(ConfigPage::MetadataUpdate),
             Self::HdHomerun => Some(ConfigPage::HdHomerun),
             Self::Library => Some(ConfigPage::Library),
+            Self::Mcp => Some(ConfigPage::Mcp),
             Self::Schedules => Some(ConfigPage::Schedules),
             Self::Welcome | Self::Sources | Self::ApiUsers | Self::Finish => None,
         }
@@ -195,6 +202,7 @@ impl SetupStep {
             SetupStep::MetadataUpdate => METADATA_UPDATE,
             SetupStep::HdHomerun => HDHOMERUN,
             SetupStep::Library => LIBRARY,
+            SetupStep::Mcp => MCP,
             SetupStep::Sources => SOURCES,
             SetupStep::ApiUsers => API_USERS,
             SetupStep::Schedules => SCHEDULES,

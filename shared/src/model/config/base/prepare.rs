@@ -72,6 +72,10 @@ impl ConfigDto {
             ipcheck.prepare()?;
         }
 
+        if let Some(mcp) = self.mcp.as_mut() {
+            mcp.prepare()?;
+        }
+
         if let Some(messaging) = &mut self.messaging {
             messaging.prepare(include_computed)?;
         }

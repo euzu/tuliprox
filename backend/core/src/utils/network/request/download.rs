@@ -46,6 +46,11 @@ use url::Url;
 pub async fn classify_resource_destination(host: &str) -> ResourceDestination { classify_host(host).await.0 }
 
 impl RequestFetchOptions {
+    /// A mandatory HLS entry must observe the first 407 before provider rotation.
+    pub const fn with_proxy_authentication_failover(mut self, enabled: bool) -> Self {
+        self.stop_on_proxy_authentication_required = !enabled;
+        self
+    }
     pub fn with_attempt_idle_timeout(timeout: Duration) -> Self {
         Self { attempt_idle_timeout: Some(timeout.max(Duration::from_millis(1))), ..Self::default() }
     }

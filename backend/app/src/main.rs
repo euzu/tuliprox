@@ -30,6 +30,7 @@ extern crate pest;
 // file under `api/` - `cargo fmt --all -- --check` passed on unformatted code.
 pub mod api;
 mod env_loader;
+mod mcp_stdio;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
@@ -129,6 +130,15 @@ struct Args {
     #[arg(short = None, long = "healthcheck", default_value_t = false, default_missing_value = "true"
     )]
     healthcheck: bool,
+
+    /// Bridge MCP JSON-RPC on stdin/stdout to a running instance (stdout carries protocol JSON only)
+    #[arg(long = "mcp-stdio", default_value_t = false, default_missing_value = "true")]
+    mcp_stdio: bool,
+
+    /// Base URL of the running instance for `--mcp-stdio`, including an optional web path prefix
+    /// (default: `http://127.0.0.1:8901`). Credentials: `TULIPROX_MCP_USER` / `TULIPROX_MCP_PASSWORD`
+    #[arg(long = "mcp-url")]
+    mcp_url: Option<String>,
 
     /// Scan local Library directory
     #[arg(long = "scan-library", default_value_t = false, default_missing_value = "true")]
@@ -281,6 +291,26 @@ fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) {
     }
 }
 
+async fn run_mcp_stdio(mcp_url: Option<&str>) -> i32 {
+    let default_url = format!("http://127.0.0.1:{}", shared::defaults::DEFAULT_PORT);
+    let base_url = mcp_url.unwrap_or(default_url.as_str());
+    let mut bridge = match mcp_stdio::McpStdioBridge::new(base_url, mcp_stdio::McpStdioBridge::credentials_from_env()) {
+        Ok(bridge) => bridge,
+        Err(err) => {
+            eprintln!("mcp-stdio: cannot create HTTP client: {err}");
+            return 1;
+        }
+    };
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    match bridge.run(stdin, tokio::io::stdout()).await {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("mcp-stdio: {err}");
+            1
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     api::api_utils::init_uptime_clock();
@@ -298,6 +328,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Must stay ahead of init_logger: the logger writes to stdout, which carries protocol JSON here.
+    if args.mcp_stdio {
+        std::process::exit(run_mcp_stdio(args.mcp_url.as_deref()).await);
+    }
 
     if let Some(ref db_path) = args.inspect_db {
         handle_inspect_db(db_path, args.db_type.as_deref());

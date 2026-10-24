@@ -1,9 +1,13 @@
 [workspace]
 members = ["backend/*", "frontend", "shared", "tools/tuliprox-testkit"]
+exclude = ["vendor/reqwest"]
 resolver = "2"
 
+[patch.crates-io]
+reqwest = { path = "vendor/reqwest" }
+
 [workspace.package]
-version = "3.3.158"
+version = "3.3.160"
 edition = "2021"
 rust-version = "1.95.0"
 

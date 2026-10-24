@@ -118,9 +118,10 @@ impl XtreamPlaylistIterator {
             if !xtream_path.exists() {
                 return Err(TuliproxError::Config(format!("No {cluster} entries found for target {}", target.name)));
             }
-            // Hold iter_lock for the stream lifetime (LockedReceiverStream), and bg_lock for the background reader.
-            let iter_lock = app_config.file_locks.read_lock(&xtream_path).await;
-            let bg_lock = app_config.file_locks.read_lock(&xtream_path).await;
+            // One read lock, shared by the stream (LockedReceiverStream) and the background reader.
+            // A second read lock on the same path would deadlock behind a queued writer.
+            let file_lock = Arc::new(app_config.file_locks.read_lock(&xtream_path).await);
+            let bg_lock = Arc::clone(&file_lock);
 
             let item_filter = XtreamItemFilter::new(&config, cluster, category_id, user).await;
 
@@ -188,7 +189,7 @@ impl XtreamPlaylistIterator {
                 }
             });
 
-            Ok(Self { inner: LockedReceiverStream::new(rx, iter_lock) })
+            Ok(Self { inner: LockedReceiverStream::new_shared(rx, file_lock) })
         } else {
             Err(TuliproxError::Config(format!("Failed to find xtream storage for target {}", target.name)))
         }
@@ -303,14 +304,19 @@ impl Stream for XtreamPlaylistJsonIterator {
 #[cfg(test)]
 mod tests {
     use super::{is_cluster_allowed_for_user, XtreamItemFilter, XtreamPlaylistIterator};
-    use crate::LockedReceiverStream;
-    use futures::StreamExt;
+    use crate::{
+        bplustree::BPlusTree,
+        test_config::{app_config_in, target_with_output, xtream_playlist_item},
+        xtream_get_file_path, xtream_get_storage_path, LockedReceiverStream,
+    };
+    use futures::{poll, StreamExt};
     use shared::{
         model::{ClusterFlags, PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
-    use tokio::sync::mpsc;
-    use tuliprox_core::model::ProxyUserCredentials;
+    use std::time::Duration;
+    use tokio::{sync::mpsc, time::timeout};
+    use tuliprox_core::model::{ProxyUserCredentials, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput};
 
     #[test]
     fn cluster_guard_respects_user_cluster_flags() {
@@ -400,5 +406,47 @@ mod tests {
         assert!(iterator.next().await.is_some_and(|entry| entry.is_ok()));
         assert!(iterator.next().await.is_some_and(|entry| entry.is_err()));
         assert!(iterator.next().await.is_none());
+    }
+
+    /// The iterator holds one read lock shared by its stream and its producer. The
+    /// old shape took two on the same path, which deadlocked behind a queued writer.
+    #[tokio::test]
+    async fn iterator_holds_one_shared_read_lock_until_it_is_dropped() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let app_config = app_config_in(temp.path());
+        let target = target_with_output(
+            "lock-target",
+            TargetOutput::Xtream(XtreamTargetOutput { flags: XtreamTargetFlagsSet::new(), trakt: None, filter: None }),
+        );
+        let storage_path = xtream_get_storage_path(&app_config.config.load(), &target.name).expect("storage path");
+        let xtream_path = xtream_get_file_path(&storage_path, XtreamCluster::Live);
+        std::fs::create_dir_all(xtream_path.parent().expect("parent dir")).expect("storage dir should be created");
+        // More entries than the channel depth: the producer is still active while nothing is consumed.
+        let mut tree = BPlusTree::new();
+        for id in 1..=400u32 {
+            tree.insert(id, xtream_playlist_item(id));
+        }
+        tree.store(&xtream_path).expect("xtream playlist should persist");
+
+        let mut iterator = XtreamPlaylistIterator::new(
+            XtreamCluster::Live,
+            &app_config,
+            &target,
+            None,
+            &ProxyUserCredentials::default(),
+        )
+        .await
+        .expect("iterator should open");
+        assert!(iterator.next().await.is_some_and(|entry| entry.is_ok()));
+
+        let mut write = Box::pin(app_config.file_locks.write_lock(&xtream_path));
+        assert!(poll!(&mut write).is_pending(), "writer must wait while the iterator is alive");
+
+        drop(iterator);
+        let guard = timeout(Duration::from_secs(5), write)
+            .await
+            .expect("queued writer must complete once iterator and producer are gone");
+        drop(guard);
+        assert!(app_config.file_locks.try_write_lock(&xtream_path).await.is_ok(), "no read guard may be left behind");
     }
 }

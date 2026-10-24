@@ -59,7 +59,6 @@ async fn global_reclamation_retires_revisions_unpinned_by_another_sessions_segme
         let config = tuliprox_core::model::HlsStartupConfig::default();
         session.startup = Some(crate::HlsSessionStartup {
             config: config.clone(),
-            first_data_timeout_ms: 1_000,
             worker: std::sync::Weak::new(),
             access_leases: Arc::new(RwLock::new(HlsAccessLeaseStore::default())),
             revisions: [(1, revision)].into(),

@@ -1,7 +1,7 @@
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, PlaylistStorage,
-        PlaylistStorageState, RecordingQueue, SharedStreamManager, StalkerResolveCoordinator,
+        ActiveProviderManager, ActiveUserManager, ConnectionManager, EpgScanCoordinator, EventManager,
+        PlaylistStorageState, SharedStreamManager, StalkerResolveCoordinator,
     },
     model::{
         AppConfig, GracePeriodOptions, HdHomeRunDeviceConfig, HttpClients, MaintenanceRegistry, MaintenanceWrite,
@@ -11,7 +11,7 @@ use crate::{
     utils::LRUResourceCache,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
-use shared::model::{EventMessage, UserConnectionPermission};
+use shared::model::EventMessage;
 use std::sync::{atomic::AtomicI8, Arc};
 use tokio::sync::RwLock;
 use tuliprox_metadata::manager::MetadataUpdateManager;
@@ -21,7 +21,9 @@ mod cancel_tokens;
 mod change_detection;
 mod hls_state;
 mod http_clients;
+mod network_access;
 mod playlist_update_control;
+mod recording_state;
 mod reload;
 mod resource_cache;
 #[cfg(test)]
@@ -35,8 +37,8 @@ pub use self::test_support::{
     create_test_app_state, create_test_app_state_with_manual_update_sender, create_test_maintenance,
 };
 pub use self::{
-    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, reload::*,
-    resource_cache::*, view::*,
+    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, recording_state::*,
+    reload::*, resource_cache::*, view::*,
 };
 
 /// Root server state. It always lives behind one `Arc<AppState>` and is never
@@ -45,17 +47,16 @@ pub use self::{
 pub struct AppState {
     pub app_config: Arc<AppConfig>,
     pub http_clients: Arc<HttpClients>,
-    pub recordings: Arc<RecordingQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub hls: HlsState,
+    pub recording: RecordingState,
     pub(crate) stalker_resolve_coordinator: StalkerResolveCoordinator,
+    /// Limits and caches the full scans of the per-target EPG databases (EPG inspection).
+    pub(crate) epg_scans: EpgScanCoordinator,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
-    /// Provider capacity as the DVR sees it; the adapter that keeps provider
-    /// details out of the recording engine.
-    pub recording_capacity: Arc<dyn tuliprox_dvr::recording::recording_capacity::RecordingCapacityPort>,
     pub event_manager: Arc<EventManager>,
     pub cancel_tokens: ArcSwap<CancelTokens>,
     pub playlists: Arc<PlaylistStorageState>,
@@ -88,23 +89,6 @@ impl AppState {
             self.event_manager.send_event(EventMessage::MaintenanceChanged(entries));
         }
         Ok(())
-    }
-
-    pub async fn get_active_connections_for_user(&self, username: &str) -> u32 {
-        self.active_users.user_connections(username).await
-    }
-
-    pub async fn get_connection_permission(
-        &self,
-        username: &str,
-        max_connections: u32,
-        soft_connections: u16,
-    ) -> UserConnectionPermission {
-        self.active_users.connection_permission(username, max_connections, soft_connections).await
-    }
-
-    pub async fn cache_playlist(&self, target_name: &str, playlist: PlaylistStorage) {
-        self.playlists.cache_playlist(target_name, playlist).await;
     }
 
     pub fn get_disabled_headers(&self) -> Option<ReverseProxyDisabledHeaderConfig> {

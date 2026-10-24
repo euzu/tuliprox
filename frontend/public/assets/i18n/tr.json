@@ -299,7 +299,8 @@
       "CORRUPT_SEGMENT_WATCHDOG_MAX_PARALLEL_JOBS": "Concurrent watchdog sanitize jobs.",
       "SESSION_IDLE_TIMEOUT": "Idle time before unused HLS sessions are removed.",
       "STRIP_MODE": "How the initial playlist lags behind live edge.",
-      "STRIP_VALUE": "Gap value in segments or seconds."
+      "STRIP_VALUE": "Gap value in segments or seconds.",
+      "MIN_ORIGIN_TARGET_DURATION_SECS": "Oturum başlangıcında ve gerçek yeniden doğrulamada, hedef süresi bu minimumun altındaysa uygun bir origin arar. Yapılandırılmış manifest kurtarma burst düzeyini kullanır (kapalı: tek aday). Uygun origin bulunamazsa geçerli oynatma devam eder. Varsayılan: 0 (devre dışı)."
     },
     "CONFIG_API": {
       "HOST": "Host where the tuliprox API listens. Default: 0.0.0.0",
@@ -926,6 +927,12 @@
     },
     "FAILOVER_GROUP_TARGET": {
       "TARGET": "Target whose failover groups are edited. Only targets with failover groups enabled are listed."
+    },
+    "MCP_CONFIG": {
+      "ALLOWED_ORIGINS": "İstek ana bilgisayarına ek olarak kabul edilen `Origin` değerleri, örn. `https://claude.ai`. `Host` başlığını yeniden yazan bir ters proxy arkasında gereklidir.",
+      "ENABLED": "MCP uç noktasını `{web_ui_path}/mcp` adresinde sunar, böylece yapay zeka asistanları bu örneği sorgulayabilir. Yeniden başlatma gerektirir.",
+      "MAX_RESPONSE_BYTES": "Bu bayt sayısından büyük araç sonuçları kesilir. Minimum 1024, varsayılan 262144.",
+      "READ_ONLY": "Durumu değiştiren araçları gizler ve reddeder. Web UI kimlik doğrulaması devre dışıysa salt okunur olmaya zorlanır."
     }
   },
   "HINT": {
@@ -962,7 +969,9 @@
     "SCHEDULE_EXAMPLE": "Schedule example",
     "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web",
     "FAILOVER_GROUPS_CONFIG": "Failover groups join the same live channel from several inputs into one channel. These settings apply to every target that turns failover groups on; a target can override some of them on its own Failover groups page.",
-    "FAILOVER_GROUPS_TARGET": "Turns failover groups on for this target. Settings left on \"Global\" use Settings > Failover groups."
+    "FAILOVER_GROUPS_TARGET": "Turns failover groups on for this target. Settings left on \"Global\" use Settings > Failover groups.",
+    "MCP_READ_ONLY_FORCED": "Web UI kimlik doğrulaması devre dışı olduğundan, MCP uç noktası bu ayardan bağımsız olarak salt okunur moda zorlanır.",
+    "MCP_RESTART_REQUIRED": "MCP uç noktası başlangıçta bağlanır. Bu ayarlardaki değişiklikleri uygulamak için Tuliprox'u yeniden başlatın."
   },
   "LABEL": {
     "HLS_STARTUP_LIMITS": "Fast start limits",
@@ -2034,7 +2043,7 @@
     "FAILOVER_GROUPS_ADD_CHANNELS": "Add channels",
     "FAILOVER_GROUPS_ADD_SELECTED": "Add selected to {group}",
     "FAILOVER_GROUPS_ADD_TO_GROUP": "Add to selected group",
-    "FAILOVER_GROUPS_OPEN_GROUP": "Open failover group",
+    "FAILOVER_GROUPS_OPEN_GROUP": "Open group",
     "FAILOVER_GROUPS_ADD_TO_GROUP_ELLIPSIS": "Add to failover group…",
     "FAILOVER_GROUPS_MOVE_TO_GROUP": "Move to selected group",
     "FAILOVER_GROUPS_APPLY": "Apply",
@@ -2079,7 +2088,6 @@
     "FAILOVER_GROUPS_MOVE_UP": "Move up",
     "FAILOVER_GROUPS_NEW_FROM_SELECTION": "New group from selection",
     "FAILOVER_GROUPS_NEW_GROUP": "New group",
-    "FAILOVER_GROUPS_OPEN_GROUP": "Open group",
     "FAILOVER_GROUPS_ORIGIN_AUTO": "Automatic",
     "FAILOVER_GROUPS_ORIGIN_EDITED": "Edited",
     "FAILOVER_GROUPS_ORIGIN_MANUAL": "Manual",
@@ -2111,7 +2119,15 @@
     "FAILOVER_GROUPS_HINT_APPLY": "Bir çalma listesi güncellemesi başlat (giriş önbelleği dikkate alınır), böylece kaydedilen değişiklikler listede görünsün.",
     "FAILOVER_GROUPS_UNDO": "Undo",
     "FAILOVER_GROUPS_UNRESOLVED": "Unresolved channels",
-    "FAILOVER_GROUPS_CURRENT_VALUES": "Current values"
+    "FAILOVER_GROUPS_CURRENT_VALUES": "Current values",
+    "ADD_ORIGIN": "Origin ekle",
+    "ALLOWED_ORIGINS": "İzin verilen origin'ler",
+    "HLS_TIMEOUT_FIXED": "Sabit değer",
+    "MAX_RESPONSE_BYTES": "Maks. yanıt baytı",
+    "MCP_CONFIG": "MCP",
+    "MIN_ORIGIN_TARGET_DURATION_SECS": "Minimum origin hedef süresi (sn)",
+    "READ_ONLY": "Salt okunur",
+    "VIEW_TYPE_LOGS": "Günlükler"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2439,7 +2455,8 @@
       "UNKNOWN": "Configure this setup step.",
       "VIDEO": "Configure video settings.",
       "WEB_UI": "Configure WebUI settings.",
-      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt."
+      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt.",
+      "MCP": "Yapay zeka asistanları için MCP sunucusunu yapılandırın."
     },
     "LABEL": {
       "API": "API",
@@ -2469,7 +2486,8 @@
       "WEBUI_USER": "WebUI User",
       "WEBUI_USERNAME": "WebUI Username",
       "WEB_UI": "Web-Ui",
-      "WELCOME": "Welcome"
+      "WELCOME": "Welcome",
+      "MCP": "MCP"
     },
     "MSG": {
       "COMPLETE_RESTART_HINT": "Setup completed successfully. Restart the application/container to continue.",

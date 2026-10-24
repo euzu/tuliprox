@@ -24,6 +24,11 @@ pub(super) fn is_media_server_playback_url(input: &ConfigInput, stream_url: &str
     input.input_type.is_media_server() || is_media_server_stream_ref_url(stream_url)
 }
 
+/// A `media-server://` reference owned by a media-server input; never a provider URL.
+pub(super) fn is_media_server_input_stream_ref(input: &ConfigInput, stream_url: &str) -> bool {
+    input.input_type.is_media_server() && is_media_server_stream_ref_url(stream_url)
+}
+
 pub(super) fn is_media_server_stream_ref_url(stream_url: &str) -> bool {
     Url::parse(stream_url).is_ok_and(|url| url.scheme() == "media-server")
 }

@@ -8,6 +8,7 @@ use url::Url;
 
 pub const PROVIDER_SCHEME_PREFIX: &str = "provider://";
 pub const BATCH_SCHEME_PREFIX: &str = "batch://";
+pub const FILE_SCHEME_PREFIX: &str = "file://";
 
 pub const CONTENT_TYPE_JSON: &str = "application/json";
 pub const CONTENT_TYPE_CBOR: &str = "application/cbor";
@@ -20,7 +21,8 @@ pub const HEADER_CONFIG_API_PROXY_REVISION: &str = "X-Tuliprox-ApiProxy-Revision
 pub fn set_sanitize_sensitive_info(value: bool) { CONSTANTS.sanitize.store(value, Ordering::Relaxed); }
 pub fn is_sanitize_sensitive_info_enabled() -> bool { CONSTANTS.sanitize.load(Ordering::Relaxed) }
 pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
-    if !is_sanitize_sensitive_info_enabled() {
+    // Local file URLs carry no host or credentials; masking would only mangle the path.
+    if !is_sanitize_sensitive_info_enabled() || query.starts_with(FILE_SCHEME_PREFIX) {
         return Cow::Borrowed(query);
     }
 
@@ -235,6 +237,17 @@ mod tests {
             sanitize_sensitive_info("http://example/player_api.php?username=foo&password=bar"),
             "http://***/player_api.php?username=***&password=***"
         );
+
+        set_sanitize_sensitive_info(previous);
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_keeps_file_urls_untouched() {
+        let previous = super::is_sanitize_sensitive_info_enabled();
+        set_sanitize_sensitive_info(true);
+
+        let input = "file:///home/user/projects/m3u-test/server/m3u-simple/data/epg.xml.gz";
+        assert_eq!(sanitize_sensitive_info(input), input);
 
         set_sanitize_sensitive_info(previous);
     }

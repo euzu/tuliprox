@@ -106,7 +106,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         return;
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
-        app_state.recordings.request_worker_restart();
+        app_state.recording.queue.request_worker_restart();
     }
     let cancel_tokens = app_state.cancel_tokens.load();
 
@@ -189,7 +189,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
             let app_state = Arc::clone(app_state);
             tokio::spawn(async move {
                 for _ in 0..50 {
-                    if !app_state.recordings.workers_running().await {
+                    if !app_state.recording.queue.workers_running().await {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;

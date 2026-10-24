@@ -203,7 +203,7 @@ fn access_error_to_response(err: &CatalogAccessError) -> Response {
 /// Find the recording, authorize the open, and resolve the on-disk
 /// path. Every step is a security boundary; no step logs the path.
 async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> Result<ResolvedMedia, Box<Response>> {
-    let queue: &RecordingQueue = &app_state.recordings;
+    let queue: &RecordingQueue = &app_state.recording.queue;
     let recording = recording_catalog_access::lookup_recording(queue, uuid)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;

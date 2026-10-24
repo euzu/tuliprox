@@ -418,8 +418,6 @@ impl HlsSegmentCache {
             if size > max_object_bytes {
                 return Err(cache_object_limit_error(max_object_bytes));
             }
-            temp_file.flush().await?;
-            writer.take();
             Ok::<u64, io::Error>(size)
         };
         let copy_result = if let Some(deadline) = deadline {
@@ -435,6 +433,20 @@ impl HlsSegmentCache {
             }
         } else {
             copy.await
+        };
+        // EOF completes the origin transfer. Flushing local bytes afterwards
+        // must not consume the origin's remaining fetch budget.
+        let copy_result = match copy_result {
+            Ok(size) => {
+                let mut writer = writer.lock().await;
+                let result = match writer.as_mut() {
+                    Some(file) => file.flush().await,
+                    None => Err(io::Error::other("staging writer already closed")),
+                };
+                writer.take();
+                result.map(|()| size)
+            }
+            Err(error) => Err(error),
         };
         match copy_result {
             Ok(size) => {

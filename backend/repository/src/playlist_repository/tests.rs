@@ -9,16 +9,16 @@ use super::{
 };
 use crate::{
     get_series_cat_collection_path, get_target_storage_path, get_vod_cat_collection_path, load_m3u_target_storage,
-    load_xtream_target_storage, strm_get_file_paths, xtream_get_storage_path, BPlusTreeQuery, PlaylistStorageState,
-    TargetIdMapping, VirtualIdRecord,
+    load_xtream_target_storage, strm_get_file_paths, test_config::app_config_in, xtream_get_storage_path,
+    BPlusTreeQuery, PlaylistStorageState, TargetIdMapping, VirtualIdRecord,
 };
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwapOption;
 use shared::{
     foundation::get_filter,
     model::{
-        ClusterFlags, ConfigPaths, ConfigTargetDto, ConfigTargetOptions, EpgOutputOptions, EpisodeStreamProperties,
-        M3uPlaylistItem, M3uTargetOutputDto, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
-        PlaylistItemType, ProcessingOrder, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
+        ClusterFlags, ConfigTargetDto, ConfigTargetOptions, EpgOutputOptions, EpisodeStreamProperties, M3uPlaylistItem,
+        M3uTargetOutputDto, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        ProcessingOrder, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
         SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, StrmExportStyle,
         StrmTargetOutputDto, TargetOutputDto, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem,
         XtreamTargetOutputDto,
@@ -28,11 +28,10 @@ use shared::{
 use std::{collections::HashMap, path::Path, sync::Arc};
 use tuliprox_core::{
     model::{
-        ApiProxyConfig, AppConfig, Config, ConfigTarget, CustomStreamResponse, HdHomeRunConfig, M3uTargetOutput,
-        MediaToolCapabilities, SourcesConfig, StagedFilter, StrmTargetFlagsSet, StrmTargetOutput, TargetExecutionPlan,
-        TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
+        AppConfig, ConfigTarget, M3uTargetOutput, StagedFilter, StrmTargetFlagsSet, StrmTargetOutput,
+        TargetExecutionPlan, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
     },
-    utils::{normalize_string_path, FileLockManager},
+    utils::normalize_string_path,
 };
 
 fn target_with_outputs(output: Vec<TargetOutput>) -> ConfigTarget {
@@ -58,38 +57,6 @@ fn target_with_options(name: &str, output: Vec<TargetOutput>, use_memory_cache: 
         watch: None,
         use_memory_cache,
     }
-}
-
-fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
-    Arc::new(AppConfig {
-        config: Arc::new(ArcSwap::from_pointee(Config {
-            storage_dir: storage_dir.to_string_lossy().into_owned(),
-            ..Config::default()
-        })),
-        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-        hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
-        api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
-        file_locks: Arc::new(FileLockManager::default()),
-        paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-            home_path: String::new(),
-            config_path: String::new(),
-            storage_path: String::new(),
-            config_file_path: String::new(),
-            sources_file_path: String::new(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            failover_file_path: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        })),
-        custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
-        access_token_secret: [0; 32],
-        encrypt_secret: [0; 16],
-        media_tools: Arc::new(MediaToolCapabilities::new()),
-        failover: Arc::default(),
-    })
 }
 
 fn target_group(cluster: XtreamCluster, id: u32, name: &str) -> PlaylistGroup {
@@ -172,38 +139,6 @@ use tempfile::tempdir;
 
 fn curation_persist_options(publication_plan: PlaylistPublicationPlan) -> TargetPlaylistPersistOptions {
     TargetPlaylistPersistOptions { publication_plan, ..TargetPlaylistPersistOptions::default() }
-}
-
-fn target_test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
-    Arc::new(AppConfig {
-        config: Arc::new(ArcSwap::from_pointee(Config {
-            storage_dir: storage_dir.to_string_lossy().into_owned(),
-            ..Config::default()
-        })),
-        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-        hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
-        api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
-        file_locks: Arc::new(FileLockManager::default()),
-        paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-            home_path: String::new(),
-            config_path: String::new(),
-            storage_path: String::new(),
-            config_file_path: String::new(),
-            sources_file_path: String::new(),
-            mapping_file_path: None,
-            mapping_files_used: None,
-            template_file_path: None,
-            template_files_used: None,
-            failover_file_path: None,
-            api_proxy_file_path: String::new(),
-            custom_stream_response_path: None,
-        })),
-        custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
-        access_token_secret: [0; 32],
-        encrypt_secret: [0; 16],
-        media_tools: Arc::new(MediaToolCapabilities::new()),
-        failover: Arc::default(),
-    })
 }
 
 fn mixed_output_target() -> ConfigTarget {

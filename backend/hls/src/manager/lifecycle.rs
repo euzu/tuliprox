@@ -16,6 +16,13 @@ pub(super) fn hls_session_idle_protection_retry_at(due_at_ms: u64, now_ms: u64) 
 }
 
 impl HlsProxyManager {
+    pub(crate) async fn terminal_playback_snapshots_for_session(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Vec<HlsAccessLease> {
+        self.access_leases.write().await.terminal_playback_snapshots_for_session(proxy_session_id, now_ms)
+    }
     pub fn lifecycle(&self) -> &Arc<HlsLifecycleManager> { &self.lifecycle }
 
     pub async fn active_live_playback_snapshots_for_session(
@@ -71,7 +78,11 @@ impl HlsProxyManager {
         lease_id: &HlsAccessLeaseId,
         preparation: &HlsAccessLeaseRemovalPreparation,
     ) -> bool {
-        self.revision_recovery_runtime().remove_prepared_access_lease(lease_id, preparation).await
+        let removed = self.revision_recovery_runtime().remove_prepared_access_lease(lease_id, preparation).await;
+        if removed {
+            self.notify_session_evidence_changed(&preparation.proxy_session_id);
+        }
+        removed
     }
 
     pub(super) async fn schedule_access_lease_activity(&self, lease: &HlsAccessLease) {
@@ -103,6 +114,7 @@ impl HlsProxyManager {
                 due_at_ms,
             )
             .await;
+        self.notify_session_evidence_changed(&lease.proxy_session_id);
     }
 
     async fn schedule_access_lease_lifecycle_snapshot(&self, snapshot: &HlsAccessLeaseLifecycleSnapshot) {
@@ -195,6 +207,7 @@ impl HlsProxyManager {
                     }
                 }
                 if should_sync_session {
+                    self.notify_session_evidence_changed(&proxy_session_id);
                     if let Some(session) = self.sessions.get_by_proxy_session_id(&proxy_session_id).await {
                         self.sync_session_access_lease_count_and_detach_if_needed(
                             active_users,

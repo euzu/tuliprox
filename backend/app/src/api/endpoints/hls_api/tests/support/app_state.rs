@@ -212,7 +212,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_inputs(
 pub(in crate::api::endpoints::hls_api::tests) fn enable_hls_cache(app_state: &Arc<AppState>) {
     let config = Config {
         reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
-            hls_cache: Some(HlsCacheConfigDto::default()),
+            hls_cache: Some(app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto::default())),
             ..Default::default()
         })),
         ..Default::default()
@@ -255,10 +255,13 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
     let metadata_manager = Arc::new(MetadataUpdateManager::new(cancel_tokens.metadata.clone()));
 
     Arc::new(AppState {
-        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-            Arc::clone(&active_provider),
-            Arc::clone(&connection_manager),
-            crate::api::model::create_test_maintenance(""),
+        recording: crate::api::model::RecordingState::new(
+            Arc::new(crate::api::model::RecordingQueue::new()),
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+                crate::api::model::create_test_maintenance(""),
+            ),
         ),
         app_config,
         http_clients: Arc::new(tuliprox_core::model::HttpClients::new(
@@ -271,11 +274,11 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
             reqwest::Client::new(),
             reqwest::Client::new(),
         )),
-        recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,

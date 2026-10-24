@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_FAILOVER_GROUPS_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_config_form,
             },
@@ -248,7 +248,7 @@ pub fn FailoverGroupsConfigView() -> Html {
 
     html! {
         <div class="tp__failover-groups-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{ translate.t(LABEL_FAILOVER_GROUPS_CONFIG) }</div>
+            <div class="tp__config-view-page__title">{ translate.t(ConfigPage::FailoverGroups.title_key()) }</div>
             <div class="tp__failover-groups-config-view__info">{ translate.t(INFO_CONFIG) }</div>
             <div class="tp__failover-groups-config-view__body tp__config-view-page__body">
                 <Card class="tp__config-view__card">

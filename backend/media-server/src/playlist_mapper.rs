@@ -14,50 +14,71 @@ use shared::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSnapshot) -> Vec<PlaylistGroup> {
-    let mut groups = Vec::new();
+const FALLBACK_MOVIES_GROUP: &str = "Media Server Movies";
+const FALLBACK_SERIES_GROUP: &str = "Media Server Series";
 
-    if !snapshot.movies.is_empty() {
-        groups.push(PlaylistGroup {
-            id: 1,
-            // TODO Presa  read from config like LibraryPlaylistConfig
-            title: "Media Server Movies".intern(),
-            channels: snapshot.movies.iter().map(media_server_movie_to_playlist_item).collect(),
-            xtream_cluster: XtreamCluster::Video,
-        });
+type LibraryNames<'a> = HashMap<(&'a str, &'a str), &'a Arc<str>>;
+
+/// Maps every library to its own playlist group named after the library, so each media server
+/// library shows up as a separate category/group in every output. Items of libraries missing in
+/// the snapshot fall back to a generic per-cluster group.
+pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSnapshot) -> Vec<PlaylistGroup> {
+    let library_names: LibraryNames<'_> = snapshot
+        .libraries
+        .iter()
+        .map(|library| ((library.reference.server_id.as_ref(), library.reference.library_id.as_ref()), &library.name))
+        .collect();
+    let mut groups: Vec<PlaylistGroup> = Vec::new();
+
+    for movie in &snapshot.movies {
+        let group = library_group_title(&library_names, &movie.server_id, &movie.library_id, FALLBACK_MOVIES_GROUP);
+        push_group_item(&mut groups, group, XtreamCluster::Video, media_server_movie_to_playlist_item(movie));
     }
 
-    let mut series_channels = Vec::with_capacity(snapshot.series.len().saturating_add(snapshot.episodes.len()));
     let seasons_by_series = media_server_seasons_by_series(&snapshot.seasons);
     for series in &snapshot.series {
         let season_key =
             media_server_series_season_key(&series.input_name, &series.server_id, &series.library_id, &series.item_id);
         let seasons = seasons_by_series.get(&season_key).map(Vec::as_slice).unwrap_or_default();
-        series_channels.push(media_server_series_to_playlist_item(series, seasons));
+        let group = library_group_title(&library_names, &series.server_id, &series.library_id, FALLBACK_SERIES_GROUP);
+        push_group_item(
+            &mut groups,
+            group,
+            XtreamCluster::Series,
+            media_server_series_to_playlist_item(series, seasons),
+        );
     }
 
     let parent_codes = series_parent_code_map(&snapshot.series);
-    series_channels.extend(
-        snapshot
-            .episodes
-            .iter()
-            .map(|episode| media_server_episode_to_playlist_item(episode, episode_parent_code(episode, &parent_codes))),
-    );
-
-    if !series_channels.is_empty() {
-        groups.push(PlaylistGroup {
-            id: next_group_id(groups.len()),
-            // TODO Presa  read from config like LibraryPlaylistConfig
-            title: "Media Server Series".intern(),
-            channels: series_channels,
-            xtream_cluster: XtreamCluster::Series,
-        });
+    for episode in &snapshot.episodes {
+        let group = library_group_title(&library_names, &episode.server_id, &episode.library_id, FALLBACK_SERIES_GROUP);
+        let item = media_server_episode_to_playlist_item(episode, episode_parent_code(episode, &parent_codes));
+        push_group_item(&mut groups, group, XtreamCluster::Series, item);
     }
 
     groups
 }
 
-fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX) }
+fn library_group_title(
+    library_names: &LibraryNames<'_>,
+    server_id: &Arc<str>,
+    library_id: &Arc<str>,
+    fallback: &str,
+) -> Arc<str> {
+    library_names
+        .get(&(server_id.as_ref(), library_id.as_ref()))
+        .map_or_else(|| fallback.intern(), |name| Arc::clone(name))
+}
+
+fn push_group_item(groups: &mut Vec<PlaylistGroup>, title: Arc<str>, cluster: XtreamCluster, mut item: PlaylistItem) {
+    item.header.group = Arc::clone(&title);
+    if let Some(group) = groups.iter_mut().find(|group| group.xtream_cluster == cluster && group.title == title) {
+        group.channels.push(item);
+    } else {
+        let id = u32::try_from(groups.len().saturating_add(1)).unwrap_or(u32::MAX);
+        groups.push(PlaylistGroup { id, title, channels: vec![item], xtream_cluster: cluster });
+    }
+}
 
 type MediaServerSeriesKey<'a> = (&'a str, &'a str, &'a str, &'a str);
 
@@ -161,7 +182,6 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
             id: stable_id.intern(),
             name: movie.title.clone(),
             title: movie.title.clone(),
-            group: "Media Server Movies".intern(),
             url: url.intern(),
             input_name: movie.input_name.clone(),
             xtream_cluster: XtreamCluster::Video,
@@ -207,7 +227,6 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
             id: stable_id.intern(),
             name: series.title.clone(),
             title: series.title.clone(),
-            group: "Media Server Series".intern(),
             url: url.intern(),
             input_name: series.input_name.clone(),
             xtream_cluster: XtreamCluster::Series,
@@ -267,7 +286,6 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
             id: stable_id.intern(),
             name: title.clone(),
             title,
-            group: "Media Server Series".intern(),
             parent_code,
             url: url.intern(),
             input_name: episode.input_name.clone(),
@@ -670,6 +688,61 @@ mod tests {
         assert_eq!(groups[1].channels[0].header.item_type, PlaylistItemType::Series);
         assert_eq!(groups[1].channels[0].header.parent_code.as_ref(), "media-server:server:shows:series:series");
         assert!(groups[1].channels[0].header.url.contains("part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv"));
+    }
+
+    fn library(library_id: &str, name: &str, kind: shared::model::MediaServerLibraryKind) -> crate::MediaServerLibrary {
+        crate::MediaServerLibrary {
+            reference: crate::MediaServerLibraryRef {
+                input_name: "media_server".into(),
+                server_id: "server".into(),
+                library_id: library_id.into(),
+            },
+            name: name.into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn maps_each_library_to_its_own_group_named_after_the_library() {
+        let mut movie_two = movie();
+        movie_two.server_id = "server".into();
+        movie_two.library_id = "movies2".into();
+        let mut movie_one = movie();
+        movie_one.server_id = "server".into();
+
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            libraries: vec![
+                library("movies", "Movies 1", shared::model::MediaServerLibraryKind::Movies),
+                library("movies2", "Movies 2", shared::model::MediaServerLibraryKind::Movies),
+                library("shows", "Shows", shared::model::MediaServerLibraryKind::TvShows),
+            ],
+            movies: vec![movie_one, movie_two],
+            series: vec![series()],
+            episodes: vec![episode()],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        let titles: Vec<&str> = groups.iter().map(|group| group.title.as_ref()).collect();
+        assert_eq!(titles, ["Movies 1", "Movies 2", "Shows"]);
+        assert_eq!(groups.iter().map(|group| group.id).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(groups[0].xtream_cluster, XtreamCluster::Video);
+        assert_eq!(groups[2].xtream_cluster, XtreamCluster::Series);
+        assert_eq!(groups[2].channels.len(), 2);
+        for group in &groups {
+            assert!(group.channels.iter().all(|channel| channel.header.group == group.title));
+        }
+    }
+
+    #[test]
+    fn falls_back_to_generic_groups_for_unknown_libraries() {
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            movies: vec![movie()],
+            series: vec![series()],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        let titles: Vec<&str> = groups.iter().map(|group| group.title.as_ref()).collect();
+        assert_eq!(titles, ["Media Server Movies", "Media Server Series"]);
     }
 
     #[test]

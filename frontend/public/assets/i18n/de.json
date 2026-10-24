@@ -299,7 +299,8 @@
       "CORRUPT_SEGMENT_WATCHDOG_MAX_PARALLEL_JOBS": "Concurrent watchdog sanitize jobs.",
       "SESSION_IDLE_TIMEOUT": "Idle time before unused HLS sessions are removed.",
       "STRIP_MODE": "How the initial playlist lags behind live edge.",
-      "STRIP_VALUE": "Gap value in segments or seconds."
+      "STRIP_VALUE": "Gap value in segments or seconds.",
+      "MIN_ORIGIN_TARGET_DURATION_SECS": "Sucht beim Sitzungsstart und bei echter Revalidierung nach einem geeigneten Origin, wenn dessen Target-Duration unter diesem Minimum liegt. Verwendet die konfigurierte Stufe des Manifest-Recovery-Bursts (aus: ein Kandidat). Gültige Wiedergabe läuft weiter, wenn kein geeigneter Origin gefunden wird. Standard: 0 (deaktiviert)."
     },
     "CONFIG_API": {
       "HOST": "Host where the tuliprox API listens. Default: 0.0.0.0",
@@ -926,6 +927,12 @@
     },
     "FAILOVER_GROUP_TARGET": {
       "TARGET": "Target whose failover groups are edited. Only targets with failover groups enabled are listed."
+    },
+    "MCP_CONFIG": {
+      "ALLOWED_ORIGINS": "Zusätzliche `Origin`-Werte, die neben dem Request-Host akzeptiert werden, z. B. `https://claude.ai`. Nötig hinter einem Reverse-Proxy, der den `Host`-Header umschreibt.",
+      "ENABLED": "Stellt den MCP-Endpunkt unter `{web_ui_path}/mcp` bereit, damit KI-Assistenten diese Instanz abfragen können. Erfordert einen Neustart.",
+      "MAX_RESPONSE_BYTES": "Tool-Ergebnisse, die größer als diese Byte-Anzahl sind, werden abgeschnitten. Minimum 1024, Standard 262144.",
+      "READ_ONLY": "Blendet Tools, die den Zustand ändern, aus und lehnt sie ab. Wird auf schreibgeschützt gezwungen, wenn die Web-UI-Authentifizierung deaktiviert ist."
     }
   },
   "HINT": {
@@ -962,7 +969,9 @@
     "SCHEDULE_EXAMPLE": "Schedule example",
     "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web",
     "FAILOVER_GROUPS_CONFIG": "Failover groups join the same live channel from several inputs into one channel. These settings apply to every target that turns failover groups on; a target can override some of them on its own Failover groups page.",
-    "FAILOVER_GROUPS_TARGET": "Turns failover groups on for this target. Settings left on \"Global\" use Settings > Failover groups."
+    "FAILOVER_GROUPS_TARGET": "Turns failover groups on for this target. Settings left on \"Global\" use Settings > Failover groups.",
+    "MCP_READ_ONLY_FORCED": "Die Web-UI-Authentifizierung ist deaktiviert, daher ist der MCP-Endpunkt unabhängig von dieser Einstellung auf den schreibgeschützten Modus gezwungen.",
+    "MCP_RESTART_REQUIRED": "Der MCP-Endpunkt wird beim Start eingebunden. Starte Tuliprox neu, um Änderungen an diesen Einstellungen zu übernehmen."
   },
   "LABEL": {
     "HLS_STARTUP_LIMITS": "Fast start limits",
@@ -2034,7 +2043,7 @@
     "FAILOVER_GROUPS_ADD_CHANNELS": "Add channels",
     "FAILOVER_GROUPS_ADD_SELECTED": "Add selected to {group}",
     "FAILOVER_GROUPS_ADD_TO_GROUP": "Add to selected group",
-    "FAILOVER_GROUPS_OPEN_GROUP": "Open failover group",
+    "FAILOVER_GROUPS_OPEN_GROUP": "Open group",
     "FAILOVER_GROUPS_ADD_TO_GROUP_ELLIPSIS": "Add to failover group…",
     "FAILOVER_GROUPS_MOVE_TO_GROUP": "Move to selected group",
     "FAILOVER_GROUPS_APPLY": "Apply",
@@ -2079,7 +2088,6 @@
     "FAILOVER_GROUPS_MOVE_UP": "Move up",
     "FAILOVER_GROUPS_NEW_FROM_SELECTION": "New group from selection",
     "FAILOVER_GROUPS_NEW_GROUP": "New group",
-    "FAILOVER_GROUPS_OPEN_GROUP": "Open group",
     "FAILOVER_GROUPS_ORIGIN_AUTO": "Automatic",
     "FAILOVER_GROUPS_ORIGIN_EDITED": "Edited",
     "FAILOVER_GROUPS_ORIGIN_MANUAL": "Manual",
@@ -2111,7 +2119,15 @@
     "FAILOVER_GROUPS_HINT_APPLY": "Ein Playlist-Update starten (der Input-Cache wird beachtet), damit die gespeicherten Änderungen in der Playlist erscheinen.",
     "FAILOVER_GROUPS_UNDO": "Undo",
     "FAILOVER_GROUPS_UNRESOLVED": "Unresolved channels",
-    "FAILOVER_GROUPS_CURRENT_VALUES": "Current values"
+    "FAILOVER_GROUPS_CURRENT_VALUES": "Current values",
+    "ADD_ORIGIN": "Origin hinzufügen",
+    "ALLOWED_ORIGINS": "Erlaubte Origins",
+    "HLS_TIMEOUT_FIXED": "Fester Wert",
+    "MAX_RESPONSE_BYTES": "Max. Antwortgröße (Bytes)",
+    "MCP_CONFIG": "MCP",
+    "MIN_ORIGIN_TARGET_DURATION_SECS": "Minimale Origin-Target-Duration (Sek.)",
+    "READ_ONLY": "Schreibgeschützt",
+    "VIEW_TYPE_LOGS": "Logs"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2439,7 +2455,8 @@
       "UNKNOWN": "Configure this setup step.",
       "VIDEO": "Configure video settings.",
       "WEB_UI": "Configure WebUI settings.",
-      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt."
+      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt.",
+      "MCP": "Konfiguriere den MCP-Server für KI-Assistenten."
     },
     "LABEL": {
       "API": "API",
@@ -2469,7 +2486,8 @@
       "WEBUI_USER": "WebUI User",
       "WEBUI_USERNAME": "WebUI Username",
       "WEB_UI": "Web-Ui",
-      "WELCOME": "Welcome"
+      "WELCOME": "Welcome",
+      "MCP": "MCP"
     },
     "MSG": {
       "COMPLETE_RESTART_HINT": "Setup completed successfully. Restart the application/container to continue.",

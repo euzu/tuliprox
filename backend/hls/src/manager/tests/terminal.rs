@@ -5,23 +5,21 @@ use super::{
     spawn_terminal_commit_retry_worker, terminal_plan, terminal_preparation_request, HlsAccessLeaseDenialMode,
     HlsAccessLeaseDenialOutcome, HlsLeaseCutoverTiming, HlsMediaActivityCommitOutcome, HlsProxyManager,
     HlsRecoveryExecutionState, HlsRuntimeCustomTailAssetIdentity, HlsTerminalAssetRevisionGuard,
-    HlsTerminalCommitAcquisitionBudgetMs, HlsTerminalCommitCommand, HlsTerminalCommitMediaGuard,
-    HlsTerminalCommitOutcome, HlsTerminalCommitOwnerKey, HlsTerminalCommitPayload, HlsTerminalCommitRequest,
-    HlsTerminalCommitRetryDecision, HlsTerminalCommitRetryScheduleDecision, HlsTerminalCommitSubmissionDecision,
-    HlsTerminalCommitWindow, HlsTerminalLeaseDecision, HlsTerminalMediaRequirementSource,
-    HlsTerminalTailPreparationRequest, HlsTerminalTailProtection, HLS_TERMINAL_TAIL_PROTECTION_CAPACITY,
+    HlsTerminalCommitCommand, HlsTerminalCommitMediaGuard, HlsTerminalCommitOutcome, HlsTerminalCommitOwnerKey,
+    HlsTerminalCommitPayload, HlsTerminalCommitRequest, HlsTerminalCommitRetryDecision,
+    HlsTerminalCommitRetryScheduleDecision, HlsTerminalCommitSubmissionDecision, HlsTerminalCommitWindow,
+    HlsTerminalLeaseDecision, HlsTerminalMediaRequirementSource, HlsTerminalTailPreparationRequest,
+    HlsTerminalTailProtection, HLS_TERMINAL_TAIL_PROTECTION_CAPACITY,
 };
 use crate::{
     media_reserve::HlsLeaseReserveSnapshot, terminal_tail::HlsLeasePlaybackMode, HlsAccessLeaseId, HlsAccessLeaseState,
     HlsManifestAcceptanceExhaustionReason, HlsSegmentFailureObject, HlsSessionKey, HlsSessionStoreOutcome,
     HlsTerminalAssetIdentity, HlsTerminalTailCompatibility, HlsTerminalTailGeneration, ProxySessionId,
 };
-use shared::model::HlsCacheConfigDto;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tuliprox_core::model::HlsCacheConfig;
 
 #[tokio::test]
 async fn late_live_completion_after_terminal_transition_updates_neither_cursor_nor_session_activity() {
@@ -115,8 +113,7 @@ async fn current_terminal_identity_waits_for_lock_contention_and_marks_activity(
 
 #[tokio::test]
 async fn hls_terminal_commit_missing_acceptance_exact_ready_bundle_commits_tail() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     manager.terminal_commit_clock.set_fixed_now_ms(2_000);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "missing-acceptance"), b"secret", 1_000).await;
@@ -155,6 +152,7 @@ async fn hls_terminal_commit_missing_acceptance_exact_ready_bundle_commits_tail(
         }
     );
 
+    session.write().await.origin_control.path_condition = crate::HlsOriginPathCondition::HardFetchFailure;
     let outcome = commit_terminal_plan(&manager, &session, &lease_id, &proxy_session_id, &preparation, 2_000, plan);
 
     assert_eq!(outcome, HlsTerminalCommitOutcome::Committed);
@@ -198,8 +196,7 @@ fn hls_cutover_policy_manager_uses_only_matching_acceptance_work_as_recovery_evi
 
 #[tokio::test]
 async fn repeated_segment_failure_counter_does_not_terminalize_access_lease() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -228,8 +225,7 @@ async fn repeated_segment_failure_counter_does_not_terminalize_access_lease() {
 
 #[tokio::test]
 async fn hls_cutover_policy_media_progress_supersedes_prepared_plan() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -277,8 +273,7 @@ async fn hls_cutover_policy_media_progress_supersedes_prepared_plan() {
 
 #[tokio::test]
 async fn hls_cutover_policy_matching_acceptance_commit_without_media_progress_terminalizes_lease() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -328,8 +323,7 @@ async fn hls_cutover_policy_matching_acceptance_commit_without_media_progress_te
 
 #[tokio::test]
 async fn hls_cutover_policy_new_acceptance_episode_without_media_progress_does_not_supersede_cutover() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -417,8 +411,7 @@ async fn hls_terminal_commit_retry_asset_change_autonomously_fails_closed() {
 
 #[tokio::test]
 async fn hls_terminal_commit_retry_lock_busy_without_a_second_client_request() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     manager.terminal_commit_clock.set_fixed_now_ms(2_000);
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
@@ -495,7 +488,7 @@ async fn hls_terminal_commit_submission_delayed_stale_incoming_preserves_authori
     let HlsTerminalCommitRetryDecision::Schedule { retry_at_ms, attempts_completed } = next_terminal_commit_retry(
         1,
         2_000,
-        preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch(),
+        2_000 + crate::terminal_commit::terminal_commit_retry_schedule_budget_ms(),
     ) else {
         panic!("fixture has retry budget");
     };
@@ -606,11 +599,14 @@ async fn hls_terminal_commit_submission_newer_command_replaces_lock_busy_owner()
 async fn hls_terminal_commit_retry_never_commits_after_the_safe_deadline() {
     let (manager, session, proxy_session_id, lease_id, preparation, plan) =
         prepared_terminal_commit_fixture("retry-deadline").await;
-    let after_deadline_ms =
-        preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch().saturating_add(1);
-    manager.terminal_commit_clock.set_fixed_now_ms(after_deadline_ms);
+    let after_deadline_ms = 2_000 + crate::terminal_commit::terminal_commit_retry_schedule_budget_ms() + 1;
     let session_guard = session.write().await;
 
+    assert!(matches!(
+        commit_terminal_plan(&manager, &session, &lease_id, &proxy_session_id, &preparation, 2_000, Arc::clone(&plan)),
+        HlsTerminalCommitOutcome::LockBusy { .. }
+    ));
+    manager.terminal_commit_clock.set_fixed_now_ms(after_deadline_ms);
     assert_eq!(
         commit_terminal_plan(&manager, &session, &lease_id, &proxy_session_id, &preparation, 2_000, plan,),
         HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed
@@ -630,15 +626,15 @@ async fn hls_terminal_commit_retry_never_commits_after_the_safe_deadline() {
 }
 
 #[tokio::test]
-async fn hls_terminal_commit_initial_and_retry_attempts_reject_exclusive_safe_deadline() {
+async fn hls_terminal_commit_starts_after_old_deadline_but_retry_budget_is_exclusive() {
     let (manager, session, proxy_session_id, lease_id, preparation, plan) =
         prepared_terminal_commit_fixture("initial-exclusive-deadline").await;
-    let safe_deadline_ms = preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch();
+    let safe_deadline_ms = 2_000 + crate::terminal_commit::terminal_commit_retry_schedule_budget_ms();
     manager.terminal_commit_clock.set_fixed_now_ms(safe_deadline_ms);
 
     assert_eq!(
         commit_terminal_plan(&manager, &session, &lease_id, &proxy_session_id, &preparation, 2_000, plan,),
-        HlsTerminalCommitOutcome::SafeCommitDeadlineElapsed
+        HlsTerminalCommitOutcome::Committed
     );
     assert!(matches!(
         manager
@@ -646,13 +642,13 @@ async fn hls_terminal_commit_initial_and_retry_attempts_reject_exclusive_safe_de
             .await
             .expect("exclusive deadline leaves the initial-attempt lease live")
             .playback_mode,
-        HlsLeasePlaybackMode::Live
+        HlsLeasePlaybackMode::TerminalTail(_)
     ));
-    assert!(!session.read().await.has_terminal_tail_protections());
+    assert!(session.read().await.has_terminal_tail_protections());
 
     let (manager, session, proxy_session_id, lease_id, preparation, plan) =
         prepared_terminal_commit_fixture("retry-exclusive-deadline").await;
-    let safe_deadline_ms = preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch();
+    let safe_deadline_ms = 2_000 + crate::terminal_commit::terminal_commit_retry_schedule_budget_ms();
     let session_guard = session.write().await;
     assert!(matches!(
         commit_terminal_plan(&manager, &session, &lease_id, &proxy_session_id, &preparation, 2_000, plan,),
@@ -858,8 +854,7 @@ async fn hls_terminal_commit_lease_end_before_retry_cancels_owner_without_mutati
 
 #[tokio::test]
 async fn hls_terminal_commit_new_media_generation_supersedes_prepared_plan() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -903,8 +898,7 @@ async fn hls_terminal_commit_new_media_generation_supersedes_prepared_plan() {
 
 #[tokio::test]
 async fn hls_terminal_commit_lease_end_prevents_commit_and_gc_protection() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -916,7 +910,7 @@ async fn hls_terminal_commit_lease_end_prevents_commit_and_gc_protection() {
         complete_failed_acceptance_episode(&mut session, 2_000)
     };
     let mut preparation_request = terminal_preparation_request(&lease_id, &proxy_session_id, progress_generation);
-    preparation_request.reserve.guaranteed_reserve_ms = 100_000;
+    preparation_request.reserve.guaranteed_reserve_ms = 0;
     preparation_request.reserve.guaranteed_media_horizon_ms = preparation_request
         .reserve
         .conservative_playback_position_ms
@@ -980,8 +974,7 @@ pub(in crate::manager::tests) async fn assert_terminal_and_live_lease_modes(
 
 #[tokio::test]
 async fn hls_cutover_policy_terminal_commit_uses_lease_deadline_and_keeps_farther_lease_live() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1003,6 +996,7 @@ async fn hls_cutover_policy_terminal_commit_uses_lease_deadline_and_keeps_farthe
     let far_reserve = HlsLeaseReserveSnapshot {
         guaranteed_media_horizon_ms: 36_000,
         conservative_playback_position_ms: 12_000,
+        playback_position_known: true,
         guaranteed_reserve_ms: 24_000,
         cutover_required: false,
         ..cutover_reserve()
@@ -1037,10 +1031,7 @@ async fn hls_cutover_policy_terminal_commit_uses_lease_deadline_and_keeps_farthe
         ))
         .await
         .expect("terminal preparation");
-    assert_eq!(
-        preparation.cutover_timing.latest_safe_terminal_commit_at.as_millis_since_epoch(),
-        2_000_u64.saturating_add(HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis())
-    );
+    assert_eq!(preparation.cutover_timing.lease_exhaustion_at.as_millis_since_epoch(), 2_000);
     assert_eq!(far_timing.latest_safe_terminal_commit_at.as_millis_since_epoch(), 14_000);
     let plan = terminal_plan(preparation.decision_generation, &proxy_session_id, &terminal_lease_id);
     let expected_protection = Arc::clone(&plan.protected_base_proxy_seqs);
@@ -1065,8 +1056,7 @@ async fn hls_cutover_policy_terminal_commit_uses_lease_deadline_and_keeps_farthe
 
 #[tokio::test]
 async fn resource_denial_does_not_destroy_existing_terminal_tail() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1120,8 +1110,7 @@ async fn resource_denial_does_not_destroy_existing_terminal_tail() {
 
 #[tokio::test]
 async fn terminal_tail_protection_is_retained_until_bounded_lease_removal() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1156,8 +1145,7 @@ async fn terminal_tail_protection_is_retained_until_bounded_lease_removal() {
 
 #[tokio::test]
 async fn terminal_unavailable_protection_is_retained_until_bounded_lease_removal() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1197,8 +1185,7 @@ async fn terminal_unavailable_protection_is_retained_until_bounded_lease_removal
 
 #[tokio::test]
 async fn hls_terminal_commit_protection_capacity_has_typed_unavailable_outcome() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
@@ -1283,5 +1270,29 @@ async fn unavailable_after_expired_splice_deadline_still_rejects_recovered_origi
             .expect("recovered lease")
             .playback_mode,
         HlsLeasePlaybackMode::Live
+    );
+}
+
+#[tokio::test]
+async fn final_terminal_authorization_rejects_every_positive_reserve_and_unknown_zero() {
+    let (manager, session, proxy, lease, preparation, plan) = prepared_terminal_commit_fixture("final-zero-gate").await;
+    let margin = preparation.reserve.transition_margin.as_millis();
+    let acquisition = crate::recovery_timing::HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis();
+    for (reserve_ms, known) in [(margin + acquisition, true), (margin, true), (1, true), (0, false)] {
+        let mut early = preparation.clone();
+        early.reserve.guaranteed_reserve_ms = reserve_ms;
+        early.reserve.playback_position_known = known;
+        assert_eq!(
+            commit_terminal_plan(&manager, &session, &lease, &proxy, &early, 2_000, Arc::clone(&plan)),
+            HlsTerminalCommitOutcome::CutoverNoLongerRequired
+        );
+        assert_eq!(
+            manager.access_lease_response_snapshot(&lease, &proxy, 2_000).await.unwrap().playback_mode,
+            HlsLeasePlaybackMode::Live
+        );
+    }
+    assert_eq!(
+        commit_terminal_plan(&manager, &session, &lease, &proxy, &preparation, 2_000, plan),
+        HlsTerminalCommitOutcome::Committed
     );
 }

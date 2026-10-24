@@ -414,10 +414,16 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_config() -> App
 }
 
 pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config() -> AppConfig {
+    create_test_dual_provider_app_config_with_type(InputType::Xtream)
+}
+
+pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config_with_type(
+    input_type: InputType,
+) -> AppConfig {
     let input = Arc::new(ConfigInput {
         id: 1,
         name: "provider_1".intern(),
-        input_type: InputType::Xtream,
+        input_type,
         headers: HashMap::default(),
         url: "http://provider-1.example".to_string(),
         username: Some("user1".to_string()),
@@ -479,7 +485,13 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_state() -> Arc<
 }
 
 pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_state() -> Arc<AppState> {
-    create_test_app_state_for_config(Arc::new(create_test_dual_provider_app_config()))
+    create_test_dual_provider_app_state_with_type(InputType::Xtream)
+}
+
+pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_state_with_type(
+    input_type: InputType,
+) -> Arc<AppState> {
+    create_test_app_state_for_config(Arc::new(create_test_dual_provider_app_config_with_type(input_type)))
 }
 
 pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
@@ -504,18 +516,21 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
     Arc::new(AppState {
-        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-            Arc::clone(&active_provider),
-            Arc::clone(&connection_manager),
-            crate::api::model::create_test_maintenance(""),
+        recording: crate::api::model::RecordingState::new(
+            Arc::new(crate::api::model::RecordingQueue::new()),
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+                crate::api::model::create_test_maintenance(""),
+            ),
         ),
         app_config: app_cfg,
         http_clients: Arc::default(),
-        recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
         active_provider,
         connection_manager,

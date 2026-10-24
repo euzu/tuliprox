@@ -949,7 +949,20 @@ fn try_reserve_hls_origin_account_io_slot(
                 HlsOriginAccountIoReserveOutcome::Acquire(lease)
             }
         }
-        Some(lease) if lease.is_active_or_acquiring() => HlsOriginAccountIoReserveOutcome::ReservedForOther,
+        Some(lease) if lease.is_active_or_acquiring() => {
+            debug!(
+                "HLS origin admission rejected: reason=ReservedForOther conflict=io-binding requested_account={} requested_owner={} requested_generation={} blocking_account={} blocking_owner={} blocking_generation={} active_io_count={} acquiring={}",
+                sanitize_sensitive_info(binding.account_name.as_ref()),
+                sanitize_sensitive_info(&binding.session_owner),
+                binding.generation,
+                sanitize_sensitive_info(lease.account_name.as_ref()),
+                sanitize_sensitive_info(&lease.session_owner),
+                lease.generation,
+                lease.active_io_count.load(std::sync::atomic::Ordering::Acquire),
+                lease.acquiring.load(std::sync::atomic::Ordering::Acquire),
+            );
+            HlsOriginAccountIoReserveOutcome::ReservedForOther
+        }
         _ => {
             let lease = Arc::new(HlsOriginAccountIoLease::acquiring(binding));
             session.origin_account_io_lease = Some(Arc::clone(&lease));

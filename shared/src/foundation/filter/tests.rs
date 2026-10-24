@@ -355,6 +355,25 @@ fn test_filter_unknown_template_placeholder_reports_error() {
 }
 
 #[test]
+fn test_filter_template_with_full_expression_keeps_regex_unanchored() {
+    let regex = r#"Name ~ "(?i)(CNBC|Fox News Channel|The Weather Channel)""#;
+    let mut templates = vec![PatternTemplate {
+        name: "NEWS".to_string(),
+        value: TemplateValue::Single(regex.to_string()),
+        placeholder: String::new(),
+    }];
+    let prepared = prepare_templates(&mut templates).expect("templates should prepare");
+
+    let direct = get_filter(regex, None).expect("direct filter should parse");
+    let templated = get_filter("!NEWS!", Some(&prepared)).expect("templated filter should parse");
+    assert_eq!(format!("{direct}"), regex);
+    assert_eq!(format!("{templated}"), regex);
+
+    let channel = create_mock_pli("US: Fox News Channel HD", "News");
+    assert!(templated.filter(&ValueProvider { pli: &channel, match_as_ascii: false }));
+}
+
+#[test]
 fn prepare_templates_does_not_duplicate_unrelated_multi_entries() {
     let mut templates = vec![
         PatternTemplate {

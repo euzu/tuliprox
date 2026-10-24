@@ -1,14 +1,17 @@
 use super::{
     create_test_app_config, create_test_app_state_for_config, create_test_dual_provider_app_config,
-    create_test_dual_provider_app_state, create_test_fingerprint, create_test_live_channel, create_test_local_channel,
-    create_test_provider_app_config, create_test_shared_target, find_input_account_by_signature,
-    force_provider_stream_response, get_stream_alternative_url, load_test_user, resolve_redirect_location,
-    resolve_streaming_strategy, resolve_xtream_vod_provider_url, select_provider_stream_url,
+    create_test_dual_provider_app_state, create_test_dual_provider_app_state_with_type, create_test_fingerprint,
+    create_test_live_channel, create_test_local_channel, create_test_provider_app_config, create_test_shared_target,
+    find_input_account_by_signature, force_provider_stream_response, get_stream_alternative_url, load_test_user,
+    resolve_redirect_location, resolve_streaming_strategy, resolve_xtream_vod_provider_url, select_provider_stream_url,
     spawn_legacy_hls_test_origin, spawn_range_aware_test_origin, stream_url_matches_provider,
     ForceStreamRequestContext, StreamingAcquireOptions,
 };
 use crate::{
-    api::model::{ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection, ProviderStreamState, UserSession},
+    api::model::{
+        ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection, ProviderStreamCustomReason,
+        ProviderStreamState, UserSession,
+    },
     model::{AppConfig, ConfigInput, ConfigInputAlias, ConfigProvider, ProxyUserCredentials, SourcesConfig},
 };
 use arc_swap::ArcSwap;
@@ -154,6 +157,23 @@ fn stream_url_matches_provider_requires_base_url_and_account_identity() {
         "http://same.example/future-route/other-user/other-pass/opaque/123.ts",
         &provider
     ));
+}
+
+#[test]
+fn stream_url_matches_provider_matches_media_server_native_url_by_base_url() {
+    for input_type in [InputType::Jellyfin, InputType::Emby, InputType::Plex] {
+        let provider = test_runtime_provider_with_type("http://media.example:8096/", "user", "pass", input_type);
+
+        assert!(
+            stream_url_matches_provider("http://media.example:8096/Videos/1/stream?static=true", &provider),
+            "{input_type:?}"
+        );
+        assert!(!stream_url_matches_provider("http://other.example:8096/Videos/1/stream", &provider), "{input_type:?}");
+        assert!(
+            !stream_url_matches_provider("http://media.example:80960/Videos/1/stream", &provider),
+            "{input_type:?}"
+        );
+    }
 }
 
 #[test]
@@ -1077,6 +1097,103 @@ async fn resolve_streaming_strategy_rewrites_url_on_fallback_even_when_accept_re
     app_state.active_provider.release_connection(&fallback_addr);
 }
 
+/// Occupies `provider_1` and resolves `stream_url` with a pinned, fallback-enabled request, so the strategy
+/// has to settle on the `provider_2` alias. `busy_addr`/`fallback_addr` are released before returning.
+async fn resolve_pinned_fallback_strategy(
+    input_type: InputType,
+    stream_url: &str,
+    busy_addr: SocketAddr,
+    fallback_addr: SocketAddr,
+) -> ProviderStreamState {
+    let app_state = create_test_dual_provider_app_state_with_type(input_type);
+    let input_name = "provider_1".intern();
+    let input =
+        app_state.app_config.sources.load().get_input_by_name(&input_name).cloned().unwrap_or_else(|| unreachable!());
+    let pinned_provider = "provider_1".intern();
+
+    let busy = app_state.active_provider.acquire_exact_connection_with_grace(
+        &pinned_provider,
+        &busy_addr,
+        false,
+        0,
+        crate::api::model::ConnectionKind::Normal,
+    );
+    assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+    let strategy = resolve_streaming_strategy(
+        &app_state,
+        stream_url,
+        &create_test_fingerprint(fallback_addr),
+        &input,
+        StreamingAcquireOptions {
+            force_provider: Some(&pinned_provider),
+            allow_forced_provider_fallback: true,
+            allow_provider_grace: false,
+            user_priority: 0,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            session_owner: Some("vod-session"),
+            playback_kind: crate::model::PlaybackKind::Vod,
+            accept_requested_stream_url: false,
+            capacity_wait_timeout: None,
+        },
+        None,
+    )
+    .await;
+
+    app_state.active_provider.release_connection(&busy_addr);
+    app_state.active_provider.release_connection(&fallback_addr);
+    strategy.provider_stream_state
+}
+
+#[tokio::test]
+async fn resolve_streaming_strategy_keeps_media_server_stream_ref_on_fallback_for_media_server_input() {
+    let stream_url = "media-server://jellyfin/server-1/item-1?media_source_id=source-1";
+    let state = resolve_pinned_fallback_strategy(
+        InputType::Jellyfin,
+        stream_url,
+        "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!()),
+        "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!()),
+    )
+    .await;
+
+    let (ProviderStreamState::Available(Some(provider), url) | ProviderStreamState::GracePeriod(Some(provider), url)) =
+        state
+    else {
+        panic!("media-server stream ref must pass through on the fallback provider")
+    };
+    assert_eq!(provider.as_ref(), "provider_2");
+    assert_eq!(url.as_ref(), stream_url);
+}
+
+#[tokio::test]
+async fn resolve_streaming_strategy_does_not_pass_native_media_server_url_of_other_account_through() {
+    let state = resolve_pinned_fallback_strategy(
+        InputType::Jellyfin,
+        "http://provider-1.example/movie/user1/pass1/1.mkv",
+        "127.0.0.1:55312".parse().unwrap_or_else(|_| unreachable!()),
+        "127.0.0.1:55313".parse().unwrap_or_else(|_| unreachable!()),
+    )
+    .await;
+
+    assert!(
+        matches!(state, ProviderStreamState::Custom { reason: ProviderStreamCustomReason::UnmappedProviderUrl, .. }),
+        "native URL of the busy account must not be accepted as-is on the fallback account"
+    );
+}
+
+#[tokio::test]
+async fn resolve_streaming_strategy_rejects_media_server_stream_ref_for_xtream_input() {
+    let state = resolve_pinned_fallback_strategy(
+        InputType::Xtream,
+        "media-server://jellyfin/server-1/item-1?media_source_id=source-1",
+        "127.0.0.1:55310".parse().unwrap_or_else(|_| unreachable!()),
+        "127.0.0.1:55311".parse().unwrap_or_else(|_| unreachable!()),
+    )
+    .await;
+
+    assert!(matches!(state, ProviderStreamState::Custom { .. }), "xtream input must not accept media-server refs");
+}
+
 #[tokio::test]
 async fn get_query_path_strips_extension_for_live_with_flag() {
     use crate::model::ConfigInputFlags;
@@ -1133,4 +1250,65 @@ async fn get_query_path_strips_extension_for_live_with_flag() {
 
     assert_eq!(extension, "");
     assert_eq!(query_path, "1");
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_accepts_media_server_stream_ref_for_media_server_input() {
+    let app_config = Arc::new(create_test_app_config());
+    for input_type in [InputType::Jellyfin, InputType::Emby, InputType::Plex] {
+        let input = ConfigInput {
+            name: "media".intern(),
+            url: "http://media.example:8096".to_string(),
+            input_type,
+            ..ConfigInput::default()
+        };
+        let provider = test_runtime_provider_with_type("http://media.example:8096", "user", "pass", input_type);
+        let stream_url = "media-server://jellyfin/server-1/item-1?media_source_id=source-1";
+
+        let selected = select_provider_stream_url(stream_url, &input, &provider, false, &app_config).await;
+
+        assert_eq!(selected, Some((provider.name.clone(), stream_url.to_string())), "{input_type:?}");
+    }
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_keeps_native_media_server_url_of_selected_provider() {
+    let app_config = Arc::new(create_test_app_config());
+    let input = ConfigInput {
+        name: "media".intern(),
+        url: "http://media.example:8096".to_string(),
+        input_type: InputType::Jellyfin,
+        ..ConfigInput::default()
+    };
+    let provider = test_runtime_provider_with_type("http://media.example:8096", "user", "pass", InputType::Jellyfin);
+    let stream_url = "http://media.example:8096/Videos/1/stream?static=true";
+
+    let selected = select_provider_stream_url(stream_url, &input, &provider, false, &app_config).await;
+
+    assert_eq!(selected, Some((provider.name.clone(), stream_url.to_string())));
+}
+
+#[tokio::test]
+async fn select_provider_stream_url_rejects_media_server_stream_ref_for_other_input_types() {
+    let app_config = Arc::new(create_test_app_config());
+    let input = ConfigInput {
+        name: "xt".intern(),
+        url: "http://provider.example".to_string(),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        input_type: InputType::Xtream,
+        ..ConfigInput::default()
+    };
+    let provider = test_runtime_provider("http://provider.example", "user", "pass");
+
+    let selected = select_provider_stream_url(
+        "media-server://jellyfin/server-1/item-1?media_source_id=source-1",
+        &input,
+        &provider,
+        false,
+        &app_config,
+    )
+    .await;
+
+    assert_eq!(selected, None);
 }

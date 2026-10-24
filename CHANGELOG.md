@@ -232,6 +232,48 @@
   [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
   and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
 
+- **Plex, Emby and Jellyfin libraries become separate categories.** Every imported media server library is now its
+  own playlist group named after the library (for example `Movies 1`, `Movies 2`), so it shows up as a separate
+  category in Xtream, M3U and every other output instead of one `Media Server Movies` / `Media Server Series` group.
+  Libraries sharing a name on one input are merged into one group. Mappings, filters and `sort` rules that matched
+  the old `Media Server Movies` / `Media Server Series` group names must use the library names instead.
+
+- **Logs is a standalone Web UI view.** The live log console moved out of the Stats view into its own sidebar entry
+  (Dashboard, Stats, Streams, Logs) for both the expanded sidebar and the collapsed/mobile icon bar. It fills the full
+  page height, shrinks down to a minimum height and then scrolls. It requires the same `system:read` permission as
+  Stats, can be selected as `web_ui.landing_page: logs`, and only streams logs while the view is open. The Stream
+  History entry now uses the `Clock` icon.
+
+- **MCP server for AI assistants.** A new `mcp:` block in `config.yml` mounts a Model Context Protocol endpoint
+  (`POST {web_ui_path}/mcp`, Streamable HTTP with plain JSON responses) that lets MCP clients such as Claude Desktop,
+  Cursor or ChatGPT inspect Tuliprox through tools (status, active streams, effective config, playlist update status,
+  stream history, QoS snapshots, event stats, public IP). It is off by default (`mcp.enabled: false`) and read-only by
+  default (`mcp.read_only: true`); with `read_only: false` the `update_playlists` and `update_geoip` tools become
+  available. Tools are thin adapters over the existing `/api/v1` routes, so the caller's Web UI token and RBAC
+  permissions decide what is allowed: a missing or expired token is a real HTTP `401`, a missing permission surfaces as
+  an `isError` tool result. Without Web UI authentication the server is forced read-only and logs a warning. Browser
+  requests are protected against DNS rebinding by an `Origin` check (`mcp.allowed_origins` for reverse proxies that
+  rewrite `Host`; entries are validated as `scheme://host[:port]` origins at load time), and tool results are
+  truncated at `mcp.max_response_bytes`. The `get_config` tool redacts passwords, secrets, tokens and user names
+  before the result leaves the server. Clients that only speak stdio use the built-in bridge
+  `tuliprox --mcp-stdio --mcp-url <base-url>`, which logs in with `TULIPROX_MCP_USER` and `TULIPROX_MCP_PASSWORD`. The block can also be edited in the
+  Web UI on the new **MCP** config page. See [MCP server](docs/src/operator/mcp.md).
+- **MCP tools to read stored playlists and debug EPG.** New read-only tools `list_playlist_sources`,
+  `query_playlist_items`, `query_target_epg_channels` and `get_target_epg_channel` (REST: `GET /playlist/sources`,
+  `/playlist/items`, `/playlist/epg/channels`, `/playlist/epg/channel`, permission `playlist.read`). A client lists the
+  stored records of a target or input per cluster with paging (`offset`, `limit` up to 500), substring search, group
+  filter and field projection, and inspects the processed per-target EPG: channels without programmes, expired or
+  currently empty channels, EPG ids that no playlist item uses, and playlist items whose EPG id is missing or unmatched
+  (`epg_status`). Only stored data is read, provider URLs are never returned, and the tool schemas plus the new
+  `initialize` `instructions` tell the client every parameter and field. See
+  [MCP server](docs/src/operator/mcp.md).
+- **Unreadable stored records are reported by the playlist items endpoint.** `GET /playlist/items` and the MCP tool
+  `query_playlist_items` now return `skipped_records` (always present, `0` for a healthy database). When stored records
+  could not be decoded they are missing from the listing and from `total_matched`, and a `note` states that the
+  listing is incomplete; before, they were only logged. `GET /playlist/epg/channels` and the MCP tool
+  `query_target_epg_channels` return the same kind of hint as `skipped_playlist_records` (always present): when stored
+  playlist records could not be read, `referenced_by_playlist` and the `unreferenced` filter may be wrong for channels
+  used only by those records, and the `note` says so.
 - **Emby and Jellyfin inputs import their libraries.** `type: emby` and `type: jellyfin` inputs now import the selected
   movie and TV libraries like Plex inputs do, and Tuliprox proxies direct playback (with `Range` support) and artwork
   without exposing server URLs or tokens to clients. Credentials are resolved from `media_server.token`, then
@@ -1020,6 +1062,11 @@
 
 ## ⚙️ Optimizations
 
+- **HLS cache usage scan runs at startup.** With a very large HLS cache the first segment fetch used to wait 2-3 seconds
+  for the lazy full-directory scan. The existing cache garbage-collection task now runs the scan before its first pass
+  (and again after a cache path change), and cancellation interrupts it. Switch staging also runs the scan before its
+  per-attempt deadline starts, so it no longer counts against the segment timeout.
+
 - **Shared table column metadata.** Column enums define stable IDs, labels, and display/sort behavior across Web UI
   tables. Metadata is memoized, header observers persist across renders, and layout drafts and validation avoid redundant
   clones and sets. Settings filenames build hash prefixes only when needed while preserving existing encoded names;
@@ -1168,6 +1215,21 @@
   `Vec` on every render. Backend and frontend share one `CapacityGroup`/`build_group_lookup` implementation in
   the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
 
+- **Keys-only B+Tree iteration; EPG status inspection no longer decodes every EPG channel.** `BPlusTreeQuery` gained
+  `keys()`, an iterator that yields the keys in order without decompressing or deserializing values and without reading
+  overflow pages (inline values are still checksum-verified). `epg_status` on the playlist items endpoint (and the MCP
+  `query_playlist_items` tool) only needs the EPG channel ids and now collects them this way, instead of decoding every
+  channel with all its programmes. That makes the call faster and shortens the time the EPG database read lock is held.
+
+- **EPG scans are limited, cancellable and cached.** Full scans of a per-target EPG database (`epg_status` on the
+  playlist items endpoint and the MCP `query_playlist_items` tool, and the EPG channel inspection behind
+  `query_target_epg_channels`) now run at most two at a time; further requests wait without holding a thread or a file
+  lock, so a burst of calls can no longer pile up blocking threads. A scan stops at the next entry when the client
+  disconnects and then releases its slot and the EPG database read lock. The set of EPG channel ids used by
+  `epg_status` is cached per EPG database (up to 8, the least recently used set is evicted) and reused until the
+  database is rewritten, so repeated `epg_status` queries no longer rescan it. A cache hit is answered from the file
+  metadata alone: it takes no scan slot and no file lock and does not open the database.
+
 ## 🐛 Fixes
 
 - **`.yaml` files in watched config directories now trigger a hot reload.** `mapping_path` and `template_path`
@@ -1176,10 +1238,60 @@
 - **Hidden files and editor temporary files in `mapping.d` and `template.d` are skipped.** Files starting with `.`
   and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
   longer breaks a reload.
+
+- **Input cards and target pipeline details in the playlist update view wrap side by side.** The input cards and the
+  per-target entries under an input's update details are sized to their content and flow into a wrapping row instead of
+  one tall column.
+
+- **`mcp.allowed_origins` entries match the browser `Origin` header.** Entries for `http`, `https`, `ws` and `wss` are
+  canonicalized when the configuration loads: the host is lowercased and a default port is dropped, so
+  `https://claude.ai:443/` is stored as `https://claude.ai`. User info in an entry is rejected. Custom schemes are kept
+  as written.
+
+- **A keys-only B+tree scan reports an undecodable key of a deleted entry.** Like the entry scan, it now decodes the
+  key before it skips a tombstone instead of silently hiding the corruption.
+
+- **First HLS segment after a restart no longer times out on a large cache.** The first cache write scans the whole
+  HLS cache directory to account its size, and that scan ran inside the per-attempt segment write deadline. With many
+  cached files the scan alone exceeded the deadline, so the first attempt failed, was retried and could delay or fail
+  the client's first segment. The scan now runs before the deadline starts, and concurrent writers share one scan
+  instead of each walking the directory.
+
+- **EPG database writes take the EPG file lock.** A playlist update wrote the target EPG database without the file
+  lock that XMLTV, EPG inspection and the EPG grid hold while reading it, so a steady stream of EPG reads could delay
+  the update indefinitely. The write now queues on that lock, which also holds back new readers until it is done. The
+  Web UI EPG listing also no longer takes the lock twice, which could deadlock against a queued write.
+
+- **Stream history search honours the selected fields again.** `GET /api/v1/stream-history` rejected the
+  `search_field` query parameter that the Web UI sends (`search_field=title&search_field=group`) with `400`, because
+  the query extractor cannot read repeated keys into a list. The endpoint now accepts one or several `search_field`
+  values.
+
+- **`--dbm` can dump input playlist databases again.** Input M3U databases (`m3u_<input>.db`, string keys) failed with
+  `wrong msgpack marker FixStr(..)` because the viewer committed to the `u32` key type before decoding any key and never
+  fell back to string keys. The first entry is now probed before output starts, and B+Tree decode failures are
+  logged at debug level since callers report them.
+
+- **Media-server stream pass-through is limited to media-server inputs.** During provider allocation, only
+  `media-server://` stream references of Emby, Jellyfin and Plex inputs are accepted as-is. Native URLs now go through
+  provider matching, and a `media-server://` reference on any other input type is rejected. Native URLs are matched
+  against the media server base URL, since media servers authenticate with tokens or API keys and not with credentials
+  in the stream URL.
+
+- **`file://` URLs are no longer mangled in sanitized log output.** With sanitizing enabled, a local path such as
+  `file:///home/user/data/epg.xml.gz` was logged as `file://***/home/user/data/epg.xml.gz`. Local file URLs carry no
+  host or credentials, so they are now logged unchanged.
+
+- **Playback of Emby, Jellyfin and Plex inputs no longer fails with an unavailable-channel clip.** The provider
+  allocation compared the virtual `media-server://` stream reference with the provider host and rejected it as an
+  unmapped provider URL, so the media-server stream was never opened. Media-server references are now accepted as-is
+  for the allocated provider.
+
 - **Long Telegram and ntfy notifications are no longer rejected.** Telegram accepts at most 4096 characters (UTF-16
   units) and ntfy 4096 bytes per message; neither channel had a limit, so a large watch or statistics notification
   failed and landed in the dead letter queue. Telegram now cuts the final text, after `MarkdownV2` escaping, and drops
   an escape that the cut separated from its character; ntfy bodies are truncated like Pushover's.
+
 - **Short EPG and player guides stay empty when playlist and XMLTV ids differ only in case.** A live channel whose
   EPG id matches a guide channel case-insensitively (for example `usa4k.us` against `<channel id="USA4K.us">`) now
   adopts the guide's spelling, so the playlist `tvg-id` / `epg_channel_id`, the XMLTV `<channel id>` and the EPG db
@@ -1837,6 +1949,12 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **`AppState` groups the recording handles and wraps the network-access checks.** The recording queue and the provider
+  capacity live in `AppState.recording` (`RecordingState`). `AppState::check_network_access`,
+  `try_check_network_access`, `check_permission_and_network_access`, `resolve_api_user_context` and `update_geoip_db`
+  pair the configuration with its GeoIP store, so the endpoints no longer pass both. The unused `cache_playlist` and
+  `get_connection_permission` pass-throughs are removed.
 
 - **`ClusterFlags` is built on `create_bitset!`.** It was the last user of the `bitflags` crate, which is removed
   from `shared`. The API and the persisted `[live,vod]` form are unchanged.

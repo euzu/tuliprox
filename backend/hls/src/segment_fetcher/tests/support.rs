@@ -425,7 +425,7 @@ pub(in crate::segment_fetcher::tests) async fn install_startup(
     let budget = crate::ProgressiveBudgetManager::new(config.clone());
     context.session.write().await.startup = Some(crate::HlsSessionStartup {
         config,
-        first_data_timeout_ms: 10_000,
+
         worker: Arc::downgrade(worker),
         access_leases: Arc::clone(worker.access_leases()),
         revisions: std::collections::BTreeMap::new(),

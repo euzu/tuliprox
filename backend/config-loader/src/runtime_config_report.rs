@@ -105,6 +105,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         ipcheck: config.ipcheck.as_ref().map(shared::model::IpCheckConfigDto::from),
         library: config.library.as_ref().map(library_config_to_dto),
         failover_groups: (!config.failover_groups.is_default()).then(|| config.failover_groups.clone()),
+        mcp: config.mcp.as_ref().map(shared::model::McpConfigDto::from),
     }
 }
 

@@ -11,7 +11,7 @@ async fn initial_local_representation_limit_does_not_enter_origin_recovery() {
     let session = test_session();
     session.write().await.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
     let request = test_origin_refresh_request(Arc::clone(&session));
-    let fetch_context = manifest_fetch_context(&request);
+    let fetch_context = manifest_fetch_context(&request, None);
     let fetched =
         fetched_manifest(&repeated_transient_manifest(crate::manifest_limits::MAX_HLS_LEASE_SNAPSHOT_SEGMENTS + 1));
     let recovery_binding =

@@ -1,6 +1,4 @@
-use super::{
-    BPlusTreeDiskIterator, BPlusTreeQuery, MetadataRetryDbKey, MetadataRetryDbValue, QosSnapshotRecord, VirtualIdRecord,
-};
+use super::{BPlusTreeQuery, MetadataRetryDbKey, MetadataRetryDbValue, QosSnapshotRecord, VirtualIdRecord};
 use base64::{engine::general_purpose, Engine as _};
 use env_logger::{Builder, Target};
 use log::{error, LevelFilter};
@@ -111,7 +109,13 @@ where
 {
     let mut query = BPlusTreeQuery::<K, M3uPlaylistItem>::try_new(path).map_err(|err| err.to_string())?;
     query.len().map_err(|err| err.to_string())?;
-    Ok(print_json_from_iter(query.iter()))
+    // `try_new` and `len` never decode keys, so a wrong key type only surfaces on the first entry.
+    // Probe it before printing anything so the caller can fall back to the next key type.
+    let mut iter = query.iter().peekable();
+    if let Some(Err(err)) = iter.peek() {
+        return Err(err.to_string());
+    }
+    Ok(print_json_from_iter(iter))
 }
 
 fn dump_xtream_db(path: &Path) -> bool { try_dump_typed_db::<u32, XtreamPlaylistItem>(path) }
@@ -160,10 +164,10 @@ fn dump_db(filename: &str, label: &str, dump_fn: DumpFn) -> bool {
     }
 }
 
-fn print_json_from_iter<K, P>(iterator: BPlusTreeDiskIterator<K, P>) -> bool
+fn print_json_from_iter<K, P, E>(iterator: impl Iterator<Item = Result<(K, P), E>>) -> bool
 where
-    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
-    P: Serialize + for<'de> Deserialize<'de> + Clone,
+    P: Serialize,
+    E: std::fmt::Display,
 {
     let mut error_count = 0;
 
@@ -250,17 +254,19 @@ fn exit_app(code: i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dump_qos_snapshot_db, to_human_readable_json_value};
+    use super::{dump_m3u_db, dump_qos_snapshot_db, to_human_readable_json_value};
     use crate::{BPlusTree, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow};
     use base64::{engine::general_purpose, Engine as _};
     use lz4_flex::compress_prepend_size;
     use serde_json::{json, Value};
     use shared::{
         model::{
-            LiveStreamProperties, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+            LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster,
+            XtreamPlaylistItem,
         },
         utils::Internable,
     };
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn encode_storage_json(text: &str) -> String {
@@ -295,6 +301,60 @@ mod tests {
         tree.store(&path).expect("tree should store");
 
         assert!(dump_qos_snapshot_db(&path));
+    }
+
+    fn m3u_item(provider_id: &str) -> M3uPlaylistItem {
+        M3uPlaylistItem {
+            virtual_id: VirtualId::new(1),
+            provider_id: provider_id.intern(),
+            name: "Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Group".intern(),
+            title: "Channel".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.invalid/stream".intern(),
+            epg_channel_id: None,
+            input_name: "input".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+            input_stream_id: provider_id.intern(),
+            upstream_user_agent: None,
+        }
+    }
+
+    #[test]
+    fn dump_m3u_db_falls_back_to_string_keys_for_input_playlists() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let path = temp.path().join("m3u_input.db");
+
+        let mut tree = BPlusTree::<Arc<str>, M3uPlaylistItem>::new();
+        let key: Arc<str> = "0123456789abcdef".intern();
+        tree.insert(Arc::clone(&key), m3u_item(&key));
+        tree.store(&path).expect("tree should store");
+
+        assert!(dump_m3u_db(&path));
+    }
+
+    #[test]
+    fn dump_m3u_db_reads_u32_keys_for_target_playlists() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let path = temp.path().join("m3u_target.db");
+
+        let mut tree = BPlusTree::<u32, M3uPlaylistItem>::new();
+        tree.insert(1, m3u_item("1"));
+        tree.store(&path).expect("tree should store");
+
+        assert!(dump_m3u_db(&path));
     }
 
     #[test]

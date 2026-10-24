@@ -56,7 +56,8 @@ reverse_proxy:
     max_concurrent_segment_fetches_per_session: 2
     max_concurrent_segment_fetches_global: 64
     origin_manifest_timeout_ms: 3000
-    origin_segment_timeout_ms: 10000
+    min_origin_target_duration_secs: 0
+    origin_segment_timeout_ms: auto
     session_idle_timeout: 300
     manifest_recovery_burst:
       level: "off"
@@ -114,8 +115,9 @@ The two switches are separate because HLS and MPEG-TS sharing have different run
 | `max_segments_prefetch` | `6` | `6` | Maximum prefetch queue depth per shared HLS session. |
 | `max_concurrent_segment_fetches_per_session` | `2` | `2` | Maximum concurrent future segment fetches for one shared HLS session. |
 | `max_concurrent_segment_fetches_global` | `64` | `64` | Global cap for concurrent future segment fetches across all HLS sessions. |
-| `origin_manifest_timeout_ms` | `3000` | `3000` | Timeout for upstream HLS manifest fetches. |
-| `origin_segment_timeout_ms` | `10000` | `10000` | Timeout for upstream HLS segment fetches. |
+| `min_origin_target_duration_secs` | `0` | `0` | Minimum preferred origin target duration in whole seconds; `0` disables the check. Checked at live session start and genuine revalidation; uses the configured recovery burst. |
+| `origin_manifest_timeout_ms` | `3000` | `3000` | Timeout for upstream HLS manifests, Keys and MAPs. |
+| `origin_segment_timeout_ms` | `auto` | `10000` | AUTO uses the full shared-session target duration in milliseconds (fallback 10000 ms if missing/zero). Positive numbers remain fixed timeouts. |
 | `session_idle_timeout` | `300` | `300` | Access-lease validity window and idle cleanup baseline, in seconds. |
 | `manifest_recovery_burst.level` | `off` | `off`, then `friendly` or `balanced` only if needed | Optional extra recovery pressure when manifest refresh needs help. |
 | `segment_repair.max_level` | `off` | `off`, then `low` only if needed | Maximum codec-aware MPEG-TS repair level. |
@@ -197,6 +199,23 @@ reverse_proxy:
 Use recovery burst levels gradually. Start with `friendly`. Move to stronger levels only when logs show manifest refresh
 instability and the provider can tolerate additional requests.
 
+Shared HLS also checks the final live media manifest's `EXT-X-TARGETDURATION` at startup and genuine
+revalidation when `min_origin_target_duration_secs` is greater than `0`. It defaults to `0` (disabled);
+only values strictly below a configured positive threshold start a search. Individual `EXTINF` values do not
+trigger it. Missing or invalid target durations, archive playback and full-manifest playlists retain their
+existing handling.
+
+The search reuses the configured `manifest_recovery_burst.level` and any lifecycle recovery already in
+progress. Eligible candidates meeting the minimum take priority under the existing compatibility rules.
+If none can be committed, valid playback continues through the existing selection or original manifest;
+short target duration alone never introduces a transient mode or playback failure. One warning and the
+result (`suitable_origin_selected` or `no_suitable_origin`) are logged per affected qualification.
+
+All leases share this result. Normal refreshes do not repeat the search. A saved threshold change takes
+effect at the next session start or genuine revalidation, without restart or general config hot reload; an in-flight qualification
+keeps its original threshold. The Web UI field is “Minimum origin target duration (secs)”
+(German: “Mindest-Target-Duration des Origins (Sekunden)”). Zero disables the check; negative and fractional values are rejected.
+
 Shared HLS evaluates a short live origin window (one or two segments) with the complete configured burst before
 allowing it. A suitable candidate with at least three segments takes priority. If only suitable short windows
 remain, the session records permission to publish them and emits one warning referencing RFC 8216 section 6.2.2.
@@ -237,7 +256,7 @@ Tuliprox validates HLS cache settings during configuration preparation.
 | `max_concurrent_segment_fetches_per_session >= 1` | At least one per-session fetch worker must be possible. |
 | `max_concurrent_segment_fetches_global >= 1` | At least one global fetch worker must be possible. |
 | `origin_manifest_timeout_ms >= 1` | Timeout must be non-zero. |
-| `origin_segment_timeout_ms >= 1` | Timeout must be non-zero. |
+| `origin_segment_timeout_ms: auto` or positive integer | `AUTO` is also accepted; zero, negative/fractional values, null and other strings are rejected. |
 | `session_idle_timeout >= 1` | Access leases and sessions need a positive validity window. |
 | `segment_repair.apply_to_first_segments <= 6` | Limits startup repair work. |
 | `segment_repair.postprocess_timeout_ms >= 100` | Avoids unrealistic post-processing timeouts. |
@@ -380,3 +399,20 @@ target/debug/tuliprox-testkit hls-probe \
 
 Use `--expect-body-error` instead of `--verify-revision` for an injected segment-body drop. The probe keeps one
 absolute 30-second deadline and a 1 MiB response bound. It does not print the playback URL in its JSON result.
+
+### Origin transfer timeout
+
+Each Segment/Part attempt snapshots the timeout mode and the shared session target duration.
+AUTO uses the full positive target duration × 1000 ms; missing or zero duration uses 10000 ms.
+Explicit positive numeric settings remain fixed millisecond values. Keys and MAPs use
+`origin_manifest_timeout_ms`, including encryption dependencies and switch staging.
+
+The connect timeout remains separate. Once connected (or handed a pooled connection), one
+absolute deadline includes response headers, decoding and the body through origin EOF.
+Headers, chunks and redirects do not renew it. Each existing retry starts a new snapshot
+and deadline; retry/backoff and redirect rules are unchanged. Provider acquisition,
+postprocessing and downstream delivery have separate budgets.
+
+Saving these HLS preferences applies them to future attempts without restarting workers.
+Running attempts retain their snapshot. In the Web UI select AUTO or a fixed value;
+the numeric field appears only for a fixed value and initially uses 10000 ms.

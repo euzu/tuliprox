@@ -7,16 +7,18 @@ use super::{
     SegmentFetchPolicy, TransientResourceStore,
 };
 use arc_swap::ArcSwap;
+use log::warn;
 use std::{
     collections::HashMap,
+    io,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
 use tokio::sync::{RwLock, Semaphore};
-use tuliprox_core::model::{AppConfig, HlsCacheConfig, HlsManifestRecoveryBurstConfig, StripConfig};
+use tuliprox_core::model::{AppConfig, Config, HlsCacheConfig, HlsManifestRecoveryBurstConfig, StripConfig};
 
 #[derive(Debug, Clone)]
 pub(super) struct HlsProxyRuntimeConfig {
@@ -25,6 +27,7 @@ pub(super) struct HlsProxyRuntimeConfig {
     pub(super) cache_duration_seconds: u64,
     pub(super) strip: StripConfig,
     pub(super) origin_manifest_timeout_ms: u64,
+    pub(super) min_origin_target_duration_secs: shared::model::Secs,
     pub(super) initial_manifest_wait_timeout_secs: u64,
     pub(super) manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     pub(super) transient_resource_ttl_ms: u64,
@@ -35,16 +38,22 @@ pub(super) struct HlsProxyRuntimeConfig {
 
 impl HlsProxyRuntimeConfig {
     pub(super) fn from_config(config: &HlsCacheConfig, rewrite_secret: &[u8]) -> Self {
-        Self::from_config_with_enabled(config, rewrite_secret, true)
+        Self::from_config_with_enabled(config, rewrite_secret, true, shared::defaults::default_connect_timeout_secs())
     }
 
-    pub(super) fn from_config_with_enabled(config: &HlsCacheConfig, rewrite_secret: &[u8], enabled: bool) -> Self {
+    pub(super) fn from_config_with_enabled(
+        config: &HlsCacheConfig,
+        rewrite_secret: &[u8],
+        enabled: bool,
+        connect_timeout_secs: u32,
+    ) -> Self {
         Self {
             enabled,
-            segment_fetch_policy: SegmentFetchPolicy::from_config(config),
+            segment_fetch_policy: SegmentFetchPolicy::from_config_with_connect_timeout(config, connect_timeout_secs),
             cache_duration_seconds: config.cache_duration.get(),
             strip: config.strip.clone(),
             origin_manifest_timeout_ms: config.origin_manifest_timeout_ms.get(),
+            min_origin_target_duration_secs: config.min_origin_target_duration_secs,
             initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs.get(),
             manifest_recovery_burst: config.manifest_recovery_burst.clone(),
             transient_resource_ttl_ms: config.cache_duration.as_millis().get(),
@@ -55,11 +64,102 @@ impl HlsProxyRuntimeConfig {
     }
 }
 
+/// Cache directory owned by one manager and removed together with it.
+pub(super) struct PrivateCacheDir(pub(super) PathBuf);
+
+/// Names tried before giving up; a stale directory of a recycled process id only costs one skipped name.
+const PRIVATE_CACHE_DIR_ATTEMPTS: usize = 1024;
+
+impl PrivateCacheDir {
+    /// A name no other manager of this process uses; it may still exist on disk, e.g. left by a process with a
+    /// recycled id.
+    fn candidate_path() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let name = format!("tuliprox-hls-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        std::env::temp_dir().join(name)
+    }
+
+    /// Creates the directory itself, so the name is reserved: an existing path is never adopted, and the returned
+    /// owner removes exactly the directory it created.
+    pub(super) fn create() -> io::Result<Self> {
+        for _ in 0..PRIVATE_CACHE_DIR_ATTEMPTS {
+            let path = Self::candidate_path();
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free private HLS cache directory name"))
+    }
+}
+
+impl Drop for PrivateCacheDir {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
 impl HlsProxyManager {
-    pub fn new() -> Self {
-        let default_dto = shared::model::HlsCacheConfigDto::default();
-        let default_config = HlsCacheConfig::from(&default_dto);
-        Self::with_hls_cache_config(&default_config)
+    /// Creates a manager with the default cache settings and a cache directory of its own.
+    ///
+    /// Sharing `default_hls_cache_path()` between managers is unsafe: the orphan-session cleanup of one
+    /// manager deletes the session directories of every other manager on that path.
+    ///
+    /// When the temp directory is not writable the manager still gets a unique path of its own, which the cache
+    /// creates on demand, but nothing removes it on drop.
+    pub fn new() -> Self { Self::with_private_cache(&shared::model::HlsCacheConfigDto::default()) }
+
+    /// Creates a manager with the settings of `dto` and, unless `dto` names a `cache_path`, a cache directory of its
+    /// own (see [`HlsProxyManager::new`]).
+    ///
+    /// Tests build managers through this instead of `with_hls_cache_config(&HlsCacheConfig::from(&dto))`, which
+    /// falls back to the process-shared `default_hls_cache_path()` for a `dto` without a path.
+    pub fn with_private_cache(dto: &shared::model::HlsCacheConfigDto) -> Self {
+        if dto.cache_path.is_some() {
+            return Self::with_hls_cache_config(&HlsCacheConfig::from(dto));
+        }
+        let (cache_path, cache_dir) = match PrivateCacheDir::create() {
+            Ok(dir) => (dir.0.clone(), Some(dir)),
+            Err(err) => {
+                warn!("Cannot create a private HLS cache directory in the temp dir: {err}");
+                (PrivateCacheDir::candidate_path(), None)
+            }
+        };
+        let private_dto = shared::model::HlsCacheConfigDto {
+            cache_path: Some(cache_path.to_string_lossy().into_owned()),
+            ..dto.clone()
+        };
+        let mut manager = Self::with_hls_cache_config(&HlsCacheConfig::from(&private_dto));
+        manager.private_cache_dir = cache_dir;
+        manager
+    }
+
+    /// Returns `dto` with the cache directory this manager currently uses, unless `dto` names one.
+    ///
+    /// Applying a `dto` without a `cache_path` through [`HlsProxyManager::update_config`] would switch the manager
+    /// to the process-shared `default_hls_cache_path()`, which every test process and the real default share.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn keep_cache_path(&self, mut dto: shared::model::HlsCacheConfigDto) -> shared::model::HlsCacheConfigDto {
+        if dto.cache_path.is_none() {
+            let current = self.segment_cache.cache_path();
+            debug_assert_ne!(
+                current,
+                PathBuf::from(tuliprox_core::model::default_hls_cache_path()),
+                "the manager already uses the process-shared HLS cache path"
+            );
+            dto.cache_path = Some(current.to_string_lossy().into_owned());
+        }
+        dto
+    }
+
+    /// Initializes HLS workers with the same loaded connect setting as the HTTP clients.
+    pub fn from_config(config: &Config, default_rewrite_secret: &[u8]) -> Self {
+        let proxy = config.reverse_proxy.as_ref();
+        let secret = proxy.map_or(default_rewrite_secret, |proxy| proxy.rewrite_secret.as_slice());
+        Self::from_hls_cache_settings(
+            proxy.and_then(|proxy| proxy.hls_cache.as_ref()),
+            secret,
+            config.connect_timeout_secs,
+        )
     }
 
     pub fn from_hls_cache_config(config: Option<&HlsCacheConfig>) -> Self {
@@ -67,6 +167,14 @@ impl HlsProxyManager {
     }
 
     pub fn from_hls_cache_config_and_secret(config: Option<&HlsCacheConfig>, rewrite_secret: &[u8]) -> Self {
+        Self::from_hls_cache_settings(config, rewrite_secret, shared::defaults::default_connect_timeout_secs())
+    }
+
+    fn from_hls_cache_settings(
+        config: Option<&HlsCacheConfig>,
+        rewrite_secret: &[u8],
+        connect_timeout_secs: u32,
+    ) -> Self {
         let default_config;
         let (config, enabled) = if let Some(config) = config {
             (config, true)
@@ -74,7 +182,7 @@ impl HlsProxyManager {
             default_config = HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default());
             (&default_config, false)
         };
-        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, enabled)
+        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, enabled, connect_timeout_secs)
     }
 
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
@@ -97,7 +205,8 @@ impl HlsProxyManager {
         let lifecycle = Arc::new(HlsLifecycleManager::new());
         let account_overlap_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let gc_policy = GarbageCollectionPolicy::from_config(&default_config);
-        let runtime_config = HlsProxyRuntimeConfig::from_config(&default_config, &[]);
+        let mut runtime_config = HlsProxyRuntimeConfig::from_config(&default_config, &[]);
+        runtime_config.segment_fetch_policy.timeouts = segment_fetch_policy.timeouts.clone();
         let gc = Arc::new(HlsGarbageCollector::new_with_metrics(
             Arc::clone(&sessions),
             Arc::clone(&segment_cache),
@@ -147,6 +256,7 @@ impl HlsProxyManager {
             availability_reevaluations,
             terminal_commit_clock: Arc::new(HlsTerminalCommitClock::default()),
             startup_observability: Arc::new(HlsStartupObservability::default()),
+            private_cache_dir: None,
         };
         manager.install_worker_revision_recovery();
         manager
@@ -164,6 +274,40 @@ impl HlsProxyManager {
 
     pub fn origin_manifest_timeout_ms(&self) -> u64 { self.runtime_config.load().origin_manifest_timeout_ms }
 
+    pub fn min_origin_target_duration_secs(&self) -> shared::model::Secs {
+        self.runtime_config.load().min_origin_target_duration_secs
+    }
+
+    /// Applies the validated preference for future qualifications. Existing
+    /// session snapshots retain the threshold with which they started.
+    pub fn update_min_origin_target_duration_secs(&self, minimum: shared::model::Secs) {
+        self.runtime_config.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.min_origin_target_duration_secs = minimum;
+            Arc::new(next)
+        });
+    }
+
+    /// Applies validated HLS preferences to future attempts without replacing worker slots.
+    pub fn update_origin_preferences(
+        &self,
+        minimum: shared::model::Secs,
+        segment: shared::model::HlsSegmentTimeout,
+        manifest_ms: u64,
+    ) {
+        let policy = self.segment_fetch_policy();
+        let mut timeouts = policy.timeouts.config();
+        timeouts.segment = segment;
+        timeouts.manifest_ms = manifest_ms;
+        policy.timeouts.update(timeouts);
+        self.runtime_config.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.min_origin_target_duration_secs = minimum;
+            next.origin_manifest_timeout_ms = manifest_ms;
+            Arc::new(next)
+        });
+    }
+
     pub fn initial_manifest_wait_timeout_secs(&self) -> u64 {
         self.runtime_config.load().initial_manifest_wait_timeout_secs
     }
@@ -179,7 +323,7 @@ impl HlsProxyManager {
     pub fn rewrite_secret_fingerprint(&self) -> String { self.runtime_config.load().rewrite_secret_fingerprint.clone() }
 
     pub async fn update_config(&self, app_config: &AppConfig) {
-        let (hls_config, rewrite_secret, enabled) = {
+        let (hls_config, rewrite_secret, enabled, connect_timeout_secs) = {
             let config = app_config.config.load();
             let rewrite_secret = config
                 .reverse_proxy
@@ -190,9 +334,18 @@ impl HlsProxyManager {
             let enabled = hls_config.is_some();
             let hls_config =
                 hls_config.unwrap_or_else(|| HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()));
-            (hls_config, rewrite_secret, enabled)
+            (hls_config, rewrite_secret, enabled, config.connect_timeout_secs)
         };
-        let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(&hls_config, &rewrite_secret, enabled);
+        let mut runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(
+            &hls_config,
+            &rewrite_secret,
+            enabled,
+            connect_timeout_secs,
+        );
+        let shared_timeouts = self.segment_fetch_policy().timeouts;
+        let next_timeouts = runtime_config.segment_fetch_policy.timeouts.config();
+        shared_timeouts.update(next_timeouts);
+        runtime_config.segment_fetch_policy.timeouts = shared_timeouts;
         let cache_path_changed = self.gc.update_cache_path(PathBuf::from(&hls_config.cache_path)).await;
         self.progressive_budget.update_limits(hls_config.startup.clone());
         self.segment_cache.update_cache_limits(hls_config.cache_bytes.get(), hls_config.cache_bytes_per_session.get());

@@ -8,7 +8,7 @@ use crate::{
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
         static_headers::CT_XML,
     },
-    auth::{resolve_api_user_context, Fingerprint},
+    auth::Fingerprint,
     model::{
         ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_ATTRIB_SRC,
         EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
@@ -16,7 +16,7 @@ use crate::{
     repository::{
         epg_query_channels_by_storage_key, get_file_path_for_db_index, get_target_storage_path,
         m3u_get_epg_file_path_for_target, open_playlist_reader, storage_const, xtream_get_epg_file_path_for_target,
-        xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
+        xtream_get_storage_path, BPlusTreeQuery, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -90,16 +90,21 @@ fn get_epg_path_for_target_of_type(target_name: &str, epg_path: PathBuf) -> Opti
 }
 
 pub(in crate::api) fn get_epg_path_for_target(config: &Config, target: &ConfigTarget) -> Option<PathBuf> {
+    get_epg_path_and_type_for_target(config, target).map(|(_, epg_path)| epg_path)
+}
+
+/// First output (in configuration order) that has an EPG database, with the path of that database.
+pub(in crate::api) fn get_epg_path_and_type_for_target(
+    config: &Config,
+    target: &ConfigTarget,
+) -> Option<(TargetType, PathBuf)> {
     // TODO if we have multiple targets, first one serves, this can be problematic when
     // we use m3u playlist but serve xtream target epg
 
     // TODO if we share the same virtual_id for epg, can we store an epg file for the target ?
-    for output in &target.output {
-        if let Some(epg_path) = get_epg_path_for_target_by_type(config, target, TargetType::from(output)) {
-            return Some(epg_path);
-        }
-    }
-    None
+    target.output.iter().map(TargetType::from).find_map(|output_type| {
+        get_epg_path_for_target_by_type(config, target, output_type).map(|epg_path| (output_type, epg_path))
+    })
 }
 
 pub(in crate::api) fn get_epg_path_for_target_by_type(
@@ -155,7 +160,8 @@ pub async fn serve_epg_web_ui(
         let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
         let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
         let encrypt_secret = app_state.get_encrypt_secret();
-        let iter_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
+        // A single read lock, held by the producer until it has read the db. A second read lock on
+        // the same path could wait behind a queued EPG writer while this one is held (deadlock).
         let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
         let epg_path = epg_path.to_path_buf();
         let target_name = target.name.clone();
@@ -209,7 +215,7 @@ pub async fn serve_epg_web_ui(
             }
         });
 
-        let stream = LockedReceiverStream::new(rx, iter_lock).map(move |result| {
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |result| {
             result.map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel))
         });
         return stream_json_or_bin_response_try_stream(accept, stream);
@@ -673,8 +679,7 @@ pub async fn serve_short_epg(
     limit: u32,
     has_archive: bool,
 ) -> axum::response::Response {
-    let lowercase_ids = target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids);
-    let output_case = EpgIdOutputCase::from_lowercase(lowercase_ids);
+    let output_case = target.epg_id_case();
     let storage_key = canonicalize_output_epg_id(channel_id, output_case);
     let response_channel_id = Arc::clone(&storage_key);
     let short_epg = {
@@ -883,9 +888,7 @@ pub(crate) async fn stream_epg_api(
         let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
-        let output_case = EpgIdOutputCase::from_lowercase(
-            target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids),
-        );
+        let output_case = target.epg_id_case();
         let prepared = prepare_stream_epg_request(&items, output_case);
 
         let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
@@ -929,13 +932,7 @@ async fn xmltv_api(
     let Some((user, target)) = get_user_target(&api_req, app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(
-        user.clone(),
-        target.clone(),
-        fingerprint.clone(),
-        &app_state.app_config,
-        &app_state.geoip,
-    ) {
+    if let Err(e) = app_state.resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone()) {
         return e.into_player_response(auth_status);
     }
 
@@ -974,13 +971,7 @@ async fn epg_api_resource(
     let Some((user, target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(
-        user.clone(),
-        target.clone(),
-        fingerprint.clone(),
-        &app_state.app_config,
-        &app_state.geoip,
-    ) {
+    if let Err(e) = app_state.resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone()) {
         return e.into_player_response(auth_status);
     }
 

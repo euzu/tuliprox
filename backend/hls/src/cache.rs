@@ -6,8 +6,6 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock, Semaphore};
 
-pub const DEFAULT_HLS_CACHE_PATH: &str = "/tmp/tuliprox/cache/hls";
-
 const TEMP_CREATE_ATTEMPTS: usize = 8;
 
 const MAX_CONCURRENT_OWNED_CACHE_OPERATIONS: usize = 64;
@@ -111,6 +109,8 @@ pub struct HlsSegmentCache {
     #[cfg(test)]
     startup_test_checkpoint: StdMutex<Option<test_support::StartupWriteCheckpoint>>,
     #[cfg(test)]
+    capacity_scan_count: AtomicU64,
+    #[cfg(test)]
     delete_test_failures: StdMutex<HashMap<PathBuf, usize>>,
 }
 
@@ -130,6 +130,8 @@ struct CacheCapacityState {
     session_bytes: HashMap<String, u64>,
     revision: Arc<CapacityRevision>,
     active_mutations: HashSet<PathBuf>,
+    /// Cache roots with an inventory scan in flight; further initializers wait instead of scanning again.
+    scans_in_flight: HashSet<PathBuf>,
     revision_reservations: HashMap<u64, (String, u64)>,
     next_write_id: u64,
     write_owners: HashMap<PathBuf, u64>,
@@ -175,6 +177,13 @@ struct CachePathDeletionReservation {
 struct CapacityInvalidationGuard {
     capacity: Arc<StdMutex<CacheCapacityState>>,
     changed: Arc<Notify>,
+}
+
+/// Owns the single in-flight inventory scan of one cache root; dropping it (including on cancellation) frees the slot.
+struct CapacityScanGuard {
+    capacity: Arc<StdMutex<CacheCapacityState>>,
+    changed: Arc<Notify>,
+    cache_path: PathBuf,
 }
 
 impl Drop for CachePathDeletionReservation {

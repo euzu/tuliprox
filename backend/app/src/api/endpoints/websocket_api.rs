@@ -398,7 +398,7 @@ async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> P
         };
     }
     let snapshot = crate::api::model::recording::recording_ws::recording_snapshot(
-        &app_state.recordings,
+        &app_state.recording.queue,
         claims,
         &app_state.app_config,
     )

@@ -38,6 +38,7 @@ video:
 proxy:
 ipcheck:
 hdhomerun:
+mcp:
 library:
 reverse_proxy:
 metadata_update:
@@ -1173,6 +1174,42 @@ distinct layers:
 > your firewall and that Tuliprox is running on the same network subnet as your media server.
 
 &nbsp;
+
+## 10. MCP Server (`mcp`)
+
+Tuliprox can expose a [Model Context Protocol](https://modelcontextprotocol.io) endpoint (`POST {web_ui_path}/mcp`)
+that lets AI assistants such as Claude Desktop or Cursor inspect a running instance through a fixed set of tools. Every
+tool is an adapter over an existing `/api/v1` route, so the caller's Web UI token and RBAC permissions apply. The
+endpoint is **off by default** and **read-only by default**.
+
+```yaml
+mcp:
+  enabled: true
+  read_only: true
+  allowed_origins:
+    - https://tuliprox.example.com
+  max_response_bytes: 262144
+```
+
+| Parameter            |      Type       | Default  | Technical Impact                                                                                                                                                                                                                                                                                           |
+|:---------------------|:---------------:|:---------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`            |      Bool       | `false`  | Mounts the MCP endpoint at `{web_ui_path}/mcp`. When `false`, or when the block is absent, no route exists.                                                                                                                                                                                                |
+| `read_only`          |      Bool       | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes.                                                                                                             |
+| `allowed_origins`    | List of Strings | `[]`     | Extra `Origin` values accepted besides the request `Host` (DNS-rebinding protection). Needed when a reverse proxy rewrites `Host`. Each entry must be an origin (`scheme://host[:port]`, custom schemes allowed) without path, query or fragment. Requests without an `Origin` header are always accepted. |
+| `max_response_bytes` |       Int       | `262144` | Tool results larger than this are truncated with an explicit marker. Minimum `1024`.                                                                                                                                                                                                                       |
+
+### Technical Background
+
+* **Authentication:** with `web_ui.auth` enabled a missing, invalid or expired token is a real HTTP `401`. A valid
+  user without the permission of the underlying REST route gets a tool result with `isError: true` (`HTTP 403`).
+* **Stdio clients:** `tuliprox --mcp-stdio --mcp-url http://localhost:8901` bridges stdin/stdout to the endpoint of
+  a running instance. Credentials come from `TULIPROX_MCP_USER` and `TULIPROX_MCP_PASSWORD`.
+* **Applied at startup:** the endpoint is mounted when the server starts. Restart Tuliprox after changing the block.
+* **Web UI:** the block can be edited on the **MCP** page of the Web UI config.
+
+See the [MCP Server Operator Reference](../operator/mcp.md) for the tool catalog, client setup and troubleshooting.
+
+---
 
 ## Additional Information
 

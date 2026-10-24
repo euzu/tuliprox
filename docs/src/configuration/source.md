@@ -1311,6 +1311,10 @@ For Emby and Jellyfin the import reads, per selected library:
   provider ids (TMDB, IMDb, TVDB), summary, genres, studio or network, content and audience rating, cast and crew,
   and, when `catalog.include_media_sources` is enabled, container, codec, resolution, bitrate and duration.
 * The **primary image** of every item that has one.
+* Every library becomes its own playlist group named after the library (for example `Movies 1`, `Movies 2`), so it
+  appears as a separate category in Xtream, M3U and all other outputs. Libraries with the same name on one input are
+  merged into one group. Items of libraries not present in the catalog fall back to `Media Server Movies` /
+  `Media Server Series`.
 
 Items are skipped or marked as follows:
 

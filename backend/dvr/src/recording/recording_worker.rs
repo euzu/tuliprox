@@ -991,12 +991,8 @@ mod tests {
             Ok::<_, std::io::Error>(())
         });
         let wrapper = directory.path().join("ffmpeg-with-proxy");
-        // Explicitly remove proxy exclusions so localhost still exercises the bypass.
-        tokio::fs::write(
-            &wrapper,
-            "#!/bin/sh\nunset no_proxy NO_PROXY\nexport http_proxy=http://127.0.0.1:9\nexec ffmpeg \"$@\"\n",
-        )
-        .await?;
+        // Keep the listener exclusions supplied by the worker while adding an unusable proxy.
+        tokio::fs::write(&wrapper, "#!/bin/sh\nexport http_proxy=http://127.0.0.1:9\nexec ffmpeg \"$@\"\n").await?;
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
         let mut recording = make_recording(chrono::Utc::now().timestamp(), 60);
         recording.url = url;

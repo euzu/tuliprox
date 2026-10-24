@@ -539,42 +539,14 @@ pub async fn audit_target_bouquets<S: std::hash::BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arc_swap::{ArcSwap, ArcSwapOption};
+    use crate::test_config::{app_config_from, empty_paths};
     use shared::model::{ConfigPaths, PlaylistClusterBouquetDto, TargetBouquetMode};
-    use std::sync::Arc;
     use tempfile::TempDir;
-    use tuliprox_core::{
-        model::{Config, MediaToolCapabilities, SourcesConfig},
-        utils::FileLockManager,
-    };
+    use tuliprox_core::model::Config;
 
     fn test_app_config(config_path: &str) -> AppConfig {
-        AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
-            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-            hdhomerun: Arc::new(ArcSwapOption::default()),
-            api_proxy: Arc::new(ArcSwapOption::default()),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                home_path: String::new(),
-                config_path: config_path.to_string(),
-                storage_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                failover_file_path: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            })),
-            custom_stream_response: Arc::new(ArcSwapOption::default()),
-            access_token_secret: [0; 32],
-            encrypt_secret: [0; 16],
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-            failover: Arc::default(),
-        }
+        let paths = ConfigPaths { config_path: config_path.to_string(), ..empty_paths() };
+        app_config_from(Config::default(), paths, None)
     }
 
     fn whitelist(groups: PlaylistClusterBouquetDto) -> TargetBouquetDto { TargetBouquetDto::whitelist(groups) }

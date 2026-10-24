@@ -195,6 +195,9 @@ async fn send_with_provider_failover_only_with_options(
                 result = execute_attempt_request(app_config, base_client, request, &attempt_target) => match result {
                 Ok(response) => {
                     let status = response.status();
+                    if options.stop_on_proxy_authentication_required && status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                        return Ok(ProviderFailoverResponse { response, provider_url_index: provider.map(|_| provider_url_index) });
+                    }
                     if allow_redirects && status.is_redirection() {
                         if let Some(current_provider) = provider {
                             current_provider.set_current_index(provider_url_index);
@@ -510,6 +513,9 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                         match result {
                             Ok(response) => {
                                 let status = response.status();
+                                if options.stop_on_proxy_authentication_required && status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                                    return Ok(ProviderFailoverResponse { response, provider_url_index: provider.map(|_| provider_url_index) });
+                                }
                                 if allow_redirects && status.is_redirection() {
                                     if let Some(current_provider) = provider {
                                         current_provider.set_current_index(provider_url_index);
@@ -876,6 +882,9 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
 
                                 let status = response.status();
                                 let is_failover = is_failover_redirect(response.url(), &failover_patterns);
+                                if options.stop_on_proxy_authentication_required && status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                                    return Ok(ProviderFailoverResponse { response, provider_url_index: provider.map(|_| provider_url_index) });
+                                }
                                 if !is_failover && status.is_success() {
                                     if let Some(current_provider) = provider {
                                         current_provider.set_current_index(provider_url_index);

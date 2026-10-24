@@ -305,7 +305,7 @@ async fn a_transfer_waits_for_a_slot_however_long_it_takes() {
 
     let waiters = Arc::clone(&queue.slot_waiters);
     let freed = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_mins(60)).await;
+        tokio::time::sleep(Duration::from_hours(1)).await;
         let queued = waiters.snapshots();
         let waiter = queued.first().expect("someone is waiting an hour later");
         waiters.signal_waiter(waiter.id)

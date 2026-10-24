@@ -277,8 +277,8 @@ use self::{
         DetectedCatchupHlsResponseParams,
     },
     media_server::{
-        is_media_server_playback_url, is_media_server_stream_ref_url, media_server_image_error_status,
-        open_media_server_image_resource, open_media_server_stream_for_input,
+        is_media_server_input_stream_ref, is_media_server_playback_url, is_media_server_stream_ref_url,
+        media_server_image_error_status, open_media_server_image_resource, open_media_server_stream_for_input,
     },
     metering::{
         get_stream_config_u64, get_stream_throttle, is_stream_metrics_enabled, is_throttled_stream,

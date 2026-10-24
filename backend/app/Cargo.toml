@@ -62,7 +62,8 @@ fastrand.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 tokio-stream = { version = "0.1.19", features = ["sync"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros", "io-std"] }
+lru = "0.16.4"
 tokio-util =  { version = "0.7.19", features = ["io", "io-util"] }
 tempfile = "3.27.0"
 base64.workspace = true

@@ -11,8 +11,8 @@ use crate::{
     },
     model::{
         ConfigApiDto, FailoverGroupsConfig, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
-        MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto,
-        VideoConfigDto, WebUiConfigDto,
+        McpConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
+        ScheduleConfigDto, VideoConfigDto, WebUiConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -111,6 +111,8 @@ pub struct ConfigDto {
     pub library: Option<LibraryConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failover_groups: Option<FailoverGroupsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpConfigDto>,
 }
 
 impl Default for ConfigDto {
@@ -151,6 +153,7 @@ impl Default for ConfigDto {
             ipcheck: None,
             library: None,
             failover_groups: None,
+            mcp: None,
         }
     }
 }
@@ -231,6 +234,8 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             library: Option<LibraryConfigDto>,
             #[serde(default)]
             failover_groups: Option<FailoverGroupsConfig>,
+            #[serde(default)]
+            mcp: Option<McpConfigDto>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -271,6 +276,7 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             ipcheck: raw.ipcheck,
             library: raw.library,
             failover_groups: raw.failover_groups,
+            mcp: raw.mcp,
         })
     }
 }

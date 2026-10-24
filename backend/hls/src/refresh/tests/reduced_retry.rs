@@ -43,7 +43,7 @@ async fn commit_observed_recovery_candidate(
 ) -> Result<super::super::CommittedOriginManifest, HlsManifestCommitError> {
     let before = {
         let s = request.session.read().await;
-        let score = score_manifest_recovery_candidate(&s, &fetched, &manifest_fetch_context(request)).unwrap();
+        let score = score_manifest_recovery_candidate(&s, &fetched, &manifest_fetch_context(request, None)).unwrap();
         assert_eq!(score.quality.host_relation, crate::manifest_fetch::HlsManifestOriginRelation::SameRedirectHost);
         assert_eq!(score.quality.sequence_relation, HlsManifestSequenceRelation::PlausibleForward);
         eprintln!(
@@ -93,7 +93,7 @@ async fn conflict_then_reduced_retry(permanent_conflict: bool) {
     let url = format!("{}/index.m3u8", server.base_url);
     request.origin_entry = LiveHlsOriginEntry::parse(&url).unwrap();
     request.manifest_recovery_burst.level = HlsManifestRecoveryBurstLevel::Beast;
-    let context = manifest_fetch_context(&request);
+    let context = manifest_fetch_context(&request, None);
     commit_baseline(&request, &context).await;
     recovery.store(true, Ordering::Release);
     let callbacks = Arc::new(Mutex::new(Vec::new()));
@@ -251,7 +251,7 @@ async fn superseded_reduced_response_preserves_successor(account_handoff: bool, 
     let url = format!("{}/index.m3u8", server.base_url);
     request.origin_entry = LiveHlsOriginEntry::parse(&url).unwrap();
     request.manifest_recovery_burst.level = HlsManifestRecoveryBurstLevel::Beast;
-    let context = manifest_fetch_context(&request);
+    let context = manifest_fetch_context(&request, None);
     commit_baseline(&request, &context).await;
     let baseline = session.read().await.origin_to_proxy.clone();
     let callbacks = Arc::new(AtomicUsize::new(0));

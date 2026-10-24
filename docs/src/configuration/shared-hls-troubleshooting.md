@@ -88,13 +88,19 @@ Fix:
 
 ## Symptom: custom video `channel_unavailable`
 
-For the warm Shared HLS path, this is a lease-local terminal decision rather than a failure-counter threshold. The
-canonical manifest stays on the same URL and returns an HTTP `200` finite playlist when a compatible terminal tail is
-ready. Before the splice deadline, an incompatible MAP/key/container/track state can fail closed with `503`.
-After the deadline, a valid published lease can receive a finite Custom Response containing only prepared
-`channel_unavailable` media, even when its live cache suffix is gone. The playlist uses `/cvs/hls/` URLs and does not
-attempt a late TS splice. The player may stall before displaying it. Disabled, missing or invalid custom media,
-expired authorization, and exhausted commit capacity can still prevent a usable response.
+For an established live lease, an availability failure may publish `channel_unavailable` only after known reserve is
+completely consumed and the origin remains degraded. Preparation and recovery may begin earlier. The canonical manifest
+returns HTTP `200` with the last live segment of the lease's previous client manifest, the CSV tail and `ENDLIST`. That
+live URI and its bound bytes remain available through GC.
+
+There is no CSV-only fallback after the old splice deadline. Missing transfer evidence does not prove reserve
+exhaustion. Disabled, missing or invalid custom media, an unavailable base, incompatible MAP/key/container/track state,
+expired authorization or exhausted commit capacity retain a concrete error response.
+
+The playback clock begins at the first nonempty qualified segment body chunk and advances at 1x; EOF separately proves
+completion. Session age alone adds no reserve penalty. Recovery/ETA decisions are capped at 1.5 session target
+durations, independently of media reserve and HTTP timeouts. Inspect `HLS terminal reserve decision` and
+`HLS recovery decision budget` for anchor, position, reserve, snapshot generation and raw/effective budgets.
 
 Possible causes:
 
@@ -102,7 +108,7 @@ Possible causes:
 | :--- | :--- |
 | Origin progress | Repeated valid HTTP `200` manifests without host-local media progress, or retryable/hard fetch evidence. |
 | Manifest acceptance | `HLS manifest acceptance full burst started`, its derived candidate count, and whether a pinned or staged cross-host candidate commits. |
-| Lease reserve | The affected lease reaches its recovery/transition boundary before progress commits. |
+| Lease reserve | The affected lease exhausts its known reserve while the origin remains degraded. |
 | Terminal preparation | `HLS terminal bundle preparation unavailable` with a typed failed or incompatible reason. |
 | Terminal commit | `HLS autonomous terminal owner failed closed` or `HLS terminal commit retry owner failed closed`. |
 | Segment/MAP/transient media | Required READY reserve cannot be established, or a required object remains unavailable. |
@@ -273,7 +279,7 @@ Adapt the user and group to your deployment.
 | `HLS terminal bundle preparation unavailable` | Prepared media is failed or incompatible; no HTTP request attempts an on-demand TS rewrite. |
 | `HLS autonomous terminal owner handed off` | The endpoint handed terminal publication to the bounded autonomous commit retry owner. |
 | `HLS terminal commit retry owner completed` | A generation-bound retry reached a terminal completion outcome. |
-| `HLS terminal commit retry owner failed closed` | Retry exhausted, missed its safe deadline, lost runtime capacity, or observed incompatible media. |
+| `HLS terminal commit retry owner failed closed` | The fixed CAS/retry budget expired, runtime capacity was lost, or media was incompatible. |
 | `HLS segment cached` | A segment was fetched and committed to the cache. |
 | `HLS session switched to transient passthrough` | The manifest required transient resource handling. |
 

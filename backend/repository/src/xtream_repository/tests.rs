@@ -20,9 +20,10 @@ mod query;
 mod support;
 
 use self::support::{
-    fixed_refresh_paths, make_live_item, target_writer_config, target_writer_group, test_app_config,
-    write_detail_preservation_fixture, write_single_item,
+    fixed_refresh_paths, make_live_item, target_writer_config, target_writer_group, write_detail_preservation_fixture,
+    write_single_item,
 };
+use crate::test_config::app_config_in;
 
 mod behavior_detail_preservation;
 mod behavior_quality_acceptance;

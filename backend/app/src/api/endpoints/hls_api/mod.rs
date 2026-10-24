@@ -23,7 +23,7 @@ use crate::{
             ProviderConfig as RuntimeProviderConfig, ProviderHandle, UserSession,
         },
     },
-    auth::{check_network_access_only, Fingerprint},
+    auth::Fingerprint,
     model::{ConfigInput, ConfigProvider, ConfigTarget, PlaybackKind, ProxyUserCredentials},
     processing::parser::hls::origin_manifest::HlsManifestWindowPolicy,
     repository::{load_input_live_bitrate_bps, m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},

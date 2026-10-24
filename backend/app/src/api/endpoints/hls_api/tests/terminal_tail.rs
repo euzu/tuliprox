@@ -694,6 +694,10 @@ pub(in crate::api::endpoints::hls_api::tests) async fn prepare_terminal_cutover_
     (asset_buffer, asset)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One encrypted playback fixture includes real delivery, elapsed media time and prepared terminal bytes."
+)]
 pub(in crate::api::endpoints::hls_api::tests) async fn prepared_terminal_cutover_fixture(
 ) -> PreparedTerminalCutoverFixture {
     let temp_dir = tempfile::tempdir().expect("terminal cutover tempdir");
@@ -777,6 +781,13 @@ pub(in crate::api::endpoints::hls_api::tests) async fn prepared_terminal_cutover
         let response = get_response(Arc::clone(&app_state), &segment.uri, None).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!response_body(response).await.is_empty());
+    }
+    {
+        let mut leases = app_state.hls.proxy.access_leases().write().await;
+        let mut lease = leases.remove_access_lease(&lease_id).unwrap();
+        lease.playback_cursor.first_segment_started_at_ms =
+            lease.playback_cursor.first_segment_started_at_ms.map(|at| at - 10_000);
+        leases.prepare_access_lease(lease);
     }
     PreparedTerminalCutoverFixture {
         _temp_dir: temp_dir,
@@ -923,12 +934,10 @@ pub(in crate::api::endpoints::hls_api::tests) async fn commit_prepared_terminal_
 ) -> (u64, u64) {
     let cutover_now_ms = pressured_lease
         .playback_cursor
-        .first_segment_completed_at_ms
-        .expect("measured lease playback start")
-        // Enter the acquisition window while the live base and its key are still usable.
-        .saturating_add(
-            fixture.base_manifest.playlist_duration_ms.saturating_sub(fixture.base_manifest.target_duration_ms),
-        );
+        .first_segment_started_at_ms
+        .expect("actual transfer start")
+        .saturating_add(fixture.base_manifest.playlist_duration_ms)
+        .saturating_add(3_800);
 
     let first = commit_terminal_tail_if_lease_reserve_requires_cutover(
         &fixture.app_state.hls_ctx(),
@@ -1352,6 +1361,8 @@ pub(in crate::api::endpoints::hls_api::tests) fn regression_origin_refresh_reque
     access_lease_id: Option<HlsAccessLeaseId>,
 ) -> OriginRefreshRequest {
     OriginRefreshRequest {
+        work_owner: None,
+        attempt: None,
         app_config: Arc::clone(&app_state.app_config),
         session,
         origin_entry: LiveHlsOriginEntry::parse(manifest_url).expect("regression origin entry"),

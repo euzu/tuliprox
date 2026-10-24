@@ -35,6 +35,13 @@ impl HlsOriginAccountSnapshot {
     }
 
     pub fn matches_session(&self, session: &crate::HlsSession) -> bool {
+        self.matches_session_identity(session)
+            && self.binding.as_ref().and_then(|binding| binding.provider_binding_tag)
+                == session.origin_account_binding.as_ref().and_then(|binding| binding.provider_binding_tag)
+    }
+
+    /// Allocation may install a fresh binding tag without changing the account generation.
+    pub(crate) fn matches_session_identity(&self, session: &crate::HlsSession) -> bool {
         self.generation == session.activity.origin_work_generation
             && match (&self.binding, &session.origin_account_binding) {
                 (Some(expected), Some(current)) => {
@@ -42,7 +49,6 @@ impl HlsOriginAccountSnapshot {
                         && expected.account_name == current.account_name
                         && expected.session_owner == current.session_owner
                         && expected.generation == current.generation
-                        && expected.provider_binding_tag == current.provider_binding_tag
                         && expected.is_active() == current.is_active()
                 }
                 (None, None) => true,
@@ -72,7 +78,12 @@ pub(crate) async fn prepare_media_origin(
         return Ok(());
     };
     let class = if io.allow_grace { HlsOriginWorkClass::Demand } else { HlsOriginWorkClass::Background };
-    let deadline = tokio::time::Instant::now() + io.ctx.hls_proxy.segment_fetch_policy().origin_object_wait_timeout();
+    let budget = io.ctx.hls_proxy.segment_fetch_policy().demand_wait_timeout_for_session(
+        crate::segment_fetcher::HlsSegmentFetchWorkload::Clear,
+        session.read().await.target_duration,
+    );
+    let now = tokio::time::Instant::now();
+    let deadline = now.checked_add(budget).unwrap_or(now);
     tokio::time::timeout_at(deadline, async {
         loop {
             match runtime.prepare(session, HlsOriginAccountWork::Media, class).await {
@@ -185,7 +196,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stalled_background_prepare_is_bounded_by_the_existing_object_budget() {
         let (io, session, runtime) = fixture(PrepareBehavior::Stall);
-        let budget = io.ctx.hls_proxy.segment_fetch_policy().origin_object_wait_timeout();
+        let budget = io.ctx.hls_proxy.segment_fetch_policy().demand_wait_timeout_for_session(
+            crate::segment_fetcher::HlsSegmentFetchWorkload::Clear,
+            session.read().await.target_duration,
+        );
         let mut prepare = Box::pin(prepare_media_origin(Some(&io), &session));
         assert!(futures::poll!(prepare.as_mut()).is_pending());
         tokio::time::advance(budget).await;

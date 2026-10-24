@@ -361,3 +361,33 @@ async fn retired_generation_cannot_bind_or_render_an_optimistic_revision() -> st
     assert_eq!(super::temp_cache_files(directory.path()).len(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn missing_headers_release_normal_and_all_startup_fetch_slots() {
+    use shared::model::HlsStartupMode;
+    for mode in
+        [None, Some(HlsStartupMode::FirstReady), Some(HlsStartupMode::Progressive), Some(HlsStartupMode::Optimistic)]
+    {
+        let origin = spawn_segment_server(800).await;
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy {
+            timeouts: crate::HlsOriginTimeoutPolicy::fixed(200, 1_000),
+            retry_delays_ms: [0; 5],
+            retry_jitter_max_ms: 0,
+            ..Default::default()
+        };
+        let (worker, context, segment) = fetch_context(&origin, &directory, &policy).await;
+        if let Some(mode) = mode {
+            install_startup(&context, &worker, mode).await;
+        }
+        clear_scheduled_prefetch(&context, &policy).await;
+        context.session.write().await.segments.retain(|seq, _| *seq == segment.proxy_seq);
+        let key = context.session.read().await.segments[&segment.proxy_seq].cache_key.clone();
+        let outcome = worker.demand_fetch_and_wait(context.clone(), &segment, current_time_millis()).await;
+        assert_eq!(outcome, super::super::SegmentDemandFetchOutcome::TimedOut, "{mode:?}");
+        assert_eq!(context.session.read().await.active_segment_fetches, 0);
+        assert!(context.segment_cache.metadata(&key).await.unwrap().is_none());
+        assert!(!context.segment_cache.has_active_temp_files());
+        assert_eq!(origin.requests.lock().await.len(), 5);
+    }
+}

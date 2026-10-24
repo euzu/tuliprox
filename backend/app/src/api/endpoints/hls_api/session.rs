@@ -1777,6 +1777,7 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
     now_ms: u64,
+    origin_timeout_ms: u64,
 ) -> Result<Option<HlsTransientOriginIoGuard>, HlsOriginRuntimeAcquireError> {
     prepare_hls_origin_binding_for_authorized_resource_work(
         app_state,
@@ -1808,14 +1809,10 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
         playback_kind: session.read().await.origin_playback_kind(),
         account_runtime: session.read().await.origin_account_runtime.clone(),
     };
-    let lease_guard = begin_hls_origin_account_io_bounded(
-        &origin_io,
-        session,
-        &binding,
-        hls_object_body_deadline(app_state.hls.proxy.segment_fetch_policy().origin_segment_timeout_ms),
-    )
-    .await
-    .map_err(|_| HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE))?;
+    let lease_guard =
+        begin_hls_origin_account_io_bounded(&origin_io, session, &binding, hls_object_body_deadline(origin_timeout_ms))
+            .await
+            .map_err(|_| HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE))?;
     let (generation, active_count) = {
         let mut session = session.write().await;
         if !session.origin_account_binding.as_ref().is_some_and(|current| {

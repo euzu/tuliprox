@@ -12,12 +12,13 @@ impl HlsAccessLease {
     }
 
     fn manifest_publication_guard(&self) -> Option<HlsLeaseManifestPublicationGuard> {
-        (lease_state_allows_use(self.state) && self.playback_mode == HlsLeasePlaybackMode::Live).then_some(
-            HlsLeaseManifestPublicationGuard {
-                issued_at_ms: self.issued_at_ms,
-                admission_generation: self.admission_generation,
-            },
-        )
+        (lease_state_allows_use(self.state)
+            && self.playback_mode == HlsLeasePlaybackMode::Live
+            && !self.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()))
+        .then_some(HlsLeaseManifestPublicationGuard {
+            issued_at_ms: self.issued_at_ms,
+            admission_generation: self.admission_generation,
+        })
     }
 }
 

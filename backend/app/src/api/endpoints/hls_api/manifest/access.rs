@@ -17,7 +17,6 @@ use axum::{
 };
 use shared::model::VirtualId;
 use std::sync::Arc;
-use tuliprox_core::utils::current_time_millis;
 use tuliprox_hls::api::{
     HlsAccessContext, HlsAccessLease, HlsAccessLeaseId, HlsLeasePlaybackMode, HlsOriginSource,
     HlsRuntimeCustomTailReason, HlsSessionHandle, HlsTerminalFailedClosedReason, ProxySessionId,
@@ -187,7 +186,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_manifest(
 ) -> axum::response::Response {
     let proxy_session_id = ProxySessionId(params.proxy_session_id);
     let access_lease_id = HlsAccessLeaseId(params.hls_access_lease_id);
-    let now_ms = current_time_millis();
+    let now_ms = app_state.hls.proxy.now_ms();
     let access_lease_snapshot =
         app_state.hls.proxy.access_lease_response_snapshot(&access_lease_id, &proxy_session_id, now_ms).await;
     if let Some(lease) = access_lease_snapshot.as_ref() {

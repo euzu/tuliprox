@@ -42,7 +42,6 @@ pub use self::{
 };
 use std::future::Future;
 
-pub const HLS_PLAYBACK_RATE_GUARD_MILLI: u16 = 1_050;
 const HLS_AVAILABILITY_STATE_ACCESS_ATTEMPTS: usize = 3;
 const HLS_AVAILABILITY_REEVALUATION_MAX_ATTEMPTS: u8 = 64;
 const HLS_AVAILABILITY_REEVALUATION_DEADLINE_MS: u64 = 2_000;
@@ -148,15 +147,16 @@ fn acceptance_directive_for_progress(
 pub fn hls_recovery_timing_policy(
     manager: &HlsProxyManager,
     origin_manifest_timeout_ms: u64,
+    target_duration: Option<u32>,
 ) -> HlsRecoveryTimingPolicy {
     let segment_policy = manager.segment_fetch_policy();
     HlsRecoveryTimingPolicy::new(
         HlsOperationTimeoutMs::from_millis(origin_manifest_timeout_ms),
         HlsOperationTimeoutMs::from_millis(
-            segment_policy.workload_budget_ms(HlsSegmentFetchWorkload::EncryptedWithKey),
+            segment_policy.workload_budget_ms_for(HlsSegmentFetchWorkload::EncryptedWithKey, target_duration),
         ),
         HlsRecoveryEtaMs::from_millis(bounded_manifest_request_eta_ms(origin_manifest_timeout_ms)),
-        HlsRecoveryEtaMs::from_millis(segment_policy.recovery_object_eta_ms()),
+        HlsRecoveryEtaMs::from_millis(segment_policy.recovery_object_eta_ms_for(target_duration)),
     )
 }
 
@@ -168,24 +168,36 @@ pub async fn hls_startup_admission_allows_snapshot(
     snapshot: &HlsLeaseManifestSnapshot,
     now_ms: u64,
 ) -> bool {
-    let (ready_timeline, origin_state, observed_latency) = {
+    let (ready_timeline, origin_state, observed_latency, target_duration_ms) = {
         let session = session.read().await;
+        if session.live_entry_revalidation.required {
+            return false;
+        }
         let degraded = session.origin_control.path_condition.is_degraded();
         (
             session.ready_timeline_snapshot(snapshot.first_proxy_seq, now_ms),
             if degraded { HlsStartupAdmissionOriginState::Degraded } else { HlsStartupAdmissionOriginState::Healthy },
             session.origin_control.recovery_samples.latency_snapshot(),
+            session
+                .origin_control
+                .target_duration_snapshot_ms
+                .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
+                .unwrap_or(snapshot.target_duration_ms),
         )
     };
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
-    let pressure_policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let pressure_policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        session.read().await.target_duration,
+    );
     let admission = evaluate_startup_admission(HlsStartupAdmissionInput {
         manifest: snapshot,
         ready_timeline: &ready_timeline,
         origin_state,
         recovery_trigger_budget: recovery_trigger_budget(
             pressure_policy,
-            snapshot.target_duration_ms,
+            target_duration_ms,
             workload,
             observed_latency,
         ),
@@ -251,7 +263,11 @@ pub async fn hls_manifest_acceptance_directive_for_session(
     let Some(owner_key) = ctx.hls_proxy.availability_reevaluation_owner_key(session, proxy_session_id).await else {
         return HlsManifestAcceptanceEvaluationOutcome::SessionSuperseded;
     };
-    let policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        session.read().await.target_duration,
+    );
     let state_access = retry_availability_state_access(|| {
         ctx.hls_proxy.with_critical_handoff_state(session, |leases, session| {
             let evidence = evaluate_and_commit_session_recovery_pressure_in_snapshot(
@@ -289,7 +305,11 @@ async fn hls_manifest_acceptance_directive_for_reevaluation(
     if !ctx.hls_proxy.availability_reevaluation_session_is_current(session, owner_key).await {
         return HlsAvailabilityReevaluationAttempt::Superseded;
     }
-    let policy = hls_recovery_pressure_policy(&ctx.hls_proxy, ctx.hls_proxy.origin_manifest_timeout_ms());
+    let policy = hls_recovery_pressure_policy(
+        &ctx.hls_proxy,
+        ctx.hls_proxy.origin_manifest_timeout_ms(),
+        session.read().await.target_duration,
+    );
     let state_access = retry_availability_state_access(|| {
         ctx.hls_proxy.with_critical_handoff_state(session, |leases, session| {
             if session.proxy_session_id != owner_key.proxy_session_id

@@ -54,6 +54,6 @@ async fn revision_crash_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
     };
     std::fs::write(Path::new(&root).join("ready"), b"ready")?;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(std::time::Duration::from_mins(1)).await;
     }
 }

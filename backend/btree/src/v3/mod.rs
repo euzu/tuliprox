@@ -9,8 +9,8 @@ pub use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
 pub use publish::{publish_staged_database, BPlusTreeStagingArtifacts};
 #[allow(unused_imports)]
 pub use tree::{
-    BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeQuery, BPlusTreeRangeIterator,
-    BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy,
+    BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeQuery,
+    BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

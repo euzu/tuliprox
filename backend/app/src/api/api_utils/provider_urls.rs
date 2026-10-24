@@ -1,4 +1,4 @@
-use super::resolve_request_url_for_logging;
+use super::{is_media_server_input_stream_ref, resolve_request_url_for_logging};
 use crate::{
     api::model::{AppState, ProviderConfig},
     model::{AppConfig, ConfigInput, InputUserInfo},
@@ -329,6 +329,11 @@ pub(super) fn rewrite_path_auth_fields(
 }
 
 pub(super) fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) -> bool {
+    // Media servers authenticate with tokens, not path credentials, so the server base URL is the only identity
+    // a native stream URL can be matched against.
+    if provider_cfg.input_type.is_media_server() {
+        return stream_url_base_matches(stream_url, provider_cfg.url.trim_end_matches('/'));
+    }
     let account_query_matches =
         provider_cfg.input_type.is_m3u() && stream_url_account_query_matches(stream_url, &provider_cfg.url);
     let Some(user_info) = provider_cfg.get_user_info() else {
@@ -480,7 +485,8 @@ pub(crate) async fn select_provider_stream_url(
     accept_requested_stream_url: bool,
     app_config: &Arc<AppConfig>,
 ) -> Option<(Arc<str>, String)> {
-    if accept_requested_stream_url {
+    // Media-server stream refs are not provider URLs; the media-server client resolves them from the input.
+    if accept_requested_stream_url || is_media_server_input_stream_ref(input, stream_url) {
         return Some((provider_cfg.name.clone(), stream_url.to_string()));
     }
 

@@ -28,9 +28,8 @@ use super::{
             HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput, HlsLeaseCutoverTiming,
             HlsObservedRecoveryLatency, HlsOperationTimeoutMs, HlsRecoveryEncryptionReadiness, HlsRecoveryEtaMs,
             HlsRecoveryMapWorkload, HlsRecoveryMediumReadiness, HlsRecoveryObjectReadiness, HlsRecoverySegmentWorkload,
-            HlsRecoveryTimingPolicy, HlsRecoveryWorkload, HlsRecoveryWorkloadEnvelope,
-            HlsTerminalCommitAcquisitionBudgetMs, HlsTerminalCommitWindow, HlsTerminalMediaPreparationState,
-            HlsTransitionMarginMs,
+            HlsRecoveryTimingPolicy, HlsRecoveryWorkload, HlsRecoveryWorkloadEnvelope, HlsTerminalCommitWindow,
+            HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
         },
         runtime_custom_tail::HlsRuntimeCustomTailReason,
         session_store::HlsSessionIncarnation,
@@ -68,11 +67,13 @@ mod headers_redirects;
 mod origin_binding;
 mod ownership;
 mod reduced_retry;
+mod reservation_retry;
 mod retry_policy;
 mod short_manifest;
 mod startup_representation;
 mod support;
 mod switch_staging;
+mod target_duration;
 mod timing;
 mod transient;
 
@@ -109,6 +110,8 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
     use std::sync::Arc;
     let session = test_session();
     let context = HlsOriginManifestFetchContext {
+        origin_account_snapshot: None,
+        attempt: None,
         app_config: test_app_config(),
         session: Arc::clone(&session),
         availability_runtime: None,
@@ -149,7 +152,6 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
         revisions[&0].revision().prefix_available.store(1, std::sync::atomic::Ordering::Release);
         session.startup = Some(crate::HlsSessionStartup {
             config: config.clone(),
-            first_data_timeout_ms: 10000,
             worker: std::sync::Weak::new(),
             access_leases: Arc::new(tokio::sync::RwLock::new(crate::HlsAccessLeaseStore::default())),
             revisions,

@@ -1,6 +1,6 @@
 use crate::{
     api::{api_utils::redirect, model::AppState},
-    auth::{check_network_access_only, Fingerprint},
+    auth::Fingerprint,
     model::{
         resolve_provider_scheme_url_with_provider_index, ApiProxyServerInfo, ConfigInput, ConfigTarget,
         ProxyUserCredentials,
@@ -186,7 +186,7 @@ async fn provider_resolve(
     if target.id != decoded.target_id {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
-    if let Err(err) = check_network_access_only(&user, &fingerprint, &app_state.app_config, &app_state.geoip) {
+    if let Err(err) = app_state.check_network_access(&user, &fingerprint) {
         return err.into_player_response(app_state.app_config.get_auth_error_status());
     }
     if user.permission_denied(&app_state.app_config) || !user.allows_cluster(decoded.cluster) {

@@ -1,4 +1,5 @@
 use super::{
+    app_config_in,
     behavior::{
         active_category_bytes, active_cluster_count, active_cluster_snapshot, assert_no_refresh_artifacts,
         cluster_fixture_readers, disk_test_input, fail_detail_preservation_after_quality, json_reader,
@@ -6,7 +7,7 @@ use super::{
     },
     fixed_refresh_paths, get_collection_path, persist_input_xtream_playlist_cluster_to_disk,
     persist_input_xtream_playlist_clusters_to_disk, persist_input_xtream_playlist_clusters_to_disk_with_operations,
-    persists_input_series_info, test_app_config, xtream_cluster_category_collection, XtreamClusterPublishOutcome,
+    persists_input_series_info, xtream_cluster_category_collection, XtreamClusterPublishOutcome,
     XtreamClusterQualityPolicy, XtreamClusterRefreshRequest, XtreamClusterStageOperations,
 };
 use crate::{build_input_storage_path, get_input_storage_path, BPlusTreeQuery};
@@ -26,7 +27,7 @@ use tuliprox_core::model::{
 #[tokio::test]
 async fn empty_disk_refresh_retains_published_playlist_and_catalog() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = ConfigInput { name: "empty-guard".intern(), input_type: InputType::Xtream, ..Default::default() };
 
     persist_input_xtream_playlist_cluster_to_disk(
@@ -64,7 +65,7 @@ async fn empty_disk_refresh_retains_published_playlist_and_catalog() -> Result<(
 #[tokio::test]
 async fn empty_cluster_is_published_when_another_cluster_still_has_items() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = ConfigInput { name: "empty-cluster".intern(), input_type: InputType::Xtream, ..Default::default() };
 
     for (cluster, category, stream) in [
@@ -123,7 +124,7 @@ fn disk_quality_disabled_does_not_read_staging_or_baseline() {
 #[tokio::test]
 async fn disk_force_publishes_an_empty_cluster_and_cleans_staging() {
     let directory = tempdir().expect("temporary directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("force-empty");
     assert_eq!(
         publish_test_cluster(&app_config, &input, XtreamCluster::Video, 0, "old-vod", 3, 2_000).await,
@@ -167,7 +168,7 @@ async fn disk_force_publishes_an_empty_cluster_and_cleans_staging() {
 #[tokio::test]
 async fn disk_force_keeps_active_files_after_a_technical_staging_failure() {
     let directory = tempdir().expect("temporary directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("force-technical-error");
     assert_eq!(
         publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 3, 1_000).await,
@@ -199,7 +200,7 @@ async fn disk_force_keeps_active_files_after_a_technical_staging_failure() {
 #[tokio::test]
 async fn pipeline_transparency_disk_quality_survives_post_evaluation_staging_failure() {
     let directory = tempdir().expect("temporary directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("accepted-then-detail-error");
     assert_eq!(
         publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 100, 1_000).await,
@@ -243,7 +244,7 @@ async fn pipeline_transparency_disk_quality_survives_post_evaluation_staging_fai
 #[tokio::test]
 async fn pipeline_transparency_disk_batch_keeps_prior_publish_and_all_evaluated_quality_on_later_error() {
     let directory = tempdir().expect("temporary directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("later-cluster-publish-error");
     assert_eq!(
         publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 100, 1_000).await,
@@ -295,7 +296,7 @@ async fn pipeline_transparency_disk_batch_keeps_prior_publish_and_all_evaluated_
 #[tokio::test]
 async fn disk_quality_bootstrap_publishes_nonempty_candidate_and_rejects_empty_without_baseline() {
     let populated_directory = tempdir().expect("populated bootstrap directory");
-    let populated_config = test_app_config(populated_directory.path());
+    let populated_config = app_config_in(populated_directory.path());
     let populated_input = disk_test_input("bootstrap-populated");
 
     let populated_outcome =
@@ -322,7 +323,7 @@ async fn disk_quality_bootstrap_publishes_nonempty_candidate_and_rejects_empty_w
     assert_no_refresh_artifacts(&populated_storage);
 
     let empty_directory = tempdir().expect("empty bootstrap directory");
-    let empty_config = test_app_config(empty_directory.path());
+    let empty_config = app_config_in(empty_directory.path());
     let empty_input = disk_test_input("bootstrap-empty");
     let empty_outcome =
         publish_test_cluster(&empty_config, &empty_input, XtreamCluster::Video, 90, "empty-vod", 0, 2_000).await;
@@ -354,7 +355,7 @@ async fn disk_quality_enforces_exact_90_percent_boundaries_and_retains_rejected_
         ("above-upper-boundary", 111, false),
     ] {
         let directory = tempdir().expect("boundary directory");
-        let app_config = test_app_config(directory.path());
+        let app_config = app_config_in(directory.path());
         let input = disk_test_input(name);
         assert_eq!(
             publish_test_cluster(&app_config, &input, XtreamCluster::Live, 0, "old-live", 100, 10_000,).await,
@@ -406,7 +407,7 @@ async fn disk_quality_enforces_exact_90_percent_boundaries_and_retains_rejected_
 #[tokio::test]
 async fn disk_quality_rejects_duplicate_rows_that_represent_only_half_the_provider_ids() {
     let directory = tempdir().expect("duplicate rejection directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("duplicate-rejection");
     let first_provider_id = 1_000_u32;
     assert_eq!(
@@ -453,7 +454,7 @@ async fn disk_quality_rejects_duplicate_rows_that_represent_only_half_the_provid
 #[tokio::test]
 async fn pipeline_transparency_disk_quality_preserves_accepted_publish_facts() {
     let directory = tempdir().expect("duplicate acceptance directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("duplicate-acceptance");
     let first_provider_id = 1_000_u32;
     let winning_provider_id = first_provider_id + 42;
@@ -512,7 +513,7 @@ async fn pipeline_transparency_disk_quality_preserves_accepted_publish_facts() {
 #[tokio::test]
 async fn disk_series_quality_compares_catalog_rows_and_ignores_embedded_episode_details() {
     let directory = tempdir().expect("series population directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("series-logical-population");
     let provider_id = 30_000;
     assert_eq!(
@@ -578,7 +579,7 @@ async fn disk_series_quality_compares_catalog_rows_and_ignores_embedded_episode_
 #[tokio::test]
 async fn disk_quality_publishes_accepted_clusters_and_retains_rejected_cluster_independently() {
     let directory = tempdir().expect("mixed cluster directory");
-    let app_config = test_app_config(directory.path());
+    let app_config = app_config_in(directory.path());
     let input = disk_test_input("mixed-clusters");
 
     for (cluster, category_name, first_provider_id) in [

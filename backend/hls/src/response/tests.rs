@@ -189,6 +189,27 @@ impl CachedSegmentFixture {
     }
 }
 
+/// Exercise the production wait bound without spending wall time or retaining
+/// a separate timeout value in the synthetic startup session.
+async fn elapse_revision_wait(
+    fixture: &CachedSegmentFixture,
+    response: impl std::future::Future<Output = HlsResourceServeOutcome>,
+) -> HlsResourceServeOutcome {
+    let wait = fixture.manager.segment_fetch_policy().demand_wait_timeout_for_session(
+        crate::segment_fetcher::HlsSegmentFetchWorkload::EncryptedWithKey,
+        fixture.session.read().await.target_duration,
+    );
+    tokio::time::pause();
+    tokio::pin!(response);
+    assert!(futures::poll!(response.as_mut()).is_pending());
+    advance(wait + Duration::from_secs(1)).await;
+    let std::task::Poll::Ready(outcome) = futures::poll!(response.as_mut()) else {
+        panic!("the revision request must expire at its policy deadline");
+    };
+    tokio::time::resume();
+    outcome
+}
+
 fn ready_response(outcome: HlsResourceServeOutcome) -> axum::response::Response {
     match outcome {
         HlsResourceServeOutcome::Ready(response) => response,
@@ -243,7 +264,6 @@ async fn publish_revision_fixture(
     let revisions = std::collections::BTreeMap::from([(fixture.segment_file.proxy_seq, revision.clone())]);
     fixture.session.write().await.startup = Some(crate::HlsSessionStartup {
         config: config.clone(),
-        first_data_timeout_ms: 1000,
         worker: Weak::new(),
         access_leases: Arc::clone(fixture.manager.access_leases()),
         revisions: revisions.clone(),

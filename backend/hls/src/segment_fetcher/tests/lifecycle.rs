@@ -349,3 +349,57 @@ async fn demand_fetch_is_blocked_for_gc_marked_session() {
     assert_eq!(outcome, super::super::SegmentDemandFetchOutcome::NotFound);
     assert!(server.requests.lock().await.is_empty());
 }
+
+#[tokio::test]
+async fn encrypted_demand_wait_uses_manifest_key_budget_before_the_short_segment_budget() {
+    use std::sync::Arc;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::Mutex,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let task = tokio::spawn(async move {
+        for key in [true, false] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            observed.lock().await.push(String::from_utf8(request).unwrap());
+            if key {
+                tokio::time::sleep(Duration::from_millis(2_400)).await;
+            }
+            let body: &[u8] = if key { b"0123456789abcdef" } else { b"encrypted-media" };
+            socket
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(body).await.unwrap();
+        }
+    });
+    let server = super::TestSegmentServer { base_url: format!("http://{address}"), requests, task };
+    let temp = tempfile::tempdir().unwrap();
+    let policy = SegmentFetchPolicy {
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(100, 3_000),
+        retry_delays_ms: [0; 5],
+        retry_jitter_max_ms: 0,
+        max_prefetch_queue_depth: 0,
+        ..Default::default()
+    };
+    let (worker, context, segment) = encrypted_fetch_context(&server, &temp, &policy).await;
+    let result = worker.demand_fetch_and_wait(context.clone(), &segment, current_time_millis()).await;
+    assert_eq!(result, super::super::SegmentDemandFetchOutcome::Ready);
+    let requests = server.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("GET /key.key "));
+    assert!(requests[1].starts_with("GET /1.ts "));
+    assert_eq!(context.session.read().await.active_segment_fetches, 0);
+    assert!(!context.segment_cache.has_active_temp_files());
+}

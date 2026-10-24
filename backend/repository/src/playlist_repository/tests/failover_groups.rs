@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn persist_test_env(_config_json: &str) -> (Arc<AppConfig>, ConfigTarget, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let app_config = test_app_config(dir.path());
+    let app_config = app_config_in(dir.path());
     let target = ConfigTarget::from(&ConfigTargetDto {
         name: "target-groups-test".to_string(),
         output: vec![TargetOutputDto::M3u(M3uTargetOutputDto {
@@ -22,7 +22,7 @@ fn persist_test_env(_config_json: &str) -> (Arc<AppConfig>, ConfigTarget, tempfi
 
 fn persist_test_env_rejecting_empty() -> (Arc<AppConfig>, ConfigTarget, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let app_config = test_app_config(dir.path());
+    let app_config = app_config_in(dir.path());
     let target = ConfigTarget::from(&ConfigTargetDto {
         name: "target-reject-test".to_string(),
         output: vec![TargetOutputDto::M3u(M3uTargetOutputDto {

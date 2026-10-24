@@ -246,7 +246,7 @@ pub(super) fn classify_manifest_fetch_failure(err: &OriginManifestFetchError) ->
     }
 }
 
-pub(super) fn manifest_hard_fetch_error(err: &OriginManifestFetchError) -> bool {
+pub(crate) fn manifest_hard_fetch_error(err: &OriginManifestFetchError) -> bool {
     classify_manifest_fetch_failure(err).is_hard()
 }
 

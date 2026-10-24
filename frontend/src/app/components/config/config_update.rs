@@ -4,7 +4,7 @@ use shared::{
     error::TuliproxError,
     model::{
         ConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto, LibraryPlaylistConfigDto,
-        ThumbnailConfigDto, WebUiConfigDto,
+        McpConfigDto, ThumbnailConfigDto, WebUiConfigDto,
     },
 };
 
@@ -34,6 +34,10 @@ fn update_hdhomerun_field(config: &mut ConfigDto, mut hdhr_cfg: HdHomeRunConfigD
         hdhr_cfg.clean();
         config.hdhomerun = Some(hdhr_cfg);
     }
+}
+
+pub(crate) fn update_mcp_field(config: &mut ConfigDto, mcp_cfg: McpConfigDto) {
+    config.mcp = if mcp_cfg == McpConfigDto::default() { None } else { Some(mcp_cfg) };
 }
 
 fn update_library_field(config: &mut ConfigDto, mut library_cfg: LibraryConfigDto) {
@@ -145,6 +149,7 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::HdHomerun(_, hdhr_cfg) => update_hdhomerun_field(config, hdhr_cfg),
             ConfigForm::Proxy(_, mut proxy_cfg) => set_config_field!(config, proxy_cfg, proxy),
             ConfigForm::IpCheck(_, mut ipcheck_cfg) => set_config_field!(config, ipcheck_cfg, ipcheck),
+            ConfigForm::Mcp(_, mcp_cfg) => update_mcp_field(config, mcp_cfg),
             ConfigForm::Library(_, library_cfg) => update_library_field(config, library_cfg),
             ConfigForm::FailoverGroups(_, failover_groups_cfg) => {
                 config.failover_groups = (!failover_groups_cfg.is_default()).then_some(failover_groups_cfg);
@@ -166,7 +171,7 @@ mod tests {
     use crate::app::components::config::config_page::ConfigForm;
     use shared::model::{
         view_type::ViewType, ConfigDto, ContentSecurityPolicyConfigDto, DiskAlertConfigDto, HdHomeRunConfigDto,
-        HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, MessagingConfigDto,
+        HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, McpConfigDto, MessagingConfigDto,
         MetadataUpdateConfigDto, ProxyConfigDto, RecordingConfigDto, RecordingDiskConfigDto,
         RecordingNotificationConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto, StreamInfoConfigDto,
         VideoConfigDto, WebAuthConfigDto, WebUiConfigDto,
@@ -250,6 +255,78 @@ mod tests {
         update_config(&mut config, vec![ConfigForm::HdHomerun(true, HdHomeRunConfigDto::default())]);
 
         assert!(config.hdhomerun.is_none(), "disabled empty forms should clear the HDHomeRun config");
+    }
+
+    #[test]
+    fn update_config_keeps_existing_mcp_block() {
+        let mcp = McpConfigDto {
+            enabled: true,
+            read_only: false,
+            allowed_origins: vec!["https://claude.ai".to_string()],
+            max_response_bytes: 4096,
+        };
+        let mut config = ConfigDto { mcp: Some(mcp.clone()), ..ConfigDto::default() };
+
+        update_config(&mut config, vec![ConfigForm::Proxy(true, ProxyConfigDto::default())]);
+
+        assert_eq!(config.mcp, Some(mcp));
+    }
+
+    #[test]
+    fn update_config_mcp_default_form_clears_block() {
+        let mut config =
+            ConfigDto { mcp: Some(McpConfigDto { enabled: true, ..McpConfigDto::default() }), ..ConfigDto::default() };
+
+        update_config(&mut config, vec![ConfigForm::Mcp(true, McpConfigDto::default())]);
+
+        assert!(config.mcp.is_none(), "an untouched default form must be stored as absent");
+    }
+
+    #[test]
+    fn update_config_mcp_default_form_keeps_absent_block_absent() {
+        let mut config = ConfigDto::default();
+
+        update_config(&mut config, vec![ConfigForm::Mcp(true, McpConfigDto::default())]);
+
+        assert!(config.mcp.is_none());
+    }
+
+    #[test]
+    fn update_config_mcp_changed_form_is_stored() {
+        let mcp = McpConfigDto {
+            enabled: true,
+            read_only: false,
+            allowed_origins: vec!["https://claude.ai".to_string()],
+            max_response_bytes: 4096,
+        };
+        let mut config = ConfigDto::default();
+
+        update_config(&mut config, vec![ConfigForm::Mcp(true, mcp.clone())]);
+
+        assert_eq!(config.mcp, Some(mcp));
+    }
+
+    #[test]
+    fn apply_and_prepare_config_normalizes_mcp_origins_and_rejects_tiny_limit() {
+        let mut config = ConfigDto::default();
+        let result = apply_and_prepare_config(
+            &mut config,
+            vec![ConfigForm::Mcp(
+                true,
+                McpConfigDto { allowed_origins: vec![" https://a.example/ ".to_string()], ..McpConfigDto::default() },
+            )],
+        );
+        assert!(result.is_ok());
+        assert_eq!(config.mcp.map(|mcp| mcp.allowed_origins), Some(vec!["https://a.example".to_string()]));
+
+        let mut config = ConfigDto::default();
+        let result = apply_and_prepare_config(
+            &mut config,
+            vec![ConfigForm::Mcp(true, McpConfigDto { max_response_bytes: 10, ..McpConfigDto::default() })],
+        );
+        assert!(result.is_err(), "a limit below the minimum must be rejected");
+        let Err(error) = result else { return };
+        assert!(error.to_string().contains("max_response_bytes"));
     }
 
     #[test]

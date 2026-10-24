@@ -63,6 +63,10 @@ fn log_corrupt_segment_watchdog_config(config: &HlsCorruptSegmentWatchdogConfig)
 }
 
 impl HlsSegmentRepairManager {
+    pub(crate) fn postprocess_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.runtime.load().postprocess_timeout_ms())
+    }
+
     pub fn new(config: HlsSegmentRepairConfig) -> Self {
         let watchdog_config = config.corrupt_segment_watchdog.clone();
         log_segment_repair_config(&config);
@@ -215,9 +219,10 @@ impl HlsSegmentRepairManager {
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
-        self.commit_origin_response_with_budget(segment_cache, key, reader, deadline, context, None).await
+        self.commit_origin_response_with_budget(segment_cache, key, reader, deadline, context, None, None).await
     }
 
+    #[allow(clippy::too_many_arguments, reason = "Keeps the EOF transition with its staging transaction.")]
     pub(crate) async fn commit_origin_response_with_budget<K, R>(
         &self,
         segment_cache: &HlsSegmentCache,
@@ -226,12 +231,16 @@ impl HlsSegmentRepairManager {
         deadline: tokio::time::Instant,
         context: HlsSegmentRepairObjectContext,
         budget: Option<Arc<crate::HlsRevisionDiskReservation>>,
+        on_origin_eof: Option<futures::future::BoxFuture<'static, io::Result<()>>>,
     ) -> io::Result<CachedSegmentMetadata>
     where
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
         let raw = segment_cache.stage_temp_with_budget(key, reader, deadline, budget).await?;
+        if let Some(on_eof) = on_origin_eof {
+            on_eof.await?;
+        }
         let runtime = self.runtime.load_full();
         if !runtime.postprocessing_enabled() {
             return segment_cache.commit_staged(key, raw).await;

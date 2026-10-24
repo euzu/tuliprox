@@ -7,9 +7,7 @@ use crate::{
     terminal_tail::HlsLeasePlaybackMode, HlsAccessLeaseId, HlsAccessLeasePendingDeadline,
     HlsPublishedTransientResourceIds, HlsSessionKey, ProxySessionId,
 };
-use shared::model::HlsCacheConfigDto;
 use std::sync::Arc;
-use tuliprox_core::model::HlsCacheConfig;
 
 #[test]
 fn key_readiness_evidence_is_valid_at_expiry_and_stale_one_millisecond_later() {
@@ -166,8 +164,7 @@ async fn rolling_manifest_publication_uses_lease_store_when_session_is_gc_marked
 
 #[tokio::test]
 async fn stale_lease_removal_preparation_cannot_release_replacement_protection() {
-    let config = HlsCacheConfig::from(&HlsCacheConfigDto::default());
-    let manager = HlsProxyManager::with_hls_cache_config(&config);
+    let manager = HlsProxyManager::new();
     let (session, _) =
         manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 1_000).await;
     let proxy_session_id = session.read().await.proxy_session_id.clone();

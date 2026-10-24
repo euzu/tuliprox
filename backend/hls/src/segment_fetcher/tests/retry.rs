@@ -86,26 +86,26 @@ fn missing_head_of_a_published_session_advances_only_while_no_manifest_exposed_i
 #[test]
 fn segment_fetch_budget_accounts_for_serialized_key_and_media_retry_chains() {
     let policy = SegmentFetchPolicy {
-        origin_segment_timeout_ms: 10_000,
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(10_000, 10_000),
         effective_repair_postprocess_timeout_ms: 2_000,
         retry_delays_ms: [0, 100, 250, 500, 750],
         retry_jitter_max_ms: 100,
         ..SegmentFetchPolicy::default()
     };
 
-    assert_eq!(policy.demand_wait_timeout_for(HlsSegmentFetchWorkload::Clear), Duration::from_millis(63_100));
+    assert_eq!(policy.demand_wait_timeout_for(HlsSegmentFetchWorkload::Clear), Duration::from_millis(143_100));
     assert_eq!(
         policy.demand_wait_timeout_for(HlsSegmentFetchWorkload::EncryptedWithKey),
-        Duration::from_millis(125_200)
+        Duration::from_millis(275_200)
     );
-    assert_eq!(policy.demand_wait_timeout(), Duration::from_millis(125_200));
-    assert_eq!(policy.origin_object_wait_timeout(), Duration::from_millis(63_100));
+    assert_eq!(policy.demand_wait_timeout(), Duration::from_millis(275_200));
+    assert_eq!(policy.origin_object_wait_timeout(), Duration::from_millis(133_100));
 }
 
 #[test]
 fn hls_recovery_timing_expected_object_eta_is_not_the_retry_chain_timeout() {
     let policy = SegmentFetchPolicy {
-        origin_segment_timeout_ms: 10_000,
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(10_000, 10_000),
         effective_repair_postprocess_timeout_ms: 2_000,
         retry_delays_ms: [0, 100, 250, 500, 750],
         retry_jitter_max_ms: 100,
@@ -117,7 +117,7 @@ fn hls_recovery_timing_expected_object_eta_is_not_the_retry_chain_timeout() {
     assert!(policy.recovery_object_eta_ms() < policy.workload_budget_ms(HlsSegmentFetchWorkload::EncryptedWithKey));
 
     let long_hard_timeout = SegmentFetchPolicy {
-        origin_segment_timeout_ms: 120_000,
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(120_000, 120_000),
         effective_repair_postprocess_timeout_ms: 30_000,
         ..policy
     };
@@ -126,6 +126,19 @@ fn hls_recovery_timing_expected_object_eta_is_not_the_retry_chain_timeout() {
         long_hard_timeout.recovery_object_eta_ms()
             < long_hard_timeout.workload_budget_ms(HlsSegmentFetchWorkload::Clear)
     );
+}
+
+#[test]
+fn recovery_eta_and_wait_budget_account_for_the_longer_key_or_map_timeout() {
+    let policy = SegmentFetchPolicy {
+        timeouts: crate::HlsOriginTimeoutPolicy::fixed(2_000, 8_000),
+        retry_delays_ms: [0; 5],
+        retry_jitter_max_ms: 0,
+        ..Default::default()
+    };
+    assert_eq!(policy.recovery_object_eta_ms_for(Some(2)), 9_000);
+    assert_eq!(policy.workload_budget_ms_for(HlsSegmentFetchWorkload::Clear, Some(2)), 51_000);
+    assert_eq!(policy.workload_budget_ms_for(HlsSegmentFetchWorkload::EncryptedWithKey, Some(2)), 161_000);
 }
 
 pub(in crate::segment_fetcher::tests) async fn wait_for_concurrent_capacity_deferral(

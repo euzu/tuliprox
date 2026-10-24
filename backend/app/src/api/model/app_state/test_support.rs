@@ -96,16 +96,19 @@ fn create_test_app_state_with_playlist_updates(
     Arc::new(AppState {
         app_config,
         http_clients: Arc::default(),
-        recordings: Arc::new(RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls: HlsState::new(Arc::new(HlsProxyManager::new())),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
+        epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
-        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-            Arc::clone(&active_provider),
-            Arc::clone(&connection_manager),
-            Arc::clone(&maintenance),
+        recording: crate::api::model::RecordingState::new(
+            Arc::new(RecordingQueue::new()),
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+                Arc::clone(&maintenance),
+            ),
         ),
         active_provider,
         connection_manager,

@@ -298,3 +298,35 @@ async fn cacheable_transient_without_range_decodes_to_identity_before_cache_and_
     assert!(request.contains("accept-encoding: identity"));
     assert!(!request.contains("\r\nrange:"));
 }
+
+#[tokio::test]
+async fn transient_cache_dripping_body_exhausts_absolute_budget_and_cleans_every_attempt() {
+    let origin = spawn_test_origin_in_chunks(
+        "200 OK",
+        vec![("Content-Type", "video/mp2t")],
+        vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec(), b"last".to_vec()],
+        Duration::from_millis(200),
+    )
+    .await;
+    let fixture = TestTransientCacheFixture::new(format!("{}/dripping.ts", origin.base_url)).await;
+    let mut request = fixture.request(None);
+    request.fetch.policy.timeouts = crate::HlsOriginTimeoutPolicy::fixed(500, 1_000);
+    request.fetch.clients.session = Some(fixture.session.clone());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let guards = dropped.clone();
+    let result = fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(request, move |_| {
+        let guards = guards.clone();
+        async move { Ok(DropCounter(guards)) }.boxed()
+    })
+    .await;
+    assert!(matches!(result, Err(HlsOriginResourceFetchError::Timeout)));
+    assert_eq!(dropped.load(Ordering::Relaxed), 5);
+    assert_eq!(origin.requests.lock().await.len(), 5);
+    assert!(!fixture.segment_cache.has_active_temp_files());
+    assert!(fixture.segment_cache.metadata(&fixture.cache_key).await.unwrap().is_none());
+    let session = fixture.session.read().await;
+    assert!(!matches!(
+        session.transient.object_cache[&fixture.lookup_key].status,
+        TransientObjectCacheStatus::Ready { .. }
+    ));
+}

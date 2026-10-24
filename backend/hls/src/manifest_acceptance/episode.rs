@@ -251,6 +251,28 @@ impl HlsManifestAcceptanceEpisode {
         update
     }
 
+    /// Release only the failed selection owned by this generation. Its full-burst
+    /// evidence survives, but the next candidate must bind and verify its own media.
+    pub(crate) fn release_failed_candidate(
+        &mut self,
+        generation: HlsManifestAcceptanceGeneration,
+        identity: HlsManifestRecoveryCandidateIdentity,
+    ) -> bool {
+        if self.generation != generation
+            || !self.full_burst_completed
+            || self.outcome != HlsManifestAcceptanceEpisodeOutcome::Pending
+            || self.selected_candidate_identity() != Some(identity)
+        {
+            return false;
+        }
+        self.workload_binding = HlsRecoveryWorkloadBinding::CandidateUnknown {
+            envelope: self.workload_binding.envelope(),
+            selected_candidate: None,
+        };
+        self.state = HlsManifestAcceptanceState::Evaluating;
+        true
+    }
+
     pub fn bind_selected_candidate(
         &mut self,
         expected_generation: HlsManifestAcceptanceGeneration,

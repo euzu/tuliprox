@@ -1475,46 +1475,12 @@ mod tests {
     use super::{
         MemoryPlaylistSource, PlaylistGroup, PlaylistItem, PlaylistSource, XtreamCluster, XtreamDiskPlaylistSource,
     };
-    use crate::BPlusTreeQuery;
-    use arc_swap::{ArcSwap, ArcSwapOption};
+    use crate::{test_config::app_config, BPlusTreeQuery};
     use shared::{
-        model::{ConfigPaths, PlaylistItemHeader, PlaylistItemType, XtreamPlaylistItem},
+        model::{PlaylistItemHeader, PlaylistItemType, XtreamPlaylistItem},
         utils::Internable,
     };
     use std::{collections::HashSet, path::PathBuf, sync::Arc};
-    use tuliprox_core::{
-        model::{AppConfig, Config, MediaToolCapabilities, SourcesConfig},
-        utils::FileLockManager,
-    };
-
-    fn test_app_config() -> Arc<AppConfig> {
-        Arc::new(AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
-            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
-            hdhomerun: Arc::new(ArcSwapOption::empty()),
-            api_proxy: Arc::new(ArcSwapOption::empty()),
-            file_locks: Arc::new(FileLockManager::default()),
-            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
-                home_path: String::new(),
-                config_path: String::new(),
-                storage_path: String::new(),
-                config_file_path: String::new(),
-                sources_file_path: String::new(),
-                mapping_file_path: None,
-                mapping_files_used: None,
-                template_file_path: None,
-                template_files_used: None,
-                failover_file_path: None,
-                api_proxy_file_path: String::new(),
-                custom_stream_response_path: None,
-            })),
-            custom_stream_response: Arc::new(ArcSwapOption::empty()),
-            access_token_secret: [0u8; 32],
-            encrypt_secret: [0u8; 16],
-            media_tools: Arc::new(MediaToolCapabilities::new()),
-            failover: Arc::default(),
-        })
-    }
 
     fn make_item(title: &str, group: &str, category_id: u32) -> PlaylistItem {
         PlaylistItem {
@@ -1610,7 +1576,7 @@ mod tests {
 
     #[tokio::test]
     async fn xtream_disk_clone_source_returns_error_when_query_clone_fails() {
-        let app_config = test_app_config();
+        let app_config = app_config();
         let storage_path = PathBuf::from("clone-error-fixture");
         let guard = Arc::new(app_config.file_locks.read_lock(&storage_path).await);
         let source = PlaylistSource::xtream_disk(XtreamDiskPlaylistSource {

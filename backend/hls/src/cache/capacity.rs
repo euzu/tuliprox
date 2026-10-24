@@ -4,8 +4,8 @@ use super::{
     lifecycle::REWRITE_SECRET_FINGERPRINT_FILE,
     revisions::{is_revision_cache_path, revision_reserved_bytes},
     safe_proxy_session_id, CacheCapacityPressure, CacheCapacityState, CapacityInvalidationGuard,
-    CapacityMutationReservation, CapacityRevision, HlsCacheCapacityRevision, HlsCacheObjectKey, HlsSegmentCache,
-    ProxySessionId,
+    CapacityMutationReservation, CapacityRevision, CapacityScanGuard, HlsCacheCapacityRevision, HlsCacheObjectKey,
+    HlsSegmentCache, ProxySessionId,
 };
 use futures::future::BoxFuture;
 use std::{
@@ -56,6 +56,17 @@ pub enum CacheInvalidationOutcome {
 
 impl Drop for CapacityInvalidationGuard {
     fn drop(&mut self) { invalidate_capacity_state(&self.capacity, &self.changed); }
+}
+
+impl Drop for CapacityScanGuard {
+    fn drop(&mut self) {
+        self.capacity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .scans_in_flight
+            .remove(&self.cache_path);
+        self.changed.notify_waiters();
+    }
 }
 
 impl CapacityMutationReservation {
@@ -374,21 +385,40 @@ impl HlsSegmentCache {
         }
     }
 
+    /// Runs the lazy full-directory usage scan now if the accounting for the current cache root is not ready yet.
+    ///
+    /// Callers invoke this before starting a per-attempt write deadline so the first cache write after a
+    /// start or a cache-root change does not charge the scan to that deadline. It is a no-op once initialized.
+    pub async fn prepare_capacity_accounting(&self) -> io::Result<()> {
+        self.ensure_capacity_initialized(&self.cache_path_snapshot().path).await
+    }
+
+    /// Initializes the usage accounting of `cache_path`. Exactly one caller scans per cache root; concurrent
+    /// callers wait for it. A cancelled scan publishes nothing and releases its slot to the next caller.
     pub(super) async fn ensure_capacity_initialized(&self, cache_path: &Path) -> io::Result<()> {
         loop {
             let notified = self.capacity_changed.notified();
-            let revision = {
-                let capacity = self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let claimed = {
+                let mut capacity = self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if capacity.initialized && capacity.cache_path == cache_path {
                     return Ok(());
                 }
-                if capacity.active_mutations.iter().any(|path| path.starts_with(cache_path)) {
+                if capacity.active_mutations.iter().any(|path| path.starts_with(cache_path))
+                    || !capacity.scans_in_flight.insert(cache_path.to_path_buf())
+                {
                     None
                 } else {
-                    Some(Arc::clone(&capacity.revision))
+                    Some((
+                        Arc::clone(&capacity.revision),
+                        CapacityScanGuard {
+                            capacity: Arc::clone(&self.capacity),
+                            changed: Arc::clone(&self.capacity_changed),
+                            cache_path: cache_path.to_path_buf(),
+                        },
+                    ))
                 }
             };
-            let Some(revision) = revision else {
+            let Some((revision, _scan_slot)) = claimed else {
                 notified.await;
                 continue;
             };
@@ -405,6 +435,8 @@ impl HlsSegmentCache {
             excluded.extend(
                 self.capacity.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reserved_spools.keys().cloned(),
             );
+            #[cfg(test)]
+            self.capacity_scan_count.fetch_add(1, Ordering::Relaxed);
             #[cfg(test)]
             self.startup_write_checkpoint(super::StartupWritePhase::AfterInventorySnapshot).await?;
             let (total_bytes, session_bytes, revision_bytes) =
@@ -450,7 +482,8 @@ impl HlsSegmentCache {
                 // The scan result was invalidated by a real accounting or
                 // mutation transition. Wait on the notification registered
                 // before the scan instead of immediately walking the complete
-                // cache tree again under sustained commit churn.
+                // cache tree again under sustained commit churn. The scan slot stays held meanwhile so other
+                // callers keep waiting instead of starting a competing scan.
                 notified.await;
                 continue;
             }

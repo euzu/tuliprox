@@ -218,6 +218,12 @@ where
         request.fetch.resource_kind,
     )?;
     let commit = request.commit;
+    // The first cache write scans the whole cache directory; do it before any per-attempt deadline starts.
+    commit
+        .segment_cache
+        .prepare_capacity_accounting()
+        .await
+        .map_err(|error| HlsOriginResourceFetchError::cache_body(&error))?;
     run_hls_origin_resource_retry_loop_with_attempt_prepare(
         target,
         request.fetch.clients,

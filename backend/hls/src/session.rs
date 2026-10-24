@@ -104,6 +104,19 @@ pub struct HlsPublishedLiveOriginBaseline {
     pub rendered_at_ms: u64,
 }
 
+/// Entry-only barrier. Existing live leases retain their own media reserve.
+#[derive(Debug, Clone, Default)]
+pub struct HlsLiveEntryRevalidation {
+    pub generation: u64,
+    pub required: bool,
+    pub origin_highwater: Option<u64>,
+    pub origin_epoch: u64,
+    pub recovered_progress_generation: Option<u64>,
+    /// First source commit allowed for entries after the qualified recovery.
+    /// Retained snapshots below this floor remain invalid after the barrier is lifted.
+    pub qualified_commit_generation: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HlsSessionOriginControl {
     pub progress_phase: HlsOriginProgressPhase,
@@ -121,6 +134,7 @@ pub struct HlsSessionOriginControl {
     pub acceptance_episode: Option<HlsManifestAcceptanceEpisode>,
     pub recovery_samples: HlsBoundedRecoverySamples,
     pub(crate) qualification: crate::short_manifest::HlsOriginQualification,
+    pub(crate) target_duration_qualification: Option<crate::short_manifest::HlsTargetDurationQualification>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +162,7 @@ impl Default for HlsSessionOriginControl {
             acceptance_episode: None,
             recovery_samples: HlsBoundedRecoverySamples::default(),
             qualification: crate::short_manifest::HlsOriginQualification::default(),
+            target_duration_qualification: None,
         }
     }
 }
@@ -276,6 +291,7 @@ pub struct HlsSession {
     pub last_client_access_at_ms: u64,
     pub last_effective_manifest_host: Option<String>,
     pub origin_refresh: OriginRefreshState,
+    pub live_entry_revalidation: HlsLiveEntryRevalidation,
     pub origin_control: HlsSessionOriginControl,
     pub render_policy: RenderPolicy,
     pub startup: Option<super::HlsSessionStartup>,
@@ -365,6 +381,7 @@ impl HlsSession {
             last_client_access_at_ms: now_ms,
             last_effective_manifest_host: None,
             origin_refresh: OriginRefreshState::default(),
+            live_entry_revalidation: HlsLiveEntryRevalidation::default(),
             origin_control: HlsSessionOriginControl::default(),
             origin_window_proxy_seqs: None,
             origin_window_durations_ms: Vec::new(),
@@ -600,6 +617,45 @@ impl HlsSession {
         self.fresh_manifest_commit_requirement_generation =
             self.fresh_manifest_commit_requirement_generation.saturating_add(1);
         self.fresh_manifest_commit_required = Some(reason);
+    }
+
+    pub fn live_entry_revalidation_generation(&self) -> Option<u64> {
+        self.live_entry_revalidation.required.then_some(self.live_entry_revalidation.generation)
+    }
+
+    pub(crate) fn require_live_entry_revalidation(&mut self, failed_progress_generation: u64) {
+        let barrier = &mut self.live_entry_revalidation;
+        if barrier.required
+            || barrier.recovered_progress_generation.is_some_and(|generation| failed_progress_generation < generation)
+        {
+            return;
+        }
+        barrier.generation = barrier.generation.saturating_add(1);
+        barrier.required = true;
+        barrier.origin_highwater = self.origin_seq_highwater;
+        barrier.origin_epoch = self.origin_epoch;
+        barrier.qualified_commit_generation = None;
+    }
+
+    pub fn live_entry_allowed_for_lease(&self, lease: &crate::HlsAccessLease) -> bool {
+        let active_live = lease.state == crate::HlsAccessLeaseState::Activated
+            && lease.playback_mode == crate::terminal_tail::HlsLeasePlaybackMode::Live
+            && lease.last_manifest_snapshot.is_some();
+        active_live
+            || (!self.live_entry_revalidation.required
+                && !lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()))
+    }
+
+    pub(crate) fn live_entry_snapshot_allowed_for_lease(
+        &self,
+        lease: &crate::HlsAccessLease,
+        snapshot: Option<&crate::media_reserve::HlsLeaseManifestSnapshot>,
+    ) -> bool {
+        self.live_entry_allowed_for_lease(lease)
+            && ((lease.state == crate::HlsAccessLeaseState::Activated && lease.last_manifest_snapshot.is_some())
+                || self.live_entry_revalidation.qualified_commit_generation.is_none_or(|generation| {
+                    snapshot.is_some_and(|snapshot| snapshot.source_commit_identity.commit_generation() >= generation)
+                }))
     }
 
     pub fn fresh_manifest_commit_requirement_generation(&self, reason: HlsFreshManifestRequiredReason) -> Option<u64> {
@@ -932,6 +988,7 @@ impl fmt::Debug for HlsSession {
             .field("last_client_access_at_ms", &self.last_client_access_at_ms)
             .field("last_effective_manifest_host", &self.last_effective_manifest_host)
             .field("origin_refresh", &self.origin_refresh)
+            .field("live_entry_revalidation", &self.live_entry_revalidation)
             .field("render_policy", &self.render_policy)
             .field("startup", &self.startup)
             .field("missing_head_limit", &self.missing_head_limit)

@@ -256,7 +256,7 @@ fn hls_recovery_timing_candidate_binding_and_staging_reduce_eta_without_moving_d
         episode
             .estimated_recovery_completion_at(generation, 5_000)
             .map(HlsEstimatedRecoveryCompletionAtMs::as_millis_since_epoch),
-        staged_eta.map(|eta| 5_000_u64.saturating_add(eta))
+        staged_eta.map(|eta| 5_000_u64.saturating_add(eta).min(frozen_deadline.as_millis_since_epoch()))
     );
     assert_eq!(episode.remaining_recovery_workload(HlsManifestAcceptanceGeneration(5)), None);
 

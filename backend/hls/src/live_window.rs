@@ -158,11 +158,16 @@ impl HlsSession {
     pub(crate) fn record_live_window_publication(
         &mut self,
         lease_id: &crate::HlsAccessLeaseId,
+        issued_at_ms: u64,
         snapshot: &crate::media_reserve::HlsLeaseManifestSnapshot,
     ) {
-        if let Some(demand) = self.live_window_demands.get_mut(lease_id) {
-            demand.published = snapshot.visible_proxy_seqs().collect();
-        }
+        let demand = self.live_window_demands.entry(lease_id.clone()).or_insert_with(|| HlsLiveWindowDemand {
+            issued_at_ms,
+            view: HlsLiveWindowView::Entry,
+            published: Vec::new(),
+        });
+        demand.issued_at_ms = issued_at_ms;
+        demand.published = snapshot.visible_proxy_seqs().collect();
         self.longest_rendered_playlist_duration_ms =
             self.longest_rendered_playlist_duration_ms.max(snapshot.playlist_duration_ms);
         for seq in snapshot.visible_proxy_seqs() {

@@ -62,7 +62,7 @@ impl HlsTerminalBaseEvidence {
 
     /// Makes the intended guard lifetime explicit at the endpoint commit boundary.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn release(self) { drop(self.read_protection) }
+    pub fn release(self) { drop(self.read_protection); }
 
     /// Transfers the READY-object reader pins to an autonomous terminal commit.
     ///
@@ -183,7 +183,16 @@ fn snapshot_terminal_base_probes(
         .iter()
         .map(|segment| {
             let entry = session.segments.get(&segment.proxy_seq);
-            let media_ready = entry.is_some_and(|entry| matches!(&entry.status, SegmentCacheStatus::Ready { .. }));
+            let revision_metadata = manifest
+                .startup_revisions
+                .as_ref()
+                .and_then(|publication| publication.revisions.get(&segment.proxy_seq))
+                .and_then(|bound| match bound.revision().state() {
+                    crate::SegmentRevisionState::Complete(metadata) => Some(metadata),
+                    _ => None,
+                });
+            let media_ready = entry.is_some_and(|entry| matches!(&entry.status, SegmentCacheStatus::Ready { .. }))
+                && (manifest.startup_revisions.is_none() || revision_metadata.is_some());
             let required_map_ready = entry.is_some_and(|entry| {
                 entry.map_ref.is_none_or(|map_id| {
                     session
@@ -215,12 +224,26 @@ fn snapshot_terminal_base_probes(
                 media_ready,
                 required_map_ready,
                 cache_key,
+                revision_metadata,
                 origin_epoch: media_ready.then(|| entry.map(|entry| entry.origin_key.origin_epoch)).flatten(),
                 key_evidence,
             }
         })
         .collect();
     HlsTerminalBaseEvidencePreparation { probes, read_protection: HlsTerminalBaseReadProtection { accesses } }
+}
+
+async fn terminal_probe_metadata(
+    cache: &HlsSegmentCache,
+    probe: &HlsTerminalBaseSegmentProbe,
+) -> Option<crate::CachedSegmentMetadata> {
+    if let Some(metadata) = probe.revision_metadata.as_ref() {
+        return Some(metadata.clone());
+    }
+    match probe.cache_key.as_ref() {
+        Some(key) => cache.metadata(key).await.ok().flatten(),
+        None => None,
+    }
 }
 
 async fn resolve_terminal_base_probes(
@@ -235,11 +258,7 @@ async fn resolve_terminal_base_probes(
     let mut last_track_preprobe_resolution = None;
     let mut track_base = None;
     for probe in probes {
-        let metadata = if let Some(cache_key) = probe.cache_key.as_ref() {
-            segment_cache.metadata(cache_key).await.ok().flatten()
-        } else {
-            None
-        };
+        let metadata = terminal_probe_metadata(segment_cache, &probe).await;
         let protectable = metadata.is_some();
         let (required_key_ready, track_encryption, key_failure) = match probe.key_evidence {
             HlsTerminalBaseKeyEvidence::Clear => (true, Some(HlsTerminalTrackEncryption::Clear), None),

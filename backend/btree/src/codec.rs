@@ -5,7 +5,7 @@
 //! The encoding is byte-for-byte the encoding this database has always written:
 //! `rmp_serde` in its default (compact, positional) form.
 
-use log::error;
+use log::debug;
 use std::io;
 
 #[inline]
@@ -24,8 +24,10 @@ pub(crate) fn binary_deserialize<T>(value: &[u8]) -> io::Result<T>
 where
     T: for<'a> serde::Deserialize<'a>,
 {
+    // Callers receive the error and decide whether it is fatal; probing readers (e.g. key type detection)
+    // expect decode failures, so this must not log at error level.
     rmp_serde::from_slice(value).map_err(|error| {
-        error!("Failed to decode {error}");
+        debug!("Failed to decode {error}");
         encode_error(error)
     })
 }

@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::{
-                config_page::{ConfigForm, LABEL_PANEL_CONFIG},
+                config_page::{ConfigForm, ConfigPage},
                 config_view_context::ConfigViewContext,
                 use_emit_config_form, HasFormData,
             },
@@ -966,10 +966,10 @@ pub fn PanelConfigView() -> Html {
 
     html! {
         <div class="tp__panel-api-config-view tp__config-view-page">
-            <div class="tp__config-view-page__title">{ translate.t(LABEL_PANEL_CONFIG) }</div>
+            <div class="tp__config-view-page__title">{ translate.t(ConfigPage::Panel.title_key()) }</div>
             <div class="tp__panel-api-config-view__header tp__config-view-page__header">
                 <Card class="tp__config-view__card tp__panel-api-config-view__info-card">
-                    <h1>{ translate.t(LABEL_PANEL_CONFIG) }</h1>
+                    <h1>{ translate.t(ConfigPage::Panel.title_key()) }</h1>
                     <div class="tp__panel-api-config-view__info-text">
                         { translate.t(HINT_PANEL_INFO) }
                     </div>

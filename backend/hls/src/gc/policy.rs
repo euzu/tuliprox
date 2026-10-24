@@ -63,6 +63,12 @@ impl ProtectedSet {
         if let Some(rendered) = &session.last_rendered_manifest {
             protected.key_resource_ids.extend(extract_transient_resource_ids(&rendered.body));
         }
+        // The last committed live segment is the mandatory terminal splice
+        // anchor. Capacity recovery may release consumed history, never this
+        // anchor while its lease remains valid.
+        protected
+            .segment_proxy_seqs
+            .extend(session.live_window_demands.values().filter_map(|demand| demand.published.last().copied()));
         for (_, protection) in session.terminal_tail_protections() {
             protected.segment_proxy_seqs.extend(protection.base_proxy_seqs.iter().copied());
         }
