@@ -35,7 +35,7 @@ fn loaded_replaces_draft_and_resets_edit_state() {
     let state = dispatch(loaded_state(), add_op("zdf", "1"));
     let state = dispatch(state, FailoverGroupsEditorAction::Loaded(response("e2", overrides.clone())));
     assert_eq!(state.draft, overrides);
-    assert!(state.undo.is_empty());
+    assert_eq!(state.undo.len(), 0);
     assert!(!state.dirty);
     assert_eq!(state.server.as_ref().and_then(|s| s.etag.as_deref()), Some("e2"));
 }
@@ -87,7 +87,7 @@ fn undo_back_to_server_state_is_clean() {
     let state = dispatch(loaded_state(), add_op("zdf", "1"));
     let state = dispatch(state, FailoverGroupsEditorAction::Undo);
     assert!(!state.dirty);
-    assert!(state.undo.is_empty());
+    assert_eq!(state.undo.len(), 0);
     let again = dispatch(state.clone(), FailoverGroupsEditorAction::Undo);
     assert_eq!(*again, *state);
 }
@@ -194,7 +194,7 @@ fn discard_reverts_to_server_state() {
     let state = dispatch(state, FailoverGroupsEditorAction::Discard);
     assert!(state.draft.is_empty());
     assert!(!state.dirty);
-    assert!(state.undo.is_empty());
+    assert_eq!(state.undo.len(), 0);
     assert!(state.conflict.is_none());
 }
 
@@ -240,7 +240,7 @@ fn consecutive_meta_edits_share_one_undo_step() {
     assert_eq!(state.draft.auto_overrides[0].name.as_deref(), Some("ZDF"));
 
     let state = dispatch(state, FailoverGroupsEditorAction::Undo);
-    assert!(state.draft.auto_overrides.is_empty());
+    assert_eq!(state.draft.auto_overrides.len(), 0);
     assert!(!state.dirty);
 }
 

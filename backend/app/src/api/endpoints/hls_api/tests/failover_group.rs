@@ -30,7 +30,7 @@ async fn manifest_refresh_never_reselects_even_with_open_circuit() {
     let env = GroupPlaybackEnv::new(&["solis", "korath"]).hls().build().await;
     let first = env.get_hls_manifest_text(env.group_vid).await;
     let bound = env.bound_member_input("viewer").await;
-    assert!(!bound.is_empty());
+    assert_ne!(bound, "");
     env.open_circuit(&bound);
     let second = env.refresh_hls_manifest(&first).await;
     assert_eq!(second.status(), StatusCode::OK);

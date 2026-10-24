@@ -173,7 +173,7 @@ fn pinned_metadata_representative_change_is_not_display_stale() {
     let next = auto_section(pinned(auto_override(&[("b", "2")])));
     let plan = plan_of(decide_hot_apply(Some(&applied), &next, &auto_store(), &auto_config()));
     assert_eq!(plan.changes, vec![change(&[VirtualId(2), VirtualId(1), VirtualId(3)], FailoverGroupPolicy::Auto)]);
-    assert!(plan.display_stale.is_empty());
+    assert_eq!(plan.display_stale.len(), 0);
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn order_change_keeping_the_representative_is_not_display_stale() {
     let next = auto_section(auto_override(&[("a", "1"), ("c", "3")]));
     let plan = plan_of(decide_hot_apply(Some(&applied), &next, &auto_store(), &auto_config()));
     assert_eq!(plan.changes.len(), 1);
-    assert!(plan.display_stale.is_empty());
+    assert_eq!(plan.display_stale.len(), 0);
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn manual_group_new_first_member_hot_applies_and_is_display_stale_unless_pinned(
     let next = manual_section(pin(manual(&[("c", "3"), ("a", "1"), ("b", "2")])));
     let plan = plan_of(decide_hot_apply(Some(&applied), &next, &manual_store(), &auto_config()));
     assert_eq!(plan.changes, vec![change(&[VirtualId(3), VirtualId(1), VirtualId(2)], FailoverGroupPolicy::Auto)]);
-    assert!(plan.display_stale.is_empty());
+    assert_eq!(plan.display_stale.len(), 0);
 }
 
 #[test]
@@ -625,5 +625,5 @@ async fn pinned_metadata_representative_change_leaves_the_store_not_display_stal
 
     let stored = FailoverGroupStore::read_group(&env.target_path, GROUP_VID).expect("read").expect("group");
     assert_eq!(stored.members.iter().map(|m| m.member_vid).collect::<Vec<_>>(), vids(&[2, 1, 3]));
-    assert!(FailoverGroupStore::read_meta(&env.target_path).expect("meta").display_stale_groups.is_empty());
+    assert_eq!(FailoverGroupStore::read_meta(&env.target_path).expect("meta").display_stale_groups.len(), 0);
 }

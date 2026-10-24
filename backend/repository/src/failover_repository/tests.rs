@@ -69,7 +69,7 @@ fn load_merges_files_sorted_by_name() {
     let main = loaded.sections.get("Main").expect("main");
     assert_eq!(main.file, failover_dir.join("a.yml"));
     assert_eq!(main.etag.as_ref(), main.overrides.etag());
-    assert!(main.findings.is_empty());
+    assert_eq!(main.findings.len(), 0);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn load_missing_source_is_empty() {
     ] {
         let loaded = load_failover_overrides(&source).expect("loads");
         assert!(loaded.sections.is_empty());
-        assert!(loaded.files_used.is_empty());
+        assert_eq!(loaded.files_used.len(), 0);
         assert!(loaded.error.is_none());
         assert_eq!(loaded.source, Some(source));
     }
@@ -258,7 +258,7 @@ async fn write_removal_keeps_empty_targets_list_in_file_mode() {
 
     let file = read_file(&path);
     assert_eq!(file.version, 1);
-    assert!(file.targets.is_empty());
+    assert_eq!(file.targets.len(), 0);
     assert!(app_config.failover.load().sections.is_empty());
 }
 

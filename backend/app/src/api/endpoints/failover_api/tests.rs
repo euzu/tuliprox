@@ -293,7 +293,7 @@ async fn list_returns_groups_diagnostics_and_etags() {
     assert_eq!(list.etag.as_deref(), Some(current_etag.as_str()));
     assert_eq!(list.applied_etag, None);
     assert!(list.diagnostics.is_empty());
-    assert!(list.display_stale.is_empty());
+    assert_eq!(list.display_stale.len(), 0);
     assert_eq!(list.groups.len(), 2);
     let zdf = list.groups.iter().find(|group| group.key == "zdf").unwrap();
     assert_eq!(zdf.group_vid, Some(VirtualId::new(1000)));

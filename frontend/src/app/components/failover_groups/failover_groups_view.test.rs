@@ -211,7 +211,7 @@ fn rows_list_groups_then_inactive_manual_groups_then_dissolved_keys() {
         (GroupRef::Manual("solo".into()), "Solo channel", RowState::Inactive)
     );
     assert_eq!((rows[3].group.clone(), rows[3].state), (GroupRef::Auto("arte".into()), RowState::Dissolved));
-    assert!(build_rows(None, &draft).is_empty());
+    assert_eq!(build_rows(None, &draft).len(), 0);
 }
 
 #[test]

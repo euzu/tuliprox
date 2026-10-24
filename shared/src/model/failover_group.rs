@@ -589,7 +589,7 @@ mod tests {
         assert_eq!(auto.name.as_deref(), Some("ZDF"));
         assert_eq!(auto.order, vec![member("a", "1")]);
         assert_eq!(auto.add, vec![member("b", "2")]);
-        assert!(auto.remove.is_empty());
+        assert_eq!(auto.remove.len(), 0);
         assert_eq!(section.excluded, vec![member("c", "9")]);
     }
 
@@ -656,7 +656,7 @@ mod tests {
             order: vec![member("p", "1")],
             ..Default::default()
         });
-        assert!(section.validate().is_empty());
+        assert_eq!(section.validate().len(), 0);
     }
 
     #[test]
@@ -678,7 +678,7 @@ mod tests {
         let mut section = TargetFailoverOverridesDto::new("T");
         section.excluded = vec![member("p", "1")];
         section.groups = vec![manual("a", vec![member("p", "1")])];
-        assert!(section.validate().is_empty());
+        assert_eq!(section.validate().len(), 0);
     }
 
     #[test]
@@ -775,7 +775,7 @@ mod tests {
         let back: FailoverFileDto = serde_json::from_str(&json).expect("parses");
         assert_eq!(back, file);
         let empty: FailoverFileDto = serde_json::from_str(r#"{"version":1}"#).expect("parses");
-        assert!(empty.targets.is_empty());
+        assert_eq!(empty.targets.len(), 0);
     }
 
     #[test]
@@ -789,6 +789,6 @@ mod tests {
         assert_eq!(status.state, FailoverTargetState::Enabled);
         let list: FailoverGroupListDto =
             serde_json::from_str(r#"{"etag":null,"applied_etag":null,"groups":[],"diagnostics":{}}"#).expect("list");
-        assert!(list.display_stale.is_empty());
+        assert_eq!(list.display_stale.len(), 0);
     }
 }

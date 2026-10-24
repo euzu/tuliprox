@@ -91,7 +91,7 @@ fn add_member_includes_an_excluded_channel_again() {
     let mut section = section();
     section.excluded.push(a.clone());
     add_member(&mut section, &auto("zdf"), &a);
-    assert!(section.excluded.is_empty());
+    assert_eq!(section.excluded.len(), 0);
     assert_eq!(auto_entry(&section, "zdf").expect("override").add, vec![a]);
 }
 
@@ -127,7 +127,7 @@ fn remove_member_from_manual_group_drops_member() {
     section.groups.push(manual("sport", &[a.clone(), b.clone()]));
     remove_member(&mut section, &manual_ref("sport"), &a);
     assert_eq!(section.groups[0].members, vec![b]);
-    assert!(section.auto_overrides.is_empty());
+    assert_eq!(section.auto_overrides.len(), 0);
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn exclude_ungrouped_member_only_adds_excluded() {
     let mut section = section();
     exclude_member(&mut section, None, &a);
     assert_eq!(section.excluded, vec![a]);
-    assert!(section.auto_overrides.is_empty());
+    assert_eq!(section.auto_overrides.len(), 0);
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn set_policy_on_auto_and_manual_groups() {
     assert_eq!(section.groups[0].policy, Some(FailoverGroupPolicy::Priority));
 
     set_policy(&mut section, &auto("zdf"), None);
-    assert!(section.auto_overrides.is_empty());
+    assert_eq!(section.auto_overrides.len(), 0);
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn add_members_adds_moves_and_skips_in_one_operation() {
     };
     assert_eq!(op.apply(&mut section), None);
     assert_eq!(section.groups[0].members, vec![b, a, c]);
-    assert!(section.groups[1].members.is_empty());
+    assert_eq!(section.groups[1].members.len(), 0);
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn add_members_moves_out_of_auto_group_and_includes_excluded_channels() {
     add_members(&mut section, &manual_ref("sport"), &[(a.clone(), Some(auto("zdf"))), (b.clone(), None)]);
     assert_eq!(auto_entry(&section, "zdf").expect("override").remove, vec![a.clone()]);
     assert_eq!(section.groups[0].members, vec![a, b]);
-    assert!(section.excluded.is_empty());
+    assert_eq!(section.excluded.len(), 0);
 }
 
 #[test]
@@ -359,7 +359,7 @@ fn create_manual_group_releases_excluded_members() {
     let mut section = section();
     section.excluded.push(a.clone());
     create_manual_group(&mut section, "Sport", &[a], "ab12");
-    assert!(section.excluded.is_empty());
+    assert_eq!(section.excluded.len(), 0);
 }
 
 #[test]
@@ -378,7 +378,7 @@ fn convert_stale_to_manual_moves_refs_and_metadata() {
     });
     let id = convert_stale_to_manual(&mut section, "old-zdf", "ab12").expect("id");
     assert_eq!(id, "zdf-ab12");
-    assert!(section.auto_overrides.is_empty());
+    assert_eq!(section.auto_overrides.len(), 0);
     let group = &section.groups[0];
     assert_eq!(group.name, "ZDF");
     assert_eq!(group.members, vec![b, c]);
@@ -419,7 +419,7 @@ fn new_group_from_selection_takes_members_out_of_their_groups() {
     let created = op.apply(&mut section);
     assert_eq!(created, Some(manual_ref("mixed-ab12")));
     assert_eq!(auto_entry(&section, "zdf").expect("override").remove, vec![a.clone()]);
-    assert!(section.groups[0].members.is_empty());
+    assert_eq!(section.groups[0].members.len(), 0);
     assert_eq!(section.groups[1].members, vec![a, b, member("p", "3")]);
 }
 
@@ -445,8 +445,8 @@ fn forget_ref_drops_the_reference_from_every_list_without_recording_a_removal() 
     forget_ref(&mut section, &auto("zdf"), &a);
     let entry = auto_entry(&section, "zdf").expect("override");
     assert_eq!(entry.order, vec![b.clone()]);
-    assert!(entry.add.is_empty());
-    assert!(entry.remove.is_empty());
+    assert_eq!(entry.add.len(), 0);
+    assert_eq!(entry.remove.len(), 0);
 
     forget_ref(&mut section, &auto("zdf"), &b);
     assert!(auto_entry(&section, "zdf").is_none(), "an empty override is removed again");

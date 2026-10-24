@@ -845,7 +845,7 @@ mod tests {
         let ProtocolMessage::PlaylistUpdateResponse(terminal) = bare.0 else {
             panic!("expected playlist update terminal response");
         };
-        assert!(terminal.targets.is_empty());
+        assert_eq!(terminal.targets.len(), 0);
     }
 
     fn provider_fetch_failure() -> ProviderFetchFailure {

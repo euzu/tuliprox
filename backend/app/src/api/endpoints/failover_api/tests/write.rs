@@ -267,7 +267,7 @@ async fn delete_removes_section() {
 
     let (status, _) = call(&router, "DELETE", "/failover/overrides?target=Main&expected_etag=stale", None).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(drain_changed(&mut events).is_empty());
+    assert_eq!(drain_changed(&mut events).len(), 0);
 
     let (status, body) =
         call(&router, "DELETE", &format!("/failover/overrides?target=Main&expected_etag={etag}"), None).await;
@@ -305,7 +305,7 @@ async fn reassign_moves_orphan_section() {
     let (status, body) = call(&router, "POST", "/failover/overrides/reassign", request("Gone", TARGET, "stale")).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(parse::<FailoverGroupConflictDto>(&body).current_etag.as_deref(), Some(etag.as_str()));
-    assert!(drain_changed(&mut events).is_empty());
+    assert_eq!(drain_changed(&mut events).len(), 0);
 
     let (status, body) = call(&router, "POST", "/failover/overrides/reassign", request("Gone", TARGET, &etag)).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));

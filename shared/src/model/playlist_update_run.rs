@@ -156,7 +156,7 @@ mod tests {
         let event = PlaylistUpdateRunStateEvent::uncorrelated(PlaylistUpdateState::Success);
         assert_eq!(serde_json::to_string(&event)?, r#"{"state":"Success"}"#);
         let old = serde_json::from_str::<PlaylistUpdateRunStateEvent>(r#"{"run_id":"r","state":"Success"}"#)?;
-        assert!(old.targets.is_empty());
+        assert_eq!(old.targets.len(), 0);
         let event = event.with_targets(vec!["Main TV".to_string()]);
         let decoded = serde_json::from_str::<PlaylistUpdateRunStateEvent>(&serde_json::to_string(&event)?)?;
         assert_eq!(decoded, event);

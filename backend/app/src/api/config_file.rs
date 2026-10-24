@@ -601,7 +601,7 @@ mod tests {
         let next = snapshot(&[("b", "2"), ("same", "9"), ("new", "1"), ("a", "2")]);
 
         assert_eq!(changed_override_targets(&previous, &next), vec!["a", "b", "gone", "new"]);
-        assert!(changed_override_targets(&next, &next).is_empty());
+        assert_eq!(changed_override_targets(&next, &next).len(), 0);
     }
 
     #[tokio::test]
@@ -624,7 +624,7 @@ mod tests {
 
         // Same content again: swapped, but no section changed, so nothing is announced.
         ConfigFile::Failover.reload(&file, &app_state).await?;
-        assert!(drain_overrides_events(&mut events).is_empty());
+        assert_eq!(drain_overrides_events(&mut events).len(), 0);
 
         // A section added in a second target and the first one removed are both reported, sorted.
         std::fs::write(&file, section_yaml("Other", &["1"]))?;
@@ -651,7 +651,7 @@ mod tests {
         assert!(Arc::ptr_eq(&before, &after), "the previous snapshot must stay active");
         assert!(after.error.is_none());
         assert!(after.sections.contains_key("Main"));
-        assert!(drain_overrides_events(&mut events).is_empty());
+        assert_eq!(drain_overrides_events(&mut events).len(), 0);
         Ok(())
     }
 

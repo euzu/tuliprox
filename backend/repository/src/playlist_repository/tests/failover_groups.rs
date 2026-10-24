@@ -566,7 +566,7 @@ async fn catalog_and_meta_published_with_groups() {
     assert!(path.join("failover_groups.db").exists());
     assert!(path.join("failover_groups.catalog.db").exists());
     assert!(path.join("failover_groups.meta.json").exists());
-    assert!(stage_leftovers(&path).is_empty());
+    assert_eq!(stage_leftovers(&path).len(), 0);
     assert_eq!(FailoverGroupStore::read_catalog(&path).expect("catalog"), batch.catalog);
     assert_eq!(FailoverGroupStore::read_meta(&path).expect("meta"), batch.meta);
 
@@ -592,7 +592,7 @@ async fn catalog_written_without_groups() {
     let mut empty = FailoverGroupBatch { enabled: true, ..FailoverGroupBatch::default() };
     persist_batch(&app_config, &target, &mut playlist, &mut empty).await.expect("persists");
     assert!(path.join("failover_groups.catalog.db").exists());
-    assert!(FailoverGroupStore::read_catalog(&path).expect("catalog").is_empty());
+    assert_eq!(FailoverGroupStore::read_catalog(&path).expect("catalog").len(), 0);
     assert_eq!(FailoverGroupStore::read_meta(&path).expect("meta"), FailoverGroupMeta::default());
 }
 
@@ -605,7 +605,7 @@ async fn rejected_persistence_writes_no_catalog_or_meta() {
     let path = target_path(&app_config, &target);
     assert!(!path.join("failover_groups.catalog.db").exists());
     assert!(!path.join("failover_groups.meta.json").exists());
-    assert!(stage_leftovers(&path).is_empty());
+    assert_eq!(stage_leftovers(&path).len(), 0);
 }
 
 #[cfg(unix)]
@@ -651,7 +651,7 @@ fn dropped_stage_removes_catalog_and_meta_files() {
     assert_eq!(stage_leftovers(dir.path()).len(), 2);
     assert!(!dir.path().join("failover_groups.catalog.db").exists());
     staged.discard();
-    assert!(stage_leftovers(dir.path()).is_empty());
+    assert_eq!(stage_leftovers(dir.path()).len(), 0);
 }
 
 #[tokio::test]
@@ -670,7 +670,7 @@ async fn disabled_target_removes_catalog_and_meta() {
     {
         assert!(!path.join(name).exists(), "{name} removed");
     }
-    assert!(FailoverGroupStore::read_catalog(&path).expect("catalog").is_empty());
+    assert_eq!(FailoverGroupStore::read_catalog(&path).expect("catalog").len(), 0);
     assert_eq!(FailoverGroupStore::read_meta(&path).expect("meta"), FailoverGroupMeta::default());
 }
 
@@ -713,7 +713,7 @@ async fn publication_clears_display_stale() {
     let (mut playlist, batch) = grouped_fixture();
     let mut batch = FailoverGroupBatch { enabled: true, meta: FailoverGroupMeta::default(), ..batch };
     persist_batch(&app_config, &target, &mut playlist, &mut batch).await.expect("persists");
-    assert!(FailoverGroupStore::read_meta(&path).expect("meta").display_stale_groups.is_empty());
+    assert_eq!(FailoverGroupStore::read_meta(&path).expect("meta").display_stale_groups.len(), 0);
     let json = std::fs::read_to_string(path.join("failover_groups.meta.json")).expect("json");
     assert!(!json.contains("display_stale_groups"), "{json}");
 }
