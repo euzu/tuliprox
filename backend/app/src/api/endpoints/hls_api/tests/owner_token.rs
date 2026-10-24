@@ -802,6 +802,43 @@ async fn live_refresh_on_token_route_renews_the_lease_with_the_hls_ttl() {
 }
 
 #[tokio::test]
+async fn manifest_refresh_of_a_running_playback_needs_no_free_provider_slot() {
+    let fixture =
+        owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
+    let device = client("10.0.0.1", 50_241);
+    let (_, token, session_token) = wrapped_entry(&fixture, &device).await;
+    assert_eq!(fixture.token_request(&device, &token, HeaderMap::new()).await.status(), StatusCode::OK);
+    // A segment still streaming from the origin holds the account's only connection.
+    let segment_token = fixture.seal(
+        Some(&session_token),
+        &format!("{}/tracks-v1/slow.hls.fmp4", fixture.origin.base_url),
+        HlsResourceKind::Media,
+        Some(fixture.input.name.as_ref()),
+    );
+    let open_segment = fixture.token_request(&device, &segment_token, HeaderMap::new()).await;
+    assert_eq!(open_segment.status(), StatusCode::OK);
+    assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 1);
+    assert!(fixture.app_state.active_provider.is_exhausted(&fixture.input.name));
+    let manifests_before = fixture.origin.manifest_requests();
+
+    for _ in 0..2 {
+        let started = std::time::Instant::now();
+        let refresh =
+            tokio::time::timeout(Duration::from_secs(2), fixture.token_request(&device, &token, HeaderMap::new()))
+                .await
+                .expect("manifest refresh does not wait for provider capacity");
+        assert_eq!(refresh.status(), StatusCode::OK);
+        assert!(started.elapsed() < Duration::from_secs(1), "no capacity wait: {:?}", started.elapsed());
+    }
+
+    assert_eq!(fixture.origin.manifest_requests(), manifests_before + 2, "every refresh fetches upstream");
+    assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 1, "refresh binds no slot");
+    assert!(fixture.app_state.active_provider.binding_tag_for_owner(&session_token).is_some());
+    assert!(fixture.app_state.active_users.get_and_update_user_session("hls-user", &session_token).await.is_some());
+    drop(open_segment);
+}
+
+#[tokio::test]
 async fn media_token_from_another_account_is_rejected_and_session_account_is_kept() {
     let fixture = owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), with_alias_account).await;
     let device = client("10.0.0.1", 50_231);
@@ -1669,7 +1706,8 @@ async fn capacity_wait_returns_at_its_deadline_while_the_account_stays_full() ->
 }
 
 #[tokio::test]
-async fn pinned_manifest_refresh_waits_for_a_freed_slot_instead_of_503() -> Result<(), Box<dyn std::error::Error>> {
+async fn pinned_manifest_refresh_is_served_immediately_while_another_playback_holds_the_slot(
+) -> Result<(), Box<dyn std::error::Error>> {
     let fixture =
         owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
     let device = client("10.0.0.1", 50_871);
@@ -1677,23 +1715,20 @@ async fn pinned_manifest_refresh_waits_for_a_freed_slot_instead_of_503() -> Resu
     // The first variant request is served from the entry hand-off; refreshes fetch upstream.
     assert_eq!(fixture.token_request(&device, &token, HeaderMap::new()).await.status(), StatusCode::OK);
     let manifests_before = fixture.origin.manifest_requests();
-    let blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_872).await?;
-    let refresh = fixture.token_request(&device, &token, HeaderMap::new());
-    tokio::pin!(refresh);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut refresh).await.is_err(),
-        "refresh waits for capacity"
-    );
-    drop(blocker);
-    let response = tokio::time::timeout(Duration::from_secs(2), &mut refresh).await?;
+    let _blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_872).await?;
+    let started = tokio::time::Instant::now();
+    let response =
+        tokio::time::timeout(Duration::from_secs(2), fixture.token_request(&device, &token, HeaderMap::new())).await?;
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(started.elapsed() < Duration::from_secs(1), "no capacity wait: {:?}", started.elapsed());
     assert!(body_text(response).await.contains("#EXTM3U"));
     assert_eq!(fixture.origin.manifest_requests(), manifests_before + 1);
+    assert_eq!(fixture.app_state.active_provider.get_provider_connections_count(), 1, "only the blocker holds a slot");
     Ok(())
 }
 
 #[tokio::test]
-async fn pinned_manifest_refresh_after_capacity_wait_sends_cookies_rotated_during_the_wait(
+async fn pinned_manifest_refresh_while_the_account_is_full_sends_the_current_session_cookies(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fixture =
         owner_token_fixture_with(playlist_origin_handler(MEDIA_PLAYLIST), |input| input.max_connections = 1).await;
@@ -1702,22 +1737,16 @@ async fn pinned_manifest_refresh_after_capacity_wait_sends_cookies_rotated_durin
     assert_eq!(fixture.token_request(&device, &token, HeaderMap::new()).await.status(), StatusCode::OK);
     let active_users = &fixture.app_state.active_users;
     store_cookie_header(active_users, &owner, "sid=old", &fixture.entry_url).await;
-    let blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_882).await?;
-    let refresh = fixture.token_request(&device, &token, HeaderMap::new());
-    tokio::pin!(refresh);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut refresh).await.is_err(),
-        "refresh waits for capacity"
-    );
     store_cookie_header(active_users, &owner, "sid=fresh", &fixture.entry_url).await;
-    drop(blocker);
-    let response = tokio::time::timeout(Duration::from_secs(2), &mut refresh).await?;
+    let _blocker = block_provider_slot(&fixture, &owner, &fixture.input.name, 50_882).await?;
+    let response =
+        tokio::time::timeout(Duration::from_secs(2), fixture.token_request(&device, &token, HeaderMap::new())).await?;
     assert_eq!(response.status(), StatusCode::OK);
     drop(body_text(response).await);
     let requests = fixture.origin.requests();
     let sent =
         requests.iter().rev().find(|request| request_path(request).contains(".m3u8")).ok_or("refresh missing")?;
-    assert!(sent.contains("sid=fresh") && !sent.contains("sid=old"), "refresh must use the rotated cookie: {sent}");
+    assert!(sent.contains("sid=fresh") && !sent.contains("sid=old"), "refresh must use the current cookie: {sent}");
     Ok(())
 }
 

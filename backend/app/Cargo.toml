@@ -16,7 +16,7 @@ workspace = true
 ignored = ["paste"]
 
 [dependencies]
-lol_html = "2.9.0"
+lol_html = "3.0.2"
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
 tuliprox-hls = { workspace = true }
@@ -35,10 +35,10 @@ tuliprox-mpegts = { workspace = true }
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
-quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
+quick-xml = { version = "0.42", features = ["async-tokio", "serialize"] }
 regex.workspace = true
 clap = { version = "4.6.6", features = ["derive"] }
-reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 url.workspace = true
 chrono.workspace = true
 iana-time-zone = "0.1.65"
@@ -46,9 +46,9 @@ cron.workspace = true
 axum = { version = "0.8.9" , features = ["macros", "default", "ws"]}
 serde_html_form = "0.4.1"
 tower = "0.5.3"
-tower-http = { version = "0.6.11", features = ["cors", "auth", "fs", "compression-full", "trace"] }
+tower-http = { version = "0.7.1", features = ["cors", "auth", "fs", "compression-full", "trace"] }
 tower_governor = { version = "0.8.0", features = ["axum"] }
-jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
 futures.workspace = true
 pest.workspace = true
 thiserror.workspace = true
@@ -63,7 +63,7 @@ blake3.workspace = true
 bytes.workspace = true
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros", "io-std"] }
-lru = "0.16.4"
+lru = "0.19.0"
 tokio-util =  { version = "0.7.19", features = ["io", "io-util"] }
 tempfile = "3.27.0"
 base64.workspace = true
@@ -87,7 +87,7 @@ strum.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-sysinfo = { version = "0.38.4", default-features = false, features = ["system", "network"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "network"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
@@ -101,7 +101,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 vergen = { version = "10.0.3", features = ["build"] }
 
 [dev-dependencies]
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 tuliprox-processing = { workspace = true, features = ["test-support"] }
 tuliprox-hls = { workspace = true, features = ["test-support"] }
 # The migration and playlist-stream tests build legacy v2 databases and

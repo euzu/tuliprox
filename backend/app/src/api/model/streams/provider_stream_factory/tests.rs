@@ -326,6 +326,7 @@ async fn collect_stream(stream: BoxedProviderStream) -> Result<Vec<u8>, StreamEr
         .await
 }
 
+mod eof_release;
 mod http;
 mod lifecycle;
 mod policy;

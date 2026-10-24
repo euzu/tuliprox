@@ -2,6 +2,7 @@ use super::{ActiveProviderManager, ConnectionKind, PlaybackLeaseRef};
 
 mod admission;
 mod behavior;
+mod eof_release;
 mod lifecycle;
 mod retry;
 mod support;

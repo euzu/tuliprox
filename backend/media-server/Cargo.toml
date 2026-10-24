@@ -13,8 +13,8 @@ bytes.workspace = true
 chrono.workspace = true
 futures.workspace = true
 http = "1"
-quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
-reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+quick-xml = { version = "0.42", features = ["async-tokio", "serialize"] }
+reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 shared = { workspace = true }

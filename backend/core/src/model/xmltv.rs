@@ -203,10 +203,8 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
         match reader.read_event_into_async(&mut buf).await {
             Ok(Event::Empty(e) | Event::Start(e)) => {
                 let name = e.name();
-                // `from_utf8_lossy` borrows for valid UTF-8 (the common case), so no
-                // allocation happens per element here.
-                let tag = String::from_utf8_lossy(name.as_ref());
-                current_tag = match tag.as_ref() {
+                let tag = name.as_ref();
+                current_tag = match tag {
                     EPG_TAG_DISPLAY_NAME => TextTag::DisplayName,
                     EPG_TAG_TITLE => TextTag::Title,
                     EPG_TAG_DESC => TextTag::Desc,
@@ -215,11 +213,11 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                 };
                 current_category_lang = None;
 
-                match tag.as_ref() {
+                match tag {
                     EPG_TAG_CHANNEL => {
                         let mut id = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == EPG_ATTRIB_ID.as_bytes() {
+                            if attr.key.as_ref() == EPG_ATTRIB_ID {
                                 if let Some(value) = get_attr_value(&attr) {
                                     id = Some(value);
                                     break;
@@ -240,13 +238,13 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                         current_programme = None;
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
-                            if key == EPG_ATTRIB_START.as_bytes() {
+                            if key == EPG_ATTRIB_START {
                                 start = get_attr_value(&attr);
-                            } else if key == EPG_ATTRIB_STOP.as_bytes() {
+                            } else if key == EPG_ATTRIB_STOP {
                                 stop = get_attr_value(&attr);
-                            } else if key == EPG_ATTRIB_CHANNEL.as_bytes() {
+                            } else if key == EPG_ATTRIB_CHANNEL {
                                 channel = get_attr_value(&attr);
-                            } else if key == EPG_ATTRIB_CATCHUP_ID.as_bytes() {
+                            } else if key == EPG_ATTRIB_CATCHUP_ID {
                                 catchup_id = get_attr_value(&attr);
                             }
                         }
@@ -264,7 +262,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     }
                     EPG_TAG_ICON => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == EPG_ATTRIB_SRC.as_bytes() {
+                            if attr.key.as_ref() == EPG_ATTRIB_SRC {
                                 if let Some(icon) = get_attr_value(&attr) {
                                     if !icon.is_empty() {
                                         if let Some(programme) = &mut current_programme {
@@ -281,7 +279,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                         current_category_lang = e
                             .attributes()
                             .flatten()
-                            .find(|attr| attr.key.as_ref() == EPG_ATTRIB_LANG.as_bytes())
+                            .find(|attr| attr.key.as_ref() == EPG_ATTRIB_LANG)
                             .and_then(|attr| get_attr_value(&attr));
                     }
                     EPG_TAG_LIVE => {
@@ -303,32 +301,31 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                 }
             }
             Ok(Event::Text(e)) => {
-                if let Ok(decoded) = e.decode() {
-                    let text = decoded.trim();
-                    if !text.is_empty() {
-                        if let Some(channel) = &mut current_channel {
-                            if current_tag == TextTag::DisplayName {
-                                channel.title = Some(concat_text(channel.title.as_ref(), text));
-                            }
+                let decoded = e.xml10_content();
+                let text = decoded.trim();
+                if !text.is_empty() {
+                    if let Some(channel) = &mut current_channel {
+                        if current_tag == TextTag::DisplayName {
+                            channel.title = Some(concat_text(channel.title.as_ref(), text));
                         }
+                    }
 
-                        if let Some(program) = &mut current_programme {
-                            if current_tag == TextTag::Title {
-                                program.title = Some(concat_text(program.title.as_ref(), text));
-                            } else if current_tag == TextTag::Desc {
-                                program.desc = Some(concat_text(program.desc.as_ref(), text));
-                            } else if current_tag == TextTag::Category {
-                                program
-                                    .categories
-                                    .push(EpgCategory { value: text.intern(), lang: current_category_lang.take() });
-                            }
+                    if let Some(program) = &mut current_programme {
+                        if current_tag == TextTag::Title {
+                            program.title = Some(concat_text(program.title.as_ref(), text));
+                        } else if current_tag == TextTag::Desc {
+                            program.desc = Some(concat_text(program.desc.as_ref(), text));
+                        } else if current_tag == TextTag::Category {
+                            program
+                                .categories
+                                .push(EpgCategory { value: text.intern(), lang: current_category_lang.take() });
                         }
                     }
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
-                match String::from_utf8_lossy(name.as_ref()).as_ref() {
+                match name.as_ref() {
                     EPG_TAG_CHANNEL => {
                         if let Some(channel) = current_channel.take() {
                             channels.push(channel);

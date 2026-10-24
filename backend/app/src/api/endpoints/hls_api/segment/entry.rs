@@ -10,12 +10,8 @@ use super::{
 };
 use crate::{
     api::{
-        api_utils::{
-            acquire_exact_provider_handle, blocks_new_playback, connection_priority_for_kind,
-            get_hls_playback_ttl_secs, is_running_playback, select_provider_stream_url, ExactProviderAcquire,
-            HLS_MANIFEST_CAPACITY_WAIT,
-        },
-        model::{AppState, CustomVideoStreamType, PlaybackLeaseRef, ProviderAllocation, UserSession},
+        api_utils::{blocks_new_playback, get_hls_playback_ttl_secs, is_running_playback, select_provider_stream_url},
+        model::{AppState, CustomVideoStreamType, UserSession},
     },
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, InputSource, ProxyUserCredentials},
@@ -175,205 +171,171 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 
     let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
-    let (request_url, session_token, provider_handle, selected_provider_config) = if let Some(session) = user_session {
-        let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
-        let pinned_kind = hls_playback_kind(archive_reference, &url, Some(session.token.as_str()));
-        let session_kind =
-            session.connection_kind.or(connection_kind).unwrap_or(crate::api::model::ConnectionKind::Normal);
-        // Manifest refreshes of parallel playbacks on one account free their slots within seconds;
-        // waiting briefly beats an immediate 503 that stalls the player.
-        let acquired = acquire_exact_provider_handle(
-            app_state,
-            &ExactProviderAcquire {
-                provider: pinned_provider,
-                addr: &fingerprint.addr,
-                allow_grace: false,
-                priority: connection_priority_for_kind(user, session_kind),
-                kind: session_kind,
-                lease: Some(PlaybackLeaseRef::new(session.token.as_str(), pinned_kind)),
-            },
-            Some(HLS_MANIFEST_CAPACITY_WAIT),
-        )
-        .await;
-        let provider_handle = if let Some(handle) = acquired {
-            Some(handle)
-        } else {
-            debug_if_enabled!(
-                "HLS pinned provider {} unavailable for {}; aborting allocation to prevent mid-session migration",
-                sanitize_sensitive_info(pinned_provider),
-                sanitize_sensitive_info(&fingerprint.addr.to_string())
-            );
-            None
-        };
-
-        if provider_handle.is_none() {
-            // The capacity wait can outlive the session snapshot: an ended or rebound session must
-            // not trigger panel provisioning for the stale pinned account.
-            if app_state.active_users.session_identity(&user.username, &session.token).await != Some(session.identity())
-            {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
-            return hls_panel_provisioning_or_status_response(
-                app_state,
-                user,
-                input,
-                virtual_id,
-                original_hls_entry_path,
-                server_info.path.as_deref(),
-                StatusCode::SERVICE_UNAVAILABLE,
-            )
-            .await;
-        }
-        match provider_handle.as_ref().map(|handle| &handle.allocation) {
-            Some(ProviderAllocation::Exhausted) => (url, None, provider_handle, None),
-            Some(ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg)) => {
-                let selected_provider_config = Arc::clone(cfg);
-                // URL acceptance follows the provider that produced the sealed URL, not the session:
-                // entry URLs are re-resolved to the selected account on every fetch, child URLs
-                // (often CDN URLs) are fetched as sealed and only from their origin provider.
-                let accept_requested_stream_url = match stage {
-                    HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider } => {
-                        if origin_provider != Some(selected_provider_config.name.as_ref()) {
-                            // A stale child URI from an earlier account: reject only this request,
-                            // the playback itself stays valid after the player refetches its master.
-                            app_state.connection_manager.release_provider_handle(provider_handle);
-                            debug_if_enabled!(
-                                "HLS child manifest from provider {} rejected for selected provider {}",
-                                sanitize_sensitive_info(origin_provider.unwrap_or("<unknown>")),
-                                sanitize_sensitive_info(&selected_provider_config.name)
-                            );
-                            return StatusCode::NOT_FOUND.into_response();
-                        }
-                        true
-                    }
-                    HlsRequestStage::Entry | HlsRequestStage::LegacyVariant | HlsRequestStage::Variant { .. } => false,
-                };
-                let Some((_provider_name, stream_url)) = select_provider_stream_url(
-                    &url,
-                    input,
-                    &selected_provider_config,
-                    accept_requested_stream_url,
-                    &app_state.app_config,
-                )
-                .await
-                else {
-                    app_state.connection_manager.release_provider_handle(provider_handle);
-                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-                };
-                // The capacity wait can outlive the session snapshot: a session that ended or switched
-                // accounts meanwhile must not be rebound, and cookies rotated or expired during the
-                // wait are read now.
-                let session_headers = app_state
-                    .active_users
-                    .provider_headers_for_session_identity(
-                        &user.username,
-                        &session.token,
-                        session.identity(),
-                        &stream_url,
-                    )
-                    .await;
-                if session_headers == tuliprox_session::SessionProviderHeaders::NoSession {
-                    app_state.connection_manager.release_provider_handle(provider_handle);
-                    debug_if_enabled!(
-                        "HLS session {} changed while waiting for pinned provider {}",
-                        sanitize_sensitive_info(&session.token),
-                        sanitize_sensitive_info(pinned_provider)
-                    );
-                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-                }
-                if session.provider.as_ref() == selected_provider_config.name.as_ref() {
-                    if let tuliprox_session::SessionProviderHeaders::Headers(session_headers) = session_headers {
-                        append_user_session_provider_headers(&mut headers, &session_headers);
-                    }
-                }
-                let session_token = app_state
-                    .active_users
-                    .create_user_session(crate::api::model::CreateUserSessionParams {
-                        user,
-                        session_token: &session.token,
-                        virtual_id,
-                        provider: &selected_provider_config.name,
-                        stream_url: &stream_url,
-                        addr: &fingerprint.addr,
-                        connection_permission,
-                        connection_kind: session.connection_kind.or(connection_kind),
-                        socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
-                    })
-                    .await;
-                let session_ttl_secs = get_hls_playback_ttl_secs(app_state, pinned_kind);
-                app_state.active_provider.refresh_adaptive_playback_lease(
-                    &selected_provider_config.name,
-                    &session_token,
-                    pinned_kind,
-                    session_ttl_secs,
+    let (request_url, session_token, provider_handle, selected_provider_config, provider_binding_tag) =
+        if let Some(session) = user_session {
+            let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
+            let pinned_kind = hls_playback_kind(archive_reference, &url, Some(session.token.as_str()));
+            // A playlist is text, not media: a refresh of a running playback resolves its pinned account
+            // without allocating, waiting for or failing on provider capacity. Only segments hold slots.
+            let Some(selected_provider_config) = app_state.active_provider.find_provider_config(pinned_provider) else {
+                debug_if_enabled!(
+                    "HLS pinned provider {} is no longer configured for {}; aborting to prevent mid-session migration",
+                    sanitize_sensitive_info(pinned_provider),
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
                 );
-                (stream_url, Some(session_token), provider_handle, Some(selected_provider_config))
+                // An ended or rebound session must not trigger panel provisioning for the stale pinned account.
+                if app_state.active_users.session_identity(&user.username, &session.token).await
+                    != Some(session.identity())
+                {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                return hls_panel_provisioning_or_status_response(
+                    app_state,
+                    user,
+                    input,
+                    virtual_id,
+                    original_hls_entry_path,
+                    server_info.path.as_deref(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await;
+            };
+            // URL acceptance follows the provider that produced the sealed URL, not the session:
+            // entry URLs are re-resolved to the selected account on every fetch, child URLs
+            // (often CDN URLs) are fetched as sealed and only from their origin provider.
+            let accept_requested_stream_url = match stage {
+                HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider } => {
+                    if origin_provider != Some(selected_provider_config.name.as_ref()) {
+                        // A stale child URI from an earlier account: reject only this request,
+                        // the playback itself stays valid after the player refetches its master.
+                        debug_if_enabled!(
+                            "HLS child manifest from provider {} rejected for selected provider {}",
+                            sanitize_sensitive_info(origin_provider.unwrap_or("<unknown>")),
+                            sanitize_sensitive_info(&selected_provider_config.name)
+                        );
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    true
+                }
+                HlsRequestStage::Entry | HlsRequestStage::LegacyVariant | HlsRequestStage::Variant { .. } => false,
+            };
+            let Some((_provider_name, stream_url)) = select_provider_stream_url(
+                &url,
+                input,
+                &selected_provider_config,
+                accept_requested_stream_url,
+                &app_state.app_config,
+            )
+            .await
+            else {
+                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            // A session that ended or switched accounts meanwhile must not be rebound.
+            let session_headers = app_state
+                .active_users
+                .provider_headers_for_session_identity(&user.username, &session.token, session.identity(), &stream_url)
+                .await;
+            if session_headers == tuliprox_session::SessionProviderHeaders::NoSession {
+                debug_if_enabled!(
+                    "HLS session {} changed while resolving pinned provider {}",
+                    sanitize_sensitive_info(&session.token),
+                    sanitize_sensitive_info(pinned_provider)
+                );
+                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            None => (url, None, None, None),
-        }
-    } else {
-        // Append/shift catchup must keep an m3u-catchup session token even when shared HLS
-        // cache is off; otherwise rewritten segments register as LiveHls in the panel.
-        let user_session_token = hls_entry_user_session_token(
-            fingerprint,
-            &user.username,
-            virtual_id,
-            session_token_hint,
-            archive_reference,
-        );
-        let hls_session_owner = if hls_cache_enabled_for_user(app_state, target, user) {
-            let session_key = HlsSessionKey::new(input.id, stream_context.stream_ref());
-            let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
-            Some(build_hls_origin_session_owner(&proxy_session_id))
+            if session.provider.as_ref() == selected_provider_config.name.as_ref() {
+                if let tuliprox_session::SessionProviderHeaders::Headers(session_headers) = session_headers {
+                    append_user_session_provider_headers(&mut headers, &session_headers);
+                }
+            }
+            let session_token = app_state
+                .active_users
+                .create_user_session(crate::api::model::CreateUserSessionParams {
+                    user,
+                    session_token: &session.token,
+                    virtual_id,
+                    provider: &selected_provider_config.name,
+                    stream_url: &stream_url,
+                    addr: &fingerprint.addr,
+                    connection_permission,
+                    connection_kind: session.connection_kind.or(connection_kind),
+                    socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
+                })
+                .await;
+            let session_ttl_secs = get_hls_playback_ttl_secs(app_state, pinned_kind);
+            app_state.active_provider.refresh_adaptive_playback_lease(
+                &selected_provider_config.name,
+                &session_token,
+                pinned_kind,
+                session_ttl_secs,
+            );
+            let provider_binding_tag = app_state.active_provider.binding_tag_for_owner(&session_token);
+            (stream_url, Some(session_token), None, Some(selected_provider_config), provider_binding_tag)
         } else {
-            None
-        };
-        let session_owner = hls_session_owner.as_deref().unwrap_or(user_session_token.as_str());
-        // Archive playback keeps its own reconnect window semantics, so the lease must
-        // be classified as catchup rather than plain live HLS.
-        let playback_kind = hls_playback_kind(archive_reference, &url, Some(user_session_token.as_str()));
-        let hls_session_ttl_secs = get_hls_playback_ttl_secs(app_state, playback_kind);
-        let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
-            app_state,
-            fingerprint,
-            user,
-            input,
-            virtual_id,
-            &url,
-            &user_session_token,
-            session_owner,
-            playback_kind,
-            hls_session_ttl_secs,
-            connection_permission,
-            fallback_connection_kind,
-            true,
-        )
-        .await
-        else {
-            return hls_panel_provisioning_or_status_response(
+            // Append/shift catchup must keep an m3u-catchup session token even when shared HLS
+            // cache is off; otherwise rewritten segments register as LiveHls in the panel.
+            let user_session_token = hls_entry_user_session_token(
+                fingerprint,
+                &user.username,
+                virtual_id,
+                session_token_hint,
+                archive_reference,
+            );
+            let hls_session_owner = if hls_cache_enabled_for_user(app_state, target, user) {
+                let session_key = HlsSessionKey::new(input.id, stream_context.stream_ref());
+                let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
+                Some(build_hls_origin_session_owner(&proxy_session_id))
+            } else {
+                None
+            };
+            let session_owner = hls_session_owner.as_deref().unwrap_or(user_session_token.as_str());
+            // Archive playback keeps its own reconnect window semantics, so the lease must
+            // be classified as catchup rather than plain live HLS.
+            let playback_kind = hls_playback_kind(archive_reference, &url, Some(user_session_token.as_str()));
+            let hls_session_ttl_secs = get_hls_playback_ttl_secs(app_state, playback_kind);
+            let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
                 app_state,
+                fingerprint,
                 user,
                 input,
                 virtual_id,
-                original_hls_entry_path,
-                server_info.path.as_deref(),
-                StatusCode::SERVICE_UNAVAILABLE,
+                &url,
+                &user_session_token,
+                session_owner,
+                playback_kind,
+                hls_session_ttl_secs,
+                connection_permission,
+                fallback_connection_kind,
+                true,
             )
-            .await;
-        };
-        debug_if_enabled!(
+            .await
+            else {
+                return hls_panel_provisioning_or_status_response(
+                    app_state,
+                    user,
+                    input,
+                    virtual_id,
+                    original_hls_entry_path,
+                    server_info.path.as_deref(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await;
+            };
+            debug_if_enabled!(
             "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
             sanitize_sensitive_info(&user.username),
             reservation.selected_provider_config.as_ref().map_or("<unknown>", |provider| provider.name.as_ref()),
             sanitize_sensitive_info(&reservation.request_url)
         );
-        (
-            reservation.request_url,
-            Some(reservation.session_token),
-            reservation.provider_handle,
-            reservation.selected_provider_config,
-        )
-    };
+            let provider_binding_tag = reservation.provider_handle.as_ref().and_then(|handle| handle.binding_tag);
+            (
+                reservation.request_url,
+                Some(reservation.session_token),
+                reservation.provider_handle,
+                reservation.selected_provider_config,
+                provider_binding_tag,
+            )
+        };
 
     // The session as created or reserved above; manifest response cookies may only enter this
     // binding, not one an account switch installed while the playlist downloaded.
@@ -381,7 +343,6 @@ pub(in crate::api) async fn handle_hls_stream_request(
         Some(token) => app_state.active_users.session_identity(&user.username, token).await,
         None => None,
     };
-    let provider_binding_tag = provider_handle.as_ref().and_then(|handle| handle.binding_tag);
     let provider_request_id = provider_handle.as_ref().and_then(|handle| handle.playback_request_id);
     let selected_provider_name = selected_provider_config.as_ref().map(|cfg| Arc::clone(&cfg.name));
 
@@ -406,7 +367,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let user_agent_stream_index = crate::api::api_utils::resolve_stream_user_agent_index(
         app_state,
         input,
-        provider_handle.is_some(),
+        selected_provider_config.is_some(),
         &user.username,
         session_token.as_deref(),
     )

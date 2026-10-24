@@ -16,13 +16,13 @@ clap = { version = "4.6.6", features = ["derive"] }
 chrono.workspace = true
 crc32fast = "1.5.1"
 futures.workspace = true
-reqwest = { version = "0.13.4", features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13.5", features = ["json", "stream", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 tempfile = "3.27.0"
 pin-project-lite = "0.2.17"
 url.workspace = true

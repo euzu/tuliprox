@@ -208,6 +208,7 @@ struct Config {
     http1_allow_obsolete_multiline_headers_in_responses: bool,
     http1_ignore_invalid_headers_in_responses: bool,
     http1_allow_spaces_after_header_name_in_responses: bool,
+    http1_max_headers: Option<usize>,
     #[cfg(feature = "http2")]
     http2_initial_stream_window_size: Option<u32>,
     #[cfg(feature = "http2")]
@@ -335,6 +336,7 @@ impl ClientBuilder {
                 http1_allow_obsolete_multiline_headers_in_responses: false,
                 http1_ignore_invalid_headers_in_responses: false,
                 http1_allow_spaces_after_header_name_in_responses: false,
+                http1_max_headers: None,
                 #[cfg(feature = "http2")]
                 http2_initial_stream_window_size: None,
                 #[cfg(feature = "http2")]
@@ -754,7 +756,7 @@ impl ClientBuilder {
                         }
 
                         let verifier = if config.root_certs.is_empty() {
-                            rustls_platform_verifier::Verifier::new(provider.clone())
+                            rustls_platform_verifier::Verifier::new(provider)
                                 .map_err(crate::error::builder)?
                         } else {
                             #[cfg(any(
@@ -764,7 +766,7 @@ impl ClientBuilder {
                             {
                                 rustls_platform_verifier::Verifier::new_with_extra_roots(
                                     crate::tls::rustls_der(config.root_certs)?,
-                                    provider.clone(),
+                                    provider,
                                 )
                                 .map_err(crate::error::builder)?
                             }
@@ -996,6 +998,10 @@ impl ClientBuilder {
 
         if config.http1_allow_spaces_after_header_name_in_responses {
             builder.http1_allow_spaces_after_header_name_in_responses(true);
+        }
+
+        if let Some(http1_max_headers) = config.http1_max_headers {
+            builder.http1_max_headers(http1_max_headers);
         }
 
         let proxies_maybe_http_auth = proxies.iter().any(|p| p.maybe_has_http_auth());
@@ -1542,6 +1548,17 @@ impl ClientBuilder {
     ) -> ClientBuilder {
         self.config
             .http1_allow_spaces_after_header_name_in_responses = value;
+        self
+    }
+
+    /// Set the maximum number of headers accepted in an HTTP/1 response.
+    ///
+    /// When a response contains more headers than this value, it is rejected
+    /// with a parse error and the request fails.
+    ///
+    /// Default is 100.
+    pub fn http1_max_headers(mut self, max: usize) -> ClientBuilder {
+        self.config.http1_max_headers = Some(max);
         self
     }
 
@@ -2699,8 +2716,11 @@ impl Client {
         }
 
         for proxy in self.inner.proxies.iter() {
-            if let Some(header) = proxy.http_non_tunnel_basic_auth(dst) {
-                headers.insert(PROXY_AUTHORIZATION, header);
+            if let Some(proxy) = proxy.intercept(dst) {
+                if let Some(header) = proxy.http_non_tunnel_basic_auth() {
+                    headers.insert(PROXY_AUTHORIZATION, header);
+                }
+                // Use only the first matching proxy, as the connector does.
                 break;
             }
         }
@@ -2716,10 +2736,13 @@ impl Client {
         }
 
         for proxy in self.inner.proxies.iter() {
-            if let Some(iter) = proxy.http_non_tunnel_custom_headers(dst) {
-                iter.iter().for_each(|(key, value)| {
-                    headers.insert(key, value.clone());
-                });
+            if let Some(proxy) = proxy.intercept(dst) {
+                if let Some(iter) = proxy.http_non_tunnel_custom_headers() {
+                    iter.iter().for_each(|(key, value)| {
+                        headers.insert(key, value.clone());
+                    });
+                }
+                // Use only the first matching proxy, as the connector does.
                 break;
             }
         }
