@@ -1191,6 +1191,10 @@
 
 ## 🐛 Fixes
 
+- **Input cards and target pipeline details in the playlist update view wrap side by side.** The input cards and the
+  per-target entries under an input's update details are sized to their content and flow into a wrapping row instead of
+  one tall column.
+
 - **`mcp.allowed_origins` entries match the browser `Origin` header.** Entries for `http`, `https`, `ws` and `wss` are
   canonicalized when the configuration loads: the host is lowercased and a default port is dropped, so
   `https://claude.ai:443/` is stored as `https://claude.ai`. User info in an entry is rejected. Custom schemes are kept

@@ -857,11 +857,11 @@ mod tests {
         let styles = include_str!("../../../../scss/app/components/playlist/_playlist_update_view.scss");
 
         for declaration in [
-            "grid-template-columns: minmax(0, 1fr) 20rem;",
+            "flex: 999 1 18rem;",
+            "flex: 1 1 20rem;",
             "@media (max-width: size.$mobile-breakpoint)",
             "grid-template-columns: minmax(0, 1fr);",
-            "border-inline-start: 1px solid var(--border-color);",
-            "border-block-start: 1px solid var(--border-color);",
+            "border: 1px solid var(--border-color);",
             "flex-flow: row wrap;",
             "min-height: 0;",
             "overflow-y: auto;",
@@ -990,14 +990,11 @@ mod tests {
             assert!(rule.contains("gap: max(var(--gap-default), 0.5rem);"), "missing control spacing for {selector}");
         }
         let actions = styles.split_once("&__input-actions {").unwrap().1.split('}').next().unwrap();
-        // The card already supplies its default padding at the outer right edge.
-        assert!(actions
-            .contains("padding-inline: var(--padding-large) calc(var(--padding-large) - var(--padding-default));"));
+        // The panel keeps its own border and padding, so it reads the same beside or below the content.
+        assert!(actions.contains("padding: var(--padding-default);"));
+        assert!(actions.contains("border: 1px solid var(--border-color);"));
         let card_styles = include_str!("../../../../scss/app/components/_card.scss");
         assert!(card_styles.contains("padding: var(--padding-default);"));
-        let mobile = styles.split_once("@media").unwrap().1;
-        let mobile_actions = mobile.split_once("&__input-actions {").unwrap().1.split('}').next().unwrap();
-        assert!(mobile_actions.contains("padding-inline: 0;"));
         assert!(styles.contains("padding: max(var(--padding-default), 0.75rem);"));
         let card_source = include_str!("input_update_card.rs");
         let policy_control = card_source
