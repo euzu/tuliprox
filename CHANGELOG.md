@@ -1021,6 +1021,11 @@
 
 ## ⚙️ Optimizations
 
+- **HLS cache usage scan runs at startup.** With a very large HLS cache the first segment fetch used to wait 2-3 seconds
+  for the lazy full-directory scan. The existing cache garbage-collection task now runs the scan before its first pass
+  (and again after a cache path change), and cancellation interrupts it. Switch staging also runs the scan before its
+  per-attempt deadline starts, so it no longer counts against the segment timeout.
+
 - **Shared table column metadata.** Column enums define stable IDs, labels, and display/sort behavior across Web UI
   tables. Metadata is memoized, header observers persist across renders, and layout drafts and validation avoid redundant
   clones and sets. Settings filenames build hash prefixes only when needed while preserving existing encoded names;
@@ -1185,6 +1190,14 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **`mcp.allowed_origins` entries match the browser `Origin` header.** Entries for `http`, `https`, `ws` and `wss` are
+  canonicalized when the configuration loads: the host is lowercased and a default port is dropped, so
+  `https://claude.ai:443/` is stored as `https://claude.ai`. User info in an entry is rejected. Custom schemes are kept
+  as written.
+
+- **A keys-only B+tree scan reports an undecodable key of a deleted entry.** Like the entry scan, it now decodes the
+  key before it skips a tombstone instead of silently hiding the corruption.
 
 - **First HLS segment after a restart no longer times out on a large cache.** The first cache write scans the whole
   HLS cache directory to account its size, and that scan ran inside the per-attempt segment write deadline. With many
@@ -1864,6 +1877,12 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **`AppState` groups the recording handles and wraps the network-access checks.** The recording queue and the provider
+  capacity live in `AppState.recording` (`RecordingState`). `AppState::check_network_access`,
+  `try_check_network_access`, `check_permission_and_network_access`, `resolve_api_user_context` and `update_geoip_db`
+  pair the configuration with its GeoIP store, so the endpoints no longer pass both. The unused `cache_playlist` and
+  `get_connection_permission` pass-throughs are removed.
 
 - **`ClusterFlags` is built on `create_bitset!`.** It was the last user of the `bitflags` crate, which is removed
   from `shared`. The API and the persisted `[live,vod]` form are unchanged.

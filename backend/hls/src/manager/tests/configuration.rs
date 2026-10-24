@@ -138,7 +138,7 @@ async fn initial_and_reloaded_connect_budgets_use_the_loaded_config() {
 
 #[test]
 fn managers_built_with_defaults_never_share_a_cache_directory() {
-    // Managers created in parallel tests used to share `DEFAULT_HLS_CACHE_PATH`; the orphan-session
+    // Managers created in parallel tests used to share `default_hls_cache_path()`; the orphan-session
     // GC of one then deleted the segment files of another.
     let first = HlsProxyManager::new();
     let second = HlsProxyManager::new();
@@ -146,8 +146,9 @@ fn managers_built_with_defaults_never_share_a_cache_directory() {
     let second_path = second.segment_cache().cache_path();
 
     assert_ne!(first_path, second_path);
-    assert_ne!(first_path, std::path::PathBuf::from(crate::cache::DEFAULT_HLS_CACHE_PATH));
-    assert_ne!(second_path, std::path::PathBuf::from(crate::cache::DEFAULT_HLS_CACHE_PATH));
+    let shared_default = std::path::PathBuf::from(tuliprox_core::model::default_hls_cache_path());
+    assert_ne!(first_path, shared_default);
+    assert_ne!(second_path, shared_default);
 }
 
 #[tokio::test]
@@ -207,4 +208,19 @@ fn private_cache_dir_never_adopts_an_existing_directory() {
     assert_ne!(second.0, first_path);
     assert!(first_path.join("stale").exists(), "creating another directory must not touch an existing one");
     assert!(std::fs::read_dir(&second.0).expect("read new dir").next().is_none());
+}
+
+#[tokio::test]
+async fn prepare_cache_capacity_accounting_scans_once_and_skips_a_disabled_manager() {
+    let disabled = HlsProxyManager::from_hls_cache_config(None);
+    disabled.prepare_cache_capacity_accounting().await.expect("disabled manager no-ops");
+    assert_eq!(disabled.segment_cache().capacity_scan_count(), 0);
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let dto =
+        HlsCacheConfigDto { cache_path: Some(temp_dir.path().to_string_lossy().into_owned()), ..Default::default() };
+    let manager = HlsProxyManager::with_hls_cache_config(&HlsCacheConfig::from(&dto));
+    manager.prepare_cache_capacity_accounting().await.expect("first scan");
+    manager.prepare_cache_capacity_accounting().await.expect("second call is a no-op");
+    assert_eq!(manager.segment_cache().capacity_scan_count(), 1);
 }

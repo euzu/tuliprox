@@ -6,8 +6,6 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock, Semaphore};
 
-pub const DEFAULT_HLS_CACHE_PATH: &str = "/tmp/tuliprox/cache/hls";
-
 const TEMP_CREATE_ATTEMPTS: usize = 8;
 
 const MAX_CONCURRENT_OWNED_CACHE_OPERATIONS: usize = 64;

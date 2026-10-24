@@ -634,11 +634,11 @@ impl<K, V> BPlusTreeQuery<K, V> {
         let next_page_id = self.header.next_page_id;
         self.with_page(leaf_page_id, |bytes, _| {
             let cell = leaf_cell_in_page(bytes, range, leaf_page_id, next_page_id)?;
+            // Decoded before the match so a corrupt tombstone key fails like it does in `decode_entry_range`.
+            let key: K = binary_deserialize(cell.key_bytes)?;
             match cell.value {
                 LeafValueRef::Tombstone => Ok(None),
-                LeafValueRef::Inline { .. } | LeafValueRef::Overflow { .. } => {
-                    binary_deserialize(cell.key_bytes).map(Some)
-                }
+                LeafValueRef::Inline { .. } | LeafValueRef::Overflow { .. } => Ok(Some(key)),
             }
         })
     }

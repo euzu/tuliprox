@@ -16,7 +16,7 @@ use crate::{
         },
         model::{AppState, CustomVideoStreamType},
     },
-    auth::{check_network_access_only, Fingerprint},
+    auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, PlaybackKind, ProxyUserCredentials},
     processing::parser::hls::{get_hls_session_token_and_url_from_token, HlsResourceKind},
     repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
@@ -297,7 +297,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_api_stream_resolved(
     token: String,
 ) -> axum::response::Response {
     // Network access check only - permission check is done later with full stream info
-    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state.app_config, &app_state.geoip) {
+    if let Err(e) = app_state.check_network_access(&user, &fingerprint) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
     let target_name = &target.name;

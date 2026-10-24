@@ -89,7 +89,8 @@ macro_rules! app_state_views {
 app_state_views! {
     /// The handles the DVR needs: the recording queue and what feeds it.
     recording_ctx => crate::api::model::recording::recording_ctx::RecordingCtx<std::sync::Arc<tuliprox_session::EventManager>> {
-        app_config, recordings, events <- event_manager, http_clients, recording_capacity,
+        app_config, recordings <- recording.queue, events <- event_manager, http_clients,
+        recording_capacity <- recording.capacity,
     }
 
     /// The handles admission reads: it decides over connections and users.

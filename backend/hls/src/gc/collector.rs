@@ -356,6 +356,16 @@ pub fn exec_hls_cache_gc(ctx: &HlsCtx, cancel_token: &CancellationToken) {
             hls_proxy
                 .sync_all_session_access_leases_and_detach_if_needed(&active_users, &active_provider, now_ms)
                 .await;
+            // Also covers a cache root change: the scan of a huge cache runs here, not inside a segment fetch.
+            // After the lease sync, which must not wait for it.
+            tokio::select! {
+                () = cancel_token.cancelled() => break,
+                result = hls_proxy.prepare_cache_capacity_accounting() => {
+                    if let Err(err) = result {
+                        warn!("HLS cache usage scan failed: {err}");
+                    }
+                }
+            }
             match hls_proxy.run_garbage_collection_once(now_ms).await {
                 Ok(report) if report.did_cleanup_or_invalidate() => {
                     debug!(

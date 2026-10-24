@@ -44,7 +44,7 @@ async fn spawn_moving_origin(head: Arc<AtomicU64>) -> TestSegmentOrigin {
 /// Enables the HLS cache with `mode` and keeps the cache directory of the test manager.
 ///
 /// A config without `cache_path` makes `update_config` switch the manager to the process-shared
-/// `DEFAULT_HLS_CACHE_PATH`. Switching to it makes every test scan everything other runs left there when the first
+/// `default_hls_cache_path()`. Switching to it makes every test scan everything other runs left there when the first
 /// segment is written, which exceeds the segment body deadline on a loaded machine and fails the first fetch attempt.
 pub(super) async fn enable_hls_cache_with_startup_mode(app_state: &Arc<AppState>, mode: HlsStartupMode) {
     let hls_cache = app_state.hls.proxy.keep_cache_path(HlsCacheConfigDto {

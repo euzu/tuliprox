@@ -362,7 +362,7 @@ async fn recording_reload_for(app_state: &Arc<AppState>, incoming: &ConfigDto) -
         &incoming_recording.directory,
         &app_state.app_config.paths.load().home_path,
     );
-    let existing = app_state.recordings.committed_snapshot().await.1.len();
+    let existing = app_state.recording.queue.committed_snapshot().await.1.len();
     recording_reload_outcome(current_recording, &incoming_recording, existing)
 }
 

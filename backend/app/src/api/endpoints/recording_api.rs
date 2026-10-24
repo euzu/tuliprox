@@ -132,7 +132,7 @@ pub async fn create_recording_request(
     let (Some(program_start), Some(program_end)) = (body.program_start, body.program_end) else {
         return error_response(StatusCode::UNPROCESSABLE_ENTITY, "recording_invalid_interval");
     };
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     let input = CreateRecordingInput {
         source: RecordingSourceInput {
             target_id: source.target_id,
@@ -198,7 +198,7 @@ async fn create_http_recording_task(
         group: resolved.group,
         series_name: resolved.series_name,
     };
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.create_media_recording_idempotent(claims, &input, idempotency).await {
         Ok(_) => {}
         // The transfer already exists from the first attempt; nothing new to
@@ -220,7 +220,7 @@ pub async fn edit_recording_task(
     AuthClaims(claims): AuthClaims,
     Json(body): Json<EditRecordingTaskBody>,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.edit_recording(&claims, &id, body.into()).await {
         Ok(_view) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -275,7 +275,7 @@ pub async fn pause_recording_task(
     if !is_admin(&claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.pause_recording(&claims, &id).await {
         Ok(()) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -296,7 +296,7 @@ pub async fn resume_recording_task(
     if !is_admin(&claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.resume_recording(&claims, &id).await {
         Ok(true) => {
             if let Err(error) = start_recording_worker_if_needed(&app_state).await {
@@ -321,7 +321,7 @@ pub async fn retry_recording_task(
     if !is_admin(&claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.retry_recording(&claims, &id).await {
         Ok(true) => {
             if let Err(error) = start_recording_worker_if_needed(&app_state).await {
@@ -347,7 +347,7 @@ pub async fn restart_recording_task(
     if !is_admin(&claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.restart_recording(&claims, &id).await {
         Ok(true) => {
             if let Err(error) = start_recording_worker_if_needed(&app_state).await {
@@ -367,7 +367,7 @@ pub async fn remove_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.remove_recording_task(&claims, &id).await {
         Ok(_) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -382,7 +382,7 @@ pub async fn cancel_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.cancel_recording(&claims, &id).await {
         Ok(()) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -398,7 +398,7 @@ pub async fn delete_recording_task(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     match service.delete_recording(&claims, &id).await {
         Ok(()) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
@@ -565,8 +565,8 @@ pub async fn get_recording_health(
             .outbox_depth
             .load(std::sync::atomic::Ordering::Relaxed),
         notification_dead_lettered: health.notification_dead_lettered(),
-        queue_revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
-        recovery: app_state.recordings.recovery_health().await.map(Into::into),
+        queue_revision: app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst),
+        recovery: app_state.recording.queue.recovery_health().await.map(Into::into),
     })
     .into_response()
 }
@@ -730,7 +730,7 @@ pub async fn list_recording_rules(
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed");
     };
     let admin = is_admin(&claims);
-    let revision = app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst);
+    let revision = app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst);
     Json(
         rules
             .into_iter()
@@ -789,7 +789,7 @@ pub async fn create_recording_rule(
         Ok(rule) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
             Json(RecordingRuleResponse {
-                revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
+                revision: app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst),
                 rule,
             })
             .into_response()
@@ -863,7 +863,7 @@ pub async fn edit_recording_rule(
         Ok(Some(rule)) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
             Json(RecordingRuleResponse {
-                revision: app_state.recordings.revision.load(std::sync::atomic::Ordering::SeqCst),
+                revision: app_state.recording.queue.revision.load(std::sync::atomic::Ordering::SeqCst),
                 rule,
             })
             .into_response()
@@ -1006,7 +1006,7 @@ pub async fn delete_recording_rule(
     // the rule store then fails. Without the compensation the operator
     // was left with the rule still present and its upcoming recordings
     // silently gone.
-    let service = RecordingService::new(app_state.recordings.clone(), app_state.app_config.clone());
+    let service = RecordingService::new(app_state.recording.queue.clone(), app_state.app_config.clone());
     let mut cancelled = Vec::new();
     if future == DeleteFuture::Cancel {
         match service.cancel_future_rule_recordings(&claims, &id, chrono::Utc::now().timestamp()).await {
@@ -1269,8 +1269,8 @@ mod tests {
     async fn wait_until_worker_owns_runnable_task(state: &AppState) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let running = state.recordings.workers_running().await;
-                let runnable = state.recordings.active.read().await.first().is_some_and(|task| {
+                let running = state.recording.queue.workers_running().await;
+                let runnable = state.recording.queue.active.read().await.first().is_some_and(|task| {
                     matches!(
                         task.state,
                         shared::model::RecordingTaskState::Running
@@ -1290,8 +1290,8 @@ mod tests {
     #[tokio::test]
     async fn resume_command_restarts_the_worker_for_a_paused_vod() {
         let mut state = enabled_recording_state();
-        Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
-        *state.recordings.active.write().await = vec![resumable_vod(shared::model::RecordingTaskState::Paused)];
+        Arc::get_mut(&mut state).expect("unique app state").recording.capacity = UnavailableCapacity::new();
+        *state.recording.queue.active.write().await = vec![resumable_vod(shared::model::RecordingTaskState::Paused)];
 
         let response = resume_recording_task(
             axum::extract::Path("vod".to_string()),
@@ -1308,8 +1308,8 @@ mod tests {
     #[tokio::test]
     async fn retry_command_restarts_the_worker_for_a_cancelled_vod() {
         let mut state = enabled_recording_state();
-        Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
-        state.recordings.finished.write().await.push(resumable_vod(shared::model::RecordingTaskState::Cancelled));
+        Arc::get_mut(&mut state).expect("unique app state").recording.capacity = UnavailableCapacity::new();
+        state.recording.queue.finished.write().await.push(resumable_vod(shared::model::RecordingTaskState::Cancelled));
 
         let response = retry_recording_task(
             axum::extract::Path("vod".to_string()),
@@ -1363,7 +1363,7 @@ mod tests {
             sources: vec![tuliprox_core::model::ConfigSource { inputs: vec!["input-a".into()], targets: vec![target] }],
             ..tuliprox_core::model::SourcesConfig::default()
         }));
-        Arc::get_mut(&mut state).expect("unique app state").recording_capacity = UnavailableCapacity::new();
+        Arc::get_mut(&mut state).expect("unique app state").recording.capacity = UnavailableCapacity::new();
         state
     }
 
@@ -1476,7 +1476,7 @@ mod tests {
             // The title points at HD, but the selected playlist row is the 4K feed.
             let response = post_live(&state, "43", "").await?;
             assert_eq!(response.status(), StatusCode::NO_CONTENT, "{output:?}");
-            let (_, tasks) = state.recordings.committed_snapshot().await;
+            let (_, tasks) = state.recording.queue.committed_snapshot().await;
             assert_eq!(tasks.len(), 1);
             let task = &tasks[0];
             assert_eq!(task.recording.source.virtual_id, "43");
@@ -1494,7 +1494,7 @@ mod tests {
                 let dir = tempfile::tempdir()?;
                 let state = live_request_state(dir.path(), output).await?;
                 assert_eq!(post_live(&state, id, input).await?.status(), StatusCode::NO_CONTENT);
-                let (_, tasks) = state.recordings.committed_snapshot().await;
+                let (_, tasks) = state.recording.queue.committed_snapshot().await;
                 assert_eq!(tasks[0].recording.source.virtual_id, expected);
                 assert_eq!(tasks[0].recording.source.input_name, "input-a");
             }
@@ -1512,7 +1512,7 @@ mod tests {
             // Playlist row 43 is a different stream with the same EPG id.
             let response = post_live(&state, "", "").await?;
             assert_eq!(response.status(), StatusCode::NO_CONTENT, "{output:?}");
-            let (_, tasks) = state.recordings.committed_snapshot().await;
+            let (_, tasks) = state.recording.queue.committed_snapshot().await;
             assert_eq!(tasks.len(), 1);
             assert_eq!(tasks[0].recording.source.virtual_id, "42");
             assert_eq!(tasks[0].recording.source.input_name, "input-a");
@@ -1678,7 +1678,7 @@ mod tests {
     }
 
     async fn tasks_owned_by(state: &AppState, owner: &str) -> usize {
-        let (_, tasks) = state.recordings.committed_snapshot().await;
+        let (_, tasks) = state.recording.queue.committed_snapshot().await;
         tasks.iter().filter(|task| task.owner_id() == &UserId::from(owner)).count()
     }
 

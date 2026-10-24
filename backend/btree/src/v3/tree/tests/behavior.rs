@@ -67,6 +67,24 @@ fn delete_writes_tombstone_and_reinsert_reuses_the_leaf() -> io::Result<()> {
 }
 
 #[test]
+fn key_iterator_fails_on_an_undecodable_tombstone_key() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tombstone-key.db");
+    let mut tree = BPlusTree::new();
+    tree.insert(7u32, String::from("original"));
+    tree.store(&path)?;
+    let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&path)?;
+    assert!(updater.delete(&7)?);
+    drop(updater);
+
+    // A msgpack integer key does not decode as `String`: the entry scan and the keys-only scan must both report it.
+    let mut query = BPlusTreeQuery::<String, String>::try_new(&path)?;
+    assert!(query.iter().next().is_some_and(|item| item.is_err()));
+    assert!(query.keys().next().is_some_and(|item| item.is_err()));
+    Ok(())
+}
+
+#[test]
 fn identical_batch_metadata_is_a_true_noop() -> io::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("metadata-noop.db");

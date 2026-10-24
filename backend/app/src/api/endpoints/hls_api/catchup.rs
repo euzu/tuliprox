@@ -258,7 +258,7 @@ pub(super) async fn hls_api_stream_leaked_relative(
     relative_path: String,
     request_query: Option<&str>,
 ) -> axum::response::Response {
-    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state.app_config, &app_state.geoip) {
+    if let Err(e) = app_state.check_network_access(&user, &fingerprint) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
     let Some(origin_url) = resolve_leaked_hls_relative_origin(&session_stream_url, &relative_path, request_query)

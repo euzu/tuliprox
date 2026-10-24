@@ -378,17 +378,19 @@ async fn create_shared_data(
             resource_client_no_redirect,
             resource_public_client_no_redirect,
         )),
-        recordings: Arc::new(recordings),
         cache: Arc::new(ArcSwapOption::from(cache)),
         shared_stream_manager,
         hls: HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
         epg_scans: crate::api::model::EpgScanCoordinator::default(),
         active_users,
-        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-            Arc::clone(&active_provider),
-            Arc::clone(&connection_manager),
-            Arc::clone(&maintenance),
+        recording: crate::api::model::RecordingState::new(
+            Arc::new(recordings),
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+                Arc::clone(&maintenance),
+            ),
         ),
         active_provider,
         connection_manager,
@@ -1206,14 +1208,16 @@ mod tests {
             };
             let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
             Arc::new(AppState {
-                recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-                    Arc::clone(&active_provider),
-                    Arc::clone(&connection_manager),
-                    crate::api::model::create_test_maintenance(""),
+                recording: crate::api::model::RecordingState::new(
+                    Arc::new(RecordingQueue::new()),
+                    crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                        Arc::clone(&active_provider),
+                        Arc::clone(&connection_manager),
+                        crate::api::model::create_test_maintenance(""),
+                    ),
                 ),
                 app_config: app_cfg,
                 http_clients: Arc::default(),
-                recordings: Arc::new(RecordingQueue::new()),
                 cache: Arc::new(ArcSwapOption::default()),
                 shared_stream_manager,
                 hls: crate::api::model::HlsState::new(Arc::new(HlsProxyManager::new())),

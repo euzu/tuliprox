@@ -5,7 +5,7 @@ use crate::{
     },
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::{
-        geoip::{update_geoip_db, GeoIpUpdateError},
+        geoip::GeoIpUpdateError,
         processor::{exec_processing, ProcessingRun},
     },
     utils::exit,
@@ -275,9 +275,7 @@ fn run_geoip_update(app_state: &Arc<AppState>, schedule: &str) {
     let app_state = Arc::clone(app_state);
     let schedule = schedule.to_string();
     tokio::spawn(async move {
-        if let Err(err) =
-            update_geoip_db(&app_state.app_config, &app_state.http_clients.default.load(), &app_state.geoip).await
-        {
+        if let Err(err) = app_state.update_geoip_db().await {
             // `Disabled` is not a failure - the task ran and found nothing to
             // do, which is what the config asked for.
             if !matches!(err, GeoIpUpdateError::Disabled) {

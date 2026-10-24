@@ -101,7 +101,7 @@ impl Drop for PrivateCacheDir {
 impl HlsProxyManager {
     /// Creates a manager with the default cache settings and a cache directory of its own.
     ///
-    /// Sharing `DEFAULT_HLS_CACHE_PATH` between managers is unsafe: the orphan-session cleanup of one
+    /// Sharing `default_hls_cache_path()` between managers is unsafe: the orphan-session cleanup of one
     /// manager deletes the session directories of every other manager on that path.
     ///
     /// When the temp directory is not writable the manager still gets a unique path of its own, which the cache
@@ -112,7 +112,7 @@ impl HlsProxyManager {
     /// own (see [`HlsProxyManager::new`]).
     ///
     /// Tests build managers through this instead of `with_hls_cache_config(&HlsCacheConfig::from(&dto))`, which
-    /// falls back to the process-shared `DEFAULT_HLS_CACHE_PATH` for a `dto` without a path.
+    /// falls back to the process-shared `default_hls_cache_path()` for a `dto` without a path.
     pub fn with_private_cache(dto: &shared::model::HlsCacheConfigDto) -> Self {
         if dto.cache_path.is_some() {
             return Self::with_hls_cache_config(&HlsCacheConfig::from(dto));
@@ -136,7 +136,7 @@ impl HlsProxyManager {
     /// Returns `dto` with the cache directory this manager currently uses, unless `dto` names one.
     ///
     /// Applying a `dto` without a `cache_path` through [`HlsProxyManager::update_config`] would switch the manager
-    /// to the process-shared `DEFAULT_HLS_CACHE_PATH`, which every test process and the real default share.
+    /// to the process-shared `default_hls_cache_path()`, which every test process and the real default share.
     #[cfg(any(test, feature = "test-support"))]
     pub fn keep_cache_path(&self, mut dto: shared::model::HlsCacheConfigDto) -> shared::model::HlsCacheConfigDto {
         if dto.cache_path.is_none() {

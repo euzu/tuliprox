@@ -459,14 +459,16 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
 
     Arc::new(AppState {
-        recording_capacity: crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
-            Arc::clone(&active_provider),
-            Arc::clone(&connection_manager),
-            crate::api::model::create_test_maintenance(""),
+        recording: crate::api::model::RecordingState::new(
+            Arc::new(crate::api::model::RecordingQueue::new()),
+            crate::api::model::recording_runtime::ProviderCapacityAdapter::new(
+                Arc::clone(&active_provider),
+                Arc::clone(&connection_manager),
+                crate::api::model::create_test_maintenance(""),
+            ),
         ),
         app_config: app_cfg,
         http_clients: Arc::default(),
-        recordings: Arc::new(crate::api::model::RecordingQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
         hls: crate::api::model::HlsState::new(Arc::new(crate::api::model::HlsProxyManager::new())),

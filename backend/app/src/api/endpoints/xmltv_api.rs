@@ -8,7 +8,7 @@ use crate::{
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
         static_headers::CT_XML,
     },
-    auth::{resolve_api_user_context, Fingerprint},
+    auth::Fingerprint,
     model::{
         ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_ATTRIB_SRC,
         EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
@@ -932,13 +932,7 @@ async fn xmltv_api(
     let Some((user, target)) = get_user_target(&api_req, app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(
-        user.clone(),
-        target.clone(),
-        fingerprint.clone(),
-        &app_state.app_config,
-        &app_state.geoip,
-    ) {
+    if let Err(e) = app_state.resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone()) {
         return e.into_player_response(auth_status);
     }
 
@@ -977,13 +971,7 @@ async fn epg_api_resource(
     let Some((user, target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(
-        user.clone(),
-        target.clone(),
-        fingerprint.clone(),
-        &app_state.app_config,
-        &app_state.geoip,
-    ) {
+    if let Err(e) = app_state.resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone()) {
         return e.into_player_response(auth_status);
     }
 

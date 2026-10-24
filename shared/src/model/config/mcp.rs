@@ -39,18 +39,19 @@ impl Default for McpConfigDto {
 
 impl McpConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        let allowed_origins: Vec<String> = self
-            .allowed_origins
-            .iter()
-            .map(|origin| origin.trim().trim_end_matches('/'))
-            .filter(|origin| !origin.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if let Some(invalid) = allowed_origins.iter().find(|origin| !is_origin(origin)) {
-            return Err(TuliproxError::ConfigBase(format!(
-                "`mcp.allowed_origins` entry `{invalid}` is not an origin; expected `scheme://host[:port]` without \
-                 path, query or fragment"
-            )));
+        let mut allowed_origins = Vec::with_capacity(self.allowed_origins.len());
+        for origin in &self.allowed_origins {
+            let origin = origin.trim().trim_end_matches('/');
+            if origin.is_empty() {
+                continue;
+            }
+            let Some(canonical) = canonical_origin(origin) else {
+                return Err(TuliproxError::ConfigBase(format!(
+                    "`mcp.allowed_origins` entry `{origin}` is not an origin; expected `scheme://host[:port]` without \
+                     path, query or fragment"
+                )));
+            };
+            allowed_origins.push(canonical);
         }
         self.allowed_origins = allowed_origins;
         if self.max_response_bytes < MIN_MCP_MAX_RESPONSE_BYTES {
@@ -63,11 +64,22 @@ impl McpConfigDto {
     }
 }
 
-/// Whether `value` is a `scheme://host[:port]` origin. Custom schemes are accepted; a path, query or fragment is not.
-fn is_origin(value: &str) -> bool {
-    url::Url::parse(value).is_ok_and(|url| {
-        url.host_str().is_some() && matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_none()
-    })
+/// The origin as a browser sends it in the `Origin` header, or `None` when `value` is not a `scheme://host[:port]`
+/// origin. The default port is omitted and the host lowercased for `http(s)`/`ws(s)`; a custom scheme is kept as given.
+/// A path, query, fragment or userinfo is not part of an origin.
+fn canonical_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    let is_origin = url.host_str().is_some()
+        && matches!(url.path(), "" | "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    if !is_origin {
+        return None;
+    }
+    let origin = url.origin();
+    Some(if origin.is_tuple() { origin.ascii_serialization() } else { value.to_owned() })
 }
 
 #[cfg(test)]
@@ -141,6 +153,26 @@ mod tests {
     fn prepare_accepts_custom_scheme_and_port_origins() {
         let dto = prepare_origins(&["vscode-webview://abc123", "http://localhost:3000/", "https://claude.ai"]).unwrap();
         assert_eq!(dto.allowed_origins, ["vscode-webview://abc123", "http://localhost:3000", "https://claude.ai"]);
+    }
+
+    #[test]
+    fn prepare_canonicalizes_tuple_origins_to_the_browser_origin_header() {
+        let dto = prepare_origins(&[
+            "https://claude.ai:443/",
+            "http://LOCALHOST:80",
+            "https://claude.ai:8443",
+            "wss://Host.example:443/",
+        ])
+        .unwrap();
+        assert_eq!(
+            dto.allowed_origins,
+            ["https://claude.ai", "http://localhost", "https://claude.ai:8443", "wss://host.example"]
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_origins_with_userinfo() {
+        assert!(prepare_origins(&["https://user@a.example"]).is_err());
     }
 
     #[test]

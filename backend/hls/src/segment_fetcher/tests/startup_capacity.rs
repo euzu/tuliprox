@@ -1,5 +1,5 @@
 use super::*;
-use crate::{cache::StartupWritePhase, SegmentCacheStatus};
+use crate::{cache::StartupWritePhase, segment_fetcher::SegmentFetchSnapshot, SegmentCacheStatus};
 use std::{fmt::Write as _, sync::Arc, time::Duration};
 use tuliprox_core::utils::current_time_millis;
 
@@ -434,8 +434,19 @@ async fn processing_after_origin_eof_does_not_reuse_the_transfer_deadline() -> s
     Ok(())
 }
 
-#[tokio::test]
-async fn first_cache_inventory_scan_does_not_consume_the_segment_body_deadline() -> std::io::Result<()> {
+/// A fresh cache with the first inventory scan paused after its snapshot, and the fetch snapshot of one demanded segment.
+struct PausedFirstScan {
+    server: TestSegmentServer,
+    _directory: tempfile::TempDir,
+    policy: SegmentFetchPolicy,
+    context: SegmentFetchContext,
+    snapshot: SegmentFetchSnapshot,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    resume: tokio::sync::oneshot::Sender<()>,
+}
+
+/// The fixture for the tests that assert a held first scan is not charged to the 200 ms attempt timeout.
+async fn paused_first_scan() -> std::io::Result<PausedFirstScan> {
     let server = spawn_segment_server(0).await;
     let directory = tempfile::tempdir()?;
     let policy = SegmentFetchPolicy {
@@ -451,16 +462,46 @@ async fn first_cache_inventory_scan_does_not_consume_the_segment_body_deadline()
     let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.unwrap();
     // A fresh cache has not accounted its directory yet: the first write triggers the full inventory scan.
     let (entered, resume) = context.segment_cache.pause_startup_write(StartupWritePhase::AfterInventorySnapshot);
-    let task_context = context.clone();
-    let task =
-        tokio::spawn(async move { super::super::fetch_segment_into_cache(&task_context, &snapshot, &policy).await });
+    Ok(PausedFirstScan { server, _directory: directory, policy, context, snapshot, entered, resume })
+}
+
+#[tokio::test]
+async fn first_cache_inventory_scan_does_not_consume_the_segment_body_deadline() -> std::io::Result<()> {
+    let fixture = paused_first_scan().await?;
+    let PausedFirstScan { server, policy, context, snapshot, entered, resume, .. } = fixture;
+    let task = tokio::spawn(async move { super::super::fetch_segment_into_cache(&context, &snapshot, &policy).await });
     tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
     // The held scan outlives the 200 ms attempt timeout; it must not be charged to any attempt.
     tokio::time::sleep(Duration::from_millis(600)).await;
     resume.send(()).unwrap();
-    let result = task.await.unwrap();
-    if let Err(error) = result {
+    if let Err(error) = task.await.unwrap() {
         panic!("slow first inventory scan failed the segment fetch: {error:?}");
+    }
+    assert_eq!(server.requests.lock().await.len(), 1, "the first attempt must succeed without a retry");
+    Ok(())
+}
+
+#[tokio::test]
+async fn switch_staging_does_not_charge_the_first_inventory_scan_to_the_body_deadline() -> std::io::Result<()> {
+    let fixture = paused_first_scan().await?;
+    let PausedFirstScan { server, policy, context, snapshot, entered, resume, .. } = fixture;
+    let origin_url = format!("{}/switch-segment.ts", server.base_url);
+    let task = tokio::spawn(async move {
+        super::super::stage_hls_switch_resource(
+            &context,
+            &policy,
+            snapshot.cache_key,
+            origin_url,
+            None,
+            crate::segment_fetcher::HlsSwitchResourceKind::Segment,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    resume.send(()).unwrap();
+    if let Err(error) = task.await.unwrap() {
+        panic!("slow first inventory scan failed the switch staging: {error:?}");
     }
     assert_eq!(server.requests.lock().await.len(), 1, "the first attempt must succeed without a retry");
     Ok(())

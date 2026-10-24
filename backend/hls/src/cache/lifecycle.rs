@@ -2,7 +2,7 @@ use super::{
     staging::run_owned_cache_operation, ActiveTempFileRegistration, CacheCapacityState, CacheInvalidationOutcome,
     CachePathDeletionReservation, CachePathGeneration, CachePathState, CachedSegmentMetadata,
     CapacityMutationReservation, CapacityRevision, HlsCacheCapacityReclaimer, HlsCacheCapacityRevision,
-    HlsCacheCapacityUsage, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, TempFileState, DEFAULT_HLS_CACHE_PATH,
+    HlsCacheCapacityUsage, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, TempFileState,
     MAX_CONCURRENT_OWNED_CACHE_OPERATIONS, MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN,
 };
 use log::warn;
@@ -22,7 +22,7 @@ use tokio::{
 };
 
 impl HlsSegmentCache {
-    pub fn new() -> Self { Self::with_cache_path(DEFAULT_HLS_CACHE_PATH) }
+    pub fn new() -> Self { Self::with_cache_path(tuliprox_core::model::default_hls_cache_path()) }
 
     pub fn with_cache_path(cache_path: impl Into<PathBuf>) -> Self {
         Self {

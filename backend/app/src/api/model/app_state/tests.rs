@@ -276,3 +276,24 @@ async fn contactable_input_hides_inputs_in_maintenance() {
     app_state.maintenance.add("provider_a", None, 1).await.unwrap();
     assert!(app_state.contactable_input(&name).is_none(), "an input in maintenance is not contacted");
 }
+
+#[tokio::test]
+async fn recording_ctx_shares_the_queue_and_capacity_held_by_the_state() {
+    let state = super::create_test_app_state(Config::default());
+
+    let ctx = state.recording_ctx();
+
+    assert!(std::sync::Arc::ptr_eq(&ctx.recordings, &state.recording.queue));
+    assert!(std::sync::Arc::ptr_eq(&ctx.recording_capacity, &state.recording.capacity));
+}
+
+#[tokio::test]
+async fn network_access_checks_allow_a_user_without_network_rules() {
+    let state = super::create_test_app_state(Config::default());
+    let user = std::sync::Arc::new(crate::model::ProxyUserCredentials::default());
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
+    let fingerprint = crate::auth::Fingerprint::new("key".to_string(), "127.0.0.1".to_string(), addr);
+
+    assert!(state.check_network_access(&user, &fingerprint).is_ok());
+    assert!(state.try_check_network_access(&user, &fingerprint).is_ok());
+}
