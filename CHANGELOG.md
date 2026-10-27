@@ -1206,6 +1206,11 @@
 
 ## 🐛 Fixes
 
+- **VOD from providers that label ranged media `text/html` plays again in reverse proxy mode.** The
+  "Provider returned HTML content" check rejected every non-adaptive success response with a `text/html`
+  content type, so a valid `206` movie (for example Matroska) served with the wrong type fell back to the
+  error video. Responses with status `206` or a `Content-Range` header are no longer rejected on content type.
+
 - **Token-only M3U streams on a `provider://` profile no longer fail with 503 on the HLS media manifest.** The HLS
   origin rewrite required the selected account's username/password even when the URL carries only a token and needs
   no credential substitution. Credentials are now required only when a rewrite actually happens.

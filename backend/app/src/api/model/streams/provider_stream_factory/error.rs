@@ -54,8 +54,16 @@ fn provider_content_type_looks_like_html(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case("text/html"))
 }
 
-pub(super) fn should_reject_success_response_content_type(item_type: PlaylistItemType, headers: &HeaderMap) -> bool {
-    !item_type.is_live_adaptive() && provider_content_type_looks_like_html(headers)
+/// Providers may mislabel media as `text/html`; `206` or `Content-Range` indicate a real ranged payload.
+pub(super) fn should_reject_success_response_content_type(
+    item_type: PlaylistItemType,
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> bool {
+    !item_type.is_live_adaptive()
+        && status != StatusCode::PARTIAL_CONTENT
+        && !headers.contains_key(reqwest::header::CONTENT_RANGE)
+        && provider_content_type_looks_like_html(headers)
 }
 
 #[derive(Debug)]

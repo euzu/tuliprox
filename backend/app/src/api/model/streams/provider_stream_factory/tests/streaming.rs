@@ -139,9 +139,23 @@ fn html_content_type_is_rejected_for_catchup_streams() {
     let mut headers = HeaderMap::new();
     headers.insert(reqwest::header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
 
-    assert!(should_reject_success_response_content_type(PlaylistItemType::Catchup, &headers));
-    assert!(should_reject_success_response_content_type(PlaylistItemType::Video, &headers));
-    assert!(should_reject_success_response_content_type(PlaylistItemType::Live, &headers));
+    assert!(should_reject_success_response_content_type(PlaylistItemType::Catchup, StatusCode::OK, &headers));
+    assert!(should_reject_success_response_content_type(PlaylistItemType::Video, StatusCode::OK, &headers));
+    assert!(should_reject_success_response_content_type(PlaylistItemType::Live, StatusCode::OK, &headers));
+}
+
+#[test]
+fn html_content_type_is_allowed_for_ranged_responses() {
+    let mut headers = HeaderMap::new();
+    headers.insert(reqwest::header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+    assert!(!should_reject_success_response_content_type(
+        PlaylistItemType::Video,
+        StatusCode::PARTIAL_CONTENT,
+        &headers
+    ));
+
+    headers.insert(reqwest::header::CONTENT_RANGE, "bytes 0-1000/5000".parse().unwrap());
+    assert!(!should_reject_success_response_content_type(PlaylistItemType::Video, StatusCode::OK, &headers));
 }
 
 #[test]
@@ -149,8 +163,35 @@ fn html_content_type_is_allowed_for_live_adaptive_streams() {
     let mut headers = HeaderMap::new();
     headers.insert(reqwest::header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
 
-    assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveHls, &headers));
-    assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveDash, &headers));
+    assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveHls, StatusCode::OK, &headers));
+    assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveDash, StatusCode::OK, &headers));
+}
+
+#[tokio::test]
+async fn ranged_media_labeled_text_html_streams_unchanged() {
+    let mkv = vec![0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4];
+    let (response, _) = local_response(
+        StatusCode::PARTIAL_CONTENT,
+        &[("content-type", "text/html; charset=UTF-8"), ("content-range", "bytes 0-7/100")],
+        mkv.clone(),
+    )
+    .await;
+    assert!(!should_reject_success_response_content_type(
+        PlaylistItemType::Video,
+        response.status(),
+        response.headers()
+    ));
+
+    let result = prepare_provider_stream_response(
+        response,
+        ProviderContentRepresentationMode::PreserveOrigin,
+        ProviderResponseHeadAvailability::Available,
+    )
+    .await;
+
+    let Ok(response) = result else { panic!("ranged response must be accepted") };
+    let body: Vec<Bytes> = response.stream.try_collect().await.unwrap();
+    assert_eq!(body.concat(), mkv);
 }
 
 #[tokio::test]
