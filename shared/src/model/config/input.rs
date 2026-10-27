@@ -119,6 +119,10 @@ pub struct ConfigInputDto {
     pub panel_api: Option<PanelApiConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Vec<ConfigProviderDto>>,
+    /// Name of a global `provider` profile bound to this input for `provider://` playback URLs
+    /// produced by mappings, when neither the input nor an alias URL uses `provider://`.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub playback_provider: Option<String>,
     /// Stalker/Ministra portal configuration. Required when `input_type`
     /// is `Stalker` or `StalkerBatch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +157,7 @@ impl Default for ConfigInputDto {
             exp_date: None,
             panel_api: None,
             provider: None,
+            playback_provider: None,
             stalker: None,
         }
     }

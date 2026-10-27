@@ -277,6 +277,15 @@ impl ConfigInputDto {
 
         self.persist = get_trimmed_string(self.persist.as_deref());
         check_provider_scheme_url!(self.url, provider_names);
+        self.playback_provider = get_trimmed_string(self.playback_provider.as_deref());
+        if let Some(name) = self.playback_provider.as_deref() {
+            if !provider_names.contains(name) {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "playback_provider '{name}' is not defined (input: {})",
+                    self.name
+                )));
+            }
+        }
 
         let mut current_index = index + 1;
         self.id = current_index;

@@ -192,6 +192,11 @@
 
 ## 🌟 New Features
 
+- **`playback_provider` input option.** Binds a global `provider` profile to an input whose `url` and alias URLs are
+  plain `http(s)://` URLs. Mappings that rewrite channel URLs to `provider://<name>/...` now resolve on such inputs
+  instead of failing with `Provider config for '<name>' not found in input` (HTTP 503), so CDN URL failover works for
+  independent playlists. Available in the input editor of the Web UI.
+
 - **Shared HLS origin transfer telemetry.** New optional `reverse_proxy.hls_origin_telemetry` block (off by default)
   measures the existing origin fetches for segments, maps, keys and manifests: time to headers, first byte and body
   completion, bytes, status, outcome and failure phase, with queue wait separated from network time. Aggregates keep

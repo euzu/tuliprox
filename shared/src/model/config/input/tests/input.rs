@@ -264,3 +264,29 @@ fn user_agent_stream_index_round_trips_and_keeps_options_non_empty() -> Result<(
     assert!(options.is_empty());
     Ok(())
 }
+
+#[test]
+fn playback_provider_requires_defined_provider_and_is_trimmed() {
+    let new_input = || ConfigInputDto {
+        name: "bound".intern(),
+        input_type: InputType::M3u,
+        url: "http://playlist.example.com/list.m3u".to_string(),
+        playback_provider: Some(" cdn ".to_string()),
+        ..ConfigInputDto::default()
+    };
+
+    let err = new_input().prepare(0, false, &HashSet::new(), None).expect_err("undefined provider must fail");
+    assert!(err.to_string().contains("playback_provider 'cdn' is not defined"), "Error: {err}");
+
+    let mut input = new_input();
+    input.prepare(0, false, &HashSet::from(["cdn".to_string()]), None).expect("defined provider is accepted");
+    assert_eq!(input.playback_provider.as_deref(), Some("cdn"));
+}
+
+#[test]
+fn playback_provider_round_trips_yaml() {
+    let yaml = "name: bound\ntype: m3u\nurl: http://example.com/list.m3u\nplayback_provider: cdn\n";
+    let dto: ConfigInputDto = serde_saphyr::from_str(yaml).expect("playback_provider should deserialize");
+    assert_eq!(dto.playback_provider.as_deref(), Some("cdn"));
+    assert!(serde_saphyr::to_string(&dto).expect("serialize").contains("playback_provider: cdn"));
+}

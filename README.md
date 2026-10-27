@@ -169,6 +169,7 @@ Upstream providers are not always reliable. Tuliprox is designed to preserve usa
 - Automatic provider URL failover on timeouts and server errors
 - Choose whether a provider resumes from the last working URL or restarts from the first URL on future requests
 - `provider://` references resolve to the currently active provider URL
+- `playback_provider` binds a provider profile to inputs with plain `http(s)://` playlist URLs, so mapped `provider://` playback URLs fail over too
 - Asynchronous DNS resolution and caching
 - Persisted resolved IPs without overwriting source configuration
 - HTTP, HTTPS, and SOCKS5 outbound proxy support for VPN gateways, corporate proxies, or Gluetun

@@ -511,6 +511,7 @@
       "INPUT_TYPE": "Define el protocolo de streaming o el formato de origen (p. ej. xtream, m3u).",
       "LIVE_SOURCE": "Selector de fuente para el clúster en directo cuando la entrada por etapas está habilitada (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Ruta de archivo opcional utilizada para persistir o reutilizar la lista de reproducción de entrada descargada.",
+      "PLAYBACK_PROVIDER": "Nombre de un perfil de proveedor global usado para resolver las URL provider:// de reproducción creadas por mapeos, cuando las URL de la entrada y los alias son URL http(s) normales. Habilita el failover de CDN para listas independientes.",
       "PROVIDERS": "Los perfiles de proveedor definen URL de origen reutilizables y el comportamiento DNS que puede referenciar esta entrada.",
       "SIMPLE_INPUT": {
         "URL": "URL de origen para esta entrada. Solo se admiten URL `file://`, `http://` y `https://`."
@@ -1416,6 +1417,7 @@
     "PATTERN_IPV6": "Patrón IPv6",
     "PERIOD_MILLIS": "Período (milis)",
     "PERSIST": "Persistir",
+    "PLAYBACK_PROVIDER": "Proveedor de reproducción",
     "PLAYER_SERVER": "Servidor del reproductor",
     "PLAN": "Plan",
     "PLANS": "Planes",
