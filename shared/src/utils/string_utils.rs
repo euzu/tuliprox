@@ -36,6 +36,87 @@ pub fn generate_random_string(length: usize) -> String {
     random_string
 }
 
+/// Generates a random string of `length` chars picked from `charset`.
+/// Returns an empty string when `charset` is empty.
+pub fn generate_random_string_from(charset: &[char], length: usize) -> String {
+    if charset.is_empty() {
+        return String::new();
+    }
+    let mut rng = fastrand::Rng::new();
+    (0..length).map(|_| charset[rng.usize(..charset.len())]).collect()
+}
+
+const CHARSET_EXTRA_ALLOWED: &str = "!._~-";
+
+fn is_allowed_charset_char(c: char) -> bool { c.is_ascii_alphanumeric() || CHARSET_EXTRA_ALLOWED.contains(c) }
+
+fn check_charset_char(c: char) -> Result<char, String> {
+    if is_allowed_charset_char(c) {
+        Ok(c)
+    } else {
+        Err(format!("character {c:?} is not allowed (allowed: ASCII letters, digits and ! . _ ~ -)"))
+    }
+}
+
+/// Expands a charset expression into its chars.
+/// Literal chars and ranges `X-Y` are supported; `\-` and `\\` escape literals.
+/// Only ASCII alphanumerics and `! . _ ~ -` are accepted.
+pub fn expand_charset_expression(expr: &str) -> Result<Vec<char>, String> {
+    // (char, escaped)
+    let mut tokens = Vec::new();
+    let mut iter = expr.chars();
+    while let Some(c) = iter.next() {
+        if c == '\\' {
+            match iter.next() {
+                Some(escaped) => tokens.push((escaped, true)),
+                None => return Err("dangling escape '\\' at end of expression".to_string()),
+            }
+        } else {
+            tokens.push((c, false));
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let (c, escaped) = tokens[idx];
+        if !escaped && c == '-' {
+            return Err("unescaped '-' must be between two chars to form a range, use '\\-' for a literal".to_string());
+        }
+        if tokens.get(idx + 1).is_some_and(|&(sep, sep_escaped)| sep == '-' && !sep_escaped) {
+            let Some(&(end, _)) = tokens.get(idx + 2) else {
+                return Err(format!("range starting at {c:?} has no end char"));
+            };
+            let (start, end) = (check_charset_char(c)?, check_charset_char(end)?);
+            if start > end {
+                return Err(format!("invalid range {start}-{end}: start is greater than end"));
+            }
+            for value in start..=end {
+                result.push(check_charset_char(value)?);
+            }
+            idx += 3;
+        } else {
+            result.push(check_charset_char(c)?);
+            idx += 1;
+        }
+    }
+    Ok(result)
+}
+
+/// Builds the effective charset: expanded `chars` minus `exclude`, de-duplicated.
+pub fn build_charset(chars: &str, exclude: &str) -> Result<Vec<char>, String> {
+    let mut charset: Vec<char> = Vec::new();
+    for c in expand_charset_expression(chars)? {
+        if !exclude.contains(c) && !charset.contains(&c) {
+            charset.push(c);
+        }
+    }
+    if charset.is_empty() {
+        return Err("resulting charset is empty".to_string());
+    }
+    Ok(charset)
+}
+
 // compare 2 small vecs without HashSet
 pub fn small_vecs_equal_unordered<T: PartialEq>(a: &[T], b: &[T]) -> bool {
     if a.len() != b.len() {
@@ -402,5 +483,69 @@ mod test {
         assert_eq!(percent_encode_unreserved("Europe/Berlin"), "Europe%2FBerlin");
         assert_eq!(percent_encode_unreserved("en_US.utf8"), "en_US.utf8");
         assert_eq!(percent_encode_unreserved("Grüße 1.ts"), "Gr%C3%BC%C3%9Fe%201.ts");
+    }
+}
+
+#[cfg(test)]
+mod charset_tests {
+    use super::*;
+
+    fn expand(expr: &str) -> String { expand_charset_expression(expr).unwrap().into_iter().collect() }
+
+    #[test]
+    fn expands_ranges_and_literals() {
+        assert_eq!(expand("A-C0-2"), "ABC012");
+        assert_eq!(expand("abx"), "abx");
+        assert_eq!(expand("a-c!_"), "abc!_");
+    }
+
+    #[test]
+    fn escapes_produce_literals() {
+        assert_eq!(expand("a\\-z"), "a-z");
+        assert_eq!(expand("\\-.\\-"), "-.-");
+    }
+
+    #[test]
+    fn rejects_bad_ranges() {
+        assert!(expand_charset_expression("z-a").is_err());
+        assert!(expand_charset_expression("-a").is_err());
+        assert!(expand_charset_expression("a-").is_err());
+        assert!(expand_charset_expression("a\\").is_err());
+    }
+
+    #[test]
+    fn rejects_disallowed_chars_naming_them() {
+        for bad in [" ", "\t", "?", "/", "#", "%", "&", ":", "@", "+", "=", ",", ";", "*", "(", "$", "\"", "ä", "\\\\"]
+        {
+            let err = expand_charset_expression(&format!("a{bad}")).unwrap_err();
+            assert!(err.contains("not allowed"), "{bad:?}: {err}");
+        }
+        let err = expand_charset_expression("a?").unwrap_err();
+        assert!(err.contains("'?'"), "{err}");
+        // range spanning disallowed chars
+        assert!(expand_charset_expression("!-9").is_err());
+    }
+
+    #[test]
+    fn exclude_removes_and_dedups() {
+        let cs: String = build_charset("A-C", "B").unwrap().into_iter().collect();
+        assert_eq!(cs, "AC");
+        let cs: String = build_charset("aab", "").unwrap().into_iter().collect();
+        assert_eq!(cs, "ab");
+    }
+
+    #[test]
+    fn empty_effective_charset_is_error() {
+        assert!(build_charset("ab", "ab").is_err());
+        assert!(build_charset("", "").is_err());
+    }
+
+    #[test]
+    fn generator_respects_length_and_charset() {
+        let cs = build_charset("A-C", "").unwrap();
+        let value = generate_random_string_from(&cs, 40);
+        assert_eq!(value.len(), 40);
+        assert!(value.chars().all(|c| cs.contains(&c)));
+        assert_eq!(generate_random_string_from(&[], 5), "");
     }
 }

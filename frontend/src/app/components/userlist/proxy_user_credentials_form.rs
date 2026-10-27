@@ -9,7 +9,7 @@ use crate::{
             ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, FilterInput, NoSubmitForm,
             Tag, TextButton, UserStatus,
         },
-        TargetUser,
+        ConfigContext, TargetUser,
     },
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
     edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
@@ -18,12 +18,9 @@ use crate::{
     i18n::use_translation,
 };
 use chrono::{Duration, Utc};
-use shared::{
-    model::{
-        permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, NetworkAccessDto, ProxyType,
-        ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
-    },
-    utils::generate_random_string,
+use shared::model::{
+    permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, CredentialGenerationDto,
+    NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
 };
 use std::{net::IpAddr, rc::Rc};
 use strum::IntoEnumIterator;
@@ -244,6 +241,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     });
 
     let create_initialized = use_ref(|| std::cell::Cell::new(false));
+    let config_ctx = use_context::<ConfigContext>();
 
     {
         let form_state = form_state.clone();
@@ -252,6 +250,10 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let set_allowed_countries = allowed_countries.clone();
         let set_allowed_networks = allowed_networks.clone();
         let create_initialized = create_initialized.clone();
+        let credential_generation = config_ctx
+            .as_ref()
+            .and_then(|ctx| ctx.api_proxy.as_ref())
+            .map_or_else(CredentialGenerationDto::default, |api_proxy| api_proxy.credential_generation.clone());
         use_effect_with(
             (props.active_page, props.user.clone(), props.server.clone()),
             move |(active_page, user, server)| {
@@ -310,9 +312,9 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
                         user.exp_date = Some(in_one_year.timestamp());
 
-                        user.username = generate_random_string(6).to_uppercase();
-                        user.password = generate_random_string(6).to_uppercase();
-                        user.token = Some(generate_random_string(6));
+                        user.username = credential_generation.generate_username();
+                        user.password = credential_generation.generate_password();
+                        user.token = Some(credential_generation.generate_token());
 
                         form_state.dispatch(UserFormAction::SetAll(user));
                     }

@@ -154,6 +154,18 @@ macro_rules! config_field_custom {
             </div>
         }
     };
+    ($label:expr, $value:expr, $hint:expr) => {
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$label.to_string()}
+                    hint_key={$hint}
+                />
+                <span class="tp__form-field__value">{$value}</span>
+            </div>
+        }
+    };
 }
 
 #[macro_export]

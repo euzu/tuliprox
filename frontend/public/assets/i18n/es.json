@@ -262,7 +262,10 @@
     "TABLE_COLUMNS": "Usa los interruptores para mostrar u ocultar columnas. Arrastra el tirador para cambiar el orden. Guardar aplica los cambios; Restaurar valores predeterminados restablece el diseño.\n\nEspacio o Intro toma o suelta una columna. Usa Arriba/Abajo para moverla; Escape cancela el movimiento.",
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "Si está habilitado, los usuarios del proxy API se cargan desde la base de datos de usuarios.",
-      "AUTH_ERROR_STATUS": "Código de estado HTTP devuelto para errores de autenticación. El valor por defecto es 403 (Forbidden)."
+      "AUTH_ERROR_STATUS": "Código de estado HTTP devuelto para errores de autenticación. El valor por defecto es 403 (Forbidden).",
+      "CREDENTIAL_LENGTH": "Número de caracteres generados para este segmento (de 1 a 64). La longitud total de todos los segmentos para este campo no puede superar 64.",
+      "CREDENTIAL_CHARS": "Caracteres usados en esta parte. Caracteres literales y rangos como A-Z o 0-9; escriba un guion literal como \\-. Solo se permiten letras ASCII, dígitos y ! . _ ~ -. Déjelo vacío para usar el valor por defecto (usuario/contraseña A-Z0-9, token A-Za-z0-9). Añada varios segmentos para un valor ordenado, p. ej. 3 letras y luego 3 dígitos.",
+      "CREDENTIAL_EXCLUDE": "Caracteres eliminados del conjunto permitido, p. ej. 1lI0O para evitar caracteres parecidos. Se escriben como caracteres simples, sin rangos."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Host de origen al que apunta este perfil de servidor proxy API.",
@@ -1840,6 +1843,14 @@
     "USE_OUTPUT": "Usar salida",
     "USE_USER_DB": "Usar BD de usuarios",
     "AUTH_ERROR_STATUS": "Estado de error de autenticación",
+    "CREDENTIAL_GENERATION": "Generación de credenciales",
+    "CREDENTIAL_LENGTH": "Longitud",
+    "CREDENTIAL_CHARS": "Caracteres permitidos",
+    "CREDENTIAL_EXCLUDE": "Caracteres excluidos",
+    "CREDENTIAL_ADD_SEGMENT": "Añadir segmento",
+    "CREDENTIAL_REMOVE_SEGMENT": "Quitar segmento",
+    "CREDENTIAL_SEGMENT": "Segmento",
+    "CREDENTIAL_DEFAULT": "Predeterminado",
     "VALIDATION": "Validación",
     "VERSION": "Versión",
     "VIDEO": "Vídeo",

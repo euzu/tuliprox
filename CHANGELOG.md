@@ -192,6 +192,12 @@
 
 ## 🌟 New Features
 
+- **Configurable credential generation for new users.** The username, password and token pre-filled when creating
+  an API user in the Web UI can now be tuned via `credential_generation` in `api-proxy.yml`: length (1-64), allowed
+  `chars` with ranges, `exclude`, or ordered `segments` (for example 3 letters followed by 3 digits). Defaults match the
+  previous behavior (6 characters). Only ASCII letters, digits and `! . _ ~ -` are accepted. Editable in the Web UI
+  under Config → Api.
+
 - **`playback_provider` input option.** Binds a global `provider` profile to an input whose `url` and alias URLs are
   plain `http(s)://` URLs. Mappings that rewrite channel URLs to `provider://<name>/...` now resolve on such inputs
   instead of failing with `Provider config for '<name>' not found in input` (HTTP 503), so CDN URL failover works for
@@ -1779,6 +1785,10 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **api-proxy.yml (`credential_generation`)**: `username`, `password` and `token` each take `length` (default `6`),
+  `chars` (default `A-Z0-9`, token `A-Za-z0-9`) and `exclude` (default empty), or an ordered `segments` list of the
+  same keys.
 
 - **config.yml (`reverse_proxy.stream`)**:
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media

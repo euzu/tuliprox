@@ -262,7 +262,10 @@
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
-      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden)."
+      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden).",
+      "CREDENTIAL_LENGTH": "Number of generated characters for this segment (1 to 64). The total length across all segments for this field cannot exceed 64.",
+      "CREDENTIAL_CHARS": "Characters used for this part. Literal characters and ranges such as A-Z or 0-9; escape a literal dash as \\-. Only ASCII letters, digits and ! . _ ~ - are allowed. Leave empty for the default (username/password A-Z0-9, token A-Za-z0-9). Add several segments to build an ordered value, e.g. 3 letters then 3 digits.",
+      "CREDENTIAL_EXCLUDE": "Characters removed from the allowed set, e.g. 1lI0O to avoid look-alikes. Written as plain characters, no ranges."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Upstream host that this proxy server profile points to.",
@@ -1840,6 +1843,14 @@
     "USE_OUTPUT": "Use output",
     "USE_USER_DB": "Use User DB",
     "AUTH_ERROR_STATUS": "Auth Error Status",
+    "CREDENTIAL_GENERATION": "Credential generation",
+    "CREDENTIAL_LENGTH": "Length",
+    "CREDENTIAL_CHARS": "Allowed characters",
+    "CREDENTIAL_EXCLUDE": "Excluded characters",
+    "CREDENTIAL_ADD_SEGMENT": "Add segment",
+    "CREDENTIAL_REMOVE_SEGMENT": "Remove segment",
+    "CREDENTIAL_SEGMENT": "Segment",
+    "CREDENTIAL_DEFAULT": "Default",
     "VALIDATION": "Validation",
     "VERSION": "Version",
     "VIDEO": "Video",

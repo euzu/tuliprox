@@ -648,6 +648,7 @@ async fn save_config_api_proxy_config(
         use_user_db: req_api_proxy.use_user_db,
         server: req_api_proxy.server.iter().map(Into::into).collect(),
         auth_error_status: req_api_proxy.auth_error_status,
+        credential_generation: req_api_proxy.credential_generation.clone(),
         ..base
     };
 
@@ -1330,6 +1331,7 @@ mod tests {
             user: vec![TargetUserDto { target: String::from("target-a"), credentials: vec![] }],
             use_user_db: true,
             auth_error_status: 401,
+            credential_generation: shared::model::CredentialGenerationDto::default(),
         }
     }
 

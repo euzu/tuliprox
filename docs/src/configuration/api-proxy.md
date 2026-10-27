@@ -11,6 +11,7 @@ specific permissions, proxy modes, and priorities.
 ```yaml
 auth_error_status: 403
 use_user_db: false
+credential_generation:
 server:
 plans:
 user:
@@ -18,13 +19,14 @@ user:
 
 ### Global Parameters
 
-| Parameter           | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                   |
-|:--------------------|:-----|:--------:|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `auth_error_status` | Int  |    No    | `403`   | The HTTP status code Tuliprox returns when a player sends invalid credentials or tokens. (Only applies to [Xtream/M3U API Endpoints](#api-endpoints-for-clients-players), stream paths, and resource paths, NOT the Web UI / REST API).                                                                                                                                                                                         |
-| `use_user_db`       | Bool |    No    | `false` | If set to `true`, Tuliprox migrates all users from this YAML file into a highly performant SQLite database (`api_user.db`). **From then on, Tuliprox ignores the users in the YAML file!** You **must** subsequently manage users entirely via the Web UI Dashboard. Switching the option to `false` or `true` automatically migrates users back to the corresponding file (`false` → `api-proxy.yml`, `true` → `api_user.db`). |
-| `server`            | List |   Yes    | `[]`    | See [Server Definitions](#1-server-definitions-server) for how to define servers.                                                                                                                                                                                                                                                                                                                                               |
-| `plans`             | List |    No    | `[]`    | Reusable user capability tiers. See [User Plans](#3-user-plans-plans).                                                                                                                                                                                                                                                                                                                                                          |
-| `user`              | List |    No    | `[]`    | See [User Definitions](#2-user-definitions-user) for how to define users & permissions.                                                                                                                                                                                                                                                                                                                                         |
+| Parameter               | Type   | Required | Default   | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                   |
+| :---------------------- | :----- | :------: | :-------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `auth_error_status`     | Int    | No       | `403`     | The HTTP status code Tuliprox returns when a player sends invalid credentials or tokens. (Only applies to [Xtream/M3U API Endpoints](#api-endpoints-for-clients-players), stream paths, and resource paths, NOT the Web UI / REST API).                                                                                                                                                                                         |
+| `use_user_db`           | Bool   | No       | `false`   | If set to `true`, Tuliprox migrates all users from this YAML file into a highly performant SQLite database (`api_user.db`). **From then on, Tuliprox ignores the users in the YAML file!** You **must** subsequently manage users entirely via the Web UI Dashboard. Switching the option to `false` or `true` automatically migrates users back to the corresponding file (`false` → `api-proxy.yml`, `true` → `api_user.db`). |
+| `credential_generation` | Object | No       | see below | Rules for the username, password and token pre-filled when creating a user in the Web UI. See [Credential Generation](#credential-generation).                                                                                                                                                                                                                                                                                  |
+| `server`                | List   | Yes      | `[]`      | See [Server Definitions](#1-server-definitions-server) for how to define servers.                                                                                                                                                                                                                                                                                                                                               |
+| `plans`                 | List   | No       | `[]`      | Reusable user capability tiers. See [User Plans](#3-user-plans-plans).                                                                                                                                                                                                                                                                                                                                                          |
+| `user`                  | List   | No       | `[]`      | See [User Definitions](#2-user-definitions-user) for how to define users & permissions.                                                                                                                                                                                                                                                                                                                                         |
 
 ### Subsections (Object Keys)
 
@@ -33,6 +35,38 @@ user:
 | `server` | Virtual server endpoints exposed to clients.          | [See section](#1-server-definitions-server) |
 | `user`   | User credentials, proxy modes, and access management. | [See section](#2-user-definitions-user)     |
 | `plans`  | Reusable capability tiers referenced by users.        | [See section](#3-user-plans-plans)          |
+
+### Credential Generation
+
+When you create a new user in the Web UI, Tuliprox pre-fills `username`, `password` and `token` with random values.
+`credential_generation` controls how these values look. Every part is optional; the defaults match the built-in
+behavior.
+
+```yaml
+credential_generation:
+  username:
+    segments:                       # ordered parts, e.g. CTR287
+      - { length: 3, chars: "A-Z" }
+      - { length: 3, chars: "0-9" }
+  password: { length: 8, exclude: "O0" }
+  token:    { length: 12, chars: "A-Za-z0-9", exclude: "1lI0O" }
+```
+
+Each of `username`, `password` and `token` uses **either** the flat form (`length`, `chars`, `exclude`) **or** a
+`segments` list of objects with the same keys. The generated value is the concatenation of all segments in order.
+Giving both forms for one credential is an error.
+
+| Key        | Type   | Default                                                  | Description                                                                                                                 |
+| :--------- | :----- | :------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
+| `length`   | Int    | `6`                                                      | Number of generated characters (1-64). The total over all segments must not exceed 64.                                      |
+| `chars`    | String | `A-Z0-9` (`username`, `password`), `A-Za-z0-9` (`token`) | Allowed characters: literals and ranges such as `a-f`. Escape a literal dash as `\-`. Missing or empty uses the default.    |
+| `exclude`  | String | empty                                                    | Literal characters removed from `chars`, for example `1lI0O` to avoid look-alikes.                                          |
+| `segments` | List   | empty                                                    | Ordered list of `{length, chars, exclude}` objects. Mutually exclusive with the flat keys; at least one entry when present. |
+
+Only ASCII letters, digits and `! . _ ~ -` are accepted in `chars`. Whitespace, URL-reserved characters
+(such as `? / # % & : @ + =`) and non-ASCII characters are rejected with an error naming the character, because
+credentials are embedded in stream URLs. The effective charset of every segment (`chars` minus `exclude`) must not be
+empty.
 
 ---
 
