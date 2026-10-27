@@ -262,7 +262,10 @@
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
-      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden)."
+      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden).",
+      "CREDENTIAL_LENGTH": "Anzahl der erzeugten Zeichen für dieses Segment (1 bis 64). Die Gesamtlänge aller Segmente dieses Feldes darf 64 nicht überschreiten.",
+      "CREDENTIAL_CHARS": "Zeichen für diesen Teil. Einzelne Zeichen und Bereiche wie A-Z oder 0-9; ein literaler Bindestrich wird als \\- geschrieben. Erlaubt sind nur ASCII-Buchstaben, Ziffern und ! . _ ~ -. Leer lassen für den Standard (Benutzername/Passwort A-Z0-9, Token A-Za-z0-9). Mehrere Segmente ergeben einen geordneten Wert, z. B. 3 Buchstaben und dann 3 Ziffern.",
+      "CREDENTIAL_EXCLUDE": "Zeichen, die aus dem erlaubten Satz entfernt werden, z. B. 1lI0O gegen Verwechslungen. Werden als einzelne Zeichen geschrieben, keine Bereiche."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Upstream host that this proxy server profile points to.",
@@ -511,6 +514,7 @@
       "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
       "LIVE_SOURCE": "Source selector for the Live cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Optional file path used to persist or reuse the downloaded input playlist.",
+      "PLAYBACK_PROVIDER": "Name eines globalen Provider-Profils, mit dem provider://-Wiedergabe-URLs aus Mappings aufgelöst werden, wenn Eingabe- und Alias-URLs einfache http(s)-URLs sind. Ermöglicht CDN-Failover für eigenständige Playlists.",
       "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference.",
       "SIMPLE_INPUT": {
         "URL": "Source URL for this input. Only `file://`, `http://`, and `https://` URLs are supported."
@@ -728,7 +732,8 @@
       "RESOURCE_REWRITE_DISABLED": "If enabled, URL rewriting for logos and EPG is disabled (also disables caching).",
       "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```",
       "STREAM_HISTORY": "Stores stream lifecycle telemetry in daily binary files. This is the raw data source for debugging, QoS analysis, and future failover tuning.",
-      "QOS_AGGREGATION": "Builds compact QoS snapshots from stream history in the background. These snapshots are designed as the later input for failover decisions."
+      "QOS_AGGREGATION": "Builds compact QoS snapshots from stream history in the background. These snapshots are designed as the later input for failover decisions.",
+      "HLS_ORIGIN_TELEMETRY": "Misst, wie schnell der Anbieter Segmente, Maps, Schlüssel und Manifeste von Shared HLS bei den Abrufen liefert, die Tuliprox ohnehin macht. Abrufbar unter GET /api/v1/hls/origin-telemetry. Änderungen erfordern einen Neustart."
     },
     "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
       "CLOUDFLARE_HEADER": "Removes Cloudflare-specific headers (like CF-Connecting-IP) before forwarding to the upstream.",
@@ -933,6 +938,12 @@
       "ENABLED": "Stellt den MCP-Endpunkt unter `{web_ui_path}/mcp` bereit, damit KI-Assistenten diese Instanz abfragen können. Erfordert einen Neustart.",
       "MAX_RESPONSE_BYTES": "Tool-Ergebnisse, die größer als diese Byte-Anzahl sind, werden abgeschnitten. Minimum 1024, Standard 262144.",
       "READ_ONLY": "Blendet Tools, die den Zustand ändern, aus und lehnt sie ab. Wird auf schreibgeschützt gezwungen, wenn die Web-UI-Authentifizierung deaktiviert ist."
+    },
+    "HLS_ORIGIN_TELEMETRY_CONFIG": {
+      "ENABLED": "Aktiviert die Telemetrie der Übertragung vom Origin. Sie misst bestehende Origin-Abrufe und sendet keine zusätzlichen Anfragen an den Anbieter.",
+      "QUEUE_CAPACITY": "Größe der begrenzten Ereignis-Warteschlange (Minimum 16). Ist sie voll, werden Ereignisse verworfen und gezählt; Abrufe warten nie.",
+      "FRESHNESS_SECS": "Sekunden, nach denen eine Messung als unbekannt (null) statt als gut oder schlecht gemeldet wird.",
+      "WINDOW_SECS": "Länge des gleitenden Fensters in Sekunden, das für die Aggregate verwendet wird."
     }
   },
   "HINT": {
@@ -1457,6 +1468,7 @@
     "PATTERN_IPV6": "Pattern IPv6",
     "PERIOD_MILLIS": "Period Millis",
     "PERSIST": "Persist",
+    "PLAYBACK_PROVIDER": "Wiedergabe-Provider",
     "PLAYER_SERVER": "Player Server",
     "PLAN": "Plan",
     "PLANS": "Plans",
@@ -1881,6 +1893,14 @@
     "USE_OUTPUT": "Use output",
     "USE_USER_DB": "Use User DB",
     "AUTH_ERROR_STATUS": "Auth Error Status",
+    "CREDENTIAL_GENERATION": "Zugangsdaten-Erzeugung",
+    "CREDENTIAL_LENGTH": "Länge",
+    "CREDENTIAL_CHARS": "Erlaubte Zeichen",
+    "CREDENTIAL_EXCLUDE": "Ausgeschlossene Zeichen",
+    "CREDENTIAL_ADD_SEGMENT": "Segment hinzufügen",
+    "CREDENTIAL_REMOVE_SEGMENT": "Segment entfernen",
+    "CREDENTIAL_SEGMENT": "Segment",
+    "CREDENTIAL_DEFAULT": "Standard",
     "VALIDATION": "Validation",
     "VERSION": "Version",
     "VIDEO": "Video",
@@ -2127,7 +2147,16 @@
     "MCP_CONFIG": "MCP",
     "MIN_ORIGIN_TARGET_DURATION_SECS": "Minimale Origin-Target-Duration (Sek.)",
     "READ_ONLY": "Schreibgeschützt",
-    "VIEW_TYPE_LOGS": "Logs"
+    "VIEW_TYPE_LOGS": "Logs",
+    "HLS_ORIGIN_TELEMETRY": "HLS-Origin-Telemetrie",
+    "HLS_ORIGIN_TELEMETRY_ENABLED": "Origin-Telemetrie aktivieren",
+    "HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY": "Warteschlangengröße",
+    "HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS": "Aktualität (Sek.)",
+    "HLS_ORIGIN_TELEMETRY_WINDOW_SECS": "Fenster (Sek.)",
+    "REVERSE_PROXY_TAB_GENERAL": "Allgemein",
+    "REVERSE_PROXY_TAB_STREAM": "Stream",
+    "REVERSE_PROXY_TAB_HLS": "HLS",
+    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetrie"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

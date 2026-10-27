@@ -151,6 +151,19 @@ verify: ## Run format, clippy, markdown lint, tests, and trunk build (stops on e
 validate: verify ## Alias for verify
 ci: verify ## Alias for verify
 
+.PHONY: pre-merge-check
+pre-merge-check: ## Fast gates a merge must pass before merging: clippy, locale key parity, tests
+	@echo "==> Pre-merge gates (subset of 'verify')"
+	@$(MAKE) lint
+	@$(MAKE) i18n-check
+	@$(MAKE) test
+	@echo "✅ Pre-merge gates passed"
+
+.PHONY: i18n-check
+i18n-check: ## Verify every locale carries exactly the en.json keys
+	@echo "==> Checking locale key parity"
+	@./bin/check-i18n-keys.sh
+
 .PHONY: trunk-build
 trunk-build: ## Build frontend with Trunk (WASM)
 	@echo "==> Building frontend (trunk)"

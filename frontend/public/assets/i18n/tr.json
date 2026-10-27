@@ -262,7 +262,10 @@
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
-      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden)."
+      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden).",
+      "CREDENTIAL_LENGTH": "Bu segment için üretilen karakter sayısı (1 ile 64 arası). Bu alandaki tüm segmentlerin toplam uzunluğu 64'ü aşamaz.",
+      "CREDENTIAL_CHARS": "Bu bölümde kullanılan karakterler. Tek karakterler ve A-Z veya 0-9 gibi aralıklar; gerçek bir tire \\- olarak yazılır. Yalnızca ASCII harfleri, rakamlar ve ! . _ ~ - kullanılabilir. Varsayılan için boş bırakın (kullanıcı adı/şifre A-Z0-9, token A-Za-z0-9). Sıralı bir değer için birkaç segment ekleyin, örn. 3 harf sonra 3 rakam.",
+      "CREDENTIAL_EXCLUDE": "İzin verilen kümeden çıkarılan karakterler, örn. benzer görünen karakterlerden kaçınmak için 1lI0O. Aralık değil, tek karakter olarak yazılır."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Upstream host that this proxy server profile points to.",
@@ -511,6 +514,7 @@
       "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
       "LIVE_SOURCE": "Source selector for the Live cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Optional file path used to persist or reuse the downloaded input playlist.",
+      "PLAYBACK_PROVIDER": "Giriş ve diğer adresler düz http(s) adresleri olduğunda, eşlemelerin oluşturduğu provider:// oynatma adreslerini çözmek için kullanılan genel sağlayıcı profilinin adı. Bağımsız çalma listeleri için CDN yük devretmesini etkinleştirir.",
       "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference.",
       "SIMPLE_INPUT": {
         "URL": "Source URL for this input. Only `file://`, `http://`, and `https://` URLs are supported."
@@ -728,7 +732,8 @@
       "RESOURCE_REWRITE_DISABLED": "If enabled, URL rewriting for logos and EPG is disabled (also disables caching).",
       "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```",
       "STREAM_HISTORY": "Stores stream lifecycle telemetry in daily binary files. This is the raw data source for debugging, QoS analysis, and future failover tuning.",
-      "QOS_AGGREGATION": "Builds compact QoS snapshots from stream history in the background. These snapshots are designed as the later input for failover decisions."
+      "QOS_AGGREGATION": "Builds compact QoS snapshots from stream history in the background. These snapshots are designed as the later input for failover decisions.",
+      "HLS_ORIGIN_TELEMETRY": "Sağlayıcının Shared HLS segmentlerini, haritalarını, anahtarlarını ve manifestolarını Tuliprox'un zaten yaptığı istekler üzerinden ne kadar hızlı teslim ettiğini ölçer. GET /api/v1/hls/origin-telemetry adresinden okunur. Değişiklik yeniden başlatma gerektirir."
     },
     "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
       "CLOUDFLARE_HEADER": "Removes Cloudflare-specific headers (like CF-Connecting-IP) before forwarding to the upstream.",
@@ -933,6 +938,12 @@
       "ENABLED": "MCP uç noktasını `{web_ui_path}/mcp` adresinde sunar, böylece yapay zeka asistanları bu örneği sorgulayabilir. Yeniden başlatma gerektirir.",
       "MAX_RESPONSE_BYTES": "Bu bayt sayısından büyük araç sonuçları kesilir. Minimum 1024, varsayılan 262144.",
       "READ_ONLY": "Durumu değiştiren araçları gizler ve reddeder. Web UI kimlik doğrulaması devre dışıysa salt okunur olmaya zorlanır."
+    },
+    "HLS_ORIGIN_TELEMETRY_CONFIG": {
+      "ENABLED": "Origin aktarım telemetrisini etkinleştirir. Mevcut origin isteklerini ölçer ve sağlayıcıya ek istek göndermez.",
+      "QUEUE_CAPACITY": "Sınırlı olay kuyruğunun boyutu (en az 16). Dolduğunda olaylar atılır ve sayılır; istekler asla beklemez.",
+      "FRESHNESS_SECS": "Bir ölçümün iyi veya kötü yerine bilinmiyor (null) olarak bildirileceği saniye.",
+      "WINDOW_SECS": "Toplamlar için kullanılan kayan pencerenin saniye cinsinden uzunluğu."
     }
   },
   "HINT": {
@@ -1457,6 +1468,7 @@
     "PATTERN_IPV6": "Pattern IPv6",
     "PERIOD_MILLIS": "Period Millis",
     "PERSIST": "Persist",
+    "PLAYBACK_PROVIDER": "Oynatma sağlayıcısı",
     "PLAYER_SERVER": "Player Server",
     "PLAN": "Plan",
     "PLANS": "Plans",
@@ -1881,6 +1893,14 @@
     "USE_OUTPUT": "Use output",
     "USE_USER_DB": "Use User DB",
     "AUTH_ERROR_STATUS": "Auth Error Status",
+    "CREDENTIAL_GENERATION": "Kimlik bilgisi üretimi",
+    "CREDENTIAL_LENGTH": "Uzunluk",
+    "CREDENTIAL_CHARS": "İzin verilen karakterler",
+    "CREDENTIAL_EXCLUDE": "Hariç tutulan karakterler",
+    "CREDENTIAL_ADD_SEGMENT": "Segment ekle",
+    "CREDENTIAL_REMOVE_SEGMENT": "Segmenti kaldır",
+    "CREDENTIAL_SEGMENT": "Segment",
+    "CREDENTIAL_DEFAULT": "Varsayılan",
     "VALIDATION": "Validation",
     "VERSION": "Version",
     "VIDEO": "Video",
@@ -2127,7 +2147,16 @@
     "MCP_CONFIG": "MCP",
     "MIN_ORIGIN_TARGET_DURATION_SECS": "Minimum origin hedef süresi (sn)",
     "READ_ONLY": "Salt okunur",
-    "VIEW_TYPE_LOGS": "Günlükler"
+    "VIEW_TYPE_LOGS": "Günlükler",
+    "HLS_ORIGIN_TELEMETRY": "HLS Origin Telemetrisi",
+    "HLS_ORIGIN_TELEMETRY_ENABLED": "Origin telemetrisini etkinleştir",
+    "HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY": "Kuyruk kapasitesi",
+    "HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS": "Tazelik (sn)",
+    "HLS_ORIGIN_TELEMETRY_WINDOW_SECS": "Pencere (sn)",
+    "REVERSE_PROXY_TAB_GENERAL": "Genel",
+    "REVERSE_PROXY_TAB_STREAM": "Akış",
+    "REVERSE_PROXY_TAB_HLS": "HLS",
+    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetri"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
