@@ -257,15 +257,13 @@ pub(super) fn rewrite_hls_provider_scheme_origin_account(
     if !provider_scheme_url.starts_with(PROVIDER_SCHEME_PREFIX) {
         return None;
     }
-    let alt_input_user_info = provider_config.get_user_info()?;
-    let Some((_source_base_url, source_username, source_password)) =
+    let Some((_source_base_url, Some(old_username), Some(old_password))) =
         input.get_matched_config_by_url(provider_scheme_url)
     else {
         return Some(provider_scheme_url.to_string());
     };
-    let (Some(old_username), Some(old_password)) = (source_username, source_password) else {
-        return Some(provider_scheme_url.to_string());
-    };
+    // Token-only inputs need no credential rewrite; require the account's credentials only here.
+    let alt_input_user_info = provider_config.get_user_info()?;
 
     let mut url = Url::parse(provider_scheme_url).ok()?;
     if rewrite_hls_url_auth_fields(
