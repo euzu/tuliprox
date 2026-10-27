@@ -9,6 +9,9 @@ fn map_selection(o: &DropDownOption) -> Html {
     html! {<span>{o.label.clone()}</span>}
 }
 
+/// A select's list hugs the field instead of floating at the default menu distance.
+const SELECT_POPUP_GAP_PX: f64 = 2.0;
+
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct SelectProps {
     pub name: String,
@@ -19,7 +22,9 @@ pub struct SelectProps {
     pub class: String,
     #[prop_or_default]
     pub popup_width: PopupMenuWidth,
-    #[prop_or_default]
+    /// Selects right-align their list with the field so it lines up with the input instead of
+    /// hanging off the icon button on the field's right end.
+    #[prop_or(PopupMenuPlacement::BottomEnd)]
     pub popup_placement: PopupMenuPlacement,
     pub options: Rc<Vec<DropDownOption>>,
     #[prop_or_default]
@@ -80,6 +85,8 @@ pub fn Select(props: &SelectProps) -> Html {
                      button_ref={button_ref}
                      popup_width={props.popup_width}
                      popup_placement={props.popup_placement}
+                     popup_gap={Some(SELECT_POPUP_GAP_PX)}
+                     popup_class={classes!("tp__popup-menu--select")}
                      width_anchor_ref={Some(field_ref)}
                      multi_select={props.multi_select}
                      options={props.options.clone()}
@@ -110,7 +117,7 @@ mod tests {
             on_select: Callback::noop(),
         });
         assert_eq!(props.popup_width, PopupMenuWidth::Content);
-        assert_eq!(props.popup_placement, PopupMenuPlacement::Adaptive);
+        assert_eq!(props.popup_placement, PopupMenuPlacement::BottomEnd);
         let source = include_str!("select.rs").split("#[cfg(test)]").next().unwrap();
         let dropdown = include_str!("drop_down_icon_button.rs");
         assert!(source.contains("ref={field_ref.clone()}"));
@@ -120,5 +127,20 @@ mod tests {
         assert!(dropdown.contains("width={props.popup_width}"));
         assert!(dropdown.contains("placement={props.popup_placement}"));
         assert!(dropdown.contains("width_anchor_ref={props.width_anchor_ref.clone()}"));
+    }
+
+    #[test]
+    fn select_popup_hugs_the_field_and_drops_its_top_left_radius() {
+        let source = include_str!("select.rs").split("#[cfg(test)]").next().unwrap();
+        let dropdown = include_str!("drop_down_icon_button.rs");
+        assert!(SELECT_POPUP_GAP_PX < crate::app::components::popup_menu::POPUP_MENU_DEFAULT_GAP_PX);
+        assert!(source.contains("popup_gap={Some(SELECT_POPUP_GAP_PX)}"));
+        assert!(source.contains("popup_class={classes!(\"tp__popup-menu--select\")}"));
+        assert!(dropdown.contains("gap={props.popup_gap}"));
+        assert!(dropdown.contains("class={props.popup_class.clone()}"));
+
+        let styles = include_str!("../../../scss/app/components/_popup_menu.scss");
+        let select_rule = styles.split_once("&--select {").unwrap().1.split('}').next().unwrap();
+        assert!(select_rule.contains("border-top-left-radius: 0;"));
     }
 }

@@ -8,7 +8,7 @@ use crate::{
 };
 use std::{collections::HashSet, rc::Rc};
 use web_sys::MouseEvent;
-use yew::{classes, component, html, use_effect_with, use_state, Callback, Html, NodeRef, Properties};
+use yew::{classes, component, html, use_effect_with, use_state, Callback, Classes, Html, NodeRef, Properties};
 use yew_hooks::use_set;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +45,12 @@ pub struct DropDownIconButtonProps {
     pub popup_width: PopupMenuWidth,
     #[prop_or_default]
     pub popup_placement: PopupMenuPlacement,
+    /// Distance between the field and the menu; `None` uses the default viewport gutter.
+    #[prop_or_default]
+    pub popup_gap: Option<f64>,
+    /// Extra classes on the menu root, for caller-specific shape variants.
+    #[prop_or_default]
+    pub popup_class: Classes,
     #[prop_or_default]
     pub width_anchor_ref: Option<NodeRef>,
     #[prop_or_default]
@@ -140,7 +146,8 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
             aria_invalid={props.aria_invalid}
             aria_describedby={props.aria_describedby.clone()} />
          <PopupMenu list_role="listbox" is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()}
-            width={props.popup_width} placement={props.popup_placement}
+            width={props.popup_width} placement={props.popup_placement} gap={props.popup_gap}
+            class={props.popup_class.clone()}
             width_anchor_ref={props.width_anchor_ref.clone()} on_close={handle_popup_close}>
             {
                 for props.options.iter().map(|o| {
