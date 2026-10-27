@@ -40,6 +40,15 @@ impl UserFormFieldErrors {
     fn has_errors(&self) -> bool { self.username.is_some() || self.password.is_some() || self.target.is_some() }
 }
 
+/// Credential values auto-filled into a new-user form. The stored values let the
+/// form tell an untouched auto-filled field from one the user edited.
+#[derive(Clone)]
+struct GeneratedCredentials {
+    username: String,
+    password: String,
+    token: Option<String>,
+}
+
 fn cluster_flags_label(flags: ClusterFlags, t: impl Fn(&str) -> String) -> String {
     let mut parts = Vec::new();
     if flags.contains(ClusterFlags::Live) {
@@ -241,7 +250,13 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     });
 
     let create_initialized = use_ref(|| std::cell::Cell::new(false));
+    let generated_credentials = use_mut_ref(|| None::<GeneratedCredentials>);
+    let credential_effect_started = use_mut_ref(|| false);
     let config_ctx = use_context::<ConfigContext>();
+    let credential_generation = config_ctx
+        .as_ref()
+        .and_then(|ctx| ctx.api_proxy.as_ref())
+        .map_or_else(CredentialGenerationDto::default, |api_proxy| api_proxy.credential_generation.clone());
 
     {
         let form_state = form_state.clone();
@@ -250,10 +265,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let set_allowed_countries = allowed_countries.clone();
         let set_allowed_networks = allowed_networks.clone();
         let create_initialized = create_initialized.clone();
-        let credential_generation = config_ctx
-            .as_ref()
-            .and_then(|ctx| ctx.api_proxy.as_ref())
-            .map_or_else(CredentialGenerationDto::default, |api_proxy| api_proxy.credential_generation.clone());
+        let generated_credentials = generated_credentials.clone();
+        let main_credential_generation = credential_generation.clone();
         use_effect_with(
             (props.active_page, props.user.clone(), props.server.clone()),
             move |(active_page, user, server)| {
@@ -312,15 +325,65 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
                         user.exp_date = Some(in_one_year.timestamp());
 
-                        user.username = credential_generation.generate_username();
-                        user.password = credential_generation.generate_password();
-                        user.token = Some(credential_generation.generate_token());
+                        user.username = main_credential_generation.generate_username();
+                        user.password = main_credential_generation.generate_password();
+                        user.token = Some(main_credential_generation.generate_token());
+                        *generated_credentials.borrow_mut() = Some(GeneratedCredentials {
+                            username: user.username.clone(),
+                            password: user.password.clone(),
+                            token: user.token.clone(),
+                        });
 
                         form_state.dispatch(UserFormAction::SetAll(user));
                     }
                 }
             },
         );
+    }
+
+    {
+        let form_state = form_state.clone();
+        let generated_credentials = generated_credentials.clone();
+        let credential_effect_started = credential_effect_started.clone();
+        let is_new_user = props.user.is_none();
+        use_effect_with(credential_generation, move |generation| {
+            {
+                let mut started = credential_effect_started.borrow_mut();
+                if !*started {
+                    *started = true;
+                    return;
+                }
+            }
+            // Only regenerate the create form; an existing user's stored credentials
+            // must never change because the configuration changed.
+            if !is_new_user {
+                return;
+            }
+            let Some(generated) = generated_credentials.borrow().clone() else {
+                return;
+            };
+            let (username, password, token) = {
+                let data = form_state.data();
+                (data.username.clone(), data.password.clone(), data.token.clone())
+            };
+            let mut next = generated.clone();
+            if username == generated.username {
+                let value = generation.generate_username();
+                next.username.clone_from(&value);
+                form_state.dispatch(UserFormAction::Username(value));
+            }
+            if password == generated.password {
+                let value = generation.generate_password();
+                next.password.clone_from(&value);
+                form_state.dispatch(UserFormAction::Password(value));
+            }
+            if token == generated.token {
+                let value = generation.generate_token();
+                next.token = Some(value.clone());
+                form_state.dispatch(UserFormAction::Token(Some(value)));
+            }
+            *generated_credentials.borrow_mut() = Some(next);
+        });
     }
 
     let handle_cancel = {
