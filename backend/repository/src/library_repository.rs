@@ -361,4 +361,40 @@ mod tests {
             _ => panic!("expected episode properties"),
         }
     }
+
+    #[tokio::test]
+    async fn media_server_items_keep_distinct_identity_after_persist_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_config = crate::test_config::app_config_in(dir.path());
+        let path = dir.path().join("media_server_input.db");
+        let item = |stable_id: &str| {
+            let mut item = PlaylistItem::from(&video_item(
+                &format!("media-server://jellyfin/server/{stable_id}"),
+                "1",
+                None,
+                None,
+                None,
+                0,
+            ));
+            item.header.item_type = shared::model::PlaylistItemType::Video;
+            item.header.id = stable_id.intern();
+            item.header.input_stream_id = stable_id.intern();
+            item.header.gen_uuid();
+            item
+        };
+        let items = vec![item("media-server:s:l:movie:aaaa"), item("media-server:s:l:movie:bbbb")];
+        let mut expected: Vec<_> = items.iter().map(|item| *item.header.get_uuid()).collect();
+        let group =
+            PlaylistGroup { id: 1, title: "Movies".intern(), channels: items, xtream_cluster: XtreamCluster::Video };
+
+        let (_, result) = persist_input_library_playlist(&app_config, &path, vec![group]).await;
+        result.expect("persist");
+        let loaded = load_input_local_library_playlist(&app_config, &path).await.expect("load");
+
+        let mut loaded_uuids: Vec<_> =
+            loaded.iter().flat_map(|group| &group.channels).map(|item| *item.header.get_uuid()).collect();
+        loaded_uuids.sort();
+        expected.sort();
+        assert_eq!(loaded_uuids, expected);
+    }
 }

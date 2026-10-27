@@ -1195,6 +1195,20 @@
 
 ## 🐛 Fixes
 
+- **Jellyfin catalogs no longer collapse to one item on a repeated update.** Jellyfin items lost their stable id
+  when the input cache was read back, so all of them shared one UUID and the duplicate filter kept a single item.
+  Any update that reused the cached input (new mapping rule, added source) published a catalog of one entry. The
+  stable id now survives the cache. Existing Jellyfin input caches are rebuilt by the next full update.
+
+- **Plex and Emby items keep the same Xtream id whether the input comes fresh or from the cache.** The cache restored
+  a different identity than the fresh download, so a series could receive a new Xtream id once an update reused the
+  cached input. Both now use the stable media-server id. Items that were first published from a cached input get a
+  new Xtream id once.
+
+- **Plex, Jellyfin and Emby movies show their poster in Xtream clients.** `get_vod_streams` returned an empty
+  `stream_icon` for media-server movies because the image reference was stored only in the stream properties. The
+  poster is now exposed through the resource proxy like the series cover.
+
 - **HLS segments free the provider slot when the upstream download ends.** A proxied HLS segment kept its provider
   slot until the client had read the last buffered byte, or until the socket idle deadline closed the stream. Players
   that request the next segment while the previous one is still being read (mpv, ffmpeg) were answered with the

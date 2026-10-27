@@ -325,6 +325,15 @@ impl XtreamPlaylistItem {
             std::borrow::Cow::Owned(value) => Arc::from(value),
         })
     }
+
+    /// Media-server items are identified by the stable id frozen at input time, not by a provider id.
+    /// Their URL may end in a numeric segment (Plex rating key, Emby item id) that parses as a provider
+    /// id, or in none (Jellyfin GUID) that leaves it `0`; the UUID must be the same either way, and
+    /// without the frozen id all items of the second kind would share one UUID and be removed as
+    /// duplicates of each other.
+    pub(crate) fn media_server_identity(&self) -> Option<&Arc<str>> {
+        (!self.input_stream_id.is_empty() && self.url.starts_with("media-server://")).then_some(&self.input_stream_id)
+    }
 }
 
 impl PlaylistEntry for XtreamPlaylistItem {
@@ -348,7 +357,15 @@ impl PlaylistEntry for XtreamPlaylistItem {
 
     #[inline]
     fn get_uuid(&self) -> UUIDType {
-        generate_runtime_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
+        match self.media_server_identity() {
+            Some(id) => generate_runtime_playlist_uuid(&self.input_name, id, self.item_type, &self.url),
+            None => generate_runtime_playlist_uuid(
+                &self.input_name,
+                &self.provider_id.to_string(),
+                self.item_type,
+                &self.url,
+            ),
+        }
     }
     #[inline]
     fn get_item_type(&self) -> PlaylistItemType { self.item_type }
