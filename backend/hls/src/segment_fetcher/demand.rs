@@ -6,7 +6,10 @@ use super::{
 };
 use log::{debug, warn};
 use std::sync::Arc;
-use tokio::{sync::OwnedSemaphorePermit, time::timeout};
+use tokio::{
+    sync::{Notify, OwnedSemaphorePermit},
+    time::timeout,
+};
 use tuliprox_core::utils::current_time_millis;
 
 impl HlsSegmentWorkerPool {
@@ -83,13 +86,7 @@ impl HlsSegmentWorkerPool {
         };
 
         self.wake_scheduler(context.clone(), now_ms).await;
-
-        let wait_timeout = self
-            .runtime
-            .load()
-            .policy
-            .demand_wait_timeout_for_session(workload, context.session.read().await.target_duration);
-        if timeout(wait_timeout, notifier.notified()).await.is_err() {
+        if !self.await_segment_fetch_wake(&context, segment_file, &notifier, workload).await {
             return SegmentDemandFetchOutcome::TimedOut;
         }
 
@@ -112,6 +109,39 @@ impl HlsSegmentWorkerPool {
             ) => SegmentDemandFetchOutcome::Unavailable,
             None => SegmentDemandFetchOutcome::NotFound,
         }
+    }
+
+    /// Waits for the wake that announces progress on an in-flight segment fetch.
+    ///
+    /// A completed fetch drops its notifier from the session and wakes only waiters that are
+    /// already registered, so the wake is registered before the entry is inspected again: a
+    /// completion that already happened is visible in the state, one that happens later still
+    /// completes the wait. Returns `false` when the fetch budget expired without progress.
+    async fn await_segment_fetch_wake(
+        &self,
+        context: &SegmentFetchContext,
+        segment_file: &HlsSegmentFile,
+        notifier: &Notify,
+        workload: HlsSegmentFetchWorkload,
+    ) -> bool {
+        let wake = notifier.notified();
+        tokio::pin!(wake);
+        wake.as_mut().enable();
+        let (target_duration, already_ready) = {
+            let session = context.session.read().await;
+            (
+                session.target_duration,
+                matches!(
+                    session.segments.get(&segment_file.proxy_seq).map(|entry| &entry.status),
+                    Some(SegmentCacheStatus::Ready { .. })
+                ),
+            )
+        };
+        if already_ready {
+            return true;
+        }
+        let wait_timeout = self.runtime.load().policy.demand_wait_timeout_for_session(workload, target_duration);
+        timeout(wait_timeout, wake).await.is_ok()
     }
 
     pub(super) async fn next_ready_segment_key_fetch_snapshot(
