@@ -316,26 +316,22 @@ async fn token_refresh(
 /// Adds `nonce` to all <script> tags that do not yet have one.
 /// Also removes any existing <meta http-equiv="Content-Security-Policy"> tags.
 fn inject_nonce_with_parser(html: String, nonce_b64: &str) -> String {
-    let settings = RewriteStrSettings {
-        element_content_handlers: vec![
-            // 1) All <script> without nonce -> add nonce
-            element!("script:not([nonce])", move |el| {
-                el.set_attribute("nonce", nonce_b64)?;
-                Ok(())
-            }),
-            // 2) All <style> without nonce -> add nonce
-            element!("style:not([nonce])", move |el| {
-                el.set_attribute("nonce", nonce_b64)?;
-                Ok(())
-            }),
-            // 3) Remove meta CSP from HTML, if present
-            element!("meta[http-equiv='Content-Security-Policy']", |el| {
-                el.remove();
-                Ok(())
-            }),
-        ],
-        ..RewriteStrSettings::default()
-    };
+    let settings = RewriteStrSettings::new()
+        // 1) All <script> without nonce -> add nonce
+        .append_element_content_handler(element!("script:not([nonce])", move |el| {
+            el.set_attribute("nonce", nonce_b64)?;
+            Ok(())
+        }))
+        // 2) All <style> without nonce -> add nonce
+        .append_element_content_handler(element!("style:not([nonce])", move |el| {
+            el.set_attribute("nonce", nonce_b64)?;
+            Ok(())
+        }))
+        // 3) Remove meta CSP from HTML, if present
+        .append_element_content_handler(element!("meta[http-equiv='Content-Security-Policy']", |el| {
+            el.remove();
+            Ok(())
+        }));
 
     lol_html::rewrite_str(&html, settings).unwrap_or(html)
 }

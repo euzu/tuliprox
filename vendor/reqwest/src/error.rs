@@ -123,6 +123,11 @@ impl Error {
             if err.is::<TimedOut>() {
                 return true;
             }
+            if let Some(err) = err.downcast_ref::<Error>() {
+                if err.is_timeout() {
+                    return true;
+                }
+            }
             #[cfg(not(all(
                 target_arch = "wasm32",
                 any(target_os = "unknown", target_os = "none")
@@ -158,6 +163,22 @@ impl Error {
                 if hyper_err.is_connect() {
                     return true;
                 }
+            }
+
+            source = err.source();
+        }
+
+        false
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none"))))]
+    /// Returns true if the error is related to DNS resolution.
+    pub fn is_dns(&self) -> bool {
+        let mut source = self.source();
+
+        while let Some(err) = source {
+            if err.is::<DnsError>() {
+                return true;
             }
 
             source = err.source();
@@ -336,6 +357,10 @@ pub(crate) fn request<E: Into<BoxError>>(e: E) -> Error {
     Error::new(Kind::Request, Some(e))
 }
 
+pub(crate) fn dns<E: Into<BoxError>>(e: E) -> BoxError {
+    Box::new(DnsError { inner: e.into() })
+}
+
 pub(crate) fn redirect<E: Into<BoxError>>(e: E, url: Url) -> Error {
     Error::new(Kind::Redirect, Some(e)).with_url(url)
 }
@@ -415,6 +440,23 @@ impl fmt::Display for BadScheme {
 
 impl StdError for BadScheme {}
 
+#[derive(Debug)]
+pub(crate) struct DnsError {
+    pub(crate) inner: BoxError,
+}
+
+impl fmt::Display for DnsError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("error resolving DNS")
+    }
+}
+
+impl StdError for DnsError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&*self.inner as _)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +506,23 @@ mod tests {
     }
 
     #[test]
+    fn decode_body_timeout_is_timeout() {
+        // A body timeout surfaced while decoding stays a decode error, but
+        // is_timeout still finds the timeout in the source chain.
+        let err = super::decode(super::body(super::TimedOut));
+        assert!(err.is_decode());
+        assert!(err.is_timeout());
+    }
+
+    #[test]
+    fn decode_wraps_other_errors() {
+        let io = io::Error::new(io::ErrorKind::Other, "boom");
+        let err = super::decode(io);
+        assert!(err.is_decode());
+        assert!(!err.is_timeout());
+    }
+
+    #[test]
     fn is_timeout() {
         let err = super::request(super::TimedOut);
         assert!(err.is_timeout());
@@ -473,5 +532,12 @@ mod tests {
         let io = io::Error::from(io::ErrorKind::TimedOut);
         let nested = super::request(io);
         assert!(nested.is_timeout());
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none"))))]
+    #[test]
+    fn is_dns() {
+        let err = super::request(DnsError { inner: "".into() });
+        assert!(err.is_dns());
     }
 }

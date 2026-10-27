@@ -175,10 +175,6 @@ pub struct ForceStreamRequestContext<'a> {
     pub(crate) content_representation: crate::api::model::ProviderContentRepresentationMode,
 }
 
-/// Upper bound a manifest refresh waits for its pinned account to free a slot. Parallel
-/// playbacks on one account free their slots within seconds; a 503 would stall the player.
-pub(crate) const HLS_MANIFEST_CAPACITY_WAIT: Duration = Duration::from_secs(5);
-
 /// Upper bound a media object (segment, init, key) waits. It stays well below a typical
 /// segment duration, so the player keeps buffer to retry after a 503.
 const HLS_MEDIA_CAPACITY_WAIT: Duration = Duration::from_secs(2);
@@ -259,6 +255,8 @@ mod streaming;
 #[cfg(test)]
 use self::metering::resolve_stream_config_u64;
 #[cfg(test)]
+pub(crate) use self::provider_acquire::acquire_exact_provider_handle;
+#[cfg(test)]
 use self::provider_urls::find_input_account_by_signature;
 #[cfg(test)]
 use self::provider_urls::stream_url_matches_provider;
@@ -330,7 +328,7 @@ pub(crate) use self::{
     failover_group::{group_playback_settings, resolve_hls_group_entry, GroupSelectionRequest, PlaybackSource},
     local_files::local_stream_response,
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
-    provider_acquire::{acquire_exact_provider_handle, stream_response_with_provider_handle},
+    provider_acquire::stream_response_with_provider_handle,
     provider_urls::select_provider_stream_url,
     resources::force_hls_resource_response,
     response::admission_failure_response,

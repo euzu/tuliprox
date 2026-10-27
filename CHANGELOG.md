@@ -1062,6 +1062,10 @@
 
 ## ⚙️ Optimizations
 
+- **Dependency updates.** `jsonwebtoken` 11, `quick-xml` 0.42, `tower-http` 0.7, `tokio-tungstenite` 0.30,
+  `sysinfo` 0.39, `lol_html` 3, `lru` 0.19, `fancy-regex` 0.20 and `gloo-net` 0.7. The vendored `reqwest` moved to
+  0.13.5 with the request-extension forwarding patch re-applied.
+
 - **HLS cache usage scan runs at startup.** With a very large HLS cache the first segment fetch used to wait 2-3 seconds
   for the lazy full-directory scan. The existing cache garbage-collection task now runs the scan before its first pass
   (and again after a cache path change), and cancellation interrupts it. Switch staging also runs the scan before its
@@ -1238,6 +1242,19 @@
 - **Hidden files and editor temporary files in `mapping.d` and `template.d` are skipped.** Files starting with `.`
   and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
   longer breaks a reload.
+
+- **HLS segments free the provider slot when the upstream download ends.** A proxied HLS segment kept its provider
+  slot until the client had read the last buffered byte, or until the socket idle deadline closed the stream. Players
+  that request the next segment while the previous one is still being read (mpv, ffmpeg) were answered with the
+  capacity-exhausted response and could not start with `max_connections: 1`. The slot is now released as soon as the
+  provider finished the segment; the already buffered bytes are still delivered completely. Errors, timeouts,
+  cancellation and non-HLS streams keep their previous release behavior.
+
+- **HLS playlist refreshes no longer need a free provider connection.** A manifest (m3u8) refresh of a running HLS
+  playback waited up to 5 seconds for a free slot on its pinned provider account and then failed with a 503 while a
+  segment held the only connection (`max_connections: 1`), stalling the player. Playlist text is now fetched without
+  allocating, waiting for or failing on provider capacity; only the media segments occupy a connection. A new
+  playback still has to pass admission and account selection.
 
 - **Input cards and target pipeline details in the playlist update view wrap side by side.** The input cards and the
   per-target entries under an input's update details are sized to their content and flow into a wrapping row instead of

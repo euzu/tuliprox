@@ -60,6 +60,17 @@ impl ActiveProviderManagerCore {
         alloc_id: AllocationId,
         expected_generation: Option<u64>,
     ) -> Option<ProviderAllocation> {
+        Self::release_allocation_locked(connections, alloc_id, expected_generation, true)
+    }
+
+    /// `cancel_body = false` frees the slot without cancelling the handle token, so a consumer that
+    /// still drains already buffered bytes is not truncated.
+    fn release_allocation_locked(
+        connections: &mut Connections,
+        alloc_id: AllocationId,
+        expected_generation: Option<u64>,
+        cancel_body: bool,
+    ) -> Option<ProviderAllocation> {
         if let Some(info) = connections.single.get(&alloc_id) {
             if let Some(expected_gen) = expected_generation {
                 if info.open_generation != expected_gen {
@@ -89,7 +100,9 @@ impl ActiveProviderManagerCore {
                 }
             }
             info.lifecycle = ConnectionLifecycle::Closed;
-            info.cancel_token.cancel();
+            if cancel_body {
+                info.cancel_token.cancel();
+            }
             info.allocation.release();
             if let Some(name) = info.allocation.get_provider_name() {
                 connections.released_providers.push(name);
@@ -97,6 +110,24 @@ impl ActiveProviderManagerCore {
             Some(info.allocation)
         } else {
             None
+        }
+    }
+
+    /// Frees the slot of an allocation whose upstream body ended cleanly while the client may still
+    /// drain buffered bytes. A cancelled handle token or a recorded close reason means error, idle
+    /// timeout, preemption or abort: those keep the regular release path.
+    pub(super) fn release_after_clean_upstream_eof(&self, alloc_id: AllocationId, generation: u64) {
+        let _transition = self.lock_capacity_transition();
+        let mut connections = self.write_connections();
+        let eligible = connections.single.get(&alloc_id).is_some_and(|info| {
+            info.open_generation == generation
+                && info.lifecycle == ConnectionLifecycle::Active
+                && !info.cancel_token.is_cancelled()
+                && ProviderCloseReason::from_u8(info.close_reason.load(Ordering::Acquire))
+                    == ProviderCloseReason::Unspecified
+        });
+        if eligible {
+            Self::release_allocation_locked(&mut connections, alloc_id, Some(generation), false);
         }
     }
 
@@ -329,6 +360,30 @@ impl ActiveProviderManager {
                     }
                 });
             }
+        }
+    }
+
+    /// Releases the provider slot as soon as the registered body owner of `alloc_id` completes
+    /// cleanly, without waiting for the client to drain its buffered bytes.
+    pub fn release_slot_on_clean_upstream_eof(&self, alloc_id: AllocationId) {
+        let (generation, completion_token) = {
+            let connections = self.read_connections();
+            let Some(info) = connections.single.get(&alloc_id) else {
+                return;
+            };
+            (info.open_generation, info.completion_token.clone())
+        };
+        let core = Arc::clone(&self.core);
+        let shutdown_token = self.shutdown_token.clone();
+        if let Ok(rt_handle) = tokio::runtime::Handle::try_current() {
+            rt_handle.spawn(async move {
+                tokio::select! {
+                    () = shutdown_token.cancelled() => {},
+                    () = completion_token.cancelled() => {
+                        core.release_after_clean_upstream_eof(alloc_id, generation);
+                    }
+                }
+            });
         }
     }
 

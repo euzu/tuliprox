@@ -16,7 +16,7 @@ dist
 /dev/
 /debug/
 /testkit-report
-
+/vendor/**/target
 # ignore everything inside docs
 docs/**/*
 

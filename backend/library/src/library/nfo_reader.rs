@@ -176,30 +176,17 @@ impl NfoReader {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    if tag_name == "actor" {
+                    if e.name().as_ref() == "actor" {
                         in_actor = true;
                         current_actor = Actor { name: String::new(), role: None, thumb: None };
                     }
                     current_text.clear();
                 }
-                Ok(Event::Text(e)) => {
-                    if let Ok(decoded) = e.decode() {
-                        current_text.push_str(decoded.trim());
-                    } else {
-                        current_text.clear();
-                    }
-                }
-                Ok(Event::CData(e)) => {
-                    if let Ok(decoded) = e.decode() {
-                        current_text.push_str(decoded.trim());
-                    } else {
-                        current_text.clear();
-                    }
-                }
+                Ok(Event::Text(e)) => current_text.push_str(e.xml10_content().trim()),
+                Ok(Event::CData(e)) => current_text.push_str(e.xml10_content().trim()),
                 Ok(Event::End(e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    let tag = tag_name.as_str();
+                    let name = e.name();
+                    let tag = name.as_ref();
                     let was_actor = tag == "actor";
                     on_end_tag(tag, &current_text, in_actor, &mut current_actor);
                     if was_actor {

@@ -21,7 +21,7 @@ chrono-tz = "0.10.4"
 futures.workspace = true
 libc = "0.2"
 log.workspace = true
-reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

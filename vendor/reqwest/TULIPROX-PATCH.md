@@ -1,10 +1,10 @@
-# Reqwest 0.13.4 request-extension forwarding
+# Reqwest 0.13.5 request-extension forwarding
 
-This directory contains the published `reqwest` 0.13.4 crate from crates.io.
+This directory contains the published `reqwest` 0.13.5 crate from crates.io.
 The upstream repository is <https://github.com/seanmonstar/reqwest>, revision
-`11489b34eda6d32b15ad4033e62beba2ee401350` (see `.cargo_vcs_info.json`).
+`de55373434f07f42926599dbb5a88550d8e55112` (see `.cargo_vcs_info.json`).
 The registry package checksum is
-`219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3`.
+`16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029`.
 The upstream MIT and Apache-2.0 license files are retained unchanged.
 
 The only functional change is the two lines in

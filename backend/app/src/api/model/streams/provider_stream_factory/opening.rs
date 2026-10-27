@@ -166,6 +166,11 @@ impl ProviderStreamOpenLifecycle {
     pub fn mark_opening(&self) { self.manager.mark_opening(self.allocation_id); }
 
     pub fn register_body_owner(&self) -> bool { self.manager.register_body_owner(self.allocation_id) }
+
+    /// Frees the provider slot once the upstream body ended, instead of when the client drained it.
+    pub fn release_slot_on_clean_upstream_eof(&self) {
+        self.manager.release_slot_on_clean_upstream_eof(self.allocation_id);
+    }
 }
 
 pub async fn open_provider_stream_with_lifecycle(
@@ -183,10 +188,16 @@ pub async fn open_provider_stream_with_lifecycle(
             lc.close_reason.clone(),
         );
     }
+    let is_hls_resource = stream_options.flags.contains(ProviderStreamFactoryFlags::HlsResource);
     let open = create_provider_stream(ctx, client, stream_options).await?;
     if let (ProviderStreamOpen::Stream(response), Some(lc)) = (&open, lifecycle.as_ref()) {
-        if response.has_upstream_owner && !lc.register_body_owner() {
-            return None;
+        if response.has_upstream_owner {
+            if !lc.register_body_owner() {
+                return None;
+            }
+            if is_hls_resource {
+                lc.release_slot_on_clean_upstream_eof();
+            }
         }
     }
     Some(open)

@@ -3,6 +3,7 @@ use super::{ActiveProviderManager, ConnectionKind, PlaybackLeaseRef};
 mod admission;
 mod behavior;
 mod capacity_probe;
+mod eof_release;
 mod lifecycle;
 mod retry;
 mod shared_rebind;

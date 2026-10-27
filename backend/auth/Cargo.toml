@@ -24,7 +24,7 @@ base64.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
-jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
 log.workspace = true
 rand = "0.9.5"
 rust-argon2 = "3.0.0"

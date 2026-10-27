@@ -1,6 +1,6 @@
 --- a/src/async_impl/client.rs
 +++ b/src/async_impl/client.rs
-@@ -2639,12 +2639,14 @@
+@@ -2656,12 +2656,14 @@
              http::Version::HTTP_3 if self.inner.h3_client.is_some() => {
                  let mut req = builder.body(body).expect("valid request parts");
                  *req.headers_mut() = headers.clone();

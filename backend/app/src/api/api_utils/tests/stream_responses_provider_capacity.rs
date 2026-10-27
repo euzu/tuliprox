@@ -14,16 +14,38 @@ use shared::{
     utils::Internable,
 };
 use std::{net::SocketAddr, sync::Arc};
-use tokio::{io::AsyncWriteExt, net::TcpListener};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
+
+/// Reads the request head before answering. Responding before the request arrived is an
+/// unexpected message for the HTTP client and fails the open depending on the hyper version.
+async fn serve_once(listener: TcpListener, response: &'static [u8]) -> std::io::Result<()> {
+    let (mut socket, _) = listener.accept().await?;
+    read_request_head(&mut socket).await?;
+    socket.write_all(response).await
+}
+
+async fn read_request_head(socket: &mut TcpStream) -> std::io::Result<()> {
+    let mut head = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = socket.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        head.extend_from_slice(&chunk[..read]);
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let upstream = listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await?;
-        socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await
-    });
+    let server =
+        tokio::spawn(serve_once(listener, b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
     let mut config = create_test_provider_app_config();
     let input = Arc::new(ConfigInput {
         id: 1,
@@ -87,10 +109,8 @@ async fn failed_provider_open_preserves_other_allocation_on_same_socket() -> Res
 async fn recording_provider_reservation_opens_without_second_slot() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let upstream = listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await?;
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata").await
-    });
+    let server =
+        tokio::spawn(serve_once(listener, b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata"));
     let mut config = create_test_provider_app_config();
     let input = Arc::new(ConfigInput {
         id: 1,
