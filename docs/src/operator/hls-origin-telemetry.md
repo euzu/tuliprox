@@ -22,7 +22,7 @@ reverse_proxy:
 |:-----------------|:----:|:--------|:-------------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`        | Bool | `false` | Turns the recorder on. When off, nothing is measured and there is no runtime cost.                                                   |
 | `queue_capacity` | Int  | `1024`  | Bounded event queue, at least `16` and at most Tokio's channel limit. When full, events are dropped and counted; fetches never wait. |
-| `freshness_secs` | Int  | `60`    | Quality values older than this are reported as `null` (unknown), not as good or bad.                                                 |
+| `freshness_secs` | Int  | `60`    | `transfer_quality` values whose newest sample is older than this are reported as `null` (unknown). `availability` is not affected.   |
 | `window_secs`    | Int  | `300`   | Rolling window used for the aggregates (at most 4096 samples per input).                                                             |
 
 * The same settings are available in the Web UI under **Config → Reverse Proxy → HLS Origin Telemetry**.
@@ -65,8 +65,10 @@ It answers `503` while the feature is disabled.
   grow with the number of viewers. One origin fetch is one sample, retries are separate samples.
 * `availability` and `transfer_quality` are separate. A fetch that returned HTTP 200 with a slow body counts as
   available but shows up in `transfer_quality`.
-* Every quality value is `null` when there is no sample or the newest sample is older than `freshness_secs`.
-  `sample_count` and `last_sample_age_ms` tell you how much to trust a value. Never treat `null` as `0`.
+* Every `transfer_quality` value is `null` when there is no sample or the newest sample is older than
+  `freshness_secs`. `availability` is not nulled by freshness: `success_ratio` stays set as long as the window holds
+  samples, so check `availability.last_sample_age_ms`. `sample_count` and `last_sample_age_ms` tell you how much to
+  trust a value. Never treat `null` as `0`.
 * Cancelled fetches are counted but excluded from `success_ratio`.
 * `network_ms` is the time from request start to the last body byte. Queue or lease wait (`queue_wait_ms`) is
   reported apart from it. Cache-side time is reported apart from it too: `cache_write_ms_p95`, `postprocess_ms_p95` and
