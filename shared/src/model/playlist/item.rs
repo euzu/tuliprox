@@ -248,7 +248,9 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
         let header = PlaylistItemHeader {
             uuid: item.get_uuid(),
             virtual_id: item.virtual_id,
-            id: if item.provider_id == 0 && input_stream_id.is_none() {
+            id: if let Some(id) = item.media_server_identity() {
+                Arc::clone(id)
+            } else if item.provider_id == 0 && input_stream_id.is_none() {
                 "".intern()
             } else {
                 item.provider_id.to_string().intern()

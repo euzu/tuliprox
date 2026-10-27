@@ -972,6 +972,43 @@ mod tests {
         assert!(!line.contains("192.168.1.20"), "{line}");
     }
 
+    #[tokio::test]
+    async fn m3u_text_output_never_leaks_media_server_logo_urls() {
+        const MEDIA_SERVER_LOGO: &str = "media-server://image/plex/plex/server/14692?image_path=%2Fthumb";
+        for resource_rewrite in [false, true] {
+            let mut item = m3u_item("media-server://plex/server/14692");
+            item.logo = MEDIA_SERVER_LOGO.intern();
+            let rewrite = Arc::new(ResourceRewrite {
+                base_url: "https://proxy.example".to_string(),
+                username: "user".to_string(),
+                password: "pass".to_string(),
+            });
+            let mut flags = M3uPlaylistIteratorFlagsSet::new();
+            if resource_rewrite {
+                flags.set(M3uPlaylistIteratorFlags::RewriteResource);
+            }
+            let item = apply_rewrite(
+                item,
+                &UrlRewriteContext { base_url: "https://proxy.example", username: "user", password: "pass" },
+                1,
+                &[7u8; 16],
+                &HashMap::new(),
+                None,
+                flags,
+                ProxyType::Redirect,
+            );
+
+            let lines: Vec<_> =
+                m3u_text_stream(futures::stream::iter(vec![Ok((item, false))]), None, rewrite, resource_rewrite)
+                    .collect()
+                    .await;
+
+            let line = lines[0].as_ref().expect("item line");
+            assert!(line.contains("tvg-logo=\"https://proxy.example/resource/m3u/user/pass/"), "{line}");
+            assert!(!line.contains("media-server://image"), "resource_rewrite={resource_rewrite}: {line}");
+        }
+    }
+
     // Regression lock: never forward the provider's source `url-tvg`. Without
     // configured Tuliprox server information, the header stays bare.
     #[tokio::test]

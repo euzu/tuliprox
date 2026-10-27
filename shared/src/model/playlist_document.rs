@@ -550,4 +550,19 @@ mod tests {
         let item = video_item("http://provider.example/movie/u/p/813563.mkv", None);
         assert_eq!(video_info_doc_extension(&item).as_ref(), "mkv");
     }
+
+    #[test]
+    fn media_server_movie_logo_becomes_a_resource_proxy_stream_icon() {
+        let mut item = video_item("media-server://plex/server/14692", Some(video_properties("mp4", false)));
+        item.logo =
+            "media-server://image/plex/plex/server/14692?image_path=%2Flibrary%2Fmetadata%2F14692%2Fthumb".intern();
+
+        let XtreamDocument::Video(doc) = item.to_document(&sample_options()) else {
+            panic!("expected a video document");
+        };
+
+        assert!(doc.stream_icon.starts_with("http://proxy.example/"), "{}", doc.stream_icon);
+        assert!(doc.stream_icon.ends_with("/logo"), "{}", doc.stream_icon);
+        assert!(!doc.stream_icon.contains("media-server"), "{}", doc.stream_icon);
+    }
 }

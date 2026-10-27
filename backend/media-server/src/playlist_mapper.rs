@@ -171,25 +171,29 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
         media_server_stream_ref_to_internal_url,
     );
     let uuid = generate_provider_playlist_uuid(&movie.input_name, &stable_id, PlaylistItemType::Video);
+    let interned_id = stable_id.intern();
     let release_date = movie.release_date.clone().or_else(|| release_date_from_year(movie.year));
     let image_url = movie.image_ref.as_ref().map(media_server_image_ref_to_internal_url).map(Arc::<str>::from);
     let details = movie_details(movie, release_date, image_url.clone());
+    let logo = image_url.unwrap_or_else(|| "".intern());
     let rating = media_server_rating(movie.descriptive_facts.as_ref());
 
     PlaylistItem {
         header: PlaylistItemHeader {
             uuid,
-            id: stable_id.intern(),
+            input_stream_id: Arc::clone(&interned_id),
+            id: interned_id,
             name: movie.title.clone(),
             title: movie.title.clone(),
             url: url.intern(),
             input_name: movie.input_name.clone(),
+            logo: Arc::clone(&logo),
             xtream_cluster: XtreamCluster::Video,
             item_type: PlaylistItemType::Video,
             additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                 name: movie.title.clone(),
                 stream_id: 0,
-                stream_icon: image_url.clone().unwrap_or_else(|| "".intern()),
+                stream_icon: logo,
                 direct_source: "".intern(),
                 category_id: 0,
                 custom_sid: None,
@@ -217,24 +221,28 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
         encode_url_path_segment(&series.item_id)
     );
     let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
+    let interned_id = stable_id.intern();
     let release_date = series.release_date.clone().or_else(|| release_date_from_year(series.year));
     let rating = media_server_rating(series.descriptive_facts.as_ref()).unwrap_or_default();
     let image_url = series.image_ref.as_ref().map(media_server_image_ref_to_internal_url).map(Arc::<str>::from);
+    let logo = image_url.unwrap_or_else(|| "".intern());
 
     PlaylistItem {
         header: PlaylistItemHeader {
             uuid,
-            id: stable_id.intern(),
+            input_stream_id: Arc::clone(&interned_id),
+            id: interned_id,
             name: series.title.clone(),
             title: series.title.clone(),
             url: url.intern(),
             input_name: series.input_name.clone(),
+            logo: Arc::clone(&logo),
             xtream_cluster: XtreamCluster::Series,
             item_type: PlaylistItemType::SeriesInfo,
             additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                 name: series.title.clone(),
                 series_id: 0,
-                cover: image_url.unwrap_or_else(|| "".intern()),
+                cover: logo,
                 backdrop_path: None,
                 category_id: 0,
                 cast: joined_values(series.descriptive_facts.as_ref().map(|facts| facts.cast.as_slice()))
@@ -271,6 +279,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
         media_server_stream_ref_to_internal_url,
     );
     let uuid = generate_provider_playlist_uuid(&episode.input_name, &stable_id, PlaylistItemType::Series);
+    let interned_id = stable_id.intern();
     let title = if episode.title.is_empty() {
         episode.series_title.clone().unwrap_or_else(|| "Media Server Episode".intern())
     } else {
@@ -279,16 +288,19 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
     let technical = episode.technical_facts.as_ref();
     let plot = episode.descriptive_facts.as_ref().and_then(|facts| facts.summary.clone());
     let image_url = episode.image_ref.as_ref().map(media_server_image_ref_to_internal_url).map(Arc::<str>::from);
+    let logo = image_url.unwrap_or_else(|| "".intern());
 
     PlaylistItem {
         header: PlaylistItemHeader {
             uuid,
-            id: stable_id.intern(),
+            input_stream_id: Arc::clone(&interned_id),
+            id: interned_id,
             name: title.clone(),
             title,
             parent_code,
             url: url.intern(),
             input_name: episode.input_name.clone(),
+            logo: Arc::clone(&logo),
             xtream_cluster: XtreamCluster::Series,
             item_type: PlaylistItemType::Series,
             additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
@@ -300,7 +312,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
                 series_release_date: None,
                 plot,
                 tmdb: provider_tmdb_id(&episode.provider_hints),
-                movie_image: image_url.unwrap_or_else(|| "".intern()),
+                movie_image: logo,
                 container_extension: media_server_container_extension(technical),
                 video: technical.and_then(media_server_video_json),
                 audio: technical.and_then(media_server_audio_json),
@@ -945,6 +957,15 @@ mod tests {
             ..MediaServerCatalogSnapshot::default()
         });
 
+        // Xtream VOD output reads `stream_icon` from `header.logo`, not from the properties.
+        assert_eq!(
+            groups[0].channels[0].header.logo.as_ref(),
+            "media-server://image/plex/media_server/server%2Fone/rating?image_path=%2Flibrary%2Fmetadata%2Frating%2Fthumb%2Fredacted"
+        );
+        assert_eq!(
+            groups[1].channels[0].header.logo.as_ref(),
+            "media-server://image/jellyfin/media_server/server/series?image_kind=Primary&tag=tag-redacted"
+        );
         let Some(StreamProperties::Video(video)) = &groups[0].channels[0].header.additional_properties else {
             panic!("expected video properties");
         };

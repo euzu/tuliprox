@@ -198,3 +198,55 @@ fn header_without_failover_group_field_still_deserializes() {
     let header: crate::model::PlaylistItemHeader = serde_json::from_value(value).expect("deserializes");
     assert!(header.failover_group.is_none());
 }
+
+#[test]
+fn media_server_item_identity_survives_xtream_round_trip() {
+    let media_server_item = |id: &str| {
+        let mut item = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: id.intern(),
+                url: format!("media-server://jellyfin/server/item-{id}").intern(),
+                input_name: "jellyfin".intern(),
+                item_type: PlaylistItemType::Video,
+                xtream_cluster: XtreamCluster::Video,
+                ..PlaylistItemHeader::default()
+            },
+        };
+        item.header.freeze_input_stream_id();
+        item.header.gen_uuid();
+        item
+    };
+    let first = media_server_item("media-server:server:lib:movie:aaaa");
+    let second = media_server_item("media-server:server:lib:movie:bbbbbb");
+
+    let first_back = PlaylistItem::from(&XtreamPlaylistItem::from(&first));
+    let second_back = PlaylistItem::from(&XtreamPlaylistItem::from(&second));
+
+    assert_eq!(first_back.header.id, first.header.id);
+    assert_eq!(first_back.header.get_uuid(), first.header.get_uuid());
+    assert_ne!(first_back.header.get_uuid(), second_back.header.get_uuid());
+}
+
+#[test]
+fn media_server_item_with_numeric_url_keeps_stable_id_after_xtream_round_trip() {
+    let mut item = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "media-server:server:lib:movie:14692".intern(),
+            url: "media-server://plex/server/14692?part_key=%2Fparts%2F1".intern(),
+            input_name: "plex".intern(),
+            item_type: PlaylistItemType::Video,
+            xtream_cluster: XtreamCluster::Video,
+            ..PlaylistItemHeader::default()
+        },
+    };
+    item.header.freeze_input_stream_id();
+    item.header.gen_uuid();
+
+    let xtream_item = XtreamPlaylistItem::from(&item);
+    let back = PlaylistItem::from(&xtream_item);
+
+    assert_eq!(xtream_item.provider_id, 14692);
+    assert_eq!(xtream_item.get_uuid(), *item.header.get_uuid());
+    assert_eq!(back.header.id, item.header.id);
+    assert_eq!(back.header.get_uuid(), item.header.get_uuid());
+}
