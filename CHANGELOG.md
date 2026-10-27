@@ -1195,6 +1195,9 @@
 
 ## 🐛 Fixes
 
+- **Token-only M3U streams on a `provider://` profile no longer fail with 503 on the HLS media manifest.** The HLS
+  origin rewrite required the selected account's username/password even when the URL carries only a token and needs
+  no credential substitution. Credentials are now required only when a rewrite actually happens.
 - **Jellyfin catalogs no longer collapse to one item on a repeated update.** Jellyfin items lost their stable id
   when the input cache was read back, so all of them shared one UUID and the duplicate filter kept a single item.
   Any update that reused the cached input (new mapping rule, added source) published a catalog of one entry. The

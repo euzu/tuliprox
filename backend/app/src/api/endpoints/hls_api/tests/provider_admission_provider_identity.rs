@@ -267,6 +267,49 @@ fn hls_runtime_origin_fetch_url_uses_selected_provider_account() {
 }
 
 #[test]
+fn hls_provider_scheme_fetch_url_keeps_token_only_m3u_url_without_credentials() {
+    let failover_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+        name: "cdn".into(),
+        urls: vec!["http://pl.example.com".into(), "http://eu.example.com".into()],
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+        dns: None,
+    }));
+    let input = ConfigInput {
+        name: Arc::from("tokens"),
+        url: "provider://cdn".to_string(),
+        input_type: InputType::M3u,
+        provider_configs: Some(vec![failover_provider]),
+        ..ConfigInput::default()
+    };
+    let account_input = ConfigInput {
+        id: 8,
+        name: Arc::from("tokens"),
+        url: "http://playlist.example.com/list.m3u?access_key=KEY".to_string(),
+        input_type: InputType::M3u,
+        max_connections: 1,
+        ..ConfigInput::default()
+    };
+    let account = Arc::new(RuntimeProviderConfig::new(
+        &account_input,
+        Arc::new(std::sync::RwLock::new(ProviderConfigConnection::default())),
+        Arc::new(|_, _| {}),
+    ));
+    let url = "provider://cdn/ChannelA/mono.m3u8?token=TOKEN";
+
+    let fetch_url = super::super::build_hls_origin_fetch_url(&input, url, url, Some(&account))
+        .expect("token-only m3u provider scheme url needs no credential rewrite");
+
+    assert_eq!(fetch_url, url);
+
+    let credential_input =
+        ConfigInput { username: Some("user".to_string()), password: Some("pass".to_string()), ..input };
+    assert!(
+        super::super::build_hls_origin_fetch_url(&credential_input, url, url, Some(&account)).is_none(),
+        "a credential rewrite still requires the selected account's credentials"
+    );
+}
+
+#[test]
 fn hls_origin_entry_attaches_url_failover_provider_only_to_provider_scheme_fetch_url() {
     let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
         name: "demo".into(),
