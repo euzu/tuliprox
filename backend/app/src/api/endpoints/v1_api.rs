@@ -181,6 +181,7 @@ pub fn v1_api_register(
         .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_page_query))
         .route("/stream-history/summary", axum::routing::get(super::stream_history_api::stream_history_summary_query))
         .route("/qos-snapshots", axum::routing::get(super::stream_history_api::qos_snapshot_query))
+        .route("/hls/origin-telemetry", axum::routing::get(super::stream_history_api::hls_origin_telemetry_query))
         .route(
             "/qos-snapshots/{stream_identity_key}",
             axum::routing::get(super::stream_history_api::qos_snapshot_detail_query),

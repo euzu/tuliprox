@@ -350,6 +350,8 @@ Optional stream telemetry can turn individual playback failures into longer-term
 - Track stable stream identity across runs
 - Track shared-stream participation
 - Aggregate rolling reliability snapshots in the background
+- Optionally measure Shared HLS origin transfer quality separately from availability, with sample coverage and
+  freshness, via `GET /api/v1/hls/origin-telemetry`
 - Maintain 24-hour, 7-day, and 30-day QoS windows
 - View QoS summaries/details in the Web UI or query them through the API
 - Compact QoS storage periodically to reclaim expired data

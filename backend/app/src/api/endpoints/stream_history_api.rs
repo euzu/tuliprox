@@ -597,6 +597,17 @@ pub(crate) async fn qos_snapshot_query(
     }
 }
 
+/// Live origin transfer quality of the shared HLS fetches. Reads in-memory aggregates only; never contacts a provider.
+pub(crate) async fn hls_origin_telemetry_query(
+    ExtractAcceptHeader(accept): ExtractAcceptHeader,
+    State(app_state): State<Arc<AppState>>,
+) -> Response {
+    match app_state.hls.proxy.origin_telemetry().snapshot() {
+        Some(snapshot) => json_or_bin_response(accept.as_deref(), &snapshot).into_response(),
+        None => error_response(StatusCode::SERVICE_UNAVAILABLE, "HLS origin telemetry is not enabled"),
+    }
+}
+
 pub(crate) async fn qos_snapshot_detail_query(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     State(app_state): State<Arc<AppState>>,
@@ -863,6 +874,21 @@ fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hls_origin_telemetry_route_reports_disabled_as_unavailable() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let router = axum::Router::new()
+            .route("/hls/origin-telemetry", axum::routing::get(hls_origin_telemetry_query))
+            .with_state(app_state);
+        let response =
+            router.oneshot(Request::builder().uri("/hls/origin-telemetry").body(Body::empty()).unwrap()).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[tokio::test]
     async fn page_route_accepts_the_search_field_query_the_web_ui_sends() {
@@ -1134,6 +1160,7 @@ mod tests {
                     compaction_interval_secs: 86_400,
                 }),
                 hls_cache: None,
+                hls_origin_telemetry: None,
             }),
             ..crate::model::Config::default()
         };

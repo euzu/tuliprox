@@ -6,8 +6,8 @@ use crate::{
     },
     error::TuliproxError,
     model::{
-        CacheConfigDto, GeoIpConfigDto, HlsCacheConfigDto, QosAggregationConfigDto, RateLimitConfigDto,
-        StreamConfigDto, StreamHistoryConfigDto,
+        CacheConfigDto, GeoIpConfigDto, HlsCacheConfigDto, HlsOriginTelemetryConfigDto, QosAggregationConfigDto,
+        RateLimitConfigDto, StreamConfigDto, StreamHistoryConfigDto,
     },
     utils::hex_to_u8_16,
 };
@@ -61,6 +61,8 @@ pub struct ReverseProxyConfigDto {
     pub qos_aggregation: Option<QosAggregationConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hls_cache: Option<HlsCacheConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hls_origin_telemetry: Option<HlsOriginTelemetryConfigDto>,
 }
 
 impl ReverseProxyConfigDto {
@@ -78,6 +80,7 @@ impl ReverseProxyConfigDto {
             && (self.qos_aggregation.is_none()
                 || self.qos_aggregation.as_ref().is_some_and(QosAggregationConfigDto::is_empty))
             && (self.hls_cache.is_none() || self.hls_cache.as_ref().is_some_and(HlsCacheConfigDto::is_empty))
+            && self.hls_origin_telemetry.as_ref().is_none_or(HlsOriginTelemetryConfigDto::is_empty)
     }
 
     pub fn clean(&mut self) {
@@ -113,6 +116,9 @@ impl ReverseProxyConfigDto {
             if hls_cache.is_empty() {
                 self.hls_cache = None;
             }
+        }
+        if self.hls_origin_telemetry.as_ref().is_some_and(HlsOriginTelemetryConfigDto::is_empty) {
+            self.hls_origin_telemetry = None;
         }
     }
 
@@ -158,6 +164,9 @@ impl ReverseProxyConfigDto {
         }
         if let Some(hls_cache) = self.hls_cache.as_mut() {
             hls_cache.prepare()?;
+        }
+        if let Some(hls_origin_telemetry) = self.hls_origin_telemetry.as_ref() {
+            hls_origin_telemetry.prepare()?;
         }
 
         Ok(())

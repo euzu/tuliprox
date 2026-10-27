@@ -60,6 +60,7 @@ reverse_proxy:
 | `rewrite_secret` | String | `""` | A 32-character Hex string (16 bytes). Tuliprox encrypts/signs the original image URLs during the rewrite process. To prevent image URLs from becoming invalid after a server restart, you MUST enter a static secret here. |
 | `stream_history` | Block | `null` | Optional stream telemetry block that persists raw connect/disconnect/startup-failure events to daily history files. |
 | `qos_aggregation` | Block | `null` | Optional background worker that aggregates stream history into compact per-stream QoS snapshots. |
+| `hls_origin_telemetry` | Block | `null` | Optional measurement of Shared HLS origin transfer quality, exposed at `GET /api/v1/hls/origin-telemetry`. See [Shared HLS Origin Telemetry](../operator/hls-origin-telemetry.md). |
 
 **Internal destinations are never exposed through the resource route.** When resource rewriting is disabled, channel
 logos, Xtream covers and backdrops, and EPG image links are classified before they are written into player output.

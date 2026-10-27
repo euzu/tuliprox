@@ -240,6 +240,7 @@ pub(in crate::utils::network::request::tests) fn test_retry_config(max_attempts:
         stream_history: None,
         qos_aggregation: None,
         hls_cache: None,
+        hls_origin_telemetry: None,
     });
     make_test_app_config(config)
 }

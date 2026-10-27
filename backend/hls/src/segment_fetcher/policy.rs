@@ -93,6 +93,7 @@ impl Default for SegmentFetchPolicy {
             retry_delays_ms: [0, 100, 250, 500, 750],
             retry_jitter_max_ms: 100,
             permanent_failure_segment_threshold: 3,
+            telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
         }
     }
 }

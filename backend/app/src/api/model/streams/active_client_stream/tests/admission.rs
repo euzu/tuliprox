@@ -44,6 +44,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         user_access_control: true,
         ..Config::default()

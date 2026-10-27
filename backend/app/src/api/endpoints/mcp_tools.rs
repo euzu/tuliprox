@@ -111,6 +111,15 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
         redact_secrets: false,
     },
     McpTool {
+        name: "get_hls_origin_telemetry",
+        description: "Shared HLS origin transfer quality per input (network time, first byte, throughput, availability) from existing fetches, with sample coverage and freshness. Values are null when unmeasured or stale. Requires reverse_proxy.hls_origin_telemetry to be enabled.",
+        input_schema: NO_ARGUMENTS,
+        method: McpToolMethod::Get,
+        path: "/hls/origin-telemetry",
+        kind: McpToolKind::Read,
+        redact_secrets: false,
+    },
+    McpTool {
         name: "list_qos_snapshots",
         description: "Stream quality-of-service snapshots, worst first. Requires qos_aggregation to be enabled.",
         input_schema: r#"{"type":"object","properties":{"limit":{"type":"integer","minimum":1},"stream_identity_key":{"type":"string"},"input_name":{"type":"string"},"provider_name":{"type":"string"},"item_type":{"type":"string"},"target_name":{"type":"string"}},"additionalProperties":false}"#,

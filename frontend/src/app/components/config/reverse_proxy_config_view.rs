@@ -14,8 +14,8 @@ use crate::{
             },
             dto_field_id,
             number_input::NumberInput,
-            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, RangeSlider, Select,
-            TextButton,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, RangeSlider, Select, TabItem,
+            TabSet, TextButton,
         },
         context::ConfigContext,
     },
@@ -30,10 +30,10 @@ use shared::{
     model::{
         ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
         HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsSegmentTimeout, HlsStartupConfigDto, HlsStartupMode,
-        HlsStripConfigDto, HlsStripMode, Millis, QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto,
-        ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, Secs, StreamBufferConfigDto, StreamConfigDto,
-        StreamHistoryConfigDto,
+        HlsOriginTelemetryConfigDto, HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsSegmentTimeout,
+        HlsStartupConfigDto, HlsStartupMode, HlsStripConfigDto, HlsStripMode, Millis, QosAggregationConfigDto,
+        RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, Secs,
+        StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto, HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY,
     },
     utils::format_float_localized,
 };
@@ -120,6 +120,19 @@ const LABEL_STREAM_HISTORY_BATCH_SIZE: &str = "LABEL.STREAM_HISTORY_BATCH_SIZE";
 const LABEL_STREAM_HISTORY_RETENTION_DAYS: &str = "LABEL.STREAM_HISTORY_RETENTION_DAYS";
 const LABEL_QOS_AGGREGATION: &str = "LABEL.QOS_AGGREGATION";
 const LABEL_QOS_AGGREGATION_ENABLED: &str = "LABEL.QOS_AGGREGATION_ENABLED";
+const LABEL_TAB_GENERAL: &str = "LABEL.REVERSE_PROXY_TAB_GENERAL";
+const LABEL_TAB_STREAM: &str = "LABEL.REVERSE_PROXY_TAB_STREAM";
+const LABEL_TAB_HLS: &str = "LABEL.REVERSE_PROXY_TAB_HLS";
+const LABEL_TAB_TELEMETRY: &str = "LABEL.REVERSE_PROXY_TAB_TELEMETRY";
+const TAB_GENERAL: &str = "general";
+const TAB_STREAM: &str = "stream";
+const TAB_HLS: &str = "hls";
+const TAB_TELEMETRY: &str = "telemetry";
+const LABEL_HLS_ORIGIN_TELEMETRY: &str = "LABEL.HLS_ORIGIN_TELEMETRY";
+const LABEL_HLS_ORIGIN_TELEMETRY_ENABLED: &str = "LABEL.HLS_ORIGIN_TELEMETRY_ENABLED";
+const LABEL_HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY: &str = "LABEL.HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY";
+const LABEL_HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS: &str = "LABEL.HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS";
+const LABEL_HLS_ORIGIN_TELEMETRY_WINDOW_SECS: &str = "LABEL.HLS_ORIGIN_TELEMETRY_WINDOW_SECS";
 const LABEL_INTERVAL_SECS: &str = "LABEL.INTERVAL_SECS";
 
 generate_form_reducer!(
@@ -254,6 +267,17 @@ generate_form_reducer!(
         BatchSize => stream_history_batch_size: usize,
         RetentionDays => stream_history_retention_days: u16,
         Directory => stream_history_directory: String,
+    }
+);
+
+generate_form_reducer!(
+    state: HlsOriginTelemetryConfigFormState { form: HlsOriginTelemetryConfigDto },
+    action_name: HlsOriginTelemetryConfigFormAction,
+    fields {
+        Enabled => enabled: bool,
+        QueueCapacity => queue_capacity: usize,
+        FreshnessSecs => freshness_secs: u64,
+        WindowSecs => window_secs: u64,
     }
 );
 
@@ -416,6 +440,28 @@ fn clamp_usize_min(value: Option<i64>, min_value: usize) -> usize {
     value.and_then(|value| usize::try_from(value).ok()).filter(|value| *value >= min_value).unwrap_or(min_value)
 }
 
+/// Number input whose value never drops below `min_value`; empty or smaller input snaps back to the minimum.
+fn edit_number_min(
+    label: String,
+    name: &'static str,
+    field_id: &str,
+    value: u64,
+    min_value: u64,
+    on_change: Callback<u64>,
+) -> Html {
+    html! {
+        <div class="tp__form-field tp__form-field__number">
+            <NumberInput
+                label={label}
+                name={name}
+                field_id={Some(field_id.to_string())}
+                value={value.min(i64::MAX as u64) as i64}
+                on_change={Callback::from(move |input: Option<i64>| on_change.emit(clamp_u64_min(input, min_value)))}
+            />
+        </div>
+    }
+}
+
 fn clamp_u8_range(value: Option<i64>, min_value: u8, max_value: u8) -> u8 {
     value.and_then(|value| u8::try_from(value).ok()).map_or(min_value, |value| value.clamp(min_value, max_value))
 }
@@ -527,6 +573,9 @@ pub fn ReverseProxyConfigView() -> Html {
         use_reducer(|| StreamHistoryConfigFormState { form: StreamHistoryConfigDto::default(), modified: false });
     let qos_aggregation_state: UseReducerHandle<QosAggregationConfigFormState> =
         use_reducer(|| QosAggregationConfigFormState { form: QosAggregationConfigDto::default(), modified: false });
+    let hls_origin_telemetry_state: UseReducerHandle<HlsOriginTelemetryConfigFormState> = use_reducer(|| {
+        HlsOriginTelemetryConfigFormState { form: HlsOriginTelemetryConfigDto::default(), modified: false }
+    });
     let manual_segment_timeout = use_mut_ref(|| 10_000_u64);
     let last_emitted_form = use_mut_ref(|| None::<ConfigForm>);
 
@@ -545,6 +594,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let admission_strategies_state = admission_strategies_state.clone();
         let stream_history_state = stream_history_state.clone();
         let qos_aggregation_state = qos_aggregation_state.clone();
+        let hls_origin_telemetry_state = hls_origin_telemetry_state.clone();
         let last_emitted_form = last_emitted_form.clone();
 
         use_emit_mapped_option(
@@ -567,6 +617,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         admission_strategies_state.form.clone(),
                         stream_history_state.form.clone(),
                         qos_aggregation_state.form.clone(),
+                        hls_origin_telemetry_state.form.clone(),
                     ),
                 ),
                 (
@@ -587,6 +638,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         admission_strategies_state.modified,
                         stream_history_state.modified,
                         qos_aggregation_state.modified,
+                        hls_origin_telemetry_state.modified,
                     ),
                 ),
             ),
@@ -602,6 +654,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         admission_strategies,
                         stream_history,
                         qos_aggregation,
+                        hls_origin_telemetry,
                     ),
                 ),
                 (
@@ -622,6 +675,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         admission_strategies_modified,
                         stream_history_modified,
                         qos_aggregation_modified,
+                        hls_origin_telemetry_modified,
                     ),
                 ),
             )| {
@@ -647,6 +701,8 @@ pub fn ReverseProxyConfigView() -> Html {
                 form.disabled_header = if disabled_header.is_empty() { None } else { Some(disabled_header.clone()) };
                 form.stream_history = if stream_history.is_empty() { None } else { Some(stream_history.clone()) };
                 form.qos_aggregation = if qos_aggregation.is_empty() { None } else { Some(qos_aggregation.clone()) };
+                form.hls_origin_telemetry =
+                    if hls_origin_telemetry.is_empty() { None } else { Some(hls_origin_telemetry.clone()) };
 
                 let modified = rp_modified
                     || disabled_header_modified
@@ -660,7 +716,8 @@ pub fn ReverseProxyConfigView() -> Html {
                     || failover_patterns_modified
                     || admission_strategies_modified
                     || stream_history_modified
-                    || qos_aggregation_modified;
+                    || qos_aggregation_modified
+                    || hls_origin_telemetry_modified;
                 let next_form = ConfigForm::ReverseProxy(modified, form);
                 let mut last_form = last_emitted_form.borrow_mut();
                 if last_form.as_ref() == Some(&next_form) {
@@ -688,6 +745,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let admission_strategies_state = admission_strategies_state.clone();
         let stream_history_state = stream_history_state.clone();
         let qos_aggregation_state = qos_aggregation_state.clone();
+        let hls_origin_telemetry_state = hls_origin_telemetry_state.clone();
 
         let reverse_proxy_cfg = config_ctx.config.as_ref().and_then(|c| c.config.reverse_proxy.clone());
         use_effect_with((reverse_proxy_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
@@ -778,6 +836,15 @@ pub fn ReverseProxyConfigView() -> Html {
                 if qos_aggregation_state.form != target_qos_aggregation {
                     qos_aggregation_state.dispatch(QosAggregationConfigFormAction::SetAll(target_qos_aggregation));
                 }
+
+                let target_hls_origin_telemetry = rp
+                    .hls_origin_telemetry
+                    .as_ref()
+                    .map_or_else(HlsOriginTelemetryConfigDto::default, std::clone::Clone::clone);
+                if hls_origin_telemetry_state.form != target_hls_origin_telemetry {
+                    hls_origin_telemetry_state
+                        .dispatch(HlsOriginTelemetryConfigFormAction::SetAll(target_hls_origin_telemetry));
+                }
             } else {
                 let target_reverse_proxy = ReverseProxyConfigDto::default();
                 if reverse_proxy_state.form != target_reverse_proxy {
@@ -849,6 +916,12 @@ pub fn ReverseProxyConfigView() -> Html {
                 let target_qos_aggregation = QosAggregationConfigDto::default();
                 if qos_aggregation_state.form != target_qos_aggregation {
                     qos_aggregation_state.dispatch(QosAggregationConfigFormAction::SetAll(target_qos_aggregation));
+                }
+
+                let target_hls_origin_telemetry = HlsOriginTelemetryConfigDto::default();
+                if hls_origin_telemetry_state.form != target_hls_origin_telemetry {
+                    hls_origin_telemetry_state
+                        .dispatch(HlsOriginTelemetryConfigFormAction::SetAll(target_hls_origin_telemetry));
                 }
             }
             || ()
@@ -1664,6 +1737,18 @@ pub fn ReverseProxyConfigView() -> Html {
         }
     };
 
+    let render_hls_origin_telemetry = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_HLS_ORIGIN_TELEMETRY)}</h1>
+                { config_field_bool!(hls_origin_telemetry_state.form, translate.t(LABEL_HLS_ORIGIN_TELEMETRY_ENABLED), enabled) }
+                { config_field!(hls_origin_telemetry_state.form, translate.t(LABEL_HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY), queue_capacity) }
+                { config_field!(hls_origin_telemetry_state.form, translate.t(LABEL_HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS), freshness_secs) }
+                { config_field!(hls_origin_telemetry_state.form, translate.t(LABEL_HLS_ORIGIN_TELEMETRY_WINDOW_SECS), window_secs) }
+            </Card>
+        }
+    };
+
     let render_stream_history_edit = || {
         html! {
             <Card class="tp__config-view__card">
@@ -1672,6 +1757,56 @@ pub fn ReverseProxyConfigView() -> Html {
                 { edit_field_number_usize!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_BATCH_SIZE), stream_history_batch_size, StreamHistoryConfigFormAction::BatchSize) }
                 { edit_field_number_u16!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_RETENTION_DAYS), stream_history_retention_days, StreamHistoryConfigFormAction::RetentionDays) }
                 { edit_field_text!(stream_history_state, translate.t(LABEL_DIRECTORY), stream_history_directory, StreamHistoryConfigFormAction::Directory) }
+            </Card>
+        }
+    };
+
+    let render_hls_origin_telemetry_edit = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_HLS_ORIGIN_TELEMETRY)}</h1>
+                { edit_field_bool!(hls_origin_telemetry_state, translate.t(LABEL_HLS_ORIGIN_TELEMETRY_ENABLED), enabled, HlsOriginTelemetryConfigFormAction::Enabled) }
+                { edit_number_min(
+                    translate.t(LABEL_HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY),
+                    "queue_capacity",
+                    &dto_field_id(&hls_origin_telemetry_state.form, "queue_capacity"),
+                    hls_origin_telemetry_state.form.queue_capacity as u64,
+                    HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY as u64,
+                    {
+                        let state = hls_origin_telemetry_state.clone();
+                        Callback::from(move |value: u64| {
+                            state.dispatch(HlsOriginTelemetryConfigFormAction::QueueCapacity(
+                                usize::try_from(value).unwrap_or(usize::MAX),
+                            ));
+                        })
+                    },
+                ) }
+                { edit_number_min(
+                    translate.t(LABEL_HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS),
+                    "freshness_secs",
+                    &dto_field_id(&hls_origin_telemetry_state.form, "freshness_secs"),
+                    hls_origin_telemetry_state.form.freshness_secs,
+                    1,
+                    {
+                        let state = hls_origin_telemetry_state.clone();
+                        Callback::from(move |value: u64| {
+                            state.dispatch(HlsOriginTelemetryConfigFormAction::FreshnessSecs(value));
+                        })
+                    },
+                ) }
+                { edit_number_min(
+                    translate.t(LABEL_HLS_ORIGIN_TELEMETRY_WINDOW_SECS),
+                    "window_secs",
+                    &dto_field_id(&hls_origin_telemetry_state.form, "window_secs"),
+                    hls_origin_telemetry_state.form.window_secs,
+                    1,
+                    {
+                        let state = hls_origin_telemetry_state.clone();
+                        Callback::from(move |value: u64| {
+                            state.dispatch(HlsOriginTelemetryConfigFormAction::WindowSecs(value));
+                        })
+                    },
+                ) }
             </Card>
         }
     };
@@ -1686,41 +1821,48 @@ pub fn ReverseProxyConfigView() -> Html {
         }
     };
 
-    let render_view_mode = || {
-        html! {
-            <div class="tp__reverse-proxy-config-view__body tp__config-view-page__body">
-                { render_settings_view() }
-                { render_geoip() }
-                { render_disabled_header_view() }
-                { render_cache() }
-                { render_hls_cache() }
-                { render_hls_segment_repair() }
-                { render_resource_retry_view() }
-                { render_rate_limit() }
-                { render_stream() }
-                { render_stream_buffer() }
-                { render_stream_history() }
-                { render_qos_aggregation() }
-            </div>
-        }
+    let active_tab = use_state(|| TAB_GENERAL.to_string());
+    let on_tab_change = {
+        let active_tab = active_tab.clone();
+        Callback::from(move |tab_id: String| active_tab.set(tab_id))
     };
 
-    let render_edit_mode = || {
+    let render_tabs = |editing: bool| {
+        let page = |children: Html| {
+            html! { <div class="tp__reverse-proxy-config-view__body tp__config-view-page__body">{ children }</div> }
+        };
+        let tab = |id: &str, title_key: &str, icon: &str, children: Html| TabItem {
+            id: id.to_string(),
+            title: translate.t(title_key),
+            icon: icon.to_string(),
+            children: page(children),
+            active_class: None,
+            inactive_class: None,
+        };
+        let (general, stream, hls, telemetry) = if editing {
+            (
+                html! { <>{ render_settings_edit() }{ render_geoip_edit() }{ render_disabled_header_edit() }{ render_cache_edit() }</> },
+                html! { <>{ render_stream_edit() }{ render_stream_buffer_edit() }{ render_rate_limit_edit() }{ render_resource_retry_edit() }</> },
+                html! { <>{ render_hls_cache_edit() }{ render_hls_segment_repair_edit() }</> },
+                html! { <>{ render_stream_history_edit() }{ render_qos_aggregation_edit() }{ render_hls_origin_telemetry_edit() }</> },
+            )
+        } else {
+            (
+                html! { <>{ render_settings_view() }{ render_geoip() }{ render_disabled_header_view() }{ render_cache() }</> },
+                html! { <>{ render_stream() }{ render_stream_buffer() }{ render_rate_limit() }{ render_resource_retry_view() }</> },
+                html! { <>{ render_hls_cache() }{ render_hls_segment_repair() }</> },
+                html! { <>{ render_stream_history() }{ render_qos_aggregation() }{ render_hls_origin_telemetry() }</> },
+            )
+        };
+        let tabs = Rc::new(vec![
+            tab(TAB_GENERAL, LABEL_TAB_GENERAL, "Settings", general),
+            tab(TAB_STREAM, LABEL_TAB_STREAM, "Streams", stream),
+            tab(TAB_HLS, LABEL_TAB_HLS, "Live", hls),
+            tab(TAB_TELEMETRY, LABEL_TAB_TELEMETRY, "Stats", telemetry),
+        ]);
         html! {
-            <div class="tp__reverse-proxy-config-view__body tp__config-view-page__body">
-                { render_settings_edit() }
-                { render_geoip_edit() }
-                { render_disabled_header_edit() }
-                { render_cache_edit() }
-                { render_hls_cache_edit() }
-                { render_hls_segment_repair_edit() }
-                { render_resource_retry_edit() }
-                { render_rate_limit_edit() }
-                { render_stream_edit() }
-                { render_stream_buffer_edit() }
-                { render_stream_history_edit() }
-                { render_qos_aggregation_edit() }
-            </div>
+            <TabSet tabs={tabs} class="tp__reverse-proxy-config-view__tabset"
+                active_tab={Some((*active_tab).clone())} on_tab_change={Some(on_tab_change.clone())} />
         }
     };
 
@@ -1728,11 +1870,7 @@ pub fn ReverseProxyConfigView() -> Html {
         <div class="tp__reverse-proxy-config-view tp__config-view-page">
         <div class="tp__config-view-page__title">{translate.t(ConfigPage::ReverseProxy.title_key())}</div>
             {
-                if *config_view_ctx.edit_mode {
-                    render_edit_mode()
-                } else {
-                    render_view_mode()
-                }
+                render_tabs(*config_view_ctx.edit_mode)
             }
         </div>
     }

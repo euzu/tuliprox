@@ -847,6 +847,7 @@ mod tests {
                 geoip: None,
                 stream_history: Some(StreamHistoryConfig { stream_history_enabled: false, ..Default::default() }),
                 hls_cache: None,
+                hls_origin_telemetry: None,
                 qos_aggregation: Some(QosAggregationConfig {
                     enabled: true,
                     interval_secs: 300,

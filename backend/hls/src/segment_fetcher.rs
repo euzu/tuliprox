@@ -51,6 +51,8 @@ pub struct SegmentFetchPolicy {
     pub retry_delays_ms: [u64; 5],
     pub retry_jitter_max_ms: u64,
     pub permanent_failure_segment_threshold: u32,
+    /// Shared across config reloads like `timeouts`; disabled by default.
+    pub telemetry: crate::origin_telemetry::OriginTelemetryRecorder,
 }
 
 /// Shared context required to schedule a segment fetch without holding session locks.
@@ -121,7 +123,6 @@ mod switch_staging;
 
 #[cfg(test)]
 use self::commit::commit_failed_segment_fetch;
-pub(crate) use self::commit::recompute_unpublished_live_head;
 #[cfg(test)]
 use self::key_dependency::wait_for_segment_key_dependency;
 #[cfg(test)]
@@ -131,6 +132,7 @@ use self::scheduler::take_queued_segment_fetch_candidate;
 #[cfg(test)]
 use self::startup_fill::prepare_startup_fill;
 pub use self::switch_staging::stage_hls_switch_resource;
+pub(crate) use self::{commit::recompute_unpublished_live_head, startup_fill::reliable_decoded_content_length};
 use self::{
     commit::{
         segment_fetch_attempt_matches, segment_fetch_binding_matches, SegmentFetchCommit, SegmentOriginWorkFinish,
@@ -149,5 +151,5 @@ use self::{
         mark_segment_discovered, ScheduledSegmentRetry, SegmentFetchSnapshot, SegmentKeyFetchDependency,
         SegmentRetryWake, SegmentWorkerRuntime,
     },
-    startup_fill::{commit_startup_response, reliable_decoded_content_length},
+    startup_fill::commit_startup_response,
 };

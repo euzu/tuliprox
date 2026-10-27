@@ -9,6 +9,7 @@ use super::{
         classify_origin_manifest_status, HlsManifestRejectLogReason, OriginManifestFetchError,
         OriginManifestStatusClass,
     },
+    telemetry::observe_manifest_attempt,
     FetchedOriginManifest, HlsManifestFetchSelection, HlsOriginManifestFetchContext, MAX_HLS_MANIFEST_BYTES,
 };
 use crate::{
@@ -17,6 +18,7 @@ use crate::{
     HlsOriginContentCodingSource, MAX_MANUAL_REDIRECTS,
 };
 use axum::http::{header, HeaderMap, StatusCode};
+use futures::FutureExt;
 use log::debug;
 use reqwest::Client;
 use shared::utils::sanitize_sensitive_info;
@@ -154,20 +156,24 @@ pub(super) async fn fetch_hls_origin_manifest_recovery_direct_target(
             return Err(OriginManifestFetchError::Request("invalid non-HTTP manifest recovery binding".to_string()));
         }
     }
-    timeout(
-        Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
-        fetch_origin_manifest_once(
-            target_url,
-            &context.headers,
-            &context.client,
-            &context.no_redirect_client,
-            context.use_manual_redirects,
-            binding.provider_url_index(),
-            context.origin_manifest_timeout_ms,
-        ),
+    observe_manifest_attempt(
+        context,
+        log_context.attempt_index,
+        timeout(
+            Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
+            fetch_origin_manifest_once(
+                target_url,
+                &context.headers,
+                &context.client,
+                &context.no_redirect_client,
+                context.use_manual_redirects,
+                binding.provider_url_index(),
+                context.origin_manifest_timeout_ms,
+            ),
+        )
+        .map(|result| result.unwrap_or_else(|_| Err(OriginManifestFetchError::Timeout))),
     )
     .await
-    .map_err(|_| OriginManifestFetchError::Timeout)?
 }
 
 #[derive(Debug, Clone, Copy)]

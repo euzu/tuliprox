@@ -21,7 +21,7 @@ const fn revision_peak_factor(raw: bool) -> u64 {
     }
 }
 
-pub(super) fn reliable_decoded_content_length(response: &DecodedHttpResponse) -> Option<u64> {
+pub(crate) fn reliable_decoded_content_length(response: &DecodedHttpResponse) -> Option<u64> {
     if response.was_content_decoded() {
         return None;
     }

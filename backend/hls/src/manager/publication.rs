@@ -20,6 +20,7 @@ use super::{
     HlsTerminalTailPreparation, HlsTerminalTailPreparationInput, HlsTransitionMarginMs, ProxySessionId,
     TransientManifestLeaseBinding, TransientResourceStore, HLS_STATE_CAS_LOCK_RETRIES,
 };
+use crate::origin_telemetry::OriginTelemetryRecorder;
 use arc_swap::ArcSwap;
 use log::{debug, error, info};
 use std::{
@@ -156,6 +157,7 @@ impl HlsProxyManager {
             rewrite_secret,
             true,
             shared::defaults::default_connect_timeout_secs(),
+            OriginTelemetryRecorder::disabled(),
         )
     }
 
@@ -164,9 +166,11 @@ impl HlsProxyManager {
         rewrite_secret: &[u8],
         enabled: bool,
         connect_timeout_secs: u32,
+        origin_telemetry: OriginTelemetryRecorder,
     ) -> Self {
-        let runtime_config =
+        let mut runtime_config =
             HlsProxyRuntimeConfig::from_config_with_enabled(config, rewrite_secret, enabled, connect_timeout_secs);
+        runtime_config.segment_fetch_policy.telemetry = origin_telemetry;
         let segment_fetch_policy = runtime_config.segment_fetch_policy.clone();
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());

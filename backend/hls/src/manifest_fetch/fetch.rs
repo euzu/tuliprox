@@ -7,6 +7,7 @@ use super::{
     },
     model::{FetchedOriginManifest, HlsOriginManifestFetchContext, RetryPolicy, DEFAULT_HLS_TARGET_DURATION_SECS},
     selection_log::{log_manifest_initial_attempt, log_manifest_retry_scheduled, ManifestRetryLogKind},
+    telemetry::observe_manifest_attempt,
 };
 #[cfg(any(test, feature = "test-support"))]
 use super::{model::LiveHlsOriginEntry, selection_log::log_origin_refresh_retry_scheduled};
@@ -16,6 +17,7 @@ use crate::{
     observability::hls_origin_log_value, scrub_hls_origin_headers, MAX_MANUAL_REDIRECTS,
 };
 use axum::http::HeaderMap;
+use futures::FutureExt;
 use log::debug;
 #[cfg(any(test, feature = "test-support"))]
 use reqwest::Client;
@@ -118,46 +120,49 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
         if context.attempt.as_ref().is_some_and(|attempt| !attempt.begin_logical_attempt()) {
             return Err(OriginManifestFetchError::RetryExhausted);
         }
-        let response_result = if context.use_manual_redirects {
-            send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
-                &context.app_config,
-                &context.no_redirect_client,
-                &input_source,
-                Some(&context.headers),
-                context.origin_entry.url(),
-                MAX_MANUAL_REDIRECTS,
-                fetch_options,
-            )
-            .await
-        } else {
-            send_input_with_retry_and_provider_policy_with_options_result(
-                &context.app_config,
-                &context.client,
-                &input_source,
-                Some(&context.headers),
-                context.origin_entry.url(),
-                fetch_options,
-            )
-            .await
-        };
-        let fetch_result = match response_result {
-            Ok(response_result) => {
-                let provider_url_index = response_result.provider_url_index;
-                let resolved_request_url = resolved_hls_manifest_request_url_from_input(
+        let fetch_result = observe_manifest_attempt(context, shared_index, async {
+            let response_result = if context.use_manual_redirects {
+                send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+                    &context.app_config,
+                    &context.no_redirect_client,
                     &input_source,
-                    provider_url_index,
+                    Some(&context.headers),
                     context.origin_entry.url(),
-                );
-                response_to_fetched_manifest(
-                    response_result.response,
-                    provider_url_index,
-                    resolved_request_url,
-                    context.origin_manifest_timeout_ms,
+                    MAX_MANUAL_REDIRECTS,
+                    fetch_options,
                 )
                 .await
+            } else {
+                send_input_with_retry_and_provider_policy_with_options_result(
+                    &context.app_config,
+                    &context.client,
+                    &input_source,
+                    Some(&context.headers),
+                    context.origin_entry.url(),
+                    fetch_options,
+                )
+                .await
+            };
+            match response_result {
+                Ok(response_result) => {
+                    let provider_url_index = response_result.provider_url_index;
+                    let resolved_request_url = resolved_hls_manifest_request_url_from_input(
+                        &input_source,
+                        provider_url_index,
+                        context.origin_entry.url(),
+                    );
+                    response_to_fetched_manifest(
+                        response_result.response,
+                        provider_url_index,
+                        resolved_request_url,
+                        context.origin_manifest_timeout_ms,
+                    )
+                    .await
+                }
+                Err(err) => Err(origin_manifest_fetch_error_from_io_error(&err)),
             }
-            Err(err) => Err(origin_manifest_fetch_error_from_io_error(&err)),
-        };
+        })
+        .await;
         context.ensure_current_origin().await?;
         let fetch_result = match fetch_result {
             Ok(fetched) => resolve_archive_master_manifest(context, fetched).await,
@@ -227,20 +232,24 @@ async fn resolve_archive_master_manifest(
         &master.provider_session_headers,
         &variant_url,
     );
-    let mut variant = timeout(
-        Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
-        fetch_origin_manifest_once(
-            &variant_url,
-            &headers,
-            &context.client,
-            &context.no_redirect_client,
-            context.use_manual_redirects,
-            master.provider_url_index,
-            context.origin_manifest_timeout_ms,
-        ),
+    let mut variant = observe_manifest_attempt(
+        context,
+        0,
+        timeout(
+            Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
+            fetch_origin_manifest_once(
+                &variant_url,
+                &headers,
+                &context.client,
+                &context.no_redirect_client,
+                context.use_manual_redirects,
+                master.provider_url_index,
+                context.origin_manifest_timeout_ms,
+            ),
+        )
+        .map(|result| result.unwrap_or_else(|_| Err(OriginManifestFetchError::Timeout))),
     )
-    .await
-    .map_err(|_| OriginManifestFetchError::Timeout)??;
+    .await?;
     if classify_hls_playlist(&variant.body) != HlsPlaylistKind::Media {
         return Err(OriginManifestFetchError::Request("archive master variant is not a media playlist".to_string()));
     }

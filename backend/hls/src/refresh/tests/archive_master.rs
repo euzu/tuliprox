@@ -53,6 +53,7 @@ async fn archive_master_resolution_binds_recovery_to_entry_and_scrubs_redirected
         retry_policy: no_delay_policy(),
         recovery_timing_policy: test_recovery_timing_policy(2_000),
         acceptance_timing_seed: None,
+        origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
     };
 
     let fetched = fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context))

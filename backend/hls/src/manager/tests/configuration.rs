@@ -224,3 +224,51 @@ async fn prepare_cache_capacity_accounting_scans_once_and_skips_a_disabled_manag
     manager.prepare_cache_capacity_accounting().await.expect("second call is a no-op");
     assert_eq!(manager.segment_cache().capacity_scan_count(), 1);
 }
+
+fn config_with_origin_telemetry(cache_dir: &tempfile::TempDir, enabled: bool) -> tuliprox_core::model::Config {
+    use shared::model::{HlsOriginTelemetryConfigDto, ReverseProxyConfigDto};
+    use tuliprox_core::model::{Config, ReverseProxyConfig};
+    Config {
+        reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+            hls_cache: Some(HlsCacheConfigDto {
+                cache_path: Some(cache_dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+            hls_origin_telemetry: Some(HlsOriginTelemetryConfigDto { enabled, ..Default::default() }),
+            ..ReverseProxyConfigDto::default()
+        })),
+        ..Config::default()
+    }
+}
+
+#[tokio::test]
+async fn origin_telemetry_is_created_from_config_and_shared_with_every_fetch_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let disabled = HlsProxyManager::from_config(&config_with_origin_telemetry(&dir, false), b"secret");
+    assert!(!disabled.origin_telemetry().is_enabled());
+
+    let manager = HlsProxyManager::from_config(&config_with_origin_telemetry(&dir, true), b"secret");
+    assert!(manager.origin_telemetry().is_enabled());
+    for policy in
+        [manager.segment_fetch_policy(), manager.segment_worker_pool().policy(), manager.map_worker_pool().policy()]
+    {
+        assert!(policy.telemetry.is_enabled());
+    }
+}
+
+#[tokio::test]
+async fn reload_keeps_a_running_recorder_and_starts_one_when_enabled_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = HlsProxyManager::from_config(&config_with_origin_telemetry(&dir, true), b"secret");
+    let held_by_worker = manager.segment_worker_pool().policy().telemetry;
+    manager.update_config(&test_app_config(config_with_origin_telemetry(&dir, false))).await;
+    // Changing or disabling a running recorder takes a restart; its handles stay valid.
+    assert!(manager.origin_telemetry().is_enabled());
+    assert!(held_by_worker.is_enabled());
+    assert!(manager.segment_worker_pool().policy().telemetry.is_enabled());
+
+    let late = HlsProxyManager::from_config(&config_with_origin_telemetry(&dir, false), b"secret");
+    late.update_config(&test_app_config(config_with_origin_telemetry(&dir, true))).await;
+    assert!(late.origin_telemetry().is_enabled());
+    assert!(late.map_worker_pool().policy().telemetry.is_enabled());
+}

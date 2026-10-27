@@ -993,6 +993,7 @@ fn manifest_fetch_context(
             target_duration,
         ),
         acceptance_timing_seed: request.acceptance_directive.timing_seed,
+        origin_telemetry: request.hls_proxy.origin_telemetry(),
     }
 }
 

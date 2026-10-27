@@ -30,5 +30,6 @@
 - [Operations & Debugging (CLI & DB Dumps)](./operations-debugging.md)
 - [DVR Operator Reference](./operator/dvr.md)
 - [MCP Server](./operator/mcp.md)
+- [Shared HLS Origin Telemetry](./operator/hls-origin-telemetry.md)
 - [Examples,Recipes & Ecosystem Stacks](./examples-recipes.md)
 - [Troubleshooting & Resilience](./troubleshooting.md)

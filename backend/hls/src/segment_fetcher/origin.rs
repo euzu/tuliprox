@@ -51,7 +51,13 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
 ) -> Result<SegmentFetchCommit, SegmentFetchError> {
-    let provider_headers = context.session.read().await.origin_provider_session_headers.clone();
+    let (provider_headers, media_duration_ms) = {
+        let session = context.session.read().await;
+        (
+            session.origin_provider_session_headers.clone(),
+            session.segments.get(&snapshot.proxy_seq).map(|entry| entry.duration_ms),
+        )
+    };
     let headers = build_segment_origin_headers(&context.headers, &provider_headers, snapshot.fetch_ref.byte_range)?;
     let target = HlsOriginResourceFetchTarget {
         kind: HlsResourceFetchKind::Segment,
@@ -64,6 +70,7 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
         } else {
             HlsOriginByteRangeExpectation::FullObject
         },
+        media_duration_ms,
     };
     let clients = HlsOriginResourceClients {
         session: Some(context.session.clone()),

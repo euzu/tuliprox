@@ -5,6 +5,9 @@ use crate::model::{ByteSize, HlsSegmentTimeout, Millis, Secs};
 
 default_eq_fns!(
     default_hls_session_ttl_secs, is_default_hls_session_ttl_secs, u64, 15;
+    default_hls_origin_telemetry_queue_capacity, is_default_hls_origin_telemetry_queue_capacity, usize, 1024;
+    default_hls_origin_telemetry_freshness_secs, is_default_hls_origin_telemetry_freshness_secs, u64, 60;
+    default_hls_origin_telemetry_window_secs, is_default_hls_origin_telemetry_window_secs, u64, 300;
 );
 
 // Resolved against the OS temp dir so the default works on Linux, macOS, and Windows.

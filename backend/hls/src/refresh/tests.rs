@@ -65,6 +65,7 @@ mod archive_master;
 mod critical_handoff;
 mod headers_redirects;
 mod origin_binding;
+mod origin_telemetry;
 mod ownership;
 mod reduced_retry;
 mod reservation_retry;
@@ -125,6 +126,7 @@ async fn retryable_manifest_failure_keeps_optimistic_admission_degraded_until_me
         retry_policy: RetryPolicy::default(),
         recovery_timing_policy: test_recovery_timing_policy(100),
         acceptance_timing_seed: None,
+        origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
     };
     let manifest = fetched_manifest("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4,\n0.ts\n#EXTINF:4,\n1.ts\n#EXTINF:4,\n2.ts\n");
     let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(origin) =

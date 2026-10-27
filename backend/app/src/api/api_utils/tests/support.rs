@@ -508,6 +508,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_with_stream_config
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         user_access_control: true,
         ..Config::default()

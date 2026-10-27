@@ -7,6 +7,7 @@ mod model;
 mod quality;
 mod recovery;
 mod selection_log;
+mod telemetry;
 
 #[allow(unused_imports)]
 pub use self::http::resolved_hls_manifest_request_url_from_input;

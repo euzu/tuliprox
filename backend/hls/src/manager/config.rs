@@ -6,6 +6,7 @@ use super::{
     HlsStartupObservability, HlsTerminalCommitClock, HlsTerminalCommitRetryCoordinator, HlsTerminalPendingCoordinator,
     SegmentFetchPolicy, TransientResourceStore,
 };
+use crate::origin_telemetry::OriginTelemetryRecorder;
 use arc_swap::ArcSwap;
 use log::warn;
 use std::{
@@ -159,6 +160,7 @@ impl HlsProxyManager {
             proxy.and_then(|proxy| proxy.hls_cache.as_ref()),
             secret,
             config.connect_timeout_secs,
+            OriginTelemetryRecorder::start(proxy.and_then(|proxy| proxy.hls_origin_telemetry.as_ref())),
         )
     }
 
@@ -167,13 +169,19 @@ impl HlsProxyManager {
     }
 
     pub fn from_hls_cache_config_and_secret(config: Option<&HlsCacheConfig>, rewrite_secret: &[u8]) -> Self {
-        Self::from_hls_cache_settings(config, rewrite_secret, shared::defaults::default_connect_timeout_secs())
+        Self::from_hls_cache_settings(
+            config,
+            rewrite_secret,
+            shared::defaults::default_connect_timeout_secs(),
+            OriginTelemetryRecorder::disabled(),
+        )
     }
 
     fn from_hls_cache_settings(
         config: Option<&HlsCacheConfig>,
         rewrite_secret: &[u8],
         connect_timeout_secs: u32,
+        origin_telemetry: OriginTelemetryRecorder,
     ) -> Self {
         let default_config;
         let (config, enabled) = if let Some(config) = config {
@@ -182,7 +190,13 @@ impl HlsProxyManager {
             default_config = HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default());
             (&default_config, false)
         };
-        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, enabled, connect_timeout_secs)
+        Self::with_hls_cache_config_and_secret_enabled(
+            config,
+            rewrite_secret,
+            enabled,
+            connect_timeout_secs,
+            origin_telemetry,
+        )
     }
 
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
@@ -264,6 +278,11 @@ impl HlsProxyManager {
 
     pub fn segment_fetch_policy(&self) -> SegmentFetchPolicy { self.runtime_config.load().segment_fetch_policy.clone() }
 
+    /// Handle to the origin transfer telemetry recorder; disabled unless `reverse_proxy.hls_origin_telemetry` is on.
+    pub fn origin_telemetry(&self) -> OriginTelemetryRecorder {
+        self.runtime_config.load().segment_fetch_policy.telemetry.clone()
+    }
+
     pub fn is_enabled(&self) -> bool { self.runtime_config.load().enabled }
 
     pub fn cache_duration_seconds(&self) -> u64 { self.runtime_config.load().cache_duration_seconds }
@@ -323,7 +342,7 @@ impl HlsProxyManager {
     pub fn rewrite_secret_fingerprint(&self) -> String { self.runtime_config.load().rewrite_secret_fingerprint.clone() }
 
     pub async fn update_config(&self, app_config: &AppConfig) {
-        let (hls_config, rewrite_secret, enabled, connect_timeout_secs) = {
+        let (hls_config, rewrite_secret, enabled, connect_timeout_secs, telemetry_config) = {
             let config = app_config.config.load();
             let rewrite_secret = config
                 .reverse_proxy
@@ -334,7 +353,9 @@ impl HlsProxyManager {
             let enabled = hls_config.is_some();
             let hls_config =
                 hls_config.unwrap_or_else(|| HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()));
-            (hls_config, rewrite_secret, enabled, config.connect_timeout_secs)
+            let telemetry_config =
+                config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_origin_telemetry.clone());
+            (hls_config, rewrite_secret, enabled, config.connect_timeout_secs, telemetry_config)
         };
         let mut runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(
             &hls_config,
@@ -346,6 +367,17 @@ impl HlsProxyManager {
         let next_timeouts = runtime_config.segment_fetch_policy.timeouts.config();
         shared_timeouts.update(next_timeouts);
         runtime_config.segment_fetch_policy.timeouts = shared_timeouts;
+        // A running recorder keeps its window and queue across reloads, so changing or disabling
+        // `hls_origin_telemetry` takes a restart. Only enabling a disabled recorder applies on reload.
+        let running_telemetry = self.origin_telemetry();
+        if running_telemetry.is_enabled() && !telemetry_config.as_ref().is_some_and(|config| config.enabled) {
+            warn!("`hls_origin_telemetry` was disabled or removed; the running recorder stays active until restart");
+        }
+        runtime_config.segment_fetch_policy.telemetry = if running_telemetry.is_enabled() {
+            running_telemetry
+        } else {
+            OriginTelemetryRecorder::start(telemetry_config.as_ref())
+        };
         let cache_path_changed = self.gc.update_cache_path(PathBuf::from(&hls_config.cache_path)).await;
         self.progressive_budget.update_limits(hls_config.startup.clone());
         self.segment_cache.update_cache_limits(hls_config.cache_bytes.get(), hls_config.cache_bytes_per_session.get());

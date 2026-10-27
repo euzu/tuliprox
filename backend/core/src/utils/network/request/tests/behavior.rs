@@ -755,6 +755,7 @@ async fn test_provider_request_chain_starts_from_last_successful_url() {
         stream_history: None,
         qos_aggregation: None,
         hls_cache: None,
+        hls_origin_telemetry: None,
     });
     let app_config = make_test_app_config(cfg);
     let client = reqwest::Client::builder()
@@ -823,6 +824,7 @@ async fn test_provider_request_chain_restarts_from_first_url_when_policy_request
         stream_history: None,
         qos_aggregation: None,
         hls_cache: None,
+        hls_origin_telemetry: None,
     });
     let app_config = make_test_app_config(cfg);
     let client = reqwest::Client::builder()
@@ -901,6 +903,7 @@ async fn test_on_connect_error_try_next_ip_before_provider_rotation() {
         stream_history: None,
         qos_aggregation: None,
         hls_cache: None,
+        hls_origin_telemetry: None,
     });
     let app_config = make_test_app_config(cfg);
     let client = reqwest::Client::builder()
