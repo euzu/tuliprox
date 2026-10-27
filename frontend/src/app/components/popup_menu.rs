@@ -24,6 +24,17 @@ pub enum PopupMenuPlacement {
     Adaptive,
     /// Keep the popup's top-right corner attached to the anchor's bottom-right corner.
     BottomEnd,
+    /// Keep the popup's right edge attached to the anchor's right edge, but flip it above the
+    /// anchor when the space below is too small.
+    BottomEndFlip,
+}
+
+impl PopupMenuPlacement {
+    /// End-aligned menus attach to the full field instead of the trigger button inside it.
+    const fn aligns_with_anchor_end(self) -> bool { matches!(self, Self::BottomEnd | Self::BottomEndFlip) }
+
+    /// Flipping menus may move above the anchor; pinned menus keep following it.
+    const fn flips_above_anchor(self) -> bool { matches!(self, Self::Adaptive | Self::BottomEndFlip) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,10 +88,13 @@ fn resolve_popup_anchor(
     trigger: PopupAnchorRect,
     field: Option<PopupAnchorRect>,
 ) -> Option<PopupAnchorRect> {
-    match (width, placement) {
-        (PopupMenuWidth::MatchAnchor, _) => field,
-        (PopupMenuWidth::Content, PopupMenuPlacement::BottomEnd) => field.or(Some(trigger)),
-        (PopupMenuWidth::Content, PopupMenuPlacement::Adaptive) => Some(trigger),
+    if width == PopupMenuWidth::MatchAnchor {
+        return field;
+    }
+    if placement.aligns_with_anchor_end() {
+        field.or(Some(trigger))
+    } else {
+        Some(trigger)
     }
 }
 
@@ -108,30 +122,32 @@ fn popup_position(
     placement: PopupMenuPlacement,
 ) -> PopupPosition {
     let PopupSpacing { gutter, gap } = spacing;
-    match placement {
-        PopupMenuPlacement::Adaptive => {
-            let max_bottom = viewport.height - gutter;
-            let max_right = viewport.width - gutter;
-            let mut top = anchor.bottom + gap;
-            let mut left = anchor.left;
-
-            if left + popup.width > max_right {
-                left = max_right - popup.width;
-            }
-            if top + popup.height > max_bottom {
-                let top_above = anchor.top - popup.height - gap;
-                top = if top_above >= gutter { top_above } else { max_bottom - popup.height };
-            }
-
-            PopupPosition { top: top.max(gutter), left: left.max(gutter) }
+    let left = if placement.aligns_with_anchor_end() {
+        // Right edges stay attached; the gutter keeps a menu wider than the room left of
+        // the field from leaving the viewport.
+        (anchor.left + anchor.width - popup.width).max(gutter)
+    } else {
+        let max_right = viewport.width - gutter;
+        let mut left = anchor.left;
+        if left + popup.width > max_right {
+            left = max_right - popup.width;
         }
-        PopupMenuPlacement::BottomEnd => PopupPosition {
-            top: anchor.bottom + gap,
-            // Right edges stay attached; the gutter keeps a menu wider than the room left of
-            // the field from leaving the viewport.
-            left: (anchor.left + anchor.width - popup.width).max(gutter),
-        },
-    }
+        left.max(gutter)
+    };
+    let top = if placement.flips_above_anchor() {
+        let max_bottom = viewport.height - gutter;
+        let mut top = anchor.bottom + gap;
+        if top + popup.height > max_bottom {
+            let top_above = anchor.top - popup.height - gap;
+            top = if top_above >= gutter { top_above } else { max_bottom - popup.height };
+        }
+        top.max(gutter)
+    } else {
+        // A pinned menu follows its anchor off-screen instead of sticking to the viewport edge.
+        anchor.bottom + gap
+    };
+
+    PopupPosition { top, left }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,15 +299,14 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
                                 height: f64::from(root.client_height()),
                             };
                             let trigger = popup_anchor_rect(anchor_ref.as_ref()?)?;
-                            let field =
-                                if width == PopupMenuWidth::MatchAnchor || placement == PopupMenuPlacement::BottomEnd {
-                                    width_anchor_ref
-                                        .as_ref()
-                                        .and_then(NodeRef::cast::<web_sys::Element>)
-                                        .and_then(|field| popup_anchor_rect(&field))
-                                } else {
-                                    None
-                                };
+                            let field = if width == PopupMenuWidth::MatchAnchor || placement.aligns_with_anchor_end() {
+                                width_anchor_ref
+                                    .as_ref()
+                                    .and_then(NodeRef::cast::<web_sys::Element>)
+                                    .and_then(|field| popup_anchor_rect(&field))
+                            } else {
+                                None
+                            };
                             let anchor = resolve_popup_anchor(width, placement, trigger, field)?;
                             // Set width before measuring height: wrapping can affect flip/clamping.
                             let _ = popup.style().set_property("--popup-anchor-width", &format!("{}px", anchor.width));
@@ -753,7 +768,7 @@ mod tests {
         // pushes a content-sized list off to the input's right. The field anchors it instead.
         let field = PopupAnchorRect { top: 99.0, bottom: 141.0, left: 21.0, width: 348.0 };
         let trigger = PopupAnchorRect { top: 100.0, bottom: 140.0, left: 333.0, width: 32.0 };
-        let placement = PopupMenuPlacement::BottomEnd;
+        let placement = PopupMenuPlacement::BottomEndFlip;
 
         let anchor = resolve_popup_anchor(PopupMenuWidth::Content, placement, trigger, Some(field)).unwrap();
         assert_eq!(anchor, field);
@@ -766,10 +781,25 @@ mod tests {
     }
 
     #[test]
+    fn select_dropdown_flips_above_the_field_when_the_space_below_is_short() {
+        let field = PopupAnchorRect { top: 640.0, bottom: 682.0, left: 21.0, width: 348.0 };
+        let menu = PopupSize { width: 160.0, height: 120.0 };
+        let placement = PopupMenuPlacement::BottomEndFlip;
+
+        let flipped = popup_position(field, menu, VIEWPORT, SELECT_SPACING, placement);
+        assert_eq!(flipped.top, field.top - menu.height - 2.0, "the list must move above the field");
+        assert_eq!(flipped.left + menu.width, field.left + field.width, "right edges must stay aligned when flipped");
+
+        // Playlist dropdowns keep the pinned variant, so they never flip a menu upward.
+        let pinned = popup_position(field, menu, VIEWPORT, SELECT_SPACING, PopupMenuPlacement::BottomEnd);
+        assert_eq!(pinned.top, field.bottom + 2.0);
+    }
+
+    #[test]
     fn select_dropdown_wider_than_its_room_stays_inside_the_viewport() {
         let field = PopupAnchorRect { top: 99.0, bottom: 141.0, left: 21.0, width: 120.0 };
         let menu = PopupSize { width: 240.0, height: 120.0 };
-        let position = popup_position(field, menu, VIEWPORT, SELECT_SPACING, PopupMenuPlacement::BottomEnd);
+        let position = popup_position(field, menu, VIEWPORT, SELECT_SPACING, PopupMenuPlacement::BottomEndFlip);
         assert_eq!(position.left, 8.0);
         assert_eq!(position.top, field.bottom + 2.0);
     }

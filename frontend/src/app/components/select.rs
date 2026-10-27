@@ -23,8 +23,9 @@ pub struct SelectProps {
     #[prop_or_default]
     pub popup_width: PopupMenuWidth,
     /// Selects right-align their list with the field so it lines up with the input instead of
-    /// hanging off the icon button on the field's right end.
-    #[prop_or(PopupMenuPlacement::BottomEnd)]
+    /// hanging off the icon button on the field's right end, and flip it above the field when the
+    /// space below is too small.
+    #[prop_or(PopupMenuPlacement::BottomEndFlip)]
     pub popup_placement: PopupMenuPlacement,
     pub options: Rc<Vec<DropDownOption>>,
     #[prop_or_default]
@@ -117,7 +118,7 @@ mod tests {
             on_select: Callback::noop(),
         });
         assert_eq!(props.popup_width, PopupMenuWidth::Content);
-        assert_eq!(props.popup_placement, PopupMenuPlacement::BottomEnd);
+        assert_eq!(props.popup_placement, PopupMenuPlacement::BottomEndFlip);
         let source = include_str!("select.rs").split("#[cfg(test)]").next().unwrap();
         let dropdown = include_str!("drop_down_icon_button.rs");
         assert!(source.contains("ref={field_ref.clone()}"));
@@ -133,7 +134,7 @@ mod tests {
     fn select_popup_hugs_the_field_and_drops_its_top_left_radius() {
         let source = include_str!("select.rs").split("#[cfg(test)]").next().unwrap();
         let dropdown = include_str!("drop_down_icon_button.rs");
-        assert!(SELECT_POPUP_GAP_PX < crate::app::components::popup_menu::POPUP_MENU_DEFAULT_GAP_PX);
+        const { assert!(SELECT_POPUP_GAP_PX < crate::app::components::popup_menu::POPUP_MENU_DEFAULT_GAP_PX) };
         assert!(source.contains("popup_gap={Some(SELECT_POPUP_GAP_PX)}"));
         assert!(source.contains("popup_class={classes!(\"tp__popup-menu--select\")}"));
         assert!(dropdown.contains("gap={props.popup_gap}"));
