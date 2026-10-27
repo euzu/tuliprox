@@ -352,3 +352,66 @@
     padding-top: var(--padding-default);
   }
 }
+
+.tp__reverse-proxy-config-view {
+  // Page tabs: flat with an underline, so they do not look like the config page selector above them.
+  // Compound selector: must win over the base `.tp__tab-set` (`height: 100%; overflow: hidden`) regardless of
+  // stylesheet order, otherwise the tabset shrinks to the page height and clips its content.
+  &__tabset.tp__tab-set {
+    flex: 0 0 auto;
+    height: auto;
+    overflow: visible;
+
+    .tp__tab-set__header {
+      flex-flow: row nowrap;
+      gap: 0;
+      padding: 0;
+      border-bottom: 2px solid var(--border-color);
+    }
+
+    // Neighbouring tabs share one border; the active tab lies on top of them.
+    .tp__tab-set__tab {
+      margin-bottom: -2px;
+
+      + .tp__tab-set__tab {
+        margin-inline-start: -1px;
+      }
+
+      &--active {
+        z-index: 1;
+      }
+
+      .tp__text-button,
+      .tp__text-button:not(.active) {
+        min-height: 2.75rem;
+        border: 1px solid var(--border-color);
+        border-bottom: 3px solid transparent;
+        border-radius: var(--border-radius) var(--border-radius) 0 0;
+        background-color: transparent;
+        color: var(--modest-text-color);
+        fill: currentColor;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+      }
+
+      .tp__text-button.active,
+      &--active .tp__text-button,
+      &--active .tp__text-button:not(.active) {
+        border-color: var(--tab-active-border-color);
+        border-bottom-color: var(--primary-color);
+        background-color: var(--tab-active-background-color);
+        color: var(--tab-active-color);
+      }
+    }
+
+    .tp__tab-set__body,
+    .tp__tab-set__panel {
+      height: auto;
+      overflow: visible;
+    }
+
+    .tp__tab-set__body {
+      padding-top: var(--padding-default);
+    }
+  }
+}

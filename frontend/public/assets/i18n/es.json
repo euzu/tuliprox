@@ -262,7 +262,10 @@
     "TABLE_COLUMNS": "Usa los interruptores para mostrar u ocultar columnas. Arrastra el tirador para cambiar el orden. Guardar aplica los cambios; Restaurar valores predeterminados restablece el diseño.\n\nEspacio o Intro toma o suelta una columna. Usa Arriba/Abajo para moverla; Escape cancela el movimiento.",
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "Si está habilitado, los usuarios del proxy API se cargan desde la base de datos de usuarios.",
-      "AUTH_ERROR_STATUS": "Código de estado HTTP devuelto para errores de autenticación. El valor por defecto es 403 (Forbidden)."
+      "AUTH_ERROR_STATUS": "Código de estado HTTP devuelto para errores de autenticación. El valor por defecto es 403 (Forbidden).",
+      "CREDENTIAL_LENGTH": "Número de caracteres generados para este segmento (de 1 a 64). La longitud total de todos los segmentos para este campo no puede superar 64.",
+      "CREDENTIAL_CHARS": "Caracteres usados en esta parte. Caracteres literales y rangos como A-Z o 0-9; escriba un guion literal como \\-. Solo se permiten letras ASCII, dígitos y ! . _ ~ -. Déjelo vacío para usar el valor por defecto (usuario/contraseña A-Z0-9, token A-Za-z0-9). Añada varios segmentos para un valor ordenado, p. ej. 3 letras y luego 3 dígitos.",
+      "CREDENTIAL_EXCLUDE": "Caracteres eliminados del conjunto permitido, p. ej. 1lI0O para evitar caracteres parecidos. Se escriben como caracteres simples, sin rangos."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Host de origen al que apunta este perfil de servidor proxy API.",
@@ -511,6 +514,7 @@
       "INPUT_TYPE": "Define el protocolo de streaming o el formato de origen (p. ej. xtream, m3u).",
       "LIVE_SOURCE": "Selector de fuente para el clúster en directo cuando la entrada por etapas está habilitada (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Ruta de archivo opcional utilizada para persistir o reutilizar la lista de reproducción de entrada descargada.",
+      "PLAYBACK_PROVIDER": "Nombre de un perfil de proveedor global usado para resolver las URL provider:// de reproducción creadas por mapeos, cuando las URL de la entrada y los alias son URL http(s) normales. Habilita el failover de CDN para listas independientes.",
       "PROVIDERS": "Los perfiles de proveedor definen URL de origen reutilizables y el comportamiento DNS que puede referenciar esta entrada.",
       "SIMPLE_INPUT": {
         "URL": "URL de origen para esta entrada. Solo se admiten URL `file://`, `http://` y `https://`."
@@ -734,7 +738,8 @@
       "RESOURCE_REWRITE_DISABLED": "Si está habilitado, se deshabilita la reescritura de URL para logotipos y EPG (también deshabilita la caché).",
       "REWRITE_SECRET": "Secreto persistente para URL de recursos estables entre reinicios. \nEjemplo:\n```\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```",
       "STREAM_HISTORY": "Almacena la telemetría del ciclo de vida del stream en archivos binarios diarios. Esta es la fuente de datos en bruto para la depuración, el análisis de QoS y el futuro ajuste de la conmutación por error.",
-      "QOS_AGGREGATION": "Construye instantáneas compactas de QoS a partir del historial de streams en segundo plano. Estas instantáneas están diseñadas como la entrada posterior para las decisiones de conmutación por error."
+      "QOS_AGGREGATION": "Construye instantáneas compactas de QoS a partir del historial de streams en segundo plano. Estas instantáneas están diseñadas como la entrada posterior para las decisiones de conmutación por error.",
+      "HLS_ORIGIN_TELEMETRY": "Mide la rapidez con la que el proveedor entrega segmentos, mapas, claves y manifiestos de Shared HLS a partir de las descargas que Tuliprox ya realiza. Disponible en GET /api/v1/hls/origin-telemetry. Los cambios requieren reinicio."
     },
     "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
       "CLOUDFLARE_HEADER": "Elimina las cabeceras específicas de Cloudflare (como CF-Connecting-IP) antes de reenviar al origen.",
@@ -933,6 +938,12 @@
     },
     "FAILOVER_GROUP_TARGET": {
       "TARGET": "Destino cuyos grupos de failover se editan. Solo aparecen los destinos con grupos de failover activados."
+    },
+    "HLS_ORIGIN_TELEMETRY_CONFIG": {
+      "ENABLED": "Activa la telemetría de transferencia del origen. Mide las descargas existentes y no envía solicitudes adicionales al proveedor.",
+      "QUEUE_CAPACITY": "Tamaño de la cola de eventos acotada (mínimo 16). Si se llena, los eventos se descartan y se cuentan; las descargas nunca esperan.",
+      "FRESHNESS_SECS": "Segundos tras los cuales una medición se informa como desconocida (null) en lugar de buena o mala.",
+      "WINDOW_SECS": "Duración en segundos de la ventana móvil usada para los agregados."
     }
   },
   "HINT": {
@@ -1464,6 +1475,7 @@
     "PATTERN_IPV6": "Patrón IPv6",
     "PERIOD_MILLIS": "Período (milis)",
     "PERSIST": "Persistir",
+    "PLAYBACK_PROVIDER": "Proveedor de reproducción",
     "PLAYER_SERVER": "Servidor del reproductor",
     "PLAN": "Plan",
     "PLANS": "Planes",
@@ -1888,6 +1900,14 @@
     "USE_OUTPUT": "Usar salida",
     "USE_USER_DB": "Usar BD de usuarios",
     "AUTH_ERROR_STATUS": "Estado de error de autenticación",
+    "CREDENTIAL_GENERATION": "Generación de credenciales",
+    "CREDENTIAL_LENGTH": "Longitud",
+    "CREDENTIAL_CHARS": "Caracteres permitidos",
+    "CREDENTIAL_EXCLUDE": "Caracteres excluidos",
+    "CREDENTIAL_ADD_SEGMENT": "Añadir segmento",
+    "CREDENTIAL_REMOVE_SEGMENT": "Quitar segmento",
+    "CREDENTIAL_SEGMENT": "Segmento",
+    "CREDENTIAL_DEFAULT": "Predeterminado",
     "VALIDATION": "Validación",
     "VERSION": "Versión",
     "VIDEO": "Vídeo",
@@ -2128,7 +2148,16 @@
     "FAILOVER_GROUPS_HINT_APPLY": "Inicia una actualización de la lista (respeta la caché de entrada), para que los cambios guardados aparezcan en ella.",
     "FAILOVER_GROUPS_UNDO": "Deshacer",
     "FAILOVER_GROUPS_UNRESOLVED": "Canales no resueltos",
-    "FAILOVER_GROUPS_CURRENT_VALUES": "Valores actuales"
+    "FAILOVER_GROUPS_CURRENT_VALUES": "Valores actuales",
+    "HLS_ORIGIN_TELEMETRY": "Telemetría de origen HLS",
+    "HLS_ORIGIN_TELEMETRY_ENABLED": "Habilitar telemetría de origen",
+    "HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY": "Capacidad de la cola",
+    "HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS": "Vigencia (segs)",
+    "HLS_ORIGIN_TELEMETRY_WINDOW_SECS": "Ventana (segs)",
+    "REVERSE_PROXY_TAB_GENERAL": "General",
+    "REVERSE_PROXY_TAB_STREAM": "Streams",
+    "REVERSE_PROXY_TAB_HLS": "HLS",
+    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetría"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Portapapeles no compatible.\nSu navegador o el contexto actual no permite el acceso al portapapeles.\nUtilice HTTPS o localhost.",

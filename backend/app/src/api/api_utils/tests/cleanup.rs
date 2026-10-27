@@ -1116,6 +1116,7 @@ async fn shared_start_abort_does_not_leak_meter_registration() {
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         ..Config::default()
     }));

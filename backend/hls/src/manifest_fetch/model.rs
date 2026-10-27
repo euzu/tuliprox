@@ -376,6 +376,7 @@ pub struct HlsOriginManifestFetchContext {
     /// Lease-specific pressure evidence captured before refresh scheduling.
     /// Each started generation freezes its own timing from this seed.
     pub acceptance_timing_seed: Option<HlsAcceptanceEpisodeTimingSeed>,
+    pub origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder,
 }
 
 impl HlsOriginManifestFetchContext {

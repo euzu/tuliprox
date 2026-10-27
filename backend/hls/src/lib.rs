@@ -68,6 +68,7 @@ mod origin;
 mod origin_account_runtime;
 mod origin_attempt;
 mod origin_progress;
+pub mod origin_telemetry;
 mod paths;
 mod post_refresh_availability;
 mod prefetch;

@@ -359,6 +359,45 @@ async fn invalidated_generation_discards_late_segment_completion_without_sleep()
 }
 
 #[tokio::test]
+async fn demand_wait_observes_a_commit_that_lands_while_the_scheduler_wakes() {
+    let server = spawn_segment_server(0).await;
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let policy = SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..Default::default() };
+    let (worker, context, segment_file) = fetch_context(&server, &temp_dir, &policy).await;
+    clear_scheduled_prefetch(&context, &policy).await;
+    let barrier = worker.pause_next_origin_prepare_for_test();
+    let demand = {
+        let worker = Arc::clone(&worker);
+        let context = context.clone();
+        let segment_file = segment_file.clone();
+        tokio::spawn(async move { worker.demand_fetch_and_wait(context, &segment_file, 20).await })
+    };
+    tokio::time::timeout(Duration::from_secs(3), barrier.entered.notified())
+        .await
+        .expect("the demand wakes the scheduler before it waits");
+
+    // The segment is installed while this demand is still inside the wake: the completion drops the
+    // notifier from the session and wakes only waiters that are already registered.
+    {
+        let mut session = context.session.write().await;
+        let entry = session.segments.get_mut(&segment_file.proxy_seq).expect("queued segment");
+        entry.status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
+        if let Some(notifier) = session.segment_fetch_notifiers.remove(&segment_file.proxy_seq) {
+            notifier.notify_waiters();
+        }
+    }
+    barrier.prepare.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), barrier.prepared.notified()).await.expect("the wake prepares");
+    barrier.proceed.notify_one();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), demand)
+        .await
+        .expect("a committed segment must not park the demand until its fetch budget expires")
+        .expect("the demand task joins");
+    assert_eq!(outcome, super::super::SegmentDemandFetchOutcome::Ready);
+}
+
+#[tokio::test]
 async fn same_origin_sequence_resource_conflict_preserves_in_flight_binding() {
     let (server, request_seen, release_response) = spawn_controlled_segment_server().await;
     let temp_dir = tempfile::tempdir().expect("temp dir");

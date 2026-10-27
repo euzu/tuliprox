@@ -43,6 +43,7 @@ where
         } else {
             HlsOriginByteRangeExpectation::FullObject
         },
+        media_duration_ms: None,
     };
     let clients = HlsOriginResourceClients {
         session: Some(context.session.clone()),

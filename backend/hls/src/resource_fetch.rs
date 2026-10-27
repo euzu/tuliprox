@@ -12,6 +12,7 @@ use reqwest::Client;
 use shared::utils::sanitize_sensitive_info;
 use std::{
     io,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tuliprox_core::utils::content_coding::{
@@ -24,8 +25,11 @@ use url::Url;
 
 const STORAGE_FULL_RAW_OS_ERRORS: &[i32] = &[28, 112, 122];
 
+mod telemetry;
 mod transport;
 
+pub(crate) use self::telemetry::PostprocessSpan;
+use self::telemetry::{AttemptTelemetry, ObservableOriginResponse};
 use super::MAX_MANUAL_REDIRECTS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +129,8 @@ pub struct HlsOriginResourceFetchTarget {
     pub origin_url: String,
     pub headers: HeaderMap,
     pub byte_range_expectation: HlsOriginByteRangeExpectation,
+    /// Media duration of the object, for origin transfer telemetry only.
+    pub media_duration_ms: Option<u64>,
 }
 
 impl HlsOriginResourceFetchTarget {
@@ -395,6 +401,17 @@ struct HlsOriginResourceRetryRun<'a> {
     identity: &'a HlsLogIdentity,
 }
 
+fn origin_resource_kind(kind: HlsResourceFetchKind) -> crate::origin_telemetry::OriginResourceKind {
+    use crate::origin_telemetry::OriginResourceKind;
+    match kind {
+        HlsResourceFetchKind::Segment | HlsResourceFetchKind::Part | HlsResourceFetchKind::Other => {
+            OriginResourceKind::Segment
+        }
+        HlsResourceFetchKind::Map => OriginResourceKind::Map,
+        HlsResourceFetchKind::Key => OriginResourceKind::Key,
+    }
+}
+
 /// Absolute per-attempt deadline shared by decoder preparation and decoded cache-body consumption.
 #[derive(Debug, Clone, Copy)]
 pub struct HlsOriginResourceBodyDeadline {
@@ -495,6 +512,40 @@ where
     .await
 }
 
+/// Reads the session's target duration and, when telemetry is on, the input name for one attempt.
+async fn session_attempt_context(
+    clients: &HlsOriginResourceClients,
+    telemetry_enabled: bool,
+) -> (Option<u32>, Option<Arc<str>>) {
+    let Some(session) = &clients.session else {
+        return (None, telemetry_enabled.then(|| Arc::from("unknown")));
+    };
+    let session = session.read().await;
+    (session.target_duration, telemetry_enabled.then(|| Arc::clone(&session.origin_source.input_name)))
+}
+
+fn log_timeout_snapshot(timeout: HlsOriginTimeoutSnapshot) {
+    log::debug!(
+        "HLS origin timeout snapshot: kind={:?} mode={} session_target_duration={:?} effective_ms={}",
+        timeout.kind,
+        timeout.mode,
+        timeout.session_target_duration,
+        timeout.effective_ms
+    );
+}
+
+/// Opaque and session-scoped, so retries of one object share a segment id; the recorder hashes it.
+fn telemetry_object_key(
+    policy: &SegmentFetchPolicy,
+    identity: &HlsLogIdentity,
+    target: &HlsOriginResourceFetchTarget,
+) -> Option<String> {
+    policy
+        .telemetry
+        .is_enabled()
+        .then(|| format!("{}:{}:{}", identity.session(), target.kind.label(), target.object_id))
+}
+
 /// Owns the single logical retry budget shared by decoded cache fetches and direct streams.
 async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F>(
     run: HlsOriginResourceRetryRun<'_>,
@@ -506,7 +557,7 @@ async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F>(
 where
     T: Send + 'static,
     G: Send + 'static,
-    R: Send + 'static,
+    R: ObservableOriginResponse + Send + 'static,
     P: FnMut(HlsResourceFetchAttempt) -> BoxFuture<'static, Result<G, HlsOriginResourceFetchError>>,
     C: FnMut(G) -> BoxFuture<'static, ()>,
     D: FnMut(reqwest::Response, HlsOriginResourceBodyDeadline) -> HlsOriginResourceResponsePrepareFuture<R>,
@@ -519,54 +570,61 @@ where
 {
     let HlsOriginResourceRetryRun { target, clients, policy, identity } = run;
     let attempts = policy.retry_delays_ms.len();
+    let telemetry_key = telemetry_object_key(policy, identity, &target);
     for attempt_index in 0..attempts {
         let delay_ms = policy.retry_delay_ms(attempt_index);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
-        let target_duration = match &clients.session {
-            Some(session) => session.read().await.target_duration,
-            None => None,
-        };
+        let (target_duration, telemetry_input) = session_attempt_context(&clients, telemetry_key.is_some()).await;
         let timeout = policy.timeouts.snapshot(target.kind, target_duration);
         let attempt = HlsResourceFetchAttempt { attempt_index, attempts, timeout };
-        log::debug!(
-            "HLS origin timeout snapshot: kind={:?} mode={} session_target_duration={:?} effective_ms={}",
-            timeout.kind,
-            timeout.mode,
-            timeout.session_target_duration,
-            timeout.effective_ms
-        );
+        log_timeout_snapshot(timeout);
         log_hls_resource_attempt_started(identity, target.log_context(), attempt);
         let attempt_started_at = Instant::now();
         let mut timeout_phase = "headers";
         let result = match prepare_attempt(attempt).await {
-            Ok(guard) => match fetch_hls_origin_resource_response_with_timeout(
-                &target,
-                &clients,
-                Duration::from_millis(timeout.effective_ms),
-            )
-            .await
-            {
-                Ok((response, deadline)) => {
-                    timeout_phase = "decoder";
-                    match prepare_response(response, deadline).await {
-                        Ok(response) => {
-                            timeout_phase = "body";
-                            commit(response, attempt, deadline, guard).await
-                        }
-                        Err(err) => {
-                            cleanup_attempt(guard).await;
-                            Err(err)
-                        }
+            Ok(guard) => {
+                // The probe starts after the provider slot is held, so queue wait stays out of the network time.
+                // A failed preparation sent no origin request and yields no record.
+                let telemetry = AttemptTelemetry::begin(
+                    &policy.telemetry,
+                    telemetry_input.as_deref().unwrap_or_default(),
+                    origin_resource_kind(target.kind),
+                    telemetry_key.as_deref(),
+                    attempt_index,
+                );
+                telemetry.start(attempt_started_at.elapsed(), target.media_duration_ms);
+                let fetched = match fetch_hls_origin_resource_response_with_timeout(
+                    &target,
+                    &clients,
+                    Duration::from_millis(timeout.effective_ms),
+                )
+                .await
+                {
+                    Ok((response, deadline)) => {
+                        telemetry.mark_headers(response.status().as_u16(), response.content_length());
+                        timeout_phase = "decoder";
+                        prepare_response(response, deadline).await.map(|response| (response, deadline))
+                    }
+                    Err(err) => Err(err),
+                };
+                match fetched {
+                    Ok((response, deadline)) => {
+                        timeout_phase = "body";
+                        let response = response.observe_body(&telemetry);
+                        let result = telemetry.scope_commit(commit(response, attempt, deadline, guard)).await;
+                        telemetry.finish(&result);
+                        result
+                    }
+                    Err(err) => {
+                        telemetry.finish_failed(&err);
+                        cleanup_attempt(guard).await;
+                        Err(err)
                     }
                 }
-                Err(err) => {
-                    cleanup_attempt(guard).await;
-                    Err(err)
-                }
-            },
+            }
             Err(err) => Err(err),
         };
 
@@ -1021,6 +1079,7 @@ mod tests {
             origin_url,
             headers,
             byte_range_expectation: HlsOriginByteRangeExpectation::FullObject,
+            media_duration_ms: None,
         }
     }
 
@@ -1734,5 +1793,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod telemetry_tests;
 mod timeout;
 pub use timeout::{HlsOriginTimeoutConfig, HlsOriginTimeoutPolicy, HlsOriginTimeoutSnapshot};

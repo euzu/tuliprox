@@ -556,6 +556,7 @@ pub struct ConfigInput {
     pub panel_api: Option<PanelApiConfig>,
     pub cache_duration_seconds: u64,
     pub provider_configs: Option<Vec<Arc<ConfigProvider>>>,
+    pub playback_provider: Option<String>,
     /// Resolved Stalker device identity + portal hints.
     pub stalker: Option<StalkerInputConfig>,
 }
@@ -821,6 +822,15 @@ impl ConfigInput {
             used_provider_configs.push(provider_cfg);
         }
 
+        if let Some(name) = self.playback_provider.as_deref() {
+            let provider_cfg = provider_configs.iter().find(|p| p.name.as_ref() == name).cloned().ok_or_else(|| {
+                TuliproxError::ConfigInput(format!("playback_provider '{name}' is not defined (input: {})", self.name))
+            })?;
+            if !used_provider_configs.iter().any(|p| p.name == provider_cfg.name) {
+                used_provider_configs.push(provider_cfg);
+            }
+        }
+
         if self.enabled {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
@@ -927,6 +937,7 @@ impl ConfigInput {
             username: alias.username.clone(),
             password: alias.password.clone(),
             persist: self.persist.clone(),
+            playback_provider: self.playback_provider.clone(),
             enabled: self.enabled,
             account_disabled: !alias.enabled,
             sequential_group: self.sequential_group,
@@ -1056,6 +1067,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
             provider_configs: None,
+            playback_provider: dto.playback_provider.clone(),
             stalker: dto
                 .stalker
                 .as_ref()
@@ -1668,6 +1680,45 @@ mod tests {
 
         let err = input.prepare(&[]).unwrap_err();
         assert!(err.to_string().contains("Malformed provider URL"));
+    }
+
+    #[test]
+    fn test_prepare_binds_playback_provider_for_non_provider_url_input() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "cdn".into(),
+            urls: vec!["http://cdn.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        }));
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "http://playlist.example.com/list.m3u".to_string(),
+            enabled: true,
+            playback_provider: Some("cdn".to_string()),
+            ..Default::default()
+        };
+
+        input.prepare(&[Arc::clone(&provider)]).unwrap();
+
+        let resolved = input.resolve_url("provider://cdn/ChannelA/mono.m3u8").unwrap();
+        assert_eq!(resolved, "http://cdn.example.com/ChannelA/mono.m3u8");
+        assert!(input.get_resolve_provider("provider://cdn/x").is_some());
+    }
+
+    #[test]
+    fn test_prepare_fails_on_unknown_playback_provider() {
+        let mut input = ConfigInput {
+            name: "test_input".into(),
+            input_type: InputType::M3u,
+            url: "http://playlist.example.com/list.m3u".to_string(),
+            enabled: true,
+            playback_provider: Some("cdn".to_string()),
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).unwrap_err();
+        assert!(err.to_string().contains("playback_provider 'cdn' is not defined"));
     }
 
     #[test]

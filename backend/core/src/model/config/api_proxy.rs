@@ -130,6 +130,7 @@ pub struct ApiProxyConfig {
     pub use_user_db: bool,
     /// HTTP status code for auth failures. 0 means default (403).
     pub auth_error_status: u16,
+    pub credential_generation: shared::model::CredentialGenerationDto,
     pub templates: Option<Arc<[shared::model::PatternTemplate]>>,
 }
 
@@ -168,6 +169,7 @@ impl ApiProxyConfig {
             user,
             use_user_db: dto.use_user_db,
             auth_error_status: dto.auth_error_status,
+            credential_generation: dto.credential_generation.clone(),
         }
     }
 }
@@ -179,6 +181,7 @@ impl From<&ApiProxyConfig> for ApiProxyConfigDto {
             user: instance.user.iter().map(TargetUserDto::from).collect(),
             use_user_db: instance.use_user_db,
             auth_error_status: instance.auth_error_status,
+            credential_generation: instance.credential_generation.clone(),
         }
     }
 }

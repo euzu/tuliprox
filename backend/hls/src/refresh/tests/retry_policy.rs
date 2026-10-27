@@ -1136,6 +1136,7 @@ async fn shared_initial_manifest_decoder_failure_retries_until_success() {
         retry_policy: no_delay_policy(),
         recovery_timing_policy: test_recovery_timing_policy(2_000),
         acceptance_timing_seed: None,
+        origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
     };
 
     let fetched = fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context))
@@ -1185,6 +1186,7 @@ async fn shared_initial_manifest_waits_for_next_attempt_base_delay() {
         retry_policy: RetryPolicy { delays_ms: [0, 100, 250, 500, 750], jitter_max_ms: 0 },
         recovery_timing_policy: test_recovery_timing_policy(2_000),
         acceptance_timing_seed: None,
+        origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
     };
     let started_at = std::time::Instant::now();
 
@@ -1226,6 +1228,7 @@ async fn shared_initial_manifest_decoder_failures_stop_at_attempt_budget() {
         retry_policy,
         recovery_timing_policy: test_recovery_timing_policy(2_000),
         acceptance_timing_seed: None,
+        origin_telemetry: crate::origin_telemetry::OriginTelemetryRecorder::disabled(),
     };
 
     let error = fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&context))

@@ -37,6 +37,8 @@ pub struct NumberInputProps {
     #[prop_or_default]
     pub label: Option<String>,
     #[prop_or_default]
+    pub hint_key: Option<String>,
+    #[prop_or_default]
     pub value: Option<i64>,
     #[prop_or_default]
     pub float_value: Option<f64>,
@@ -181,7 +183,7 @@ pub fn NumberInput(props: &NumberInputProps) -> Html {
     };
 
     html! {
-        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()}>
+        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()} hint_key={props.hint_key.clone()}>
             <input
                 id={resolved_field_id}
                 ref={input_ref.clone()}
@@ -277,6 +279,7 @@ mod browser_tests {
             name: "unsigned-test".to_string(),
             field_id: None,
             label: None,
+            hint_key: None,
             value: None,
             float_value: None,
             on_change: Callback::noop(),
@@ -298,6 +301,7 @@ mod browser_tests {
             name: "bounded-signed-test".to_string(),
             field_id: None,
             label: None,
+            hint_key: None,
             value: Some(value),
             float_value: None,
             on_change,

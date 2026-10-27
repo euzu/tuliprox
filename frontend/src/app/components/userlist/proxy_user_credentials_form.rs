@@ -9,7 +9,7 @@ use crate::{
             ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption, DropDownSelection, FilterInput, NoSubmitForm,
             Tag, TextButton, UserStatus,
         },
-        TargetUser,
+        ConfigContext, TargetUser,
     },
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
     edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
@@ -18,14 +18,11 @@ use crate::{
     i18n::use_translation,
 };
 use chrono::{Duration, Utc};
-use shared::{
-    model::{
-        permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, NetworkAccessDto, ProxyType,
-        ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
-    },
-    utils::generate_random_string,
+use shared::model::{
+    permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, CredentialGenerationDto,
+    NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
 };
-use std::{net::IpAddr, rc::Rc};
+use std::{cell::Cell, net::IpAddr, rc::Rc};
 use strum::IntoEnumIterator;
 use yew::prelude::*;
 
@@ -41,6 +38,46 @@ struct UserFormFieldErrors {
 
 impl UserFormFieldErrors {
     fn has_errors(&self) -> bool { self.username.is_some() || self.password.is_some() || self.target.is_some() }
+}
+
+/// Credential values auto-filled into a new-user form. The stored values let the
+/// form tell an untouched auto-filled field from one the user edited.
+#[derive(Clone)]
+struct GeneratedCredentials {
+    username: String,
+    password: String,
+    token: Option<String>,
+}
+
+impl GeneratedCredentials {
+    /// Which fields still hold the auto-filled value, i.e. were not edited by the user.
+    fn untouched(&self, form: &ProxyUserCredentialsDto) -> (bool, bool, bool) {
+        (form.username == self.username, form.password == self.password, form.token == self.token)
+    }
+}
+
+/// Remembers whether the create draft was already built for the open edit view.
+///
+/// Leaving the edit view ends the create session: the next "new user" must start
+/// from freshly generated credentials instead of the abandoned draft.
+#[derive(Default)]
+struct CreateDraftSession {
+    initialized: Cell<bool>,
+}
+
+impl CreateDraftSession {
+    /// The edit view was left, so the draft is abandoned.
+    fn abandon(&self) { self.initialized.set(false); }
+
+    /// Returns true when the create draft has to be built; later calls keep the draft.
+    fn begin(&self) -> bool {
+        if self.initialized.get() {
+            false
+        } else {
+            self.initialized.set(true);
+            true
+        }
+    }
 }
 
 fn cluster_flags_label(flags: ClusterFlags, t: impl Fn(&str) -> String) -> String {
@@ -243,7 +280,14 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         options
     });
 
-    let create_initialized = use_ref(|| std::cell::Cell::new(false));
+    let create_draft = use_ref(CreateDraftSession::default);
+    let generated_credentials = use_mut_ref(|| None::<GeneratedCredentials>);
+    let credential_effect_started = use_mut_ref(|| false);
+    let config_ctx = use_context::<ConfigContext>();
+    let credential_generation = config_ctx
+        .as_ref()
+        .and_then(|ctx| ctx.api_proxy.as_ref())
+        .map_or_else(CredentialGenerationDto::default, |api_proxy| api_proxy.credential_generation.clone());
 
     {
         let form_state = form_state.clone();
@@ -251,10 +295,18 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let set_update = update.clone();
         let set_allowed_countries = allowed_countries.clone();
         let set_allowed_networks = allowed_networks.clone();
-        let create_initialized = create_initialized.clone();
+        let create_draft = create_draft.clone();
+        let generated_credentials = generated_credentials.clone();
+        let main_credential_generation = credential_generation.clone();
         use_effect_with(
             (props.active_page, props.user.clone(), props.server.clone()),
             move |(active_page, user, server)| {
+                if *active_page == Some(UserlistPage::List) {
+                    // Leaving the edit view abandons the create draft, so the next create
+                    // session generates fresh credentials.
+                    create_draft.abandon();
+                    return;
+                }
                 if active_page.is_none() || *active_page == Some(UserlistPage::Edit) {
                     if let Some(u) = user.clone() {
                         set_update.set(true);
@@ -280,9 +332,9 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             set_allowed_countries.set(Vec::new());
                             set_allowed_networks.set(Vec::new());
                         }
-                        create_initialized.set(false);
+                        create_draft.abandon();
                         form_state.dispatch(UserFormAction::SetAll(creds));
-                    } else if create_initialized.get() {
+                    } else if !create_draft.begin() {
                         // Create form already initialized — only merge the default
                         // server when the user hasn't picked one yet.
                         if form_state.data().server.is_none() {
@@ -291,7 +343,6 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             }
                         }
                     } else {
-                        create_initialized.set(true);
                         set_update.set(false);
                         set_selected_target.set(None);
                         set_allowed_countries.set(Vec::new());
@@ -310,15 +361,62 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
                         user.exp_date = Some(in_one_year.timestamp());
 
-                        user.username = generate_random_string(6).to_uppercase();
-                        user.password = generate_random_string(6).to_uppercase();
-                        user.token = Some(generate_random_string(6));
+                        user.username = main_credential_generation.generate_username();
+                        user.password = main_credential_generation.generate_password();
+                        user.token = Some(main_credential_generation.generate_token());
+                        *generated_credentials.borrow_mut() = Some(GeneratedCredentials {
+                            username: user.username.clone(),
+                            password: user.password.clone(),
+                            token: user.token.clone(),
+                        });
 
                         form_state.dispatch(UserFormAction::SetAll(user));
                     }
                 }
             },
         );
+    }
+
+    {
+        let form_state = form_state.clone();
+        let generated_credentials = generated_credentials.clone();
+        let credential_effect_started = credential_effect_started.clone();
+        let is_new_user = props.user.is_none();
+        use_effect_with(credential_generation, move |generation| {
+            {
+                let mut started = credential_effect_started.borrow_mut();
+                if !*started {
+                    *started = true;
+                    return;
+                }
+            }
+            // Only regenerate the create form; an existing user's stored credentials
+            // must never change because the configuration changed.
+            if !is_new_user {
+                return;
+            }
+            let Some(generated) = generated_credentials.borrow().clone() else {
+                return;
+            };
+            let (username_untouched, password_untouched, token_untouched) = generated.untouched(form_state.data());
+            let mut next = generated.clone();
+            if username_untouched {
+                let value = generation.generate_username();
+                next.username.clone_from(&value);
+                form_state.dispatch(UserFormAction::Username(value));
+            }
+            if password_untouched {
+                let value = generation.generate_password();
+                next.password.clone_from(&value);
+                form_state.dispatch(UserFormAction::Password(value));
+            }
+            if token_untouched {
+                let value = generation.generate_token();
+                next.token = Some(value.clone());
+                form_state.dispatch(UserFormAction::Token(Some(value)));
+            }
+            *generated_credentials.borrow_mut() = Some(next);
+        });
     }
 
     let handle_cancel = {
@@ -761,6 +859,43 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_draft_begins_once_per_edit_view() {
+        let draft = CreateDraftSession::default();
+        assert!(draft.begin());
+        assert!(!draft.begin());
+        assert!(!draft.begin());
+    }
+
+    #[test]
+    fn create_draft_begins_again_after_leaving_the_edit_view() {
+        let draft = CreateDraftSession::default();
+        assert!(draft.begin());
+        draft.abandon();
+        assert!(draft.begin());
+    }
+
+    #[test]
+    fn generated_credentials_report_only_unedited_fields() {
+        let generated = GeneratedCredentials {
+            username: "AAA111".to_string(),
+            password: "BBB222".to_string(),
+            token: Some("ccc333".to_string()),
+        };
+        let mut form = ProxyUserCredentialsDto {
+            username: generated.username.clone(),
+            password: "edited".to_string(),
+            token: generated.token.clone(),
+            ..ProxyUserCredentialsDto::default()
+        };
+
+        assert_eq!(generated.untouched(&form), (true, false, true));
+
+        form.password.clone_from(&generated.password);
+        form.token = None;
+        assert_eq!(generated.untouched(&form), (true, true, false));
+    }
 
     #[test]
     fn build_network_access_returns_none_for_empty_inputs() {

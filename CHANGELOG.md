@@ -232,6 +232,28 @@
   [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
   and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
 
+- **Configurable credential generation for new users.** The username, password and token pre-filled when creating
+  an API user in the Web UI can now be tuned via `credential_generation` in `api-proxy.yml`: length (1-64), allowed
+  `chars` with ranges, `exclude`, or ordered `segments` (for example 3 letters followed by 3 digits). Defaults match the
+  previous behavior (6 characters). Only ASCII letters, digits and `! . _ ~ -` are accepted. Editable in the Web UI
+  under Config → Api.
+
+- **`playback_provider` input option.** Binds a global `provider` profile to an input whose `url` and alias URLs are
+  plain `http(s)://` URLs. Mappings that rewrite channel URLs to `provider://<name>/...` now resolve on such inputs
+  instead of failing with `Provider config for '<name>' not found in input` (HTTP 503), so CDN URL failover works for
+  independent playlists. Available in the input editor of the Web UI.
+
+- **Shared HLS origin transfer telemetry.** New optional `reverse_proxy.hls_origin_telemetry` block (off by default)
+  measures the existing origin fetches for segments, maps, keys and manifests: time to headers, first byte and body
+  completion, bytes, status, outcome and failure phase, with queue wait separated from network time. Aggregates keep
+  availability and transfer quality apart and report sample coverage and freshness. Transfer-quality values stay `null`
+  when unmeasured or stale; availability values such as `success_ratio` are not nulled by freshness, so check
+  `availability.last_sample_age_ms`.
+  The bounded recorder counts dropped events, adds no provider requests and exports no credentials or origin URLs.
+  Configurable in the Web UI under Config → Reverse Proxy. Read it at `GET /api/v1/hls/origin-telemetry` or via the
+  MCP tool `get_hls_origin_telemetry`. See
+  [Shared HLS Origin Telemetry](docs/src/operator/hls-origin-telemetry.md).
+
 - **Plex, Emby and Jellyfin libraries become separate categories.** Every imported media server library is now its
   own playlist group named after the library (for example `Movies 1`, `Movies 2`), so it shows up as a separate
   category in Xtream, M3U and every other output instead of one `Media Server Movies` / `Media Server Series` group.
@@ -1244,6 +1266,11 @@
   and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
   longer breaks a reload.
 
+- **VOD from providers that label ranged media `text/html` plays again in reverse proxy mode.** The
+  "Provider returned HTML content" check rejected every non-adaptive success response with a `text/html`
+  content type, so a valid `206` movie (for example Matroska) served with the wrong type fell back to the
+  error video. Responses with status `206` or a `Content-Range` header are no longer rejected on content type.
+
 - **Token-only M3U streams on a `provider://` profile no longer fail with 503 on the HLS media manifest.** The HLS
   origin rewrite required the selected account's username/password even when the URL carries only a token and needs
   no credential substitution. Credentials are now required only when a rewrite actually happens.
@@ -1828,6 +1855,10 @@
 - **source.yml (target `options`)**:
   - Added `failover_groups` (default off): `enabled` plus the optional overrides `match_by`, `match_as_ascii`,
     `epg_conflict`, `name_strip_quality`, `policy`, `allow_provider_grace` and `failover`.
+
+- **api-proxy.yml (`credential_generation`)**: `username`, `password` and `token` each take `length` (default `6`),
+  `chars` (default `A-Z0-9`, token `A-Za-z0-9`) and `exclude` (default empty), or an ordered `segments` list of the
+  same keys.
 
 - **config.yml (`reverse_proxy.stream`)**:
   - `hls_wrap_media_playlist` (default `true`): answers a proxied live HLS entry request whose provider returns a media

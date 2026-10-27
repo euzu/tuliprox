@@ -111,6 +111,7 @@ The permission column names the permission the REST route requires (see `groups.
 | `get_playlist_update_status` |  read | `GET /playlist/update/status` | `playlist.read`                                                                                   | none                                                                                                                                                                                                          |
 | `query_stream_history`       |  read | `GET /stream-history`         | `system.read`                                                                                     | optional `from`, `to` (date `YYYY-MM-DD` or datetime), `page` (integer >= 1), `page_size` (25, 50, 100 or 200), `search`, `search_mode` (`text` or `regex`), `search_field` (list of record fields to search) |
 | `get_stream_history_summary` |  read | `GET /stream-history/summary` | `system.read`                                                                                     | optional `from`, `to`, `provider_name`, `input_name`, `api_username`, `item_type`, `event_type`                                                                                                               |
+| `get_hls_origin_telemetry`   | read  | `GET /hls/origin-telemetry`   | `system.read`                                                                                     | none                                                                                                                                                                                                          |
 | `list_qos_snapshots`         |  read | `GET /qos-snapshots`          | `system.read`                                                                                     | optional `limit` (integer >= 1), `stream_identity_key`, `input_name`, `provider_name`, `item_type`, `target_name`                                                                                             |
 | `get_qos_snapshot`           |  read | `GET /qos-snapshots/{key}`    | `system.read`                                                                                     | required `stream_identity_key`                                                                                                                                                                                |
 | `get_event_stats`            |  read | `GET /events/stats`           | `system.read`                                                                                     | none                                                                                                                                                                                                          |
@@ -125,7 +126,8 @@ The permission column names the permission the REST route requires (see `groups.
 Notes:
 
 * `query_stream_history` and `get_stream_history_summary` need `reverse_proxy.stream_history` to be enabled.
-  `list_qos_snapshots` and `get_qos_snapshot` need `qos_aggregation` to be enabled. `update_geoip` needs
+  `list_qos_snapshots` and `get_qos_snapshot` need `qos_aggregation` to be enabled.
+  `get_hls_origin_telemetry` needs `reverse_proxy.hls_origin_telemetry` to be enabled. `update_geoip` needs
   `reverse_proxy.geoip` to be enabled. Otherwise the REST route answers with an error status that is returned as an
   `isError` result.
 * `update_playlists` queues a playlist update (the REST route answers `202` with a run id). A second request while one

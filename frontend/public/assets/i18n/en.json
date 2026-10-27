@@ -262,7 +262,10 @@
     "TABLE_COLUMNS": "Use the switches to show or hide columns. Drag a handle to change the order. Save applies your changes; Restore defaults resets the layout.\n\nSpace or Enter picks up or drops a column. Use Up/Down to move; Escape cancels the move.",
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
-      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden)."
+      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden).",
+      "CREDENTIAL_LENGTH": "Number of generated characters for this segment (1 to 64). The total length across all segments for this field cannot exceed 64.",
+      "CREDENTIAL_CHARS": "Characters used for this part. Literal characters and ranges such as A-Z or 0-9; escape a literal dash as \\-. Only ASCII letters, digits and ! . _ ~ - are allowed. Leave empty for the default (username/password A-Z0-9, token A-Za-z0-9). Add several segments to build an ordered value, e.g. 3 letters then 3 digits.",
+      "CREDENTIAL_EXCLUDE": "Characters removed from the allowed set, e.g. 1lI0O to avoid look-alikes. Written as plain characters, no ranges."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Upstream host that this proxy server profile points to.",
@@ -511,6 +514,7 @@
       "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
       "LIVE_SOURCE": "Source selector for the Live cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Optional file path used to persist or reuse the downloaded input playlist.",
+      "PLAYBACK_PROVIDER": "Name of a global provider profile used to resolve provider:// playback URLs created by mappings, when the input and alias URLs are plain http(s) URLs. Enables CDN failover for independent playlists.",
       "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference.",
       "SIMPLE_INPUT": {
         "URL": "Source URL for this input. Only `file://`, `http://`, and `https://` URLs are supported."
@@ -734,7 +738,8 @@
       "RESOURCE_REWRITE_DISABLED": "If enabled, URL rewriting for logos and EPG is disabled (also disables caching).",
       "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```",
       "STREAM_HISTORY": "Stores stream lifecycle telemetry in daily binary files. This is the raw data source for debugging, QoS analysis, and future failover tuning.",
-      "QOS_AGGREGATION": "Builds compact QoS snapshots from stream history in the background. These snapshots are designed as the later input for failover decisions."
+      "QOS_AGGREGATION": "Builds compact QoS snapshots from stream history in the background. These snapshots are designed as the later input for failover decisions.",
+      "HLS_ORIGIN_TELEMETRY": "Measures how fast the provider delivers Shared HLS segments, maps, keys and manifests from fetches Tuliprox already makes. Read it at GET /api/v1/hls/origin-telemetry. Changing it needs a restart."
     },
     "REVERSE_PROXY_DISABLED_HEADER_CONFIG": {
       "CLOUDFLARE_HEADER": "Removes Cloudflare-specific headers (like CF-Connecting-IP) before forwarding to the upstream.",
@@ -933,6 +938,12 @@
     },
     "FAILOVER_GROUP_TARGET": {
       "TARGET": "Target whose failover groups are edited. Only targets with failover groups enabled are listed."
+    },
+    "HLS_ORIGIN_TELEMETRY_CONFIG": {
+      "ENABLED": "Enables origin transfer telemetry. It measures existing origin fetches and sends no extra provider requests.",
+      "QUEUE_CAPACITY": "Size of the bounded event queue (minimum 16). When it is full, events are dropped and counted; fetches never wait.",
+      "FRESHNESS_SECS": "Seconds after which a measurement is reported as unknown (null) instead of good or bad.",
+      "WINDOW_SECS": "Length in seconds of the rolling window used for the aggregates."
     }
   },
   "HINT": {
@@ -1464,6 +1475,7 @@
     "PATTERN_IPV6": "Pattern IPv6",
     "PERIOD_MILLIS": "Period Millis",
     "PERSIST": "Persist",
+    "PLAYBACK_PROVIDER": "Playback provider",
     "PLAYER_SERVER": "Player Server",
     "PLAN": "Plan",
     "PLANS": "Plans",
@@ -1888,6 +1900,14 @@
     "USE_OUTPUT": "Use output",
     "USE_USER_DB": "Use User DB",
     "AUTH_ERROR_STATUS": "Auth Error Status",
+    "CREDENTIAL_GENERATION": "Credential generation",
+    "CREDENTIAL_LENGTH": "Length",
+    "CREDENTIAL_CHARS": "Allowed characters",
+    "CREDENTIAL_EXCLUDE": "Excluded characters",
+    "CREDENTIAL_ADD_SEGMENT": "Add segment",
+    "CREDENTIAL_REMOVE_SEGMENT": "Remove segment",
+    "CREDENTIAL_SEGMENT": "Segment",
+    "CREDENTIAL_DEFAULT": "Default",
     "VALIDATION": "Validation",
     "VERSION": "Version",
     "VIDEO": "Video",
@@ -2128,7 +2148,16 @@
     "FAILOVER_GROUPS_HINT_APPLY": "Start a playlist update (it respects the input cache), so the saved changes show up in the playlist.",
     "FAILOVER_GROUPS_UNDO": "Undo",
     "FAILOVER_GROUPS_UNRESOLVED": "Unresolved channels",
-    "FAILOVER_GROUPS_CURRENT_VALUES": "Current values"
+    "FAILOVER_GROUPS_CURRENT_VALUES": "Current values",
+    "HLS_ORIGIN_TELEMETRY": "HLS Origin Telemetry",
+    "HLS_ORIGIN_TELEMETRY_ENABLED": "Enable origin telemetry",
+    "HLS_ORIGIN_TELEMETRY_QUEUE_CAPACITY": "Queue capacity",
+    "HLS_ORIGIN_TELEMETRY_FRESHNESS_SECS": "Freshness (secs)",
+    "HLS_ORIGIN_TELEMETRY_WINDOW_SECS": "Window (secs)",
+    "REVERSE_PROXY_TAB_GENERAL": "General",
+    "REVERSE_PROXY_TAB_STREAM": "Stream",
+    "REVERSE_PROXY_TAB_HLS": "HLS",
+    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetry"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

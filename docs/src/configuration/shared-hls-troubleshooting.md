@@ -4,6 +4,11 @@ This page helps operators diagnose Shared HLS problems without reading the sourc
 
 Start with the checklist, then use the symptom sections below.
 
+## Slow playback while origin requests return `200`
+
+Enable [origin telemetry](../operator/hls-origin-telemetry.md). High `network_ms` with low `queue_wait_ms` points at the
+origin or VPN path; low `network_ms` with stalls points at local cache or downstream delivery.
+
 ## Quick checklist
 
 1. Confirm `reverse_proxy.hls_cache` exists in `config.yml`.

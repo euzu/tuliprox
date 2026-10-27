@@ -75,6 +75,7 @@ async fn shared_admission_rejection_does_not_leak_meter_registration() {
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         ..Config::default()
     }));
@@ -193,6 +194,7 @@ async fn activate_session_before_stream_open_marks_pending_provider_for_grace_ho
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         ..Config::default()
     }));

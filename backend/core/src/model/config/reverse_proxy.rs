@@ -1,5 +1,6 @@
 use crate::model::{
-    config::cache::CacheConfig, macros, GeoIpConfig, QosAggregationConfig, RateLimitConfig, StreamConfig,
+    config::cache::CacheConfig, macros, GeoIpConfig, HlsOriginTelemetryConfig, QosAggregationConfig, RateLimitConfig,
+    StreamConfig,
 };
 use regex::Regex;
 use shared::{
@@ -401,6 +402,7 @@ pub struct ReverseProxyConfig {
     pub stream_history: Option<crate::model::StreamHistoryConfig>,
     pub qos_aggregation: Option<QosAggregationConfig>,
     pub hls_cache: Option<HlsCacheConfig>,
+    pub hls_origin_telemetry: Option<HlsOriginTelemetryConfig>,
 }
 
 macros::from_impl!(ReverseProxyConfig);
@@ -424,6 +426,7 @@ impl From<&ReverseProxyConfigDto> for ReverseProxyConfig {
             stream_history: dto.stream_history.as_ref().map(Into::into),
             qos_aggregation: dto.qos_aggregation.as_ref().map(Into::into),
             hls_cache: dto.hls_cache.as_ref().map(Into::into),
+            hls_origin_telemetry: dto.hls_origin_telemetry.as_ref().map(Into::into),
         }
     }
 }
@@ -447,6 +450,7 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
             stream_history: instance.stream_history.as_ref().map(Into::into),
             qos_aggregation: instance.qos_aggregation.as_ref().map(Into::into),
             hls_cache: instance.hls_cache.as_ref().map(Into::into),
+            hls_origin_telemetry: instance.hls_origin_telemetry.as_ref().map(Into::into),
         }
     }
 }

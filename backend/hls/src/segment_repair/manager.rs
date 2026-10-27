@@ -246,6 +246,7 @@ impl HlsSegmentRepairManager {
             return segment_cache.commit_staged(key, raw).await;
         }
         let postprocessing_deadline = HlsPostProcessingDeadline::new(runtime.postprocess_timeout_ms());
+        let _origin_telemetry_span = crate::resource_fetch::PostprocessSpan::start();
         self.process_staged_and_commit(segment_cache, key, raw, context, runtime, postprocessing_deadline).await
     }
 

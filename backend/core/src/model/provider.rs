@@ -667,6 +667,7 @@ mod tests {
             t_batch_url: None,
             panel_api: None,
             provider_configs: None,
+            playback_provider: None,
             cache_duration_seconds: 0,
             stalker: None,
         };

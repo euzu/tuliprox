@@ -175,6 +175,7 @@ Upstream providers are not always reliable. Tuliprox is designed to preserve usa
   correct automatic groups and create your own
 - Choose whether a provider resumes from the last working URL or restarts from the first URL on future requests
 - `provider://` references resolve to the currently active provider URL
+- `playback_provider` binds a provider profile to inputs with plain `http(s)://` playlist URLs, so mapped `provider://` playback URLs fail over too
 - Asynchronous DNS resolution and caching
 - Persisted resolved IPs without overwriting source configuration
 - HTTP, HTTPS, and SOCKS5 outbound proxy support for VPN gateways, corporate proxies, or Gluetun
@@ -356,6 +357,8 @@ Optional stream telemetry can turn individual playback failures into longer-term
 - Track stable stream identity across runs
 - Track shared-stream participation
 - Aggregate rolling reliability snapshots in the background
+- Optionally measure Shared HLS origin transfer quality separately from availability, with sample coverage and
+  freshness, via `GET /api/v1/hls/origin-telemetry`
 - Maintain 24-hour, 7-day, and 30-day QoS windows
 - View QoS summaries/details in the Web UI or query them through the API
 - Compact QoS storage periodically to reclaim expired data

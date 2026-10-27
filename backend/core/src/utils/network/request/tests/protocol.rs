@@ -586,6 +586,7 @@ async fn manual_redirect_provider_failover_restarts_from_provider_entry() {
         stream_history: None,
         qos_aggregation: None,
         hls_cache: None,
+        hls_origin_telemetry: None,
     });
     let app_config = make_test_app_config(cfg);
     let client = reqwest::Client::builder()

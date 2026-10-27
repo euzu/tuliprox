@@ -101,6 +101,58 @@ Failover **DOES NOT** trigger on:
 
 * HTTP 401 / 403 (Authentication errors, to avoid rotating due to a banned account).
 
+### Binding a provider to an independent playlist
+
+A `provider://<name>` URL only resolves on an input that knows the profile `<name>`. An input learns it when its own
+`url` or one of its alias `url` values starts with `provider://`.
+
+If the playlist is fetched from a plain `http(s)://` URL (for example an independent playlist host) while the media
+streams live on CDN hosts, a mapping can rewrite the channel URLs to `provider://cdn/...`. Without a binding, playback
+fails before the master playlist with `Provider config for 'cdn' not found in input '<input>'` (HTTP 503).
+
+Set `playback_provider` on the input to attach the profile without changing the playlist URL or the real accounts:
+
+```yaml
+provider:
+  - name: cdn
+    urls:
+      - http://pl.example.com:4000
+      - http://eu.example.com:4000
+    provider_url_selection_policy: restart_from_first
+
+inputs:
+  - name: Provider
+    type: m3u
+    url: http://playlist.example.com/list.m3u?access_key=...
+    playback_provider: cdn
+
+sources:
+  - inputs:
+      - Provider
+    targets:
+      - name: cdn_target
+        mapping:
+          - cdn_mapping
+        output:
+          - type: m3u
+```
+
+The mapping rule lives in [`mapping.yml`](./mapping-dsl.md):
+
+```yaml
+mappings:
+  mapping:
+    - id: cdn_mapping
+      mapper:
+        - filter: Url ~ "^http://(pl|eu)[.]example[.]com:4000/"
+          script: |
+            parts = @Url ~ "^http://[^/]+/(?P<rest>.*)$"
+            @Url = concat("provider://cdn/", parts.rest)
+```
+
+The field does not change the playlist download, credentials, or connection limits. It only makes `provider://cdn/...`
+URLs resolvable and enables the provider's URL failover for them. Aliases inherit the binding.
+
 ## 2. Inputs (Data Sources) (`inputs`)
 
 An `input` represents an upstream provider or a local media library.
@@ -116,6 +168,7 @@ inputs:
     sequential_group: 1
     cache_duration: 1d
     persist: playlist_{}.m3u
+    playback_provider: my_failover_provider # optional, see below
     method: GET
     exp_date: "2028-11-30 12:34:12"
     headers: { }
@@ -137,6 +190,7 @@ inputs:
 | `sequential_group`      | Int    |    No    |         | Optional non-zero process-wide group ID. With `process_parallel: true`, complete refreshes of inputs sharing an ID run one after another, including all Stalker page slices. Different groups and ungrouped inputs may overlap. Not valid for `staged` inputs; a staged overlay inherits its provider job.                                                                                                                               |
 | `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again. |
 | `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                               |
+| `playback_provider`     | String |    No    |         | Name of a global `provider` profile bound to this input for `provider://` URLs created by a mapping. Only needed when input and alias `url` values are plain `http(s)://`; see [Binding a provider to an independent playlist](#binding-a-provider-to-an-independent-playlist). Startup fails for unknown names.                                                                                                                         |
 | `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                            |
 | `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. In server mode, Tuliprox refreshes missing or soon-expiring Xtream account dates through the account's `player_api.php` credentials; see [Automatic Xtream Expiration Refresh](#automatic-xtream-expiration-refresh).                                                                                                                                                      |
 | `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                    |

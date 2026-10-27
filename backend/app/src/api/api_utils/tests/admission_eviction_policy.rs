@@ -720,6 +720,7 @@ async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         ..Config::default()
     };

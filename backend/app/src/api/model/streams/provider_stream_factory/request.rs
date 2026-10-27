@@ -296,7 +296,11 @@ async fn provider_stream_request(
                 debug!("{}", sanitize_sensitive_info(&message));
             }
             if status.is_success() {
-                if should_reject_success_response_content_type(stream_options.get_item_type(), response.headers()) {
+                if should_reject_success_response_content_type(
+                    stream_options.get_item_type(),
+                    status,
+                    response.headers(),
+                ) {
                     debug!(
                         "Provider returned HTML content for non-adaptive stream {}",
                         sanitize_sensitive_info(stream_options.get_log_url().as_ref())

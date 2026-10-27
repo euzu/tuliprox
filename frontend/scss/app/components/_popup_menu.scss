@@ -25,9 +25,16 @@
     max-width: calc(100vw - 1rem);
   }
 
+
   &__header {
     flex: none;
     padding-bottom: var(--padding-mini);
+  }
+
+  // A select's list is right-aligned with its input and sits close to it, so the corner
+  // facing away from the field reads as attached rather than rounded.
+  &--select {
+    border-top-left-radius: 0;
   }
 
   ul {

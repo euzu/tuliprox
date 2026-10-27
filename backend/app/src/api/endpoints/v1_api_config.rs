@@ -577,9 +577,18 @@ async fn save_config_sources(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_SOURCES_REVISION, &updated_revision)
 }
 
-async fn get_config_api_proxy_config_public(
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
+/// Reads `api-proxy.yml` for a config response.
+///
+/// `permissions: None` means the caller is unauthenticated because the Web UI has no
+/// auth configured; there is no identity to filter for, so the document is returned in
+/// full. This matches `get_config_common` for `config.yml`, which already ships the very
+/// same servers and users to the same caller. Filtering with an empty permission set
+/// would strip every server and user and leave the Web UI with a config it cannot save
+/// back.
+async fn get_config_api_proxy_config_common(
+    app_state: &Arc<AppState>,
+    permissions: Option<PermissionSet>,
+) -> axum::response::Response {
     let paths = app_state.app_config.paths.load();
     let api_proxy_file_path = paths.api_proxy_file_path.clone();
     let revision = match read_file_revision(&api_proxy_file_path).await {
@@ -595,18 +604,27 @@ async fn get_config_api_proxy_config_public(
         app_state.app_config.api_proxy.load().as_ref().and_then(|config| config.templates.as_deref()),
     ) {
         Ok(Some(mut api_proxy_dto)) => {
-            filter_api_proxy_by_permissions(&mut api_proxy_dto, PermissionSet::new());
+            if let Some(permissions) = permissions {
+                filter_api_proxy_by_permissions(&mut api_proxy_dto, permissions);
+            }
             let response = axum::response::Json(api_proxy_dto).into_response();
-            return response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision);
+            response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision)
         }
         Ok(None) => {
             error!("Failed to read api proxy config");
+            internal_server_error!()
         }
         Err(err) => {
             error!("Failed to read api proxy config: {err}");
+            internal_server_error!()
         }
     }
-    internal_server_error!()
+}
+
+async fn get_config_api_proxy_config_public(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    get_config_api_proxy_config_common(&app_state, None).await
 }
 
 async fn save_config_api_proxy_config(
@@ -648,6 +666,7 @@ async fn save_config_api_proxy_config(
         use_user_db: req_api_proxy.use_user_db,
         server: req_api_proxy.server.iter().map(Into::into).collect(),
         auth_error_status: req_api_proxy.auth_error_status,
+        credential_generation: req_api_proxy.credential_generation.clone(),
         ..base
     };
 
@@ -777,34 +796,7 @@ async fn get_config_api_proxy_config(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let paths = app_state.app_config.paths.load();
-    let api_proxy_file_path = paths.api_proxy_file_path.clone();
-    let revision = match read_file_revision(&api_proxy_file_path).await {
-        Ok(revision) => revision,
-        Err(err) => {
-            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
-            return internal_server_error!();
-        }
-    };
-    match read_api_proxy_file_with_templates(
-        api_proxy_file_path.as_str(),
-        true,
-        app_state.app_config.api_proxy.load().as_ref().and_then(|config| config.templates.as_deref()),
-    ) {
-        Ok(Some(mut api_proxy_dto)) => {
-            filter_api_proxy_by_permissions(&mut api_proxy_dto, permissions);
-            let response = axum::response::Json(api_proxy_dto).into_response();
-            response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision)
-        }
-        Ok(None) => {
-            error!("Failed to read api proxy config");
-            internal_server_error!()
-        }
-        Err(err) => {
-            error!("Failed to read api proxy config: {err}");
-            internal_server_error!()
-        }
-    }
+    get_config_api_proxy_config_common(&app_state, Some(permissions)).await
 }
 
 async fn config_batch_content(
@@ -1330,6 +1322,7 @@ mod tests {
             user: vec![TargetUserDto { target: String::from("target-a"), credentials: vec![] }],
             use_user_db: true,
             auth_error_status: 401,
+            credential_generation: shared::model::CredentialGenerationDto::default(),
         }
     }
 
@@ -1666,5 +1659,47 @@ mod tests {
         let saved: SourcesConfigDto =
             serde_saphyr::from_str(&tokio::fs::read_to_string(&sources_file).await.unwrap()).unwrap();
         assert_eq!(saved.sources[0].targets[0].curation.as_ref(), Some(&curation));
+    }
+
+    #[tokio::test]
+    async fn public_api_proxy_config_keeps_servers_and_users_for_the_web_ui() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tempfile::TempDir;
+        use tower::ServiceExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let api_proxy_file = temp_dir.path().join("api-proxy.yml");
+        let stored = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "localhost".to_string(),
+                ..ApiProxyServerInfoDto::default()
+            }],
+            user: vec![TargetUserDto { target: "target-a".to_string(), credentials: vec![] }],
+            ..ApiProxyConfigDto::default()
+        };
+        tokio::fs::write(&api_proxy_file, serde_saphyr::to_string(&stored).unwrap()).await.unwrap();
+
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let mut paths = app_state.app_config.paths.load_full().as_ref().clone();
+        paths.home_path = temp_dir.path().to_string_lossy().to_string();
+        paths.api_proxy_file_path = api_proxy_file.to_string_lossy().to_string();
+        app_state.app_config.paths.store(Arc::new(paths));
+
+        // Auth is disabled, so the Web UI router serves `/config/apiproxy` from the public handler.
+        let router = super::v1_api_config_register(axum::routing::Router::new()).with_state(Arc::clone(&app_state));
+        let response =
+            router.oneshot(Request::builder().uri("/config/apiproxy").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let returned: ApiProxyConfigDto = serde_json::from_slice(&body).unwrap();
+        assert_eq!(returned.server.len(), 1);
+        assert_eq!(returned.server[0].name, "default");
+        assert_eq!(returned.user.len(), 1);
     }
 }

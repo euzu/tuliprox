@@ -58,6 +58,7 @@ pub(super) fn build_hls_transient_resource_fetch_target(
             range_header,
         )?,
         byte_range_expectation,
+        media_duration_ms: None,
     })
 }
 

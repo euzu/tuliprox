@@ -795,6 +795,7 @@ impl GroupPlaybackEnvBuilder {
                 hls_cache: self
                     .hls_cache
                     .then(|| crate::model::HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default())),
+                hls_origin_telemetry: None,
             }),
             ..Config::default()
         };

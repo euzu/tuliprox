@@ -500,6 +500,7 @@ async fn dash_stream_request_remains_redirect_and_preserves_provider_affinity() 
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         ..Config::default()
     }));

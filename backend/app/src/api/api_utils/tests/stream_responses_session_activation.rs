@@ -375,6 +375,7 @@ async fn activate_session_before_stream_open_does_not_commit_user_lease_before_p
             stream_history: None,
             qos_aggregation: None,
             hls_cache: None,
+            hls_origin_telemetry: None,
         }),
         ..Config::default()
     }));
