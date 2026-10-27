@@ -18,12 +18,12 @@ reverse_proxy:
     window_secs: 300
 ```
 
-| Parameter        | Type | Default | Meaning                                                                                            |
-|:-----------------|:----:|:--------|:---------------------------------------------------------------------------------------------------|
-| `enabled`        | Bool | `false` | Turns the recorder on. When off, nothing is measured and there is no runtime cost.                 |
-| `queue_capacity` | Int  | `1024`  | Bounded event queue (minimum `16`). When full, events are dropped and counted; fetches never wait. |
-| `freshness_secs` | Int  | `60`    | Quality values older than this are reported as `null` (unknown), not as good or bad.               |
-| `window_secs`    | Int  | `300`   | Rolling window used for the aggregates (at most 4096 samples per input).                           |
+| Parameter        | Type | Default | Meaning                                                                                                                              |
+|:-----------------|:----:|:--------|:-------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`        | Bool | `false` | Turns the recorder on. When off, nothing is measured and there is no runtime cost.                                                   |
+| `queue_capacity` | Int  | `1024`  | Bounded event queue, at least `16` and at most Tokio's channel limit. When full, events are dropped and counted; fetches never wait. |
+| `freshness_secs` | Int  | `60`    | Quality values older than this are reported as `null` (unknown), not as good or bad.                                                 |
+| `window_secs`    | Int  | `300`   | Rolling window used for the aggregates (at most 4096 samples per input).                                                             |
 
 * The same settings are available in the Web UI under **Config → Reverse Proxy → HLS Origin Telemetry**.
 * Unknown keys are rejected. A block equal to the defaults is the same as no block.

@@ -112,7 +112,7 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
     },
     McpTool {
         name: "get_hls_origin_telemetry",
-        description: "Shared HLS origin transfer quality per input (network time, first byte, throughput, availability) from existing fetches, with sample coverage and freshness. Values are null when unmeasured or stale. Requires reverse_proxy.hls_origin_telemetry to be enabled.",
+        description: "Shared HLS origin transfer quality per input (network time, first byte, throughput, availability) from existing fetches, with sample coverage and freshness. Transfer-quality values are null when unmeasured or stale (older than freshness_secs); availability values such as success_ratio are not nulled by freshness, so check availability.last_sample_age_ms before trusting them. Requires reverse_proxy.hls_origin_telemetry to be enabled.",
         input_schema: NO_ARGUMENTS,
         method: McpToolMethod::Get,
         path: "/hls/origin-telemetry",

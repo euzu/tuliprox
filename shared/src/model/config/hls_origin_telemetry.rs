@@ -10,6 +10,9 @@ use crate::{
 /// Smallest accepted `queue_capacity`; a smaller queue would drop events under any burst.
 pub const HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY: usize = 16;
 
+/// Largest accepted `queue_capacity`: Tokio's bounded channel panics above `Semaphore::MAX_PERMITS`.
+pub const HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY: usize = usize::MAX >> 3;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HlsOriginTelemetryConfigDto {
@@ -47,9 +50,11 @@ impl HlsOriginTelemetryConfigDto {
     pub fn is_empty(&self) -> bool { *self == Self::default() }
 
     pub(crate) fn prepare(&self) -> Result<(), TuliproxError> {
-        if self.queue_capacity < HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY {
+        if !(HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY..=HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY)
+            .contains(&self.queue_capacity)
+        {
             return Err(TuliproxError::ConfigReverseProxy(format!(
-                "`hls_origin_telemetry.queue_capacity` must be >= {HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY}"
+                "`hls_origin_telemetry.queue_capacity` must be between {HLS_ORIGIN_TELEMETRY_MIN_QUEUE_CAPACITY} and {HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY}"
             )));
         }
         if self.freshness_secs == 0 || self.window_secs == 0 {
@@ -63,7 +68,7 @@ impl HlsOriginTelemetryConfigDto {
 
 #[cfg(test)]
 mod tests {
-    use super::HlsOriginTelemetryConfigDto;
+    use super::{HlsOriginTelemetryConfigDto, HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY};
     use crate::model::ReverseProxyConfigDto;
 
     #[test]
@@ -109,6 +114,11 @@ mod tests {
         assert!(cfg.prepare().is_err());
         cfg.queue_capacity = 16;
         assert!(cfg.prepare().is_ok());
+        cfg.queue_capacity = HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY;
+        assert!(cfg.prepare().is_ok());
+        cfg.queue_capacity = HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY + 1;
+        assert!(cfg.prepare().is_err());
+        cfg.queue_capacity = 16;
         cfg.window_secs = 0;
         assert!(cfg.prepare().is_err());
         cfg.window_secs = 300;

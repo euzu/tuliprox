@@ -278,3 +278,8 @@ fn capped_window_reports_the_time_it_really_covers() {
     let availability = &snapshot.inputs[0].availability;
     assert!(availability.window_covered_ms.expect("covered") < availability.window_secs * 1000);
 }
+
+#[test]
+fn max_queue_capacity_matches_tokio_channel_limit() {
+    assert_eq!(shared::model::HLS_ORIGIN_TELEMETRY_MAX_QUEUE_CAPACITY, tokio::sync::Semaphore::MAX_PERMITS);
+}
