@@ -126,6 +126,20 @@ inputs:
     url: http://playlist.example.com/list.m3u?access_key=...
     playback_provider: cdn
 
+sources:
+  - inputs:
+      - Provider
+    targets:
+      - name: cdn_target
+        mapping:
+          - cdn_mapping
+        output:
+          - type: m3u
+```
+
+The mapping rule lives in [`mapping.yml`](./mapping-dsl.md):
+
+```yaml
 mappings:
   mapping:
     - id: cdn_mapping
