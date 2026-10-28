@@ -18,6 +18,10 @@ pub enum BuiltInFunction {
     Pad,
     Format,
     AddFavourite,
+    Slug,
+    NormalizeSpaces,
+    Coalesce,
+    Deunicode,
 }
 
 impl FromStr for BuiltInFunction {
@@ -40,6 +44,10 @@ impl FromStr for BuiltInFunction {
             "pad" => Ok(Self::Pad),
             "format" => Ok(Self::Format),
             "add_favourite" => Ok(Self::AddFavourite),
+            "slug" => Ok(Self::Slug),
+            "normalize_spaces" => Ok(Self::NormalizeSpaces),
+            "coalesce" => Ok(Self::Coalesce),
+            "deunicode" => Ok(Self::Deunicode),
             _ => Err(TuliproxError::Mapper(format!("Unknown function {s}"))),
         }
     }
@@ -63,6 +71,10 @@ impl Display for BuiltInFunction {
             Self::Pad => "pad",
             Self::Format => "format",
             Self::AddFavourite => "add_favourite",
+            Self::Slug => "slug",
+            Self::NormalizeSpaces => "normalize_spaces",
+            Self::Coalesce => "coalesce",
+            Self::Deunicode => "deunicode",
         })
     }
 }

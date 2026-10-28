@@ -82,6 +82,9 @@ impl<'a> MapperContext<'a> {
                     | BuiltInFunction::Template
                     | BuiltInFunction::First
                     | BuiltInFunction::TitleCase
+                    | BuiltInFunction::Slug
+                    | BuiltInFunction::NormalizeSpaces
+                    | BuiltInFunction::Deunicode
                     | BuiltInFunction::AddFavourite
                         if args.len() > 1 =>
                     {

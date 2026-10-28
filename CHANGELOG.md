@@ -192,10 +192,18 @@
 
 ## 🌟 New Features
 
-- **`title_case` mapper function.** New built-in function for the mapper DSL that capitalizes the first character of
-  every word and lowercases the rest of each word: `@Title = title_case(@Title)` turns `us: tnt hd` into
-  `Us: Tnt Hd`. Only whitespace separates words, so `spider-man` becomes `Spider-man`. The existing `capitalize`
-  still touches only the first character of the whole string; the documentation now states that difference explicitly.
+- **New mapper built-in functions: `title_case`, `slug`, `normalize_spaces`, `coalesce`, and `deunicode`.** Five new
+  helper functions for playlist transformations in the mapper DSL:
+  - `title_case`: Capitalizes the first character of every word and lowercases the rest: `@Title = title_case(@Title)`
+    turns `us: tnt hd` into `Us: Tnt Hd`. Only whitespace separates words, so `spider-man` becomes `Spider-man`. The
+    existing `capitalize` still touches only the first character of the whole string.
+  - `slug`: Converts text into a lowercase, ASCII-transliterated slug with `-` separators (`slug("US: HBO Max HD!")`
+    becomes `us-hbo-max-hd`).
+  - `normalize_spaces`: Collapses multiple consecutive whitespace characters into a single space and trims outer
+    edges (`normalize_spaces("  US |  ESPN   HD  ")` becomes `US | ESPN HD`).
+  - `coalesce`: Returns the first non-empty, non-blank value across arguments (`@Logo = coalesce(@Logo, @Logo_Small, "default.png")`).
+  - `deunicode`: Transliterates Unicode characters to their closest ASCII representation (`deunicode("Univisión: Café y Noticias")`
+    becomes `Univision: Cafe y Noticias`).
 
 - **Configurable credential generation for new users.** The username, password and token pre-filled when creating
   an API user in the Web UI can now be tuned via `credential_generation` in `api-proxy.yml`: length (1-64), allowed
