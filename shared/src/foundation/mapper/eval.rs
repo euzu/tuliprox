@@ -310,6 +310,13 @@ impl Expression {
                                 .collect::<Vec<_>>()
                                 .join(" "),
                         ),
+                        BuiltInFunction::TitleCase => Value(
+                            concat_args(&evaluated_args)
+                                .iter()
+                                .map(Capitalize::title_case)
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
                         BuiltInFunction::Split => {
                             let string = extract_evaluated_arg_value!(evaluated_args, 0);
                             let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
