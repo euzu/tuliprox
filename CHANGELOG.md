@@ -200,6 +200,21 @@
   new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. See
   [Rhai scripts](docs/src/configuration/mapping-dsl.md#23-rhai-scripts-type-rhai).
 
+- **New mapper built-in functions: `title_case`, `slug`, `normalize_spaces`, `coalesce`, and `deunicode`.** Five new
+  helper functions for playlist transformations in the mapper DSL:
+  - `title_case`: Capitalizes the first character of every word and lowercases the rest: `@Title = title_case(@Title)`
+    turns `us: tnt hd` into `Us: Tnt Hd`. Only whitespace separates words, so `spider-man` becomes `Spider-man`. An
+    optional array keeps listed acronyms in capitals: `title_case("us: tnt hd", ["TNT", "HD"])` becomes
+    `Us: TNT HD`. The existing `capitalize` still touches only the first character of the whole string.
+  - `slug`: Converts text into a lowercase, ASCII-transliterated slug with `-` separators (`slug("US: HBO Max HD!")`
+    becomes `us-hbo-max-hd`).
+  - `normalize_spaces`: Collapses multiple consecutive whitespace characters into a single space and trims outer
+    edges (`normalize_spaces("  US |  ESPN   HD  ")` becomes `US | ESPN HD`).
+  - `coalesce`: Returns the first non-empty, non-blank value across arguments (`@Logo = coalesce(@Logo, @Logo_Small, "default.png")`).
+    Arguments are evaluated left to right and evaluation stops at the first usable value.
+  - `deunicode`: Transliterates Unicode characters to their closest ASCII representation (`deunicode("Univisión: Café y Noticias")`
+    becomes `Univision: Cafe y Noticias`).
+
 - **Configurable credential generation for new users.** The username, password and token pre-filled when creating
   an API user in the Web UI can now be tuned via `credential_generation` in `api-proxy.yml`: length (1-64), allowed
   `chars` with ranges, `exclude`, or ordered `segments` (for example 3 letters followed by 3 digits). Defaults match the
@@ -1224,6 +1239,10 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Mapper arity errors name the function the user wrote.** A mapper script with the wrong number of arguments reported
+  the internal enum variant (`Function accepts only one argument TitleCase`) instead of the function name
+  (`Function accepts only one argument title_case`).
 
 - **VOD from providers that label ranged media `text/html` plays again in reverse proxy mode.** The
   "Provider returned HTML content" check rejected every non-adaptive success response with a `text/html`

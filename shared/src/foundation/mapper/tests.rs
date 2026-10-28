@@ -158,6 +158,145 @@ fn test_mapper_format() {
 }
 
 #[test]
+fn capitalize_only_touches_the_first_character_while_title_case_covers_every_word() {
+    let dsl = r#"
+            @Name = capitalize("us: tnt hd")
+            @Title = title_case("us: tnt hd")
+            @Group = title_case(concat("live ", "from ", "new york"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "Us: tnt hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Us: Tnt Hd");
+    assert_eq!(accessor.pli.header.group.as_ref(), "Live From New York");
+}
+
+#[test]
+fn title_case_keeps_listed_acronyms_in_capitals() {
+    let dsl = r#"
+            @Name = title_case("example channel name hd")
+            @Title = title_case("example channel name hd", ["HD", "FHD", "UK"])
+            @Group = title_case("uk fhd sports", ["UK", "FHD"])
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "Example Channel Name Hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Example Channel Name HD");
+    assert_eq!(accessor.pli.header.group.as_ref(), "UK FHD Sports");
+}
+
+#[test]
+fn title_case_rejects_invalid_arguments() {
+    let error =
+        MapperScript::parse(r#"@Name = title_case("a", "b")"#, None).expect_err("argument type must be validated");
+    assert!(error.to_string().contains("array of strings"), "unexpected error: {error}");
+
+    let error =
+        MapperScript::parse(r#"@Name = title_case("a", ["HD"], "b")"#, None).expect_err("arity must be validated");
+    assert!(error.to_string().contains("title_case"), "unexpected error: {error}");
+}
+
+#[test]
+fn test_mapper_slug_normalize_spaces_deunicode_coalesce() {
+    let dsl = r#"
+            @Name = slug("Österreich: ORF 1 HD!")
+            @Title = normalize_spaces("  Sky   Sport   1   HD  ")
+            @Group = deunicode("München TV - Canal+ Séries")
+            @URL = coalesce("", "   ", "http://stream.m3u8", "Fallback")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "osterreich-orf-1-hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Sky Sport 1 HD");
+    assert_eq!(accessor.pli.header.group.as_ref(), "Munchen TV - Canal+ Series");
+    assert_eq!(accessor.pli.header.url.as_ref(), "http://stream.m3u8");
+}
+
+#[test]
+fn test_mapper_coalesce_fallback_on_empty_fields() {
+    let dsl = r#"
+            @Logo = coalesce(@Logo, @Logo_Small, "https://example.com/default.png")
+            @Title = coalesce(@Title, "Fallback Title")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem {
+        header: PlaylistItemHeader {
+            logo_small: "https://example.com/small.png".intern(),
+            ..PlaylistItemHeader::default()
+        },
+    };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.logo.as_ref(), "https://example.com/small.png");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Fallback Title");
+}
+
+#[test]
+fn coalesce_stops_at_the_first_usable_argument() {
+    let dsl = r#"
+            @Name = coalesce("first", number("not a number"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert!(outcome.diagnostics.is_empty(), "unexpected diagnostics: {:?}", outcome.diagnostics);
+    assert_eq!(accessor.pli.header.name.as_ref(), "first");
+}
+
+#[test]
+fn coalesce_propagates_failure_of_a_reached_argument() {
+    let dsl = r#"
+            @Name = coalesce("", number("not a number"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(outcome.diagnostics.len(), 1, "unexpected diagnostics: {:?}", outcome.diagnostics);
+    assert!(accessor.pli.header.name.is_empty());
+}
+
+#[test]
+fn single_arg_functions_reject_more_than_one_argument() {
+    for func in ["slug", "normalize_spaces", "deunicode"] {
+        let script = format!(r#"@Name = {func}("a", "b")"#);
+        let error = MapperScript::parse(&script, None).expect_err("arity must be validated");
+        assert!(error.to_string().contains(func), "unexpected error for {func}: {error}");
+    }
+}
+
+#[test]
 fn regex_identifier_ascii_normalization_preserves_map_selection() {
     let dsl = r#"
             source = @Name

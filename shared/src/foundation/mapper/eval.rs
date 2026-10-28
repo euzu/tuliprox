@@ -5,7 +5,7 @@ use super::{
 use crate::{
     foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value},
     model::{PatternTemplate, PlaylistItemType},
-    utils::{deunicode_string, Capitalize, Internable},
+    utils::{deunicode_string, normalize_spaces, slugify, Capitalize, Internable},
 };
 use log::trace;
 use regex::Regex;
@@ -129,9 +129,17 @@ impl EvalResult {
     }
 
     pub fn is_error(&self) -> bool { matches!(self, Failure(_)) }
+
+    fn is_usable(&self) -> bool {
+        match self {
+            Value(value) => !value.trim().is_empty(),
+            Number(_) | Named(_) => true,
+            Undefined | AnyValue | Failure(_) => false,
+        }
+    }
 }
 
-fn concat_args(args: &Vec<EvalResult>) -> Vec<Cow<'_, str>> {
+fn concat_args(args: &[EvalResult]) -> Vec<Cow<'_, str>> {
     let mut result = vec![];
 
     for arg in args {
@@ -153,6 +161,19 @@ fn concat_args(args: &Vec<EvalResult>) -> Vec<Cow<'_, str>> {
     }
 
     result
+}
+
+fn title_case_args(text: &EvalResult, acronyms: &[&str]) -> EvalResult {
+    match text {
+        Value(_) | Number(_) | Named(_) => Value(
+            concat_args(std::slice::from_ref(text))
+                .iter()
+                .map(|s| s.title_case_with_acronyms(acronyms))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        Undefined | AnyValue | Failure(_) => Undefined,
+    }
 }
 
 pub(super) fn eval_regex(source: &str, re_pattern: &Regex, match_as_ascii: bool) -> EvalResult {
@@ -227,6 +248,9 @@ impl Expression {
                 },
             },
             Expression::StringLiteral(s) => Value(s.clone()),
+            Expression::ArrayLiteral(values) => {
+                Named(values.iter().enumerate().map(|(i, value)| (i.to_string(), value.clone())).collect())
+            }
             Expression::NumberLiteral(num) => Number(*num),
             Expression::RegexExpr { field, pattern: _pattern, re_pattern } => match field {
                 RegexSource::Identifier(ident) => match ctx.get_var(ident) {
@@ -274,6 +298,21 @@ impl Expression {
                 }
             }
             Expression::FunctionCall { name, args } => {
+                if matches!(name, BuiltInFunction::Coalesce) {
+                    for arg in args {
+                        let value = arg.eval(ctx, accessor);
+                        if value.is_error() {
+                            return Failure(format!(
+                                "Function '{name:?}' failed: {}",
+                                if let Failure(msg) = &value { msg } else { "Unknown error" }
+                            ));
+                        }
+                        if value.is_usable() {
+                            return value;
+                        }
+                    }
+                    return Undefined;
+                }
                 let mut evaluated_args: Vec<EvalResult> = args.iter().map(|a| a.eval(ctx, accessor)).collect();
                 for arg in &evaluated_args {
                     if arg.is_error() {
@@ -310,6 +349,33 @@ impl Expression {
                                 .collect::<Vec<_>>()
                                 .join(" "),
                         ),
+                        BuiltInFunction::Slug => {
+                            Value(concat_args(&evaluated_args).iter().map(|s| slugify(s)).collect::<Vec<_>>().join(" "))
+                        }
+                        BuiltInFunction::NormalizeSpaces => Value(
+                            concat_args(&evaluated_args)
+                                .iter()
+                                .map(|s| normalize_spaces(s))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                        BuiltInFunction::Deunicode => Value(
+                            concat_args(&evaluated_args)
+                                .iter()
+                                .map(|s| deunicode::deunicode(s))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                        BuiltInFunction::TitleCase => match evaluated_args.as_slice() {
+                            [text] => title_case_args(text, &[]),
+                            [text, Named(values)] => {
+                                let acronyms = values.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>();
+                                title_case_args(text, &acronyms)
+                            }
+                            _ => Undefined,
+                        },
+                        // Coalesce short-circuits argument evaluation above; this arm keeps the match exhaustive.
+                        BuiltInFunction::Coalesce => Undefined,
                         BuiltInFunction::Split => {
                             let string = extract_evaluated_arg_value!(evaluated_args, 0);
                             let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
