@@ -1,5 +1,5 @@
 use crate::utils::CONSTANTS;
-use deunicode::deunicode_with_tofu_cow;
+use deunicode::{deunicode, deunicode_with_tofu_cow};
 use std::{borrow::Cow, sync::Arc};
 
 /// Cleans a playlist title by removing common IPTV prefixes (e.g., "[US]", "┃DE┃").
@@ -243,6 +243,51 @@ pub fn humanize_snake_case(s: &str) -> String {
 
 pub fn deunicode_string(s: &str) -> Cow<'_, str> { deunicode_with_tofu_cow(s, "[?]") }
 
+/// Converts text into a lowercase, URL- and filename-safe slug.
+///
+/// Transliterates Unicode characters to ASCII (via `deunicode`), converts to lowercase,
+/// replaces sequences of non-alphanumeric characters with a single hyphen (`-`), and strips
+/// leading and trailing hyphens.
+pub fn slugify(s: &str) -> String {
+    let ascii = deunicode(s);
+    let mut slug = String::with_capacity(ascii.len());
+    let mut prev_is_dash = true;
+    for c in ascii.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_is_dash = false;
+        } else if !prev_is_dash {
+            slug.push('-');
+            prev_is_dash = true;
+        }
+    }
+    if prev_is_dash && !slug.is_empty() {
+        slug.pop();
+    }
+    slug
+}
+
+/// Collapses consecutive whitespace characters into a single space and trims edges.
+pub fn normalize_spaces(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut prev_is_space = true;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_is_space {
+                result.push(' ');
+                prev_is_space = true;
+            }
+        } else {
+            result.push(c);
+            prev_is_space = false;
+        }
+    }
+    if prev_is_space && !result.is_empty() {
+        result.pop();
+    }
+    result
+}
+
 /// Percent-encodes every byte outside the RFC 3986 unreserved set
 /// (`A-Z a-z 0-9 - . _ ~`), e.g. `:` -> `%3A`, `ü` -> `%C3%BC`. Suitable for
 /// cookie values and RFC 5987 `filename*` header parameters.
@@ -406,8 +451,8 @@ macro_rules! concat_string {
 #[cfg(test)]
 mod test {
     use super::{
-        clean_playlist_title, generate_random_string, natural_cmp, percent_encode_unreserved, quality_rank,
-        sanitize_filename_chars,
+        clean_playlist_title, generate_random_string, natural_cmp, normalize_spaces, percent_encode_unreserved,
+        quality_rank, sanitize_filename_chars, slugify,
     };
     use crate as shared; // allow path-based macro call in tests
     use crate::utils::Capitalize;
@@ -457,6 +502,26 @@ mod test {
         assert_eq!("spider-man".title_case(), "Spider-man");
         assert_eq!("".title_case(), "");
         assert_eq!("über straße".title_case(), "Über Straße");
+    }
+
+    #[test]
+    fn test_slugify() {
+        assert_eq!(slugify("Österreich: ORF 1 HD!"), "osterreich-orf-1-hd");
+        assert_eq!(slugify("  Sky   Sport   1   HD  "), "sky-sport-1-hd");
+        assert_eq!(slugify("Live Sports | Sky Premier HD"), "live-sports-sky-premier-hd");
+        assert_eq!(slugify("---"), "");
+        assert_eq!(slugify(""), "");
+        assert_eq!(slugify("a---b"), "a-b");
+        assert_eq!(slugify("Spider-Man: Far From Home"), "spider-man-far-from-home");
+    }
+
+    #[test]
+    fn test_normalize_spaces() {
+        assert_eq!(normalize_spaces("  Sky   Sport   1   HD  "), "Sky Sport 1 HD");
+        assert_eq!(normalize_spaces("no_spaces"), "no_spaces");
+        assert_eq!(normalize_spaces("   "), "");
+        assert_eq!(normalize_spaces(""), "");
+        assert_eq!(normalize_spaces("hello \t\n world"), "hello world");
     }
 
     #[test]

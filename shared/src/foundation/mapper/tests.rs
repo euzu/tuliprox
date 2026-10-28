@@ -184,6 +184,60 @@ fn title_case_rejects_more_than_one_argument() {
 }
 
 #[test]
+fn test_mapper_slug_normalize_spaces_deunicode_coalesce() {
+    let dsl = r#"
+            @Name = slug("Österreich: ORF 1 HD!")
+            @Title = normalize_spaces("  Sky   Sport   1   HD  ")
+            @Group = deunicode("München TV - Canal+ Séries")
+            @URL = coalesce("", "   ", "http://stream.m3u8", "Fallback")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "osterreich-orf-1-hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Sky Sport 1 HD");
+    assert_eq!(accessor.pli.header.group.as_ref(), "Munchen TV - Canal+ Series");
+    assert_eq!(accessor.pli.header.url.as_ref(), "http://stream.m3u8");
+}
+
+#[test]
+fn test_mapper_coalesce_fallback_on_empty_fields() {
+    let dsl = r#"
+            @Logo = coalesce(@Logo, @Logo_Small, "https://example.com/default.png")
+            @Title = coalesce(@Title, "Fallback Title")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem {
+        header: PlaylistItemHeader {
+            logo_small: "https://example.com/small.png".intern(),
+            ..PlaylistItemHeader::default()
+        },
+    };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.logo.as_ref(), "https://example.com/small.png");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Fallback Title");
+}
+
+#[test]
+fn single_arg_functions_reject_more_than_one_argument() {
+    for func in ["slug", "normalize_spaces", "deunicode"] {
+        let script = format!(r#"@Name = {func}("a", "b")"#);
+        let error = MapperScript::parse(&script, None).expect_err("arity must be validated");
+        assert!(error.to_string().contains(func), "unexpected error for {func}: {error}");
+    }
+}
+
+#[test]
 fn regex_identifier_ascii_normalization_preserves_map_selection() {
     let dsl = r#"
             source = @Name

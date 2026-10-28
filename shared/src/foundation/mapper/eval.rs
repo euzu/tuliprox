@@ -5,7 +5,7 @@ use super::{
 use crate::{
     foundation::mapper::EvalResult::{AnyValue, Failure, Named, Number, Undefined, Value},
     model::{PatternTemplate, PlaylistItemType},
-    utils::{deunicode_string, Capitalize, Internable},
+    utils::{deunicode_string, normalize_spaces, slugify, Capitalize, Internable},
 };
 use log::trace;
 use regex::Regex;
@@ -317,6 +317,31 @@ impl Expression {
                                 .collect::<Vec<_>>()
                                 .join(" "),
                         ),
+                        BuiltInFunction::Slug => {
+                            Value(concat_args(&evaluated_args).iter().map(|s| slugify(s)).collect::<Vec<_>>().join(" "))
+                        }
+                        BuiltInFunction::NormalizeSpaces => Value(
+                            concat_args(&evaluated_args)
+                                .iter()
+                                .map(|s| normalize_spaces(s))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                        BuiltInFunction::Deunicode => Value(
+                            concat_args(&evaluated_args)
+                                .iter()
+                                .map(|s| deunicode::deunicode(s))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                        BuiltInFunction::Coalesce => evaluated_args
+                            .into_iter()
+                            .find(|er| match er {
+                                Value(s) => !s.trim().is_empty(),
+                                Number(_) | Named(_) => true,
+                                _ => false,
+                            })
+                            .unwrap_or(Undefined),
                         BuiltInFunction::Split => {
                             let string = extract_evaluated_arg_value!(evaluated_args, 0);
                             let pattern = extract_evaluated_arg_value!(evaluated_args, 1);

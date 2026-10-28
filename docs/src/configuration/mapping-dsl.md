@@ -196,6 +196,10 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 | `first(list)`                | Returns the first element of a Named list/Regex match.                                                                                                                                              | `first(@Caption ~ "(\d+)")`    |
 | `print(a, b, ...)`           | Logs the values to the console (Requires `trace` log level).                                                                                                                                        | `print("Matched:", @Title)`    |
 | `add_favourite(grp)`         | **Background:** Clone function! Takes the currently processed stream, changes its group to `grp`, generates a clean alias UUID, and adds the stream additionally (as a "Favorite") to the playlist. | `add_favourite("Top 10")`      |
+| `slug(a)`                    | Converts text to a lowercase URL- and filename-safe slug (ASCII only, `-` separated).                                                                                                               | `slug(@Title)`                 |
+| `normalize_spaces(a)`        | Collapses consecutive whitespace into a single space and trims edges.                                                                                                                               | `normalize_spaces(@Title)`     |
+| `coalesce(a, b, ...)`        | Returns the first non-empty, non-blank argument.                                                                                                                                                    | `coalesce(@Logo, "fallback")`  |
+| `deunicode(a)`               | Transliterates Unicode characters to ASCII (e.g. `ä` -> `a`, `é` -> `e`).                                                                                                                           | `deunicode(@Title)`            |
 
 #### Choosing a case function
 
@@ -213,6 +217,22 @@ adding capitals. They differ in how much of the string they touch:
 becomes `"O'neill"`. Hyphens and apostrophes therefore stay inside a word. Because the remainder of each word is
 lowercased, acronyms such as `"TNT"` become `"Tnt"`; convert those with `uppercase` before or after `title_case`
 if they must stay `TNT`.
+
+#### Normalization and fallback functions
+
+```dsl
+# Create URL- and filename-safe IDs (e.g. for EPG or STRM)
+@epg_channel_id = slug("US: HBO Max HD!")   # us-hbo-max-hd
+
+# Collapse messy whitespace from playlist titles
+@Title = normalize_spaces("  US |  ESPN   HD  ")  # US | ESPN HD
+
+# Transliterate Unicode characters to plain ASCII
+@Name = deunicode("Univisión: Café y Noticias")    # Univision: Cafe y Noticias
+
+# Pick first non-empty, non-blank value with fallback
+@Logo = coalesce(@Logo, @Logo_Small, "https://example.com/default.png")
+```
 
 ### 2. RegEx Captures & Extraction
 
