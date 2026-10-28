@@ -11,10 +11,31 @@ pub trait Capitalize {
 
     /// Uppercases the first character of every whitespace-separated word and lowercases the remainder of each word.
     ///
-    /// Only `char::is_whitespace` separates words, so `"spider-man"` and `"o'neill"` each form a single word. The
-    /// buffer is allocated once with the input length as a lower bound; characters whose uppercase form is longer
-    /// than one char (`ß` -> `SS`) grow it as needed.
+    /// Only `char::is_whitespace` separates words, so `"spider-man"` and `"o'neill"` each form a single word.
     fn title_case(&self) -> String;
+
+    /// Like [`Capitalize::title_case`], but words that match an entry in `acronyms` (ASCII case-insensitively) keep
+    /// the spelling of that entry instead of being title-cased.
+    fn title_case_with_acronyms(&self, acronyms: &[&str]) -> String;
+}
+
+fn push_title_word(result: &mut String, word: &mut String, acronyms: &[&str]) {
+    if word.is_empty() {
+        return;
+    }
+    if let Some(acronym) = acronyms.iter().find(|acronym| acronym.eq_ignore_ascii_case(word)) {
+        result.push_str(acronym);
+    } else {
+        // Lowercase the whole word before uppercasing its first character, so contextual mappings such as the
+        // final Greek sigma (`Σ` -> `ς`) apply.
+        let lowered = word.to_lowercase();
+        let mut chars = lowered.chars();
+        if let Some(first) = chars.next() {
+            result.extend(first.to_uppercase());
+            result.push_str(chars.as_str());
+        }
+    }
+    word.clear();
 }
 
 // Implement the Capitalize trait for &str
@@ -27,21 +48,21 @@ impl<T: AsRef<str>> Capitalize for T {
         first + &rest
     }
 
-    fn title_case(&self) -> String {
+    fn title_case(&self) -> String { self.title_case_with_acronyms(&[]) }
+
+    fn title_case_with_acronyms(&self, acronyms: &[&str]) -> String {
         let s = self.as_ref();
         let mut result = String::with_capacity(s.len());
-        let mut word_start = true;
+        let mut word = String::new();
         for c in s.chars() {
             if c.is_whitespace() {
+                push_title_word(&mut result, &mut word, acronyms);
                 result.push(c);
-                word_start = true;
-            } else if word_start {
-                result.extend(c.to_uppercase());
-                word_start = false;
             } else {
-                result.extend(c.to_lowercase());
+                word.push(c);
             }
         }
+        push_title_word(&mut result, &mut word, acronyms);
         result
     }
 }
@@ -502,6 +523,14 @@ mod test {
         assert_eq!("spider-man".title_case(), "Spider-man");
         assert_eq!("".title_case(), "");
         assert_eq!("über straße".title_case(), "Über Straße");
+        assert_eq!("ΟΔΟΣ ΤΕΛΟΣ".title_case(), "Οδος Τελος");
+    }
+
+    #[test]
+    fn test_title_case_with_acronyms() {
+        assert_eq!("example channel name hd".title_case_with_acronyms(&["HD", "FHD", "UK"]), "Example Channel Name HD");
+        assert_eq!("uk fhd sports".title_case_with_acronyms(&["UK", "FHD"]), "UK FHD Sports");
+        assert_eq!("plain title".title_case_with_acronyms(&[]), "Plain Title");
     }
 
     #[test]

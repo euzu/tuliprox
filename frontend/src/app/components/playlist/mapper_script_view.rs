@@ -72,8 +72,13 @@ fn render_args(args: &[ExprId], script: &MapperScript, format_params: &mut Forma
     html! {
         <>
             {
-                for args.iter().map(|expr_id| {
-                    render_expression(expr_id, script, format_params)
+                for args.iter().enumerate().map(|(i, expr_id)| {
+                    let rendered = render_expression(expr_id, script, format_params);
+                    if i < args.len() - 1 {
+                        html! { <>{ rendered }{", "}</> }
+                    } else {
+                        rendered
+                    }
                 })
             }
         </>
@@ -113,6 +118,16 @@ fn render_function_call(
 
 fn render_literal(literal: &str) -> Html {
     html! { <span class="literal">{"'"}{ literal }{"'"}</span> }
+}
+
+fn render_array(values: &[String]) -> Html {
+    html! {
+        <>
+            <span class="bracket">{"["}</span>
+            { render_joined_keys(values, |value| render_literal(value)) }
+            <span class="bracket">{"]"}</span>
+        </>
+    }
 }
 
 fn render_num_literal(literal: &f64) -> Html {
@@ -331,6 +346,7 @@ fn render_expression(expr_id: &ExprId, script: &MapperScript, format_params: &mu
         |expression| match expression {
             Expression::Identifier(ident) => render_identifier(ident),
             Expression::StringLiteral(literal) => render_literal(literal),
+            Expression::ArrayLiteral(values) => render_array(values),
             Expression::NumberLiteral(num) => render_num_literal(num),
             Expression::FieldAccess(field) => render_field(field),
             Expression::VarAccess(name, field) => render_var_access(name, field),

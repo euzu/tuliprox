@@ -195,13 +195,15 @@
 - **New mapper built-in functions: `title_case`, `slug`, `normalize_spaces`, `coalesce`, and `deunicode`.** Five new
   helper functions for playlist transformations in the mapper DSL:
   - `title_case`: Capitalizes the first character of every word and lowercases the rest: `@Title = title_case(@Title)`
-    turns `us: tnt hd` into `Us: Tnt Hd`. Only whitespace separates words, so `spider-man` becomes `Spider-man`. The
-    existing `capitalize` still touches only the first character of the whole string.
+    turns `us: tnt hd` into `Us: Tnt Hd`. Only whitespace separates words, so `spider-man` becomes `Spider-man`. An
+    optional array keeps listed acronyms in capitals: `title_case("us: tnt hd", ["TNT", "HD"])` becomes
+    `Us: TNT HD`. The existing `capitalize` still touches only the first character of the whole string.
   - `slug`: Converts text into a lowercase, ASCII-transliterated slug with `-` separators (`slug("US: HBO Max HD!")`
     becomes `us-hbo-max-hd`).
   - `normalize_spaces`: Collapses multiple consecutive whitespace characters into a single space and trims outer
     edges (`normalize_spaces("  US |  ESPN   HD  ")` becomes `US | ESPN HD`).
   - `coalesce`: Returns the first non-empty, non-blank value across arguments (`@Logo = coalesce(@Logo, @Logo_Small, "default.png")`).
+    Arguments are evaluated left to right and evaluation stops at the first usable value.
   - `deunicode`: Transliterates Unicode characters to their closest ASCII representation (`deunicode("Univisión: Café y Noticias")`
     becomes `Univision: Cafe y Noticias`).
 

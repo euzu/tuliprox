@@ -18,6 +18,7 @@ null = { "null" }
 identifier = @{ !null ~ (ASCII_ALPHANUMERIC | "_")+ }
 var_access = { identifier ~ ("." ~ identifier)? }
 string_literal = @{ "\"" ~ ( "\\\\" | "\\\"" | "\\n" | "\\t" | "\\r" | (!"\"" ~ ANY) )* ~ "\"" }
+array_literal = { "[" ~ (string_literal ~ ("," ~ string_literal)*)? ~ "]" }
 number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 number_range_from = { number ~ ".." }
 number_range_to = { ".." ~ number }
@@ -34,7 +35,7 @@ regex_expr = { regex_source ~ regex_op ~ string_literal }
 block_expr = { "{" ~ statements ~ "}" }
 condition = { function_call | var_access | field_access }
 assignment = { (("@" ~ assignment_field) | identifier) ~ "=" ~ expression }
-expression = { assignment | map_block | match_block | for_each_block | function_call | regex_expr | string_literal | number | var_access | field_access | null | block_expr }
+expression = { assignment | map_block | match_block | for_each_block | function_call | regex_expr | array_literal | string_literal | number | var_access | field_access | null | block_expr }
 function_name = { "concat" | "uppercase" | "lowercase" | "capitalize" | "title_case" | "split" | "trim" | "print" | "number" | "first" | "template" | "replace" | "pad" | "format" | "add_favourite" | "slug" | "normalize_spaces" | "coalesce" | "deunicode" }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
 any_match = { "_" }
@@ -284,6 +285,18 @@ impl MapperScript {
                 // remove quotes
                 let content = &raw[1..raw.len() - 1];
                 Ok(Some(Expression::StringLiteral(content.to_string())))
+            }
+
+            Rule::array_literal => {
+                let values = pair
+                    .into_inner()
+                    .filter(|item| item.as_rule() == Rule::string_literal)
+                    .map(|item| {
+                        let raw = item.as_str();
+                        raw[1..raw.len() - 1].to_string()
+                    })
+                    .collect();
+                Ok(Some(Expression::ArrayLiteral(values)))
             }
 
             Rule::number => {

@@ -55,6 +55,7 @@ impl<'a> MapperContext<'a> {
             Expression::NullValue
             | Expression::FieldAccess(_)
             | Expression::StringLiteral(_)
+            | Expression::ArrayLiteral(_)
             | Expression::NumberLiteral(_) => {}
             Expression::RegexExpr { field, pattern: _pattern, re_pattern: _re_pattern } => match field {
                 RegexSource::Identifier(ident) => {
@@ -81,7 +82,6 @@ impl<'a> MapperContext<'a> {
                     BuiltInFunction::ToNumber
                     | BuiltInFunction::Template
                     | BuiltInFunction::First
-                    | BuiltInFunction::TitleCase
                     | BuiltInFunction::Slug
                     | BuiltInFunction::NormalizeSpaces
                     | BuiltInFunction::Deunicode
@@ -94,6 +94,21 @@ impl<'a> MapperContext<'a> {
                             args.len()
                         )));
                     }
+                    BuiltInFunction::TitleCase => match args.len() {
+                        1 => {}
+                        2 => {
+                            if !matches!(self.expressions.get(args[1].0), Some(Expression::ArrayLiteral(_))) {
+                                return Err(TuliproxError::Mapper(format!(
+                                    "Second argument of {name} must be an array of strings"
+                                )));
+                            }
+                        }
+                        len => {
+                            return Err(TuliproxError::Mapper(format!(
+                                "Function accepts one or two arguments {name}, {len} given"
+                            )));
+                        }
+                    },
                     BuiltInFunction::Split if args.len() != 2 => {
                         return Err(TuliproxError::Mapper(format!(
                             "Function accepts two arguments {}, {} given",
