@@ -158,15 +158,25 @@ fn test_mapper_format() {
 }
 
 #[test]
-fn test_mapper_pad_with_undefined_argument() {
-    // The undefined argument is removed before dispatch, so pad receives a short argument list.
+fn test_mapper_pad_with_undefined_arguments() {
+    // A parameter that evaluated to undefined must keep its slot instead of pulling the later arguments forward.
     let dsl = r#"
-            name = @Caption ~ "(?P<part>zzz)"
-            @Title = pad(name, 10, "-");
+            part = @Caption ~ "(?P<part>zzz)"
+            @Title = pad(part, 10, "-")
+            @Name = pad("abc", part, "-")
+            @Group = pad("abc", 6, part, "^")
+            @Logo = pad("abc", 6, "*", "^")
         "#;
 
     let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
-    let mut item = PlaylistItem { header: PlaylistItemHeader { title: "keep".into(), ..Default::default() } };
+    let mut item = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "keep".into(),
+            name: "keep".into(),
+            group: "keep".into(),
+            ..Default::default()
+        },
+    };
     let mut accessor =
         ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
 
@@ -174,6 +184,49 @@ fn test_mapper_pad_with_undefined_argument() {
 
     assert_eq!(outcome.diagnostics.len(), 0);
     assert_eq!(accessor.pli.header.title.as_ref(), "keep");
+    assert_eq!(accessor.pli.header.name.as_ref(), "keep");
+    assert_eq!(accessor.pli.header.group.as_ref(), "keep");
+    // A complete argument list still pads, with the align argument in the fourth position.
+    assert_eq!(accessor.pli.header.logo.as_ref(), "*abc**");
+}
+
+#[test]
+fn test_mapper_replace_and_format_keep_argument_positions() {
+    // Replace and Format address their parameters by position, so an undefined argument must not slide the following
+    // arguments into earlier slots.
+    let dsl = r#"
+            part = @Caption ~ "(?P<part>zzz)"
+            @Title = replace("abc", "b", "X")
+            @Name = replace(part, "abc", "X")
+            @Group = format("{} {}", part, "B")
+            @Logo = format("{}{}", part, "B")
+            @logo_small = replace("abc", part, "X")
+            @url = replace("abc", "b", part)
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut item = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "keep".into(),
+            name: "keep".into(),
+            group: "keep".into(),
+            logo: "keep".into(),
+            ..Default::default()
+        },
+    };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(outcome.diagnostics.len(), 0);
+    assert_eq!(accessor.pli.header.title.as_ref(), "aXc");
+    assert_eq!(accessor.pli.header.name.as_ref(), "keep");
+    assert_eq!(accessor.pli.header.group.as_ref(), "{} B");
+    assert_eq!(accessor.pli.header.logo.as_ref(), "{}B");
+    // A missing pattern or replacement leaves the text unchanged, as documented.
+    assert_eq!(accessor.pli.header.logo_small.as_ref(), "abc");
+    assert_eq!(accessor.pli.header.url.as_ref(), "abc");
 }
 
 #[test]

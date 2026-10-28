@@ -1,5 +1,5 @@
 use super::{
-    AssignmentTarget, BuiltInFunction, Expression, ForEachKey, MapCaseKey, MapKey, MapperContext, MapperScript,
+    AssignmentTarget, BuiltInFunction, ExprId, Expression, ForEachKey, MapCaseKey, MapKey, MapperContext, MapperScript,
     MappingDiagnostic, MappingOutcome, MatchCaseKey, RegexSource, ValueAccessor,
 };
 use crate::{
@@ -181,6 +181,126 @@ fn title_case_args(text: &EvalResult, acronyms: &[&str]) -> EvalResult {
     }
 }
 
+fn pad_text_value(arg: &EvalResult) -> Option<String> {
+    match arg {
+        Number(value) => Some(value.to_string()),
+        _ => text_arg(arg).map(String::from),
+    }
+}
+
+/// Text view of an argument for a positional parameter; a `Named` value contributes its first entry.
+fn text_arg(arg: &EvalResult) -> Option<&str> {
+    match arg {
+        Value(value) => Some(value.as_str()),
+        Named(values) => values.first().map(|(_key, val)| val.as_str()),
+        Undefined | Number(_) | AnyValue | Failure(_) => None,
+    }
+}
+
+/// String view of an argument for a format placeholder; numbers keep their formatted representation.
+fn format_arg(arg: &EvalResult) -> Option<String> {
+    match arg {
+        Number(value) => Some(format_number(*value)),
+        _ => text_arg(arg).map(String::from),
+    }
+}
+
+fn pad_width_value(arg: &EvalResult) -> Option<usize> {
+    match arg {
+        Number(value) => {
+            Some(if value.is_nan() || value.is_infinite() { 0 } else { value.abs().min(usize::MAX as f64) as usize })
+        }
+        Value(value) => Some(value.parse::<usize>().ok().unwrap_or(0)),
+        Named(values) => Some(values.first().and_then(|(_key, val)| val.parse::<usize>().ok()).unwrap_or(0)),
+        Undefined | AnyValue | Failure(_) => None,
+    }
+}
+
+/// Builds the padded value from arguments that keep their declared positions.
+///
+/// `pad(text, width, fill[, align])` is positional, so an argument that evaluated to `Undefined` must leave a gap
+/// instead of shifting the following arguments into earlier parameter slots.
+fn pad_values(args: &[EvalResult]) -> EvalResult {
+    let Some(text) = args.first().and_then(pad_text_value) else {
+        return Undefined;
+    };
+    let Some(width) = args.get(1).and_then(pad_width_value) else {
+        return Undefined;
+    };
+    let Some(fill) = args.get(2).and_then(pad_text_value) else {
+        return Undefined;
+    };
+
+    if width <= text.len() {
+        return Value(text);
+    }
+
+    let fill_str = fill.chars().next().unwrap_or(' ').to_string();
+    let count = width - text.len();
+    match args.get(3).and_then(pad_text_value).as_deref() {
+        Some("^") => {
+            let left = count / 2;
+            let right = count - left;
+            Value(format!("{}{text}{}", fill_str.repeat(left), fill_str.repeat(right)))
+        }
+        Some("<") => Value(format!("{text}{}", fill_str.repeat(count))),
+        _ => Value(format!("{}{text}", fill_str.repeat(count))),
+    }
+}
+
+/// Replaces `pattern` with `substitution` in `text`, keeping every parameter in its declared position.
+fn replace_values(args: &[EvalResult]) -> EvalResult {
+    let (Some(text), Some(pattern), Some(substitution)) =
+        (args.first().and_then(text_arg), args.get(1).and_then(text_arg), args.get(2).and_then(text_arg))
+    else {
+        // An unknown pattern or substitution leaves the first argument as it was.
+        return args.first().cloned().unwrap_or(Undefined);
+    };
+    Value(text.replace(pattern, substitution))
+}
+
+/// Substitutes the positional arguments for the `{}` placeholders of the format string.
+fn format_values(args: &[EvalResult]) -> EvalResult {
+    let Some(format_string) = args.first().and_then(text_arg) else {
+        return Undefined;
+    };
+
+    let mut formatted = String::with_capacity(format_string.len());
+    let mut arguments = args.iter().skip(1);
+    let mut chars = format_string.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '{' && chars.peek() == Some(&'}') {
+            chars.next();
+            // An unknown argument keeps its placeholder, so the later arguments stay in their own positions.
+            match arguments.next().and_then(format_arg) {
+                Some(argument) => formatted.push_str(&argument),
+                None => formatted.push_str("{}"),
+            }
+        } else {
+            formatted.push(ch);
+        }
+    }
+    Value(formatted)
+}
+
+/// Evaluates function arguments without compacting them, so each argument keeps its declared position.
+fn eval_args_in_place(
+    name: &BuiltInFunction,
+    args: &[ExprId],
+    ctx: &mut MapperContext,
+    accessor: &mut ValueAccessor,
+) -> Result<Vec<EvalResult>, EvalResult> {
+    let mut values = Vec::with_capacity(args.len());
+    for &arg in args {
+        let value = arg.eval(ctx, accessor);
+        if value.is_error() {
+            return Err(function_failure(name, &value));
+        }
+        values.push(value);
+    }
+    Ok(values)
+}
+
 pub(super) fn eval_regex(source: &str, re_pattern: &Regex, match_as_ascii: bool) -> EvalResult {
     let source = if match_as_ascii { deunicode_string(source) } else { Cow::Borrowed(source) };
     let mut values = vec![];
@@ -340,6 +460,21 @@ impl Expression {
                         _ => title_case_args(&text, &[]),
                     };
                 }
+                // Pad, Replace, and Format address their arguments by position. They evaluate the arguments in place
+                // instead of the compacted list below, so an argument that evaluated to undefined keeps its slot
+                // instead of pulling the later arguments forward.
+                let positional: Option<fn(&[EvalResult]) -> EvalResult> = match name {
+                    BuiltInFunction::Pad => Some(pad_values),
+                    BuiltInFunction::Replace => Some(replace_values),
+                    BuiltInFunction::Format => Some(format_values),
+                    _ => None,
+                };
+                if let Some(evaluate) = positional {
+                    return match eval_args_in_place(name, args, ctx, accessor) {
+                        Ok(values) => evaluate(&values),
+                        Err(failure) => failure,
+                    };
+                }
                 let mut evaluated_args: Vec<EvalResult> = args.iter().map(|a| a.eval(ctx, accessor)).collect();
                 for arg in &evaluated_args {
                     if arg.is_error() {
@@ -444,123 +579,9 @@ impl Expression {
                                 Undefined
                             }
                         }
-                        BuiltInFunction::Replace => {
-                            let value = extract_evaluated_arg_value!(evaluated_args, 0);
-                            let pattern = extract_evaluated_arg_value!(evaluated_args, 1);
-                            let substring = extract_evaluated_arg_value!(evaluated_args, 2);
-
-                            if let (Some(text), Some(pat), Some(subst)) = (value, pattern, substring) {
-                                Value(text.replace(pat, subst))
-                            } else {
-                                evaluated_args[0].clone()
-                            }
-                        }
-                        BuiltInFunction::Pad => {
-                            // Undefined arguments are removed before dispatch, so a positional argument can be absent
-                            // and the remaining arguments shift left. Pad reads three positions, so a short list must
-                            // not be read as a complete argument set.
-                            if evaluated_args.len() < 3 {
-                                return Undefined;
-                            }
-                            let value = match &evaluated_args[0] {
-                                Number(value) => Some(value.to_string()),
-                                Value(value) => Some(value.clone()),
-                                Named(values) => values.first().map(|(_key, val)| val.clone()),
-                                _ => None,
-                            };
-                            let width = match &evaluated_args[1] {
-                                Number(value) => {
-                                    if value.is_nan() || value.is_infinite() {
-                                        0
-                                    } else {
-                                        value.abs().min(usize::MAX as f64) as usize
-                                    }
-                                }
-                                Value(value) => value.parse::<usize>().ok().unwrap_or(0),
-                                Named(values) => {
-                                    values.first().and_then(|(_key, val)| val.parse::<usize>().ok()).unwrap_or(0)
-                                }
-                                _ => 0,
-                            };
-
-                            let fill = match &evaluated_args[2] {
-                                Number(value) => Some(value.to_string()),
-                                Value(value) => Some(value.clone()),
-                                Named(values) => values.first().map(|(_key, val)| val.clone()),
-                                _ => None,
-                            };
-
-                            let align = extract_evaluated_arg_value!(evaluated_args, 3); // "<", ">", "^"
-
-                            if let Some(text) = value {
-                                let fill_char = fill.and_then(|s| s.chars().next()).unwrap_or(' ');
-
-                                let padded = if width <= text.len() {
-                                    text.clone()
-                                } else {
-                                    let pad = width - text.len();
-                                    if let Some(al) = align {
-                                        match al.as_str() {
-                                            "^" => {
-                                                let left = pad / 2;
-                                                let right = pad - left;
-                                                format!(
-                                                    "{}{}{}",
-                                                    fill_char.to_string().repeat(left),
-                                                    text,
-                                                    fill_char.to_string().repeat(right)
-                                                )
-                                            }
-                                            "<" => format!("{}{}", text, fill_char.to_string().repeat(pad)),
-                                            _ => format!("{}{}", fill_char.to_string().repeat(pad), text),
-                                        }
-                                    } else {
-                                        format!("{}{}", fill_char.to_string().repeat(pad), text)
-                                    }
-                                };
-
-                                Value(padded)
-                            } else {
-                                Undefined
-                            }
-                        }
-                        BuiltInFunction::Format => {
-                            let fmt_pattern = extract_evaluated_arg_value!(evaluated_args, 0);
-
-                            if let Some(fmt_str) = fmt_pattern {
-                                let args = evaluated_args
-                                    .iter()
-                                    .skip(1)
-                                    .map(|value| match value {
-                                        Value(value) => Some(value.clone()),
-                                        Number(value) => Some(format_number(*value)),
-                                        Named(values) => values.first().map(|(_, value)| value.clone()),
-                                        Undefined | AnyValue | Failure(_) => None,
-                                    })
-                                    .collect::<Vec<_>>();
-
-                                let mut formatted = String::new();
-                                let mut arg_iter = args.iter();
-                                let mut chars = fmt_str.chars().peekable();
-
-                                while let Some(ch) = chars.next() {
-                                    if ch == '{' && chars.peek() == Some(&'}') {
-                                        chars.next();
-                                        if let Some(Some(arg)) = arg_iter.next() {
-                                            formatted.push_str(arg);
-                                        } else {
-                                            formatted.push_str("{}");
-                                        }
-                                    } else {
-                                        formatted.push(ch);
-                                    }
-                                }
-
-                                Value(formatted)
-                            } else {
-                                Undefined
-                            }
-                        }
+                        // Pad, Replace, and Format evaluate their arguments in place above so that every parameter
+                        // keeps the position it was written in.
+                        BuiltInFunction::Pad | BuiltInFunction::Replace | BuiltInFunction::Format => Undefined,
                         BuiltInFunction::AddFavourite => {
                             let group_name = extract_evaluated_arg_value!(evaluated_args, 0);
                             if let Some(group) = group_name {
