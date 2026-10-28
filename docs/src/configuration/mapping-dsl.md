@@ -184,7 +184,8 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 | `concat(a, b, ...)`          | Concatenates multiple strings.                                                                                                                                                                      | `concat("US \| ", @Title)`     |
 | `uppercase(a)`               | Converts text to UPPERCASE.                                                                                                                                                                         | `uppercase(@Group)`            |
 | `lowercase(a)`               | Converts text to lowercase.                                                                                                                                                                         | `lowercase(@Genre)`            |
-| `capitalize(a)`              | Title Case (Capitalizes the first letter of words).                                                                                                                                                 | `capitalize(@Title)`           |
+| `capitalize(a)`              | Capitalizes only the first character of the whole string, lowercases the rest.                                                                                                                      | `capitalize(@Title)`           |
+| `title_case(a, acronyms?)`   | Capitalizes the first character of every word and lowercases the rest. The optional second argument keeps the listed acronyms in capitals.                                                          | `title_case(@Title, ["HD"])`   |
 | `split(a, delim)`            | Splits a string and returns a Named list (iterable).                                                                                                                                                | `split(@Genre, ",")`           |
 | `trim(a)`                    | Removes whitespace from the edges.                                                                                                                                                                  | `trim(@Title)`                 |
 | `replace(a, b, c)`           | Simple text Search (b) & Replace (c).                                                                                                                                                               | `replace(@Title, "FHD", "")`   |
@@ -195,6 +196,66 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 | `first(list)`                | Returns the first element of a Named list/Regex match.                                                                                                                                              | `first(@Caption ~ "(\d+)")`    |
 | `print(a, b, ...)`           | Logs the values to the console (Requires `trace` log level).                                                                                                                                        | `print("Matched:", @Title)`    |
 | `add_favourite(grp)`         | **Background:** Clone function! Takes the currently processed stream, changes its group to `grp`, generates a clean alias UUID, and adds the stream additionally (as a "Favorite") to the playlist. | `add_favourite("Top 10")`      |
+| `slug(a)`                    | Converts text to a lowercase URL- and filename-safe slug (ASCII only, `-` separated).                                                                                                               | `slug(@Title)`                 |
+| `normalize_spaces(a)`        | Collapses consecutive whitespace into a single space and trims edges.                                                                                                                               | `normalize_spaces(@Title)`     |
+| `coalesce(a, b, ...)`        | Returns the first non-empty, non-blank argument.                                                                                                                                                    | `coalesce(@Logo, "fallback")`  |
+| `deunicode(a)`               | Transliterates Unicode characters to ASCII (e.g. `ä` -> `a`, `é` -> `e`).                                                                                                                           | `deunicode(@Title)`            |
+
+Function arguments may contain an array literal: a comma-separated list of quoted strings in square brackets, for
+example `["HD", "FHD", "UK"]`. Arrays are currently accepted as the acronym list of `title_case`.
+
+Arguments are positional. `pad`, `replace` and `format` map every argument to the parameter at the position where it
+was written, even when an earlier argument evaluates to nothing (for example an unmatched regex capture). The later
+arguments keep their own slots instead of moving up, so `format("{} {}", part, "B")` still puts `B` in the second
+placeholder and leaves the first as `{}`. `pad` produces no value when text, width or fill is missing, which leaves the
+target field unchanged; `replace` returns the text unchanged when the pattern or the replacement is missing.
+
+#### Choosing a case function
+
+All four case functions lowercase the parts they do not uppercase (except acronyms passed to `title_case`), so they
+normalise the input rather than only adding capitals. They differ in how much of the string they touch:
+
+```dsl
+@Name  = capitalize("us: tnt hd")                        # Us: tnt hd   -> first character only
+@Title = title_case("us: tnt hd")                        # Us: Tnt Hd   -> first character of every word
+@Title = title_case("us: tnt hd", ["TNT", "HD"])         # Us: TNT HD   -> acronyms keep their capitals
+@Group = uppercase("us: tnt hd")                         # US: TNT HD
+@Genre = lowercase("US: TNT HD")                         # us: tnt hd
+```
+
+The second `title_case` argument is optional. Without it the function title-cases every word; with an array literal it
+additionally keeps the listed acronyms in the spelling given in the array.
+
+`title_case` treats only whitespace as a word boundary, so `"spider-man"` becomes `"Spider-man"` and `"o'neill"`
+becomes `"O'neill"`. Hyphens and apostrophes therefore stay inside a word. Because the remainder of each word is
+lowercased, acronyms such as `"TNT"` become `"Tnt"`. Pass them as the optional array argument to keep their capitals:
+
+```dsl
+@Name = title_case("us: tnt hd", ["TNT", "HD"])   # Us: TNT HD
+```
+
+Do not run `uppercase` over the result to restore an acronym; it changes the casing of the entire title. To uppercase
+only one acronym in an existing title, use a targeted `replace` after `title_case`:
+
+```dsl
+@Name = replace(title_case(@Name), " Tnt ", " TNT ")
+```
+
+#### Normalization and fallback functions
+
+```dsl
+# Create URL- and filename-safe IDs (e.g. for EPG or STRM)
+@epg_channel_id = slug("US: HBO Max HD!")   # us-hbo-max-hd
+
+# Collapse messy whitespace from playlist titles
+@Title = normalize_spaces("  US |  ESPN   HD  ")  # US | ESPN HD
+
+# Transliterate Unicode characters to plain ASCII
+@Name = deunicode("Univisión: Café y Noticias")    # Univision: Cafe y Noticias
+
+# Pick first non-empty, non-blank value with fallback
+@Logo = coalesce(@Logo, @Logo_Small, "https://example.com/default.png")
+```
 
 ### 2. RegEx Captures & Extraction
 

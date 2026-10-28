@@ -55,6 +55,7 @@ impl<'a> MapperContext<'a> {
             Expression::NullValue
             | Expression::FieldAccess(_)
             | Expression::StringLiteral(_)
+            | Expression::ArrayLiteral(_)
             | Expression::NumberLiteral(_) => {}
             Expression::RegexExpr { field, pattern: _pattern, re_pattern: _re_pattern } => match field {
                 RegexSource::Identifier(ident) => {
@@ -81,32 +82,50 @@ impl<'a> MapperContext<'a> {
                     BuiltInFunction::ToNumber
                     | BuiltInFunction::Template
                     | BuiltInFunction::First
+                    | BuiltInFunction::Slug
+                    | BuiltInFunction::NormalizeSpaces
+                    | BuiltInFunction::Deunicode
                     | BuiltInFunction::AddFavourite
                         if args.len() > 1 =>
                     {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts only one argument {:?}, {} given",
+                            "Function accepts only one argument {}, {} given",
                             name,
                             args.len()
                         )));
                     }
+                    BuiltInFunction::TitleCase => match args.len() {
+                        1 => {}
+                        2 => {
+                            if !matches!(self.expressions.get(args[1].0), Some(Expression::ArrayLiteral(_))) {
+                                return Err(TuliproxError::Mapper(format!(
+                                    "Second argument of {name} must be an array of strings"
+                                )));
+                            }
+                        }
+                        len => {
+                            return Err(TuliproxError::Mapper(format!(
+                                "Function accepts one or two arguments {name}, {len} given"
+                            )));
+                        }
+                    },
                     BuiltInFunction::Split if args.len() != 2 => {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts two arguments {:?}, {} given",
+                            "Function accepts two arguments {}, {} given",
                             name,
                             args.len()
                         )));
                     }
                     BuiltInFunction::Replace if args.len() != 3 => {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts three arguments {:?}, {} given",
+                            "Function accepts three arguments {}, {} given",
                             name,
                             args.len()
                         )));
                     }
                     BuiltInFunction::Pad if !(args.len() == 3 || args.len() == 4) => {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts three or four arguments {:?}, {} given",
+                            "Function accepts three or four arguments {}, {} given",
                             name,
                             args.len()
                         )));

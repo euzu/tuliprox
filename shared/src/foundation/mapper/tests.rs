@@ -158,6 +158,251 @@ fn test_mapper_format() {
 }
 
 #[test]
+fn test_mapper_pad_with_undefined_arguments() {
+    // A parameter that evaluated to undefined must keep its slot instead of pulling the later arguments forward.
+    let dsl = r#"
+            part = @Caption ~ "(?P<part>zzz)"
+            @Title = pad(part, 10, "-")
+            @Name = pad("abc", part, "-")
+            @Group = pad("abc", 6, part, "^")
+            @Logo = pad("abc", 6, "*", "^")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut item = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "keep".into(),
+            name: "keep".into(),
+            group: "keep".into(),
+            ..Default::default()
+        },
+    };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(outcome.diagnostics.len(), 0);
+    assert_eq!(accessor.pli.header.title.as_ref(), "keep");
+    assert_eq!(accessor.pli.header.name.as_ref(), "keep");
+    assert_eq!(accessor.pli.header.group.as_ref(), "keep");
+    // A complete argument list still pads, with the align argument in the fourth position.
+    assert_eq!(accessor.pli.header.logo.as_ref(), "*abc**");
+}
+
+#[test]
+fn test_mapper_replace_and_format_keep_argument_positions() {
+    // Replace and Format address their parameters by position, so an undefined argument must not slide the following
+    // arguments into earlier slots.
+    let dsl = r#"
+            part = @Caption ~ "(?P<part>zzz)"
+            @Title = replace("abc", "b", "X")
+            @Name = replace(part, "abc", "X")
+            @Group = format("{} {}", part, "B")
+            @Logo = format("{}{}", part, "B")
+            @logo_small = replace("abc", part, "X")
+            @url = replace("abc", "b", part)
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut item = PlaylistItem {
+        header: PlaylistItemHeader {
+            title: "keep".into(),
+            name: "keep".into(),
+            group: "keep".into(),
+            logo: "keep".into(),
+            ..Default::default()
+        },
+    };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(outcome.diagnostics.len(), 0);
+    assert_eq!(accessor.pli.header.title.as_ref(), "aXc");
+    assert_eq!(accessor.pli.header.name.as_ref(), "keep");
+    assert_eq!(accessor.pli.header.group.as_ref(), "{} B");
+    assert_eq!(accessor.pli.header.logo.as_ref(), "{}B");
+    // A missing pattern or replacement leaves the text unchanged, as documented.
+    assert_eq!(accessor.pli.header.logo_small.as_ref(), "abc");
+    assert_eq!(accessor.pli.header.url.as_ref(), "abc");
+}
+
+#[test]
+fn capitalize_only_touches_the_first_character_while_title_case_covers_every_word() {
+    let dsl = r#"
+            @Name = capitalize("us: tnt hd")
+            @Title = title_case("us: tnt hd")
+            @Group = title_case(concat("live ", "from ", "new york"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "Us: tnt hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Us: Tnt Hd");
+    assert_eq!(accessor.pli.header.group.as_ref(), "Live From New York");
+}
+
+#[test]
+fn title_case_keeps_listed_acronyms_in_capitals() {
+    let dsl = r#"
+            @Name = title_case("example channel name hd")
+            @Title = title_case("example channel name hd", ["HD", "FHD", "UK"])
+            @Group = title_case("uk fhd sports", ["UK", "FHD"])
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "Example Channel Name Hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Example Channel Name HD");
+    assert_eq!(accessor.pli.header.group.as_ref(), "UK FHD Sports");
+}
+
+#[test]
+fn title_case_keeps_options_in_their_original_position() {
+    let dsl = r#"
+            @Name = title_case(first(@Title ~ "(\d+)"), ["HD"])
+            @Title = title_case("example hd", ["HD"])
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert!(accessor.pli.header.name.is_empty(), "options must not become the text argument");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Example HD");
+}
+
+#[test]
+fn title_case_rejects_invalid_arguments() {
+    let error =
+        MapperScript::parse(r#"@Name = title_case("a", "b")"#, None).expect_err("argument type must be validated");
+    assert!(error.to_string().contains("array of strings"), "unexpected error: {error}");
+
+    let error =
+        MapperScript::parse(r#"@Name = title_case("a", ["HD"], "b")"#, None).expect_err("arity must be validated");
+    assert!(error.to_string().contains("title_case"), "unexpected error: {error}");
+}
+
+#[test]
+fn test_mapper_slug_normalize_spaces_deunicode_coalesce() {
+    let dsl = r#"
+            @Name = slug("Österreich: ORF 1 HD!")
+            @Title = normalize_spaces("  Sky   Sport   1   HD  ")
+            @Group = deunicode("München TV - Canal+ Séries")
+            @URL = coalesce("", "   ", "http://stream.m3u8", "Fallback")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "osterreich-orf-1-hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Sky Sport 1 HD");
+    assert_eq!(accessor.pli.header.group.as_ref(), "Munchen TV - Canal+ Series");
+    assert_eq!(accessor.pli.header.url.as_ref(), "http://stream.m3u8");
+}
+
+#[test]
+fn test_mapper_coalesce_fallback_on_empty_fields() {
+    let dsl = r#"
+            @Logo = coalesce(@Logo, @Logo_Small, "https://example.com/default.png")
+            @Title = coalesce(@Title, "Fallback Title")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem {
+        header: PlaylistItemHeader {
+            logo_small: "https://example.com/small.png".intern(),
+            ..PlaylistItemHeader::default()
+        },
+    };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.logo.as_ref(), "https://example.com/small.png");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Fallback Title");
+}
+
+#[test]
+fn coalesce_stops_at_the_first_usable_argument() {
+    let dsl = r#"
+            @Name = coalesce("first", number("not a number"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert!(outcome.diagnostics.is_empty(), "unexpected diagnostics: {:?}", outcome.diagnostics);
+    assert_eq!(accessor.pli.header.name.as_ref(), "first");
+}
+
+#[test]
+fn coalesce_propagates_failure_of_a_reached_argument() {
+    let dsl = r#"
+            @Name = coalesce("", number("not a number"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(outcome.diagnostics.len(), 1, "unexpected diagnostics: {:?}", outcome.diagnostics);
+    assert!(accessor.pli.header.name.is_empty());
+}
+
+#[test]
+fn coalesce_skips_empty_named_lists() {
+    let dsl = r#"
+            @Name = coalesce([], "fallback")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "fallback");
+}
+
+#[test]
+fn single_arg_functions_reject_more_than_one_argument() {
+    for func in ["slug", "normalize_spaces", "deunicode"] {
+        let script = format!(r#"@Name = {func}("a", "b")"#);
+        let error = MapperScript::parse(&script, None).expect_err("arity must be validated");
+        assert!(error.to_string().contains(func), "unexpected error for {func}: {error}");
+    }
+}
+
+#[test]
 fn regex_identifier_ascii_normalization_preserves_map_selection() {
     let dsl = r#"
             source = @Name

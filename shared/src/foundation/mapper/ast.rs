@@ -71,6 +71,7 @@ pub enum RegexSource {
 pub enum Expression {
     Identifier(String),
     StringLiteral(String),
+    ArrayLiteral(Vec<String>),
     NumberLiteral(f64),
     FieldAccess(String),
     VarAccess(String, String),
@@ -87,12 +88,13 @@ pub enum Expression {
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
         use Expression::{
-            Assignment, Block, FieldAccess, ForEachBlock, FunctionCall, Identifier, MapBlock, MatchBlock, NullValue,
-            NumberLiteral, RegexExpr, StringLiteral, VarAccess,
+            ArrayLiteral, Assignment, Block, FieldAccess, ForEachBlock, FunctionCall, Identifier, MapBlock, MatchBlock,
+            NullValue, NumberLiteral, RegexExpr, StringLiteral, VarAccess,
         };
         match (self, other) {
             (Identifier(a), Identifier(b)) => a == b,
             (StringLiteral(a), StringLiteral(b)) => a == b,
+            (ArrayLiteral(a), ArrayLiteral(b)) => a == b,
             (NumberLiteral(a), NumberLiteral(b)) => a == b,
             (FieldAccess(a), FieldAccess(b)) => a == b,
             (VarAccess(a1, b1), VarAccess(a2, b2)) => a1 == a2 && b1 == b2,
