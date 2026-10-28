@@ -296,4 +296,62 @@ mod tests {
         let ids: Vec<&str> = merged.mappings.mapping.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "a", "c"]);
     }
+
+    #[test]
+    fn rhai_rules_are_compiled_while_loading_and_dsl_rules_stay_unchanged() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("mapping.yml");
+        std::fs::write(
+            &path,
+            r#"mappings:
+  mapping:
+    - id: mixed
+      mapper:
+        - name: dsl rule
+          filter: 'Name ~ ".*"'
+          script: |
+            @Group = "Dsl"
+        - name: rhai rule
+          filter: 'Name ~ ".*"'
+          type: rhai
+          script: |
+            item.group = "Rhai";
+"#,
+        )
+        .expect("write mapping file");
+
+        let (_, mappings) = read_mappings(dir.path().to_str().expect("utf-8 path"), false)
+            .expect("mapping file should load")
+            .expect("mapping file should contain mappings");
+        let mapping = mappings.get_mapping("mixed").expect("mapping should resolve");
+
+        assert!(matches!(mapping.rules[0].program, crate::model::MappingProgram::Dsl(_)));
+        assert!(matches!(mapping.rules[1].program, crate::model::MappingProgram::Rhai(_)));
+    }
+
+    #[test]
+    fn an_invalid_rhai_program_fails_configuration_loading_with_the_mapping_context() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("mapping.yml");
+        std::fs::write(
+            &path,
+            r#"mappings:
+  mapping:
+    - id: broken
+      mapper:
+        - name: rhai rule
+          filter: 'Name ~ ".*"'
+          type: rhai
+          script: |
+            let x = ;
+"#,
+        )
+        .expect("write mapping file");
+
+        let error =
+            read_mappings(dir.path().to_str().expect("utf-8 path"), false).expect_err("invalid script must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("Mapping 'broken', rule rhai rule"), "missing mapping context: {message}");
+    }
 }
