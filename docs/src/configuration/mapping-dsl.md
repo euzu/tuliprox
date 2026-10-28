@@ -207,6 +207,12 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 Function arguments may contain an array literal: a comma-separated list of quoted strings in square brackets, for
 example `["HD", "FHD", "UK"]`. Arrays are currently accepted as the acronym list of `title_case`.
 
+Arguments are positional. `pad`, `replace` and `format` map every argument to the parameter at the position where it
+was written, even when an earlier argument evaluates to nothing (for example an unmatched regex capture). The later
+arguments keep their own slots instead of moving up, so `format("{} {}", part, "B")` still puts `B` in the second
+placeholder and leaves the first as `{}`. `pad` produces no value when text, width or fill is missing, which leaves the
+target field unchanged; `replace` returns the text unchanged when the pattern or the replacement is missing.
+
 #### Choosing a case function
 
 All four case functions lowercase the parts they do not uppercase (except acronyms passed to `title_case`), so they
