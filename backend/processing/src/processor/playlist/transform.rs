@@ -127,7 +127,9 @@ pub(crate) fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRena
 }
 
 pub(crate) struct ChannelMappingOutcome {
-    pub(crate) channel: PlaylistItem,
+    /// `None` only when a Rhai script overwrote the reserved `item` variable. The item cannot be
+    /// recovered in that case, so the channel is discarded instead of reappearing unmodified.
+    pub(crate) channel: Option<PlaylistItem>,
     pub(crate) virtual_items: Vec<PlaylistItem>,
     pub(crate) matched_rules: usize,
     pub(crate) changed_fields: HashSet<String>,
@@ -169,36 +171,69 @@ pub(crate) fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) 
     let mut changed_fields = HashSet::new();
     let mut diagnostics = Vec::new();
     if !mapping.rules.is_empty() {
-        let ref_chan = &mut channel;
         let templates = mapping.templates.as_deref();
+        let script_templates = mapping.templates.as_ref().map(Arc::clone);
         for (rule_index, rule) in mapping.rules.iter().enumerate() {
-            let provider = ValueProvider { pli: ref_chan, match_as_ascii: mapping.match_as_ascii };
-            if rule.filter.filter(&provider) {
-                matched_rules += 1;
-                let mut accessor = ValueAccessor {
-                    pli: ref_chan,
-                    virtual_items: vec![],
-                    match_as_ascii: mapping.match_as_ascii,
-                    changed_fields: vec![],
-                };
-                let outcome = match &rule.program {
-                    MappingProgram::Script(script) => script.eval(&mut accessor, templates),
-                };
-                changed_fields.extend(outcome.changed_fields.iter().cloned());
-                for diagnostic in outcome.diagnostics {
-                    let rule_label = rule.name.as_deref().map_or_else(|| (rule_index + 1).to_string(), str::to_string);
-                    diagnostics.push(format!(
-                        "rule '{rule_label}' failed for channel '{}' at statement {}: {}",
-                        accessor.pli.header.name,
-                        diagnostic.statement + 1,
-                        diagnostic.message
-                    ));
+            let matched = {
+                let provider = ValueProvider { pli: &channel, match_as_ascii: mapping.match_as_ascii };
+                rule.filter.filter(&provider)
+            };
+            if !matched {
+                continue;
+            }
+            matched_rules += 1;
+            let rule_label = rule.name.as_deref().map_or_else(|| (rule_index + 1).to_string(), str::to_string);
+            match &rule.program {
+                MappingProgram::Dsl(script) => {
+                    let mut accessor = ValueAccessor {
+                        pli: &mut channel,
+                        virtual_items: vec![],
+                        match_as_ascii: mapping.match_as_ascii,
+                        changed_fields: vec![],
+                    };
+                    let outcome = script.eval(&mut accessor, templates);
+                    changed_fields.extend(outcome.changed_fields.iter().cloned());
+                    for diagnostic in outcome.diagnostics {
+                        diagnostics.push(format!(
+                            "rule '{rule_label}' failed for channel '{}' at statement {}: {}",
+                            accessor.pli.header.name,
+                            diagnostic.statement + 1,
+                            diagnostic.message
+                        ));
+                    }
+                    virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
                 }
-                virtual_items.extend(accessor.virtual_items.into_iter().map(|(_, pli)| pli));
+                MappingProgram::Rhai(script) => {
+                    let context = MappingScriptContext::new(script_templates.clone(), mapping.match_as_ascii);
+                    let outcome = script.eval(channel, context);
+                    let Some(mapped) = outcome.item else {
+                        diagnostics.extend(
+                            outcome
+                                .diagnostics
+                                .into_iter()
+                                .map(|diagnostic| format!("rule '{rule_label}' failed for channel: {diagnostic}")),
+                        );
+                        return ChannelMappingOutcome {
+                            channel: None,
+                            virtual_items,
+                            matched_rules,
+                            changed_fields,
+                            diagnostics,
+                        };
+                    };
+                    channel = mapped;
+                    changed_fields.extend(outcome.changed_fields);
+                    virtual_items.extend(outcome.virtual_items);
+                    // Neutral verb: a Rhai diagnostic covers both a failed evaluation and an
+                    // assignment the item refused while the script kept running.
+                    diagnostics.extend(outcome.diagnostics.into_iter().map(|diagnostic| {
+                        format!("rule '{rule_label}' on channel '{}': {diagnostic}", channel.header.name)
+                    }));
+                }
             }
         }
     }
-    ChannelMappingOutcome { channel, virtual_items, matched_rules, changed_fields, diagnostics }
+    ChannelMappingOutcome { channel: Some(channel), virtual_items, matched_rules, changed_fields, diagnostics }
 }
 
 pub(crate) fn map_playlist_at_stage(
@@ -251,7 +286,9 @@ fn map_items_with_mappings_at_stage(
         for channel in mapped_items {
             let outcome = map_channel(channel, mapping);
             stage_outcome.record(&mapping.id, &outcome);
-            next_items.push(outcome.channel);
+            if let Some(channel) = outcome.channel {
+                next_items.push(channel);
+            }
             next_items.extend(outcome.virtual_items);
         }
         mapped_items = next_items;

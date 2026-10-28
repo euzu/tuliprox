@@ -192,6 +192,14 @@
 
 ## 🌟 New Features
 
+- **Mapper rules can be written in Rhai.** A mapper entry accepts an optional `type`: `dsl` (default, the existing
+  mapper language) or `rhai`. Rhai rules receive the channel as `item` (`item.group = "News"`, `item.chno = 42`,
+  `item["Caption"] = "Renamed"`) and the mapping environment as `ctx` (`ctx.regex`, `ctx.template`, `ctx.favourite`).
+  Scripts are compiled when the configuration loads, so syntax errors report the mapping id and rule name instead of
+  failing mid-refresh. Existing mapping files are unchanged and keep running as `dsl`. The embedded runtime lives in a
+  new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. See
+  [Rhai scripts](docs/src/configuration/mapping-dsl.md#23-rhai-scripts-type-rhai).
+
 - **New mapper built-in functions: `title_case`, `slug`, `normalize_spaces`, `coalesce`, and `deunicode`.** Five new
   helper functions for playlist transformations in the mapper DSL:
   - `title_case`: Capitalizes the first character of every word and lowercases the rest: `@Title = title_case(@Title)`
