@@ -6,7 +6,15 @@ use std::{borrow::Cow, sync::Arc};
 pub fn clean_playlist_title(title: &str) -> String { CONSTANTS.re_clean_title.replace(title, "").trim().to_string() }
 
 pub trait Capitalize {
+    /// Uppercases the first character and lowercases the remainder of the whole string.
     fn capitalize(&self) -> String;
+
+    /// Uppercases the first character of every whitespace-separated word and lowercases the remainder of each word.
+    ///
+    /// Only `char::is_whitespace` separates words, so `"spider-man"` and `"o'neill"` each form a single word. The
+    /// buffer is allocated once with the input length as a lower bound; characters whose uppercase form is longer
+    /// than one char (`ß` -> `SS`) grow it as needed.
+    fn title_case(&self) -> String;
 }
 
 // Implement the Capitalize trait for &str
@@ -17,6 +25,24 @@ impl<T: AsRef<str>> Capitalize for T {
         let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
         let rest = chars.as_str().to_lowercase();
         first + &rest
+    }
+
+    fn title_case(&self) -> String {
+        let s = self.as_ref();
+        let mut result = String::with_capacity(s.len());
+        let mut word_start = true;
+        for c in s.chars() {
+            if c.is_whitespace() {
+                result.push(c);
+                word_start = true;
+            } else if word_start {
+                result.extend(c.to_uppercase());
+                word_start = false;
+            } else {
+                result.extend(c.to_lowercase());
+            }
+        }
+        result
     }
 }
 
@@ -419,6 +445,18 @@ mod test {
     #[test]
     fn test_capitalize() {
         assert_eq!("hELLO".capitalize(), "Hello");
+        assert_eq!("us: tnt hd".capitalize(), "Us: tnt hd");
+        assert_eq!("".capitalize(), "");
+    }
+
+    #[test]
+    fn test_title_case() {
+        assert_eq!("us: tnt hd".title_case(), "Us: Tnt Hd");
+        assert_eq!("HELLO WORLD".title_case(), "Hello World");
+        assert_eq!("  spaced   words ".title_case(), "  Spaced   Words ");
+        assert_eq!("spider-man".title_case(), "Spider-man");
+        assert_eq!("".title_case(), "");
+        assert_eq!("über straße".title_case(), "Über Straße");
     }
 
     #[test]

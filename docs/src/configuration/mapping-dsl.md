@@ -184,7 +184,8 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 | `concat(a, b, ...)`          | Concatenates multiple strings.                                                                                                                                                                      | `concat("US \| ", @Title)`     |
 | `uppercase(a)`               | Converts text to UPPERCASE.                                                                                                                                                                         | `uppercase(@Group)`            |
 | `lowercase(a)`               | Converts text to lowercase.                                                                                                                                                                         | `lowercase(@Genre)`            |
-| `capitalize(a)`              | Title Case (Capitalizes the first letter of words).                                                                                                                                                 | `capitalize(@Title)`           |
+| `capitalize(a)`              | Capitalizes only the first character of the whole string, lowercases the rest.                                                                                                                      | `capitalize(@Title)`           |
+| `title_case(a)`              | Capitalizes the first character of every word, lowercases the rest of each word.                                                                                                                    | `title_case(@Title)`           |
 | `split(a, delim)`            | Splits a string and returns a Named list (iterable).                                                                                                                                                | `split(@Genre, ",")`           |
 | `trim(a)`                    | Removes whitespace from the edges.                                                                                                                                                                  | `trim(@Title)`                 |
 | `replace(a, b, c)`           | Simple text Search (b) & Replace (c).                                                                                                                                                               | `replace(@Title, "FHD", "")`   |
@@ -195,6 +196,23 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 | `first(list)`                | Returns the first element of a Named list/Regex match.                                                                                                                                              | `first(@Caption ~ "(\d+)")`    |
 | `print(a, b, ...)`           | Logs the values to the console (Requires `trace` log level).                                                                                                                                        | `print("Matched:", @Title)`    |
 | `add_favourite(grp)`         | **Background:** Clone function! Takes the currently processed stream, changes its group to `grp`, generates a clean alias UUID, and adds the stream additionally (as a "Favorite") to the playlist. | `add_favourite("Top 10")`      |
+
+#### Choosing a case function
+
+All four case functions lowercase the parts they do not uppercase, so they normalise the input rather than only
+adding capitals. They differ in how much of the string they touch:
+
+```dsl
+@Name  = capitalize("us: tnt hd")     # Us: tnt hd   -> first character only
+@Title = title_case("us: tnt hd")     # Us: Tnt Hd   -> first character of every word
+@Group = uppercase("us: tnt hd")      # US: TNT HD
+@Genre = lowercase("US: TNT HD")      # us: tnt hd
+```
+
+`title_case` treats only whitespace as a word boundary, so `"spider-man"` becomes `"Spider-man"` and `"o'neill"`
+becomes `"O'neill"`. Hyphens and apostrophes therefore stay inside a word. Because the remainder of each word is
+lowercased, acronyms such as `"TNT"` become `"Tnt"`; convert those with `uppercase` before or after `title_case`
+if they must stay `TNT`.
 
 ### 2. RegEx Captures & Extraction
 

@@ -81,32 +81,33 @@ impl<'a> MapperContext<'a> {
                     BuiltInFunction::ToNumber
                     | BuiltInFunction::Template
                     | BuiltInFunction::First
+                    | BuiltInFunction::TitleCase
                     | BuiltInFunction::AddFavourite
                         if args.len() > 1 =>
                     {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts only one argument {:?}, {} given",
+                            "Function accepts only one argument {}, {} given",
                             name,
                             args.len()
                         )));
                     }
                     BuiltInFunction::Split if args.len() != 2 => {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts two arguments {:?}, {} given",
+                            "Function accepts two arguments {}, {} given",
                             name,
                             args.len()
                         )));
                     }
                     BuiltInFunction::Replace if args.len() != 3 => {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts three arguments {:?}, {} given",
+                            "Function accepts three arguments {}, {} given",
                             name,
                             args.len()
                         )));
                     }
                     BuiltInFunction::Pad if !(args.len() == 3 || args.len() == 4) => {
                         return Err(TuliproxError::Mapper(format!(
-                            "Function accepts three or four arguments {:?}, {} given",
+                            "Function accepts three or four arguments {}, {} given",
                             name,
                             args.len()
                         )));

@@ -7,6 +7,7 @@ pub enum BuiltInFunction {
     Uppercase,
     Lowercase,
     Capitalize,
+    TitleCase,
     Split,
     Trim,
     Print,
@@ -26,6 +27,7 @@ impl FromStr for BuiltInFunction {
         match s.to_lowercase().as_str() {
             "concat" => Ok(Self::Concat),
             "capitalize" => Ok(Self::Capitalize),
+            "title_case" => Ok(Self::TitleCase),
             "lowercase" => Ok(Self::Lowercase),
             "uppercase" => Ok(Self::Uppercase),
             "split" => Ok(Self::Split),
@@ -48,6 +50,7 @@ impl Display for BuiltInFunction {
         f.write_str(match self {
             Self::Concat => "concat",
             Self::Capitalize => "capitalize",
+            Self::TitleCase => "title_case",
             Self::Lowercase => "lowercase",
             Self::Uppercase => "uppercase",
             Self::Split => "split",

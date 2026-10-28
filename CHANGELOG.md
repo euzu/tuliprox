@@ -192,6 +192,11 @@
 
 ## 🌟 New Features
 
+- **`title_case` mapper function.** New built-in function for the mapper DSL that capitalizes the first character of
+  every word and lowercases the rest of each word: `@Title = title_case(@Title)` turns `us: tnt hd` into
+  `Us: Tnt Hd`. Only whitespace separates words, so `spider-man` becomes `Spider-man`. The existing `capitalize`
+  still touches only the first character of the whole string; the documentation now states that difference explicitly.
+
 - **Configurable credential generation for new users.** The username, password and token pre-filled when creating
   an API user in the Web UI can now be tuned via `credential_generation` in `api-proxy.yml`: length (1-64), allowed
   `chars` with ranges, `exclude`, or ordered `segments` (for example 3 letters followed by 3 digits). Defaults match the
@@ -1216,6 +1221,10 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Mapper arity errors name the function the user wrote.** A mapper script with the wrong number of arguments reported
+  the internal enum variant (`Function accepts only one argument TitleCase`) instead of the function name
+  (`Function accepts only one argument title_case`).
 
 - **VOD from providers that label ranged media `text/html` plays again in reverse proxy mode.** The
   "Provider returned HTML content" check rejected every non-adaptive success response with a `text/html`

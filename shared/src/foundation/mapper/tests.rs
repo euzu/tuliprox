@@ -158,6 +158,32 @@ fn test_mapper_format() {
 }
 
 #[test]
+fn capitalize_only_touches_the_first_character_while_title_case_covers_every_word() {
+    let dsl = r#"
+            @Name = capitalize("us: tnt hd")
+            @Title = title_case("us: tnt hd")
+            @Group = title_case(concat("live ", "from ", "new york"))
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "Us: tnt hd");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Us: Tnt Hd");
+    assert_eq!(accessor.pli.header.group.as_ref(), "Live From New York");
+}
+
+#[test]
+fn title_case_rejects_more_than_one_argument() {
+    let error = MapperScript::parse(r#"@Name = title_case("a", "b")"#, None).expect_err("arity must be validated");
+    assert!(error.to_string().contains("title_case"), "unexpected error: {error}");
+}
+
+#[test]
 fn regex_identifier_ascii_normalization_preserves_map_selection() {
     let dsl = r#"
             source = @Name
