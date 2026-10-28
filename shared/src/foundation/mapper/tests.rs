@@ -198,6 +198,24 @@ fn title_case_keeps_listed_acronyms_in_capitals() {
 }
 
 #[test]
+fn title_case_keeps_options_in_their_original_position() {
+    let dsl = r#"
+            @Name = title_case(first(@Title ~ "(\d+)"), ["HD"])
+            @Title = title_case("example hd", ["HD"])
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert!(accessor.pli.header.name.is_empty(), "options must not become the text argument");
+    assert_eq!(accessor.pli.header.title.as_ref(), "Example HD");
+}
+
+#[test]
 fn title_case_rejects_invalid_arguments() {
     let error =
         MapperScript::parse(r#"@Name = title_case("a", "b")"#, None).expect_err("argument type must be validated");
@@ -285,6 +303,22 @@ fn coalesce_propagates_failure_of_a_reached_argument() {
 
     assert_eq!(outcome.diagnostics.len(), 1, "unexpected diagnostics: {:?}", outcome.diagnostics);
     assert!(accessor.pli.header.name.is_empty());
+}
+
+#[test]
+fn coalesce_skips_empty_named_lists() {
+    let dsl = r#"
+            @Name = coalesce([], "fallback")
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+    let mut accessor =
+        ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    mapper.eval(&mut accessor, None);
+
+    assert_eq!(accessor.pli.header.name.as_ref(), "fallback");
 }
 
 #[test]

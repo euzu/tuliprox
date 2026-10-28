@@ -133,10 +133,15 @@ impl EvalResult {
     fn is_usable(&self) -> bool {
         match self {
             Value(value) => !value.trim().is_empty(),
-            Number(_) | Named(_) => true,
+            Number(_) => true,
+            Named(values) => !values.is_empty(),
             Undefined | AnyValue | Failure(_) => false,
         }
     }
+}
+
+fn function_failure(name: &BuiltInFunction, value: &EvalResult) -> EvalResult {
+    Failure(format!("Function '{name:?}' failed: {}", if let Failure(msg) = value { msg } else { "Unknown error" }))
 }
 
 fn concat_args(args: &[EvalResult]) -> Vec<Cow<'_, str>> {
@@ -302,10 +307,7 @@ impl Expression {
                     for arg in args {
                         let value = arg.eval(ctx, accessor);
                         if value.is_error() {
-                            return Failure(format!(
-                                "Function '{name:?}' failed: {}",
-                                if let Failure(msg) = &value { msg } else { "Unknown error" }
-                            ));
+                            return function_failure(name, &value);
                         }
                         if value.is_usable() {
                             return value;
@@ -313,13 +315,35 @@ impl Expression {
                     }
                     return Undefined;
                 }
+                if matches!(name, BuiltInFunction::TitleCase) {
+                    // Evaluate the arguments here instead of using the compacted list below, so the acronym options keep
+                    // their original position and an undefined text argument cannot turn the options into the text.
+                    let Some(text_expr) = args.first() else {
+                        return Undefined;
+                    };
+                    let text = text_expr.eval(ctx, accessor);
+                    if text.is_error() {
+                        return function_failure(name, &text);
+                    }
+                    let Some(options_expr) = args.get(1) else {
+                        return title_case_args(&text, &[]);
+                    };
+                    let options = options_expr.eval(ctx, accessor);
+                    if options.is_error() {
+                        return function_failure(name, &options);
+                    }
+                    return match &options {
+                        Named(values) => {
+                            let acronyms = values.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>();
+                            title_case_args(&text, &acronyms)
+                        }
+                        _ => title_case_args(&text, &[]),
+                    };
+                }
                 let mut evaluated_args: Vec<EvalResult> = args.iter().map(|a| a.eval(ctx, accessor)).collect();
                 for arg in &evaluated_args {
                     if arg.is_error() {
-                        return Failure(format!(
-                            "Function '{name:?}' failed: {}",
-                            if let Failure(msg) = arg { msg } else { "Unknown error" }
-                        ));
+                        return function_failure(name, arg);
                     }
                 }
                 evaluated_args.retain(|er| !matches!(er, Undefined | Failure(_) | AnyValue));
@@ -366,14 +390,8 @@ impl Expression {
                                 .collect::<Vec<_>>()
                                 .join(" "),
                         ),
-                        BuiltInFunction::TitleCase => match evaluated_args.as_slice() {
-                            [text] => title_case_args(text, &[]),
-                            [text, Named(values)] => {
-                                let acronyms = values.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>();
-                                title_case_args(text, &acronyms)
-                            }
-                            _ => Undefined,
-                        },
+                        // TitleCase evaluates its arguments above to keep the acronym options in their original position.
+                        BuiltInFunction::TitleCase => Undefined,
                         // Coalesce short-circuits argument evaluation above; this arm keeps the match exhaustive.
                         BuiltInFunction::Coalesce => Undefined,
                         BuiltInFunction::Split => {
