@@ -456,6 +456,12 @@ impl Expression {
                             }
                         }
                         BuiltInFunction::Pad => {
+                            // Undefined arguments are removed before dispatch, so a positional argument can be absent
+                            // and the remaining arguments shift left. Pad reads three positions, so a short list must
+                            // not be read as a complete argument set.
+                            if evaluated_args.len() < 3 {
+                                return Undefined;
+                            }
                             let value = match &evaluated_args[0] {
                                 Number(value) => Some(value.to_string()),
                                 Value(value) => Some(value.clone()),

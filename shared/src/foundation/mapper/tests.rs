@@ -158,6 +158,25 @@ fn test_mapper_format() {
 }
 
 #[test]
+fn test_mapper_pad_with_undefined_argument() {
+    // The undefined argument is removed before dispatch, so pad receives a short argument list.
+    let dsl = r#"
+            name = @Caption ~ "(?P<part>zzz)"
+            @Title = pad(name, 10, "-");
+        "#;
+
+    let mapper = MapperScript::parse(dsl, None).expect("Parsing failed");
+    let mut item = PlaylistItem { header: PlaylistItemHeader { title: "keep".into(), ..Default::default() } };
+    let mut accessor =
+        ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false, changed_fields: vec![] };
+
+    let outcome = mapper.eval(&mut accessor, None);
+
+    assert_eq!(outcome.diagnostics.len(), 0);
+    assert_eq!(accessor.pli.header.title.as_ref(), "keep");
+}
+
+#[test]
 fn capitalize_only_touches_the_first_character_while_title_case_covers_every_word() {
     let dsl = r#"
             @Name = capitalize("us: tnt hd")
