@@ -1,3 +1,4 @@
+use super::{BinaryOperator, Filter, StringOperator, UnaryOperator};
 use crate::{
     foundation::{filter::get_filter, prepare_templates, value_provider::ValueProvider},
     model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemHeader, PlaylistItemType, TemplateValue},
@@ -449,4 +450,83 @@ fn prepare_templates_promotes_single_template_to_multi_for_multi_dependency() {
     let url = prepared.iter().find(|template| template.name == "URL").expect("URL template");
 
     assert_eq!(url.value, TemplateValue::Multi(vec!["a/stream".to_string(), "b/stream".to_string()]));
+}
+
+/// The `expr` rule iterates over its operands instead of recursing once per
+/// `AND`/`OR`, so a long chain must not exhaust the parser stack. Before the
+/// change a chain this long failed with `stack limit reached` on the static musl
+/// build, and overflowed the stack in a release build.
+#[test]
+fn test_filter_long_chain_parses() {
+    for terms in [200usize, 2000, 10_000] {
+        let filter_text = (0..terms).map(|i| format!(r#"Group ~ "^NOPE{i}$""#)).collect::<Vec<_>>().join(" OR ");
+        // Parsing only: `Display` and evaluation both walk the tree recursively, so
+        // they are covered separately at a depth that fits a test thread.
+        get_filter(&filter_text, None).expect("long chain parses");
+    }
+}
+
+/// Evaluation walks the tree recursively, so it is limited by stack depth per
+/// term rather than by the parser. This asserts a chain that is comfortable for
+/// evaluation still parses and evaluates.
+#[test]
+fn test_filter_chain_evaluates() {
+    let terms = 200usize;
+    let filter_text = (0..terms).map(|i| format!(r#"Group ~ "^NOPE{i}$""#)).collect::<Vec<_>>().join(" OR ");
+    let filter = get_filter(&filter_text, None).expect("chain parses");
+    let item = create_mock_pli("Channel", "Group");
+    let provider = ValueProvider { pli: &item, match_as_ascii: false };
+    // Every term is a non-match, so evaluation walks the whole chain.
+    assert!(!filter.filter(&provider));
+}
+
+/// `NOT` binds to the operand that follows it, exactly as before the grammar change.
+#[test]
+fn test_filter_long_not_chain_parses() {
+    let terms = 500usize;
+    let filter_text = (0..terms).map(|i| format!(r#"NOT Name = "n{i}""#)).collect::<Vec<_>>().join(" AND ");
+    let filter = get_filter(&filter_text, None).expect("long NOT chain parses");
+
+    let matching = create_mock_pli("n0", "Group");
+    let provider = ValueProvider { pli: &matching, match_as_ascii: false };
+    assert!(!filter.filter(&provider), "one negated term must reject the item");
+
+    let other = create_mock_pli("elsewhere", "Group");
+    let provider = ValueProvider { pli: &other, match_as_ascii: false };
+    assert!(filter.filter(&provider), "all negated terms hold for another name");
+}
+
+/// Chains group from the right, as the previous recursive grammar did. A left fold
+/// would turn `a AND b OR c` into `(a AND b) OR c` and silently change results.
+#[test]
+fn test_filter_chain_associativity_is_right() {
+    match get_filter(r#"Name = "a" AND Name = "b" OR Group = "c""#, None).expect("filter parses") {
+        Filter::BinaryExpression(lhs, BinaryOperator::And, rhs) => {
+            assert!(matches!(*lhs, Filter::StringComparison(ItemField::Name, StringOperator::Eq, _)));
+            assert!(matches!(*rhs, Filter::BinaryExpression(_, BinaryOperator::Or, _)));
+        }
+        other => panic!("expected `a AND (b OR c)`, got {other:?}"),
+    }
+
+    match get_filter(r#"Name = "a" OR Name = "b" AND Group = "c""#, None).expect("filter parses") {
+        Filter::BinaryExpression(lhs, BinaryOperator::Or, rhs) => {
+            assert!(matches!(*lhs, Filter::StringComparison(ItemField::Name, StringOperator::Eq, _)));
+            assert!(matches!(*rhs, Filter::BinaryExpression(_, BinaryOperator::And, _)));
+        }
+        other => panic!("expected `a OR (b AND c)`, got {other:?}"),
+    }
+}
+
+/// `NOT` applies to one operand, not to the rest of the chain.
+#[test]
+fn test_filter_not_binds_to_single_operand() {
+    match get_filter(r#"NOT Name = "a" AND Name = "b""#, None).expect("filter parses") {
+        Filter::BinaryExpression(lhs, BinaryOperator::And, rhs) => {
+            assert!(matches!(*lhs, Filter::UnaryExpression(UnaryOperator::Not, _)));
+            assert!(matches!(*rhs, Filter::StringComparison(..)));
+        }
+        other => panic!("expected `(NOT a) AND b`, got {other:?}"),
+    }
+    // Doubled NOT stays a syntax error.
+    assert!(get_filter(r#"NOT NOT Name = "a""#, None).is_err());
 }

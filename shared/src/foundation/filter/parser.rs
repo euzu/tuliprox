@@ -37,10 +37,7 @@ bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
 not_expr = _{ not ~ basic_expr }
-expr = {
-  not_expr ~ (bool_op ~ expr)?
-  | basic_expr ~ (bool_op ~ expr)*
-}
+expr = { (not_expr | basic_expr) ~ (bool_op ~ (not_expr | basic_expr))* }
 stmt = { expr ~ (bool_op ~ expr)* }
 main = _{ SOI ~ stmt ~ EOI }
 "#]
@@ -219,80 +216,112 @@ fn get_parser_type_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError>
     )
 }
 
+/// Builds one expression tree from the flat `expr` rule.
+///
+/// The grammar produces a single operand sequence instead of recursing once per
+/// operator, so deep `AND`/`OR` chains no longer nest the parser stack. The tree is
+/// folded here from the right, because that is the grouping the previous recursive
+/// grammar produced: `A AND B OR C` stays `A AND (B OR C)`, not `(A AND B) OR C`.
 fn get_parser_expression(
     expr: Pair<Rule>,
     templates: Option<&[PatternTemplate]>,
     errors: &mut Vec<String>,
 ) -> Result<Filter, String> {
-    let mut stmts = Vec::new();
-    let pairs = expr.into_inner();
-    let mut bop: Option<BinaryOperator> = None;
-    let mut uop: Option<UnaryOperator> = None;
+    let mut operands: Vec<Filter> = Vec::new();
+    let mut operators: Vec<BinaryOperator> = Vec::new();
+    let mut negate = false;
 
-    for pair in pairs {
-        match pair.as_rule() {
-            Rule::field_comparison => {
-                let comp_res = get_parser_field_comparison(pair, templates);
-                match comp_res {
-                    Ok(comp) => handle_expr!(bop, uop, stmts, comp),
-                    Err(err) => errors.push(err.to_string()),
+    for pair in expr.into_inner() {
+        let parsed = match pair.as_rule() {
+            Rule::field_comparison => match get_parser_field_comparison(pair, templates) {
+                Ok(comp) => Some(comp),
+                Err(err) => {
+                    errors.push(err.to_string());
+                    None
                 }
-            }
-            Rule::type_comparison => {
-                let comp_res = get_parser_type_comparison(pair);
-                match comp_res {
-                    Ok(comp) => handle_expr!(bop, uop, stmts, comp),
-                    Err(err) => errors.push(err.to_string()),
+            },
+            Rule::type_comparison => match get_parser_type_comparison(pair) {
+                Ok(comp) => Some(comp),
+                Err(err) => {
+                    errors.push(err.to_string());
+                    None
                 }
-            }
+            },
             Rule::string_comparison => match get_parser_string_comparison(pair, templates) {
-                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
-                Err(err) => errors.push(err.to_string()),
+                Ok(comp) => Some(comp),
+                Err(err) => {
+                    errors.push(err.to_string());
+                    None
+                }
             },
             Rule::presence_comparison => match get_parser_presence_comparison(pair) {
-                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
-                Err(err) => errors.push(err.to_string()),
+                Ok(comp) => Some(comp),
+                Err(err) => {
+                    errors.push(err.to_string());
+                    None
+                }
             },
             Rule::numeric_comparison => match get_parser_numeric_comparison(pair) {
-                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
-                Err(err) => errors.push(err.to_string()),
+                Ok(comp) => Some(comp),
+                Err(err) => {
+                    errors.push(err.to_string());
+                    None
+                }
             },
             Rule::set_comparison => match get_parser_set_comparison(pair, templates) {
-                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
-                Err(err) => errors.push(err.to_string()),
+                Ok(comp) => Some(comp),
+                Err(err) => {
+                    errors.push(err.to_string());
+                    None
+                }
             },
-            Rule::comparison | Rule::expr => {
-                let expr = get_parser_expression(pair, templates, errors)?;
-                handle_expr!(bop, uop, stmts, expr);
-            }
+            Rule::comparison | Rule::expr => Some(get_parser_expression(pair, templates, errors)?),
             Rule::expr_group => {
-                let expr = get_parser_expression(pair.into_inner().next().unwrap(), templates, errors)?;
-                handle_expr!(bop, uop, stmts, Filter::Group(Box::new(expr)));
+                let inner = pair.into_inner().next().ok_or_else(|| "empty expression group".to_string())?;
+                Some(Filter::Group(Box::new(get_parser_expression(inner, templates, errors)?)))
             }
             Rule::not => {
-                uop = Some(UnaryOperator::Not);
+                negate = true;
+                None
             }
-            Rule::bool_op => match get_parser_binary_op(&pair.into_inner().next().unwrap()) {
-                Ok(binop) => {
-                    bop = Some(binop);
+            Rule::bool_op => {
+                let op = pair.into_inner().next().ok_or_else(|| "missing boolean operator".to_string())?;
+                match get_parser_binary_op(&op) {
+                    Ok(binop) => operators.push(binop),
+                    Err(err) => errors.push(format!("{err}")),
                 }
-                Err(err) => {
-                    errors.push(format!("{err}"));
-                }
-            },
+                None
+            }
             _ => {
                 errors.push(format!("did not expect rule: {pair:?}"));
+                None
             }
+        };
+
+        if let Some(filter) = parsed {
+            let negated = std::mem::take(&mut negate);
+            operands.push(if negated { Filter::UnaryExpression(UnaryOperator::Not, Box::new(filter)) } else { filter });
         }
     }
-    if stmts.is_empty() {
+
+    if operands.is_empty() {
         return Err(format!("Invalid Filter, could not parse {errors:?}"));
     }
-    if stmts.len() > 1 {
-        return Err(format!("did not expect multiple rule: {stmts:?}, {errors:?}"));
+    // A failed operand is already recorded in `errors`; the filter is rejected below
+    // either way, so a count mismatch never builds a partial tree.
+    if operators.len() + 1 != operands.len() {
+        return Err(format!("incomplete filter expression: {operands:?}, {errors:?}"));
     }
 
-    Ok(stmts.pop().unwrap())
+    let mut acc = operands.pop().ok_or_else(|| "empty filter expression".to_string())?;
+    for op in operators.into_iter().rev() {
+        let Some(lhs) = operands.pop() else {
+            return Err("incomplete filter expression".to_string());
+        };
+        acc = Filter::BinaryExpression(Box::new(lhs), op, Box::new(acc));
+    }
+
+    Ok(acc)
 }
 
 fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxError> {

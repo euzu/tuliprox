@@ -1232,6 +1232,16 @@
 
 ## 🐛 Fixes
 
+- **Filters rejected with `stack limit reached` parse again.** A filter whose template chain expanded to more than a
+  few dozen terms failed at startup on the static-musl release build and left the container in a restart loop, with a
+  different reported column on every start. The trigger was not a filter limit: `pest` 2.9.4 checks the remaining
+  native stack before parsing, and on a static musl binary that check reports only the currently mapped stack region
+  (about 128 KiB) instead of the real limit, so the available budget depended on how much of the startup call chain
+  had already run. `pest` 2.9.5 probes only the targets whose stack bounds it can determine, which excludes musl. The
+  filter grammar now also reads a chain as a flat operand list and folds the expression afterwards, so a long
+  `AND`/`OR` chain no longer nests the parser stack. Operators still group from the right as before and `NOT` still
+  binds to a single operand, so existing filters keep their result and no configuration change is required.
+
 - **Mapper arity errors name the function the user wrote.** A mapper script with the wrong number of arguments reported
   the internal enum variant (`Function accepts only one argument TitleCase`) instead of the function name
   (`Function accepts only one argument title_case`).
