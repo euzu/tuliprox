@@ -375,6 +375,7 @@ async fn main() {
                 .unwrap_or_else(|err| exit!("{}", err)),
         );
         scan_library_cli(&app_config, args.force_library_rescan).await;
+        // Drain queued syslog datagrams
         flush_syslog();
         return;
     }
@@ -656,7 +657,6 @@ async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
             if result.errors > 0 {
                 warn!("  Errors: {}", result.errors);
             }
-            std::process::exit(0);
         }
         Err(err) => {
             error!("Library scan failed: {err}");

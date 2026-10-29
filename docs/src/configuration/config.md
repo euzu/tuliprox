@@ -555,7 +555,7 @@ UDP datagram transmission requires strict payload bounding to prevent packet fra
   parseable JSON and carries `"truncated": true` when shortened.
 * **Minimum Floors:** Config validation enforces `max_message_len >= 480` for `rfc5424` and `rfc3164` (worst-case RFC
   headers occupy up to 391 and 339 bytes respectively, guaranteeing at least an 89-byte message). For `format: json`,
-  the JSON envelope with maximal header fields reaches 731 bytes, so validation enforces `max_message_len >= 1024`.
+  the JSON envelope with maximal header fields reaches 733 bytes, so validation enforces `max_message_len >= 1024`.
 * **MTU Thresholds:** On standard 1500-byte Ethernet networks, the maximum unfragmented UDP payload is **1472 bytes for
   IPv4** (1500 - 20 IP header - 8 UDP header) and **1452 bytes for IPv6** (without extension headers). Datagrams
   exceeding these thresholds are fragmented at the IP layer; Docker bridge networks, NAT gateways, and cloud firewalls
@@ -607,7 +607,7 @@ Configure Docker's built-in syslog logging driver in your `compose.yml`:
 ```yaml
 services:
   tuliprox:
-    image: ghcr.io/euzuner/tuliprox:latest
+    image: ghcr.io/euzu/tuliprox:latest
     logging:
       driver: syslog
       options:
