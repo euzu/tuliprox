@@ -719,3 +719,52 @@ fn append_refuses_a_filter_with_an_unresolved_root() {
     let copied = target.append(&parse(r#"Name = "a" OR Group = "b""#)).expect("copy");
     assert_eq!(target.finish(copied).to_string(), r#"Name = "a" OR Group = "b""#);
 }
+
+/// `Leaf` and `Filter` are `Eq`: their comparisons only look at indices and values, which is
+/// an equivalence relation. The bound below fails to compile if that ever stops holding.
+#[test]
+fn leaf_and_filter_are_eq() {
+    fn requires_eq<T: Eq>(_: &T) {}
+    let filter = parse(r#"Name = "a" AND Group = "b""#);
+    requires_eq(&filter);
+    let leaf = Leaf::StringComparison(ItemField::Name, StringOperator::Eq, "a".to_string());
+    requires_eq(&leaf);
+    assert_eq!(leaf.clone(), leaf);
+    assert_eq!(filter.clone(), filter);
+}
+
+/// The regex-free fallback accepts every item, whatever its fields hold.
+#[test]
+fn match_all_without_regex_accepts_everything() {
+    let mut builder = FilterBuilder::new();
+    let root = builder.match_all_without_regex(ItemField::Group);
+    let filter = builder.finish(root);
+    assert_eq!(filter.to_string(), "Group IS EMPTY OR Group IS NOT EMPTY");
+
+    for (name, group) in [("a", "grp"), ("", ""), ("x", "")] {
+        let item = mock(name, group);
+        assert!(
+            filter.filter(&ValueProvider { pli: &item, match_as_ascii: false }),
+            "({name:?}, {group:?}) must be accepted"
+        );
+    }
+}
+
+/// A filter whose root does not resolve has no value to evaluate and must report a non-match
+/// instead of panicking. `finish` accepts any id, so this is reachable through the public API.
+#[test]
+fn unresolved_root_evaluates_to_false() {
+    let mut foreign = FilterBuilder::new();
+    let mut foreign_id = foreign.leaf(Leaf::PresenceComparison(ItemField::Name, PresenceOperator::IsEmpty));
+    for _ in 0..5 {
+        foreign_id = foreign.leaf(Leaf::PresenceComparison(ItemField::Name, PresenceOperator::IsEmpty));
+    }
+    let mut builder = FilterBuilder::new();
+    let _own = builder.leaf(Leaf::PresenceComparison(ItemField::Name, PresenceOperator::IsEmpty));
+    let filter = builder.finish(foreign_id);
+
+    assert!(filter.node(filter.root()).is_none());
+    assert_eq!(filter.to_string(), "");
+    let item = mock("a", "b");
+    assert!(!filter.filter(&ValueProvider { pli: &item, match_as_ascii: false }));
+}

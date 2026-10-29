@@ -251,7 +251,12 @@ impl Filter {
                     steps.push(Step::Or(*right));
                     steps.push(Step::Eval(*left));
                 }
-                None => {}
+                // An id that does not resolve has no value, so it behaves like a leaf that does
+                // not match. Pushing it keeps `results` in step with `steps`: an operator that
+                // finds nothing to consume would otherwise take the result of an enclosing
+                // subtree and invert the expression. This is unreachable for a filter built by
+                // the builder, whose children all resolve.
+                None => results.push(false),
             }
         }
 

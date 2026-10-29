@@ -13,6 +13,10 @@ impl PartialEq for CompiledRegex {
     fn eq(&self, other: &Self) -> bool { self.restr == other.restr }
 }
 
+/// Equality compares the pattern text, which determines the compiled regex, so it is
+/// reflexive, symmetric and transitive.
+impl Eq for CompiledRegex {}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UnaryOperator {
     Not,
@@ -124,7 +128,7 @@ pub enum Node {
 }
 
 /// A comparison without children.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Leaf {
     FieldComparison(ItemField, CompiledRegex),
     TypeComparison(ItemField, PlaylistItemType),
@@ -182,9 +186,7 @@ impl Default for Filter {
             // instead of aborting the process.
             Err(err) => {
                 log::error!("cannot compile the default filter regex '.*': {err}");
-                let empty = builder.leaf(Leaf::PresenceComparison(ItemField::Group, PresenceOperator::IsEmpty));
-                let present = builder.leaf(Leaf::PresenceComparison(ItemField::Group, PresenceOperator::IsNotEmpty));
-                builder.or(empty, present)
+                builder.match_all_without_regex(ItemField::Group)
             }
         };
         builder.finish(root)
@@ -204,6 +206,9 @@ impl PartialEq for Filter {
             && self.leaves.iter().zip(other.leaves.iter()).all(|((_, left), (_, right))| left == right)
     }
 }
+
+/// The comparison above compares indices and leaf values, so it is an equivalence relation.
+impl Eq for Filter {}
 
 /// Compares two nodes by the position of their children rather than by their arena ids.
 fn nodes_match(left: &Node, right: &Node) -> bool {
@@ -272,6 +277,17 @@ impl FilterBuilder {
         // here instead of being copied into a wrong position.
         other.node(other.root)?;
         node_ids.get(other.root.index()).copied()
+    }
+
+    /// Pushes an expression that matches every item without using a regex.
+    ///
+    /// This is the fallback for callers whose match-all pattern cannot be compiled, which
+    /// means the regex engine or its cache is unusable. `group` is empty or `group IS NOT EMPTY`
+    /// together accept every item, and neither needs a pattern.
+    pub fn match_all_without_regex(&mut self, field: ItemField) -> NodeId {
+        let empty = self.leaf(Leaf::PresenceComparison(field, PresenceOperator::IsEmpty));
+        let present = self.leaf(Leaf::PresenceComparison(field, PresenceOperator::IsNotEmpty));
+        self.or(empty, present)
     }
 
     /// Number of nodes allocated so far; callers use it to bound the size of a filter.

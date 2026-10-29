@@ -1,6 +1,6 @@
 use crate::model::macros;
 use shared::{
-    foundation::{CompiledRegex, Filter, FilterBuilder, Leaf, PresenceOperator},
+    foundation::{CompiledRegex, Filter, FilterBuilder, Leaf},
     model::{ConfigFavouritesDto, ItemField, XtreamCluster},
 };
 use std::sync::Arc;
@@ -24,9 +24,7 @@ impl ConfigFavourites {
             // instead of aborting the process.
             Err(err) => {
                 log::error!("cannot compile the default favourites filter regex '.*': {err}");
-                let empty = builder.leaf(Leaf::PresenceComparison(ItemField::Group, PresenceOperator::IsEmpty));
-                let present = builder.leaf(Leaf::PresenceComparison(ItemField::Group, PresenceOperator::IsNotEmpty));
-                builder.or(empty, present)
+                builder.match_all_without_regex(ItemField::Group)
             }
         };
         builder.finish(root)
