@@ -1281,6 +1281,13 @@
   and names ending in `~` or `.swp` are no longer read as mapping or template files, so a half-saved editor file no
   longer breaks a reload.
 
+- **Filters are no longer limited by the parser stack.** A filter that expanded to more than a few dozen terms was
+  rejected with `stack limit reached` on the static-musl build and left the container restarting. The parser dependency
+  no longer probes the stack on musl, and a filter is now stored flat and read, rendered, evaluated and dropped without
+  recursion, so a long `AND`/`OR` chain no longer needs stack. Existing filters keep their result, a rendered filter
+  keeps its grouping when it is written back to the configuration, and oversized filters are rejected with an error
+  naming the limit.
+
 - **Mapper arity errors name the function the user wrote.** A mapper script with the wrong number of arguments reported
   the internal enum variant (`Function accepts only one argument TitleCase`) instead of the function name
   (`Function accepts only one argument title_case`).

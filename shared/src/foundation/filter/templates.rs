@@ -118,12 +118,17 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
         if let Some(sorted) = graph.topological_sort() {
             for template_name in sorted {
                 if let Some(depends_on) = dependencies.get(&template_name) {
-                    let mut templ_value = template_values.get(&template_name).unwrap().clone();
+                    let mut templ_value = template_values
+                        .get(&template_name)
+                        .ok_or_else(|| TuliproxError::FilterParse(format!("Failed to load template {template_name}")))?
+                        .clone();
                     for dep_templ_name in depends_on {
                         let dep_value = template_values.get(dep_templ_name).ok_or_else(|| {
                             TuliproxError::FilterParse(format!("Failed to load template {dep_templ_name}"))
                         })?;
-                        let dep_templ = template_map.get_mut(dep_templ_name).unwrap();
+                        let dep_templ = template_map.get_mut(dep_templ_name).ok_or_else(|| {
+                            TuliproxError::FilterParse(format!("Failed to load template {dep_templ_name}"))
+                        })?;
                         templ_value = apply_dependency_template_value(templ_value, &dep_templ.placeholder, dep_value);
                     }
                     template_values.insert(template_name.clone(), templ_value);
@@ -131,8 +136,9 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
             }
 
             for (k, v) in template_values {
-                let template = template_map.get_mut(&k).unwrap();
-                template.value = v;
+                if let Some(template) = template_map.get_mut(&k) {
+                    template.value = v;
+                }
             }
         }
     }
@@ -162,9 +168,14 @@ pub fn apply_templates_to_pattern(
                         "Empty multi value templates are not supported for pattern! {pattern}"
                     )));
                 }
-                Ordering::Equal => {
-                    new_pattern = TemplateValue::Single(multi_vals.first().unwrap().to_owned());
-                }
+                Ordering::Equal => match multi_vals.first() {
+                    Some(value) => new_pattern = TemplateValue::Single(value.clone()),
+                    None => {
+                        return Err(TuliproxError::FilterParse(format!(
+                            "Empty multi value templates are not supported for pattern! {pattern}"
+                        )));
+                    }
+                },
                 Ordering::Greater => {
                     return Err(TuliproxError::FilterParse(format!(
                         "Multi value templates are not supported for pattern! {pattern}"

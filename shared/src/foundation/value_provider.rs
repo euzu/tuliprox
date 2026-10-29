@@ -180,7 +180,9 @@ impl ValueProvider<'_> {
             ItemField::Input => header.input_name.as_ref(),
             ItemField::Type => header.item_type.as_str(),
             ItemField::EpgId => header.epg_channel_id.as_deref()?,
-            ItemField::Chno | ItemField::Quality => unreachable!("handled above"),
+            // Both are returned above; if that ever changes, reporting "no value" is better
+            // than aborting the process on a filter evaluation.
+            ItemField::Chno | ItemField::Quality => return None,
             ItemField::Caption => {
                 if header.title.is_empty() {
                     header.name.as_ref()

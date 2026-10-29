@@ -24,9 +24,6 @@ bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
 not_expr = _{ not ~ basic_expr }
-expr = {
-  not_expr ~ (bool_op ~ expr)?
-  | basic_expr ~ (bool_op ~ expr)*
-}
+expr = { (not_expr | basic_expr) ~ (bool_op ~ (not_expr | basic_expr))* }
 stmt = { expr ~ (bool_op ~ expr)* }
 main = _{ SOI ~ stmt ~ EOI }
