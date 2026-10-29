@@ -3,7 +3,7 @@ use arc_swap::{access::Access, ArcSwap};
 use chrono::Local;
 use log::{debug, error, warn};
 use shared::{
-    foundation::{get_filter, BinaryOperator, Filter},
+    foundation::{get_filter, Filter, FilterBuilder},
     model::{
         ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto,
         XtreamCluster,
@@ -254,11 +254,16 @@ impl ProxyUserCredentials {
         });
         self.t_filter = match (plan_filter, user_filter) {
             // Group both sides so OR expressions keep their intended precedence.
-            (Some(plan), Some(user)) => Some(Arc::new(Filter::BinaryExpression(
-                Box::new(Filter::Group(Box::new((*plan).clone()))),
-                BinaryOperator::And,
-                Box::new(Filter::Group(Box::new((*user).clone()))),
-            ))),
+            (Some(plan), Some(user)) => {
+                let mut builder = FilterBuilder::new();
+                // `plan`/`user` are `Arc<Filter>`; the builder copies each tree into its arena.
+                let plan_node = builder.append(plan.as_ref());
+                let user_node = builder.append(user.as_ref());
+                let left = builder.group(plan_node);
+                let right = builder.group(user_node);
+                let root = builder.and(left, right);
+                Some(Arc::new(builder.finish(root)))
+            }
             (Some(filter), None) | (None, Some(filter)) => Some(filter),
             (None, None) => None,
         };

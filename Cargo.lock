@@ -2171,6 +2171,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "id-arena"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3949,6 +3955,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "hex",
+ "id-arena",
  "indexmap",
  "js-sys",
  "log",
@@ -3962,6 +3969,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "serde_tuple",
+ "smallvec",
  "strum",
  "strum_macros",
  "thiserror 2.0.21",
