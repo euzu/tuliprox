@@ -326,6 +326,19 @@ log:
   log_level: info
   runtime_config_report_enabled: false
   runtime_config_report_format: yaml
+
+  # Optional asynchronous syslog / NDJSON log shipping over UDP (default: disabled)
+  syslog:
+    enabled: false
+    host: "192.168.1.50"
+    port: 514
+    format: rfc5424
+    facility: local0
+    app_name: "tuliprox"
+    # hostname: "node1"
+    # log_level: debug
+    queue_capacity: 4096
+    max_message_len: 1024
 ```
 
 | Parameter                       | Type   | Default | Technical Impact & Background                                                                                                                                                                                                          |
@@ -335,6 +348,7 @@ log:
 | `log_active_user`               | Bool   | `false` | Periodically writes the current active client connection count as an INFO message to the log file.                                                                                                                                     |
 | `runtime_config_report_enabled` | Bool   | `false` | Opt-in startup dump of the complete effective runtime configuration after defaults, path resolution, and runtime preparation have been applied. Sensitive values such as passwords, secrets, tokens, and API keys are masked as `***`. |
 | `runtime_config_report_format`  | String | `yaml`  | Output format for the runtime config report. Supported values: `json` and `yaml`. Both formats are emitted as pretty, multi-line output. Ignored unless `runtime_config_report_enabled` is `true`.                                     |
+| `syslog`                        | Object | *empty* | Optional external UDP log shipping configuration block. Default disabled (`enabled: false`). See [External Log Shipping (`log.syslog`)](#external-log-shipping-logsyslog).                                                             |
 
 If enabled, Tuliprox keeps the existing startup summary and prints the additional full runtime report once during
 startup. The report includes:
@@ -346,6 +360,308 @@ startup. The report includes:
 
 The report is intended for diagnostics and verification of effective defaults. Sensitive values are redacted before
 logging.
+
+### External Log Shipping (`log.syslog`)
+
+Tuliprox can stream application log records directly and asynchronously to an external log collector (such as Vector,
+rsyslog, syslog-ng, Logstash, Fluent Bit, Loki, Graylog, or Splunk) via UDP. Streaming and media paths (HLS, MPEG-TS,
+DVR) never block on log I/O.
+
+| Field             | Type   | Default      | Description                                                                                                                                                                                   |
+|:------------------|:-------|:-------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`         | Bool   | `false`      | Enables asynchronous UDP log shipping to an external collector. Opt-in; when `false`, no socket or worker thread is spawned.                                                                  |
+| `host`            | String | `""`         | Destination IP address or hostname. Required when `enabled` is `true`. IPv6 literals are specified without square brackets.                                                                   |
+| `port`            | Int    | `514`        | Destination UDP port (range `1..=65535`).                                                                                                                                                     |
+| `format`          | String | `rfc5424`    | Wire format for transmitted datagrams. Supported values: `rfc5424`, `rfc3164`, `json`.                                                                                                        |
+| `facility`        | String | `local0`     | Syslog facility: all 24 RFC 5424 values are accepted, but **only `local0`..`local7` make sense here** — see [Facility](#facility).                                                            |
+| `app_name`        | String | `"tuliprox"` | Application name header (`1..=48` ASCII characters without spaces, range `0x21..=0x7E`).                                                                                                      |
+| `hostname`        | String | `null`       | Optional hostname override (`1..=255` characters). If omitted, falls back to the system hostname, or NILVALUE (`-`) if undetectable.                                                          |
+| `log_level`       | String | `null`       | Optional independent remote log level: `debug`, `info`, `warn`, `error`. If omitted, syslog follows the resolved root logger filter (including module rules). Note: `trace` is rejected.      |
+| `queue_capacity`  | Int    | `4096`       | Capacity of the bounded in-memory datagram channel (range `1..=65536`). When full, new datagrams are dropped immediately without blocking the caller (`dropped_full`).                        |
+| `max_message_len` | Int    | `1024`       | Maximum datagram size in bytes (range `480..=65507`, minimum `1024` for `json`). Datagrams exceeding this size have their message payload truncated at a character boundary.                  |
+
+### Facility
+
+`facility` is the left half of the syslog `PRI` byte (`PRI = facility * 8 + severity`). It does **not** say how
+important a message is — that is the severity — it says **which subsystem the message came from**, and collectors
+route by it.
+
+All 24 values of RFC 5424 §6.2.1 are accepted, so existing collector rules keep working:
+
+| Code | Value | Meaning |
+| :--- | :--- | :--- |
+| 0 | `kern` | Kernel messages |
+| 1 | `user` | Generic user-space application |
+| 2 | `mail` | Mail transport |
+| 3 | `daemon` | Long-running system service |
+| 4 | `auth` | Login/authentication (superseded by `authpriv`) |
+| 5 | `syslog` | The syslog daemon itself (reserved by RFC 5424) |
+| 6 | `lpr` | Line-printer subsystem |
+| 7 | `news` | Usenet |
+| 8 | `uucp` | UUCP |
+| 9 | `cron` | Cron daemon |
+| 10 | `authpriv` | Security/authorization log |
+| 11 | `ftp` | FTP daemon |
+| 12 | `ntp` | Time synchronization |
+| 13 | `audit` | Security audit log |
+| 14 | `alert` | Console alert |
+| 15 | `clock2` | Second clock daemon (legacy) |
+| 16–23 | `local0`..`local7` | Reserved for site-local use |
+
+**In practice only `local0`..`local7` make sense for Tuliprox, and `local0` is the default.** Two reasons:
+
+1. **The rest name subsystems this application does not have.** Tuliprox is one process, not a collection of mail,
+   print, cron or kernel components. `syslog` is even reserved for the syslog daemon itself, and a user-space
+   process cannot honestly emit `kern` messages.
+2. **A foreign facility moves the records.** A stock rsyslog configuration writes `cron.*` to `/var/log/cron` and
+   `auth,authpriv.*` to the auth log, and excludes those facilities from the general log. Choosing `facility: cron`
+   would not merely label the output oddly — it would take Tuliprox out of `/var/log/syslog`.
+
+`local0`..`local7` exist exactly for this case: they are reserved for local use and are the conventional slot for a
+third-party service. Use different `local0`..`local7` values if you run several instances and want the collector to
+separate them.
+
+For anything finer, route on `app_name` in the collector instead. That is the field your rules should key on; it does
+not change the PRI and does not need a config reload when the routing changes.
+
+The remaining values stay available for two cases: an existing collector rule that already buckets on a specific
+facility, and an operator who deliberately wants Tuliprox records in a dedicated log (for example `authpriv`). Because
+one sink ships every record to one destination, such a choice applies to all Tuliprox output, not to a subset.
+
+#### Container and journald setups ignore this setting
+
+`facility` — and the rest of `log.syslog` — only affects datagrams that Tuliprox sends itself (the `log.syslog` path).
+When a container runtime or journald forwards the stdout stream instead (see
+[Infrastructure-Side Shipping](#infrastructure-side-shipping-option-0)), the application never emits syslog at all, so
+there is no `PRI` to fill and no header to shape. The forwarding component chooses those fields by its own rules:
+
+* **Docker `syslog` logging driver:** the facility is a driver option (`syslog-facility`, documented with `daemon`),
+  and the driver writes the entire header itself. Its `tag` option becomes the app name, and the host name is the one
+  the driver sees — `app_name` and `hostname` from `config.yml` are ignored as well.
+* **journald:** the facility comes from the journal's own configuration. For a native systemd unit it is
+  `SyslogFacility=`, which defaults to `daemon` (`systemd.exec(5)`).
+
+Under such a setup the value in `config.yml` neither helps nor hurts: it is simply unused. The one way it can hurt is
+running both paths at once. If the container's log driver forwards stdout **and** `log.syslog.enabled` is `true`, every
+record is shipped twice — once by Tuliprox with your facility, once by the driver with the driver's facility. Pick one
+path.
+
+### Wire Formats
+
+Tuliprox implements three standard wire formats for UDP log datagrams:
+
+#### 1. RFC 5424 (`format: rfc5424`, default)
+
+Standard modern syslog format conforming to RFC 5424 / RFC 5426 over UDP:
+
+```text
+<134>1 2026-10-27T17:45:00.123456+01:00 node1 tuliprox 12345 main_api - Client stream allocated
+```
+
+* `PRI` (`<134>`): Calculated as `facility_code * 8 + severity`. Severity maps Error to 3, Warn to 4, Info to 6, and Debug/Trace to 7.
+* `VERSION`: Fixed at `1`.
+* `TIMESTAMP`: High-precision RFC 3339 timestamp with microsecond resolution and explicit numeric timezone offset.
+* `HOSTNAME`: Configured hostname, falling back to the operating system DNS hostname, or `-` (NILVALUE). Sanitized and capped at 255 bytes.
+* `APP-NAME`: Configured application identifier (up to 48 ASCII characters without spaces).
+* `PROCID`: Process ID of the running Tuliprox instance (`std::process::id()`).
+* `MSGID`: The last `::` segment of the logging target (`main_api`), sanitized and capped at 32 bytes (or `-` when empty).
+* `STRUCTURED-DATA`: Emitted as `-` (NILVALUE).
+* `MSG`: Log message payload sanitized of C0 control characters and truncated to the remaining byte budget.
+
+#### 2. RFC 3164 (`format: rfc3164`)
+
+Legacy BSD syslog format for older appliances and log collectors:
+
+```text
+<134>Oct 27 17:45:00 node1 tuliprox[12345]: Client stream allocated
+```
+
+* `PRI`: `<facility * 8 + severity>`.
+* `TIMESTAMP`: Local time formatted as `Mmm dd hh:mm:ss`, where single-digit days are space-padded (e.g., `Oct  7`).
+* `HOSTNAME`: Configured or detected hostname. Because RFC 3164 lacks a formal NILVALUE, an unresolvable hostname sends literal `-`.
+* `TAG`: Application name and process ID in BSD format: `app_name[pid]:` (space-delimited from message).
+* Note: RFC 3164 has no `MSGID` field; the target module is not emitted on the wire in this format.
+
+#### 3. NDJSON (`format: json`)
+
+Single-line newline-delimited JSON (NDJSON) object ideal for ingestion by Vector, Fluent Bit, Loki, or Logstash:
+
+```json
+{"@timestamp":"2026-10-27T17:45:00.123456+01:00","level":"info","facility":"local0","app_name":"tuliprox","hostname":"node1","pid":12345,"target":"tuliprox_app::api::main_api","message":"Client stream allocated","truncated":false}
+```
+
+The field set and insertion order are fixed: `@timestamp`, `level`, `facility`, `app_name`, `hostname`, `pid`, `target`,
+`message`, and `truncated`. The `target` field preserves the full Rust module path (sanitized and capped at 255 bytes).
+The `truncated` boolean field indicates whether the message payload was shortened to fit `max_message_len`.
+
+### Shipping Semantics and Filter Hierarchy
+
+Log shipping behavior is governed by a three-level filter model:
+
+1. **Global Maximum Level (`log::max_level`):** The process-wide gate computed as `root_max.max(syslog_max)`. Records
+   below this level are discarded immediately at the logging macro call site before any allocation occurs.
+2. **Root Filter (Stdout and Web UI Ring Buffer):** Evaluates `log.log_level` (and module rules such as
+   `tuliprox=debug,hyper_util=warn`). Accepted records are formatted for stdout and pushed into the in-memory ring buffer
+   for the Web UI Live Logs console.
+3. **Syslog Filter (External Collector):** Evaluates whether the record should be formatted and queued for UDP
+   transmission to the remote collector.
+
+#### Configuration and Filter Rules
+
+* **Default Disabled:** The feature is opt-in (`enabled: false`). It can be toggled on or off in the Web UI under
+  **Config → Log** (in the Syslog card) or directly in `config.yml`. When disabled, no worker thread is spawned, no
+  UDP socket is bound, and no syslog datagram formatting occurs.
+* **Host Requirement:** Setting `enabled: true` requires `host` to be non-empty; saving an empty host triggers a
+  configuration validation error.
+* **Omitted `log_level`:** When `log_level` is omitted (`null`), syslog follows the **resolved root filter** (including
+  CLI `-l` overrides, `TULIPROX_LOG`, module-level directives, and the internal noise list). Remote syslog receives
+  identically what stdout receives.
+* **Explicit `log_level`:** When set to `debug`, `info`, `warn`, or `error`, the sink uses an independent filter at that
+  level while stdout and Web UI remain at the root level. Module-specific syntax (`module=level`) is not supported for
+  the remote sink level.
+* **`trace` Rejection:** Setting `log.syslog.log_level: trace` is rejected by configuration validation. The trace log
+  path dumps raw HTTP request headers (`headers.rs:176`), including `Authorization` headers, session cookies, and provider
+  credentials. Transmitting these credentials unencrypted over UDP is deliberately unsupported.
+* **Noise List Mitigation:** When `log_level` is configured independently, Tuliprox automatically suppresses known noisy
+  third-party crates (`reqwest`, `hyper_util`, `tungstenite`, `tokio_tungstenite`, `rustls_platform_verifier`, `notify`,
+  `mio`) by capping them at `Error` level. **Important:** This noise list is a mitigation for known libraries, **not a
+  general leak guarantee**. Third-party debug logs may still expose URLs, headers, or tokens in error strings over UDP.
+
+#### Operational Warnings and Invariants
+
+* **Shipped Example Config is Loud:** The default `config/config.yml` shipped with Tuliprox sets `log_level: debug` and
+  `sanitize_sensitive_info: false`. Combining these settings with remote `debug` will transmit upstream provider URLs and
+  query credentials unmasked over the network. Always set `sanitize_sensitive_info: true` and recommend `info` as the
+  remote sink level outside a controlled laboratory environment.
+* **Root `trace` Exposure:** A sink configured to follow the root level (omitted `log.syslog.log_level`) will transmit
+  full HTTP request-header dumps if the root logger is set to `trace` (e.g. via `tuliprox -l trace` or `log_level: trace`).
+  Use `debug` as the finest root level in production.
+* **Remote Debug Overhead:** Setting `log.syslog.log_level: debug` enables `StepMeasure` and per-request diagnostic
+  builders (redirect, retry, and download diagnostics) process-wide via the `log_enabled!` macro check, even when stdout
+  is set to `info`. This incurs additional CPU cycles and Web UI event broadcast traffic.
+* **Module Path Filtering:** RFC 5424 carries only the final segment of the target module as `MSGID` (and RFC 3164
+  omits target information entirely). If your collector needs to filter or route logs based on the full Rust module path
+  (e.g., `tuliprox_app::api::main_api`), use `format: json`.
+
+### Sizing, Truncation, and MTU Limits
+
+UDP datagram transmission requires strict payload bounding to prevent packet fragmentation and network drops:
+
+* **Two-Phase Truncation:** Headers are never truncated. The formatter builds the prefix header first, computes the
+  remaining byte budget up to `max_message_len`, and truncates only the message body to fit that budget at a valid UTF-8
+  character boundary.
+* **Valid JSON Guarantee:** For `format: json`, the message is truncated before JSON serialization, followed by up to
+  three iterative adjustments if JSON escaping expands the payload. The resulting datagram is guaranteed to be valid,
+  parseable JSON and carries `"truncated": true` when shortened.
+* **Minimum Floors:** Config validation enforces `max_message_len >= 480` for `rfc5424` and `rfc3164` (worst-case RFC
+  headers occupy up to 391 and 339 bytes respectively, guaranteeing at least an 89-byte message). For `format: json`,
+  the JSON envelope with maximal header fields reaches 731 bytes, so validation enforces `max_message_len >= 1024`.
+* **MTU Thresholds:** On standard 1500-byte Ethernet networks, the maximum unfragmented UDP payload is **1472 bytes for
+  IPv4** (1500 - 20 IP header - 8 UDP header) and **1452 bytes for IPv6** (without extension headers). Datagrams
+  exceeding these thresholds are fragmented at the IP layer; Docker bridge networks, NAT gateways, and cloud firewalls
+  frequently drop UDP fragments, leading to silent message loss. The default `max_message_len: 1024` ensures safe headroom
+  even across VPN tunnels (such as WireGuard or IPsec). Values up to 65507 are permitted for loopback or jumbo-frame LANs.
+
+### Queueing, Observability, and Lifecycle
+
+* **Bounded Queue:** Datagrams are handed off from application threads to a dedicated worker thread via a bounded
+  channel (`queue_capacity`, default `4096`). Calls to `offer()` use `try_send` and never block the caller. If the queue
+  is full, `dropped_full` is incremented and the datagram is dropped immediately.
+* **Throttled Worker Summary:** The worker thread tracks transmission counters (`dropped_full`, `dropped_unresolved`,
+  `dropped_send_error`, `truncated`, `sent`). Based on an absolute deadline (every 5 minutes), the worker logs a `warn!`
+  report to stdout and the Web UI if any drop or truncation counter has changed:
+  `syslog worker report for <host>:<port>: dropped_full=..., dropped_unresolved=..., dropped_send_error=..., truncated=..., sent=...`.
+  Under continuous load, the absolute deadline ensures reports are never starved.
+* **Bounded Shutdown & Live Reload:** Sink shutdown and configuration swaps are bounded by a strict 2-second timeout
+  (`SYSLOG_SHUTDOWN_TIMEOUT = 2 s`). A `WorkerMsg::Shutdown` sentinel drains queued datagrams in FIFO order. If the
+  remote collector becomes unresponsive or the channel is stalled, shutdown terminates at the deadline to prevent
+  hanging the process or blocking configuration reload.
+* **No Periodic DNS Re-Resolution:** Destination hostnames are resolved lazily on the background worker thread (never
+  delaying application startup or `/healthcheck` probes). The resolved IP address is cached for the sender's lifetime.
+  Re-resolution occurs only while no address is usable (retrying every 30 seconds) or after an address-related socket
+  error (`NetworkUnreachable`, `HostUnreachable`, `InvalidInput`). Normal DNS changes are **not detected** automatically
+  because UDP sends continue to succeed silently. To force re-resolution, restart Tuliprox or modify any transport field
+  (`host`, `port`, `format`, `facility`, `app_name`, `hostname`, `queue_capacity`, `max_message_len`) to trigger a fresh
+  sender.
+
+#### Security Notice
+
+UDP/514 transmission is unauthenticated, unencrypted, and lossy. Packets may be dropped, intercepted, or spoofed on
+untrusted networks. For secure, authenticated, or loss-free transport (such as TCP with TLS), use
+[Option 0 (Infrastructure-Side Shipping)](#infrastructure-side-shipping-option-0).
+
+### Infrastructure-Side Shipping (Option 0)
+
+When operating in accordance with 12-factor application design, Tuliprox logs to stdout, and the container runtime or
+host supervisor forwards the log stream to a central collector. This provides TCP/TLS encryption, local buffering, and
+retry semantics without application-level UDP shipping.
+
+The application-level block `log.syslog` is unused in this mode: Tuliprox writes no syslog header, so `facility`,
+`app_name` and `hostname` come from the forwarding component instead (see
+[Container and journald setups ignore this setting](#container-and-journald-setups-ignore-this-setting)).
+
+#### 1. Docker / Docker Compose
+
+Configure Docker's built-in syslog logging driver in your `compose.yml`:
+
+```yaml
+services:
+  tuliprox:
+    image: ghcr.io/euzuner/tuliprox:latest
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "udp://192.168.1.50:514"   # or tcp://, or tcp+tls://
+        syslog-format: "rfc5424micro"
+        tag: "tuliprox"
+```
+
+#### 2. systemd / journald
+
+When running bare-metal under systemd, stdout is captured by `journald`. You can forward entries to remote syslog servers
+via `rsyslog` (using `imjournal` and `omfwd`) or via `systemd-journal-upload`.
+
+#### 3. Vector / Fluent Bit DaemonSet
+
+Collector agents can tail container logs directly. Tuliprox formats stdout records as:
+
+```text
+[TIMESTAMP LEVEL TARGET] MESSAGE
+```
+
+For example: `[2026-10-27T17:45:00+01:00 INFO tuliprox_app::api::main_api] Client stream allocated`.
+
+To parse this with Vector, use a `remap` transform with a VRL `parse_regex` (Fluent Bit takes the equivalent
+`regex` parser definition):
+
+```yaml
+# vector.yaml
+transforms:
+  parse_tuliprox:
+    type: remap
+    inputs: [container_logs]
+    source: |
+      . = parse_regex!(.message, r'^\[(?P<timestamp>[^ ]+) (?P<level>[^ ]+) (?P<target>[^ ]+)\] (?P<message>.*)$')
+```
+
+### Verification (Manual Smoke Test)
+
+You can verify syslog transmission using a local netcat listener:
+
+```bash
+# Terminal 1: Start a local UDP listener on port 5514
+nc -u -l 5514
+
+# Terminal 2: Run Tuliprox with syslog enabled
+# (Set log.syslog: { enabled: true, host: "127.0.0.1", port: 5514, log_level: debug } in config.yml)
+cargo run --bin tuliprox -- -c config/config.yml -i config/source.yml
+```
+
+1. **Datagram Delivery:** Check that datagrams arrive in real time on Terminal 1 formatted as `<PRI>1 ...`.
+2. **Independent Level:** With `log.log_level: info` and `log.syslog.log_level: debug`, verify debug records appear in
+   `nc` while the Web UI Live Logs and stdout remain at `info`.
+3. **Noise Suppression:** Verify that third-party crates (`reqwest`, `hyper`) do not emit debug records to `nc`.
+4. **Live Reload:** Set `log.syslog.enabled: false` via the Web UI or config reload; verify `nc` falls silent immediately.
 
 ---
 

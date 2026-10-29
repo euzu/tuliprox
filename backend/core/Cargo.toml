@@ -24,6 +24,7 @@ bytes.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10.4"
 ctr = "0.9.2"
+env_filter = "2"
 env_logger = "0.11.11"
 fastrand.workspace = true
 flate2 = "1.1.9"

@@ -41,7 +41,7 @@ use crate::{
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::{exec_processing, ProcessingRun},
     repository::{db_viewer, run_startup_migrations},
-    utils::{config_file_reader, init_logger, request::create_client, resolve_env_var},
+    utils::{config_file_reader, flush_syslog, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
@@ -375,6 +375,7 @@ async fn main() {
                 .unwrap_or_else(|err| exit!("{}", err)),
         );
         scan_library_cli(&app_config, args.force_library_rescan).await;
+        flush_syslog();
         return;
     }
 
@@ -398,6 +399,7 @@ async fn main() {
             if let Err(err) = api::setup_api::start_setup_server(&config_paths, &missing_files).await {
                 exit!("Can't start setup server: {err}");
             }
+            flush_syslog();
             return;
         }
     }
@@ -415,6 +417,9 @@ async fn main() {
     } else {
         start_in_cli_mode(Arc::new(app_config), Arc::new(targets)).await;
     }
+    // Both modes return on a normal shutdown: the server returns once its serve loop ends after the shutdown
+    // signal. Queued datagrams are delivered here rather than lost on process exit.
+    flush_syslog();
 }
 
 async fn print_info(app_config: &AppConfig, loaded_env: Option<&Path>) {

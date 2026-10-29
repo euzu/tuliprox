@@ -26,6 +26,19 @@ log:
   sanitize_sensitive_info: false
   log_active_user: true
   log_level: debug
+  # syslog:
+  #   enabled: false                       # default: false; enable here or in the Web-UI (Config -> Log)
+  #   host: "192.168.1.50"                 # destination hostname or IP literal (no brackets for IPv6)
+  #   port: 514                            # destination UDP port (1..=65535, default: 514)
+  #   format: rfc5424                      # wire format: rfc5424 | rfc3164 | json (default: rfc5424)
+  #   facility: local0                     # all 24 RFC 5424 facilities are accepted, but only local0..local7 make
+  #                                        # sense here (default: local0). A facility is a routing key: cron/authpriv
+  #                                        # move the records out of the general log. Route on app_name instead.
+  #   app_name: "tuliprox"                 # application identifier (1..=48 ASCII characters without spaces, default: tuliprox)
+  #   hostname: "node1"                    # optional hostname override; default: system hostname, else "-"
+  #   log_level: debug                     # optional filter: debug|info|warn|error (omit = follow root; trace is not allowed)
+  #   queue_capacity: 4096                 # in-memory datagram queue capacity (1..=65536, drop-on-full, default: 4096)
+  #   max_message_len: 1024                # datagram size limit in bytes (480..=65507, json min: 1024; default: 1024)
 
 update_on_boot: false # best not to hammer upstream during testing
 

@@ -4,6 +4,12 @@
 
 ## ⚠️ Breaking Changes
 
+- **The in-memory log ring buffer behind the Web-UI Live Logs now follows the root log filter.** Previously,
+  the ring buffer stored every record that passed the global maximum log level, exposing noisy dependency logs
+  and foreign-crate debug records even when stdout filtered them out. The ring buffer is now gated directly on the
+  root filter (`log.log_level` and module specifications), ensuring the Web UI stream matches stdout. This applies
+  unconditionally, whether external syslog shipping is enabled or not.
+
 - **Unused `media_server` options removed.** The input keys `media_server.playback` (`direct_play_only`,
   `allow_transcode`, `playback_info_policy`, `preflight_streams`), `media_server.image_policy`,
   `media_server.catalog.refresh_mode`, `media_server.catalog.refresh_on_startup`, `media_server.catalog.include_paths`
@@ -191,6 +197,15 @@
   id added.
 
 ## 🌟 New Features
+
+- **External log shipping via syslog and NDJSON (`log.syslog`).** Application log records can now be streamed
+  asynchronously over UDP to an external collector (such as Vector, rsyslog, Logstash, or Fluent Bit) without
+  blocking media processing. Supports RFC 5424, RFC 3164, and NDJSON wire formats, an optional independent remote
+  log level, bounded memory queues with drop-on-full semantics, and live configuration reloads without restart.
+  Configurable via `config.yml` or the Web UI under Config → Log. See
+  [Logging](docs/src/configuration/config.md#3-logging-log). Measured cost of the log call on the reference
+  machine (release, `syslog_hot_path_cost`): 437 ns/record with no sink and 837 ns/record with the sink enabled,
+  i.e. roughly 400 ns per shipped record, dominated by the datagram formatting and the queue hand-off.
 
 - **New mapper built-in functions: `title_case`, `slug`, `normalize_spaces`, `coalesce`, and `deunicode`.** Five new
   helper functions for playlist transformations in the mapper DSL:
