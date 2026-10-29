@@ -301,8 +301,8 @@ fn builder_allocates_children_before_their_parent() {
 fn append_copies_a_tree_between_filters() {
     let source = parse(r#"Name = "a" OR Group = "b""#);
     let mut builder = FilterBuilder::new();
-    let copied = builder.append(&source);
-    let combined = builder.append(&parse(r#"Name = "a""#));
+    let copied = builder.append(&source).expect("copy");
+    let combined = builder.append(&parse(r#"Name = "a""#)).expect("copy");
     let root = builder.and(copied, combined);
     let combined = builder.finish(root);
 
@@ -335,16 +335,16 @@ fn display_parenthesises_where_regrouping_would_happen() {
 
     // A binary left operand would be regrouped without parentheses.
     let mut builder = FilterBuilder::new();
-    let left = builder.append(&parse(r#"Name = "a" OR Group = "b""#));
-    let right = builder.append(&parse(r#"Title = "c""#));
+    let left = builder.append(&parse(r#"Name = "a" OR Group = "b""#)).expect("copy");
+    let right = builder.append(&parse(r#"Title = "c""#)).expect("copy");
     let root = builder.and(left, right);
     let filter = builder.finish(root);
     assert_eq!(filter.to_string(), r#"(Name = "a" OR Group = "b") AND Title = "c""#);
 
     // `NOT` binds to one operand, so a binary child must be parenthesised as well.
     let mut builder = FilterBuilder::new();
-    let inner_left = builder.append(&parse(r#"Name = "a""#));
-    let inner_right = builder.append(&parse(r#"Group = "b""#));
+    let inner_left = builder.append(&parse(r#"Name = "a""#)).expect("copy");
+    let inner_right = builder.append(&parse(r#"Group = "b""#)).expect("copy");
     let inner = builder.and(inner_left, inner_right);
     let root = builder.not(inner);
     assert_eq!(builder.finish(root).to_string(), r#"NOT (Name = "a" AND Group = "b")"#);
@@ -362,8 +362,8 @@ fn display_parenthesises_where_regrouping_would_happen() {
 #[test]
 fn parenthesised_rendering_round_trips_in_meaning() {
     let mut builder = FilterBuilder::new();
-    let left = builder.append(&parse(r#"Name = "a" OR Group = "b""#));
-    let right = builder.append(&parse(r#"Title = "c""#));
+    let left = builder.append(&parse(r#"Name = "a" OR Group = "b""#)).expect("copy");
+    let right = builder.append(&parse(r#"Title = "c""#)).expect("copy");
     let root = builder.and(left, right);
     let original = builder.finish(root);
 
@@ -386,7 +386,7 @@ fn parenthesised_rendering_round_trips_in_meaning() {
 fn append_after_local_nodes_keeps_indices_consistent() {
     let mut builder = FilterBuilder::new();
     let own = builder.leaf(Leaf::PresenceComparison(ItemField::Name, PresenceOperator::IsEmpty));
-    let copied = builder.append(&parse(r#"Group = "x""#));
+    let copied = builder.append(&parse(r#"Group = "x""#)).expect("copy");
     let root = builder.or(own, copied);
     let filter = builder.finish(root);
 
@@ -682,4 +682,40 @@ fn filter_production_code_contains_no_panicking_constructs() {
         }
     }
     assert!(violations.is_empty(), "panicking constructs in production code:\n{}", violations.join("\n"));
+}
+
+/// A filter can be finished with an id from another builder, because `finish` takes any
+/// `NodeId`. Copying such a filter must report `None` instead of indexing out of bounds or
+/// mapping the foreign id to whatever sits at its index here.
+#[test]
+fn append_refuses_a_filter_with_an_unresolved_root() {
+    let leaf = |builder: &mut FilterBuilder| {
+        builder.leaf(Leaf::PresenceComparison(ItemField::Name, PresenceOperator::IsEmpty))
+    };
+
+    // Id beyond this filter's own length.
+    let mut foreign = FilterBuilder::new();
+    let mut foreign_id = leaf(&mut foreign);
+    for _ in 0..5 {
+        foreign_id = leaf(&mut foreign);
+    }
+    let mut builder = FilterBuilder::new();
+    let _own = leaf(&mut builder);
+    let out_of_range = builder.finish(foreign_id);
+    let mut target = FilterBuilder::new();
+    assert!(target.append(&out_of_range).is_none(), "an out-of-range root must be refused");
+
+    // Id whose index is valid here, but belongs to another arena.
+    let mut foreign = FilterBuilder::new();
+    let in_range = leaf(&mut foreign);
+    let mut builder = FilterBuilder::new();
+    let _own = leaf(&mut builder);
+    let mismatched = builder.finish(in_range);
+    let mut target = FilterBuilder::new();
+    assert!(target.append(&mismatched).is_none(), "a foreign root must be refused, not remapped");
+
+    // A filter this crate built still copies.
+    let mut target = FilterBuilder::new();
+    let copied = target.append(&parse(r#"Name = "a" OR Group = "b""#)).expect("copy");
+    assert_eq!(target.finish(copied).to_string(), r#"Name = "a" OR Group = "b""#);
 }

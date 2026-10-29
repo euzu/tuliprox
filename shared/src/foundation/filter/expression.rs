@@ -247,8 +247,12 @@ impl FilterBuilder {
     ///
     /// Both arenas are filled in allocation order, and a node only refers to nodes allocated
     /// before it, so a single pass maps every child id.
-    pub fn append(&mut self, other: &Filter) -> NodeId {
-        let root = other.root;
+    ///
+    /// Returns `None` when `other` refers to a node that is not in its own arena. That cannot
+    /// happen for a filter this crate built, but the constructor takes an arbitrary id, and a
+    /// filter that carries a foreign root must not turn a copy into a panic. Nodes allocated
+    /// before the failure stay in this builder unused; callers drop the builder on error.
+    pub fn append(&mut self, other: &Filter) -> Option<NodeId> {
         let mut leaf_ids = Vec::with_capacity(other.leaves.len());
         for (_, leaf) in &other.leaves {
             leaf_ids.push(self.leaves.alloc(leaf.clone()));
@@ -256,21 +260,28 @@ impl FilterBuilder {
         let mut node_ids = Vec::with_capacity(other.nodes.len());
         for (_, node) in &other.nodes {
             let mapped = match *node {
-                Node::Leaf(id) => Node::Leaf(leaf_ids[id.index()]),
-                Node::Group(id) => Node::Group(node_ids[id.index()]),
-                Node::Not(id) => Node::Not(node_ids[id.index()]),
-                Node::And(left, right) => Node::And(node_ids[left.index()], node_ids[right.index()]),
-                Node::Or(left, right) => Node::Or(node_ids[left.index()], node_ids[right.index()]),
+                Node::Leaf(id) => Node::Leaf(*leaf_ids.get(id.index())?),
+                Node::Group(id) => Node::Group(*node_ids.get(id.index())?),
+                Node::Not(id) => Node::Not(*node_ids.get(id.index())?),
+                Node::And(left, right) => Node::And(*node_ids.get(left.index())?, *node_ids.get(right.index())?),
+                Node::Or(left, right) => Node::Or(*node_ids.get(left.index())?, *node_ids.get(right.index())?),
             };
             node_ids.push(self.nodes.alloc(mapped));
         }
-        node_ids[root.index()]
+        // The root must resolve in `other` as well, so a filter with a foreign root is refused
+        // here instead of being copied into a wrong position.
+        other.node(other.root)?;
+        node_ids.get(other.root.index()).copied()
     }
 
     /// Number of nodes allocated so far; callers use it to bound the size of a filter.
     #[must_use]
     pub fn node_count(&self) -> usize { self.nodes.len() }
 
+    /// Finishes the filter at `root`.
+    ///
+    /// `root` must come from this builder. A foreign id is preserved as given, and readers
+    /// treat an unresolvable root as an empty filter; [`FilterBuilder::append`] refuses it.
     #[must_use]
     pub fn finish(self, root: NodeId) -> Filter { Filter { nodes: self.nodes, leaves: self.leaves, root } }
 }
