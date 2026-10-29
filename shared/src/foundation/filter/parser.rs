@@ -420,20 +420,23 @@ fn max_nesting(filter_text: &str) -> usize {
     let mut depth = 0usize;
     let mut deepest = 0usize;
     let mut in_value = false;
-    let mut escaped = false;
+    // The grammar reads a quoted value as `( "\\\"" | (!"\"" ~ ANY) )*`, so a backslash and the
+    // quote after it are consumed as one escaped quote. A quote therefore closes the value only
+    // when no backslash precedes it, whatever the length of the backslash run before it.
+    let mut previous_was_backslash = false;
     for ch in filter_text.chars() {
         if in_value {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
+            if ch == '"' && !previous_was_backslash {
                 in_value = false;
             }
+            previous_was_backslash = ch == '\\';
             continue;
         }
         match ch {
-            '"' => in_value = true,
+            '"' => {
+                in_value = true;
+                previous_was_backslash = false;
+            }
             '(' => {
                 depth += 1;
                 deepest = deepest.max(depth);
@@ -589,4 +592,72 @@ pub fn get_filter_detailed(
 
 pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
     get_filter_detailed(filter_text, templates).map_err(|(err, _)| err)
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::{max_nesting, FilterParser, Rule};
+    use pest::{iterators::Pair, Parser};
+
+    /// Deepest `expr_group` nesting in the parse tree pest actually produces.
+    fn parsed_depth(pairs: pest::iterators::Pairs<'_, Rule>) -> usize {
+        fn walk(pair: &Pair<'_, Rule>, depth: usize) -> usize {
+            let mut deepest = depth;
+            for inner in pair.clone().into_inner() {
+                let next = if inner.as_rule() == Rule::expr_group { depth + 1 } else { depth };
+                deepest = deepest.max(walk(&inner, next));
+            }
+            deepest
+        }
+        pairs.map(|p| walk(&p, 0)).max().unwrap_or(0)
+    }
+
+    /// `max_nesting` scans the raw text before pest runs, so for every filter pest accepts it
+    /// has to agree with the nesting pest finds in the parsed structure. Input pest rejects is
+    /// not compared: the scan then decides nothing, because the syntax error is reported.
+    fn assert_agrees(text: &str) {
+        if let Ok(pairs) = FilterParser::parse(Rule::main, text) {
+            assert_eq!(max_nesting(text), parsed_depth(pairs), "scanner and parse tree disagree for {text:?}");
+        }
+    }
+
+    #[test]
+    fn scanner_agrees_with_the_parse_tree() {
+        let cases = [
+            r#"Name = "a""#,
+            r#"(Name = "a")"#,
+            r#"(((Name = "a")))"#,
+            r#"(Name = "a") AND (Group = "b")"#,
+            r#"(Name = "a" AND (Group = "b" OR (Title = "c")))"#,
+            // parentheses inside a quoted value are data
+            r#"Group ~ "((((((((a))))))))""#,
+            r#"Name = "((((((" OR Group = "))))))""#,
+            // an escaped quote keeps the value open, so the parentheses after it are data too
+            r#"Name = "a\""#,
+            r#"Name = "a\")""#,
+            r#"Group ~ "a\" (b)""#,
+            // a backslash run before the closing quote: every such quote is escaped
+            r#"Name = "a\\""#,
+            r#"Name = "a\\\\""#,
+            r#"Name = "a\\" ((((""#,
+            r#"Name = "a\\" ((((" OR Name = "b""#,
+            // a real parenthesis after a value that ends with an escaped backslash
+            r#"Name = "a\\" AND (Group = "b")"#,
+        ];
+        for text in cases {
+            assert_agrees(text);
+        }
+    }
+
+    /// The scanner's answer decides whether a filter is rejected before pest runs, so a value
+    /// with many parentheses must not be counted as nesting.
+    #[test]
+    fn parentheses_after_an_escaped_quote_are_data() {
+        for count in [1usize, 200, 300, 900] {
+            let mut text = String::from(r#"Name = "a\\""#);
+            text.push_str(&"(".repeat(count));
+            text.push('"');
+            assert_eq!(max_nesting(&text), 0, "{count} parentheses are inside the value");
+        }
+    }
 }
