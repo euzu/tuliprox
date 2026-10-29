@@ -1642,6 +1642,9 @@ Tuliprox supports the following filter expression types:
   `2` = HD/720p, `1` = SD/480p/576p, `0` = no recognized quality token.
 * Filters don't have operator precedence, so please use parentheses
 * You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
+* A filter is limited to about 10000 terms in total, counted over the whole expression including nested groups. Larger
+  filters are rejected with an error naming the limit.
+* Parentheses may nest up to 256 levels. Deeper nesting is rejected before the filter is parsed.
 
 > **Note:**
 >
