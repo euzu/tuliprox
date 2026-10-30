@@ -768,3 +768,62 @@ fn unresolved_root_evaluates_to_false() {
     let item = mock("a", "b");
     assert!(!filter.filter(&ValueProvider { pli: &item, match_as_ascii: false }));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The recursive and the iterative evaluator must agree.
+// ---------------------------------------------------------------------------------------------
+
+/// `filter()` recurses for the first levels and walks the rest with an explicit stack. Both
+/// paths implement the same semantics, so every tree must give the same answer through each.
+#[test]
+fn recursive_and_iterative_evaluation_agree() {
+    let texts = [
+        r#"Group = "a""#,
+        r#"NOT Group = "a""#,
+        r#"Group = "a" AND Name = "x""#,
+        r#"Group = "a" OR Name = "x""#,
+        r#"NOT Group = "a" AND Name = "x" OR Group = "b""#,
+        r#"(Group = "a" OR Group = "b") AND NOT (Name = "x" AND Group = "a")"#,
+        r#"NOT (NOT (Group = "a") OR Name = "y") AND (Group = "b" OR (Name = "x"))"#,
+        r#"Group IS EMPTY OR Name IS NOT EMPTY AND NOT Group IN ["a", "c"]"#,
+    ];
+    let mut filters: Vec<Filter> = texts.iter().map(|text| parse(text)).collect();
+
+    // A binary left operand is never produced by the parser, only by code.
+    let mut builder = FilterBuilder::new();
+    let a = builder.leaf(Leaf::StringComparison(ItemField::Group, StringOperator::Eq, "a".to_string()));
+    let x = builder.leaf(Leaf::StringComparison(ItemField::Name, StringOperator::Eq, "x".to_string()));
+    let b = builder.leaf(Leaf::StringComparison(ItemField::Group, StringOperator::Eq, "b".to_string()));
+    let left = builder.or(a, x);
+    let negated = builder.not(left);
+    let root = builder.and(negated, b);
+    filters.push(builder.finish(root));
+
+    let items = [mock("x", "a"), mock("x", "b"), mock("y", "a"), mock("y", "b"), mock("x", ""), mock("", "c")];
+    for filter in &filters {
+        for item in &items {
+            let provider = ValueProvider { pli: item, match_as_ascii: false };
+            assert_eq!(
+                filter.eval_node(filter.root(), &provider, usize::MAX),
+                filter.eval_iterative(filter.root(), &provider),
+                "{filter} disagrees for name={} group={}",
+                item.header.name,
+                item.header.group
+            );
+        }
+    }
+}
+
+/// Oversized text is rejected before pest builds a parse tree for it.
+#[test]
+fn filter_text_beyond_the_byte_limit_is_rejected() {
+    let limit = super::parser::MAX_FILTER_BYTES;
+    let prefix = r#"Group = ""#;
+    let at_limit = format!("{prefix}{}\"", "a".repeat(limit - prefix.len() - 1));
+    assert_eq!(at_limit.len(), limit);
+    assert!(accepts(&at_limit), "text at the limit parses");
+
+    let over = format!("{prefix}{}\"", "a".repeat(limit - prefix.len()));
+    let err = get_filter(&over, None).expect_err("text over the limit is rejected");
+    assert!(err.to_string().contains("too large"), "{err}");
+}

@@ -260,8 +260,6 @@ impl ProxyUserCredentials {
                 // A copy only fails for a filter with an unresolvable root, which this crate
                 // does not produce. The user is denied rather than served an uncombined filter,
                 // because the combination is what restricts them.
-                // Both sides must copy; a failure means a filter this crate should not have
-                // produced, so it denies instead of serving a half-combined filter.
                 if let (Some(plan_node), Some(user_node)) =
                     (builder.append(plan.as_ref()), builder.append(user.as_ref()))
                 {

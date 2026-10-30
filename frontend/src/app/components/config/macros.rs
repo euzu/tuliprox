@@ -198,6 +198,18 @@ macro_rules! config_field_child {
             </div>
         }
     };
+    ($label:expr, $field_id:expr, $hint:expr, $body:block) => {
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$field_id.to_string()}
+                    hint_key={$hint}
+                />
+                { $body }
+            </div>
+        }
+    };
     ($label:expr, $body:block) => {
         html! {
             <div class="tp__form-field tp__form-field__text">

@@ -22,6 +22,7 @@ pub mod response_compression;
 pub mod runtime_liveness;
 mod step_measure;
 mod sys_utils;
+pub(crate) mod syslog;
 mod telegram;
 mod time_utils;
 

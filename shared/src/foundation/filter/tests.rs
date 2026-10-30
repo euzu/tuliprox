@@ -507,9 +507,8 @@ fn test_node_budget_counts_nested_groups() {
     get_filter(&parts.join(" OR "), None).expect("a filter within the budget parses");
 }
 
-/// Evaluation walks the tree recursively, so it is limited by stack depth per
-/// term rather than by the parser. The longest chain the parser accepts must still
-/// be safe to evaluate on a worker thread stack.
+/// The longest chain the parser accepts evaluates on a worker thread stack: past the
+/// recursive budget the evaluator continues on an explicit stack.
 #[test]
 fn test_filter_chain_evaluates() {
     let terms = max_chain_terms();

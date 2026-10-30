@@ -4,6 +4,12 @@
 
 ## ⚠️ Breaking Changes
 
+- **The in-memory log ring buffer behind the Web-UI Live Logs now follows the root log filter.** Previously,
+  the ring buffer stored every record that passed the global maximum log level, exposing noisy dependency logs
+  and foreign-crate debug records even when stdout filtered them out. The ring buffer is now gated directly on the
+  root filter (`log.log_level` and module specifications), ensuring the Web UI stream matches stdout. This applies
+  unconditionally, whether external syslog shipping is enabled or not.
+
 - **Unused `media_server` options removed.** The input keys `media_server.playback` (`direct_play_only`,
   `allow_transcode`, `playback_info_policy`, `preflight_streams`), `media_server.image_policy`,
   `media_server.catalog.refresh_mode`, `media_server.catalog.refresh_on_startup`, `media_server.catalog.include_paths`
@@ -199,6 +205,15 @@
   failing mid-refresh. Existing mapping files are unchanged and keep running as `dsl`. The embedded runtime lives in a
   new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. See
   [Rhai scripts](docs/src/configuration/mapping-dsl.md#23-rhai-scripts-type-rhai).
+
+- **External log shipping via syslog and NDJSON (`log.syslog`).** Application log records can now be streamed
+  asynchronously over UDP to an external collector (such as Vector, rsyslog, Logstash, or Fluent Bit) without
+  blocking media processing. Supports RFC 5424, RFC 3164, and NDJSON wire formats, an optional independent remote
+  log level, bounded memory queues with drop-on-full semantics, and live configuration reloads without restart.
+  Configurable via `config.yml` or the Web UI under Config → Log. See
+  [Logging](docs/src/configuration/config.md#3-logging-log). Measured cost of the log call on the reference
+  machine (release, `syslog_hot_path_cost`): 437 ns/record with no sink and 837 ns/record with the sink enabled,
+  i.e. roughly 400 ns per shipped record, dominated by the datagram formatting and the queue hand-off.
 
 - **New mapper built-in functions: `title_case`, `slug`, `normalize_spaces`, `coalesce`, and `deunicode`.** Five new
   helper functions for playlist transformations in the mapper DSL:
@@ -1245,7 +1260,8 @@
   no longer probes the stack on musl, and a filter is now stored flat and read, rendered, evaluated and dropped without
   recursion, so a long `AND`/`OR` chain no longer needs stack. Existing filters keep their result, a rendered filter
   keeps its grouping when it is written back to the configuration, and oversized filters are rejected with an error
-  naming the limit.
+  naming the limit. The web UI filter view renders long chains without recursion, and the runtime watchdog drains
+  queued syslog records before it exits for a restart.
 
 - **Mapper arity errors name the function the user wrote.** A mapper script with the wrong number of arguments reported
   the internal enum variant (`Function accepts only one argument TitleCase`) instead of the function name

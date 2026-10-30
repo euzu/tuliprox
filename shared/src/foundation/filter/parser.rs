@@ -38,7 +38,7 @@ expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
 not_expr = _{ not ~ basic_expr }
 expr = { (not_expr | basic_expr) ~ (bool_op ~ (not_expr | basic_expr))* }
-stmt = { expr ~ (bool_op ~ expr)* }
+stmt = { expr }
 main = _{ SOI ~ stmt ~ EOI }
 "#]
 struct FilterParser;
@@ -248,8 +248,13 @@ fn get_parser_type_comparison(expr: Pair<Rule>) -> Result<Leaf, TuliproxError> {
 /// the chain, so this admits about 10 000 terms, far more than any hand-written filter.
 pub(super) const MAX_FILTER_NODES: usize = 20_000;
 
-/// Longest nesting of parentheses accepted in one filter.
+/// Longest filter text accepted, in bytes, after templates are applied.
 ///
+/// pest builds the whole parse tree before [`MAX_FILTER_NODES`] is checked, so oversized text
+/// from a client is rejected before it is parsed. The limit allows the full node budget with
+/// long values: about 400 bytes per term, 8 MB in total.
+pub(super) const MAX_FILTER_BYTES: usize = MAX_FILTER_NODES * 400;
+
 /// Deepest parenthesis nesting accepted in one filter.
 ///
 /// `pest` builds its parse tree with one nested call per group, before any of this crate's
@@ -285,53 +290,15 @@ fn get_parser_expression(
 
     for pair in expr.into_inner() {
         let parsed = match pair.as_rule() {
-            Rule::field_comparison => match get_parser_field_comparison(pair, templates) {
+            // A comparison is one leaf. Its error is recorded and the operand count check below
+            // rejects the expression, so the remaining operands still report their errors.
+            Rule::comparison => match parse_leaf(pair, templates) {
                 Ok(leaf) => Some(builder.leaf(leaf)),
                 Err(err) => {
                     errors.push(err.message().to_string());
                     None
                 }
             },
-            Rule::type_comparison => match get_parser_type_comparison(pair) {
-                Ok(leaf) => Some(builder.leaf(leaf)),
-                Err(err) => {
-                    errors.push(err.message().to_string());
-                    None
-                }
-            },
-            Rule::string_comparison => match get_parser_string_comparison(pair, templates) {
-                Ok(leaf) => Some(builder.leaf(leaf)),
-                Err(err) => {
-                    errors.push(err.message().to_string());
-                    None
-                }
-            },
-            Rule::presence_comparison => match get_parser_presence_comparison(pair) {
-                Ok(leaf) => Some(builder.leaf(leaf)),
-                Err(err) => {
-                    errors.push(err.message().to_string());
-                    None
-                }
-            },
-            Rule::numeric_comparison => match get_parser_numeric_comparison(pair) {
-                Ok(leaf) => Some(builder.leaf(leaf)),
-                Err(err) => {
-                    errors.push(err.message().to_string());
-                    None
-                }
-            },
-            Rule::set_comparison => match get_parser_set_comparison(pair, templates) {
-                Ok(leaf) => Some(builder.leaf(leaf)),
-                Err(err) => {
-                    errors.push(err.message().to_string());
-                    None
-                }
-            },
-            // `comparison` is a named rule and reaches this arm; `expr` never appears as a direct
-            // child of `expr` (only inside `expr_group`), so it is not matched here.
-            // A comparison adds exactly one level of recursion and is not nesting, so it does
-            // not consume budget: the depth counts parentheses only.
-            Rule::comparison => Some(get_parser_expression(pair, templates, errors, depth, builder)?),
             Rule::expr_group => {
                 let inner = pair.into_inner().next().ok_or_else(|| "empty expression group".to_string())?;
                 let node = get_parser_expression(inner, templates, errors, depth + 1, builder)?;
@@ -365,12 +332,13 @@ fn get_parser_expression(
     }
 
     if operands.is_empty() {
-        return Err(format!("Invalid Filter, could not parse {errors:?}"));
+        // The causes are already in `errors`, which the caller reports.
+        return Err("Invalid Filter, could not parse".to_string());
     }
     // A failed operand is already recorded in `errors`; the filter is rejected below
     // either way, so a count mismatch never builds a partial tree.
     if operators.len() + 1 != operands.len() {
-        return Err(format!("incomplete filter expression: {operands:?}, {errors:?}"));
+        return Err("incomplete filter expression".to_string());
     }
     let mut acc = operands.pop().ok_or_else(|| "empty filter expression".to_string())?;
     for op in operators.into_iter().rev() {
@@ -387,6 +355,20 @@ fn get_parser_expression(
     check_node_budget(builder)?;
 
     Ok(acc)
+}
+
+/// Parses a `comparison` rule into its leaf.
+fn parse_leaf(comparison: Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<Leaf, TuliproxError> {
+    let pair = next_rule(&mut comparison.into_inner(), "comparison")?;
+    match pair.as_rule() {
+        Rule::field_comparison => get_parser_field_comparison(pair, templates),
+        Rule::type_comparison => get_parser_type_comparison(pair),
+        Rule::string_comparison => get_parser_string_comparison(pair, templates),
+        Rule::presence_comparison => get_parser_presence_comparison(pair),
+        Rule::numeric_comparison => get_parser_numeric_comparison(pair),
+        Rule::set_comparison => get_parser_set_comparison(pair, templates),
+        _ => Err(TuliproxError::FilterParse(format!("did not expect rule: {pair:?}"))),
+    }
 }
 
 fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxError> {
@@ -492,6 +474,16 @@ pub fn get_filter_detailed(
         ));
     }
 
+    if source.len() > MAX_FILTER_BYTES {
+        return Err((
+            TuliproxError::FilterParse(format!(
+                "filter is too large: {} bytes, at most {MAX_FILTER_BYTES} are allowed",
+                source.len()
+            )),
+            None,
+        ));
+    }
+
     let nesting = max_nesting(&source);
     if nesting > MAX_NESTING_DEPTH {
         return Err((
@@ -507,47 +499,18 @@ pub fn get_filter_detailed(
             let mut errors = Vec::new();
             let mut builder = FilterBuilder::new();
             let mut result: Option<NodeId> = None;
-            let mut op: Option<BinaryOperator> = None;
             for pair in pairs {
                 match pair.as_rule() {
+                    // `stmt` holds exactly one `expr`; the operator chain lives inside it.
                     Rule::stmt => {
                         for expr in pair.into_inner() {
-                            match expr.as_rule() {
-                                Rule::expr => {
-                                    match get_parser_expression(expr, templates, &mut errors, 0, &mut builder) {
-                                        Ok(node) => match op.take() {
-                                            Some(binop) => {
-                                                // The grammar keeps every operator inside one `expr`, so this
-                                                // fold is not reached; it mirrors the expression-level grouping
-                                                // should a future grammar split a statement again.
-                                                if let Some(lhs) = result {
-                                                    result = Some(match binop {
-                                                        BinaryOperator::And => builder.and(lhs, node),
-                                                        BinaryOperator::Or => builder.or(lhs, node),
-                                                    });
-                                                } else {
-                                                    errors.push("missing left operand".to_string());
-                                                }
-                                            }
-                                            None => result = Some(node),
-                                        },
-                                        Err(err) => errors.push(err),
-                                    }
+                            if expr.as_rule() == Rule::expr {
+                                match get_parser_expression(expr, templates, &mut errors, 0, &mut builder) {
+                                    Ok(node) => result = Some(node),
+                                    Err(err) => errors.push(err),
                                 }
-                                Rule::bool_op => match expr.into_inner().next() {
-                                    Some(op_pair) => match get_parser_binary_op(&op_pair) {
-                                        Ok(binop) => {
-                                            op = Some(binop);
-                                        }
-                                        Err(err) => {
-                                            errors.push(err.message().to_string());
-                                        }
-                                    },
-                                    None => errors.push("missing boolean operator".to_string()),
-                                },
-                                _ => {
-                                    errors.push(format!("unknown expression {expr:?}"));
-                                }
+                            } else {
+                                errors.push(format!("unknown expression {expr:?}"));
                             }
                         }
                     }

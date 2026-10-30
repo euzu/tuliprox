@@ -567,7 +567,18 @@
       "LOG_LEVEL": "Sets the verbosity of application logs (e.g. info, debug, error).",
       "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs.",
       "RUNTIME_CONFIG_REPORT_ENABLED": "If enabled, the runtime configuration is printed to the log on startup.",
-      "RUNTIME_CONFIG_REPORT_FORMAT": "Defines the format in\nwhich the runtime configuration report is printed to the log."
+      "RUNTIME_CONFIG_REPORT_FORMAT": "Defines the format in\nwhich the runtime configuration report is printed to the log.",
+      "SYSLOG_APP_NAME": "Application name in the syslog header (1..=48 ASCII characters without spaces, default tuliprox).",
+      "SYSLOG_ENABLED": "Enables shipping application logs to an external syslog collector over UDP (unencrypted and lossy).",
+      "SYSLOG_FACILITY": "Syslog facility: all 24 values of RFC 5424 are offered for interoperability, but only local0..local7 really make sense for this application (local0 is the default). A facility is a routing key, not a severity: collectors write cron to /var/log/cron and authpriv to the auth log, so a foreign facility moves these records out of the general log. Route on app_name for finer splits.",
+      "SYSLOG_FORMAT": "Syslog wire format: RFC 5424 (modern standard), RFC 3164 (legacy BSD), or JSON (NDJSON object with target).",
+      "SYSLOG_HOST": "Hostname or IP address of the syslog collector (required when syslog is enabled).",
+      "SYSLOG_HOSTNAME": "Optional hostname override. If omitted, the system hostname is used (or NILVALUE '-' if unknown).",
+      "SYSLOG_LOG_LEVEL": "Independent remote log level (DEBUG, INFO, WARN, ERROR). TRACE is unavailable to prevent credential leaks. Omitted inherits root level.",
+      "SYSLOG_MAX_MESSAGE_LEN": "Maximum UDP datagram size (480..=65507 bytes; min 1024 for JSON). Datagrams above 1472 (IPv4) or 1452 (IPv6) may be fragmented and dropped by firewalls.",
+      "SYSLOG_PORT": "UDP destination port of the syslog collector (1..=65535, default 514).",
+      "SYSLOG_PREVIEW_ONLY": "Pre-staged syslog configuration is kept when disabled without shipping any datagrams until enabled.",
+      "SYSLOG_QUEUE_CAPACITY": "Capacity of the bounded memory queue for outgoing datagrams (1..=65536). Excess messages are dropped when the queue fills."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "The name of the generated M3U file (e.g. playlist.m3u).",
@@ -1980,7 +1991,20 @@
     "REVERSE_PROXY_TAB_GENERAL": "General",
     "REVERSE_PROXY_TAB_STREAM": "Stream",
     "REVERSE_PROXY_TAB_HLS": "HLS",
-    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetry"
+    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetry",
+    "SYSLOG": "Syslog",
+    "SYSLOG_APP_NAME": "Syslog App Name",
+    "SYSLOG_ENABLED": "Enable Syslog",
+    "SYSLOG_FACILITY": "Syslog Facility",
+    "SYSLOG_FORMAT": "Syslog Format",
+    "SYSLOG_HOST": "Syslog Host",
+    "SYSLOG_HOSTNAME": "Syslog Hostname",
+    "SYSLOG_INFO": "External syslog shipping is currently disabled. Enable to configure remote logging over UDP.",
+    "SYSLOG_INHERIT_ROOT": "Inherit root level",
+    "SYSLOG_LOG_LEVEL": "Syslog Log Level",
+    "SYSLOG_MAX_MESSAGE_LEN": "Max Message Length",
+    "SYSLOG_PORT": "Syslog Port",
+    "SYSLOG_QUEUE_CAPACITY": "Queue Capacity"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

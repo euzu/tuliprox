@@ -207,7 +207,7 @@ impl AppState {
         let old_storage_dir = current_config.storage_dir.clone();
         drop(current_config);
         let changes = self.detect_changes_for_config(&config);
-        let config_log_level = config.log.as_ref().and_then(|log| log.log_level.clone());
+        let log_dto = config.log.as_ref().map(shared::model::LogConfigDto::from);
         config.update_runtime();
 
         let use_geoip = config.is_geoip_enabled();
@@ -215,7 +215,7 @@ impl AppState {
 
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
-        reload_logger(config_log_level.as_deref());
+        reload_logger(log_dto.as_ref());
         self.active_provider.update_config(&self.app_config);
         self.hls.proxy.update_config(&self.app_config).await;
         self.update_config().await?;

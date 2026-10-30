@@ -70,7 +70,7 @@ pub fn sanitize_filename_component(raw: &str) -> String {
     // Trailing dots and spaces are silently stripped by Windows, which
     // would desync the persisted `relative_path` from the real file.
     let trimmed = out.trim_matches(|ch: char| ch.is_whitespace() || ch == '.');
-    let mut result = truncate_on_char_boundary(trimmed, MAX_FILENAME_COMPONENT_BYTES)
+    let mut result = trimmed[..trimmed.floor_char_boundary(MAX_FILENAME_COMPONENT_BYTES)]
         .trim_end_matches(|ch: char| ch.is_whitespace() || ch == '.')
         .to_string();
 
@@ -92,18 +92,6 @@ fn is_invisible_formatting(ch: char) -> bool {
             | '\u{2066}'..='\u{2069}' // directional isolates
             | '\u{feff}'              // BOM / zero-width no-break space
     )
-}
-
-/// Truncate to at most `max_bytes`, never splitting a character.
-fn truncate_on_char_boundary(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
 }
 
 /// `true` when the component's stem is a Windows device name.
