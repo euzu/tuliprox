@@ -221,7 +221,9 @@ pub(super) async fn fetch_resource_with_timeout(
     let mut current_headers = req_headers.clone();
     let mut current_input = input;
     let mut method = input.map_or(InputFetchMethod::GET, |i| i.method);
-    let fetch_options = RequestFetchOptions::with_attempt_idle_timeout(attempt_timeout).without_resource_retries();
+    let fetch_options = RequestFetchOptions::with_attempt_idle_timeout(attempt_timeout)
+        .without_resource_retries()
+        .with_header_timeout_only();
 
     for redirects in 0..=RESOURCE_REDIRECT_LIMIT {
         // Every hop is routed on its own, so a redirect cannot move a request to an egress the hop

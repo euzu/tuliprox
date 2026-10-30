@@ -9,8 +9,10 @@ pub(super) enum ResourceRetryExecution {
 }
 
 pub(super) fn apply_request_fetch_options(request: &mut reqwest::Request, options: RequestFetchOptions) {
-    if let Some(timeout) = options.attempt_idle_timeout {
-        *request.timeout_mut() = Some(timeout);
+    if !options.header_timeout_only {
+        if let Some(timeout) = options.attempt_idle_timeout {
+            *request.timeout_mut() = Some(timeout);
+        }
     }
     apply_outbound_content_coding_policy(request.headers_mut(), options.content_coding);
 }

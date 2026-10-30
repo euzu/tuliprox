@@ -345,6 +345,9 @@ pub(crate) use self::{
 };
 #[cfg(test)]
 use self::{
-    resource_limiter::{acquire_resource_host_permit, RESOURCE_HOST_CONCURRENCY_LIMIT},
+    resource_limiter::{
+        acquire_resource_host_permit, get_resource_host_semaphore, RESOURCE_HOST_CONCURRENCY_LIMIT,
+        RESOURCE_HOST_MAP_PRUNE_THRESHOLD,
+    },
     resources::fetch_resource_with_timeout,
 };

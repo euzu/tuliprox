@@ -1,7 +1,8 @@
 use super::{
-    acquire_resource_host_permit, create_test_app_state, fetch_resource_with_timeout, media_server_image_error_status,
-    resource_input_for_url, resource_proxy_response, resource_redirect_or_proxy, resource_response,
-    spawn_legacy_hls_test_origin, ResourceFetchPolicy, RESOURCE_HOST_CONCURRENCY_LIMIT,
+    acquire_resource_host_permit, create_test_app_state, fetch_resource_with_timeout, get_resource_host_semaphore,
+    media_server_image_error_status, resource_input_for_url, resource_proxy_response, resource_redirect_or_proxy,
+    resource_response, spawn_legacy_hls_test_origin, ResourceFetchPolicy, RESOURCE_HOST_CONCURRENCY_LIMIT,
+    RESOURCE_HOST_MAP_PRUNE_THRESHOLD,
 };
 use crate::{
     media_server::{MediaServerError, MediaServerErrorKind},
@@ -538,6 +539,55 @@ async fn unresponsive_upstream_fails_after_attempt_timeout() {
 }
 
 #[tokio::test]
+async fn resource_fetch_timeout_covers_headers_only_and_delivers_delayed_body() {
+    let app_state = create_test_app_state();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("mock origin binds");
+    let origin_addr = listener.local_addr().expect("mock origin address");
+
+    let origin_task = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut chunk = [0_u8; 1024];
+            let _ = socket.read(&mut chunk).await;
+            let response_headers =
+                b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 10\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(response_headers).await;
+            let _ = socket.flush().await;
+            // Delay body longer than the attempt timeout (100ms attempt timeout, delay 250ms)
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let _ = socket.write_all(b"0123456789").await;
+            let _ = socket.flush().await;
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{origin_addr}")).expect("test proxy"))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("mock client");
+    app_state.http_clients.resource_public_no_redirect.store(Arc::new(client));
+
+    let url = Url::parse("http://8.8.8.8/delayed_body.png").expect("valid url");
+    let resp = fetch_resource_with_timeout(
+        &app_state,
+        &url,
+        ResourceFetchPolicy::Public,
+        "http://8.8.8.8/delayed_body.png",
+        &HashMap::new(),
+        None,
+        Duration::from_millis(100),
+    )
+    .await;
+
+    assert!(resp.is_some(), "fetch must succeed when headers arrive immediately");
+    let response = resp.expect("valid response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = response.into_body().collect().await.expect("reading response body must succeed").to_bytes();
+    assert_eq!(&body_bytes[..], b"0123456789", "full body must be delivered despite body delay");
+    origin_task.abort();
+}
+
+#[tokio::test]
 async fn resource_limiter_blocks_excess_permits_on_same_host_without_blocking_other_hosts() {
     use futures::FutureExt as _;
     use std::pin::pin;
@@ -568,4 +618,62 @@ async fn resource_limiter_blocks_excess_permits_on_same_host_without_blocking_ot
         .await
         .expect("must resolve after permit is released");
     assert!(acquired.is_some(), "must acquire permit once one is released");
+}
+
+#[tokio::test]
+async fn resource_limiter_prunes_idle_entries_above_threshold_while_keeping_active_host() {
+    use futures::FutureExt as _;
+    use std::pin::pin;
+
+    let active_host = "limiter-prune-active.invalid";
+    let held_permit = acquire_resource_host_permit(active_host).await;
+    assert!(held_permit.is_some(), "must acquire permit on active host");
+    let active_semaphore = get_resource_host_semaphore(active_host).expect("active host semaphore must exist");
+
+    for i in 0..=RESOURCE_HOST_MAP_PRUNE_THRESHOLD {
+        let idle_host = format!("limiter-prune-idle-{i}.invalid");
+        let permit = acquire_resource_host_permit(&idle_host).await;
+        assert!(permit.is_some(), "must acquire permit on idle host");
+        drop(permit);
+    }
+
+    let new_host = "limiter-prune-new.invalid";
+    let new_permit = acquire_resource_host_permit(new_host).await;
+    assert!(new_permit.is_some(), "must acquire permit on new host");
+
+    // Idle host was pruned
+    assert!(
+        get_resource_host_semaphore("limiter-prune-idle-0.invalid").is_none(),
+        "idle entries above threshold must be pruned"
+    );
+
+    // Active host kept its semaphore (same Arc and permits still counted)
+    let current_active_semaphore =
+        get_resource_host_semaphore(active_host).expect("active host semaphore must still be present");
+    assert!(Arc::ptr_eq(&active_semaphore, &current_active_semaphore), "active host must keep the same semaphore Arc");
+    assert_eq!(
+        current_active_semaphore.available_permits(),
+        RESOURCE_HOST_CONCURRENCY_LIMIT - 1,
+        "active host permit count must still reflect held permit"
+    );
+
+    // Remaining capacity on active host can be acquired
+    let mut more_permits = Vec::new();
+    for _ in 0..(RESOURCE_HOST_CONCURRENCY_LIMIT - 1) {
+        let permit = acquire_resource_host_permit(active_host).await;
+        assert!(permit.is_some(), "must acquire remaining capacity on active host");
+        more_permits.push(permit.expect("permit"));
+    }
+
+    // Now active host is saturated and waits
+    let mut next_acquire = pin!(acquire_resource_host_permit(active_host));
+    assert!(next_acquire.as_mut().now_or_never().is_none(), "next acquire on active host must wait");
+
+    drop(held_permit);
+    let acquired = tokio::time::timeout(Duration::from_secs(1), next_acquire)
+        .await
+        .expect("must resolve after permit is released");
+    assert!(acquired.is_some(), "must acquire permit once one is released");
+    drop(new_permit);
+    drop(more_permits);
 }

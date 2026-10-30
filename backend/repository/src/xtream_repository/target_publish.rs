@@ -23,7 +23,7 @@ use serde_json::Value;
 use shared::{
     error::TuliproxError,
     model::{ClusterFlags, PlaylistGroup, XtreamCluster, XtreamPlaylistItem},
-    utils::{get_u32_from_serde_value, Internable},
+    utils::{get_u32_from_serde_value, sanitize_sensitive_info, Internable},
 };
 #[cfg(unix)]
 use std::fs;
@@ -525,9 +525,9 @@ pub async fn write_playlist_batch_item_upsert(
     let xtream_path_clone = xtream_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
         let _guard = file_lock;
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
         let index_path = get_file_path_for_db_index(&xtream_path_clone);
         let snapshot = IndexSnapshot::<u32, u32>::read(&index_path).ok().flatten();
-        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
         // Keys that are new or moved to another `source_ordinal`; only needed when an index is kept.
         let mut changed = Vec::new();
         if snapshot.is_some() {
@@ -543,7 +543,12 @@ pub async fn write_playlist_batch_item_upsert(
         }
         tree.upsert_batch_encoded(prepared_items)?;
         if let Some(snapshot) = snapshot {
-            snapshot.write_merged(&index_path, &changed)?;
+            if let Err(err) = snapshot.write_merged(&index_path, &changed) {
+                warn!(
+                    "Failed to write merged index snapshot for {}: {err}",
+                    sanitize_sensitive_info(&index_path.to_string_lossy())
+                );
+            }
         }
         Ok(())
     })

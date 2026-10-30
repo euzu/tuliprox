@@ -1258,7 +1258,8 @@
 
 - **Image/resource proxy fails fast on upstream errors and limits per-host concurrency.** The image/resource proxy
   no longer retries a failing upstream image three times (each failing image could block a browser slot for minutes),
-  fails after 15 s without response, and limits concurrent upstream fetches per host to 6 to avoid provider overload.
+  fails after 15 s waiting for the response (the limit applies to waiting for the response, not to the image transfer),
+  and limits concurrent upstream fetches per host to 6 to avoid provider overload.
 
 - **Xtream list order stays sorted after stream or series info resolves.** Resolving VOD or series info updates the
   target database in place, and every commit removed the sorted index, so later list requests returned items in
