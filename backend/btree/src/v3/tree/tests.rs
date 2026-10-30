@@ -7,6 +7,7 @@ mod persistence;
 mod protocol;
 mod query;
 mod support;
+mod verified_cache;
 
 use self::support::{
     assert_writer_is_blocked, database_header, empty_leaf, finish_writer, invalid_data, invalid_input, random_value,

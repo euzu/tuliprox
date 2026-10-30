@@ -135,7 +135,7 @@ impl CurationMediaScope {
     fn includes_playlist_item(self, item_type: PlaylistItemType) -> bool {
         match self {
             Self::Movies => item_type.is_video(),
-            Self::Series => matches!(item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo),
+            Self::Series => item_type.is_series_info(),
             Self::Both => matches!(
                 item_type,
                 PlaylistItemType::Video
@@ -479,8 +479,7 @@ fn create_category_from_items(
     for item in items {
         let projected_item = clone_item_for_category(item, specification, &group_title);
         let parent_uuid = projected_item.header.uuid.intern();
-        let is_series_info =
-            matches!(projected_item.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo);
+        let is_series_info = projected_item.header.item_type.is_series_info();
         let child_lookup_keys = if is_series_info { series_info_child_lookup_keys(item) } else { Vec::new() };
         let cluster = projected_item.header.xtream_cluster;
         matched_items_by_cluster.entry(cluster).or_default().push(projected_item);

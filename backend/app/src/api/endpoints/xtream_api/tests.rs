@@ -201,32 +201,7 @@ async fn xtream_short_epg_returns_imported_ics_programme_for_matching_channel_id
     .expect("write target EPG");
 
     let app_state = create_test_app_state(config);
-    let live_item = short_epg_live_item();
-    let mut live = BPlusTree::new();
-    live.insert(live_item.virtual_id.get(), live_item.clone());
-    app_state
-        .playlists
-        .cache_playlist(
-            &target.name,
-            PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage {
-                live,
-                vod: BPlusTree::new(),
-                series: BPlusTree::new(),
-            })),
-        )
-        .await;
-    let mut id_mapping = BPlusTree::new();
-    id_mapping.insert(
-        live_item.virtual_id,
-        VirtualIdRecord::new(
-            live_item.provider_id,
-            live_item.virtual_id,
-            PlaylistItemType::Live,
-            VirtualId::new(0),
-            UUIDType::default(),
-        ),
-    );
-    app_state.playlists.cache_id_mapping(&target.name, id_mapping).await;
+    cache_xtream_test_item(&app_state, &target, short_epg_live_item(), None).await;
 
     let mut user = ProxyUserCredentials::default();
     user.output_clusters = ClusterFlags::all();
@@ -303,11 +278,11 @@ async fn cache_xtream_test_item(
         .playlists
         .cache_playlist(
             &target.name,
-            PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage {
+            PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage::from_trees(
                 live,
-                vod: BPlusTree::new(),
-                series: BPlusTree::new(),
-            })),
+                BPlusTree::new(),
+                BPlusTree::new(),
+            ))),
         )
         .await;
     let mut id_mapping = BPlusTree::new();

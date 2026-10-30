@@ -1207,14 +1207,6 @@ impl ResourceFetchPolicy {
             Self::NonPublic => None,
         }
     }
-
-    /// Whether an upstream response may be relayed to the client.
-    ///
-    /// A public destination was chosen by the user's own configuration, so what it answered is what
-    /// the client asked for. A resource proxy whose destination is deliberately hidden from the client
-    /// must not become a reader for that destination: status, headers and body of an upstream error can
-    /// disclose more about the internal service than the link itself.
-    pub(super) const fn relays_upstream_response(self) -> bool { matches!(self, Self::Public) }
 }
 
 pub fn is_seek_request(cluster: XtreamCluster, req_headers: &HeaderMap) -> bool {

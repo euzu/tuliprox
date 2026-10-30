@@ -9,7 +9,45 @@ use crate::{
 };
 use log::warn;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
+
+thread_local! {
+    static SKIP_SERIES_DETAILS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII guard that sets the thread-local `SKIP_SERIES_DETAILS` flag to `true`,
+/// and restores the previous value when dropped.
+#[derive(Debug)]
+pub(crate) struct SkipSeriesDetailsGuard {
+    prev: bool,
+}
+
+impl SkipSeriesDetailsGuard {
+    #[must_use]
+    pub(crate) fn enter() -> Self {
+        let prev = SKIP_SERIES_DETAILS.with(|flag| flag.replace(true));
+        Self { prev }
+    }
+
+    #[inline]
+    pub(crate) fn is_enabled() -> bool { SKIP_SERIES_DETAILS.with(Cell::get) }
+}
+
+impl Drop for SkipSeriesDetailsGuard {
+    fn drop(&mut self) { SKIP_SERIES_DETAILS.with(|flag| flag.set(self.prev)); }
+}
+
+fn deserialize_series_details<'de, D>(deserializer: D) -> Result<Option<SeriesStreamDetailProperties>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    if SkipSeriesDetailsGuard::is_enabled() {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(None)
+    } else {
+        Option::<SeriesStreamDetailProperties>::deserialize(deserializer)
+    }
+}
 
 fn format_episode_code(season: u32, episode: u32) -> Option<String> {
     match (season, episode) {
@@ -182,7 +220,7 @@ pub struct SeriesStreamProperties {
     pub youtube_trailer: Arc<str>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_series_details")]
     pub details: Option<SeriesStreamDetailProperties>,
 }
 
@@ -472,5 +510,36 @@ pub(super) fn non_empty_arc(s: &Arc<str>) -> Option<Arc<str>> {
         None
     } else {
         Some(Arc::clone(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_series_details_guard_restores_previous_flag() {
+        assert!(!SkipSeriesDetailsGuard::is_enabled());
+        {
+            let _g1 = SkipSeriesDetailsGuard::enter();
+            assert!(SkipSeriesDetailsGuard::is_enabled());
+            {
+                let _g2 = SkipSeriesDetailsGuard::enter();
+                assert!(SkipSeriesDetailsGuard::is_enabled());
+            }
+            assert!(SkipSeriesDetailsGuard::is_enabled(), "outer guard still active");
+        }
+        assert!(!SkipSeriesDetailsGuard::is_enabled(), "restored to false");
+    }
+
+    #[test]
+    fn skip_series_details_guard_unwinds_safely() {
+        assert!(!SkipSeriesDetailsGuard::is_enabled());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = SkipSeriesDetailsGuard::enter();
+            assert!(SkipSeriesDetailsGuard::is_enabled());
+            panic!("test unwind");
+        });
+        assert!(!SkipSeriesDetailsGuard::is_enabled(), "restored to false after unwind");
     }
 }

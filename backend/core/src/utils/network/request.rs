@@ -76,6 +76,7 @@ const RESOURCE_DESTINATION_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250)
 pub struct RequestFetchOptions {
     stop_on_proxy_authentication_required: bool,
     pub attempt_idle_timeout: Option<Duration>,
+    header_timeout_only: bool,
     content_coding: OutboundContentCodingPolicy,
     resource_retry: ResourceRetryExecution,
     return_http_errors: bool,

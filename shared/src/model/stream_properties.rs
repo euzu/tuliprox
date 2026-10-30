@@ -78,6 +78,12 @@ impl StreamProperties {
         }
     }
 
+    pub fn clear_series_details(&mut self) {
+        if let StreamProperties::Series(series) = self {
+            series.details = None;
+        }
+    }
+
     pub fn prepare(&mut self) {
         match self {
             StreamProperties::Live(live) => {
@@ -333,6 +339,7 @@ mod video;
 pub use catchup::{CatchupAttribute, CatchupProperties};
 pub use live::LiveStreamProperties;
 pub use resources::is_resource_field_name;
+pub(crate) use series::SkipSeriesDetailsGuard;
 use series::{first_series_episode_value, non_empty_arc, parse_season_episode_field, parse_season_field};
 pub use series::{
     normalize_episode_title, EpisodeStreamProperties, SeriesStreamDetailEpisodeProperties,

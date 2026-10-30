@@ -1,16 +1,19 @@
 use super::{
     force_stream_response, get_headers_from_request, get_hls_playback_ttl_secs, is_hop_by_hop_response_header,
-    media_server_image_error_status, open_media_server_image_resource, redirect, serve_file, try_unwrap_body,
-    ForceStreamRequestContext, HeaderFilter, ResourceFetchPolicy, StreamResponseMode, RESOURCE_REDIRECT_LIMIT,
+    media_server_image_error_status, open_media_server_image_resource, redirect,
+    resource_limiter::acquire_resource_host_permit, serve_file, try_unwrap_body, ForceStreamRequestContext,
+    HeaderFilter, ResourceFetchPolicy, StreamResponseMode, RESOURCE_ATTEMPT_TIMEOUT, RESOURCE_REDIRECT_LIMIT,
 };
 use crate::{
     api::model::{tee_stream, AppState, StreamDetails, StreamError, UserSession},
     auth::Fingerprint,
     model::{ConfigInput, PlaybackKind},
     utils::{
-        async_file_writer, classify_output_resource_url, classify_resource_hop, create_new_file_for_write,
-        debug_if_enabled, request,
-        request::{classify_resource_destination, send_with_retry_and_provider, ResourceDestination},
+        async_file_writer, classify_output_resource_url, classify_resource_hop, create_new_file_for_write, request,
+        request::{
+            classify_resource_destination, send_with_retry_and_provider_policy_with_options, RequestFetchOptions,
+            ResourceDestination,
+        },
         trace_if_enabled, LRUResourceCache, ResourceHop,
     },
 };
@@ -25,7 +28,7 @@ use shared::{
     model::{InputFetchMethod, PlaylistItemType, ResourceOutputPolicy, StreamChannel},
     utils::sanitize_sensitive_info,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use url::Url;
 
@@ -186,6 +189,28 @@ pub(super) async fn fetch_resource_with_retry(
     req_headers: &HashMap<String, Vec<u8>>,
     input: Option<&ConfigInput>,
 ) -> Option<axum::response::Response> {
+    fetch_resource_with_timeout(
+        app_state,
+        url,
+        fetch_policy,
+        resource_url,
+        req_headers,
+        input,
+        RESOURCE_ATTEMPT_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn fetch_resource_with_timeout(
+    app_state: &Arc<AppState>,
+    url: &Url,
+    fetch_policy: ResourceFetchPolicy,
+    resource_url: &str,
+    req_headers: &HashMap<String, Vec<u8>>,
+    input: Option<&ConfigInput>,
+    attempt_timeout: Duration,
+) -> Option<axum::response::Response> {
     let cache_key = fetch_policy.cache_key(resource_url);
     let config = app_state.app_config.config.load();
     let default_user_agent = config.default_user_agent.clone();
@@ -196,6 +221,9 @@ pub(super) async fn fetch_resource_with_retry(
     let mut current_headers = req_headers.clone();
     let mut current_input = input;
     let mut method = input.map_or(InputFetchMethod::GET, |i| i.method);
+    let fetch_options = RequestFetchOptions::with_attempt_idle_timeout(attempt_timeout)
+        .without_resource_retries()
+        .with_header_timeout_only();
 
     for redirects in 0..=RESOURCE_REDIRECT_LIMIT {
         // Every hop is routed on its own, so a redirect cannot move a request to an egress the hop
@@ -207,13 +235,17 @@ pub(super) async fn fetch_resource_with_retry(
         }
         let use_proxy_aware_client = hop == ResourceHop::ViaProxy;
         let provider_config = current_input.and_then(|i| i.get_resolve_provider(current_url.as_str()));
-        let response = match send_with_retry_and_provider(
+        let permit =
+            if let Some(host) = current_url.host_str() { acquire_resource_host_permit(host).await } else { None };
+        let result = send_with_retry_and_provider_policy_with_options(
             &app_state.app_config,
             &current_url,
             provider_config.as_ref(),
             // Hand redirects back instead of retrying them: the loop below follows them itself, so that
             // every hop is classified and no client-side redirect policy decides where the request ends.
             true,
+            true,
+            fetch_options,
             |resolved_url| {
                 let http_client = if use_proxy_aware_client {
                     app_state.http_clients.resource_public_no_redirect.load()
@@ -231,8 +263,19 @@ pub(super) async fn fetch_resource_with_retry(
                 )
             },
         )
-        .await
-        {
+        .await;
+        drop(permit);
+        let response = match result {
+            // The single-attempt path hands HTTP error statuses back as responses; treat them as a failed
+            // fetch, as the retrying path did.
+            Ok(response) if response.status().is_client_error() || response.status().is_server_error() => {
+                debug!(
+                    "Resource fetch failed for {}: status {}",
+                    sanitize_sensitive_info(resource_url),
+                    response.status()
+                );
+                return None;
+            }
             Ok(response) => response,
             Err(err) => {
                 debug!(
@@ -279,18 +322,7 @@ pub(super) async fn fetch_resource_with_retry(
             );
         }
 
-        debug_if_enabled!("Failed to open resource got status {status} for {}", sanitize_sensitive_info(resource_url));
-        if !fetch_policy.relays_upstream_response() {
-            return Some(status.into_response());
-        }
-        let mut response_builder = axum::response::Response::builder().status(status);
-        for (key, value) in response.headers() {
-            if !is_hop_by_hop_response_header(key) {
-                response_builder = response_builder.header(key, value);
-            }
-        }
-        let stream = response.bytes_stream().map_err(|err| StreamError::reqwest(&err));
-        return Some(try_unwrap_body!(response_builder.body(axum::body::Body::from_stream(stream))));
+        return None;
     }
     None
 }

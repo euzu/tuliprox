@@ -84,10 +84,7 @@ impl Leaf {
                 let is_match = match item_type {
                     PlaylistItemType::Live => actual.is_live(),
                     PlaylistItemType::Video => actual.is_video(),
-                    PlaylistItemType::Series => {
-                        actual.is_series()
-                            || matches!(actual, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
-                    }
+                    PlaylistItemType::Series => actual.is_series() || actual.is_series_info(),
                     _ => actual == *item_type,
                 };
                 if log_enabled!(Level::Trace) {
