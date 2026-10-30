@@ -257,11 +257,13 @@ serve-fe: ## Run frontend dev server with Trunk: make serve-fe
 run-be: serve ## Alias for serve
 
 .PHONY: architecture-check
-architecture-check: ## Verify workspace dependency direction
+architecture-check: ## Verify workspace dependency direction and Docker crate lists
 	@echo "==> Checking the architecture gate itself"
 	./bin/check-workspace-deps-test.sh
 	@echo "==> Checking workspace dependency direction"
 	./bin/check-workspace-deps.sh
+	@echo "==> Checking Docker skeleton crate lists"
+	./bin/check-docker-crates.sh
 
 .PHONY: doctor-check
 doctor-check: ## Verify the DVR doctor still matches the routes it reports on

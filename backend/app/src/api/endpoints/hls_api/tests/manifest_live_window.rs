@@ -1,4 +1,5 @@
 mod retained;
+mod startup_recovery;
 
 use super::{normal_manifest, response_body, test_app_state_with_hls_proxy, try_test_hls_cached_manifest_response};
 use crate::api::model::{HlsAccessLeaseId, HlsAccessLeaseState, HlsProxyManager, HlsSessionKey, SegmentCacheStatus};

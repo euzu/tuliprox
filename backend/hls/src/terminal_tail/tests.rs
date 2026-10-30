@@ -173,6 +173,7 @@ async fn unresolved_aes_terminal_base_evidence(iv: &str) -> HlsTerminalBaseEvide
             origin_byte_range: None,
             map_ref: None,
             encryption: Some(timeline_encryption),
+            retained_resource_identity: None,
             origin_fetch_ref: None,
             status: SegmentCacheStatus::Ready {
                 content_length: u64::try_from(TERMINAL_ASSET_BYTES.len()).unwrap_or(u64::MAX),
@@ -250,6 +251,7 @@ async fn terminal_timing_session(
                 origin_byte_range: None,
                 map_ref: None,
                 encryption: None,
+                retained_resource_identity: None,
                 origin_fetch_ref: None,
                 status: SegmentCacheStatus::Ready {
                     content_length: u64::try_from(content_length).unwrap_or(u64::MAX),

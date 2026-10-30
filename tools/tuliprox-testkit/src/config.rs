@@ -270,10 +270,19 @@ pub struct FixtureStreamOptions {
     pub share_live_mpeg_ts: bool,
     #[serde(default)]
     pub hls_startup_mode: Option<crate::hls_probe::StartupMode>,
+    /// Hold back origin segments so missing-head scenarios exercise the selected startup window.
+    pub hls_startup_strip_segments: Option<u64>,
 }
 
 impl Default for FixtureStreamOptions {
-    fn default() -> Self { Self { share_live_hls: true, share_live_mpeg_ts: true, hls_startup_mode: None } }
+    fn default() -> Self {
+        Self {
+            share_live_hls: true,
+            share_live_mpeg_ts: true,
+            hls_startup_mode: None,
+            hls_startup_strip_segments: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

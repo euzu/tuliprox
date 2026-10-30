@@ -99,6 +99,7 @@ mod allocation;
 mod capacity;
 mod capacity_probe;
 mod leases;
+pub use leases::ProviderWorkReservation;
 mod preemption;
 mod release;
 mod shared;

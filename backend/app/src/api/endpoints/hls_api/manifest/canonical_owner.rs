@@ -217,15 +217,20 @@ pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_han
         return hls_canonical_owner_failed(HlsCanonicalOwnerFailureReason::LeaseUnavailable);
     }
     match &lease.playback_mode {
-        HlsLeasePlaybackMode::TerminalTail(_) | HlsLeasePlaybackMode::TerminalCustomResponse(_) => {
-            let Some(response) =
-                hls_terminal_playback_response(&lease, context.proxy_session_id, context.access_lease_id)
-            else {
+        HlsLeasePlaybackMode::TerminalTail(_)
+        | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+        | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
+            let Some(response) = hls_terminal_playback_response(
+                context.app_state,
+                &lease,
+                context.proxy_session_id,
+                context.access_lease_id,
+            ) else {
                 return hls_canonical_owner_failed(HlsCanonicalOwnerFailureReason::LeaseUnavailable);
             };
             return HlsCanonicalOwnerEvaluation::Resolved(HlsCanonicalOwnerResolution::Terminal(response));
         }
-        HlsLeasePlaybackMode::TerminalUnavailable { .. } | HlsLeasePlaybackMode::Ended => {
+        HlsLeasePlaybackMode::Ended => {
             return hls_canonical_owner_failed(HlsCanonicalOwnerFailureReason::LeaseUnavailable);
         }
         HlsLeasePlaybackMode::Live => {}
@@ -249,6 +254,10 @@ pub(in crate::api::endpoints::hls_api) async fn evaluate_hls_canonical_owner_han
     let current_session =
         context.app_state.hls.proxy.sessions().get_by_proxy_session_id(context.proxy_session_id).await;
     if let Some(current_session) = current_session.as_ref() {
+        if let Some(response) = super::hls_exhausted_startup_response(context.app_state, current_session, &lease).await
+        {
+            return HlsCanonicalOwnerEvaluation::Resolved(HlsCanonicalOwnerResolution::Standalone(response));
+        }
         let options = hls_cached_manifest_options_for_requirement(
             Duration::ZERO,
             context.manifest_commit_requirement,
@@ -393,20 +402,155 @@ pub(in crate::api::endpoints::hls_api) enum HlsManifestRefreshOrdering {
     AwaitBeforeTerminalEvaluation,
 }
 
+pub(in crate::api::endpoints::hls_api) async fn current_hls_refresh_lease(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    proxy_session_id: &ProxySessionId,
+    access_lease_id: &HlsAccessLeaseId,
+    expected: &HlsAccessLease,
+) -> Result<HlsAccessLease, Box<axum::response::Response>> {
+    let unavailable =
+        || Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable));
+    let sessions = app_state.hls.proxy.sessions();
+    let current_session = sessions.get_by_proxy_session_id(proxy_session_id).await.ok_or_else(unavailable)?;
+    if !Arc::ptr_eq(session, &current_session)
+        || sessions.session_incarnation(session).is_none()
+        || sessions.session_incarnation(session) != sessions.session_incarnation(&current_session)
+    {
+        return Err(unavailable());
+    }
+    let lease = app_state
+        .hls
+        .proxy
+        .access_lease_response_snapshot(access_lease_id, proxy_session_id, app_state.hls.proxy.now_ms())
+        .await
+        .ok_or_else(unavailable)?;
+    let terminal_transition = expected.playback_mode == HlsLeasePlaybackMode::Live
+        && matches!(
+            lease.playback_mode,
+            HlsLeasePlaybackMode::TerminalTail(_)
+                | HlsLeasePlaybackMode::TerminalCustomResponse(_)
+                | HlsLeasePlaybackMode::TerminalUnavailable { .. }
+        );
+    let expected_admission = if terminal_transition {
+        expected.admission_generation.checked_add(1)
+    } else {
+        Some(expected.admission_generation)
+    };
+    if lease.issued_at_ms != expected.issued_at_ms || Some(lease.admission_generation) != expected_admission {
+        return Err(unavailable());
+    }
+    if !sessions.get_by_proxy_session_id(proxy_session_id).await.is_some_and(|current| Arc::ptr_eq(session, &current)) {
+        return Err(unavailable());
+    }
+    Ok(lease)
+}
+
+pub(in crate::api::endpoints::hls_api) async fn await_hls_terminal_or_refresh(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    expected: &HlsAccessLease,
+    mut lease: HlsAccessLease,
+    mut commits: tokio::sync::watch::Receiver<()>,
+    refresh: impl std::future::Future<Output = bool>,
+) -> Option<axum::response::Response> {
+    let proxy_session_id = &expected.proxy_session_id;
+    let access_lease_id = &expected.lease_id;
+    tokio::pin!(refresh);
+    loop {
+        if let Some(response) = hls_terminal_playback_response(app_state, &lease, proxy_session_id, access_lease_id) {
+            return Some(response);
+        }
+        tokio::select! {
+            _ = &mut refresh => break,
+            changed = commits.changed() => {
+                if changed.is_err() {
+                    // The session handle normally keeps the sender alive.
+                    refresh.await;
+                    break;
+                }
+                lease = match current_hls_refresh_lease(
+                    app_state, session, proxy_session_id, access_lease_id, expected,
+                ).await {
+                    Ok(lease) => lease,
+                    Err(response) => return Some(*response),
+                };
+            }
+        }
+    }
+    let lease = match current_hls_refresh_lease(app_state, session, proxy_session_id, access_lease_id, expected).await {
+        Ok(lease) => lease,
+        Err(response) => return Some(*response),
+    };
+    resolve_hls_terminal_manifest_state(
+        app_state,
+        session,
+        proxy_session_id,
+        access_lease_id,
+        lease,
+        app_state.hls.proxy.now_ms(),
+    )
+    .await
+    .err()
+    .map(|response| *response)
+}
+
 pub(in crate::api::endpoints::hls_api) async fn trigger_hls_canonical_manifest_refresh(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
     proxy_session_id: &ProxySessionId,
     access_lease_id: &HlsAccessLeaseId,
+    access_lease_state: HlsAccessLeaseState,
     refresh_request: OriginRefreshRequest,
     ordering: HlsManifestRefreshOrdering,
 ) -> Option<axum::response::Response> {
+    if access_lease_state == HlsAccessLeaseState::Idle {
+        // An idle viewer starts against current origin evidence, even when its
+        // former publication has no usable cache objects left. The cached path
+        // joins in-flight work; a debounce remains explicitly retryable.
+        let outcome = maybe_trigger_origin_refresh_with_outcome(refresh_request.clone()).await;
+        if matches!(outcome, HlsOriginRefreshTriggerOutcome::DebouncedUntil { .. })
+            && session.read().await.start_segments_exhausted()
+        {
+            return Some(hls_canonical_retry_after_response());
+        }
+        return hls_direct_refresh_follow_up(app_state, session, proxy_session_id, refresh_request, outcome).await;
+    }
     match ordering {
         HlsManifestRefreshOrdering::Background => {
             let outcome = maybe_trigger_origin_refresh_with_outcome(refresh_request.clone()).await;
             hls_direct_refresh_follow_up(app_state, session, proxy_session_id, refresh_request, outcome).await
         }
         HlsManifestRefreshOrdering::AwaitBeforeTerminalEvaluation => {
+            let initial = app_state
+                .hls
+                .proxy
+                .access_lease_response_snapshot(access_lease_id, proxy_session_id, app_state.hls.proxy.now_ms())
+                .await;
+            if let Some(expected) = initial
+                .as_ref()
+                .filter(|lease| lease.state == HlsAccessLeaseState::Activated && lease.last_manifest_snapshot.is_some())
+            {
+                // Subscribe before checking again: a commit in either gap is
+                // observed through current state or the retained watch version.
+                let commits = session.read().await.subscribe_terminal_commits();
+                let lease =
+                    match current_hls_refresh_lease(app_state, session, proxy_session_id, access_lease_id, expected)
+                        .await
+                    {
+                        Ok(lease) => lease,
+                        Err(response) => return Some(*response),
+                    };
+                return await_hls_terminal_or_refresh(
+                    app_state,
+                    session,
+                    expected,
+                    lease,
+                    commits,
+                    trigger_origin_refresh_sync(refresh_request),
+                )
+                .await;
+            }
             // An already-owned refresh cannot be joined through this call, but
             // it must not bypass the lease-specific terminal decision. The
             // in-flight owner will still publish its eventual progress/failure.

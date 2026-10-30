@@ -543,6 +543,7 @@ pub(in crate::api::endpoints::hls_api) fn shared_hls_provisioning_segment_entry(
         origin_byte_range: None,
         map_ref: None,
         encryption: None,
+        retained_resource_identity: None,
         origin_fetch_ref: None,
         status: SegmentCacheStatus::Ready { content_length, ready_at_ms: now_ms },
         last_rendered_at_ms: None,
@@ -727,9 +728,9 @@ pub(in crate::api::endpoints::hls_api) async fn hls_shared_provisioning_or_provi
     access_lease_state: HlsAccessLeaseState,
     strip: &crate::model::StripConfig,
     server_path: Option<&str>,
-) -> axum::response::Response {
+) -> HlsProviderExhaustedResolution {
     let Some((_user, _target)) = app_state.app_config.get_target_for_username(username) else {
-        return hls_canonical_retry_after_response();
+        return HlsProviderExhaustedResolution::Exhausted(hls_canonical_retry_after_response());
     };
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let now_ms = current_time_millis();
@@ -740,15 +741,17 @@ pub(in crate::api::endpoints::hls_api) async fn hls_shared_provisioning_or_provi
         if let Some(HlsProvisioningStatus::ProviderExhausted) =
             app_state.hls.provisioning.consumer_status(&input.name, virtual_id, now_ms)
         {
-            return hls_runtime_or_standalone_custom_tail_response(
-                app_state,
-                session,
-                &proxy_session_id,
-                access_lease_id,
-                HlsRuntimeCustomTailReason::ProviderConnectionsExhausted,
-                StatusCode::SERVICE_UNAVAILABLE,
-            )
-            .await;
+            return HlsProviderExhaustedResolution::Exhausted(
+                hls_runtime_or_standalone_custom_tail_response(
+                    app_state,
+                    session,
+                    &proxy_session_id,
+                    access_lease_id,
+                    HlsRuntimeCustomTailReason::ProviderConnectionsExhausted,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                .await,
+            );
         }
         if let Some(response) = hls_shared_provisioning_timeline_manifest_response(
             app_state,
@@ -761,8 +764,11 @@ pub(in crate::api::endpoints::hls_api) async fn hls_shared_provisioning_or_provi
         )
         .await
         {
-            return response;
+            return HlsProviderExhaustedResolution::Provisioning(response);
         }
+        // Missing/unrenderable provisioning media does not make a running job
+        // terminal. Keep the lease retryable until provisioning resolves.
+        return HlsProviderExhaustedResolution::Provisioning(hls_canonical_retry_after_response());
     }
 
     let provider_exhausted_custom_response_available = is_custom_video_stream_enabled(&app_state.app_config)
@@ -774,22 +780,25 @@ pub(in crate::api::endpoints::hls_api) async fn hls_shared_provisioning_or_provi
             .and_then(|response| response.provider_connections_exhausted.as_ref())
             .is_some();
     if provider_exhausted_custom_response_available {
-        return hls_runtime_or_standalone_custom_tail_response(
-            app_state,
-            session,
-            &proxy_session_id,
-            access_lease_id,
-            HlsRuntimeCustomTailReason::ProviderConnectionsExhausted,
-            StatusCode::SERVICE_UNAVAILABLE,
-        )
-        .await;
+        return HlsProviderExhaustedResolution::Exhausted(
+            hls_runtime_or_standalone_custom_tail_response(
+                app_state,
+                session,
+                &proxy_session_id,
+                access_lease_id,
+                HlsRuntimeCustomTailReason::ProviderConnectionsExhausted,
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+            .await,
+        );
     }
-    hls_canonical_retry_after_response()
+    HlsProviderExhaustedResolution::Exhausted(hls_canonical_retry_after_response())
 }
 
 pub(in crate::api::endpoints::hls_api) enum HlsProviderExhaustedResolution {
     RetryAcquire,
-    Response(axum::response::Response),
+    Provisioning(axum::response::Response),
+    Exhausted(axum::response::Response),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -829,19 +838,17 @@ pub(in crate::api::endpoints::hls_api) async fn hls_provider_connections_exhaust
         return HlsProviderExhaustedResolution::RetryAcquire;
     }
 
-    HlsProviderExhaustedResolution::Response(
-        hls_shared_provisioning_or_provider_exhausted_response(
-            app_state,
-            fingerprint,
-            session,
-            username,
-            input,
-            virtual_id,
-            access_lease_id,
-            access_lease_state,
-            strip,
-            server_path,
-        )
-        .await,
+    hls_shared_provisioning_or_provider_exhausted_response(
+        app_state,
+        fingerprint,
+        session,
+        username,
+        input,
+        virtual_id,
+        access_lease_id,
+        access_lease_state,
+        strip,
+        server_path,
     )
+    .await
 }

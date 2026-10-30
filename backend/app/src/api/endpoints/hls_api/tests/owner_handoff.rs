@@ -237,7 +237,7 @@ async fn hls_provider_exhausted_without_provisioning_returns_custom_manifest() {
     prepare_pending_test_hls_access_lease(&app_state, &proxy_session_id, &access_lease_id).await;
     let strip = app_state.hls.proxy.strip();
 
-    let response = super::super::hls_shared_provisioning_or_provider_exhausted_response(
+    let resolution = super::super::hls_shared_provisioning_or_provider_exhausted_response(
         &app_state,
         None,
         &session,
@@ -251,6 +251,9 @@ async fn hls_provider_exhausted_without_provisioning_returns_custom_manifest() {
     )
     .await;
 
+    let super::super::HlsProviderExhaustedResolution::Exhausted(response) = resolution else {
+        panic!("disabled provisioning must resolve to exhaustion");
+    };
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_body(response).await;
     let manifest = String::from_utf8(body.to_vec()).expect("manifest is utf8");

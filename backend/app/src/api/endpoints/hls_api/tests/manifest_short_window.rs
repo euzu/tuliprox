@@ -247,6 +247,7 @@ async fn first_ready_revalidation_keeps_its_qualification_while_new_media_is_loa
         assert_eq!(session.origin_control.acceptance_generation.0, 1);
         session.last_rendered_manifest.as_mut().unwrap().valid_until_ms = 0;
         session.activity.last_authorized_media_at_ms = None;
+        session.origin_account_binding.as_mut().unwrap().startup_protection.as_mut().unwrap().anchored_at_ms = 0;
         session.startup.as_mut().unwrap().revisions.clear();
         for segment in session.segments.values_mut() {
             segment.status = SegmentCacheStatus::Expired;
@@ -476,7 +477,49 @@ async fn assert_ten_short_refresh_cycles(counts: [usize; 10]) {
 }
 
 #[tokio::test]
+async fn segment_fetch_context_completes_with_session_writers_queued() {
+    use futures::FutureExt as _;
+
+    let app = test_app_state();
+    let session = Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "lock-order"), b"secret", 0)));
+    let fingerprint = test_fingerprint();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let held = session.write().await;
+        let mut context =
+            super::super::build_hls_segment_fetch_context(&app, &session, None, &fingerprint, None).boxed().shared();
+        assert!(futures::poll!(&mut context).is_pending());
+        let first_writer = session.write();
+        tokio::pin!(first_writer);
+        assert!(futures::poll!(first_writer.as_mut()).is_pending());
+        drop(held);
+
+        // Queue writers around the initial snapshot and any later read. A context
+        // must not retain a read guard while waiting behind one of these writers.
+        let mut probe = context.clone();
+        let _ = futures::poll!(&mut probe);
+        drop(probe);
+        let held = first_writer.await;
+        let next_writer = session.write();
+        tokio::pin!(next_writer);
+        assert!(futures::poll!(next_writer.as_mut()).is_pending());
+        drop(held);
+
+        let (context, ()) = tokio::join!(context, async { drop(next_writer.await) });
+        assert!(Arc::ptr_eq(&context.session, &session));
+        assert!(session.try_write().is_ok(), "context must release every session read guard");
+    })
+    .await
+    .expect("origin context construction and queued session writers must complete");
+}
+
+#[tokio::test]
 async fn short_manifests_keep_map_key_and_segment_routes_on_later_publications() {
+    tokio::time::timeout(Duration::from_secs(30), assert_short_resource_publications())
+        .await
+        .expect("short manifest map, key and segment publications must complete");
+}
+
+async fn assert_short_resource_publications() {
     let fixture = short_window_resource_fixture(2, ShortWindowResources::EncryptedWithMap).await;
     let initial = open_short_lease(&fixture, "short-resources").await;
     let session =

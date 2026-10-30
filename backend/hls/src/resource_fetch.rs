@@ -27,10 +27,12 @@ const STORAGE_FULL_RAW_OS_ERRORS: &[i32] = &[28, 112, 122];
 
 mod telemetry;
 mod transport;
+mod work;
 
 pub(crate) use self::telemetry::PostprocessSpan;
 use self::telemetry::{AttemptTelemetry, ObservableOriginResponse};
 use super::MAX_MANUAL_REDIRECTS;
+pub use work::HlsOriginRetryWork;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HlsResourceStatusClass {
@@ -147,6 +149,7 @@ impl HlsOriginResourceFetchTarget {
 #[derive(Clone)]
 pub struct HlsOriginResourceClients {
     pub session: Option<crate::HlsSessionHandle>,
+    pub retry_work: Option<std::sync::Arc<HlsOriginRetryWork>>,
     pub client: Client,
     pub no_redirect_client: Client,
     pub use_manual_redirects: bool,
@@ -547,6 +550,10 @@ fn telemetry_object_key(
 }
 
 /// Owns the single logical retry budget shared by decoded cache fetches and direct streams.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep one operation deadline around preparation, retries and commit, including test barriers."
+)]
 async fn run_hls_origin_resource_raw_retry_core<T, G, R, P, C, D, F>(
     run: HlsOriginResourceRetryRun<'_>,
     mut prepare_attempt: P,
@@ -569,105 +576,171 @@ where
     ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
 {
     let HlsOriginResourceRetryRun { target, clients, policy, identity } = run;
-    let attempts = policy.retry_delays_ms.len();
+    let cancellation = if let Some(session) = clients.session.as_ref() {
+        session.read().await.origin_work_cancellation.clone()
+    } else {
+        tokio_util::sync::CancellationToken::new()
+    };
+    let work = match &clients.retry_work {
+        Some(work) => Some(std::sync::Arc::clone(work)),
+        None => match &clients.session {
+            Some(session) => {
+                let target_duration = session.read().await.target_duration;
+                let started = tokio::time::Instant::now();
+                let budget =
+                    Duration::from_millis(policy.resource_retry_budget_ms(target.kind, target.source, target_duration));
+                let deadline = started.checked_add(budget).unwrap_or(started);
+                tokio::time::timeout_at(deadline, work::HlsOriginRetryWork::begin(session, None, deadline))
+                    .await
+                    .map_err(|_| HlsOriginResourceFetchError::Timeout)?
+            }
+            None => None,
+        },
+    };
+    let operation_deadline = work.as_ref().map(|work| work.deadline());
     let telemetry_key = telemetry_object_key(policy, identity, &target);
-    for attempt_index in 0..attempts {
-        let delay_ms = policy.retry_delay_ms(attempt_index);
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
+    let run = async {
+        #[cfg(any(test, feature = "test-support"))]
+        let mut retry_barrier: Option<std::sync::Arc<HlsResourceRetryBarrier>> = None;
+        let attempts = policy.retry_delays_ms.len();
+        for attempt_index in 0..attempts {
+            let delay_ms = policy.retry_delay_ms(attempt_index);
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
 
-        let (target_duration, telemetry_input) = session_attempt_context(&clients, telemetry_key.is_some()).await;
-        let timeout = policy.timeouts.snapshot(target.kind, target_duration);
-        let attempt = HlsResourceFetchAttempt { attempt_index, attempts, timeout };
-        log_timeout_snapshot(timeout);
-        log_hls_resource_attempt_started(identity, target.log_context(), attempt);
-        let attempt_started_at = Instant::now();
-        let mut timeout_phase = "headers";
-        let result = match prepare_attempt(attempt).await {
-            Ok(guard) => {
-                // The probe starts after the provider slot is held, so queue wait stays out of the network time.
-                // A failed preparation sent no origin request and yields no record.
-                let telemetry = AttemptTelemetry::begin(
-                    &policy.telemetry,
-                    telemetry_input.as_deref().unwrap_or_default(),
-                    origin_resource_kind(target.kind),
-                    telemetry_key.as_deref(),
-                    attempt_index,
-                );
-                telemetry.start(attempt_started_at.elapsed(), target.media_duration_ms);
-                let fetched = match fetch_hls_origin_resource_response_with_timeout(
-                    &target,
-                    &clients,
-                    Duration::from_millis(timeout.effective_ms),
-                )
-                .await
-                {
-                    Ok((response, deadline)) => {
-                        telemetry.mark_headers(response.status().as_u16(), response.content_length());
-                        timeout_phase = "decoder";
-                        prepare_response(response, deadline).await.map(|response| (response, deadline))
-                    }
-                    Err(err) => Err(err),
-                };
-                match fetched {
-                    Ok((response, deadline)) => {
-                        timeout_phase = "body";
-                        let response = response.observe_body(&telemetry);
-                        let result = telemetry.scope_commit(commit(response, attempt, deadline, guard)).await;
-                        telemetry.finish(&result);
-                        result
-                    }
-                    Err(err) => {
-                        telemetry.finish_failed(&err);
-                        cleanup_attempt(guard).await;
-                        Err(err)
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(barrier) = retry_barrier.take() {
+                barrier.prepare_ready.notify_one();
+                barrier.resume_prepare.notified().await;
+            }
+            let (target_duration, telemetry_input) = session_attempt_context(&clients, telemetry_key.is_some()).await;
+            let timeout = policy.timeouts.snapshot(target.kind, target_duration);
+            let attempt = HlsResourceFetchAttempt { attempt_index, attempts, timeout, work: work.clone() };
+            log_timeout_snapshot(timeout);
+            log_hls_resource_attempt_started(identity, target.log_context(), &attempt);
+            let attempt_started_at = Instant::now();
+            let mut timeout_phase = "headers";
+            let prepared = if let Some(deadline) = operation_deadline {
+                let now = tokio::time::Instant::now();
+                let attempt_deadline =
+                    now.checked_add(Duration::from_millis(timeout.effective_ms)).unwrap_or(now).min(deadline);
+                tokio::time::timeout_at(attempt_deadline, prepare_attempt(attempt.clone()))
+                    .await
+                    .unwrap_or(Err(HlsOriginResourceFetchError::Timeout))
+            } else {
+                prepare_attempt(attempt.clone()).await
+            };
+            let result = match prepared {
+                Ok(guard) => {
+                    // The probe starts after the provider slot is held, so queue wait stays out of the network time.
+                    // A failed preparation sent no origin request and yields no record.
+                    let telemetry = AttemptTelemetry::begin(
+                        &policy.telemetry,
+                        telemetry_input.as_deref().unwrap_or_default(),
+                        origin_resource_kind(target.kind),
+                        telemetry_key.as_deref(),
+                        attempt_index,
+                    );
+                    telemetry.start(attempt_started_at.elapsed(), target.media_duration_ms);
+                    let fetched = match fetch_hls_origin_resource_response_with_timeout(
+                        &target,
+                        &clients,
+                        Duration::from_millis(timeout.effective_ms),
+                    )
+                    .await
+                    {
+                        Ok((response, mut deadline)) => {
+                            if let Some(total) = operation_deadline {
+                                deadline.deadline = deadline.deadline.min(total);
+                            }
+                            telemetry.mark_headers(response.status().as_u16(), response.content_length());
+                            timeout_phase = "decoder";
+                            prepare_response(response, deadline).await.map(|response| (response, deadline))
+                        }
+                        Err(err) => Err(err),
+                    };
+                    match fetched {
+                        Ok((response, deadline)) => {
+                            timeout_phase = "body";
+                            let response = response.observe_body(&telemetry);
+                            let result =
+                                telemetry.scope_commit(commit(response, attempt.clone(), deadline, guard)).await;
+                            telemetry.finish(&result);
+                            result
+                        }
+                        Err(err) => {
+                            telemetry.finish_failed(&err);
+                            cleanup_attempt(guard).await;
+                            Err(err)
+                        }
                     }
                 }
-            }
-            Err(err) => Err(err),
-        };
+                Err(err) => Err(err),
+            };
 
-        match result {
-            Ok(output) => {
-                log_hls_resource_attempt_succeeded(identity, target.log_context(), attempt_started_at.elapsed());
-                return Ok(output);
-            }
-            Err(err) if err.aborts_without_retry() || attempt_index + 1 == attempts => {
-                if matches!(err, HlsOriginResourceFetchError::Timeout) {
-                    log_hls_resource_timeout(
+            match result {
+                Ok(output) => {
+                    log_hls_resource_attempt_succeeded(identity, target.log_context(), attempt_started_at.elapsed());
+                    return Ok(output);
+                }
+                Err(err) if err.aborts_without_retry() || attempt_index + 1 == attempts => {
+                    if matches!(err, HlsOriginResourceFetchError::Timeout) {
+                        log_hls_resource_timeout(
+                            identity,
+                            target.log_context(),
+                            &attempt,
+                            u128::from(timeout.effective_ms),
+                            timeout_phase,
+                        );
+                    }
+                    log_hls_resource_fetch_failed(identity, target.log_context(), &attempt, err.log_status());
+                    return Err(err);
+                }
+                Err(err) => {
+                    if matches!(err, HlsOriginResourceFetchError::Timeout) {
+                        log_hls_resource_timeout(
+                            identity,
+                            target.log_context(),
+                            &attempt,
+                            u128::from(timeout.effective_ms),
+                            timeout_phase,
+                        );
+                    }
+                    log_hls_resource_retry_scheduled(
                         identity,
                         target.log_context(),
-                        attempt,
-                        u128::from(timeout.effective_ms),
-                        timeout_phase,
+                        &attempt,
+                        err.log_status(),
+                        policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
                     );
+                    #[cfg(any(test, feature = "test-support"))]
+                    if let Some(session) = &clients.session {
+                        let barrier = session.write().await.origin_retry_barrier.take();
+                        if let Some(barrier) = barrier {
+                            barrier.retry_ready.notify_one();
+                            barrier.resume_backoff.notified().await;
+                            retry_barrier = Some(barrier);
+                        }
+                    }
                 }
-                log_hls_resource_fetch_failed(identity, target.log_context(), attempt, err.log_status());
-                return Err(err);
-            }
-            Err(err) => {
-                if matches!(err, HlsOriginResourceFetchError::Timeout) {
-                    log_hls_resource_timeout(
-                        identity,
-                        target.log_context(),
-                        attempt,
-                        u128::from(timeout.effective_ms),
-                        timeout_phase,
-                    );
-                }
-                log_hls_resource_retry_scheduled(
-                    identity,
-                    target.log_context(),
-                    attempt,
-                    err.log_status(),
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
-                );
             }
         }
+
+        Err(HlsOriginResourceFetchError::Timeout)
+    };
+    let bounded = async {
+        match operation_deadline {
+            Some(deadline) => {
+                tokio::time::timeout_at(deadline, run).await.unwrap_or(Err(HlsOriginResourceFetchError::Timeout))
+            }
+            None => run.await,
+        }
+    };
+    tokio::select! {
+        () = cancellation.cancelled() => Err(HlsOriginResourceFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::StoreRace)),
+        result = bounded => result,
     }
-
-    Err(HlsOriginResourceFetchError::Timeout)
 }
 
 #[cfg(test)]
@@ -696,7 +769,20 @@ async fn fetch_hls_origin_resource_response_with_timeout(
         let request = client.get(url).headers(request_headers).build().map_err(|err| {
             HlsOriginResourceFetchError::Transport(sanitize_sensitive_info(&err.to_string()).to_string())
         })?;
-        let response = transport::send(client, request, timeout, &mut deadline).await?;
+        #[cfg(any(test, feature = "test-support"))]
+        let barrier = match &clients.session {
+            Some(session) => session.read().await.origin_retry_barrier.clone(),
+            None => None,
+        };
+        let response = transport::send(
+            client,
+            request,
+            timeout,
+            &mut deadline,
+            #[cfg(any(test, feature = "test-support"))]
+            barrier.as_deref(),
+        )
+        .await?;
         if !clients.use_manual_redirects || !response.status().is_redirection() {
             let response = classify_hls_origin_resource_response(response, target.byte_range_expectation)?;
             let deadline = deadline
@@ -868,16 +954,44 @@ impl HlsResourceFetchLogStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HlsResourceFetchAttempt {
     pub attempt_index: usize,
     pub attempts: usize,
     pub timeout: HlsOriginTimeoutSnapshot,
+    work: Option<std::sync::Arc<work::HlsOriginRetryWork>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default, Debug)]
+pub struct HlsResourceRetryBarrier {
+    pub transfer_started: tokio::sync::Notify,
+    pub retry_ready: tokio::sync::Notify,
+    pub resume_backoff: tokio::sync::Notify,
+    pub prepare_ready: tokio::sync::Notify,
+    pub resume_prepare: tokio::sync::Notify,
 }
 
 impl HlsResourceFetchAttempt {
     /// Returns the one-based attempt number used in human-readable diagnostics.
-    const fn display_number(self) -> usize { self.attempt_index + 1 }
+    const fn display_number(&self) -> usize { self.attempt_index + 1 }
+
+    pub fn logical_deadline(&self) -> Option<tokio::time::Instant> { self.work.as_ref().map(|work| work.deadline()) }
+
+    /// Before preparation, protect an existing valid reservation; after acquiring
+    /// I/O, require an admitted allocation before the first origin request.
+    pub async fn protect_origin_work(
+        &self,
+        manager: &std::sync::Arc<tuliprox_session::ActiveProviderManager>,
+        session: &crate::HlsSessionHandle,
+        generation: u64,
+        require_allocation: bool,
+    ) -> Result<(), HlsOriginResourceFetchError> {
+        if let Some(work) = &self.work {
+            work.protect(manager, session, generation, require_allocation).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -895,7 +1009,7 @@ pub(super) fn take_body_failure_log_attempts() -> Vec<(usize, usize)> {
 fn log_hls_resource_attempt_started(
     identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
-    attempt: HlsResourceFetchAttempt,
+    attempt: &HlsResourceFetchAttempt,
 ) {
     if let Some(origin_url) = context.origin_url {
         debug!(
@@ -943,7 +1057,7 @@ fn log_hls_resource_attempt_succeeded(
 fn log_hls_resource_retry_scheduled(
     identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
-    attempt: HlsResourceFetchAttempt,
+    attempt: &HlsResourceFetchAttempt,
     status: HlsResourceFetchLogStatus,
     next_delay_ms: u64,
 ) {
@@ -964,7 +1078,7 @@ fn log_hls_resource_retry_scheduled(
 fn log_hls_resource_fetch_failed(
     identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
-    attempt: HlsResourceFetchAttempt,
+    attempt: &HlsResourceFetchAttempt,
     status: HlsResourceFetchLogStatus,
 ) {
     warn!(
@@ -983,7 +1097,7 @@ fn log_hls_resource_fetch_failed(
 fn log_hls_resource_timeout(
     identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
-    attempt: HlsResourceFetchAttempt,
+    attempt: &HlsResourceFetchAttempt,
     deadline_ms: u128,
     phase: &str,
 ) {
@@ -1007,7 +1121,7 @@ fn log_hls_resource_timeout(
 pub(super) fn log_hls_resource_body_failure(
     identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
-    attempt: HlsResourceFetchAttempt,
+    attempt: &HlsResourceFetchAttempt,
     error: &io::Error,
     deadline_ms: u128,
 ) {
@@ -1028,6 +1142,7 @@ pub fn retry_after_secs_from_ms(retry_after_ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod retry_work;
     use super::{
         build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
         fetch_hls_origin_resource_response, run_hls_origin_resource_retry_loop_with_attempt_prepare,
@@ -1085,6 +1200,7 @@ mod tests {
 
     fn fetch_clients(use_manual_redirects: bool) -> HlsOriginResourceClients {
         HlsOriginResourceClients {
+            retry_work: None,
             session: None,
             client: Client::builder().build().expect("client"),
             no_redirect_client: Client::builder().redirect(Policy::none()).build().expect("no redirect client"),
@@ -1113,8 +1229,9 @@ mod tests {
             attempt_index: 0,
             attempts: 3,
             timeout: crate::HlsOriginTimeoutPolicy::default().snapshot(HlsResourceFetchKind::Segment, None),
+            work: None,
         };
-        let last = HlsResourceFetchAttempt { attempt_index: 2, ..first };
+        let last = HlsResourceFetchAttempt { attempt_index: 2, ..first.clone() };
 
         assert_eq!(first.display_number(), 1);
         assert_eq!(last.display_number(), 3);

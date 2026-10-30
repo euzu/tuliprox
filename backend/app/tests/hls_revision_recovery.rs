@@ -18,9 +18,6 @@ use tokio::{
 const BODY: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/fixtures/hls/channel_unavailable.ts"));
 
-// A configured Postman member is shared between the process scenarios.
-static SCENARIO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 struct Fixture {
     directory: tempfile::TempDir,
     base: String,
@@ -30,7 +27,6 @@ struct Fixture {
     release_retry: watch::Sender<bool>,
     retry_started: watch::Receiver<bool>,
     attempts: Arc<AtomicUsize>,
-    _scenario: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for Fixture {
@@ -43,21 +39,11 @@ impl Drop for Fixture {
 impl Fixture {
     #[allow(clippy::too_many_lines, reason = "Keeps the isolated process and streaming origin fixture together.")]
     async fn start() -> Self {
-        let scenario = SCENARIO.lock().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin_base = format!("http://{}", listener.local_addr().unwrap());
-        let manifest_base =
-            std::env::var("TULIPROX_HLS_RECOVERY_MANIFEST_BASE").unwrap_or_else(|_| origin_base.clone());
-        if manifest_base != origin_base {
-            let response = reqwest::Client::new()
-                .post(format!("{manifest_base}/configure"))
-                .json(&serde_json::json!({"segmentOrigin": origin_base}))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), 204);
-        }
-        let catalog = format!("#EXTM3U\n#EXTINF:-1 tvg-id=\"recovery\" group-title=\"Test\",Recovery Channel\n{manifest_base}/index.m3u8\n");
+        let catalog = format!(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"recovery\" group-title=\"Test\",Recovery Channel\n{origin_base}/index.m3u8\n"
+        );
         let mut manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n".to_string();
         for seq in 100..106 {
             writeln!(manifest, "#EXTINF:4,\n{origin_base}/{seq}.ts").unwrap();
@@ -154,7 +140,6 @@ impl Fixture {
             release_retry,
             retry_started: started_retry,
             attempts,
-            _scenario: scenario,
         }
     }
 

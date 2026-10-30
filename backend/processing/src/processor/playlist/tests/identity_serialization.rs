@@ -126,7 +126,7 @@ fn mapper_changes_id_without_changing_frozen_input_stream_id() {
         rules: vec![CompiledMappingRule {
             name: None,
             filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
-            program: MappingProgram::Script(
+            program: MappingProgram::Dsl(
                 MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse"),
             ),
         }],
@@ -134,10 +134,11 @@ fn mapper_changes_id_without_changing_frozen_input_stream_id() {
     };
 
     let outcome = map_channel(item, &mapping);
+    let mapped = outcome.channel.expect("channel survives mapping");
 
     assert_eq!(outcome.matched_rules, 1);
-    assert_eq!(outcome.channel.header.id.as_ref(), "target-id");
-    assert_eq!(outcome.channel.header.input_stream_id.as_ref(), "origin-alpha");
+    assert_eq!(mapped.header.id.as_ref(), "target-id");
+    assert_eq!(mapped.header.input_stream_id.as_ref(), "origin-alpha");
 }
 
 #[test]
@@ -163,7 +164,7 @@ fn mapper_cannot_resurrect_missing_legacy_input_stream_id_from_target_id() {
         rules: vec![CompiledMappingRule {
             name: None,
             filter: get_filter(r#"name ~ ".*""#, None).expect("filter should parse"),
-            program: MappingProgram::Script(
+            program: MappingProgram::Dsl(
                 MapperScript::parse(r#"@id = "target-id""#, None).expect("mapper should parse"),
             ),
         }],
@@ -171,12 +172,13 @@ fn mapper_cannot_resurrect_missing_legacy_input_stream_id_from_target_id() {
     };
 
     let outcome = map_channel(legacy_item, &mapping);
-    let materialized_m3u = M3uPlaylistItem::from(&outcome.channel);
-    let materialized_xtream = XtreamPlaylistItem::from(&outcome.channel);
+    let mapped = outcome.channel.expect("channel survives mapping");
+    let materialized_m3u = M3uPlaylistItem::from(&mapped);
+    let materialized_xtream = XtreamPlaylistItem::from(&mapped);
 
     assert_eq!(outcome.matched_rules, 1);
-    assert_eq!(outcome.channel.header.id.as_ref(), "target-id");
-    assert_eq!(outcome.channel.get_input_stream_id(), None);
+    assert_eq!(mapped.header.id.as_ref(), "target-id");
+    assert_eq!(mapped.get_input_stream_id(), None);
     assert!(materialized_m3u.provider_id.is_empty());
     assert_eq!(materialized_m3u.get_input_stream_id(), None);
     assert_eq!(materialized_xtream.provider_id, 0);

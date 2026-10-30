@@ -77,6 +77,9 @@ impl HlsSegmentWorkerPool {
             None
         };
         if generation_valid {
+            if let Err(error) = &result {
+                session.record_start_provider_failure(error);
+            }
             match result {
                 Ok(commit) => self.commit_successful_segment_fetch(session, snapshot, &commit, finished_at_ms),
                 Err(err) => commit_failed_segment_fetch(session, snapshot, policy, &err, finished_at_ms),
@@ -107,7 +110,7 @@ impl HlsSegmentWorkerPool {
         let notifier = (!stale_commit_cleanup_reserved && scheduled_retry.is_none())
             .then(|| session.segment_fetch_notifiers.remove(&snapshot.proxy_seq))
             .flatten();
-        let evidence_changed_for = (generation_valid && fetch_succeeded).then(|| session.proxy_session_id.clone());
+        let evidence_changed_for = generation_valid.then(|| session.proxy_session_id.clone());
         SegmentFetchCompletion {
             generation_valid,
             stale_commit_cleanup_reserved,

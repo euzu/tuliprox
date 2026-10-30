@@ -291,6 +291,10 @@ For the configuration reference, see [Shared HLS Configuration](./shared-hls-con
 For the shared session, access lease, and transient delivery state machines, see
 [HLS Cache State Machines](./hls-cache-state-machine.md).
 
+When all origin segments fail during pending startup or idle re-entry, disabling custom responses makes the HLS
+fallback use the global `custom_stream_response_error_status` (default `502`). See
+[Shared HLS Configuration](./shared-hls-configuration.md#optional-startup-modes) for startup recovery behavior.
+
 The session and global byte limits cover committed objects, immutable revisions, and outstanding write reservations.
 Staging and postprocessing grow their budgets before writing additional bytes. Committing an object consumes its own
 reservation; capacity released by a completed or aborted write wakes deferred downloads. Both targeted reclamation
@@ -651,8 +655,22 @@ If Tuliprox selected a different provider account for every segment, providers c
 hopping. Tuliprox therefore keeps a logical, confirmed slot lease for the playback:
 
 * `hls_session_ttl_secs: 15`: After Tuliprox has forwarded actual media bytes, a cleanly finished HLS request may keep
-  its provider account reserved for this playback for up to 15 seconds. A manifest-only or abandoned start does not
-  create a capacity reservation.
+  its provider account reserved for this playback for up to 15 seconds. Ordinary manifest-only or abandoned starts do
+  not create a capacity reservation.
+* Shared live HLS additionally reserves its existing slot at the first accepted origin media manifest, before releasing
+  the manifest allocation. Its fixed start protection is hard-active for `1T`, soft-active through `3T`, and reserves
+  provider capacity through `3T + 1s`, using that manifest's target duration `T`. Polling, retries, duration changes and
+  additional access leases do not extend this window. Normal authorized media activity renews protection. The local
+  entry master keeps the existing access-lease timeout and acquires no provider slot. A timely session request receives
+  the configured processing budget without inheriting the original entry deadline.
+* A definitive shared-start capacity failure wakes waiters and releases the matching binding immediately. It returns
+  the provider-exhausted custom video, the configured disabled-video status (default `502`), or `503` when an enabled
+  provider-exhausted asset is missing. The failed access lease retains that outcome; a new master may retry admission.
+* A shared live-HLS resource retry keeps its already admitted slot through preparation, transfers, backoff and required
+  processing using one fixed resource budget. This is a work right on the existing provider lease; it does not confirm
+  media or renew normal protection. Active I/O and any work rights still count one logical slot. EOF, terminal failure,
+  deadline and cancellation release only that operation's right, including direct transient response bodies. Polling and
+  configuration changes cannot renew an operation's deadline. New work after normal expiry requires fresh admission.
 * Archive/Catchup playback uses the same confirmed-lease principle with `catchup_session_ttl_secs: 45`.
 * Provider errors, preemption, kicks and timeouts release the lease immediately rather than keeping the reconnect window.
 * `provider_affinity_ttl_secs: 120`: When a player pauses its requests longer than the reconnect window (for example

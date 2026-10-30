@@ -73,6 +73,37 @@ impl MappingStage {
     pub fn is_processing(&self) -> bool { *self == Self::Processing }
 }
 
+/// The language a mapping rule is written in.
+///
+/// `Dsl` is the embedded mapper language and the default, so every existing mapping keeps its
+/// meaning. `Rhai` marks the script as a Rhai program that is compiled by the backend and never
+/// parsed by the frontend.
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    EnumIter,
+    EnumString,
+    AsRefStr,
+    Display,
+)]
+#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum MapperType {
+    #[default]
+    Dsl,
+    Rhai,
+}
+
+impl MapperType {
+    pub const fn is_dsl(&self) -> bool { matches!(self, Self::Dsl) }
+}
+
 #[derive(
     Debug,
     Default,
@@ -189,6 +220,10 @@ impl Prepare for MapperOperation {
 pub struct MapperDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// `dsl` (default) or `rhai`. Omitted for DSL rules so existing files and payloads are
+    /// unchanged.
+    #[serde(rename = "type", default, skip_serializing_if = "MapperType::is_dsl")]
+    pub mapper_type: MapperType,
     pub filter: String,
     pub script: String,
     #[serde(skip_serializing, skip_deserializing)]
@@ -205,13 +240,21 @@ impl Prepare for MapperDto {
     /// Will panic if default `RegEx` gets invalid
     fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
-        let script = if templates.is_some() {
-            apply_templates_to_pattern_single(&self.script, templates)?
+        // Rhai programs are compiled by the backend host, not parsed here: the DSL parser lives in
+        // this wasm-compatible crate while Rhai must not enter the frontend bundle. Template
+        // substitution is a text substitution and therefore also skipped for Rhai; such scripts use
+        // `ctx.template(name)` instead.
+        self.t_script = if self.mapper_type.is_dsl() {
+            let script = if templates.is_some() {
+                apply_templates_to_pattern_single(&self.script, templates)?
+            } else {
+                self.script.clone()
+            };
+            trace!("Mapper script: {script}");
+            Some(MapperScript::parse(&script, templates)?)
         } else {
-            self.script.clone()
+            None
         };
-        trace!("Mapper script: {script}");
-        self.t_script = Some(MapperScript::parse(&script, templates)?);
         Ok(())
     }
 }
@@ -402,5 +445,51 @@ mod tests {
         let dto: MappingDto = serde_saphyr::from_str("id: test\nstage: after_epg\n").expect("stage should parse");
         assert_eq!(dto.stage, MappingStage::AfterEpg);
         assert!(serde_saphyr::from_str::<MappingDto>("id: test\nstage: before_persistence\n").is_err());
+    }
+
+    const RULE: &str = "id: sports\nmapper:\n  - filter: 'Name ~ \".*\"'\n    script: '@Group = \"News\"'\n";
+
+    #[test]
+    fn mapper_type_defaults_to_dsl_and_is_omitted_from_serialized_output() {
+        let dto: MappingDto = serde_saphyr::from_str(RULE).expect("rule without a type should parse");
+        let rule = &dto.mapper.as_ref().expect("mapper list")[0];
+
+        assert_eq!(rule.mapper_type, MapperType::Dsl);
+        assert!(
+            !serde_saphyr::to_string(&dto).expect("mapping should serialize").contains("type:"),
+            "default mapper type must be omitted from serialized output"
+        );
+    }
+
+    #[test]
+    fn mapper_type_parses_rhai_and_rejects_unknown_values() {
+        let dto: MappingDto = serde_saphyr::from_str(
+            "id: sports\nmapper:\n  - type: rhai\n    filter: 'Name ~ \".*\"'\n    script: 'x'\n",
+        )
+        .expect("rhai rule should parse");
+        assert_eq!(dto.mapper.as_ref().expect("mapper list")[0].mapper_type, MapperType::Rhai);
+
+        assert!(serde_saphyr::from_str::<MappingDto>(
+            "id: sports\nmapper:\n  - type: javascript\n    filter: 'Name ~ \".*\"'\n    script: 'x'\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn prepare_parses_dsl_scripts_and_leaves_rhai_programs_unparsed() {
+        let mut dto: MappingDto = serde_saphyr::from_str(&format!(
+            "{RULE}  - type: rhai\n    filter: 'Name ~ \".*\"'\n    script: 'for x in [1] {{ }}'\n"
+        ))
+        .expect("mixed rule list should parse");
+
+        dto.prepare(None).expect("mapping should prepare");
+
+        let mappers = dto.mapper.as_ref().expect("mapper list");
+        assert!(mappers[0].t_script.is_some(), "a dsl rule must be parsed into an AST");
+        assert!(
+            mappers[1].t_script.is_none(),
+            "a rhai rule must not be parsed by the dsl parser; the backend host compiles it"
+        );
+        assert!(mappers[1].t_filter.is_some(), "the filter is shared by both mapper types");
     }
 }

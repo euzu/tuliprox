@@ -238,6 +238,16 @@
   [Corrections and own groups](docs/src/configuration/failover-groups.md#corrections-and-own-groups-failover-files)
   and the [REST API Cookbook](docs/src/rest-api-cookbook.md#failover-groups-editor).
 
+- **Mapper rules can be written in Rhai.** A mapper entry accepts an optional `type`: `dsl` (default, the existing
+  mapper language) or `rhai`. Rhai rules receive the channel as `item` (`item.group = "News"`, `item.chno = 42`,
+  `item["Caption"] = "Renamed"`) and the mapping environment as `ctx` (`ctx.regex`, `ctx.template`, `ctx.favourite`).
+  Scripts are compiled when the configuration loads, so syntax errors report the mapping id and rule name instead of
+  failing mid-refresh. Existing mapping files are unchanged and keep running as `dsl`. The embedded runtime lives in a
+  new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. Rhai's
+  module system is compiled out, so `import` is rejected when the configuration loads and a script cannot load other
+  files from disk. The documentation's Rhai examples are executed by the test suite. See
+  [Rhai scripts](docs/src/configuration/mapping-dsl.md#23-rhai-scripts-type-rhai).
+
 - **External log shipping via syslog and NDJSON (`log.syslog`).** Application log records can now be streamed
   asynchronously over UDP to an external collector (such as Vector, rsyslog, Logstash, or Fluent Bit) without
   blocking media processing. Supports RFC 5424, RFC 3164, and NDJSON wire formats, an optional independent remote

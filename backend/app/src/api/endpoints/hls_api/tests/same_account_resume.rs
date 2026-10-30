@@ -52,6 +52,10 @@ async fn pause_playback(app: &Arc<AppState>, session: &HlsSessionHandle, lease: 
         s.last_client_access_at_ms = s.last_client_access_at_ms.saturating_sub(PAUSE_MS);
         let binding = s.origin_account_binding.as_mut().unwrap();
         binding.pinned_at_ms = binding.pinned_at_ms.saturating_sub(PAUSE_MS);
+        age(&mut binding.startup_media_deadline_ms);
+        if let Some(start) = binding.startup_protection.as_mut() {
+            start.anchored_at_ms = start.anchored_at_ms.saturating_sub(PAUSE_MS);
+        }
         age(&mut binding.last_origin_io_at_ms);
         age(&mut binding.last_reservation_refresh_at_ms);
         age(&mut s.origin_refresh.last_fetch_started_at_ms);

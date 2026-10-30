@@ -716,7 +716,7 @@ pub(in crate::segment_fetcher::tests) async fn prefix_drop_rounds() -> std::io::
             .ok_or_else(|| std::io::Error::other("fetch snapshot"))?;
         let fill_context = context.clone();
         let fill = tokio::spawn(async move {
-            super::super::fetch_segment_with_retries_into_cache(&fill_context, &snapshot, &policy).await
+            super::super::fetch_segment_with_retries_into_cache(&fill_context, &snapshot, &policy, None).await
         });
         let revision = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {

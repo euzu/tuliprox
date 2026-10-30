@@ -14,6 +14,7 @@ mod query;
 mod retry;
 mod startup;
 mod startup_capacity;
+mod startup_recovery;
 mod support;
 
 use self::support::{

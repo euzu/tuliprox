@@ -31,6 +31,7 @@ pub struct HlsManifestAttemptContext {
     closed: AtomicBool,
     failed: AtomicBool,
     admission_backoff_paid: AtomicBool,
+    provider_failure: std::sync::Mutex<Option<crate::HlsBoundAccountAcquireErrorKind>>,
 }
 
 impl PartialEq for HlsManifestAttemptContext {
@@ -52,11 +53,18 @@ impl HlsManifestAttemptContext {
             closed: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             admission_backoff_paid: AtomicBool::new(false),
+            provider_failure: std::sync::Mutex::new(None),
         }
     }
 
     pub fn is_closed(&self) -> bool { self.closed.load(Ordering::Acquire) }
     pub fn failed(&self) -> bool { self.failed.load(Ordering::Acquire) }
+    pub fn provider_failure(&self) -> Option<crate::HlsBoundAccountAcquireErrorKind> {
+        *self.provider_failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub(crate) fn record_provider_failure(&self, kind: crate::HlsBoundAccountAcquireErrorKind) {
+        *self.provider_failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
+    }
     pub fn finish(&self, failed: bool) {
         self.failed.store(failed, Ordering::Release);
         self.closed.store(true, Ordering::Release);

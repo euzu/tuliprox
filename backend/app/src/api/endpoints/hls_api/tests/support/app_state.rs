@@ -360,6 +360,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_segment_entry(
         origin_byte_range: None,
         map_ref: None,
         encryption: None,
+        retained_resource_identity: None,
         origin_fetch_ref: Some(OriginSegmentFetchRef {
             resolved_origin_url: format!("http://origin.example.com/{proxy_seq}.ts"),
             byte_range: None,

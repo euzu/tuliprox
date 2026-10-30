@@ -40,10 +40,16 @@ impl HlsAccessLeaseState {
 
 impl HlsAccessLeasePendingDeadline {
     pub(super) const fn tightened_with(self, candidate: Self) -> Self {
+        // Consume the entry deadline once when a timely session request starts.
+        // Its processing budget is independent; retries cannot move that deadline.
+        if let (Self::Bootstrap { .. }, Self::Processing { .. }) = (self, candidate) {
+            return candidate;
+        }
         let deadline_ms =
             if self.deadline_ms() <= candidate.deadline_ms() { self.deadline_ms() } else { candidate.deadline_ms() };
         match (self, candidate) {
             (Self::FollowUp { .. }, _) | (_, Self::FollowUp { .. }) => Self::FollowUp { deadline_ms },
+            (Self::Processing { .. }, _) | (_, Self::Processing { .. }) => Self::Processing { deadline_ms },
             (Self::Bootstrap { .. }, Self::Bootstrap { .. }) => Self::Bootstrap { deadline_ms },
         }
     }
@@ -61,6 +67,21 @@ impl HlsLeaseManifestPublicationOutcome {
 }
 
 impl HlsAccessLease {
+    // Terminal playback only needs local media. Failed starts retain fallback
+    // access without reopening origin preparation for pending or idle leases.
+    pub(crate) fn permits_origin_work(&self, now_ms: u64) -> bool {
+        if !matches!(self.playback_mode, HlsLeasePlaybackMode::Live) {
+            return false;
+        }
+        match self.state {
+            HlsAccessLeaseState::Pending | HlsAccessLeaseState::Idle => {
+                !self.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+            }
+            HlsAccessLeaseState::Activated => self.valid_until_ms > now_ms,
+            HlsAccessLeaseState::PolicyRevoking | HlsAccessLeaseState::Expired | HlsAccessLeaseState::Denied => false,
+        }
+    }
+
     pub fn with_archive_playback(mut self, epg_reference_ts: Option<i64>, archive_origin_url: Option<String>) -> Self {
         self.epg_reference_ts = epg_reference_ts;
         self.archive_origin_url = archive_origin_url;
@@ -112,6 +133,25 @@ impl HlsAccessLeaseActivation {
 }
 
 impl HlsAccessLeaseStore {
+    pub(crate) fn fail_start_attempts(
+        &mut self,
+        session: &ProxySessionId,
+        shared: &std::sync::Arc<crate::manifest_fetch::HlsManifestAttemptContext>,
+        kind: Option<crate::HlsBoundAccountAcquireErrorKind>,
+    ) {
+        for lease in self.by_lease_id.values_mut().filter(|lease| {
+            lease.proxy_session_id == *session
+                && matches!(lease.state, HlsAccessLeaseState::Pending | HlsAccessLeaseState::Idle)
+                && lease.playback_mode == HlsLeasePlaybackMode::Live
+        }) {
+            let attempt = lease.manifest_start_attempt.get_or_insert_with(|| std::sync::Arc::clone(shared));
+            if let Some(kind) = kind {
+                attempt.record_provider_failure(kind);
+            }
+            attempt.finish(true);
+        }
+    }
+
     pub(crate) fn manifest_attempt_context(
         &mut self,
         lease_id: Option<&HlsAccessLeaseId>,
@@ -824,14 +864,7 @@ impl HlsAccessLeaseStore {
         self.refresh_access_lease_validities_for_session(session, now_ms).ok()?;
         self.by_lease_id
             .values()
-            .filter(|lease| {
-                lease.proxy_session_id == *session
-                    && matches!(lease.playback_mode, HlsLeasePlaybackMode::Live)
-                    && matches!(
-                        lease.state,
-                        HlsAccessLeaseState::Pending | HlsAccessLeaseState::Idle | HlsAccessLeaseState::Activated
-                    )
-            })
+            .filter(|lease| lease.proxy_session_id == *session && lease.permits_origin_work(now_ms))
             .min_by(|left, right| {
                 left.issued_at_ms.cmp(&right.issued_at_ms).then_with(|| left.lease_id.0.cmp(&right.lease_id.0))
             })
@@ -842,17 +875,9 @@ impl HlsAccessLeaseStore {
         if self.refresh_access_lease_validities_for_session(proxy_session_id, now_ms).is_err() {
             return false;
         }
-        let mut has_usable_lease = false;
-        for lease in self.by_lease_id.values() {
-            if lease.proxy_session_id == *proxy_session_id
-                && (lease.state == HlsAccessLeaseState::Pending
-                    || lease.state == HlsAccessLeaseState::Idle
-                    || (lease.state == HlsAccessLeaseState::Activated && lease.valid_until_ms > now_ms))
-            {
-                has_usable_lease = true;
-            }
-        }
-        has_usable_lease
+        self.by_lease_id
+            .values()
+            .any(|lease| lease.proxy_session_id == *proxy_session_id && lease.permits_origin_work(now_ms))
     }
 
     pub fn session_snapshot(

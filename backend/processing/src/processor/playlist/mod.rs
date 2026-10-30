@@ -52,6 +52,7 @@ use tuliprox_core::{
         FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
         TransformStage, UpdateGuard, UpdateTask,
     },
+    scripting::MappingScriptContext,
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure},
 };
 use tuliprox_curation::{

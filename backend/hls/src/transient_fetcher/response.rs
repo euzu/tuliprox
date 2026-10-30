@@ -171,24 +171,32 @@ fn hls_transient_direct_body(
         }.await;
         // Stop origin I/O before lifecycle work or downstream notification.
         drop(reader);
-        match &result {
-            Ok(true) => {
-                finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
-                if let Some(guard) = origin_io_guard.take() {
-                    guard.finish_clean().await;
+        let logical_deadline = attempt.logical_deadline();
+        let finish = async {
+            match &result {
+                Ok(true) => {
+                    finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
+                    if let Some(guard) = origin_io_guard.take() {
+                        guard.finish_clean().await;
+                    }
+                }
+                Ok(false) => finalizer.finish(HlsTransientDirectStreamOutcome::ClientAborted).await,
+                Err(error) => {
+                    log_hls_resource_body_failure(
+                        &log_identity,
+                        hls_transient_direct_log_context(&resource_id, resource_kind),
+                        &attempt,
+                        error,
+                        body_deadline.timeout().as_millis(),
+                    );
+                    finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
                 }
             }
-            Ok(false) => finalizer.finish(HlsTransientDirectStreamOutcome::ClientAborted).await,
-            Err(error) => {
-                log_hls_resource_body_failure(
-                    &log_identity,
-                    hls_transient_direct_log_context(&resource_id, resource_kind),
-                    attempt,
-                    error,
-                    body_deadline.timeout().as_millis(),
-                );
-                finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
-            }
+        };
+        if let Some(deadline) = logical_deadline {
+            let _ = tokio::time::timeout_at(deadline, finish).await;
+        } else {
+            finish.await;
         }
         drop(origin_io_guard);
         drop(read_guard);

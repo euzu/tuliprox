@@ -28,6 +28,10 @@ async fn discover_playlist(client: &reqwest::Client, url: &str) -> Result<Virtua
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the real-process scenario, origin evidence and cleanup in one lifecycle."
+)]
 async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool) -> Result<(), TestkitError> {
     let sut = std::env::var("TULIPROX_TESTKIT_SUT_BINARY")
         .map_err(|_| TestkitError::Configuration("set TULIPROX_TESTKIT_SUT_BINARY to the built SUT".to_owned()))?;
@@ -56,7 +60,11 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
         extra_config_files: Vec::new(),
     };
     let channels = HashMap::from([("channel".to_owned(), Channel { origin_marker: 17, protocol: "hls".to_owned() })]);
-    let options = FixtureStreamOptions { hls_startup_mode: Some(mode), ..FixtureStreamOptions::default() };
+    let options = FixtureStreamOptions {
+        hls_startup_mode: Some(mode),
+        hls_startup_strip_segments: (missing > 0 || abort).then_some(3),
+        ..FixtureStreamOptions::default()
+    };
     let fixture = IsolatedFixture::start(
         &bootstrap,
         Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -79,6 +87,7 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
         let playlist_url = format!("{}/m3u?username=testkit&password={}", fixture.base_url, fixture_password());
         let urls = discover_playlist(&client, &playlist_url).await?;
         let progressive = matches!(mode, StartupMode::Progressive | StartupMode::Optimistic);
+        let prefix_timing = progressive && missing == 0;
         let result = probe(
             urls.playback_url(17)?,
             &RunId::new(&run_id),
@@ -86,8 +95,8 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
             &ProbeOptions {
                 verify_revision: !abort,
                 expect_body_error: abort,
-                max_first_byte_millis: if progressive { Some(900) } else { None },
-                min_prefix_to_eof_millis: if progressive { Some(500) } else { None },
+                max_first_byte_millis: if missing > 0 { Some(5_000) } else { prefix_timing.then_some(900) },
+                min_prefix_to_eof_millis: prefix_timing.then_some(500),
             },
         )
         .await?;
@@ -107,6 +116,13 @@ async fn run(mode: StartupMode, missing: u32, abort: bool, unknown_length: bool)
                 if Path::new(&path).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("ts")) {
                     *segment_counts.entry(path).or_insert(0_usize) += 1;
                 }
+            }
+        }
+        for sequence in 0..missing.max(u32::from(abort)) {
+            if !segment_counts.contains_key(&format!("/hls/17/{sequence}.ts")) {
+                return Err(TestkitError::Protocol(format!(
+                    "startup fixture did not exercise faulted origin segment {sequence}: {segment_counts:?}"
+                )));
             }
         }
         if !abort
@@ -139,6 +155,11 @@ async fn first_ready_delivers_processed_revision() -> Result<(), TestkitError> {
 #[ignore = "requires built SUT via TULIPROX_TESTKIT_SUT_BINARY"]
 async fn progressive_delivers_prefix_before_origin_eof() -> Result<(), TestkitError> {
     run(StartupMode::Progressive, 0, false, false).await
+}
+#[tokio::test]
+#[ignore = "requires built SUT via TULIPROX_TESTKIT_SUT_BINARY"]
+async fn conservative_skips_404_and_410_head() -> Result<(), TestkitError> {
+    run(StartupMode::Conservative, 2, false, false).await
 }
 #[tokio::test]
 #[ignore = "requires built SUT via TULIPROX_TESTKIT_SUT_BINARY"]

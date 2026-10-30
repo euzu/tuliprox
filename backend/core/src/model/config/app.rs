@@ -656,7 +656,7 @@ mod tests {
             rules: vec![CompiledMappingRule {
                 name: None,
                 filter: Filter::default(),
-                program: MappingProgram::Script(MapperScript::parse("", None).expect("empty script should parse")),
+                program: MappingProgram::Dsl(MapperScript::parse("", None).expect("empty script should parse")),
             }],
             ..CompiledMapping::default()
         }])

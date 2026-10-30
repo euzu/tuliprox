@@ -819,6 +819,7 @@ pub(in crate::refresh::tests) async fn install_published_recovery_binding(
                     origin_byte_range: None,
                     map_ref: None,
                     encryption: None,
+                    retained_resource_identity: None,
                     origin_fetch_ref: None,
                     status: SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 1 },
                     last_rendered_at_ms: None,

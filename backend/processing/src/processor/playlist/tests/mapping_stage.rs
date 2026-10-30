@@ -20,7 +20,7 @@ pub(super) fn build_mapping(id: &str, stage: MappingStage, script: &str) -> Comp
         rules: vec![CompiledMappingRule {
             name: None,
             filter: get_filter(r#"name ~ ".*""#, None).expect("filter parses"),
-            program: MappingProgram::Script(MapperScript::parse(script, None).expect("script parses")),
+            program: MappingProgram::Dsl(MapperScript::parse(script, None).expect("script parses")),
         }],
         counters: vec![],
         templates: None,
@@ -600,4 +600,103 @@ fn prepare_target_deduplicates_virtual_items_created_by_after_epg_mappings() {
         assert_eq!(prepared.playlist.iter().map(|group| group.channels.len()).sum::<usize>(), 3);
         assert_eq!(stats[&input.name].processed_stats.channel_count, 3);
     });
+}
+
+mod rhai_mapping {
+    use super::*;
+    use shared::model::{PatternTemplate, PlaylistItemHeader, TemplateValue};
+    use tuliprox_core::scripting::MappingScript;
+
+    fn rhai_mapping(script: &str, templates: Option<Vec<PatternTemplate>>) -> CompiledMapping {
+        CompiledMapping {
+            id: "rhai".to_string(),
+            match_as_ascii: false,
+            stage: MappingStage::Processing,
+            rules: vec![CompiledMappingRule {
+                name: Some("rhai rule".to_string()),
+                filter: get_filter(r#"name ~ ".*""#, None).expect("filter parses"),
+                program: MappingProgram::Rhai(MappingScript::compile(script).expect("script compiles")),
+            }],
+            counters: vec![],
+            templates: templates.map(Arc::from),
+        }
+    }
+
+    fn channel(name: &str) -> PlaylistItem {
+        PlaylistItem { header: PlaylistItemHeader { name: name.intern(), ..Default::default() } }
+    }
+
+    #[test]
+    fn rhai_rule_mutates_the_item_through_the_pipeline() {
+        let mapping = rhai_mapping(r#"item.group = "Rhai"; item.chno = 12;"#, None);
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+        let mapped = outcome.channel.expect("channel survives mapping");
+
+        assert_eq!(outcome.matched_rules, 1);
+        assert_eq!(mapped.header.group.as_ref(), "Rhai");
+        assert_eq!(mapped.header.chno, 12);
+        assert_eq!(outcome.changed_fields.len(), 2);
+        assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    }
+
+    #[test]
+    fn rhai_rule_sees_the_mapping_templates() {
+        let templates = vec![PatternTemplate {
+            name: "quality".to_string(),
+            value: TemplateValue::Single("UHD".to_string()),
+            placeholder: "!quality!".to_string(),
+        }];
+        let mapping = rhai_mapping(r#"item.group = ctx.template("quality");"#, Some(templates));
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+        let mapped = outcome.channel.expect("channel survives mapping");
+
+        assert_eq!(mapped.header.group.as_ref(), "UHD");
+    }
+
+    #[test]
+    fn rhai_rule_emits_favourite_aliases_as_virtual_items() {
+        let mapping = rhai_mapping(r#"ctx.favourite(item, "Favourites");"#, None);
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+
+        assert!(outcome.channel.is_some(), "the original channel must stay in the playlist");
+        assert_eq!(outcome.virtual_items.len(), 1);
+        assert_eq!(outcome.virtual_items[0].header.group.as_ref(), "Favourites");
+    }
+
+    #[test]
+    fn a_script_that_discards_its_item_reports_a_diagnostic_and_drops_the_channel() {
+        let mapping = rhai_mapping("item = 1;", None);
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+
+        assert!(outcome.channel.is_none(), "a lost item must not reappear unmodified");
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert!(outcome.diagnostics[0].contains("channel 'Channel'"), "{:?}", outcome.diagnostics);
+        assert!(outcome.diagnostics[0].contains("replaced the reserved variable 'item'"), "{:?}", outcome.diagnostics);
+    }
+
+    #[test]
+    fn a_script_that_discards_its_item_keeps_the_favourites_it_created() {
+        let mapping = rhai_mapping(r#"ctx.favourite(item, "Favourites"); item = 1;"#, None);
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+
+        assert!(outcome.channel.is_none(), "a lost item must not reappear unmodified");
+        assert_eq!(outcome.virtual_items.len(), 1);
+        assert_eq!(outcome.virtual_items[0].header.group.as_ref(), "Favourites");
+    }
+
+    #[test]
+    fn a_failing_statement_reports_a_diagnostic_and_keeps_the_channel() {
+        let mapping = rhai_mapping(r#"item["nope"] = "x";"#, None);
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+
+        assert!(outcome.channel.is_some(), "the item must survive a failed assignment");
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert!(outcome.diagnostics[0].contains("rule 'rhai rule'"), "{:?}", outcome.diagnostics);
+    }
 }

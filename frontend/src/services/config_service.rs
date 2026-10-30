@@ -266,7 +266,13 @@ impl ConfigService {
                             if let Some(mappers) = mapping.mapper.as_mut() {
                                 for mapper in mappers.iter_mut() {
                                     mapper.t_filter = get_filter(mapper.filter.as_str(), templates).ok();
-                                    mapper.t_script = MapperScript::parse(&mapper.script, templates).ok();
+                                    // Rhai scripts are compiled by the backend host; parsing them with the
+                                    // mapper DSL here would report every Rhai program as invalid.
+                                    mapper.t_script = if mapper.mapper_type.is_dsl() {
+                                        MapperScript::parse(&mapper.script, templates).ok()
+                                    } else {
+                                        None
+                                    };
                                 }
                             }
                         }

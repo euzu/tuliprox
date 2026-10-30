@@ -70,6 +70,9 @@ normal tuliprox-metadata -> tuliprox-session
 # translates its concrete Trakt edge into that trusted representation.
 normal tuliprox-curation -> shared
 normal tuliprox-curation -> tuliprox-core
+# Shared Rhai runtime. Holds no domain types, so any host crate can depend on it.
+normal tuliprox-core -> tuliprox-scripting
+normal tuliprox-scripting -> shared
 # The playlist pipeline. It states what it needs from the background
 # metadata worker as a trait (`MetadataUpdateSink`) that the binary
 # implements, so it does not depend on the worker itself. It delegates
@@ -142,6 +145,7 @@ dev tuliprox -> tuliprox-repository
 dev tuliprox -> tuliprox-session
 dev tuliprox-hls -> tuliprox-mpegts
 dev tuliprox-repository -> tuliprox-btree
+dev tuliprox-testkit -> tuliprox-mpegts
 ALLOWLIST
 
 if [ -n "$allow_file" ]; then

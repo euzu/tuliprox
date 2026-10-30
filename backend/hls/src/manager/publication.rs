@@ -122,6 +122,53 @@ fn hls_pending_manifest_follow_up_deadline(now_ms: u64, target_duration: Option<
 }
 
 impl HlsProxyManager {
+    /// A definitive admission failure is retained by this access lease. A fresh
+    /// master may open a successor attempt after capacity becomes available.
+    pub async fn fail_access_lease_start_admission(
+        &self,
+        ctx: &crate::HlsCtx,
+        session: &HlsSessionHandle,
+        lease_id: &HlsAccessLeaseId,
+        kind: crate::HlsBoundAccountAcquireErrorKind,
+        now_ms: u64,
+        expected_account: &crate::origin_account_runtime::HlsOriginAccountSnapshot,
+    ) {
+        let generation = {
+            let mut leases = self.access_leases.write().await;
+            let mut state = session.write().await;
+            let owns_binding = expected_account.matches_session_identity(&state);
+            let attempt = leases.manifest_attempt_context(
+                Some(lease_id),
+                crate::HlsManifestCommitRequirement::FreshCommitRequired {
+                    reason: crate::HlsFreshManifestRequiredReason::ColdStart,
+                },
+                owns_binding.then(|| state.origin_refresh.attempt.clone()).flatten(),
+                state.live_entry_revalidation_generation(),
+                now_ms,
+            );
+            attempt.record_provider_failure(kind);
+            attempt.finish(true);
+            if owns_binding && !state.origin_refresh.in_flight && state.activity.active_access_lease_count == 0 {
+                state.origin_refresh.attempt = Some(attempt);
+            }
+            owns_binding.then_some(state.activity.origin_work_generation)
+        };
+        if let Some(generation) = generation {
+            let ctx = ctx.clone();
+            let session = Arc::clone(session);
+            let expected = expected_account.clone();
+            // Once the failure is committed, cancelling its HTTP waiter cannot
+            // orphan the reservation cleanup.
+            let cleanup = tokio::spawn(async move {
+                crate::origin::finish_failed_hls_start_for_context(&ctx, &session, Some(generation), Some(&expected))
+                    .await;
+            });
+            let _ = cleanup.await;
+        }
+        let proxy_id = session.read().await.proxy_session_id.clone();
+        self.notify_session_evidence_changed(&proxy_id);
+    }
+
     pub(crate) async fn prepare_manifest_attempt(
         &self,
         request: &crate::refresh::OriginRefreshRequest,
@@ -300,10 +347,8 @@ impl HlsProxyManager {
     pub fn now_ms(&self) -> u64 { self.terminal_commit_clock.now_ms() }
 
     /// Anchor the scheduling clock to tokio's, for `start_paused` tests.
-    #[cfg(test)]
-    pub(crate) fn follow_tokio_clock_for_test(&self, base_ms: u64) {
-        self.terminal_commit_clock.follow_tokio_clock(base_ms);
-    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn follow_tokio_clock_for_test(&self, base_ms: u64) { self.terminal_commit_clock.follow_tokio_clock(base_ms); }
 
     pub fn transient_resources(&self) -> &Arc<TransientResourceStore> { &self.transient_resources }
 

@@ -171,12 +171,21 @@ stateDiagram-v2
 
 ## Origin account protection
 
-Origin account protection is derived from the most recent successful media response. Manifest-only activity is not enough
-to mark a session as media-active.
+Shared live HLS grants bounded protection at its first accepted origin media manifest, while the manifest allocation still
+holds provider capacity. This start anchor freezes its target duration: hard-active through `1T`, soft-active through `3T`,
+with provider TTL through `3T + 1s`. Subsequent authorized media activity renews protection. Manifest polling and additional
+leases neither renew the start nor mark media delivery; generic provider `Starting` leases remain non-reserving.
+
+An admitted resource operation additionally holds continuous origin work and a deadline-bound right on that same provider
+lease through preparation, retries, backoff and required processing. Its fixed budget can outlive normal protection;
+new independent work requires its own valid admission. Normal protection and parallel work rights still count one slot.
+Only the completing operation's right is removed on success, final error, deadline or cancellation. Direct transient bodies
+retain it through EOF, timeout or Drop. This does not change the normal protection states below.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> NoMediaYet: No successful media response yet
+    [*] --> NoMediaYet: No start anchor or authorized media yet
+    NoMediaYet --> HardActive: First accepted origin media manifest fixes start anchor
     NoMediaYet --> HardActive: Segment, MAP, or /r response succeeds
     HardActive --> SoftActive: now > last_media + target_duration
     SoftActive --> Expired: soft overlap window elapsed
@@ -186,8 +195,8 @@ stateDiagram-v2
 
 | Protection state | Condition |
 | :--- | :--- |
-| `NoMediaYet` | No segment, MAP, or transient resource response has succeeded yet. |
-| `HardActive` | Current time is inside the hard-active window after the last authorized media access. |
+| `NoMediaYet` | Neither a start anchor nor authorized media activity exists. |
+| `HardActive` | Current time is inside the hard window after the fixed start or later authorized media access. |
 | `SoftActive` | Hard-active protection elapsed, but the soft overlap window has not elapsed. |
 | `Expired` | The soft overlap window elapsed. |
 
