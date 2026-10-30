@@ -36,6 +36,14 @@ fn script_fields() -> impl Iterator<Item = HeaderField> {
     MAPPER_FIELDS.iter().copied().chain([HeaderField::Input, HeaderField::Type, HeaderField::Genre])
 }
 
+/// Resolve a field name a script used, accepting only the fields in [`script_fields`].
+///
+/// `HeaderField::parse` also knows fields the DSL does not expose, such as `provider_id`; the
+/// indexer and the property fallback must not reach them.
+fn script_field(name: &str) -> Option<HeaderField> {
+    HeaderField::parse(name).filter(|field| script_fields().any(|allowed| allowed == *field))
+}
+
 const fn is_writable(field: HeaderField) -> bool {
     !matches!(field, HeaderField::Input | HeaderField::Type | HeaderField::ProviderId)
 }
@@ -269,11 +277,11 @@ fn register_mapper_api(engine: &mut Engine) {
     // `item["caption"]` resolves through the same table as `item.caption`, so a field spelling
     // that works in the DSL keeps working here.
     engine.register_indexer_get(|item: &mut MapperItem, name: ImmutableString| -> Dynamic {
-        HeaderField::parse(&name).map_or(Dynamic::UNIT, |field| item.read(field))
+        script_field(&name).map_or(Dynamic::UNIT, |field| item.read(field))
     });
     engine.register_indexer_set(
         |item: &mut MapperItem, name: ImmutableString, value: Dynamic| -> Result<(), Box<EvalAltResult>> {
-            let field = HeaderField::parse(&name).ok_or_else(|| format!("unknown field '{name}'"))?;
+            let field = script_field(&name).ok_or_else(|| format!("unknown field '{name}'"))?;
             item.write(field, &value)
         },
     );

@@ -12,7 +12,7 @@
 
 use log::trace;
 use rhai::ParseError;
-pub use rhai::{Dynamic, Engine, EvalAltResult, ImmutableString, Map, Position, Scope, AST};
+pub use rhai::{Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, Position, Scope, AST};
 use shared::{error::TuliproxError, utils::Capitalize};
 use std::fmt::{Display, Formatter};
 
@@ -123,10 +123,23 @@ impl ScriptError {
     pub fn into_tuliprox_error(self) -> TuliproxError { TuliproxError::Mapper(self.to_string()) }
 }
 
-/// Case helpers shared by all hosts, matching the mapper DSL's `capitalize` and `title_case`.
+/// Case helpers shared by all hosts, matching the mapper DSL's `capitalize` and `title_case`,
+/// including the `title_case(text, ["HD", ...])` form that keeps listed acronyms as written.
 pub fn register_text_helpers(engine: &mut Engine) {
     engine.register_fn("capitalize", |value: ImmutableString| value.as_str().capitalize());
     engine.register_fn("title_case", |value: ImmutableString| value.as_str().title_case());
+    engine.register_fn("title_case", |value: ImmutableString, acronyms: Array| -> Result<String, Box<EvalAltResult>> {
+        let acronyms = acronyms
+            .into_iter()
+            .map(|acronym| {
+                acronym
+                    .into_immutable_string()
+                    .map_err(|type_name| format!("title_case acronyms must be strings, got {type_name}").into())
+            })
+            .collect::<Result<Vec<_>, Box<EvalAltResult>>>()?;
+        let acronyms: Vec<&str> = acronyms.iter().map(ImmutableString::as_str).collect();
+        Ok(value.as_str().title_case_with_acronyms(&acronyms))
+    });
 }
 
 #[cfg(test)]
@@ -181,6 +194,29 @@ mod tests {
             .expect("script evaluates");
 
         assert_eq!(value.as_str(), "Us: tnt hd|Us: Tnt Hd");
+    }
+
+    #[test]
+    fn title_case_keeps_listed_acronyms_like_the_mapper_dsl() {
+        let runtime = runtime();
+        let script = runtime.compile(r#"title_case("uk fhd sports hd", ["UK", "FHD", "HD"])"#, "origin");
+        let script = script.expect("script compiles");
+        let mut scope = Scope::new();
+
+        let value = runtime.engine().eval_ast_with_scope::<String>(&mut scope, script.ast()).expect("script evaluates");
+
+        assert_eq!(value, "UK FHD Sports HD");
+    }
+
+    #[test]
+    fn title_case_rejects_non_string_acronyms() {
+        let runtime = runtime();
+        let script = runtime.compile(r#"title_case("a hd", [1])"#, "origin").expect("script compiles");
+        let mut scope = Scope::new();
+
+        let error = runtime.engine().eval_ast_with_scope::<Dynamic>(&mut scope, script.ast());
+
+        assert!(error.is_err(), "a non-string acronym must be rejected");
     }
 
     #[test]

@@ -39,6 +39,7 @@ COPY backend/mpegts/Cargo.toml ./backend/mpegts/
 COPY backend/parser/Cargo.toml ./backend/parser/
 COPY backend/processing/Cargo.toml ./backend/processing/
 COPY backend/repository/Cargo.toml ./backend/repository/
+COPY backend/scripting/Cargo.toml ./backend/scripting/
 COPY backend/session/Cargo.toml ./backend/session/
 COPY tools/tuliprox-testkit/Cargo.toml ./tools/tuliprox-testkit/
 
@@ -48,7 +49,7 @@ RUN mkdir -p frontend/src backend/app/src/tools tools/tuliprox-testkit/src && \
     printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
     printf '\n' > tools/tuliprox-testkit/src/lib.rs && \
     printf 'fn main() {}\n' > tools/tuliprox-testkit/src/main.rs && \
-    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser processing repository session; do \
+    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser processing repository scripting session; do \
       mkdir -p "backend/${crate}/src"; \
       printf '\n' > "backend/${crate}/src/lib.rs"; \
     done && \

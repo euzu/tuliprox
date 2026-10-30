@@ -504,7 +504,8 @@ items are skipped.
 
 * `!template!` text substitution in the script source is not performed, because it would rewrite program text. Use
   `ctx.template(name)`.
-* `print` writes at `trace` level. `capitalize` and `title_case` are available with the same behaviour as in the DSL.
+* `print` writes at `trace` level. `capitalize` and `title_case` are available with the same behaviour as in the DSL,
+  including `title_case(text, ["HD", "UK"])`, which keeps the listed acronyms as written.
 * A script must not replace `item` or `ctx` with another value. Replacing `item` discards the channel with a
   diagnostic; alias rows created with `ctx.favourite` before that point are kept. Replacing `ctx` produces a
   diagnostic and loses all alias rows created so far. Shadowing either variable with `let` is harmless: the host

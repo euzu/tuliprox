@@ -239,6 +239,22 @@ fn reading_an_unknown_property_yields_unit_instead_of_failing() {
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
 }
 
+#[test]
+fn fields_outside_the_dsl_vocabulary_are_not_reachable_through_the_indexer() {
+    let outcome =
+        run(r#"if item["provider_id"] == () && item.provider_id == () { item.group = "hidden"; }"#, item("Channel"));
+    let mapped = outcome.item.expect("item survives the script");
+    assert_eq!(mapped.header.group.as_ref(), "hidden");
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+
+    let outcome = run(r#"item["provider_id"] = "1";"#, item("Channel"));
+    assert!(
+        outcome.diagnostics.iter().any(|diagnostic| diagnostic.contains("unknown field 'provider_id'")),
+        "{:?}",
+        outcome.diagnostics
+    );
+}
+
 const DOC: &str = include_str!("../../../../../docs/src/configuration/mapping-dsl.md");
 
 fn rhai_blocks() -> Vec<&'static str> {
