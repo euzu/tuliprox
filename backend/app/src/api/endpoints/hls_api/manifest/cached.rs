@@ -7,7 +7,7 @@ use super::{
     HlsMaterializedSharedManifest, HLS_MANIFEST_WAIT_POLL_INTERVAL, HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
 };
 use crate::{
-    api::model::AppState,
+    api::model::{get_custom_stream_response_error_status, is_custom_video_stream_enabled, AppState},
     model::ConfigInput,
     processing::parser::hls::origin_manifest::HlsManifestWindowPolicy,
     repository::{persist_input_live_bitrate_bps, LiveBitratePersistenceOutcome},
@@ -27,6 +27,54 @@ use tuliprox_hls::api::{
 
 type HlsPreparedManifest =
     (HlsMaterializedSharedManifest, HlsLeaseManifestSnapshot, HlsPublishedTransientResourceIds, u64);
+
+pub(in crate::api::endpoints::hls_api) async fn hls_exhausted_startup_response(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    lease: &tuliprox_hls::api::HlsAccessLease,
+) -> Option<axum::response::Response> {
+    if lease
+        .manifest_start_attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.failed() && attempt.provider_failure().is_some())
+    {
+        return None;
+    }
+    let reason = tuliprox_hls::api::HlsRuntimeCustomTailReason::ChannelUnavailable;
+    // Idle re-entry may have published media from its previous playback. The
+    // standalone response must leave those snapshots and revision bindings intact.
+    let idle_reentry = lease.state == HlsAccessLeaseState::Idle
+        && lease.playback_mode == tuliprox_hls::api::HlsLeasePlaybackMode::Live
+        && lease.runtime_policy_revocation.is_none();
+    // Retained entries can have been evicted before this new start has even
+    // refreshed the origin. Only its settled failure makes exhaustion terminal.
+    if idle_reentry && !lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()) {
+        return None;
+    }
+    if !(lease.permits_unpublished_standalone_tail(reason) || idle_reentry) {
+        return None;
+    }
+    let exhausted = {
+        let state = session.read().await;
+        // A fresh manifest or media preparation may still replace an exhausted
+        // retained window. End the start only after that work has settled.
+        !state.initial_manifest_commit_work_pending()
+            && state.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) == 0
+            && state.start_segments_exhausted()
+    };
+    if !exhausted {
+        return None;
+    }
+    let fallback_status = if is_custom_video_stream_enabled(&app_state.app_config) {
+        axum::http::StatusCode::NOT_FOUND
+    } else {
+        get_custom_stream_response_error_status(&app_state.app_config)
+    };
+    Some(
+        super::hls_custom_video_manifest_response_for_lease(app_state, lease, reason.video_type(), fallback_status)
+            .await,
+    )
+}
 
 enum HlsLiveWindowPreparation {
     Prepared(HlsPreparedManifest),
@@ -470,7 +518,12 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             .proxy
             .access_lease_response_snapshot(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
             .await?;
-        if let Some(response) = super::hls_terminal_playback_response(&lease, &proxy_session_id, access_lease_id) {
+        if let Some(response) =
+            super::hls_terminal_playback_response(app_state, &lease, &proxy_session_id, access_lease_id)
+        {
+            return Some(response);
+        }
+        if let Some(response) = hls_exhausted_startup_response(app_state, session, &lease).await {
             return Some(response);
         }
         if lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()) {
@@ -668,9 +721,12 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         )
                         .await
                     {
-                        if let Some(response) =
-                            super::hls_terminal_playback_response(&current, &proxy_session_id, access_lease_id)
-                        {
+                        if let Some(response) = super::hls_terminal_playback_response(
+                            app_state,
+                            &current,
+                            &proxy_session_id,
+                            access_lease_id,
+                        ) {
                             return Some(response);
                         }
                     }
@@ -752,7 +808,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         )
                         .await?;
                     if let Some(terminal) =
-                        super::hls_terminal_playback_response(&current, &proxy_session_id, access_lease_id)
+                        super::hls_terminal_playback_response(app_state, &current, &proxy_session_id, access_lease_id)
                     {
                         return Some(terminal);
                     }

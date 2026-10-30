@@ -257,6 +257,7 @@ pub(in crate::refresh::tests) fn install_stored_provisioning_manifest(session: &
                 origin_byte_range: None,
                 map_ref: None,
                 encryption: None,
+                retained_resource_identity: None,
                 origin_fetch_ref: None,
                 status: SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: rendered_at_ms },
                 last_rendered_at_ms: None,

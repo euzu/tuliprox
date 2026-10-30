@@ -258,6 +258,7 @@ async fn fetch_direct_decoded_with_timeout(
         resource_file: TransientResourceFile { resource_id: resource.id, extension: "bin".to_string() },
         resource_kind,
         clients: HlsOriginResourceClients {
+            retry_work: None,
             session: None,
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
@@ -447,6 +448,7 @@ impl TestTransientCacheFixture {
                 resource_file: self.resource_file.clone(),
                 resource_kind: self.resource.kind,
                 clients: HlsOriginResourceClients {
+                    retry_work: None,
                     session: None,
                     client: reqwest::Client::new(),
                     no_redirect_client: reqwest::Client::builder()
@@ -488,3 +490,5 @@ impl Drop for DropCounter {
 mod cache;
 mod decoding;
 mod lifecycle;
+
+mod retry_work;

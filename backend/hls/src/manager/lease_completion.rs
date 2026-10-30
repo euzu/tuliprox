@@ -197,6 +197,17 @@ impl super::HlsLeaseRuntime {
         self.startup_observability.remove_access_lease(lease_id);
         self.qos.remove_access_lease(lease_id).await;
         // Keep the exact lease present until all release steps have finished.
-        leases.remove_access_lease_if_preparation_matches(lease_id, preparation).is_some()
+        let removed = leases.remove_access_lease_if_preparation_matches(lease_id, preparation).is_some();
+        if removed {
+            if let Some(current) = current.as_ref() {
+                let mut session = current.session().write().await;
+                crate::availability::binding_protection::after_lease_removal(
+                    &mut leases,
+                    &mut session,
+                    tuliprox_core::utils::current_time_millis(),
+                );
+            }
+        }
+        removed
     }
 }

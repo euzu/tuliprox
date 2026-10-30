@@ -509,6 +509,9 @@ async fn persistent_reservation_closes_once_and_new_master_can_restart_all_modes
             enable_hls_cache_with_startup_mode(&app, mode).await;
             if video {
                 enable_channel_unavailable_custom_response(&app);
+                let mut custom = app.app_config.custom_stream_response.load().as_ref().unwrap().as_ref().clone();
+                custom.provider_connections_exhausted = custom.channel_unavailable.clone();
+                app.app_config.custom_stream_response.store(Some(Arc::new(custom)));
             }
             create_active_hls_user_session(&app).await;
             let session =
@@ -521,7 +524,7 @@ async fn persistent_reservation_closes_once_and_new_master_can_restart_all_modes
             let started = tokio::time::Instant::now();
             let response = canonical_response_for_lease(&app, &input, &url, "failed-start").await;
             assert!(started.elapsed() < Duration::from_secs(3), "{mode:?} video={video}");
-            assert_eq!(response.status(), if video { StatusCode::OK } else { StatusCode::NOT_FOUND });
+            assert_eq!(response.status(), if video { StatusCode::OK } else { StatusCode::BAD_GATEWAY });
             let lease_id = HlsAccessLeaseId("failed-start".into());
             let lease = app
                 .hls
@@ -536,7 +539,7 @@ async fn persistent_reservation_closes_once_and_new_master_can_restart_all_modes
             assert_eq!(origin.segment_request_count(), 0);
             app.active_provider.clear_provider_reservation("foreign-playback");
             let repeated = canonical_response_for_lease(&app, &input, &url, "failed-start").await;
-            assert_eq!(repeated.status(), if video { StatusCode::OK } else { StatusCode::NOT_FOUND });
+            assert_eq!(repeated.status(), if video { StatusCode::OK } else { StatusCode::BAD_GATEWAY });
             assert_eq!(attempt.logical_attempts(), 5);
             assert_eq!(
                 origin.manifest_request_count(),

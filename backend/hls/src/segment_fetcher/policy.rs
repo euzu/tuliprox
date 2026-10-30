@@ -5,6 +5,23 @@ use super::{
 use std::time::Duration;
 
 impl SegmentFetchPolicy {
+    pub(crate) fn resource_retry_budget_ms(
+        &self,
+        kind: crate::HlsResourceFetchKind,
+        source: crate::HlsResourceFetchSource,
+        target_duration: Option<u32>,
+    ) -> u64 {
+        let config = self.timeouts.config();
+        let transfer = config.snapshot(kind, target_duration).effective_ms;
+        let postprocess =
+            if source == crate::HlsResourceFetchSource::Normal && kind == crate::HlsResourceFetchKind::Segment {
+                self.effective_repair_postprocess_timeout_ms
+            } else {
+                0
+            };
+        self.retry_chain_budget_ms(transfer, config.connect_ms, postprocess)
+            .saturating_add(SEGMENT_FETCH_SCHEDULING_MARGIN_MS)
+    }
     pub fn segment_timeout_ms(&self, target_duration: Option<u32>) -> u64 {
         self.timeouts.snapshot(crate::HlsResourceFetchKind::Segment, target_duration).effective_ms
     }

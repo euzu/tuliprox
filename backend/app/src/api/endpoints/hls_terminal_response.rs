@@ -56,6 +56,9 @@ pub(super) async fn hls_manifest_terminal_preflight(
             HlsManifestTerminalPreflight::FailClosed { reason: HlsTerminalFailedClosedReason::LeaseStateUnavailable }
         };
     };
+    if lease.state == HlsAccessLeaseState::Idle {
+        return HlsManifestTerminalPreflight::RefreshBeforeTerminalEvaluation;
+    }
     let (publication_late, capacity_recovery_blocks_ready_timeline) = {
         let session = session.read().await;
         let target_duration_ms =
@@ -173,6 +176,7 @@ pub(super) fn terminal_segment_immutable_replay_response(
 }
 
 pub(super) fn hls_terminal_playback_response(
+    app_state: &Arc<AppState>,
     lease: &HlsAccessLease,
     proxy_session_id: &ProxySessionId,
     access_lease_id: &HlsAccessLeaseId,
@@ -191,7 +195,14 @@ pub(super) fn hls_terminal_playback_response(
                 StatusCode::NOT_FOUND.into_response()
             })
         }
-        HlsLeasePlaybackMode::TerminalUnavailable { .. } => Some(StatusCode::SERVICE_UNAVAILABLE.into_response()),
+        HlsLeasePlaybackMode::TerminalUnavailable { .. } => Some(
+            if crate::api::model::is_custom_video_stream_enabled(&app_state.app_config) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                crate::api::model::get_custom_stream_response_error_status(&app_state.app_config)
+            }
+            .into_response(),
+        ),
         HlsLeasePlaybackMode::Live => None,
         HlsLeasePlaybackMode::Ended => Some(StatusCode::NOT_FOUND.into_response()),
     }
@@ -246,7 +257,7 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
     let mut reevaluations = 0_usize;
 
     loop {
-        if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
+        if let Some(response) = hls_terminal_playback_response(app_state, &lease, proxy_session_id, access_lease_id) {
             return Err(Box::new(response));
         }
         let resolution = commit_terminal_tail_if_lease_reserve_requires_cutover(
@@ -259,10 +270,12 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
         .await;
         match hls_terminal_endpoint_action(resolution) {
             HlsTerminalEndpointAction::ServeLive => {
-                let snapshot_now_ms = current_time_millis();
+                let snapshot_now_ms = app_state.hls.proxy.now_ms();
                 let current =
                     current_hls_terminal_lease(app_state, proxy_session_id, access_lease_id, snapshot_now_ms).await?;
-                if let Some(response) = hls_terminal_playback_response(&current, proxy_session_id, access_lease_id) {
+                if let Some(response) =
+                    hls_terminal_playback_response(app_state, &current, proxy_session_id, access_lease_id)
+                {
                     return Err(Box::new(response));
                 }
                 if hls_terminal_live_decision_is_current(&lease, &current) {
@@ -280,10 +293,14 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
                 reevaluations = reevaluations.saturating_add(1);
             }
             HlsTerminalEndpointAction::ReloadTerminal => {
-                let reloaded =
-                    current_hls_terminal_lease(app_state, proxy_session_id, access_lease_id, current_time_millis())
-                        .await?;
-                return match hls_terminal_playback_response(&reloaded, proxy_session_id, access_lease_id) {
+                let reloaded = current_hls_terminal_lease(
+                    app_state,
+                    proxy_session_id,
+                    access_lease_id,
+                    app_state.hls.proxy.now_ms(),
+                )
+                .await?;
+                return match hls_terminal_playback_response(app_state, &reloaded, proxy_session_id, access_lease_id) {
                     Some(response) => Err(Box::new(response)),
                     None => Err(Box::new(hls_terminal_failed_closed_response(
                         HlsTerminalFailedClosedReason::RuntimeUnavailable,
@@ -296,7 +313,7 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
                         HlsTerminalFailedClosedReason::RuntimeUnavailable,
                     )));
                 }
-                evaluation_now_ms = current_time_millis();
+                evaluation_now_ms = app_state.hls.proxy.now_ms();
                 let reloaded =
                     current_hls_terminal_lease(app_state, proxy_session_id, access_lease_id, evaluation_now_ms).await?;
                 let reloaded_session = current_hls_terminal_session(app_state, proxy_session_id).await?;
@@ -313,5 +330,3 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
         }
     }
 }
-
-use tuliprox_core::utils::current_time_millis;

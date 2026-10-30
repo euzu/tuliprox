@@ -127,6 +127,7 @@ pub(super) async fn ensure_segment_key_dependency_ready(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
+    retry_work: Option<Arc<crate::HlsOriginRetryWork>>,
 ) -> Result<(), SegmentFetchError> {
     let Some(dependency) = snapshot.key_dependency.clone() else {
         return Ok(());
@@ -145,7 +146,16 @@ pub(super) async fn ensure_segment_key_dependency_ready(
         SegmentKeyDependency::Fetch(dependency) => {
             let SegmentKeyFetchDependency { token, resource, resource_file } = *dependency;
             let binding = SegmentKeyBindingSnapshot::from(snapshot);
-            fetch_segment_key_dependency_into_cache(context, &binding, policy, token, resource, resource_file).await
+            fetch_segment_key_dependency_into_cache(
+                context,
+                &binding,
+                policy,
+                token,
+                resource,
+                resource_file,
+                retry_work,
+            )
+            .await
         }
     }
 }
@@ -196,6 +206,38 @@ pub(super) async fn fetch_segment_key_dependency_into_cache(
     token: TransientObjectFetchToken,
     resource: TransientResourceRef,
     resource_file: TransientResourceFile,
+    retry_work: Option<Arc<crate::HlsOriginRetryWork>>,
+) -> Result<(), SegmentFetchError> {
+    let retry_work = match retry_work {
+        Some(work) => Some(work),
+        None => {
+            crate::HlsOriginRetryWork::for_resource(
+                &context.session,
+                context.origin_io.as_ref().map(|io| &io.ctx.active_provider),
+                policy,
+                crate::HlsResourceFetchKind::Key,
+                crate::HlsResourceFetchSource::Normal,
+            )
+            .await
+        }
+    };
+    let deadline = retry_work.as_ref().map(|work| work.deadline());
+    let run =
+        commit_segment_key_dependency(context, binding, policy, token, resource, resource_file, retry_work.clone());
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, run).await.unwrap_or(Err(SegmentFetchError::Timeout)),
+        None => run.await,
+    }
+}
+
+async fn commit_segment_key_dependency(
+    context: &SegmentFetchContext,
+    binding: &SegmentKeyBindingSnapshot,
+    policy: &SegmentFetchPolicy,
+    token: TransientObjectFetchToken,
+    resource: TransientResourceRef,
+    resource_file: TransientResourceFile,
+    retry_work: Option<Arc<crate::HlsOriginRetryWork>>,
 ) -> Result<(), SegmentFetchError> {
     let mut fetch_finalizer = HlsTransientObjectFetchFinalizer::new(
         context.session.clone(),
@@ -210,6 +252,7 @@ pub(super) async fn fetch_segment_key_dependency_into_cache(
         &resource,
         &resource_file,
         binding.origin_work_generation,
+        retry_work,
     )
     .await?;
     let generation_valid = origin_work.generation_valid && {
@@ -270,6 +313,7 @@ async fn stage_segment_key_dependency(
     resource: &TransientResourceRef,
     resource_file: &TransientResourceFile,
     expected_generation: u64,
+    retry_work: Option<Arc<crate::HlsOriginRetryWork>>,
 ) -> Result<(StagedCacheObject, SegmentOriginWorkFinish), SegmentFetchError> {
     let request = HlsTransientOriginFetchRequest {
         resolved_origin_uri: resource.resolved_origin_uri.clone(),
@@ -279,6 +323,7 @@ async fn stage_segment_key_dependency(
         resource_file: resource_file.clone(),
         resource_kind: TransientResourceKind::Key,
         clients: HlsOriginResourceClients {
+            retry_work,
             session: Some(context.session.clone()),
             client: context.client.clone(),
             no_redirect_client: context.no_redirect_client.clone(),
@@ -296,9 +341,7 @@ async fn stage_segment_key_dependency(
         let context = prepare_context.clone();
         let resource = resource_for_prepare.clone();
         async move {
-            let guard =
-                prepare_segment_origin_attempt(context.clone(), attempt.timeout.effective_ms, expected_generation)
-                    .await?;
+            let guard = prepare_segment_origin_attempt(context.clone(), attempt, expected_generation).await?;
             if !context.session.read().await.transient.origin_resource_is_fetchable(&resource, current_time_millis()) {
                 finish_segment_origin_attempt(context, guard).await;
                 return Err(SegmentFetchError::Timeout);

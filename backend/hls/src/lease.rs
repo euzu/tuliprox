@@ -117,6 +117,7 @@ pub struct HlsAccessLeaseTiming {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsAccessLeasePendingDeadline {
     Bootstrap { deadline_ms: u64 },
+    Processing { deadline_ms: u64 },
     FollowUp { deadline_ms: u64 },
 }
 

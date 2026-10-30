@@ -122,6 +122,8 @@ pub mod api {
     pub use super::media_reserve::{evaluate_lease_reserve, HlsLeaseReserveInput};
     #[cfg(any(test, feature = "test-support"))]
     pub use super::recovery_timing::HlsRecoveryTriggerBudgetMs;
+    #[cfg(any(test, feature = "test-support"))]
+    pub use super::timeline::HlsSegmentEncryption;
     pub use super::{
         availability::{
             commit_terminal_tail_if_lease_reserve_requires_cutover, hls_manifest_acceptance_directive_for_session,
@@ -176,12 +178,12 @@ pub mod api {
             HlsAccountBindingProtection, HlsAccountOverlapTiming, HlsBoundAccountAcquireErrorKind,
             HlsEffectiveOriginAcquirePolicy, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
             HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginSource,
-            HlsOriginSourceKind, HlsOriginWorkClass,
+            HlsOriginSourceKind, HlsOriginStartProtection, HlsOriginWorkClass,
         },
         origin_account_runtime::{
             HlsOriginAccountRuntime, HlsOriginAccountSnapshot, HlsOriginAccountWork, HlsPreparedOriginAccount,
         },
-        origin_progress::publication_late_after_ms,
+        origin_progress::{publication_late_after_ms, HlsOriginPathCondition},
         paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},
         playback::{
             validate_hls_access_lease, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLeaseValidationError,
@@ -194,7 +196,8 @@ pub mod api {
         },
         renderer::{HlsManifestRenderer, RenderError, RenderedManifest},
         resource_fetch::{
-            retry_after_secs_from_ms, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsResourceFetchAttempt,
+            retry_after_secs_from_ms, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginRetryWork,
+            HlsResourceFetchAttempt,
         },
         response::{
             finite_hls_immutable_media_response, finite_hls_media_head_response, finite_hls_media_response,
@@ -299,8 +302,8 @@ pub(crate) use self::{
         build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
         retry_after_secs_from_ms, run_hls_origin_resource_retry_loop_with_attempt_prepare,
         HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
-        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsOriginTimeoutConfig, HlsOriginTimeoutPolicy,
-        HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource,
+        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsOriginRetryWork, HlsOriginTimeoutConfig,
+        HlsOriginTimeoutPolicy, HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource,
     },
     segment_fetcher::{HlsSegmentWorkerPool, SegmentFetchContext, SegmentFetchPolicy},
     segment_repair::{

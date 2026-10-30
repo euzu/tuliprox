@@ -228,6 +228,7 @@ impl HlsSegmentWorkerPool {
             token,
             resource,
             resource_file,
+            None,
         )
         .await;
         let proxy_session_id = {

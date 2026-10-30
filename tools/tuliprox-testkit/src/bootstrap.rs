@@ -67,6 +67,9 @@ impl FixturePaths {
             let _ = writeln!(config,
                 "  hls_cache:\n    cache_path: {}\n    max_concurrent_segment_fetches_per_session: 3\n    startup:\n      mode: {mode}",
                 yaml_scalar(&root.join("hls-cache")));
+            if let Some(strip) = fixture_stream.hls_startup_strip_segments {
+                let _ = writeln!(config, "    strip:\n      mode: segments\n      value: {strip}");
+            }
         }
         std::fs::write(&config_file, config)?;
         std::fs::write(
@@ -508,11 +511,25 @@ impl IsolatedSut {
         if config.command.trim().is_empty() || config.readiness_url.trim().is_empty() {
             return Err(TestkitError::Configuration("bootstrap command and readiness URL are required".to_owned()));
         }
-        let child = Command::new(&config.command).args(&config.arguments).current_dir(working_directory).spawn()?;
+        let mut command = Command::new(&config.command);
+        command.args(&config.arguments).current_dir(working_directory);
+        Self::start_command(
+            command,
+            &config.readiness_url,
+            Duration::from_millis(config.readiness_timeout_millis.max(1)),
+        )
+        .await
+    }
+
+    /// Starts a run-owned command with caller-selected output handling and the usual readiness/cleanup contract.
+    pub async fn start_command(
+        mut command: Command,
+        readiness_url: &str,
+        readiness_timeout: Duration,
+    ) -> Result<Self, TestkitError> {
+        let child = command.kill_on_drop(true).spawn()?;
         let mut sut = Self { child };
-        if let Err(startup_error) =
-            sut.wait_ready(&config.readiness_url, Duration::from_millis(config.readiness_timeout_millis.max(1))).await
-        {
+        if let Err(startup_error) = sut.wait_ready(readiness_url, readiness_timeout).await {
             if let Err(cleanup_error) = sut.stop().await {
                 return Err(TestkitError::Protocol(format!(
                     "isolated Tuliprox startup failed ({startup_error}) and cleanup failed ({cleanup_error})"
@@ -677,7 +694,7 @@ mod tests {
         let opts = crate::config::FixtureStreamOptions {
             share_live_hls: true,
             share_live_mpeg_ts: false,
-            hls_startup_mode: None,
+            ..crate::config::FixtureStreamOptions::default()
         };
         let source =
             render_sources("run", "127.0.0.1:9910".parse().unwrap(), &HashMap::new(), None, &opts, false, &m3u_input());

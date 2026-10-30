@@ -315,7 +315,22 @@ fn remove_indexed_session(
         .find_map(|(proxy_session_id, indexed)| Arc::ptr_eq(session, indexed).then(|| proxy_session_id.clone()))?;
     let removed = indexes.by_key.remove(key)?;
     indexes.by_proxy_session_id.remove(&proxy_session_id);
+    retire_removed_session(&removed);
     Some((proxy_session_id, removed))
+}
+
+fn retire_removed_session(session: &HlsSessionHandle) {
+    if let Ok(mut state) = session.try_write() {
+        state.mark_for_gc_removal();
+    } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        // Removal must not await a session lock under the index writer. A
+        // reader may itself be removing this session. Only this old handle is
+        // retired; neither its successor nor its provider binding is cleared.
+        let session = Arc::clone(session);
+        runtime.spawn(async move {
+            session.write().await.mark_for_gc_removal();
+        });
+    }
 }
 
 #[cfg(test)]

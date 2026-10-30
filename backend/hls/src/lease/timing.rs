@@ -9,7 +9,9 @@ use tuliprox_session::ConnectionKind;
 impl HlsAccessLeasePendingDeadline {
     pub const fn deadline_ms(self) -> u64 {
         match self {
-            Self::Bootstrap { deadline_ms } | Self::FollowUp { deadline_ms } => deadline_ms,
+            Self::Bootstrap { deadline_ms } | Self::Processing { deadline_ms } | Self::FollowUp { deadline_ms } => {
+                deadline_ms
+            }
         }
     }
 }

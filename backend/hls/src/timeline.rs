@@ -1,8 +1,8 @@
 use super::{
     media_reserve::{HlsReadyMediaState, HlsReadyTimelineSnapshot, HlsReadyTimelineUnit},
     resource_identity::{HlsMediaResourceIdentity, HlsMediaResourceSemanticKey, HlsPublishedResourceHistory},
-    safe_proxy_session_id, HlsSession, MapEntry, OriginMapKey, ProxyMapId, ProxySessionId, SegmentCacheKey,
-    SegmentFetchPriority, TransientResourceId,
+    safe_proxy_session_id, HlsSession, MapEntry, OriginMapFetchRef, OriginMapKey, ProxyMapId, ProxySessionId,
+    SegmentCacheKey, SegmentFetchPriority, TransientResourceId,
 };
 use axum::http::StatusCode;
 use log::info;
@@ -84,6 +84,7 @@ impl SegmentEntry {
         self.origin_fetch_ref
             .as_ref()
             .map(|fetch_ref| HlsMediaResourceIdentity::from_url(&fetch_ref.resolved_origin_url, fetch_ref.byte_range))
+            .or(self.retained_resource_identity)
     }
 }
 
@@ -184,6 +185,8 @@ pub struct SegmentEntry {
     pub origin_byte_range: Option<ParsedByteRange>,
     pub map_ref: Option<ProxyMapId>,
     pub encryption: Option<HlsSegmentEncryption>,
+    /// Comparison evidence retained when an account handoff invalidates the download URL.
+    pub retained_resource_identity: Option<HlsMediaResourceIdentity>,
     pub origin_fetch_ref: Option<OriginSegmentFetchRef>,
     pub status: SegmentCacheStatus,
     pub last_rendered_at_ms: Option<u64>,
@@ -206,6 +209,7 @@ impl fmt::Debug for SegmentEntry {
             .field("origin_byte_range", &self.origin_byte_range)
             .field("map_ref", &self.map_ref)
             .field("encryption", &self.encryption)
+            .field("retained_resource_identity", &self.retained_resource_identity)
             .field("origin_fetch_ref", &self.origin_fetch_ref)
             .field("status", &self.status)
             .field("last_rendered_at_ms", &self.last_rendered_at_ms)
@@ -433,6 +437,15 @@ impl HlsSession {
                     draft.pending_handoff_discontinuity_sequence = Some(0);
                 }
             }
+            draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
+        } else if self.last_rendered_manifest.is_none()
+            && draft.published_resource_history.is_empty()
+            && draft.origin_epoch_effective_host_id == Some(effective_host_id)
+            && draft.pending_handoff_discontinuity_sequence.is_none()
+            && !draft.pending_origin_epoch_handoff
+        {
+            // Unpublished overlap still needs its refreshed fetch references. Treating it
+            // as published handoff history would trim the very media needed for startup.
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
         } else {
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::Rebase { retained_head_in_use })?;
@@ -891,8 +904,14 @@ impl TimelineDraft {
                     byte_range: parsed.origin_byte_range,
                     valid_until_ms: None,
                 });
-                entry.encryption = map_segment_encryption(parsed)?;
-                entry.map_ref = map_ref;
+                entry.retained_resource_identity = None;
+                let encryption = map_segment_encryption(parsed)?;
+                // Cached ciphertext and its initialization/key bindings belong together,
+                // even when the replacement account advertises the same segment URL.
+                if !matches!(entry.status, SegmentCacheStatus::Ready { .. }) {
+                    entry.encryption = encryption;
+                    entry.map_ref = map_ref;
+                }
             }
             return Ok(proxy_seq);
         }
@@ -921,6 +940,7 @@ impl TimelineDraft {
             origin_byte_range: parsed.origin_byte_range,
             map_ref,
             encryption: map_segment_encryption(parsed)?,
+            retained_resource_identity: None,
             // Preserve the concrete fetch target resolved by the parser; do not derive provider/session identity from it.
             origin_fetch_ref: Some(OriginSegmentFetchRef {
                 resolved_origin_url: parsed.resolved_origin_url.clone(),
@@ -952,6 +972,13 @@ impl TimelineDraft {
             byte_range: parsed_map.byte_range,
         };
         if let Some(proxy_map_id) = self.origin_map_to_proxy.get(&origin_map_key).copied() {
+            if let Some(entry) = self.maps.get_mut(&proxy_map_id) {
+                entry.origin_fetch_ref = Some(OriginMapFetchRef {
+                    resolved_origin_url: parsed_map.resolved_origin_uri.clone(),
+                    byte_range: parsed_map.byte_range,
+                    valid_until_ms: None,
+                });
+            }
             return Ok(proxy_map_id);
         }
 

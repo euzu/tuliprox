@@ -12,7 +12,7 @@ use tuliprox_core::model::StripConfig;
 const MODES: [HlsStartupMode; 3] =
     [HlsStartupMode::FirstReady, HlsStartupMode::Progressive, HlsStartupMode::Optimistic];
 
-fn manifest(
+pub(super) fn manifest(
     origin: &str,
     first: u64,
     durations: &[u64],
@@ -24,7 +24,7 @@ fn manifest(
     normal_manifest(&body)
 }
 
-fn prepare_selected(session: &mut HlsSession, sequences: &[u64], mode: HlsStartupMode, complete: bool) {
+pub(super) fn prepare_selected(session: &mut HlsSession, sequences: &[u64], mode: HlsStartupMode, complete: bool) {
     let startup = session.startup.as_mut().unwrap();
     for (index, seq) in sequences.iter().enumerate() {
         let revision = startup
@@ -268,7 +268,7 @@ async fn assert_live_window_http_fill(external: Option<&str>) {
 }
 
 #[tokio::test]
-async fn live_window_readiness_uses_selected_head_and_never_skips_a_failure() {
+async fn live_window_readiness_preserves_active_failures_and_invalidates_failed_entry_plans() {
     let server = spawn_segment_server(0).await;
     for mode in MODES {
         let directory = tempfile::tempdir().unwrap();
@@ -294,7 +294,10 @@ async fn live_window_readiness_uses_selected_head_and_never_skips_a_failure() {
         let origin_head = state.publishable_origin_head_proxy_seq;
         super::super::recompute_unpublished_live_head(&mut state);
         assert_eq!(state.publishable_origin_head_proxy_seq, origin_head);
-        assert_eq!(state.plan_live_window(HlsLiveWindowView::Entry).unwrap().visible, plan.visible);
+        assert!(!plan.is_current(&state));
+        assert_ne!(state.plan_live_window(HlsLiveWindowView::Entry).unwrap().visible, plan.visible);
+        let active = state.plan_live_window(HlsLiveWindowView::Active { first_published: head }).unwrap();
+        assert_eq!(active.visible.first(), Some(&head));
         state.apply_origin_manifest(&manifest(&server.base_url, 2, &[4; 6])).unwrap();
         assert!(!plan.is_current(&state));
         assert!(HlsManifestRenderer::render_live_window(&state, &plan, 0).is_err());

@@ -17,6 +17,7 @@ use super::{
     HlsLiveReserveDeadline, HlsOriginProgressDecision, ProxySessionId,
 };
 
+pub(crate) mod binding_protection;
 mod manifest_failure;
 mod recovery_pressure;
 mod reevaluation;
@@ -173,7 +174,21 @@ pub async fn hls_startup_admission_allows_snapshot(
         if session.live_entry_revalidation.required {
             return false;
         }
-        let degraded = session.origin_control.path_condition.is_degraded();
+        // A failed object outside a recovered entry window does not invalidate
+        // that lease's fully downloaded replacement. Other origin failures keep
+        // their normal admission and reserve checks.
+        let recovered_entry = session.origin_control.path_condition
+            == crate::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure
+            && snapshot
+                .startup_revisions
+                .as_ref()
+                .and_then(|publication| publication.window_plan.as_ref())
+                .is_some_and(|window| {
+                    window.plan.is_startup_recovery()
+                        && window.plan.is_current(&session)
+                        && window.plan.is_ready(&session)
+                });
+        let degraded = session.origin_control.path_condition.is_degraded() && !recovered_entry;
         (
             session.ready_timeline_snapshot(snapshot.first_proxy_seq, now_ms),
             if degraded { HlsStartupAdmissionOriginState::Degraded } else { HlsStartupAdmissionOriginState::Healthy },

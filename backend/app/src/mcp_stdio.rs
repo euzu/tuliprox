@@ -16,7 +16,7 @@ const CODE_UPSTREAM_FAILURE: i64 = -32000;
 const CODE_UNAUTHORIZED: i64 = -32001;
 const CODE_INTERNAL_ERROR: i64 = -32603;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 
 struct BridgeError {
     code: i64,

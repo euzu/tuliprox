@@ -68,7 +68,8 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_custom_tail_response
         if let Some(lease) =
             app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await
         {
-            if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
+            if let Some(response) = hls_terminal_playback_response(app_state, &lease, proxy_session_id, access_lease_id)
+            {
                 return response;
             }
         }
@@ -97,7 +98,8 @@ pub(in crate::api::endpoints::hls_api) async fn hls_runtime_or_standalone_custom
         HlsLeasePlaybackMode::TerminalTail(_)
         | HlsLeasePlaybackMode::TerminalCustomResponse(_)
         | HlsLeasePlaybackMode::TerminalUnavailable { .. } => {
-            if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
+            if let Some(response) = hls_terminal_playback_response(app_state, &lease, proxy_session_id, access_lease_id)
+            {
                 return response;
             }
         }
@@ -149,6 +151,41 @@ pub(in crate::api::endpoints::hls_api) async fn hls_unpublished_lease_channel_un
         .proxy
         .access_lease_response_snapshot(access_lease_id, proxy_session_id, current_time_millis())
         .await;
+    if let Some(lease) = lease.as_ref().filter(|lease| {
+        lease.archive_origin_url.is_none()
+            && lease
+                .manifest_start_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.failed() && attempt.provider_failure().is_some())
+    }) {
+        let video_type = if lease
+            .manifest_start_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.provider_failure())
+            .is_some_and(tuliprox_hls::api::HlsBoundAccountAcquireErrorKind::is_capacity_denial)
+        {
+            CustomVideoStreamType::ProviderConnectionsExhausted
+        } else {
+            CustomVideoStreamType::ChannelUnavailable
+        };
+        let fallback = if crate::api::model::is_custom_video_stream_enabled(&app_state.app_config) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            crate::api::model::get_custom_stream_response_error_status(&app_state.app_config)
+        };
+        return hls_custom_video_manifest_response_for_lease(app_state, lease, video_type, fallback).await;
+    }
+    if let Some(lease) =
+        lease.as_ref().filter(|lease| lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()))
+    {
+        if let Some(session) = app_state.hls.proxy.sessions().get_by_proxy_session_id(proxy_session_id).await {
+            if let Some(response) =
+                super::super::manifest::hls_exhausted_startup_response(app_state, &session, lease).await
+            {
+                return response;
+            }
+        }
+    }
     if let Some(lease) = lease.filter(|lease| lease.permits_unpublished_standalone_tail(reason)) {
         return hls_custom_video_manifest_response_for_lease(
             app_state,

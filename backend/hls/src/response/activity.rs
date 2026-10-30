@@ -43,6 +43,22 @@ impl HlsMediaActivityMarker {
                             marker.session_owner.as_deref(),
                             marker.playback_request_id,
                         ) {
+                            if marker.lease_identity.is_live() {
+                                let session = marker.session.read().await;
+                                if session.origin_playback_kind() == tuliprox_core::model::PlaybackKind::LiveHls {
+                                    if let Some(binding) = session.origin_account_binding.as_ref() {
+                                        active_provider.refresh_playback_lease(
+                                            &binding.account_name,
+                                            &tuliprox_session::PlaybackLeaseRef {
+                                                owner,
+                                                kind: session.origin_playback_kind(),
+                                                request_id,
+                                            },
+                                            session.account_overlap_timing().reservation_ttl_secs(),
+                                        );
+                                    }
+                                }
+                            }
                             active_provider.confirm_identified_playback_activity(owner, request_id);
                         }
                     }

@@ -302,14 +302,25 @@ Identical origin key URLs therefore cannot inherit cached keys from the previous
 their original mappings and cached bytes; existing resource TTLs and metadata limits still govern retention. Rolling EVENT
 rewrites restart at handoff and preserve the new namespace when appending subsequent manifest lines.
 
-Origin account protection is based on successful media access:
+Origin account protection uses the first accepted live media manifest as a fixed start anchor, followed by authorized
+media activity. The start freezes `T`: hard-active through `1T`, soft-active through `3T`, provider TTL through `3T + 1s`.
+It is installed under provider capacity serialization before the final manifest allocation is released. Repeated manifests,
+additional leases, and target-duration changes cannot move it or count extra slots. It does not record media delivery.
 
 | Protection state | Meaning |
 | :--- | :--- |
-| `NoMediaYet` | No segment, MAP, or transient resource response has succeeded yet. |
-| `HardActive` | Recent media access is still inside the hard-active window. |
+| `NoMediaYet` | Neither a start anchor nor authorized media activity exists yet. |
+| `HardActive` | The start anchor or subsequent authorized media access is inside its hard window. |
 | `SoftActive` | The hard window has elapsed, but the session is still inside the soft overlap window. |
 | `Expired` | The soft window elapsed and the binding is no longer protected by recent media activity. |
+
+A logical resource fetch holds continuous origin work and an identified right on its existing provider lease. Its fixed
+resource budget covers initial preparation, all attempts, backoff, subsequent preparation and required processing.
+Provider I/O handles can close between attempts while the right keeps the logical slot reserved. The lease expires at
+the later of normal protection and live work deadlines; parallel work rights release independently and use binding tags
+to protect successors. Acquiring a right requires own admitted capacity; expired work rights cannot authorize new work.
+Direct transient bodies retain this ownership after headers and release it on EOF, body timeout or Drop. The work timer
+also expires without a successful worker completion. Polls, new viewers and configuration changes cannot move its deadline.
 
 Upgrades to the effective origin policy apply immediately. Downgrades or clearing the policy wait for a target-duration
 based grace window so active playback is not destabilized by a short pause or by brief client behavior differences.

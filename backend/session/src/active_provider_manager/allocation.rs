@@ -315,7 +315,7 @@ impl ActiveProviderManager {
         Self::prune_expired_leases(&mut leases);
         let confirmed = leases
             .lease_of_owner(session_owner)
-            .is_some_and(|lease| lease.provider_name == *provider_name && lease.state.is_confirmed());
+            .is_some_and(|lease| lease.provider_name == *provider_name && lease.reserves_capacity());
         drop(leases);
         confirmed || self.has_active_owner_for_provider(provider_name, session_owner)
     }
@@ -730,6 +730,29 @@ impl ActiveProviderManager {
             }
             PreemptionOutcome::Exhausted => None,
         }
+    }
+
+    /// Tries free capacity on one provider without grace or preemption, before a lineup fallback.
+    pub fn try_acquire_exact_connection_with_lease_for_session(
+        &self,
+        provider_name: &Arc<str>,
+        addr: &SocketAddr,
+        priority: i8,
+        kind: ConnectionKind,
+        lease: Option<PlaybackLeaseRef<'_>>,
+    ) -> Option<ProviderHandle> {
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        self.acquire_exact_connection_inner_no_preempt(
+            provider_name,
+            false,
+            &AcquireProviderParams { addr, priority, kind, lease },
+        )
     }
 
     /// Exact-provider acquisition with an explicit playback lease identity.

@@ -119,6 +119,7 @@ impl CachedSegmentFixture {
                 origin_byte_range: None,
                 map_ref: None,
                 encryption: None,
+                retained_resource_identity: None,
                 origin_fetch_ref: None,
                 status: SegmentCacheStatus::Ready { content_length: full_size, ready_at_ms: 1_000 },
                 last_rendered_at_ms: Some(1_000),

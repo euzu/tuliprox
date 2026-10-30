@@ -1055,7 +1055,7 @@ async fn hls_cache_manifest_response_applies_current_users_server_path_without_m
     assert!(stored_body.contains(&format!("/hls/shared/live/{}/", proxy_session_id.0)));
     assert!(!stored_body.contains("/iptv/hls/shared/live/"));
     assert!(!stored_body.contains(&access_lease_id.0));
-    assert!(session.read().await.activity.last_authorized_media_at_ms.is_some());
+    assert!(session.read().await.activity.last_authorized_media_at_ms.is_none());
 }
 
 #[test]
@@ -1416,7 +1416,7 @@ async fn hls_cache_no_media_yet_waits_for_first_normal_manifest_commit() {
     let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
 
     assert!(body.contains(&access_lease_id.0));
-    assert!(session.read().await.activity.last_authorized_media_at_ms.is_some());
+    assert!(session.read().await.activity.last_authorized_media_at_ms.is_none());
 }
 
 pub(in crate::api::endpoints::hls_api::tests) async fn wait_for_hls_test_session(

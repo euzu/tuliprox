@@ -314,12 +314,7 @@ pub(super) fn record_origin_qualification(session: &mut HlsSession, segment_coun
             .as_ref()
             .is_some_and(|episode| episode.generation == generation && episode.full_burst_completed);
     let windows = if (1..3).contains(&segment_count) && full_burst {
-        log::warn!(
-            "HLS short origin window qualified: RFC 8216 section 6.2.2 recommends three target durations; host={} session={} proxy_session={} segments={segment_count} qualification={} burst={}",
-            session.origin_control.pinned_host.as_deref().map_or_else(|| "none".to_string(), hls_origin_log_value),
-            safe_session_key(&session.key), safe_proxy_session_id(&session.proxy_session_id), generation.0,
-            session.origin_control.acceptance_episode.as_ref().map_or(0, |episode| episode.completed_burst_candidates)
-        );
+        crate::short_manifest::log_short_window_warning(session, segment_count, "origin window qualified");
         HlsQualifiedOriginWindows::ShortAllowed
     } else if segment_count >= 3 {
         HlsQualifiedOriginWindows::Regular

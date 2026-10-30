@@ -144,6 +144,7 @@ dev tuliprox -> tuliprox-processing
 dev tuliprox -> tuliprox-repository
 dev tuliprox-hls -> tuliprox-mpegts
 dev tuliprox-repository -> tuliprox-btree
+dev tuliprox-testkit -> tuliprox-mpegts
 ALLOWLIST
 
 if [ -n "$allow_file" ]; then
