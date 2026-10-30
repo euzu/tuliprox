@@ -57,7 +57,8 @@ pub struct MapperItem {
     pli: PlaylistItem,
     changed: Vec<&'static str>,
     /// Assignments the item refused although the field itself is valid, for example `genre` on a
-    /// live channel or a non-numeric `chno`. The DSL logs and continues in the same situation, so
+    /// live channel, a non-numeric `chno` or a value that is neither a string nor an integer. The
+    /// DSL logs and continues in the same situation, so
     /// these do not abort the script; they surface as mapping diagnostics afterwards.
     rejected: Vec<String>,
 }
@@ -84,7 +85,16 @@ impl MapperItem {
         if !is_writable(field) {
             return Err(format!("field '{}' is read-only", field.as_str()).into());
         }
-        let text = field_text(value)?;
+        // A value of the wrong type, typically `()` from a regex capture that did not match, is
+        // refused like any other value the item cannot carry: recorded, and the script continues.
+        let Some(text) = field_text(value) else {
+            self.rejected.push(format!(
+                "could not assign {}: expected a string or integer, got {}",
+                field.as_str(),
+                value.type_name()
+            ));
+            return Ok(());
+        };
         if self.pli.header.set(field, &text) {
             self.changed.push(field.as_str());
             Ok(())
@@ -101,16 +111,13 @@ impl MapperItem {
 /// Convert a script value into the string a header field stores.
 ///
 /// Numbers are accepted for numeric fields such as `chno`; the field setter rejects values that
-/// do not parse. Everything else is rejected instead of being silently stringified, so a script
-/// that assigns a map or array fails loudly.
-fn field_text(value: &Dynamic) -> Result<String, Box<EvalAltResult>> {
-    if value.is::<ImmutableString>() {
-        return value.clone().into_string().map_err(Into::into);
+/// do not parse. Everything else yields `None` instead of being silently stringified, so a script
+/// that assigns a map, an array or `()` gets a diagnostic rather than a field holding `"()"`.
+fn field_text(value: &Dynamic) -> Option<String> {
+    if let Some(text) = value.read_lock::<ImmutableString>() {
+        return Some(text.to_string());
     }
-    if value.is::<i64>() {
-        return value.as_int().map(|number| number.to_string()).map_err(Into::into);
-    }
-    Err(format!("expected a string or integer, got {}", value.type_name()).into())
+    value.as_int().ok().map(|number| number.to_string())
 }
 
 /// The mapping environment a script receives as `ctx`.

@@ -240,6 +240,21 @@ fn reading_an_unknown_property_yields_unit_instead_of_failing() {
 }
 
 #[test]
+fn a_value_of_the_wrong_type_is_reported_without_aborting_the_script() {
+    let outcome = run(
+        r#"let m = ctx.regex(item.name, "(?P<show>x)"); item.group = m["show"]; item.title = "After";"#,
+        item("Channel"),
+    );
+
+    let mapped = outcome.item.expect("item survives the script");
+    assert_eq!(mapped.header.title.as_ref(), "After", "the script must continue after the refused assignment");
+    assert_eq!(mapped.header.group.as_ref(), "", "the refused value must not be stored");
+    assert_eq!(outcome.changed_fields, vec!["title".to_string()]);
+    assert_eq!(outcome.diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+    assert!(outcome.diagnostics[0].contains("could not assign group: expected a string or integer, got ()"));
+}
+
+#[test]
 fn fields_outside_the_dsl_vocabulary_are_not_reachable_through_the_indexer() {
     let outcome =
         run(r#"if item["provider_id"] == () && item.provider_id == () { item.group = "hidden"; }"#, item("Channel"));

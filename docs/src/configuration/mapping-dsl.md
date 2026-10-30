@@ -504,15 +504,16 @@ items are skipped.
 
 * `!template!` text substitution in the script source is not performed, because it would rewrite program text. Use
   `ctx.template(name)`.
-* `print` writes at `trace` level. `capitalize` and `title_case` are available with the same behaviour as in the DSL,
-  including `title_case(text, ["HD", "UK"])`, which keeps the listed acronyms as written.
+* `print` writes at `trace` level. `capitalize` and `title_case` apply the same casing rules as in the DSL to string
+  arguments, including `title_case(text, ["HD", "UK"])`, which keeps the listed acronyms as written. Unlike the DSL
+  functions they accept only strings, not numbers or `()`; convert a number with `to_string()` first.
 * A script must not replace `item` or `ctx` with another value. Replacing `item` discards the channel with a
   diagnostic; alias rows created with `ctx.favourite` before that point are kept. Replacing `ctx` produces a
   diagnostic and loses all alias rows created so far. Shadowing either variable with `let` is harmless: the host
   still finds the original binding and keeps the channel and context.
-* Assigning a valid field that the item cannot carry — `genre` on a live channel, a non-numeric `chno` — is reported
-  as a diagnostic and the script continues, exactly like the DSL. Assigning an unknown or read-only field stops the
-  script.
+* Assigning a valid field that the item cannot carry — `genre` on a live channel, a non-numeric `chno`, or a value
+  that is neither a string nor an integer, such as `()` from a regex capture that did not match — is reported as a
+  diagnostic and the script continues, exactly like the DSL. Assigning an unknown or read-only field stops the script.
 * Scripts cannot read or write files, open connections, import modules or call `eval`. Operation count, call depth,
   string, array and map sizes are bounded, so a runaway loop stops with a diagnostic.
 * The Web UI shows a Rhai script as written; it does not parse or validate it, and the mapping file is not editable
