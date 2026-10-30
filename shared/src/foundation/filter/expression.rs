@@ -18,11 +18,6 @@ impl PartialEq for CompiledRegex {
 impl Eq for CompiledRegex {}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UnaryOperator {
-    Not,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StringOperator {
     Eq,
     NotEq,

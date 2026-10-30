@@ -1252,7 +1252,8 @@
   no longer probes the stack on musl, and a filter is now stored flat and read, rendered, evaluated and dropped without
   recursion, so a long `AND`/`OR` chain no longer needs stack. Existing filters keep their result, a rendered filter
   keeps its grouping when it is written back to the configuration, and oversized filters are rejected with an error
-  naming the limit.
+  naming the limit. The web UI filter view renders long chains without recursion, and the runtime watchdog drains
+  queued syslog records before it exits for a restart.
 
 - **Mapper arity errors name the function the user wrote.** A mapper script with the wrong number of arguments reported
   the internal enum variant (`Function accepts only one argument TitleCase`) instead of the function name
