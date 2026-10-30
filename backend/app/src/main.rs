@@ -41,7 +41,7 @@ use crate::{
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::{exec_processing, ProcessingRun},
     repository::{db_viewer, run_startup_migrations},
-    utils::{config_file_reader, init_logger, request::create_client, resolve_env_var},
+    utils::{config_file_reader, exit_process, flush_syslog, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
@@ -365,7 +365,7 @@ async fn main() {
 
     if args.healthcheck {
         let healthy = healthcheck(config_paths.config_file_path.as_str()).await;
-        std::process::exit(i32::from(!healthy));
+        exit_process(i32::from(!healthy));
     }
 
     run_startup_migrations(&config_paths);
@@ -378,8 +378,7 @@ async fn main() {
                 .await
                 .unwrap_or_else(|err| exit!("{}", err)),
         );
-        scan_library_cli(&app_config, args.force_library_rescan).await;
-        return;
+        exit_process(scan_library_cli(&app_config, args.force_library_rescan).await);
     }
 
     info!("Version: {VERSION}");
@@ -402,6 +401,7 @@ async fn main() {
             if let Err(err) = api::setup_api::start_setup_server(&config_paths, &missing_files).await {
                 exit!("Can't start setup server: {err}");
             }
+            flush_syslog();
             return;
         }
     }
@@ -419,6 +419,9 @@ async fn main() {
     } else {
         start_in_cli_mode(Arc::new(app_config), Arc::new(targets)).await;
     }
+    // Both modes return on a normal shutdown: the server returns once its serve loop ends after the shutdown
+    // signal. Queued datagrams are delivered here rather than lost on process exit.
+    flush_syslog();
 }
 
 async fn print_info(app_config: &AppConfig, loaded_env: Option<&Path>) {
@@ -641,12 +644,14 @@ fn library_processor_from_app_config(app_config: &Arc<AppConfig>) -> Option<Libr
     )
 }
 
-async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
+/// Runs the CLI library scan and returns the process exit code instead of terminating, so the caller can drain
+/// queued log output before exiting.
+async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) -> i32 {
     info!("Starting Library scan from CLI (force_rescan: {force_rescan})");
 
     let Some(processor) = library_processor_from_app_config(app_config) else {
         error!("Library is not enabled in configuration");
-        std::process::exit(1);
+        return 1;
     };
 
     match processor.scan(force_rescan).await {
@@ -659,11 +664,11 @@ async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
             if result.errors > 0 {
                 warn!("  Errors: {}", result.errors);
             }
-            std::process::exit(0);
+            0
         }
         Err(err) => {
             error!("Library scan failed: {err}");
-            std::process::exit(1);
+            1
         }
     }
 }

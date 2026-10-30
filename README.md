@@ -468,6 +468,7 @@ or CLI when manual control is needed.
 - `${env:VAR}` interpolation throughout configuration
 - `.env` loading with host/container environment variables taking precedence
 - Optional startup runtime-configuration report in YAML or JSON with sensitive values redacted
+- External log shipping via UDP (syslog RFC 5424, RFC 3164, or NDJSON) with independent remote log level and non-blocking delivery
 - Configurable default outbound User-Agent
 - Dev Container/Codespaces environment with the Rust/WASM tooling needed for development
 

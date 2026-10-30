@@ -567,7 +567,18 @@
       "LOG_LEVEL": "يضبط مستوى تفصيل سجلات التطبيق (مثل info، debug، error).",
       "SANITIZE_SENSITIVE_INFO": "إذا تم التفعيل، يتم إخفاء كلمات المرور والرموز في السجلات.",
       "RUNTIME_CONFIG_REPORT_ENABLED": "إذا تم التفعيل، يتم طباعة تهيئة وقت التشغيل في السجل عند بدء التشغيل.",
-      "RUNTIME_CONFIG_REPORT_FORMAT": "يحدد التنسيق الذي تُطبع به تهيئة وقت التشغيل في السجل."
+      "RUNTIME_CONFIG_REPORT_FORMAT": "يحدد التنسيق الذي تُطبع به تهيئة وقت التشغيل في السجل.",
+      "SYSLOG_APP_NAME": "اسم التطبيق في ترويسة syslog (1..=48 حرف ASCII بدون مسافات، الافتراضي tuliprox).",
+      "SYSLOG_ENABLED": "تفعيل إرسال سجلات التطبيق إلى مجمع syslog خارجي عبر UDP (غير مشفر ومعرض للفقد).",
+      "SYSLOG_FACILITY": "مرفق syslog: تتوفر جميع القيم الـ24 في RFC 5424 للتوافق، لكن القيم المنطقية لهذا التطبيق هي local0..local7 فقط (والافتراضي local0). المرفق مفتاح توجيه وليس درجة أهمية: يكتب المُجمِّع cron في /var/log/cron و authpriv في سجل المصادقة، لذا فإن مرفقًا غير مناسب ينقل هذه السجلات خارج السجل العام. استخدم app_name لتقسيم أدق.",
+      "SYSLOG_FORMAT": "تنسيق نقل syslog: RFC 5424 (القياسي الحديث)، RFC 3164 (BSD القديم)، أو JSON (كائن NDJSON مع target).",
+      "SYSLOG_HOST": "اسم المضيف أو عنوان IP لمجمع syslog (مطلوب عند تفعيل syslog).",
+      "SYSLOG_HOSTNAME": "تجاوز اختياري لاسم المضيف. إذا تم حذفه، يُستخدم اسم مضيف النظام (أو '-' إذا كان غير معروف).",
+      "SYSLOG_LOG_LEVEL": "مستوى سجل بعيد مستقل (DEBUG, INFO, WARN, ERROR). لا يتوفر TRACE لمنع تسريب بيانات الاعتماد. يؤدي الحذف إلى وراثة المستوى الجذري.",
+      "SYSLOG_MAX_MESSAGE_LEN": "الحد الأقصى لحجم مخطط بيانات UDP (480..=65507 بايت؛ الحد الأدنى 1024 لتنسيق JSON). قد تتجزأ الرسائل الأكبر من 1472 (IPv4) أو 1452 (IPv6) وتسقطها جدران الحماية.",
+      "SYSLOG_PORT": "منفذ UDP الوجهة لمجمع syslog (1..=65535، الافتراضي 514).",
+      "SYSLOG_PREVIEW_ONLY": "يتم الاحتفاظ بتهيئة syslog المعدة مسبقاً عند التعطيل دون إرسال أي رسائل حتى يتم تفعيلها.",
+      "SYSLOG_QUEUE_CAPACITY": "سعة قائمة انتظار الذاكرة المقيدة للرسائل الصادرة (1..=65536). يتم إسقاط الرسائل الزائدة عند امتلاء القائمة."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "اسم ملف M3U المُولّد (مثل playlist.m3u).",
@@ -2157,7 +2168,20 @@
     "REVERSE_PROXY_TAB_GENERAL": "عام",
     "REVERSE_PROXY_TAB_STREAM": "البث",
     "REVERSE_PROXY_TAB_HLS": "HLS",
-    "REVERSE_PROXY_TAB_TELEMETRY": "القياس"
+    "REVERSE_PROXY_TAB_TELEMETRY": "القياس",
+    "SYSLOG": "Syslog",
+    "SYSLOG_APP_NAME": "اسم تطبيق Syslog",
+    "SYSLOG_ENABLED": "تفعيل Syslog",
+    "SYSLOG_FACILITY": "مرفق Syslog",
+    "SYSLOG_FORMAT": "تنسيق Syslog",
+    "SYSLOG_HOST": "مضيف Syslog",
+    "SYSLOG_HOSTNAME": "اسم المضيف في Syslog",
+    "SYSLOG_INFO": "إرسال syslog الخارجي معطل حالياً. قم بالتفعيل لتهيئة تسجيل السجلات عن بُعد عبر UDP.",
+    "SYSLOG_INHERIT_ROOT": "وراثة المستوى الجذري",
+    "SYSLOG_LOG_LEVEL": "مستوى سجل Syslog",
+    "SYSLOG_MAX_MESSAGE_LEN": "أقصى طول للرسالة",
+    "SYSLOG_PORT": "منفذ Syslog",
+    "SYSLOG_QUEUE_CAPACITY": "سعة قائمة الانتظار"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "الحافظة غير مدعومة.\nمتصفحك أو السياق الحالي لا يسمح بالوصول إلى الحافظة.\nيرجى استخدام HTTPS أو localhost.",

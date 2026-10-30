@@ -8,11 +8,18 @@ use sysinfo::{MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, Ref
 macro_rules! exit {
     ($($arg:tt)*) => {{
         log::error!($($arg)*);
-        std::process::exit(1);
+        $crate::utils::exit_process(1)
     }};
 }
 
 pub use exit;
+
+/// Ends the process after draining queued syslog datagrams. `process::exit` kills the syslog worker, so every exit
+/// after `init_logger` goes through here or the last records never reach the collector.
+pub fn exit_process(code: i32) -> ! {
+    crate::utils::flush_syslog();
+    std::process::exit(code)
+}
 
 static PROCESS_PEAK_RSS_BYTES: AtomicU64 = AtomicU64::new(0);
 static PROCESS_PEAK_VMEM_BYTES: AtomicU64 = AtomicU64::new(0);

@@ -125,6 +125,19 @@ impl From<&StreamConfig> for StreamConfigDto {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CustomStreamResponse {
+    pub channel_unavailable: Option<TransportStreamBuffer>,
+    pub user_connections_exhausted: Option<TransportStreamBuffer>, // user has no more connections
+    pub provider_connections_exhausted: Option<TransportStreamBuffer>, // provider limit reached, has no more connections
+    pub low_priority_preempted: Option<TransportStreamBuffer>,         // stream was preempted by a higher-priority user
+    pub user_account_expired: Option<TransportStreamBuffer>,
+    pub panel_api_provisioning: Option<TransportStreamBuffer>,
+    pub hls_session_or_lease_expired: Option<TransportStreamBuffer>,
+    pub maintenance: Option<TransportStreamBuffer>, // input taken out of service by an operator
+    pub panel_api_provisioning_hls_segments: Vec<TransportStreamBuffer>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::StreamConfig;
@@ -196,17 +209,4 @@ mod tests {
             ])
         );
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct CustomStreamResponse {
-    pub channel_unavailable: Option<TransportStreamBuffer>,
-    pub user_connections_exhausted: Option<TransportStreamBuffer>, // user has no more connections
-    pub provider_connections_exhausted: Option<TransportStreamBuffer>, // provider limit reached, has no more connections
-    pub low_priority_preempted: Option<TransportStreamBuffer>,         // stream was preempted by a higher-priority user
-    pub user_account_expired: Option<TransportStreamBuffer>,
-    pub panel_api_provisioning: Option<TransportStreamBuffer>,
-    pub hls_session_or_lease_expired: Option<TransportStreamBuffer>,
-    pub maintenance: Option<TransportStreamBuffer>, // input taken out of service by an operator
-    pub panel_api_provisioning_hls_segments: Vec<TransportStreamBuffer>,
 }

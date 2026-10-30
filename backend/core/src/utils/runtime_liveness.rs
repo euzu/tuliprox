@@ -333,7 +333,7 @@ fn run_watchdog(liveness: &RuntimeLiveness, runtime: &tokio::runtime::Handle, re
                  persisted past the {restart_grace_ms} ms grace; exiting with code {WATCHDOG_RESTART_EXIT_CODE} so the \
                  supervisor can restart the process"
             );
-            std::process::exit(WATCHDOG_RESTART_EXIT_CODE);
+            crate::utils::exit_process(WATCHDOG_RESTART_EXIT_CODE);
         }
     }
 }

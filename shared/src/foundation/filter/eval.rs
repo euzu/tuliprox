@@ -171,7 +171,7 @@ impl Filter {
         self.eval_node(self.root(), provider, Self::RECURSIVE_EVAL_DEPTH)
     }
 
-    fn eval_node(&self, id: NodeId, provider: &ValueProvider, budget: usize) -> bool {
+    pub(super) fn eval_node(&self, id: NodeId, provider: &ValueProvider, budget: usize) -> bool {
         if budget == 0 {
             return self.eval_iterative(id, provider);
         }
@@ -192,7 +192,7 @@ impl Filter {
     /// Walks the subtree with an explicit stack, so its depth is not limited by the native
     /// stack. `and`/`or` still short-circuit: the right operand is only scheduled once the
     /// left result leaves the outcome open.
-    fn eval_iterative(&self, root: NodeId, provider: &ValueProvider) -> bool {
+    pub(super) fn eval_iterative(&self, root: NodeId, provider: &ValueProvider) -> bool {
         enum Step {
             Eval(NodeId),
             Not,

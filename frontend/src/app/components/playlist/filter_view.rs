@@ -151,21 +151,30 @@ impl Render<'_> {
                     { self.node(*inner, level, false, p_count) }
                 </>
             },
-            Node::And(left, right) => self.binary(*left, "AND", *right, level, do_indent, p_count),
-            Node::Or(left, right) => self.binary(*left, "OR", *right, level, do_indent, p_count),
+            Node::And(..) | Node::Or(..) => self.chain(node_id, level, do_indent, p_count),
         }
     }
 
-    fn binary(&self, left: NodeId, op: &str, right: NodeId, level: usize, do_indent: bool, p_count: usize) -> Html {
+    /// Renders an `AND`/`OR` chain with a loop. The parser nests a chain on its right operand,
+    /// so recursing on it would need stack proportional to the chain length.
+    fn chain(&self, mut node_id: NodeId, level: usize, do_indent: bool, p_count: usize) -> Html {
         let pretty = self.pretty;
-        html! {
-            <span class="binary_op-wrapper">
-                 { self.node(left, level, do_indent && pretty, p_count) }
-                 { newline(pretty) }
-                 { indent(level, pretty) }
-                 <span class="binary_op">{format!(" {op} ")}</span>
-                 { self.node(right, level, false, p_count) }
-            </span>
+        let mut parts = Vec::new();
+        let mut first = true;
+        loop {
+            let (left, op, right) = match self.filter.node(node_id) {
+                Some(Node::And(left, right)) => (*left, "AND", *right),
+                Some(Node::Or(left, right)) => (*left, "OR", *right),
+                _ => break,
+            };
+            parts.push(self.node(left, level, first && do_indent && pretty, p_count));
+            parts.push(newline(pretty));
+            parts.push(indent(level, pretty));
+            parts.push(html! { <span class="binary_op">{format!(" {op} ")}</span> });
+            first = false;
+            node_id = right;
         }
+        parts.push(self.node(node_id, level, false, p_count));
+        html! { <span class="binary_op-wrapper">{ for parts }</span> }
     }
 }

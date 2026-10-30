@@ -1645,6 +1645,7 @@ Tuliprox supports the following filter expression types:
 * A filter is limited to about 10000 terms in total, counted over the whole expression including nested groups. Larger
   filters are rejected with an error naming the limit.
 * Parentheses may nest up to 256 levels. Deeper nesting is rejected before the filter is parsed.
+* A filter text is limited to 8 MB after templates are applied. Longer text is rejected before it is parsed.
 
 > **Note:**
 >

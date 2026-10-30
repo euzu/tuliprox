@@ -567,7 +567,18 @@
       "LOG_LEVEL": "Establece el nivel de detalle de los registros de la aplicación (p. ej. info, debug, error).",
       "SANITIZE_SENSITIVE_INFO": "Si está habilitado, enmascara contraseñas y tokens en los registros.",
       "RUNTIME_CONFIG_REPORT_ENABLED": "Si está habilitado, la configuración en tiempo de ejecución se imprime en el registro al iniciar.",
-      "RUNTIME_CONFIG_REPORT_FORMAT": "Define el formato en\nel que se imprime el informe de configuración en tiempo de ejecución en el registro."
+      "RUNTIME_CONFIG_REPORT_FORMAT": "Define el formato en\nel que se imprime el informe de configuración en tiempo de ejecución en el registro.",
+      "SYSLOG_APP_NAME": "Nombre de la aplicación en el encabezado syslog (1..=48 caracteres ASCII sin espacios, predeterminado tuliprox).",
+      "SYSLOG_ENABLED": "Habilita el envío de registros de la aplicación a un recopilador syslog externo mediante UDP (no cifrado y con pérdidas).",
+      "SYSLOG_FACILITY": "Instalación (facility) de syslog: se ofrecen los 24 valores de RFC 5424 por interoperabilidad, pero para esta aplicación solo tienen sentido local0..local7 (local0 es el valor por defecto). La facility es una clave de enrutamiento, no una gravedad: los colectores escriben cron en /var/log/cron y authpriv en el registro de autenticación, así que una facility ajena saca estos registros del log general. Para divisiones más finas use app_name.",
+      "SYSLOG_FORMAT": "Formato de transmisión de syslog: RFC 5424 (estándar moderno), RFC 3164 (BSD heredado) o JSON (objeto NDJSON con target).",
+      "SYSLOG_HOST": "Nombre de host o dirección IP del recopilador syslog (obligatorio cuando syslog está habilitado).",
+      "SYSLOG_HOSTNAME": "Sobrescritura opcional del nombre de host. Si se omite, se usa el nombre del sistema (o '-' si se desconoce).",
+      "SYSLOG_LOG_LEVEL": "Nivel de registro remoto independiente (DEBUG, INFO, WARN, ERROR). TRACE no está disponible para evitar fugas de credenciales. Si se omite, hereda el nivel raíz.",
+      "SYSLOG_MAX_MESSAGE_LEN": "Tamaño máximo del datagrama UDP (480..=65507 bytes; mín. 1024 para JSON). Los datagramas superiores a 1472 (IPv4) o 1452 (IPv6) pueden fragmentarse y ser descartados por firewalls.",
+      "SYSLOG_PORT": "Puerto UDP de destino del recopilador syslog (1..=65535, predeterminado 514).",
+      "SYSLOG_PREVIEW_ONLY": "La configuración de syslog preestablecida se conserva cuando está deshabilitada sin enviar datagramas hasta que se habilite.",
+      "SYSLOG_QUEUE_CAPACITY": "Capacidad de la cola en memoria acotada para datagramas salientes (1..=65536). Se descartan mensajes cuando la cola se llena."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "El nombre del archivo M3U generado (p. ej. playlist.m3u).",
@@ -2157,7 +2168,20 @@
     "REVERSE_PROXY_TAB_GENERAL": "General",
     "REVERSE_PROXY_TAB_STREAM": "Streams",
     "REVERSE_PROXY_TAB_HLS": "HLS",
-    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetría"
+    "REVERSE_PROXY_TAB_TELEMETRY": "Telemetría",
+    "SYSLOG": "Syslog",
+    "SYSLOG_APP_NAME": "Nombre de aplicación de Syslog",
+    "SYSLOG_ENABLED": "Habilitar Syslog",
+    "SYSLOG_FACILITY": "Instalación (facility) de Syslog",
+    "SYSLOG_FORMAT": "Formato de Syslog",
+    "SYSLOG_HOST": "Host de Syslog",
+    "SYSLOG_HOSTNAME": "Nombre de host de Syslog",
+    "SYSLOG_INFO": "El envío externo de syslog está actualmente deshabilitado. Habilite para configurar el registro remoto mediante UDP.",
+    "SYSLOG_INHERIT_ROOT": "Heredar nivel raíz",
+    "SYSLOG_LOG_LEVEL": "Nivel de registro de Syslog",
+    "SYSLOG_MAX_MESSAGE_LEN": "Longitud máxima del mensaje",
+    "SYSLOG_PORT": "Puerto de Syslog",
+    "SYSLOG_QUEUE_CAPACITY": "Capacidad de cola"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Portapapeles no compatible.\nSu navegador o el contexto actual no permite el acceso al portapapeles.\nUtilice HTTPS o localhost.",
