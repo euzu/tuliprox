@@ -31,6 +31,15 @@ fn field_assignment_tracks_changed_fields() {
 }
 
 #[test]
+fn repeated_assignment_reports_field_once() {
+    let outcome = run(r#"item.group = "News"; item.group = "Sports";"#, item("Channel"));
+
+    let mapped = outcome.item.expect("item survives the script");
+    assert_eq!(mapped.header.group.as_ref(), "Sports");
+    assert_eq!(outcome.changed_fields, vec!["group".to_string()]);
+}
+
+#[test]
 fn caption_writes_both_name_and_title_like_the_dsl() {
     let outcome = run(r#"item.caption = "Renamed";"#, item("Channel"));
 

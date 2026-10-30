@@ -5238,7 +5238,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-scripting"
-version = "3.3.170"
+version = "3.3.172"
 dependencies = [
  "log",
  "rhai",

@@ -96,7 +96,10 @@ impl MapperItem {
             return Ok(());
         };
         if self.pli.header.set(field, &text) {
-            self.changed.push(field.as_str());
+            let name = field.as_str();
+            if !self.changed.iter().any(|changed| changed.eq_ignore_ascii_case(name)) {
+                self.changed.push(name);
+            }
             Ok(())
         } else {
             // The field name is valid and writable, so the item itself refused the value: a live
