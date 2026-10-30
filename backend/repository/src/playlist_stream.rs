@@ -2,7 +2,10 @@ use super::{BPlusTreeDiskIteratorOwned, BPlusTreeQuery, SortedIndexIterator};
 use futures::Stream;
 use log::error;
 use serde::{Deserialize, Serialize};
-use shared::error::TuliproxError;
+use shared::{
+    error::TuliproxError,
+    model::{SeriesListProjection, XtreamCluster, XtreamPlaylistItem},
+};
 use std::{
     io,
     path::Path,
@@ -169,6 +172,53 @@ where
     let query = BPlusTreeQuery::<K, V>::try_new(path)
         .map_err(|err| TuliproxError::Config(format!("Could not reopen BPlusTreeQuery {} - {err}", path.display())))?;
     Ok(PlaylistIteratorReader::Unsorted(query.disk_iter()))
+}
+
+fn read_xtream_cluster_entries<V, F>(
+    xtream_path: &Path,
+    index_path: &Path,
+    cluster: XtreamCluster,
+    mut visitor: F,
+) -> Result<(), TuliproxError>
+where
+    V: Serialize + for<'de> Deserialize<'de> + Clone + Into<XtreamPlaylistItem>,
+    F: FnMut(u32, XtreamPlaylistItem) -> bool,
+{
+    let reader = open_playlist_reader::<u32, V, u32>(
+        xtream_path,
+        index_path,
+        Some("Sorted index error, falling back to unsorted"),
+    )?;
+    for entry in reader {
+        match entry {
+            Ok((key, item)) => {
+                if !visitor(key, item.into()) {
+                    break;
+                }
+            }
+            Err(err) => {
+                error!("Skipping unreadable Xtream playlist entry in cluster {cluster}: {err}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Helper that opens an Xtream cluster reader (`SeriesListProjection` for Series) and visits entries.
+pub fn visit_xtream_cluster_entries<F>(
+    xtream_path: &Path,
+    index_path: &Path,
+    cluster: XtreamCluster,
+    visitor: F,
+) -> Result<(), TuliproxError>
+where
+    F: FnMut(u32, XtreamPlaylistItem) -> bool,
+{
+    if cluster == XtreamCluster::Series {
+        read_xtream_cluster_entries::<SeriesListProjection, F>(xtream_path, index_path, cluster, visitor)
+    } else {
+        read_xtream_cluster_entries::<XtreamPlaylistItem, F>(xtream_path, index_path, cluster, visitor)
+    }
 }
 
 #[cfg(test)]

@@ -1562,7 +1562,7 @@ sources:
 | `curation`         | Object        |    No    |           | Optional target-wide catalog policy with Trakt and/or TMDB Trending sources. Mutually exclusive with legacy `output[].trakt`; see [target-wide curation](#target-wide-curation-curation).                                    |
 | `favourites`       | List          |    No    |           | Duplicates final transformed channels into dedicated favorite groups after processing is complete. This adds curated views without changing the original group structure.                                                    |
 | `watch`            | List          |    No    |           | Watch entries for this target: channel changes in matching groups and/or matching groups that appear or disappear. Changes are reported as Messaging events; see [Watch](#329-watch-watch).                                  |
-| `use_memory_cache` | Bool          |    No    | `false`   | If enabled, the final compiled playlist is cached in RAM. This reduces disk access and improves delivery speed, especially for M3U downloads, but increases memory consumption.                                              |
+| `use_memory_cache` | Bool          |    No    | `false`   | If enabled, the final playlist is cached in RAM to speed up M3U downloads and Xtream lists (in sorted-index order). Series season and episode details remain on disk to keep RAM usage lean.                                 |
 
 ---
 

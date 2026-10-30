@@ -1007,9 +1007,7 @@ fn item_subject_uuid(item: &PlaylistItem) -> UUIDType {
 fn selected_series_parent_keys(playlist: &[PlaylistGroup], selected_subjects: &HashSet<UUIDType>) -> HashSet<Arc<str>> {
     let mut parent_keys = HashSet::new();
     for item in playlist.iter().flat_map(|group| &group.channels) {
-        if !matches!(item.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
-            || !selected_subjects.contains(&item_subject_uuid(item))
-        {
+        if !item.header.item_type.is_series_info() || !selected_subjects.contains(&item_subject_uuid(item)) {
             continue;
         }
         parent_keys.insert(item.get_uuid().intern());

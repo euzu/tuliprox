@@ -44,6 +44,8 @@ pub use recovery::{
     RecoveryRepositoryState, RecoverySchema, RecoveryStoragePlacement, RecoveryVerificationReport,
 };
 // --- Sorted-index sidecar --------------------------------------------------
+/// Snapshot of a sorted-index sidecar that the database writer rewrites after its own commit.
+pub use sorted_index::v4::IndexSnapshot;
 /// Iterates a database in sorted-index order, falling back to the caller's own
 /// handling when the sidecar is unusable.
 pub use sorted_index::v4::OwnedIterator as SortedIndexIterator;

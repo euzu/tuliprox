@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     error::TuliproxError,
-    model::{PlaylistGroup, PlaylistItemType, TargetType, XtreamCluster},
+    model::{PlaylistGroup, TargetType, XtreamCluster},
 };
 use std::{
     io,
@@ -176,9 +176,7 @@ fn playlist_rows(playlist: &[PlaylistGroup], view: LineupGuideView) -> Vec<Lineu
             let header = &item.header;
             let cluster = header.xtream_cluster;
             let indexed = match view {
-                LineupGuideView::M3u => {
-                    !matches!(header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
-                }
+                LineupGuideView::M3u => !header.item_type.is_series_info(),
                 LineupGuideView::Xtream => matches!(cluster, XtreamCluster::Live | XtreamCluster::Video),
             };
             if !indexed {
@@ -393,7 +391,7 @@ pub async fn lineup_guide_candidates(
 mod tests {
     use super::*;
     use shared::{
-        model::{PlaylistItem, PlaylistItemHeader, VirtualId},
+        model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType, VirtualId},
         utils::Internable,
     };
     use tempfile::TempDir;

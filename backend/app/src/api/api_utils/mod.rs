@@ -212,6 +212,8 @@ where
 /// requests a provider or EPG entry can trigger through one resource link stays bounded.
 const RESOURCE_REDIRECT_LIMIT: u8 = 5;
 
+pub(crate) const RESOURCE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How the client-visible answer of a resource route is shaped.
 ///
 /// The variant mirrors the classification of the destination the route serves: a [`Public`] destination
@@ -241,6 +243,7 @@ mod media_server;
 mod metering;
 mod provider_acquire;
 mod provider_urls;
+mod resource_limiter;
 mod resources;
 mod response;
 mod serialization;
@@ -339,4 +342,9 @@ pub(crate) use self::{
         get_hls_playback_ttl_secs, record_connect_failed_attempt, resolve_request_url_for_logging,
         resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect, stream_response,
     },
+};
+#[cfg(test)]
+use self::{
+    resource_limiter::{acquire_resource_host_permit, RESOURCE_HOST_CONCURRENCY_LIMIT},
+    resources::fetch_resource_with_timeout,
 };

@@ -103,3 +103,18 @@ pub(crate) fn xtream_playlist_item(id: u32) -> XtreamPlaylistItem {
         upstream_user_agent: None,
     }
 }
+
+/// Series Xtream playlist item whose provider and virtual id are `id`.
+pub(crate) fn xtream_series_item(
+    id: u32,
+    details: Option<shared::model::SeriesStreamDetailProperties>,
+) -> XtreamPlaylistItem {
+    let mut item = xtream_playlist_item(id);
+    item.xtream_cluster = XtreamCluster::Series;
+    item.item_type = PlaylistItemType::SeriesInfo;
+    item.url = "".intern();
+    let series_props =
+        shared::model::SeriesStreamProperties { name: format!("Series {id}").intern(), details, ..Default::default() };
+    item.additional_properties = Some(shared::model::StreamProperties::Series(Box::new(series_props)));
+    item
+}

@@ -12,7 +12,7 @@ use super::{
 #[cfg(windows)]
 use super::{encode_windows_path, sync_published_file_parent};
 use crate::{
-    bplustree::{get_file_path_for_db_index, BPlusTree, BPlusTreeStagingArtifacts, BPlusTreeUpdate},
+    bplustree::{get_file_path_for_db_index, BPlusTree, BPlusTreeStagingArtifacts, BPlusTreeUpdate, IndexSnapshot},
     error_macros::cant_write_result,
     playlist_backend::PlaylistKey,
     storage_const,
@@ -485,39 +485,7 @@ pub async fn write_playlist_item_update(
     target_name: &str,
     pli: &XtreamPlaylistItem,
 ) -> Result<(), TuliproxError> {
-    let storage_path = {
-        let config = app_config.config.load();
-        ensure_xtream_storage_path(&config, target_name).await?
-    };
-    let xtream_path = xtream_get_file_path(&storage_path, pli.xtream_cluster);
-
-    if !file_exists_async(&xtream_path).await {
-        return Err(TuliproxError::RepositoryXtream(format!(
-            "BPlusTree file not found for update {}",
-            xtream_path.display()
-        )));
-    }
-
-    // Prepare encoded payload before opening the writer lock.
-    let prepared_items =
-        BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&[(&pli.virtual_id.get(), pli)])
-            .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
-
-    // Keep FileLockManager lock for cross-operation coordination (e.g. swap + update).
-    let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
-
-    let xtream_path_clone = xtream_path.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        let _guard = file_lock;
-        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
-        tree.upsert_batch_encoded(prepared_items)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
-    .map_err(|err| cant_write_result!(RepositoryXtream, "xtream", &xtream_path, err))?;
-
-    Ok(())
+    write_playlist_batch_item_upsert(app_config, target_name, pli.xtream_cluster, std::slice::from_ref(pli)).await
 }
 
 pub async fn write_playlist_batch_item_upsert(
@@ -549,14 +517,34 @@ pub async fn write_playlist_batch_item_upsert(
     let prepared_items = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch_refs)
         .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
 
+    let items_info: Vec<(u32, u32)> = pli_list.iter().map(|pli| (pli.source_ordinal, pli.virtual_id.get())).collect();
+
     // Keep FileLockManager lock for cross-operation coordination (e.g. swap + update).
     let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
 
     let xtream_path_clone = xtream_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
         let _guard = file_lock;
+        let index_path = get_file_path_for_db_index(&xtream_path_clone);
+        let snapshot = IndexSnapshot::<u32, u32>::read(&index_path).ok().flatten();
         let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
+        // Keys that are new or moved to another `source_ordinal`; only needed when an index is kept.
+        let mut changed = Vec::new();
+        if snapshot.is_some() {
+            for (source_ordinal, virtual_id) in items_info {
+                let moved = tree
+                    .query(&virtual_id)
+                    .map_err(std::io::Error::other)?
+                    .is_none_or(|old_item| old_item.source_ordinal != source_ordinal);
+                if moved {
+                    changed.push((source_ordinal, virtual_id));
+                }
+            }
+        }
         tree.upsert_batch_encoded(prepared_items)?;
+        if let Some(snapshot) = snapshot {
+            snapshot.write_merged(&index_path, &changed)?;
+        }
         Ok(())
     })
     .await
