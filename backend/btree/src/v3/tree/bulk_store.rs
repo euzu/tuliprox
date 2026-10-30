@@ -289,12 +289,12 @@ where
     Ok(level.first().ok_or_else(|| invalid_input("tree has no root page"))?.page_id)
 }
 
-pub(super) fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
+pub(crate) fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
     let name = filepath.file_name().ok_or_else(|| invalid_input("database path has no file name"))?.to_string_lossy();
     Ok(filepath.with_file_name(format!("{name}.{}.v3.tmp", uuid::Uuid::new_v4())))
 }
 
-pub(in crate::v3) fn publish_database(
+pub(crate) fn publish_database(
     temporary: &Path,
     destination: &Path,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,

@@ -134,12 +134,15 @@ pub async fn get_xtream_stream_info(
                                 vod_pli.additional_properties =
                                     Some(StreamProperties::Video(Box::new(video_stream_props)));
 
-                                if let Err(err) = write_playlist_item_update(app_config, &target.name, &vod_pli).await {
-                                    error!("Failed to persist video stream: {err}");
-                                }
-
-                                if target.use_memory_cache {
-                                    playlists.update_playlist_items(target, vec![&vod_pli]).await;
+                                match write_playlist_item_update(app_config, &target.name, &vod_pli).await {
+                                    Ok(()) => {
+                                        if target.use_memory_cache {
+                                            playlists.update_playlist_items(target, &[&vod_pli]).await;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        error!("Failed to persist video stream: {err}");
+                                    }
                                 }
 
                                 if let Some(value) = xtream_resolve_stream_info(
@@ -258,7 +261,7 @@ pub async fn get_xtream_stream_info(
 
                                         let xtream_episodes: Vec<XtreamPlaylistItem> =
                                             episodes.iter().map(XtreamPlaylistItem::from).collect();
-                                        if let Err(err) = write_playlist_batch_item_upsert(
+                                        match write_playlist_batch_item_upsert(
                                             app_config,
                                             &target.name,
                                             XtreamCluster::Series,
@@ -266,12 +269,15 @@ pub async fn get_xtream_stream_info(
                                         )
                                         .await
                                         {
-                                            error!("Failed to persist playlist batch item update: {err}");
-                                        }
-
-                                        if target.use_memory_cache && !in_memory_updates.is_empty() {
-                                            playlists.insert_playlist_items(target, episodes).await;
-                                            playlists.update_target_id_mapping(target, in_memory_updates).await;
+                                            Ok(()) => {
+                                                if target.use_memory_cache && !in_memory_updates.is_empty() {
+                                                    playlists.insert_playlist_items(target, episodes).await;
+                                                    playlists.update_target_id_mapping(target, in_memory_updates).await;
+                                                }
+                                            }
+                                            Err(err) => {
+                                                error!("Failed to persist playlist batch item update: {err}");
+                                            }
                                         }
 
                                         if !provider_series.is_empty() {
@@ -282,12 +288,18 @@ pub async fn get_xtream_stream_info(
                                                 &mut series_pli,
                                                 &provider_series,
                                             );
-                                            if let Err(err) =
-                                                write_playlist_item_update(app_config, &target.name, &series_pli).await
+                                            match write_playlist_item_update(app_config, &target.name, &series_pli)
+                                                .await
                                             {
-                                                error!("Failed to persist series stream: {err}");
+                                                Ok(()) => {
+                                                    if target.use_memory_cache {
+                                                        playlists.update_playlist_items(target, &[&series_pli]).await;
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to persist series stream: {err}");
+                                                }
                                             }
-                                            playlists.update_playlist_items(target, vec![&series_pli]).await;
 
                                             if let Some(value) = xtream_resolve_stream_info(
                                                 app_config,

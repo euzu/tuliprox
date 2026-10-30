@@ -1,7 +1,8 @@
 use super::{
-    build_pages, invalid_data, invalid_input, publish_database, publish_database_and_invalidate_sorted_index,
+    build_pages, invalid_data, invalid_input, mark_verified, publish_database_and_invalidate_sorted_index,
     recover_pending_under_existing_lock, sync_parent_directory, temporary_path, verify_full, with_exclusive_sidecar,
     BPlusTree, BPlusTreeMetadata, BPlusTreeQuery, DatabaseHeader, PageSink, StoredDatabase, VerificationReport,
+    VerifiedIdentity,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -103,10 +104,11 @@ where
             drop(sink);
             let mut query = BPlusTreeQuery::<K, V>::from_file_unlocked(File::open(&temp_path)?)?;
             let verification = verify_full(&mut query)?;
+            let identity = VerifiedIdentity::from_header(&query.header);
             drop(query);
-            Ok((root_page_id, verification))
+            Ok((root_page_id, verification, identity))
         })();
-        let (root_page_id, verification) = match prepared {
+        let (root_page_id, verification, identity) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 let _ = std::fs::remove_file(&temp_path);
@@ -114,6 +116,7 @@ where
             }
         };
         publish_database_and_invalidate_sorted_index(&temp_path, filepath, sync_published_directory)?;
+        mark_verified(filepath, identity);
         self.dirty = false;
         Ok(StoredDatabase { root_page_id, verification })
     }
@@ -186,20 +189,7 @@ where
         drop(query);
 
         let index_path = crate::common::get_file_path_for_db_index(filepath);
-        let temporary = temporary_path(&index_path)?;
-        let prepared = (|| {
-            let mut writer = crate::sorted_index::v4::Writer::new(&temporary, database_id, generation)?;
-            for (sort_key, primary_key, locator) in &entries {
-                writer.push(sort_key, primary_key, *locator)?;
-            }
-            let _ = writer.finish()?;
-            Ok(())
-        })();
-        if let Err(error) = prepared {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-        publish_database(&temporary, &index_path, sync_parent_directory).map_err(io::Error::from)
+        crate::sorted_index::publish_index(&index_path, database_id, generation, &entries)
     }
 }
 

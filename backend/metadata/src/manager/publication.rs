@@ -16,7 +16,7 @@ use tuliprox_core::{
 };
 use tuliprox_repository::{
     get_input_storage_path, get_target_id_mapping_file, persist_input_live_info_batch, persist_input_series_info_batch,
-    persist_input_vod_info_batch, xtream_get_file_path, BPlusTreeQuery, TargetIdMapping,
+    persist_input_vod_info_batch, xtream_get_file_path, BPlusTreeQuery, PlaylistStorageState, TargetIdMapping,
 };
 
 pub(super) struct DbHandle {
@@ -238,22 +238,17 @@ impl InputWorker {
         resolved
     }
 
-    pub(super) async fn update_memory_cache<E: EventSink + Clone + 'static>(
-        ctx: &MetadataUpdateCtx<E>,
+    pub(super) async fn update_memory_cache(
+        playlists: &PlaylistStorageState,
         target_name: &str,
         cluster: XtreamCluster,
         updates: Vec<XtreamPlaylistItem>,
     ) {
-        let mut playlists = ctx.playlists.data.write().await;
+        let mut playlists = playlists.data.write().await;
         if let Some(playlist) = playlists.get_mut(target_name) {
             if let Some(xtream_storage) = &mut playlist.xtream {
-                let storage = match cluster {
-                    XtreamCluster::Live => &mut xtream_storage.live,
-                    XtreamCluster::Video => &mut xtream_storage.vod,
-                    XtreamCluster::Series => &mut xtream_storage.series,
-                };
                 for item in updates {
-                    storage.insert(item.virtual_id.get(), item);
+                    xtream_storage.upsert(cluster, item);
                 }
             }
         }

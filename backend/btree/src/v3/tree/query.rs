@@ -698,7 +698,7 @@ where
     K: Ord + for<'de> Deserialize<'de>,
     V: for<'de> Deserialize<'de>,
 {
-    pub(super) fn query_io(&mut self, key: &K) -> io::Result<Option<V>> {
+    pub(crate) fn query_io(&mut self, key: &K) -> io::Result<Option<V>> {
         let Some((leaf_id, range)) = self.locate_cell(key)? else { return Ok(None) };
         self.decode_entry_range(leaf_id, range).map(|entry| entry.map(|(_, value)| value))
     }

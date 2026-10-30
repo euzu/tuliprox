@@ -1081,6 +1081,15 @@
 
 ## ⚙️ Optimizations
 
+- **No full database re-verification on in-place writes.** In-place database writes (stream/series info resolves, probes)
+  no longer re-verify the whole database file when its identity was already verified in this process.
+
+- **`get_series` no longer decodes episode details for the list.** The series catalog list response only needs
+  the series header fields. Reading stored series items now skips deserializing and interning season and episode details
+  via a scoped decode projection, reducing response latency on large series catalogs. Xtream list endpoints are served
+  from the memory cache when `use_memory_cache` is enabled, and the memory cache no longer holds series season/episode
+  details (series info is read from disk).
+
 - **Dependency updates.** `jsonwebtoken` 11, `quick-xml` 0.42, `tower-http` 0.7, `tokio-tungstenite` 0.30,
   `sysinfo` 0.39, `lol_html` 3, `lru` 0.19, `fancy-regex` 0.20 and `gloo-net` 0.7. The vendored `reqwest` moved to
   0.13.5 with the request-extension forwarding patch re-applied.
@@ -1254,6 +1263,17 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Image/resource proxy fails fast on upstream errors and limits per-host concurrency.** The image/resource proxy
+  no longer retries a failing upstream image three times (each failing image could block a browser slot for minutes),
+  fails after 15 s waiting for the response (the limit applies to waiting for the response, not to the image transfer),
+  and limits concurrent upstream fetches per host to 6 to avoid provider overload.
+
+- **Xtream list order stays sorted after stream or series info resolves.** Resolving VOD or series info updates the
+  target database in place, and every commit removed the sorted index, so later list requests returned items in
+  virtual-id order. The Xtream target write path now keeps the index (new or moved keys are merged in) and reads values
+  by primary key while the index is older than the database. Disk and memory cache list the same items in the same
+  `(source_ordinal, virtual_id)` order.
 
 - **Filters are no longer limited by the parser stack.** A filter that expanded to more than a few dozen terms was
   rejected with `stack limit reached` on the static-musl build and left the container restarting. The parser dependency

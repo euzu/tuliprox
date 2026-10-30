@@ -451,8 +451,13 @@ reverse_proxy:
 
 ## 5. Resource Retries (`resource_retry`)
 
-This block defines the retry behavior when Tuliprox proxies static resources (logos, EPG images).
-It ensures transient network issues or temporary provider timeouts don't result in broken images for your clients.
+This block defines the shared retry behavior for outbound requests that use the standard retry policy.
+It ensures transient network issues or temporary provider timeouts do not fail a request on the first error.
+
+Image proxy fetches (logos, covers, EPG icons on the Web UI and player resource routes) do not use these same-URL
+retries: they make one attempt per URL, fail after 15 seconds without a response, and run at most 6 concurrent
+upstream fetches per host. Provider URL failover still applies. A failing image server therefore cannot hold a
+client connection for minutes or receive a retry burst.
 
 ```yaml
 reverse_proxy:
