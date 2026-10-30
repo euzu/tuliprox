@@ -92,18 +92,6 @@ pub(crate) fn sanitize_message(message: &str) -> Cow<'_, str> {
     }
 }
 
-#[must_use]
-pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 fn calculate_pri(facility: SyslogFacility, level: log::Level) -> u8 {
     let severity = match level {
         log::Level::Error => 3,
@@ -148,7 +136,8 @@ fn format_rfc3164(meta: &SyslogMeta<'_>, header: &SyslogHeader) -> (String, bool
     out.push(' ');
     push_field_or_nil(&mut out, &header.hostname, 255);
     out.push(' ');
-    push_field_or_nil(&mut out, &header.app_name, 48);
+    // RFC 3164 §4.1.3 caps TAG at 32 characters; parsers that enforce it would otherwise read the rest as MSG.
+    push_field_or_nil(&mut out, &header.app_name, 32);
     let _ = write!(&mut out, "[{}]: ", header.pid);
     append_message(out, meta.message, header.max_len)
 }
@@ -159,12 +148,25 @@ fn append_message(mut out: String, message: &str, max_len: usize) -> (String, bo
     let sanitized = sanitize_message(message);
     let truncated = sanitized.len() > budget;
     if truncated {
-        let cut = floor_char_boundary(&sanitized, budget);
+        let cut = sanitized.floor_char_boundary(budget);
         out.push_str(&sanitized[..cut]);
     } else {
         out.push_str(&sanitized);
     }
     (out, truncated)
+}
+
+/// Longest char-boundary prefix of `message` whose JSON-escaped form fits in `budget` bytes. `sanitize_message`
+/// already replaced every control byte, so only `"` and `\\` grow when serialized, by one byte each.
+fn json_escaped_prefix_len(message: &str, budget: usize) -> usize {
+    let mut escaped = 0;
+    for (idx, ch) in message.char_indices() {
+        escaped += ch.len_utf8() + usize::from(matches!(ch, '"' | '\\'));
+        if escaped > budget {
+            return idx;
+        }
+    }
+    message.len()
 }
 
 fn format_json(meta: &SyslogMeta<'_>, header: &SyslogHeader) -> (String, bool) {
@@ -190,28 +192,19 @@ fn format_json(meta: &SyslogMeta<'_>, header: &SyslogHeader) -> (String, bool) {
         serde_json::to_string(&payload).unwrap_or_default()
     };
 
-    let full_serialized = serialize(&sanitized_msg, false);
-    if full_serialized.len() <= header.max_len {
+    // NDJSON: every record ends with the newline delimiter, and the delimiter counts against `max_len`.
+    let max_len = header.max_len.saturating_sub(1);
+    let mut full_serialized = serialize(&sanitized_msg, false);
+    if full_serialized.len() <= max_len {
+        full_serialized.push('\n');
         return (full_serialized, false);
     }
 
     let empty_serialized = serialize("", true);
-    let budget = header.max_len.saturating_sub(empty_serialized.len());
-    let mut cut_len = floor_char_boundary(&sanitized_msg, budget);
+    let budget = max_len.saturating_sub(empty_serialized.len());
+    let cut_len = json_escaped_prefix_len(&sanitized_msg, budget);
     let mut serialized = serialize(&sanitized_msg[..cut_len], true);
-
-    let mut attempts = 0;
-    while serialized.len() > header.max_len && attempts < 3 {
-        attempts += 1;
-        let excess = serialized.len() - header.max_len;
-        cut_len = floor_char_boundary(&sanitized_msg, cut_len.saturating_sub(excess));
-        serialized = serialize(&sanitized_msg[..cut_len], true);
-    }
-
-    while serialized.len() > header.max_len && cut_len > 0 {
-        cut_len = floor_char_boundary(&sanitized_msg, cut_len.saturating_sub(1));
-        serialized = serialize(&sanitized_msg[..cut_len], true);
-    }
+    serialized.push('\n');
 
     debug_assert!(serialized.len() <= header.max_len);
     (serialized, true)
@@ -340,8 +333,9 @@ mod tests {
         };
         let (out, truncated) = format(&meta, &header);
         assert!(!truncated);
-        assert!(!out.contains('\n'));
-        let val: serde_json::Value = serde_json::from_str(&out).expect("must parse as json");
+        let line = out.strip_suffix('\n').expect("NDJSON record must end with a newline");
+        assert!(!line.contains('\n'));
+        let val: serde_json::Value = serde_json::from_str(line).expect("must parse as json");
         assert_eq!(val["level"], "info");
         assert_eq!(val["facility"], "local0");
         assert_eq!(val["app_name"], "tuliprox");
@@ -458,6 +452,30 @@ mod tests {
         let sanitized = sanitize_message(&raw_msg);
         assert!(sanitized.starts_with(msg));
         assert_eq!(val["truncated"], true);
+
+        // One cut fills the budget: escaped quotes cost two bytes each, so the gap stays below one escaped char.
+        let quotes = "\"".repeat(2000);
+        let meta_quotes = SyslogMeta { message: &quotes, ..meta };
+        let (out_quotes, truncated_quotes) = format(&meta_quotes, &header);
+        assert!(truncated_quotes);
+        assert!(out_quotes.ends_with('\n'), "truncated NDJSON record must end with a newline");
+        assert!(out_quotes.len() <= 1024 && out_quotes.len() >= 1022, "len {}", out_quotes.len());
+        serde_json::from_str::<serde_json::Value>(&out_quotes).expect("must parse after truncation");
+    }
+
+    #[test]
+    fn test_7b_rfc3164_tag_capped_at_32_chars() {
+        let meta = SyslogMeta { timestamp: Local::now(), level: log::Level::Info, target: "t", message: "msg" };
+        let header = SyslogHeader {
+            format: SyslogFormat::Rfc3164,
+            facility: SyslogFacility::Local0,
+            app_name: "a".repeat(48),
+            hostname: "node1".to_string(),
+            pid: 7,
+            max_len: 1024,
+        };
+        let (out, _) = format(&meta, &header);
+        assert!(out.contains(&format!(" {}[7]: msg", "a".repeat(32))), "{out}");
     }
 
     #[test]
@@ -504,7 +522,7 @@ mod tests {
         };
         let (out, truncated) = format(&meta, &header);
         assert!(!truncated);
-        assert_eq!(out.len(), 733);
+        assert_eq!(out.len(), 734, "worst-case envelope plus the NDJSON newline");
         assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
         assert!(1024 - out.len() >= 256);
 
@@ -512,11 +530,11 @@ mod tests {
             SyslogMeta { timestamp: fixed_dt, level: log::Level::Trace, target: &"t".repeat(300), message: "" };
         let (out_300, truncated_300) = format(&meta_300, &header);
         assert!(!truncated_300);
-        assert_eq!(out_300.len(), 733);
+        assert_eq!(out_300.len(), 734);
 
         header.hostname = "\"".repeat(255);
         let (out_quotes, truncated_quotes) = format(&meta, &header);
         assert!(!truncated_quotes);
-        assert_eq!(out_quotes.len(), 733);
+        assert_eq!(out_quotes.len(), 734);
     }
 }

@@ -35,8 +35,10 @@ impl SyslogSink {
         self.filter.as_ref().is_some_and(|f| f.enabled(metadata))
     }
 
+    /// Without an own filter the sink inherits the root decision, but never below `debug`: trace records carry
+    /// request-header dumps that must not leave the host unencrypted, the same reason validation rejects `trace`.
     pub(crate) fn matches(&self, record: &Record<'_>, root_enabled: bool) -> bool {
-        self.filter.as_ref().map_or(root_enabled, |f| f.matches(record))
+        self.filter.as_ref().map_or(root_enabled && record.level() <= Level::Debug, |f| f.matches(record))
     }
 
     pub(crate) fn max_level(&self) -> LevelFilter { self.filter.as_ref().map_or(LevelFilter::Off, Filter::filter) }

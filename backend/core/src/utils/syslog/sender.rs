@@ -189,9 +189,13 @@ impl SyslogSender {
     #[must_use]
     pub(crate) fn same_transport(&self, transport: &SyslogTransport) -> bool { self.transport == *transport }
 
+    /// Asks the worker to stop after the datagrams already queued, without waiting for it.
+    pub(crate) fn stop(&self) { let _ = self.tx.try_send(WorkerMsg::Shutdown); }
+
+    /// Stops the worker and waits up to `SYSLOG_SHUTDOWN_TIMEOUT` for it to drain the queue.
     pub(crate) fn shutdown(self: Arc<Self>) {
         let done_rx = self.done_rx.lock().take();
-        let _ = self.tx.try_send(WorkerMsg::Shutdown);
+        self.stop();
         drop(self);
         if let Some(rx) = done_rx {
             let _ = rx.recv_timeout(SYSLOG_SHUTDOWN_TIMEOUT);
@@ -207,6 +211,29 @@ struct WorkerReportState {
     next_report: Instant,
 }
 
+/// The address the worker sends to, plus the resolved addresses after it for failover.
+struct Target {
+    socket: UdpSocket,
+    addr: SocketAddr,
+    remaining: std::vec::IntoIter<SocketAddr>,
+    /// Set once a datagram was sent since the last resolve.
+    delivered: bool,
+}
+
+impl Target {
+    /// Moves to the next resolved address that binds. Returns `false` when none is left.
+    fn fail_over(&mut self) -> bool {
+        match self.remaining.find_map(try_bind_candidate) {
+            Some((socket, addr)) => {
+                self.socket = socket;
+                self.addr = addr;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 struct WorkerContext {
     rx: Receiver<WorkerMsg>,
     done_tx: SyncSender<()>,
@@ -217,14 +244,10 @@ struct WorkerContext {
 }
 
 impl WorkerContext {
-    fn resolve_and_bind(&self) -> Option<(UdpSocket, SocketAddr)> {
-        let addrs = (self.seams.resolve)(&self.host, self.port).ok()?;
-        for candidate in addrs {
-            if let Some((socket, addr)) = try_bind_candidate(candidate) {
-                return Some((socket, addr));
-            }
-        }
-        None
+    fn resolve_and_bind(&self) -> Option<Target> {
+        let mut remaining = (self.seams.resolve)(&self.host, self.port).ok()?.into_iter();
+        let (socket, addr) = remaining.find_map(try_bind_candidate)?;
+        Some(Target { socket, addr, remaining, delivered: false })
     }
 
     fn maybe_report(&self, state: &mut WorkerReportState) {
@@ -277,7 +300,7 @@ impl WorkerContext {
             next_report: Instant::now() + self.seams.report_interval,
         };
 
-        let mut current_target: Option<(UdpSocket, SocketAddr)> = None;
+        let mut current_target: Option<Target> = None;
         let mut next_retry = Instant::now();
 
         'worker: loop {
@@ -288,7 +311,6 @@ impl WorkerContext {
                     if current_target.is_some() {
                         break;
                     }
-                    self.stats.dropped_unresolved.fetch_add(1, Ordering::Relaxed);
                     next_retry = Instant::now() + self.seams.dns_retry_interval;
                 }
 
@@ -312,7 +334,7 @@ impl WorkerContext {
                 }
             }
 
-            let Some((ref socket, target_addr)) = current_target else {
+            let Some(target) = current_target.as_mut() else {
                 continue;
             };
 
@@ -320,20 +342,29 @@ impl WorkerContext {
             let wait_dur = report_state.next_report.saturating_duration_since(now);
             match self.rx.recv_timeout(wait_dur) {
                 Ok(WorkerMsg::Datagram(d)) => {
-                    match (self.seams.send)(socket, d.as_bytes(), target_addr) {
+                    match (self.seams.send)(&target.socket, d.as_bytes(), target.addr) {
                         Ok(_) => {
                             self.stats.sent.fetch_add(1, Ordering::Relaxed);
+                            target.delivered = true;
                         }
                         Err(e) => {
                             self.stats.dropped_send_error.fetch_add(1, Ordering::Relaxed);
-                            if matches!(
+                            let address_error = matches!(
                                 e.kind(),
                                 io::ErrorKind::NetworkUnreachable
                                     | io::ErrorKind::HostUnreachable
                                     | io::ErrorKind::InvalidInput
-                            ) {
+                            );
+                            if address_error && !target.fail_over() {
+                                // A collector that worked before may have moved, so re-resolve at once. When no
+                                // resolved address ever worked, wait for the retry interval instead of running a
+                                // DNS lookup per record.
+                                next_retry = if target.delivered {
+                                    Instant::now()
+                                } else {
+                                    Instant::now() + self.seams.dns_retry_interval
+                                };
                                 current_target = None;
-                                next_retry = Instant::now();
                             }
                         }
                     }
@@ -391,6 +422,7 @@ mod tests {
     static TEST_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
     static TEST_RESOLVER_ANSWERS: Mutex<Vec<Vec<SocketAddr>>> = Mutex::new(Vec::new());
     static TEST_SEND_HOST_UNREACHABLE_ONCE: AtomicBool = AtomicBool::new(false);
+    static TEST_UNREACHABLE_ADDR: Mutex<Option<SocketAddr>> = Mutex::new(None);
     static TEST_SEND_CALLS: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
     static TEST_SEND_SAW_WORKER_GUARD: AtomicBool = AtomicBool::new(false);
 
@@ -415,6 +447,9 @@ mod tests {
         }
         if TEST_SEND_HOST_UNREACHABLE_ONCE.swap(false, Ordering::SeqCst) {
             return Err(io::Error::new(io::ErrorKind::HostUnreachable, "host unreachable"));
+        }
+        if *TEST_UNREACHABLE_ADDR.lock() == Some(target) {
+            return Err(io::Error::new(io::ErrorKind::NetworkUnreachable, "network unreachable"));
         }
         TEST_SEND_CALLS.lock().push(target);
         socket.send_to(buf, target)
@@ -492,12 +527,17 @@ mod tests {
         let sender = SyslogSender::start_with_seams(&config, seams).expect("start must return Ok");
         assert!(start.elapsed() < Duration::from_millis(200));
 
+        // Failed retries without a record are not losses: the counter must stay at zero while idle.
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(sender.stats.dropped_unresolved.load(Ordering::Relaxed), 0);
+
+        sender.offer(Local::now(), Level::Info, "t", "lost while unresolved");
         let deadline = Instant::now() + Duration::from_secs(1);
         while sender.stats.dropped_unresolved.load(Ordering::Relaxed) == 0 {
             assert!(Instant::now() < deadline, "dropped_unresolved timed out");
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(sender.stats.dropped_unresolved.load(Ordering::Relaxed) >= 1);
+        assert_eq!(sender.stats.dropped_unresolved.load(Ordering::Relaxed), 1);
         sender.shutdown();
 
         let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
@@ -655,6 +695,42 @@ mod tests {
         }
 
         sender.shutdown();
+    }
+
+    #[test]
+    fn test_6b_unreachable_address_fails_over_to_next_resolved_address() {
+        let _guard = TEST_LOCK.lock();
+        TEST_RESOLVER_CALLS.store(0, Ordering::SeqCst);
+        TEST_SEND_CALLS.lock().clear();
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+        let good_addr = receiver.local_addr().unwrap();
+        let bad_addr: SocketAddr = "127.0.0.1:5143".parse().unwrap();
+        *TEST_UNREACHABLE_ADDR.lock() = Some(bad_addr);
+        *TEST_RESOLVER_ANSWERS.lock() = vec![vec![bad_addr, good_addr]];
+
+        let mut config = SyslogConfig::default();
+        config.enabled = true;
+        config.host = "collector.example".to_string();
+        config.port = 514;
+
+        let mut seams = Seams::default();
+        seams.resolve = test_resolve;
+        seams.send = test_send;
+
+        let sender = SyslogSender::start_with_seams(&config, seams).expect("start sender");
+        sender.offer(Local::now(), Level::Info, "t", "lost on first address");
+        sender.offer(Local::now(), Level::Info, "t", "delivered on second address");
+
+        let mut buf = [0u8; 1024];
+        receiver.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (len, _) = receiver.recv_from(&mut buf).expect("must receive on the next resolved address");
+        assert!(String::from_utf8_lossy(&buf[..len]).contains("delivered on second address"));
+        assert_eq!(TEST_RESOLVER_CALLS.load(Ordering::SeqCst), 1, "failover must not re-resolve");
+        assert_eq!(*TEST_SEND_CALLS.lock(), vec![good_addr]);
+
+        sender.shutdown();
+        *TEST_UNREACHABLE_ADDR.lock() = None;
     }
 
     #[test]

@@ -376,7 +376,7 @@ DVR) never block on log I/O.
 | `facility`        | String | `local0`     | Syslog facility: all 24 RFC 5424 values are accepted, but **only `local0`..`local7` make sense here** — see [Facility](#facility).                                                            |
 | `app_name`        | String | `"tuliprox"` | Application name header (`1..=48` ASCII characters without spaces, range `0x21..=0x7E`).                                                                                                      |
 | `hostname`        | String | `null`       | Optional hostname override (`1..=255` characters). If omitted, falls back to the system hostname, or NILVALUE (`-`) if undetectable.                                                          |
-| `log_level`       | String | `null`       | Optional independent remote log level: `debug`, `info`, `warn`, `error`. If omitted, syslog follows the resolved root logger filter (including module rules). Note: `trace` is rejected.      |
+| `log_level`       | String | `null`       | Optional independent remote log level: `debug`, `info`, `warn`, `error`. If omitted, follows the root logger filter (including module rules) but never ships `trace`; `trace` is rejected.    |
 | `queue_capacity`  | Int    | `4096`       | Capacity of the bounded in-memory datagram channel (range `1..=65536`). When full, new datagrams are dropped immediately without blocking the caller (`dropped_full`).                        |
 | `max_message_len` | Int    | `1024`       | Maximum datagram size in bytes (range `480..=65507`, minimum `1024` for `json`). Datagrams exceeding this size have their message payload truncated at a character boundary.                  |
 
@@ -479,7 +479,8 @@ Legacy BSD syslog format for older appliances and log collectors:
 * `PRI`: `<facility * 8 + severity>`.
 * `TIMESTAMP`: Local time formatted as `Mmm dd hh:mm:ss`, where single-digit days are space-padded (e.g., `Oct  7`).
 * `HOSTNAME`: Configured or detected hostname. Because RFC 3164 lacks a formal NILVALUE, an unresolvable hostname sends literal `-`.
-* `TAG`: Application name and process ID in BSD format: `app_name[pid]:` (space-delimited from message).
+* `TAG`: Application name and process ID in BSD format: `app_name[pid]:` (space-delimited from message). `app_name` is
+  cut to 32 characters, the TAG limit of RFC 3164 §4.1.3.
 * Note: RFC 3164 has no `MSGID` field; the target module is not emitted on the wire in this format.
 
 #### 3. NDJSON (`format: json`)
@@ -493,6 +494,7 @@ Single-line newline-delimited JSON (NDJSON) object ideal for ingestion by Vector
 The field set and insertion order are fixed: `@timestamp`, `level`, `facility`, `app_name`, `hostname`, `pid`, `target`,
 `message`, and `truncated`. The `target` field preserves the full Rust module path (sanitized and capped at 255 bytes).
 The `truncated` boolean field indicates whether the message payload was shortened to fit `max_message_len`.
+Every datagram ends with a newline (`\n`) delimiter, which counts toward `max_message_len`.
 
 ### Shipping Semantics and Filter Hierarchy
 
@@ -555,7 +557,7 @@ UDP datagram transmission requires strict payload bounding to prevent packet fra
   parseable JSON and carries `"truncated": true` when shortened.
 * **Minimum Floors:** Config validation enforces `max_message_len >= 480` for `rfc5424` and `rfc3164` (worst-case RFC
   headers occupy up to 391 and 339 bytes respectively, guaranteeing at least an 89-byte message). For `format: json`,
-  the JSON envelope with maximal header fields reaches 733 bytes, so validation enforces `max_message_len >= 1024`.
+  the JSON envelope with maximal header fields reaches 734 bytes including the newline delimiter, so validation enforces `max_message_len >= 1024`.
 * **MTU Thresholds:** On standard 1500-byte Ethernet networks, the maximum unfragmented UDP payload is **1472 bytes for
   IPv4** (1500 - 20 IP header - 8 UDP header) and **1452 bytes for IPv6** (without extension headers). Datagrams
   exceeding these thresholds are fragmented at the IP layer; Docker bridge networks, NAT gateways, and cloud firewalls
@@ -572,14 +574,15 @@ UDP datagram transmission requires strict payload bounding to prevent packet fra
   report to stdout and the Web UI if any drop or truncation counter has changed:
   `syslog worker report for <host>:<port>: dropped_full=..., dropped_unresolved=..., dropped_send_error=..., truncated=..., sent=...`.
   Under continuous load, the absolute deadline ensures reports are never starved.
-* **Bounded Shutdown & Live Reload:** Sink shutdown and configuration swaps are bounded by a strict 2-second timeout
-  (`SYSLOG_SHUTDOWN_TIMEOUT = 2 s`). A `WorkerMsg::Shutdown` sentinel drains queued datagrams in FIFO order. If the
-  remote collector becomes unresponsive or the channel is stalled, shutdown terminates at the deadline to prevent
-  hanging the process or blocking configuration reload.
+* **Bounded Shutdown & Live Reload:** A `WorkerMsg::Shutdown` sentinel drains queued datagrams in FIFO order. On
+  process exit, including fatal startup errors, Tuliprox waits for the drain up to a strict 2-second timeout
+  (`SYSLOG_SHUTDOWN_TIMEOUT = 2 s`), so an unresponsive collector cannot hang the process. A configuration reload does
+  not wait: the previous worker drains its queue in the background while the new sink takes over.
 * **No Periodic DNS Re-Resolution:** Destination hostnames are resolved lazily on the background worker thread (never
   delaying application startup or `/healthcheck` probes). The resolved IP address is cached for the sender's lifetime.
-  Re-resolution occurs only while no address is usable (retrying every 30 seconds) or after an address-related socket
-  error (`NetworkUnreachable`, `HostUnreachable`, `InvalidInput`). Normal DNS changes are **not detected** automatically
+  After an address-related socket error (`NetworkUnreachable`, `HostUnreachable`, `InvalidInput`), the worker moves to
+  the next resolved address, for example from an unroutable IPv6 address to IPv4. Re-resolution occurs only when every
+  resolved address has failed, at once if one of them delivered before, otherwise every 30 seconds. Normal DNS changes are **not detected** automatically
   because UDP sends continue to succeed silently. To force re-resolution, restart Tuliprox or modify any transport field
   (`host`, `port`, `format`, `facility`, `app_name`, `hostname`, `queue_capacity`, `max_message_len`) to trigger a fresh
   sender.

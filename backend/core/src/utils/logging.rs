@@ -83,12 +83,22 @@ impl LoggerContext {
 struct ReloadableLogger {
     inner: RwLock<Logger>,
     syslog: ArcSwapOption<SyslogSink>,
+    /// Readers hold it while they offer to a sink, `swap_sink` holds it for writing. Once a swap returns, no thread
+    /// can still offer to the retired sink, so its shutdown sentinel is queued after every datagram it accepted.
+    syslog_gate: RwLock<()>,
 }
 
 impl ReloadableLogger {
-    fn new(logger: Logger) -> Self { Self { inner: RwLock::new(logger), syslog: ArcSwapOption::empty() } }
+    fn new(logger: Logger) -> Self {
+        Self { inner: RwLock::new(logger), syslog: ArcSwapOption::empty(), syslog_gate: RwLock::new(()) }
+    }
 
     fn replace(&self, logger: Logger) { *self.inner.write() = logger; }
+
+    fn swap_sink(&self, sink: Option<Arc<SyslogSink>>) -> Option<Arc<SyslogSink>> {
+        let _gate = self.syslog_gate.write();
+        self.syslog.swap(sink)
+    }
 }
 
 impl Log for ReloadableLogger {
@@ -110,7 +120,14 @@ impl Log for ReloadableLogger {
         let now = Local::now();
         let message = record.args().to_string();
         if let Some(sink) = sink {
-            sink.offer(now, record.level(), record.target(), &message);
+            let _gate = self.syslog_gate.read();
+            // A swap between the load above and the gate retired `sink`; the current sink takes the record instead.
+            let current = self.syslog.load();
+            if let Some(current) =
+                current.as_ref().filter(|current| Arc::ptr_eq(current, &sink) || current.matches(record, root_enabled))
+            {
+                current.offer(now, record.level(), record.target(), &message);
+            }
         }
         if root_enabled {
             let mut builder = Record::builder();
@@ -284,35 +301,22 @@ pub(crate) fn build_syslog_sink_internal(
     if !log.syslog.enabled {
         return Ok(None);
     }
-    if log.syslog.log_level == Some(shared::model::LogLevel::Trace) {
-        return Err("Syslog log_level 'trace' is not supported".to_string());
-    }
+    // `init_logger` reads the log block before `ConfigDto::prepare` validates it, so the sink validates on its own:
+    // the formatter relies on the `max_message_len` minimum, and `trace` must never reach the collector.
+    log.syslog.validate().map_err(|err| err.to_string())?;
 
     let config = crate::model::SyslogConfig::from(&log.syslog);
     let transport = SyslogTransport::from_config(&config);
 
-    let sender = if let Some(existing) = existing_sender {
-        if existing.same_transport(&transport) {
-            Arc::clone(existing)
-        } else {
-            #[cfg(test)]
-            if let Some(seams) = seams {
-                SyslogSender::start_with_seams(&config, seams)?
-            } else {
-                SyslogSender::start(&config)?
-            }
-            #[cfg(not(test))]
-            SyslogSender::start(&config)?
-        }
-    } else {
+    let sender = match existing_sender {
+        Some(existing) if existing.same_transport(&transport) => Arc::clone(existing),
         #[cfg(test)]
-        if let Some(seams) = seams {
-            SyslogSender::start_with_seams(&config, seams)?
-        } else {
-            SyslogSender::start(&config)?
-        }
+        _ => match seams {
+            Some(seams) => SyslogSender::start_with_seams(&config, seams)?,
+            None => SyslogSender::start(&config)?,
+        },
         #[cfg(not(test))]
-        SyslogSender::start(&config)?
+        _ => SyslogSender::start(&config)?,
     };
 
     let filter = log.syslog.log_level.and_then(syslog_level_filter).map(SyslogSink::build_filter);
@@ -346,11 +350,13 @@ fn apply_logger_with_context(context: &LoggerContext, log: Option<&LogConfigDto>
     // Sink first: a reload must not leave the stdout logger pointing at the previous sink. On the very first call
     // there is no handle yet, which is why the same store repeats after `install_logger` below.
     if let Some(handle) = LOGGER_HANDLE.get() {
-        handle.syslog.store(new_sink.clone());
+        handle.swap_sink(new_sink.clone());
     }
 
+    // Reload runs on a Tokio worker, so it must not wait for the old worker: `stop` queues the shutdown behind the
+    // pending datagrams and the old worker drains them on its own thread.
     if let Some(old_sender) = old_to_shutdown {
-        old_sender.shutdown();
+        old_sender.stop();
     }
 
     let config_log_level = log.and_then(|c| c.log_level.as_deref());
@@ -388,7 +394,7 @@ pub fn reload_logger(log: Option<&LogConfigDto>) {
 
 pub fn flush_syslog() {
     if let Some(handle) = LOGGER_HANDLE.get() {
-        if let Some(sink) = handle.syslog.swap(None) {
+        if let Some(sink) = handle.swap_sink(None) {
             let sender = sink.sender.clone();
             drop(sink);
             sender.shutdown();
@@ -849,6 +855,35 @@ log:
             build_syslog_sink(Some(&dto_trace), None).is_err(),
             "trace must be rejected instead of silently ignored"
         );
+
+        // The early parse skips `ConfigDto::prepare`, so the sink itself must reject values the formatter cannot meet.
+        let mut dto_short_json = LogConfigDto::default();
+        dto_short_json.syslog.enabled = true;
+        dto_short_json.syslog.host = "127.0.0.1".to_string();
+        dto_short_json.syslog.format = shared::model::SyslogFormat::Json;
+        dto_short_json.syslog.max_message_len = 200;
+        assert!(build_syslog_sink(Some(&dto_short_json), None).is_err(), "too small max_message_len must be rejected");
+    }
+
+    #[test]
+    fn logging_test_9b_inherited_level_never_ships_trace() {
+        let config = crate::model::SyslogConfig {
+            enabled: true,
+            host: "127.0.0.1".to_string(),
+            ..crate::model::SyslogConfig::default()
+        };
+        let sink = SyslogSink::new(SyslogSender::start(&config).expect("sender start"), None);
+
+        let trace_args = format_args!("trace");
+        let trace_record = Record::builder().level(Level::Trace).target("test").args(trace_args).build();
+        let debug_args = format_args!("debug");
+        let debug_record = Record::builder().level(Level::Debug).target("test").args(debug_args).build();
+
+        assert!(!sink.matches(&trace_record, true), "root trace must not reach the collector");
+        assert!(sink.matches(&debug_record, true));
+        assert!(!sink.matches(&debug_record, false));
+
+        sink.sender.clone().shutdown();
     }
 
     #[test]
