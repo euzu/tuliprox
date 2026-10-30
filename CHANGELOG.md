@@ -2019,6 +2019,37 @@
 
 ## 🛠 Maintenance
 
+- **Docker images ship FFmpeg 9.0.2.** The bundled static `ffmpeg`/`ffprobe` moved from 7.1 to 9.0.2, and the
+  resource build uses FFmpeg 9.0. The `ffprobe` JSON fields that Tuliprox reads are unchanged.
+
+- **Release builds use pinned, reproducible inputs.** All GitHub Actions, Docker base images and the `cross` build
+  images (`docker/cross/`, referenced by `Cross.toml`) are pinned to a digest, and Dependabot proposes weekly updates
+  for them against `develop`. The release workflow builds first and then pushes the version commit and tag
+  atomically. It refuses to publish when the branch moved during the build.
+
+- **Fixed version rules for releases.** Every `develop` build raises the patch version, so a `develop` version never
+  ends in `.0`; after a master release it continues at `X.Y.1`. Every `master` build raises the minor version with
+  patch 0. Both skip versions whose tag already exists, and a re-run of a tagged commit reuses its version. After a
+  master release, CI merges the release into `develop` so the next release pull request does not conflict on the
+  version lines; when master changed more than the version in `Cargo.toml`, `Cargo.lock` or `frontend/Cargo.toml`,
+  CI stops and asks for a manual merge. Pull request CI now also runs for pull requests into `master`. The manual
+  `Version bump` input of the Docker workflow is removed.
+
+- **GitHub releases are built by CI.** A merge into `master` publishes the release with one bundle per platform:
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and `armv7-unknown-linux-musleabihf` as `.tar.gz`, and
+  `x86_64-pc-windows-gnu` as `.zip`, each with a `.sha256` file. A bundle contains the binary, `web/` and
+  `resources/`, the same files as the Docker image. Pull request CI checks the armv7 and Windows targets with
+  `cross check`, so a target that no longer builds fails before the merge. The local `bin/release.sh`,
+  `bin/inc_version.sh` and `bin/build_cross_toolchains_darwin_images.sh` are removed.
+
+- **`make pre-merge-check` and `make i18n-check`.** `pre-merge-check` runs the architecture gates, clippy, the
+  locale key check and the workspace tests on a merged tree. `i18n-check` (`bin/check-i18n.sh`) lists every missing
+  and extra translation key of every locale at once; duplicate keys stay covered by the frontend locale test.
+
+- **Pull requests get a Gitleaks privacy scan.** CI scans every pull request commit with `.gitleaks.default.toml`.
+  The optional pre-push hook in `.githooks/` runs the same scan locally, plus private `.gitleaks.*.toml` rules; see
+  `.githooks/README.md`. CI runs the workspace tests with the `dev-slim` profile (`make test-slim`).
+
 - **`AppState` groups the recording handles and wraps the network-access checks.** The recording queue and the provider
   capacity live in `AppState.recording` (`RecordingState`). `AppState::check_network_access`,
   `try_check_network_access`, `check_permission_and_network_access`, `resolve_api_user_context` and `update_geoip_db`

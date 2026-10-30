@@ -1,0 +1,83 @@
+title = "Tuliprox pre-push privacy scan"
+minVersion = "8.25.0"
+
+# Keep the secret detection rules embedded in the installed Gitleaks binary.
+# Local .gitleaks.*.toml files are scanned independently by the hook.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-home-path"
+description = "Absolute personal home directory"
+# Require an absolute path, not a nested directory or a lowercase /users API.
+# Unix and MSYS (/c/Users) prefixes are case-sensitive; Windows paths are case-insensitive.
+# Capture the username because the built-in allowlist ignores full home paths.
+# Spell path separators in allowlist patterns as [/] to avoid matching this file.
+regex = '''(?m)(?:^|[^[:alnum:]_./\\\r\n-])(?i:file://)?(?:/(?:Users|home)/|/[a-zA-Z]/Users/|(?i:[a-z]:[\\/]+Users[\\/]+))([^\\/\s"'<>|`]+)'''
+secretGroup = 1
+
+[[rules.allowlists]]
+description = "Documented service accounts, container users, and example homes"
+regexTarget = "match"
+regexes = ['''[/]home[/](?:m3u-filter|tuliprox|tp|user|vscode)$''']
+
+[[rules.allowlists]]
+description = "Known Emby API endpoints and encoded user IDs"
+regexTarget = "match"
+regexes = ['''[/]Users[/](?:AuthenticateByName|user|user%201|a%2Fb%3Fc)$''']
+
+[[rules.allowlists]]
+description = "Relative web-root suffix in runtime configuration tests"
+regexTarget = "line"
+regexes = ['''^\s*assert_eq!\(report\.config\.api\.web_root, report\.paths\.config_path\.clone\(\) \+ "[/]home[/]web"\);\s*$''']
+
+[[rules]]
+id = "local-gitleaks-config"
+description = "Local Gitleaks configurations must not be committed"
+path = '''(^|/)\.gitleaks\.[^/]+\.toml$'''
+
+# The shared configuration is versioned; only local configurations are blocked.
+[[rules.allowlists]]
+paths = ['''^\.gitleaks\.default\.toml$''']
+
+[[allowlists]]
+description = "Known example and test values"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+    # Shared proxy rewrite examples and deterministic test keys
+    '''^00112233445566778899aabbccddeeff$''',
+    # Confirmed example web authentication signing key
+    '''^ef9ab256a8c0abe5de92c2e05ca92baa810472ab702ff1674e9248308ceeec92$''',
+    # Confirmed example TMDB API key
+    '''^4219e299c89411838049ab0dab19ebd5$''',
+    # Documented proxy rewrite example key
+    '''^A1B2C3D4E5F60718293A4B5C6D7E8F90$''',
+    # Synthetic web authentication and testkit fixtures
+    '''^0123456789abcdef0123456789abcdef$''',
+    # CRC32 field access is code, not a credential
+    '''^locator\.serialized_key_crc32$''',
+    # Expected ciphertext in the deterministic encryption test
+    '''^EBESExQVFhcYGRobHB0eH2-bgxiO9XQB4mKK$''',
+    # Catchup marker constant is code, not a credential
+    '''^M3U_CATCHUP_MARKER$''',
+    # Example environment signing key
+    '''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
+    # Confirmed example CrowdSec LAPI key
+    '''^2PbAzuGn9ynn6pYsqoqd98wMJYPA/CIynySN1Lva5H8$''',
+    # Documented idempotency identifier
+    '''^5f1c0f1e-2b7a-4f5d-9d2e-6c3f0f1b2a44$''',
+    # Fixed frontend setup test key
+    '''^AABBCCDDEEFF00112233445566778899$''',
+    # Published test fixture checksum
+    '''^b481b7b85f79883b41f8a1436301257ee5cb5a45e30993233ec73a2a5824ff13$''',
+]
+
+[[allowlists]]
+description = "Known example and test values"
+targetRules = ["jwt"]
+regexTarget = "secret"
+regexes = [
+    # Fixed dummy JWT used by the frontend request service
+    '''^eyJraWQiOiJkZWZhdWx0IiwiYWxnIjoiUlMyNTYifQ\.eyJsb2dpbiI6ImR1bW15In0\.WWzZP0hICmJeIgMLVYNOpayriEC08J_lYssk9z8GglHXfZ6oJUDv3svlJDA8sQG025VA_LR5UzyyiWeQDCdpWyrCI_nI2Xd-3ga3JwWtxHE9NWFalgq0Q9jjxoB4LYWCXsAkqoZqk6s7b3F5Fi_h5oYHfwM4h8hXEbrgnJ_Z1wpSc7HNh6SUnOllxcaJOxYlRrlUn3XulSSf2NhHe3XotvFguiIV1-RIns3cSIL29bvMUEFw84w7BfJn-joynZsWlfJBvzyOiuDqduXa0deH7b962unM2wPpbvTgliJhFFOUBHClRhBOmoo0cijuMZB4K7NjgjGmU5eVfHG6pVWs_b0ikS4V_P6RJcNS6Alcc_HB_YXv0yCD3pjcBbuRXAskivEhgXuecdRMGQgohAhXplLuu5SR0K6Bcrt7UFFnBi2qN6fbw1i4s8PDXqiTu4rIg9agCkVNfplRvj8Szl6egF0Vd1TN1WGEarkdINEUyfNQkAihFY5BKxfaPun1-a0VydRMZElu6VzrrUMxXt4T7zybuJZI63C3mKLEHZixdSC76c9AE-zGom5LZYE4mqwd4dW3QHtWFZgGZiL9C_VBIf63WzjTYhWVuO2U8O9bsKkSEl5L-Ww9j8ccDHp5nc7y6yUgSYd600TBRI7WblFovLsl2tjElvUqfJZhj6JmX_Q$''',
+]

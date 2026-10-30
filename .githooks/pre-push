@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() {
+    printf 'ERROR: %s\n' "$1" >&2
+    exit 1
+}
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail "Run this hook in a Git working tree."
+cd "$repo_root"
+
+# Scan the objects that will actually be pushed, even if local replacements exist.
+export GIT_NO_REPLACE_OBJECTS=1
+
+initialized=false
+scan_failed=false
+develop_commit=
+while read -r local_ref local_oid remote_ref remote_oid extra || [[ -n "${local_ref:-}" ]]; do
+    [[ -n "$local_ref" && -n "$remote_ref" && -z "$extra" ]] || fail "Invalid pre-push input."
+    [[ "$local_oid" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ &&
+       "$remote_oid" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || fail "Invalid pre-push object ID."
+
+    # Deleting a remote ref sends no new commits and needs no scanner.
+    [[ "$local_oid" =~ ^0+$ ]] && continue
+
+    if [[ "$initialized" == false ]]; then
+        command -v gitleaks >/dev/null 2>&1 || fail "Install Gitleaks 8.25.0 or newer (8.x); see .githooks/README.md."
+        scanner_version=$(gitleaks version </dev/null 2>/dev/null) || fail "Cannot determine the Gitleaks version."
+        if [[ "$scanner_version" =~ ^v?8\.([0-9]+)\.([0-9]+)$ ]]; then
+            (( 10#${BASH_REMATCH[1]} >= 25 )) || fail "Gitleaks 8.25.0 or newer (8.x) is required."
+        else
+            fail "A released Gitleaks 8.25.0 or newer (8.x) is required."
+        fi
+
+        shallow=$(git rev-parse --is-shallow-repository 2>/dev/null) || fail "Cannot inspect repository history."
+        [[ "$shallow" == false ]] || fail "Fetch the complete history before pushing from a shallow clone."
+        [[ -f .gitleaks.default.toml && -r .gitleaks.default.toml ]] || fail "The shared Gitleaks configuration is missing or unreadable."
+
+        # Git lists the main worktree first. NUL-delimited fields preserve
+        # spaces and unusual characters without assuming where .git is stored.
+        main_repo_root=
+        while IFS= read -r -d '' field; do
+            [[ -n "$field" ]] || break
+            case "$field" in
+                "worktree "*) main_repo_root=${field#worktree } ;;
+                bare) fail "Shared local rules require a main working tree." ;;
+            esac
+        done < <(git worktree list --porcelain -z 2>/dev/null)
+        [[ -n "$main_repo_root" && -d "$main_repo_root" ]] || fail "Cannot locate the main working tree. Git 2.36 or newer is required."
+
+        config_roots=("$repo_root")
+        if [[ ! "$main_repo_root" -ef "$repo_root" ]]; then
+            config_roots+=("$main_repo_root")
+        fi
+        configs=(.gitleaks.default.toml)
+        shopt -s nullglob
+        # Main-root configs are shared across linked worktrees. Local configs
+        # remain additive, and the main worktree is scanned only once.
+        for config_root in "${config_roots[@]}"; do
+            for config in "$config_root"/.gitleaks.*.toml; do
+                [[ "${config##*/}" == .gitleaks.default.toml ]] && continue
+                [[ -f "$config" && -r "$config" ]] || fail "A local Gitleaks configuration is not a readable regular file."
+                configs+=("$config")
+            done
+        done
+        initialized=true
+        printf 'Running pre-push privacy scan with %s configuration(s)...\n' "${#configs[@]}"
+    fi
+
+    # Peel annotated tags to their commits. Reject refs that cannot be scanned.
+    local_commit=$(git rev-parse --verify "${local_oid}^{commit}" 2>/dev/null) || fail "A pushed ref does not resolve to a commit."
+    # Every push uses a fresh upstream baseline, regardless of the destination
+    # branch or local remote-tracking refs. Fetch it only once for all pushed refs.
+    if [[ -z "$develop_commit" ]]; then
+        printf 'Fetching the privacy scan baseline from euzu/tuliprox/develop...\n'
+        # Store the baseline in a private ref and leave FETCH_HEAD to the user's own fetches.
+        git fetch --quiet --no-tags --no-recurse-submodules --no-write-fetch-head \
+            https://github.com/euzu/tuliprox.git "+refs/heads/develop:refs/privacy-scan/develop" </dev/null ||
+            fail "Cannot fetch euzu/tuliprox/develop. Check the connection and retry."
+        develop_commit=$(git rev-parse --verify 'refs/privacy-scan/develop^{commit}' 2>/dev/null) ||
+            fail "The fetched upstream develop baseline does not resolve to a commit."
+    fi
+    git merge-base "$develop_commit" "$local_commit" >/dev/null 2>&1 ||
+        fail "Upstream develop and the pushed ref have no common history. Check the branch before pushing."
+    revisions="${develop_commit}..${local_commit}"
+    printf 'Scanning commits for %s relative to euzu/tuliprox/develop (%s).\n' "$local_ref" "$develop_commit"
+    log_opts="--full-history --root --diff-merges=separate --no-renames --no-ext-diff --no-textconv ${revisions} --"
+
+    for index in "${!configs[@]}"; do
+        # Separate mandatory passes compose the detection rules additively.
+        # Never concatenate TOML or build an arbitrarily deep [extend] chain.
+        # Local scans intentionally show complete findings and errors. Closing
+        # stdin prevents the scanner from consuming the next ref's input.
+        printf '\nScanning %s with configuration %s of %s: %s\n' \
+            "$local_ref" "$((index + 1))" "${#configs[@]}" "${configs[$index]}"
+        if ! gitleaks git --config "${configs[$index]}" \
+            --verbose --redact=0 --no-banner --no-color --log-level info \
+            --ignore-gitleaks-allow --log-opts="$log_opts" . </dev/null; then
+            scan_failed=true
+            printf 'Privacy scan failed for configuration %s of %s. Continuing to collect findings.\n' \
+                "$((index + 1))" "${#configs[@]}" >&2
+        fi
+    done
+done
+
+if [[ "$scan_failed" == true ]]; then
+    fail "Privacy scan failed. Push aborted. Review all findings and errors above."
+fi
+printf 'Privacy scan passed.\n'
