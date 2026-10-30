@@ -8,7 +8,7 @@
 # Stage 0: Fetch static FFmpeg binaries
 # -----------------------------------------------------------------
 # We use a static build to ensure it works in the scratch image without libraries
-FROM mwader/static-ffmpeg:9.0.2@sha256:7d9bdaaf887f7e6ce6151f67325c344074b5ff1fb75316011c3376503e449a7b AS ffmpeg-static
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
 
 # Workspace skeleton shared by the backend and frontend dependency builds.
 FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS workspace-skeleton
@@ -153,7 +153,7 @@ RUN set -eu; \
 # -----------------------------------------------------------------
 # Stage 4: Prepare timezone data
 # -----------------------------------------------------------------
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS tz-prep
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS tz-prep
 
 ARG TZ=UTC
 ENV TZ=${TZ}
@@ -243,7 +243,7 @@ CMD ["-s", "-p", "/app/config"]
 # -----------------------------------------------------------------
 # Final Image #3: Production image based on Alpine
 # -----------------------------------------------------------------
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS alpine-final
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS alpine-final
 
 ARG RUST_TARGET=x86_64-unknown-linux-musl
 ARG TZ=UTC
