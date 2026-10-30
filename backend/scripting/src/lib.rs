@@ -1,9 +1,10 @@
 //! Embedded Rhai runtime for tuliprox scripting hosts.
 //!
 //! This crate owns the Rhai configuration shared by every scripting host: the engine limits,
-//! the redirection of `print`/`debug` into the log, the `eval` prohibition, and the compile
-//! error mapping. It deliberately knows nothing about playlists, filters or configuration, so a
-//! new host only registers its own types and functions and reuses everything else here.
+//! the redirection of `print`/`debug` into the log, the `eval` prohibition, the compile-time
+//! exclusion of modules (`import`), and the compile error mapping. It deliberately knows nothing
+//! about playlists, filters or configuration, so a new host only registers its own types and
+//! functions and reuses everything else here.
 //!
 //! A host builds one [`ScriptRuntime`] per process (for example behind an `OnceLock`) because
 //! constructing an engine is comparatively expensive. `compile` is cheap and only runs when the
@@ -147,6 +148,13 @@ mod tests {
         let error = runtime().compile(r#"eval("1 + 1")"#, "origin").expect_err("eval must be disabled");
 
         assert!(error.to_string().contains("eval"), "message should name the disabled symbol: {error}");
+    }
+
+    #[test]
+    fn import_is_not_available_to_scripts() {
+        let error = runtime().compile(r#"import "x" as y;"#, "origin").expect_err("import must be disabled");
+
+        assert!(error.to_string().contains("import"), "message should name the disabled keyword: {error}");
     }
 
     #[test]

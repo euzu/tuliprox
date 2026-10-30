@@ -238,3 +238,206 @@ fn reading_an_unknown_property_yields_unit_instead_of_failing() {
     assert_eq!(mapped.header.group.as_ref(), "fallback");
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
 }
+
+const DOC: &str = include_str!("../../../../../docs/src/configuration/mapping-dsl.md");
+
+fn rhai_blocks() -> Vec<&'static str> {
+    let mut blocks = Vec::new();
+    let mut rest = DOC;
+    while let Some(start) = rest.find("```rhai") {
+        let after_fence = &rest[start + "```rhai".len()..];
+        let newline_offset = after_fence.find('\n').expect("newline after ```rhai");
+        let content = &after_fence[newline_offset + 1..];
+        let end = content.find("```").expect("fenced block must be closed");
+        blocks.push(content[..end].trim());
+        rest = &content[end + "```".len()..];
+    }
+    blocks
+}
+
+fn doc_example(name: &str) -> &'static str {
+    let expected_marker = format!("// example: {name}");
+    for block in rhai_blocks() {
+        if block.lines().next().map(str::trim) == Some(expected_marker.as_str()) {
+            return block;
+        }
+    }
+    panic!("example '{name}' not found in docs");
+}
+
+#[test]
+fn every_rhai_block_in_the_docs_compiles_and_runs() {
+    let blocks = rhai_blocks();
+    assert!(!blocks.is_empty(), "docs should contain at least one rhai block");
+
+    let templates: Arc<[PatternTemplate]> = Arc::from(vec![template("quality", "HD")]);
+
+    for (i, block) in blocks.iter().enumerate() {
+        let compiled = MappingScript::compile(block)
+            .unwrap_or_else(|err| panic!("block {i} failed to compile:\n{block}\nerror: {err}"));
+
+        let context = MappingScriptContext::new(Some(Arc::clone(&templates)), false);
+        let sample = item("DE: Sky Sport 1");
+        let outcome = compiled.eval(sample, context);
+
+        for diag in &outcome.diagnostics {
+            assert!(
+                !diag.starts_with("script error"),
+                "block {i} produced a script error:\n{block}\ndiagnostic: {diag}"
+            );
+        }
+    }
+}
+
+#[test]
+fn doc_example_country_prefix() {
+    let example = doc_example("country-prefix");
+
+    let positive = run(example, item("DE: Sky Sport 1"));
+    let mapped = positive.item.expect("item survives");
+    assert_eq!(mapped.header.group.as_ref(), "Sport DE");
+    assert_eq!(mapped.header.name.as_ref(), "Sky Sport 1");
+    assert_eq!(mapped.header.title.as_ref(), "Sky Sport 1");
+    assert!(positive.diagnostics.is_empty(), "{:?}", positive.diagnostics);
+
+    let negative = run(example, item("Sky Sport 1"));
+    let mapped_neg = negative.item.expect("item survives");
+    assert_eq!(mapped_neg.header.group.as_ref(), "");
+    assert_eq!(mapped_neg.header.name.as_ref(), "Sky Sport 1");
+    assert_eq!(mapped_neg.header.title.as_ref(), "");
+    assert_eq!(negative.changed_fields, Vec::<String>::new());
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}
+
+#[test]
+fn doc_example_quality_suffix() {
+    let example = doc_example("quality-suffix");
+
+    let mut channel = item("ZDF HD");
+    channel.header.title = "ZDF HD".intern();
+    channel.header.group = "German".intern();
+    let positive = run(example, channel);
+    let mapped = positive.item.expect("item survives");
+    assert_eq!(mapped.header.name.as_ref(), "ZDF");
+    assert_eq!(mapped.header.title.as_ref(), "ZDF");
+    assert_eq!(mapped.header.group.as_ref(), "German HD");
+    assert!(positive.diagnostics.is_empty(), "{:?}", positive.diagnostics);
+
+    let mut channel_neg = item("ZDF");
+    channel_neg.header.title = "ZDF".intern();
+    channel_neg.header.group = "German".intern();
+    let negative = run(example, channel_neg);
+    let mapped_neg = negative.item.expect("item survives");
+    assert_eq!(mapped_neg.header.name.as_ref(), "ZDF");
+    assert_eq!(mapped_neg.header.title.as_ref(), "ZDF");
+    assert_eq!(mapped_neg.header.group.as_ref(), "German");
+    assert_eq!(negative.changed_fields, Vec::<String>::new());
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}
+
+#[test]
+fn doc_example_favourites() {
+    let example = doc_example("favourites");
+
+    let positive = run(example, item("Sky Sport 1"));
+    let mapped = positive.item.expect("item survives");
+    assert_eq!(mapped.header.name.as_ref(), "Sky Sport 1");
+    assert_eq!(positive.virtual_items.len(), 1);
+    let alias = &positive.virtual_items[0];
+    assert_eq!(alias.header.group.as_ref(), "Favourites");
+    assert_eq!(alias.header.name.as_ref(), "Sky Sport 1");
+    assert!(positive.diagnostics.is_empty(), "{:?}", positive.diagnostics);
+
+    let negative = run(example, item("Sky Cinema 1"));
+    assert!(negative.item.is_some());
+    assert_eq!(negative.virtual_items.len(), 0);
+    assert_eq!(negative.changed_fields, Vec::<String>::new());
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}
+
+#[test]
+fn doc_example_channel_offset() {
+    let example = doc_example("channel-offset");
+
+    let mut channel = item("Channel");
+    channel.header.chno = 42;
+    let positive = run(example, channel);
+    let mapped = positive.item.expect("item survives");
+    assert_eq!(mapped.header.chno, 1042);
+    assert!(positive.diagnostics.is_empty(), "{:?}", positive.diagnostics);
+
+    let channel_neg = item("Channel");
+    let negative = run(example, channel_neg);
+    let mapped_neg = negative.item.expect("item survives");
+    assert_eq!(mapped_neg.header.chno, 0);
+    assert_eq!(negative.changed_fields, Vec::<String>::new());
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}
+
+#[test]
+fn doc_example_missing_epg() {
+    let example = doc_example("missing-epg");
+
+    let channel_none = item("Channel");
+    let positive_none = run(example, channel_none);
+    let mapped_none = positive_none.item.expect("item survives");
+    assert_eq!(mapped_none.header.group.as_ref(), "No EPG");
+    assert!(positive_none.diagnostics.is_empty(), "{:?}", positive_none.diagnostics);
+
+    let mut channel_empty = item("Channel");
+    channel_empty.header.epg_channel_id = Some("".intern());
+    let positive_empty = run(example, channel_empty);
+    let mapped_empty = positive_empty.item.expect("item survives");
+    assert_eq!(mapped_empty.header.group.as_ref(), "No EPG");
+    assert!(positive_empty.diagnostics.is_empty(), "{:?}", positive_empty.diagnostics);
+
+    let mut channel_neg = item("Channel");
+    channel_neg.header.epg_channel_id = Some("epg-123".intern());
+    channel_neg.header.group = "German".intern();
+    let negative = run(example, channel_neg);
+    let mapped_neg = negative.item.expect("item survives");
+    assert_eq!(mapped_neg.header.group.as_ref(), "German");
+    assert_eq!(negative.changed_fields, Vec::<String>::new());
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}
+
+#[test]
+fn doc_example_title_case() {
+    let example = doc_example("title-case");
+
+    let positive = run(example, item("das erste hd"));
+    let mapped = positive.item.expect("item survives");
+    assert_eq!(mapped.header.name.as_ref(), "Das Erste Hd");
+    assert_eq!(mapped.header.title.as_ref(), "Das Erste Hd");
+    assert!(positive.diagnostics.is_empty(), "{:?}", positive.diagnostics);
+
+    let mut channel_neg = item("Das Erste Hd");
+    channel_neg.header.title = "Das Erste Hd".intern();
+    let negative = run(example, channel_neg);
+    let mapped_neg = negative.item.expect("item survives");
+    assert_eq!(mapped_neg.header.name.as_ref(), "Das Erste Hd");
+    assert_eq!(mapped_neg.header.title.as_ref(), "Das Erste Hd");
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}
+
+#[test]
+fn doc_example_template_suffix() {
+    let example = doc_example("template-suffix");
+
+    let mut channel = item("ZDF");
+    channel.header.title = "ZDF".intern();
+    let templates: Arc<[PatternTemplate]> = Arc::from(vec![template("quality", "HD")]);
+    let context = MappingScriptContext::new(Some(templates), false);
+    let positive = script(example).eval(channel, context);
+    let mapped = positive.item.expect("item survives");
+    assert_eq!(mapped.header.title.as_ref(), "ZDF HD");
+    assert!(positive.diagnostics.is_empty(), "{:?}", positive.diagnostics);
+
+    let mut channel_neg = item("ZDF");
+    channel_neg.header.title = "ZDF".intern();
+    let negative = run(example, channel_neg);
+    let mapped_neg = negative.item.expect("item survives");
+    assert_eq!(mapped_neg.header.title.as_ref(), "ZDF");
+    assert_eq!(negative.changed_fields, Vec::<String>::new());
+    assert!(negative.diagnostics.is_empty(), "{:?}", negative.diagnostics);
+}

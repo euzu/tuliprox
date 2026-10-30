@@ -11,4 +11,4 @@ workspace = true
 [dependencies]
 shared = { workspace = true }
 log.workspace = true
-rhai = { version = "1.27.0", default-features = false, features = ["std", "sync"] }
+rhai = { version = "1.27.0", default-features = false, features = ["no_module", "std", "sync"] }

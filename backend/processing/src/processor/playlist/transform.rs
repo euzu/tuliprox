@@ -205,14 +205,13 @@ pub(crate) fn map_channel(mut channel: PlaylistItem, mapping: &CompiledMapping) 
                 }
                 MappingProgram::Rhai(script) => {
                     let context = MappingScriptContext::new(script_templates.clone(), mapping.match_as_ascii);
+                    let channel_name = Arc::clone(&channel.header.name);
                     let outcome = script.eval(channel, context);
                     let Some(mapped) = outcome.item else {
-                        diagnostics.extend(
-                            outcome
-                                .diagnostics
-                                .into_iter()
-                                .map(|diagnostic| format!("rule '{rule_label}' failed for channel: {diagnostic}")),
-                        );
+                        virtual_items.extend(outcome.virtual_items);
+                        diagnostics.extend(outcome.diagnostics.into_iter().map(|diagnostic| {
+                            format!("rule '{rule_label}' failed for channel '{channel_name}': {diagnostic}")
+                        }));
                         return ChannelMappingOutcome {
                             channel: None,
                             virtual_items,

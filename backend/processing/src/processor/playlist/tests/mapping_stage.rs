@@ -672,7 +672,19 @@ mod rhai_mapping {
 
         assert!(outcome.channel.is_none(), "a lost item must not reappear unmodified");
         assert_eq!(outcome.diagnostics.len(), 1);
+        assert!(outcome.diagnostics[0].contains("channel 'Channel'"), "{:?}", outcome.diagnostics);
         assert!(outcome.diagnostics[0].contains("replaced the reserved variable 'item'"), "{:?}", outcome.diagnostics);
+    }
+
+    #[test]
+    fn a_script_that_discards_its_item_keeps_the_favourites_it_created() {
+        let mapping = rhai_mapping(r#"ctx.favourite(item, "Favourites"); item = 1;"#, None);
+
+        let outcome = map_channel(channel("Channel"), &mapping);
+
+        assert!(outcome.channel.is_none(), "a lost item must not reappear unmodified");
+        assert_eq!(outcome.virtual_items.len(), 1);
+        assert_eq!(outcome.virtual_items[0].header.group.as_ref(), "Favourites");
     }
 
     #[test]

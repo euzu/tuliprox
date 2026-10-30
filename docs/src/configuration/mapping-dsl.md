@@ -439,7 +439,7 @@ mappings:
   mapping:
     - id: sports
       mapper:
-        - name: group sports channels
+        - name: favourite sports channels
           filter: 'Group ~ ".*Sports.*"'
           type: rhai
           script: |
@@ -469,8 +469,9 @@ let number = item.chno;           // read as an integer
 The writable fields are the same as the DSL: `name`, `title`, `caption`, `group`, `id`, `chno`, `logo`, `logo_small`,
 `parent_code`, `audio_track`, `time_shift`, `rec`, `url`, `epg_channel_id`/`epg_id` and `genre`. `input` and `type` are
 read-only. Both the property and the index form go through the same field lookup, so `item.NAME`, `item.name` and
-`item["NAME"]` address the same field. Reading a field the item does not carry yields `()`, so a missing EPG id is testable; writing an unknown or
-read-only field is a runtime error that is logged as a mapping diagnostic and leaves the channel otherwise unchanged.
+`item["NAME"]` address the same field. Reading a field the item does not carry yields `()`, so a missing EPG id is
+testable; writing an unknown or read-only field is a runtime error that is logged as a mapping diagnostic and skips
+the rest of the script; assignments that ran before the error stay applied.
 
 ### The `ctx` variable
 
@@ -504,9 +505,10 @@ items are skipped.
 * `!template!` text substitution in the script source is not performed, because it would rewrite program text. Use
   `ctx.template(name)`.
 * `print` writes at `trace` level. `capitalize` and `title_case` are available with the same behaviour as in the DSL.
-* A script must not replace `item` or `ctx` with another value. The channel is discarded with a diagnostic in that
-  case, instead of reappearing unmodified. Shadowing them with `let` is harmless: the host still finds the original
-  binding and keeps the channel.
+* A script must not replace `item` or `ctx` with another value. Replacing `item` discards the channel with a
+  diagnostic; alias rows created with `ctx.favourite` before that point are kept. Replacing `ctx` produces a
+  diagnostic and loses all alias rows created so far. Shadowing either variable with `let` is harmless: the host
+  still finds the original binding and keeps the channel and context.
 * Assigning a valid field that the item cannot carry — `genre` on a live channel, a non-numeric `chno` — is reported
   as a diagnostic and the script continues, exactly like the DSL. Assigning an unknown or read-only field stops the
   script.
@@ -515,6 +517,97 @@ items are skipped.
 * The Web UI shows a Rhai script as written; it does not parse or validate it, and the mapping file is not editable
   there. The backend compiles the script when the configuration is loaded (startup or hot reload) and logs the
   mapping id, the rule name and the position on failure.
+
+### Examples
+
+Extract a two-letter country prefix from the channel name into the group and set the remaining text as the caption.
+
+```rhai
+// example: country-prefix
+let m = ctx.regex(item.name, "^(?P<country>[A-Z]{2}):\\s*(?P<rest>.+)$");
+if !m.is_empty() {
+    item.group = "Sport " + m["country"];
+    item.caption = m["rest"];
+}
+```
+
+Strip a resolution suffix from the title to set the caption and append the quality tag to the group.
+
+```rhai
+// example: quality-suffix
+let m = ctx.regex(item.title, "^(?P<base>.+?)\\s+(?P<quality>UHD|FHD|HD|SD|4K)$");
+if !m.is_empty() {
+    item.caption = m["base"];
+    item.group = item.group + " " + m["quality"];
+}
+```
+
+Add an alias row to the "Favourites" group whenever the channel name contains "Sport".
+
+```rhai
+// example: favourites
+if item.name.contains("Sport") {
+    ctx.favourite(item, "Favourites");
+}
+```
+
+Add an offset of 1000 to all existing channel numbers while leaving unnumbered channels untouched.
+
+```rhai
+// example: channel-offset
+if item.chno > 0 {
+    item.chno = item.chno + 1000;
+}
+```
+
+Assign channels that lack an EPG channel identifier to a dedicated fallback group.
+
+```rhai
+// example: missing-epg
+if item.epg_channel_id == () || item.epg_channel_id == "" {
+    item.group = "No EPG";
+}
+```
+
+Normalize channel names to title case using the built-in helper function.
+
+```rhai
+// example: title-case
+item.caption = title_case(item.name);
+```
+
+Append the "quality" template to the title when the template is defined in the configuration.
+
+```rhai
+// example: template-suffix
+let quality = ctx.template("quality");
+if quality != () {
+    item.title = item.title + " " + quality;
+}
+```
+
+A complete `mapping.yml` combining multiple Rhai script rules in a single mapping definition:
+
+```yaml
+mappings:
+  mapping:
+    - id: sports_and_epg
+      mapper:
+        - name: favourite sports channels
+          filter: 'Group ~ ".*Sports.*"'
+          type: rhai
+          script: |
+            if item.name.contains("Sport") {
+                ctx.favourite(item, "Favourites");
+            }
+        - name: flag missing epg
+          filter: 'Group ~ ".*"'
+          type: rhai
+          script: |
+            if item.epg_channel_id == () || item.epg_channel_id == "" {
+                item.group = "No EPG";
+            }
+```
 
 ---
 

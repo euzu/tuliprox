@@ -203,7 +203,9 @@
   `item["Caption"] = "Renamed"`) and the mapping environment as `ctx` (`ctx.regex`, `ctx.template`, `ctx.favourite`).
   Scripts are compiled when the configuration loads, so syntax errors report the mapping id and rule name instead of
   failing mid-refresh. Existing mapping files are unchanged and keep running as `dsl`. The embedded runtime lives in a
-  new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. See
+  new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. Rhai's
+  module system is compiled out, so `import` is rejected when the configuration loads and a script cannot load other
+  files from disk. The documentation's Rhai examples are executed by the test suite. See
   [Rhai scripts](docs/src/configuration/mapping-dsl.md#23-rhai-scripts-type-rhai).
 
 - **External log shipping via syslog and NDJSON (`log.syslog`).** Application log records can now be streamed
