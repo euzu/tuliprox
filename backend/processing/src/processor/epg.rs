@@ -819,7 +819,7 @@ pub(crate) fn retain_epg_referenced_by_groups(groups: &[PlaylistGroup], epg: &mu
         })
         .collect::<HashSet<_>>();
     for source in epg {
-        source.children.retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+        source.retain_children(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
     }
 }
 
@@ -937,8 +937,8 @@ async fn assign_channel_epg(
     if let Some((mut epg_source, _)) = merged_epg.take() {
         let referenced_epg_ids = referenced_live_epg_ids(fp);
         epg_source
-            .children
-            .retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+            .retain_children(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+        epg_source.input_name = Some(Arc::from(fp.input.name.as_ref()));
         new_epg.push(epg_source);
     }
 }
@@ -1011,6 +1011,7 @@ mod tests {
                 match_names,
                 config: Box::new(IcsEpgSourceConfig::default()),
             },
+            source_idx: 0,
         }])
     }
 
@@ -1099,6 +1100,7 @@ mod tests {
             priority: 0,
             logo_override: false,
             kind: PersistedEpgSourceKind::Xmltv,
+            source_idx: 0,
         }]);
         let mut playlist = FetchedPlaylist {
             input: &input,
@@ -1314,6 +1316,7 @@ mod tests {
                 priority: 0,
                 logo_override: true,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1385,6 +1388,8 @@ mod tests {
             logo_override: false,
             attributes: None,
             children: vec![Arc::new(shared::model::EpgChannel::new("USA4K.us".intern()))],
+            channel_sources: None,
+            input_name: None,
         }];
 
         super::adopt_guide_live_epg_id_case(&mut playlist, &epg);
@@ -1425,6 +1430,7 @@ mod tests {
                     priority: 0,
                     logo_override: false,
                     kind: PersistedEpgSourceKind::Xmltv,
+                    source_idx: 0,
                 }])),
             };
             let mut epg = Vec::new();
@@ -1493,6 +1499,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1610,6 +1617,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1649,6 +1657,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,

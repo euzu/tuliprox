@@ -75,6 +75,7 @@ pub fn next_playlist_update_run_order() -> PlaylistUpdateRunOrder {
     PlaylistUpdateRunOrder::from(NEXT_PLAYLIST_UPDATE_RUN_ORDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
 }
 
+mod analytics;
 mod fetch_outcome;
 mod ingest;
 mod input_status;
@@ -84,7 +85,7 @@ use manual_update::LibraryUpdateMode;
 mod target;
 mod transform;
 
-pub use self::{ingest::*, target::*, transform::*};
+pub use self::{analytics::*, ingest::*, target::*, transform::*};
 
 /// Work the composition root runs once the playlist lock is held, before the
 /// update proper starts.

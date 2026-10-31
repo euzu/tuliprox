@@ -546,6 +546,7 @@ async fn manual_update_library_empty_does_not_authorize_foreign_forced_empty_tar
         &mut Vec::new(),
         ClusterFlags::Vod,
         false,
+        &Arc::default(),
     )
     .await
     .unwrap();

@@ -72,12 +72,38 @@ impl XmlTag {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Epg {
     pub priority: i16,
     pub logo_override: bool,
     pub attributes: Option<HashMap<Arc<str>, Arc<str>>>,
     pub children: Vec<Arc<EpgChannel>>,
+    pub channel_sources: Option<Vec<u16>>,
+    pub input_name: Option<Arc<str>>,
+}
+
+impl Epg {
+    pub fn retain_children<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&Arc<EpgChannel>) -> bool,
+    {
+        if let Some(sources) = self.channel_sources.take() {
+            let mut src_iter = sources.into_iter();
+            let mut kept_sources = Vec::with_capacity(self.children.len());
+            self.children.retain(|channel| {
+                let keep = predicate(channel);
+                if let Some(src) = src_iter.next() {
+                    if keep {
+                        kept_sources.push(src);
+                    }
+                }
+                keep
+            });
+            self.channel_sources = Some(kept_sources);
+        } else {
+            self.children.retain(predicate);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +123,7 @@ pub struct PersistedEpgSource {
     pub priority: i16,
     pub logo_override: bool,
     pub kind: PersistedEpgSourceKind,
+    pub source_idx: usize,
 }
 
 fn filter_channels_and_programmes(channels: &mut Vec<EpgChannel>, programmes: &mut Vec<EpgProgramme>) {

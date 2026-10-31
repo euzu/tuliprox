@@ -26,6 +26,11 @@
     padding: var(--padding-mini) var(--padding-micro);
   }
 
+  // Reserve the scrollbar space, so a scrollbar never covers the icon buttons.
+  .tp__app-sidebar__scroll {
+    scrollbar-gutter: stable;
+  }
+
   .tp__app-sidebar__header {
     justify-content: center;
     padding: 0;

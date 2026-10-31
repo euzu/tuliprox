@@ -67,6 +67,7 @@ struct ProgrammeMergeEntry {
 struct ChannelMergeAcc {
     priority: i16,
     source_order: usize,
+    source_idx: u16,
     logo_override: bool,
     icon_logo_override: bool,
     needs_programme_merge: bool,

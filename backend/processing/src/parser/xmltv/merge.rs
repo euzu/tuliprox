@@ -123,6 +123,7 @@ impl EpgMergeAccumulator {
         &mut self,
         priority: i16,
         source_order: usize,
+        source_idx: usize,
         logo_override: bool,
         mut channel: EpgChannel,
     ) {
@@ -142,6 +143,7 @@ impl EpgMergeAccumulator {
                     }
                     acc.priority = priority;
                     acc.source_order = source_order;
+                    acc.source_idx = u16::try_from(source_idx).unwrap_or(u16::MAX);
                     acc.logo_override = logo_override;
                     acc.channel.title = channel.title;
                     acc.channel.icon = channel.icon;
@@ -160,6 +162,7 @@ impl EpgMergeAccumulator {
                 entry.insert(ChannelMergeAcc {
                     priority,
                     source_order,
+                    source_idx: u16::try_from(source_idx).unwrap_or(u16::MAX),
                     logo_override,
                     icon_logo_override,
                     needs_programme_merge: false,
@@ -205,11 +208,22 @@ impl EpgMergeAccumulator {
         priority: i16,
         source_order: usize,
         logo_override: bool,
+        channel: EpgChannel,
+    ) {
+        self.add_channel_with_programmes_and_source_idx(priority, source_order, source_order, logo_override, channel);
+    }
+
+    pub fn add_channel_with_programmes_and_source_idx(
+        &mut self,
+        priority: i16,
+        source_order: usize,
+        source_idx: usize,
+        logo_override: bool,
         mut channel: EpgChannel,
     ) {
         let programmes = std::mem::take(&mut channel.programmes);
         let channel_key = with_folded_epg_id(&channel.id, |folded| folded.intern());
-        self.upsert_channel(priority, source_order, logo_override, channel);
+        self.upsert_channel(priority, source_order, source_idx, logo_override, channel);
         if let Some(acc) = self.channels.get_mut(&channel_key) {
             if !acc.programmes.is_empty() {
                 acc.needs_programme_merge = true;
@@ -247,6 +261,8 @@ impl EpgMergeAccumulator {
             priority: 0,
             attributes,
             children: channels.into_iter().map(Arc::new).collect(),
+            channel_sources: None,
+            input_name: None,
         })
     }
 
@@ -269,6 +285,7 @@ impl EpgMergeAccumulator {
             .filter(|acc| acc.icon_logo_override)
             .map(|acc| Arc::clone(&acc.channel.id))
             .collect::<HashSet<_>>();
+        let channel_sources = channels.iter().map(|acc| acc.source_idx).collect::<Vec<u16>>();
         let children = channels.into_iter().map(|acc| Arc::new(acc.channel)).collect();
 
         Some((
@@ -277,6 +294,8 @@ impl EpgMergeAccumulator {
                 priority: 0,
                 attributes: attributes.map(|attributes| attributes.attributes),
                 children,
+                channel_sources: Some(channel_sources),
+                input_name: None,
             },
             icon_override_channels,
         ))

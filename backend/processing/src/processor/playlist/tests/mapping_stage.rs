@@ -286,6 +286,7 @@ fn persist_filter_runs_after_after_epg_mapping() {
             &mut errors,
             ClusterFlags::empty(),
             false,
+            &Arc::default(),
         )
         .await
         .expect("target preparation");
@@ -391,6 +392,7 @@ fn prepare_target_applies_after_epg_mapping_before_sampling_stats() {
                         match_names: vec!["BBC One".intern()],
                         config: Box::new(IcsEpgSourceConfig::default()),
                     },
+                    source_idx: 0,
                 }]);
 
                 let mut playlist = FetchedPlaylist {
@@ -422,6 +424,7 @@ match {
                     &mut errors,
                     ClusterFlags::empty(),
                     false,
+                    &Arc::default(),
                 )
                 .await
                 .expect("target preparation");
@@ -486,6 +489,7 @@ fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
                         match_names: vec![],
                         config: Box::new(IcsEpgSourceConfig::default()),
                     },
+                    source_idx: 0,
                 }]);
                 let mut playlist = FetchedPlaylist {
                     input: &input,
@@ -515,6 +519,7 @@ fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
                     &mut errors,
                     ClusterFlags::empty(),
                     false,
+                    &Arc::default(),
                 )
                 .await
                 .expect("target preparation");
@@ -590,6 +595,7 @@ fn prepare_target_deduplicates_virtual_items_created_by_after_epg_mappings() {
             &mut errors,
             ClusterFlags::empty(),
             false,
+            &Arc::default(),
         )
         .await
         .expect("target preparation");

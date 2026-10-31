@@ -1,8 +1,9 @@
 use super::{
-    get_target_epg_channel, list_playlist_sources, playlist_content_live, playlist_content_series,
-    playlist_content_vod, playlist_epg, playlist_episode_item, playlist_filter_preview, playlist_recording_stream,
-    playlist_resolve_url, playlist_resource, playlist_series_info, playlist_update, playlist_update_status,
-    playlist_webplayer_stream, query_playlist_items, query_target_epg_channels,
+    get_target_epg_channel, list_playlist_sources, playlist_analytics, playlist_analytics_unmapped_csv,
+    playlist_content_live, playlist_content_series, playlist_content_vod, playlist_epg, playlist_episode_item,
+    playlist_filter_preview, playlist_recording_stream, playlist_resolve_url, playlist_resource, playlist_series_info,
+    playlist_update, playlist_update_status, playlist_webplayer_stream, query_playlist_items,
+    query_target_epg_channels,
 };
 use crate::api::{
     auth_middleware::permission_layer,
@@ -18,6 +19,8 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
         .route("/playlist/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/playlist/update", axum::routing::post(playlist_update))
         .route("/playlist/update/status", axum::routing::get(playlist_update_status))
+        .route("/playlist/analytics", axum::routing::get(playlist_analytics))
+        .route("/playlist/analytics/{target_id}/unmapped.csv", axum::routing::get(playlist_analytics_unmapped_csv))
         .route("/playlist/epg", axum::routing::post(playlist_epg))
         .route("/playlist/epg/stream", axum::routing::post(stream_epg_api))
         .route("/playlist/epg/groups", axum::routing::post(epg_grid_api::playlist_epg_groups))
@@ -50,6 +53,8 @@ pub fn v1_api_playlist_register_with_permissions(
 ) -> axum::Router<Arc<AppState>> {
     let read_routes = Router::new()
         .route("/update/status", axum::routing::get(playlist_update_status))
+        .route("/analytics", axum::routing::get(playlist_analytics))
+        .route("/analytics/{target_id}/unmapped.csv", axum::routing::get(playlist_analytics_unmapped_csv))
         .route("/sources", axum::routing::get(list_playlist_sources))
         .route("/items", axum::routing::get(query_playlist_items))
         .route("/epg/channels", axum::routing::get(query_target_epg_channels))

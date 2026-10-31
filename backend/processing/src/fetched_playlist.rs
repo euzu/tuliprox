@@ -1,7 +1,7 @@
 use crate::parser::xmltv::TVGuide;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistGroup, UUIDType},
+    model::{PlaylistGroup, UUIDType, XtreamCluster},
 };
 use std::collections::HashSet;
 use tuliprox_core::model::ConfigInput;
@@ -26,6 +26,8 @@ impl FetchedPlaylist<'_> {
     pub fn is_memory(&self) -> bool { self.source.is_memory() }
 
     pub fn get_channel_count(&mut self) -> usize { self.source.get_channel_count() }
+
+    pub fn get_cluster_count(&mut self, cluster: XtreamCluster) -> usize { self.source.get_cluster_count(cluster) }
 
     pub fn get_group_count(&mut self) -> usize { self.source.get_group_count() }
 
