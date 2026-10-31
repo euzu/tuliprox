@@ -140,6 +140,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     }
                 }
                 Err(mut target_errors) => {
+                    record_failed_target_analytics(&ctx.config.config.load_full(), &target.name, &analytics_info).await;
                     target_stats.push(TargetStats::failure(&target.name));
                     errors.append(&mut target_errors);
                 }
@@ -210,6 +211,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             }
             Err(target_errors) => {
                 completion.send_replace(true);
+                record_failed_target_analytics(&ctx.config.config.load_full(), &target.name, &analytics_info).await;
                 results.push(TargetJobResult {
                     index,
                     name: target.name.clone(),
@@ -618,6 +620,14 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
             Err(err) => {
                 let result_error = TuliproxError::new(err.kind(), err.message());
                 errors.push(err);
+                persist_target_analytics(
+                    &config,
+                    &target.name,
+                    analytics_dto,
+                    &unmapped_csv,
+                    TargetAnalyticsOutcome::Failed,
+                )
+                .await;
                 step.stop("EPG spill failed; skipping persist to preserve existing EPG");
                 log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
                 return (Err(vec![result_error]), errors);

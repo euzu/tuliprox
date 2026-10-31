@@ -491,6 +491,18 @@ pub async fn persist_target_analytics(
     }
 }
 
+/// Records a target run that failed before analytics could be computed from a playlist
+/// (e.g. while preparing the target): previous metrics stay, the run is marked as failed.
+pub async fn record_failed_target_analytics(
+    config: &Config,
+    target_name: &str,
+    source_info: &Arc<SourceAnalyticsInfo>,
+) {
+    let input = TargetAnalyticsInput::new(Arc::clone(source_info));
+    let (dto, csv) = compute_target_analytics(&config.storage_dir, &input, &[], &[]);
+    persist_target_analytics(config, target_name, dto, &csv, TargetAnalyticsOutcome::Failed).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,5 +951,23 @@ mod tests {
         assert!(!first_failure.success);
         assert_eq!(first_failure.live.input_count, 50);
         assert!(!tuliprox_repository::get_target_analytics_unmapped_file_path(&fresh_storage).exists());
+    }
+
+    #[tokio::test]
+    async fn record_failed_target_analytics_marks_the_previous_snapshot_failed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = Config { storage_dir: temp.path().to_str().unwrap().to_string(), ..Default::default() };
+        let target = make_test_target("prepare_failed");
+        let target_storage = get_target_storage_path(&config, &target.name).unwrap();
+        tokio::fs::create_dir_all(&target_storage).await.unwrap();
+        let source_info = Arc::new(SourceAnalyticsInfo {
+            raw_counts: TargetAnalyticsRawCounts { live: 7, vod: 0, series: 0 },
+            ..Default::default()
+        });
+
+        record_failed_target_analytics(&config, &target.name, &source_info).await;
+        let first = load_target_analytics(&target_storage).await.unwrap().expect("failed snapshot written");
+        assert!(!first.success);
+        assert_eq!(first.live.input_count, 7);
     }
 }
