@@ -493,12 +493,14 @@ pub async fn persist_target_analytics(
 
 /// Records a target run that failed before analytics could be computed from a playlist
 /// (e.g. while preparing the target): previous metrics stay, the run is marked as failed.
+/// `started` is when the preparation attempt began, so `took_secs` covers the whole attempt.
 pub async fn record_failed_target_analytics(
     config: &Config,
     target_name: &str,
     source_info: &Arc<SourceAnalyticsInfo>,
+    started: Instant,
 ) {
-    let input = TargetAnalyticsInput::new(Arc::clone(source_info));
+    let input = TargetAnalyticsInput { started, source_info: Arc::clone(source_info) };
     let (dto, csv) = compute_target_analytics(&config.storage_dir, &input, &[], &[]);
     persist_target_analytics(config, target_name, dto, &csv, TargetAnalyticsOutcome::Failed).await;
 }
@@ -965,9 +967,11 @@ mod tests {
             ..Default::default()
         });
 
-        record_failed_target_analytics(&config, &target.name, &source_info).await;
+        let started = Instant::now().checked_sub(std::time::Duration::from_secs(5)).expect("instant in the past");
+        record_failed_target_analytics(&config, &target.name, &source_info, started).await;
         let first = load_target_analytics(&target_storage).await.unwrap().expect("failed snapshot written");
         assert!(!first.success);
         assert_eq!(first.live.input_count, 7);
+        assert!(first.took_secs >= 5, "took_secs covers the whole preparation attempt");
     }
 }

@@ -115,6 +115,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
         let mut target_stats = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
             let consume_input_source = index + 1 == targets.len();
+            let prepare_started = Instant::now();
             let result = prepare_playlist_for_target(
                 ctx,
                 playlists,
@@ -140,7 +141,13 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     }
                 }
                 Err(mut target_errors) => {
-                    record_failed_target_analytics(&ctx.config.config.load_full(), &target.name, &analytics_info).await;
+                    record_failed_target_analytics(
+                        &ctx.config.config.load_full(),
+                        &target.name,
+                        &analytics_info,
+                        prepare_started,
+                    )
+                    .await;
                     target_stats.push(TargetStats::failure(&target.name));
                     errors.append(&mut target_errors);
                 }
@@ -168,6 +175,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
         let (completion, receiver) = watch::channel(false);
         completion_receivers.push(receiver);
 
+        let prepare_started = Instant::now();
         match prepare_playlist_for_target(
             ctx,
             playlists,
@@ -211,7 +219,13 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             }
             Err(target_errors) => {
                 completion.send_replace(true);
-                record_failed_target_analytics(&ctx.config.config.load_full(), &target.name, &analytics_info).await;
+                record_failed_target_analytics(
+                    &ctx.config.config.load_full(),
+                    &target.name,
+                    &analytics_info,
+                    prepare_started,
+                )
+                .await;
                 results.push(TargetJobResult {
                     index,
                     name: target.name.clone(),
