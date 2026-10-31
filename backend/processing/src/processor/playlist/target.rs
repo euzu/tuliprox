@@ -564,7 +564,11 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        // Nothing is published, so the previous analytics and unmapped CSV stay as they are.
+        // Nothing is published: keep the previous metrics and CSV, only record the run.
+        let (empty_analytics, empty_csv) =
+            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
+        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
+            .await;
         return (Ok(()), errors);
     }
 
@@ -578,7 +582,11 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        // Nothing is published, so the previous analytics and unmapped CSV stay as they are.
+        // Nothing is published: keep the previous metrics and CSV, only record the run.
+        let (empty_analytics, empty_csv) =
+            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
+        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
+            .await;
         return (Ok(()), errors);
     }
     if views.publication_plan != PlaylistPublicationPlan::Ordinary {
@@ -633,8 +641,8 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         },
     )
     .await;
-    let success = result.is_ok();
-    persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, success).await;
+    let outcome = if result.is_ok() { TargetAnalyticsOutcome::Published } else { TargetAnalyticsOutcome::Failed };
+    persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, outcome).await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
     if result.is_ok() && process_watch(&ctx.config, &ctx.events, target, watch_playlist).await {
         step.tick("group watches");

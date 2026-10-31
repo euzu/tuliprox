@@ -435,12 +435,23 @@ pub fn compute_target_analytics(
     (dto, stats.unmapped_csv)
 }
 
+/// How a target run ended, as far as its analytics are concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetAnalyticsOutcome {
+    /// The playlist was published: store the new metrics and the unmapped CSV.
+    Published,
+    /// Publishing failed: keep previous metrics if any, otherwise store this run's metrics, flagged as failed.
+    Failed,
+    /// The run succeeded but published nothing (empty playlist): keep previous metrics and CSV, record the run.
+    Unchanged,
+}
+
 pub async fn persist_target_analytics(
     config: &Config,
     target_name: &str,
     analytics_dto: TargetAnalyticsDto,
     unmapped_csv: &str,
-    success: bool,
+    outcome: TargetAnalyticsOutcome,
 ) {
     let Some(target_storage_path) = get_target_storage_path(config, target_name) else {
         warn!("Cannot resolve storage path for target '{target_name}' analytics");
@@ -448,19 +459,22 @@ pub async fn persist_target_analytics(
     };
 
     let now = shared::utils::current_time_secs();
+    let success = outcome != TargetAnalyticsOutcome::Failed;
 
-    let final_dto = if success {
-        analytics_dto
+    let (final_dto, write_csv) = if outcome == TargetAnalyticsOutcome::Published {
+        (analytics_dto, true)
     } else {
         match load_target_analytics(&target_storage_path).await {
             Ok(Some(mut previous)) => {
-                previous.success = false;
+                previous.success = success;
                 previous.updated_at = now;
                 previous.took_secs = analytics_dto.took_secs;
-                previous
+                (previous, false)
             }
-            Ok(None) | Err(_) => {
-                // Target failed and no previous analytics exist; do not create an artifact on failure.
+            // No earlier snapshot: this run's metrics are the only ones there are.
+            Ok(None) => (TargetAnalyticsDto { success, updated_at: now, ..analytics_dto }, success),
+            Err(err) => {
+                warn!("Failed to read previous target '{target_name}' analytics: {err}");
                 return;
             }
         }
@@ -470,7 +484,7 @@ pub async fn persist_target_analytics(
         warn!("Failed to persist target '{target_name}' analytics: {err}");
     }
 
-    if success {
+    if write_csv {
         if let Err(err) = save_target_analytics_unmapped_csv(&target_storage_path, unmapped_csv).await {
             warn!("Failed to persist target '{target_name}' unmapped channels CSV: {err}");
         }
@@ -877,7 +891,7 @@ mod tests {
             epg: None,
         };
 
-        persist_target_analytics(&config, &target.name, initial_dto, "", true).await;
+        persist_target_analytics(&config, &target.name, initial_dto, "", TargetAnalyticsOutcome::Published).await;
 
         let loaded = load_target_analytics(&target_storage).await.unwrap().unwrap();
         assert!(loaded.success);
@@ -901,7 +915,7 @@ mod tests {
             epg: None,
         };
 
-        persist_target_analytics(&config, &target.name, zero_dto, "", false).await;
+        persist_target_analytics(&config, &target.name, zero_dto.clone(), "", TargetAnalyticsOutcome::Failed).await;
 
         let reloaded = load_target_analytics(&target_storage).await.unwrap().unwrap();
         assert!(!reloaded.success, "success must be false after failure");
@@ -909,5 +923,21 @@ mod tests {
         assert_eq!(reloaded.episodes, Some(100), "previous episodes must be preserved");
         assert_eq!(reloaded.took_secs, 1);
         assert!(reloaded.updated_at >= 1_000);
+
+        // 3. Successful run that published nothing: previous metrics stay, the run is recorded as successful.
+        persist_target_analytics(&config, &target.name, zero_dto.clone(), "", TargetAnalyticsOutcome::Unchanged).await;
+        let unchanged = load_target_analytics(&target_storage).await.unwrap().unwrap();
+        assert!(unchanged.success);
+        assert_eq!(unchanged.live.count, 42, "previous metrics are kept for an unpublished run");
+
+        // 4. First run of another target fails: a failed snapshot with this run's metrics is written.
+        let fresh = make_test_target("fresh_target");
+        let fresh_storage = get_target_storage_path(&config, &fresh.name).unwrap();
+        tokio::fs::create_dir_all(&fresh_storage).await.unwrap();
+        persist_target_analytics(&config, &fresh.name, zero_dto, "", TargetAnalyticsOutcome::Failed).await;
+        let first_failure = load_target_analytics(&fresh_storage).await.unwrap().expect("failed snapshot written");
+        assert!(!first_failure.success);
+        assert_eq!(first_failure.live.input_count, 50);
+        assert!(!tuliprox_repository::get_target_analytics_unmapped_file_path(&fresh_storage).exists());
     }
 }

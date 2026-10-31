@@ -105,6 +105,12 @@ Analytics data is persisted during target finalization:
 
 Writing analytics is non-blocking: storage write errors are logged as warnings and do not fail target publication.
 
+- **Published run**: new metrics and a new unmapped CSV are written.
+- **Failed run**: previous metrics are kept and marked `success: false`; without a previous snapshot, this run's
+  metrics are written as failed. The CSV is not touched.
+- **Empty run** (nothing published): previous metrics and CSV are kept, only the run time is updated.
+- CSV fields starting with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not evaluate them.
+
 ---
 
 ## 5. REST API Endpoints
