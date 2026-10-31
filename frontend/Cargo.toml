@@ -44,7 +44,7 @@ strum_macros.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.104"
-features = ["AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "VisualViewport", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "PointerEvent", "HtmlElement", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "ResizeObserver", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
+features = ["AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "VisualViewport", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "PointerEvent", "HtmlElement", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "ResizeObserver", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection", "HtmlIFrameElement", "MessageEvent", "FormData", "File", "FileList", "Blob"]
 
 [dev-dependencies]
 web-sys = { version = "0.3.104", features = ["EventInit", "MessageEventInit"] }

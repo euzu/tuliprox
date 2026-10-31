@@ -292,6 +292,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_config() -> AppConfig {
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -336,6 +337,7 @@ pub(in crate::api::api_utils::tests) fn create_test_provider_app_config() -> App
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -397,6 +399,7 @@ pub(in crate::api::api_utils::tests) fn create_test_dual_provider_app_config_wit
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -485,6 +488,7 @@ pub(in crate::api::api_utils::tests) fn create_test_app_state_for_config(app_cfg
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }
 

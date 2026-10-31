@@ -1,0 +1,6 @@
+id: rename-group
+name: Rename group (Phase S fixture)
+version: 0.1.0
+api_version: 1
+hooks:
+  - playlist.after-filter

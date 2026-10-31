@@ -275,7 +275,7 @@ impl Publication {
             accepted_empty_clusters: ClusterFlags::empty(),
             library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         };
-        let (result, errors) = tokio::time::timeout(
+        let (result, errors, _) = tokio::time::timeout(
             Duration::from_secs(5),
             target::finalize_prepared_target_with_tmdb(Arc::clone(&self.context), prepared, Some(&self.tmdb_client)),
         )

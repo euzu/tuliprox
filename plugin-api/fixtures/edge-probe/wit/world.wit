@@ -1,0 +1,10 @@
+// The fixture's own composite world: the session-edge and dashboard-metrics
+// interfaces of the frozen contract in one component. Nothing here redefines
+// the contract.
+package tuliprox:edge-probe@0.0.0;
+
+world edge-probe {
+  include tuliprox:plugin/base@1.0.0;
+  export tuliprox:plugin/stream-hooks@1.0.0;
+  export tuliprox:plugin/metrics-hooks@1.0.0;
+}

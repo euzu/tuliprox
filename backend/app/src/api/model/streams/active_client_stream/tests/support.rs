@@ -45,6 +45,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -125,6 +126,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }
 

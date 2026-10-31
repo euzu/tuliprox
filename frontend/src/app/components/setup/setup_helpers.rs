@@ -357,13 +357,13 @@ pub fn apply_setup_api_users(app_config: &mut AppConfigDto, users: &[TargetUserD
 }
 
 pub fn move_to_previous_step(setup_ctx: &SetupContext, current_step: SetupStep) {
-    if let Some(previous_step) = current_step.prev() {
+    if let Some(previous_step) = current_step.prev_visible(setup_ctx.plugin_step) {
         setup_ctx.active_step.set(previous_step);
     }
 }
 
 pub fn move_to_next_step(setup_ctx: &SetupContext, current_step: SetupStep) {
-    if let Some(next_step) = current_step.next() {
+    if let Some(next_step) = current_step.next_visible(setup_ctx.plugin_step) {
         if next_step.index() > setup_ctx.max_unlocked_step.index() {
             setup_ctx.max_unlocked_step.set(next_step);
         }

@@ -184,6 +184,11 @@ pub struct SeriesStreamProperties {
     pub tmdb: Option<u32>,
     #[serde(default)]
     pub details: Option<SeriesStreamDetailProperties>,
+    /// Fingerprint of the `enrich-metadata` plugins that last amended this record
+    /// (plugin plan §7). Kept last: the record is stored positionally, and an
+    /// older record without it decodes to `None`.
+    #[serde(default)]
+    pub plugin_fingerprint: Option<Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -274,6 +279,7 @@ impl SeriesStreamProperties {
     pub(super) fn from_info_base(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
+            plugin_fingerprint: None,
             category_id: info.info.category_id,
             series_id,
             backdrop_path: info.info.backdrop_path.clone(),
@@ -357,6 +363,7 @@ impl SeriesStreamProperties {
         let tmdb = info.info.tmdb.parse::<u32>().ok();
         SeriesStreamProperties {
             name: info.info.name.clone(),
+            plugin_fingerprint: None,
             category_id: info.info.category_id.parse::<u32>().unwrap_or_else(|_| {
                 warn!("Failed to parse category_id {}", info.info.category_id);
                 0

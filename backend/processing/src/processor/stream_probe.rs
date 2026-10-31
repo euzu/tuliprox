@@ -221,7 +221,9 @@ async fn prepare_generic_stream_metadata<E: EventSink>(
         | InputType::Plex
         | InputType::Stalker
         | InputType::StalkerBatch
-        | InputType::Staged => return Ok(PreparedGenericProbeOutcome::Noop),
+        // A plugin input has no provider connection to probe through, same as capabilities() says.
+        | InputType::Staged
+        | InputType::Plugin => return Ok(PreparedGenericProbeOutcome::Noop),
     };
 
     if !db_path.exists() {

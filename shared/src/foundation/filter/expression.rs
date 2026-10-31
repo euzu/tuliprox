@@ -131,6 +131,87 @@ pub enum Leaf {
     PresenceComparison(ItemField, PresenceOperator),
     NumericComparison(ItemField, NumericOperator, u32),
     SetComparison(ItemField, Vec<String>),
+    /// `plugin.<id>.<fn>(literal, ...)`: the decision comes from a batch the host prepares
+    /// before evaluation (see [`PluginCallDecisions`]). `call` is the ordinal of this term among
+    /// the filter's plugin terms; the builder assigns it, whatever the leaf was built with.
+    PluginCall {
+        call: usize,
+        plugin: String,
+        func: String,
+        args: Vec<String>,
+    },
+}
+
+/// One `plugin.<id>.<fn>(...)` term of a filter, as [`Filter::plugin_calls`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginCallRef<'a> {
+    /// Ordinal of the term among the filter's plugin terms, the `call` of
+    /// [`PluginCallDecisions::decision`].
+    pub index: usize,
+    pub plugin: &'a str,
+    pub func: &'a str,
+    pub args: &'a [String],
+}
+
+/// The decisions of the plugin terms of a filter, prepared before evaluation.
+///
+/// `shared` also builds for the wasm frontend and never sees the plugin host, so the evaluator
+/// reads decisions through this trait. `call` is a [`PluginCallRef::index`], `item` the position
+/// of the evaluated item in the batch the decisions were prepared for.
+pub trait PluginCallDecisions {
+    fn decision(&self, call: usize, item: usize) -> bool;
+}
+
+/// No decisions: every plugin term is `false`. What [`Filter::filter`] evaluates with.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoPluginCalls;
+
+impl PluginCallDecisions for NoPluginCalls {
+    fn decision(&self, _call: usize, _item: usize) -> bool { false }
+}
+
+/// Decision vectors for the plugin terms of one filter over one ordered list of items.
+///
+/// A call without a vector, a vector whose length is not the item count and an item past the
+/// end all answer `false`.
+#[derive(Debug, Clone, Default)]
+pub struct PluginCallBatch {
+    items: usize,
+    calls: Vec<Option<Vec<bool>>>,
+}
+
+impl PluginCallBatch {
+    /// A batch for `items` items and no decisions yet.
+    #[must_use]
+    pub const fn new(items: usize) -> Self { Self { items, calls: Vec::new() } }
+
+    /// Stores the decisions of plugin term `call`, one per item. Returns `false` and stores
+    /// nothing when the length is not the item count.
+    pub fn set(&mut self, call: usize, decisions: Vec<bool>) -> bool {
+        if decisions.len() != self.items {
+            return false;
+        }
+        if self.calls.len() <= call {
+            self.calls.resize_with(call + 1, || None);
+        }
+        self.calls[call] = Some(decisions);
+        true
+    }
+
+    /// The item count this batch was prepared for.
+    #[must_use]
+    pub const fn items(&self) -> usize { self.items }
+}
+
+impl PluginCallDecisions for PluginCallBatch {
+    fn decision(&self, call: usize, item: usize) -> bool {
+        self.calls
+            .get(call)
+            .and_then(Option::as_ref)
+            .and_then(|decisions| decisions.get(item))
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 /// A parsed filter expression.
@@ -164,6 +245,15 @@ impl Filter {
     /// Number of nodes, useful for callers that pre-size a traversal stack.
     #[must_use]
     pub fn node_count(&self) -> usize { self.nodes.len() }
+
+    /// The `plugin.<id>.<fn>(...)` terms, in term order. The host validates them against the
+    /// plugin registry and prepares one decision vector per term.
+    pub fn plugin_calls(&self) -> impl Iterator<Item = PluginCallRef<'_>> {
+        self.leaves.iter().filter_map(|(_, leaf)| match leaf {
+            Leaf::PluginCall { call, plugin, func, args } => Some(PluginCallRef { index: *call, plugin, func, args }),
+            _ => None,
+        })
+    }
 }
 
 impl Default for Filter {
@@ -224,6 +314,7 @@ fn nodes_match(left: &Node, right: &Node) -> bool {
 pub struct FilterBuilder {
     nodes: Arena<Node>,
     leaves: Arena<Leaf>,
+    plugin_calls: usize,
 }
 
 impl FilterBuilder {
@@ -231,8 +322,18 @@ impl FilterBuilder {
     pub fn new() -> Self { Self::default() }
 
     pub fn leaf(&mut self, leaf: Leaf) -> NodeId {
+        let leaf = self.number_plugin_call(leaf);
         let leaf_id = self.leaves.alloc(leaf);
         self.nodes.alloc(Node::Leaf(leaf_id))
+    }
+
+    /// Gives a plugin term the next ordinal, so `call` is unique within the filter.
+    fn number_plugin_call(&mut self, mut leaf: Leaf) -> Leaf {
+        if let Leaf::PluginCall { call, .. } = &mut leaf {
+            *call = self.plugin_calls;
+            self.plugin_calls += 1;
+        }
+        leaf
     }
 
     pub fn group(&mut self, inner: NodeId) -> NodeId { self.nodes.alloc(Node::Group(inner)) }
@@ -255,7 +356,8 @@ impl FilterBuilder {
     pub fn append(&mut self, other: &Filter) -> Option<NodeId> {
         let mut leaf_ids = Vec::with_capacity(other.leaves.len());
         for (_, leaf) in &other.leaves {
-            leaf_ids.push(self.leaves.alloc(leaf.clone()));
+            let leaf = self.number_plugin_call(leaf.clone());
+            leaf_ids.push(self.leaves.alloc(leaf));
         }
         let mut node_ids = Vec::with_capacity(other.nodes.len());
         for (_, node) in &other.nodes {
@@ -331,6 +433,16 @@ impl std::fmt::Display for Leaf {
                     write!(f, "\"{}\"", value.replace('"', "\\\""))?;
                 }
                 f.write_str("]")
+            }
+            Self::PluginCall { plugin, func, args, .. } => {
+                write!(f, "plugin.{plugin}.{func}(")?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "\"{}\"", arg.replace('"', "\\\""))?;
+                }
+                f.write_str(")")
             }
         }
     }

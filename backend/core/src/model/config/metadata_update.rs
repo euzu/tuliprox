@@ -14,7 +14,7 @@ use shared::{
     },
     model::{
         ByteSize, Bytes, FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto,
-        ResolveConfigDto, TmdbConfigDto,
+        ResolveConfigDto, Secs, TmdbConfigDto,
     },
     utils::parse_duration_seconds,
 };
@@ -47,9 +47,9 @@ pub struct MetadataLogConfig {
 #[derive(Debug, Clone)]
 pub struct ResolveConfig {
     pub max_retry_backoff: String,
-    pub max_retry_backoff_secs: u64,
+    pub max_retry_backoff_secs: Secs,
     pub min_retry_base: String,
-    pub min_retry_base_secs: u64,
+    pub min_retry_base_secs: Secs,
     pub exhaustion_reset_gap: String,
     pub exhaustion_reset_gap_secs: u64,
     pub max_attempts: u8,
@@ -216,17 +216,17 @@ impl From<&MetadataLogConfig> for MetadataLogConfigDto {
 impl From<&ResolveConfigDto> for ResolveConfig {
     fn from(dto: &ResolveConfigDto) -> Self {
         Self {
-            max_retry_backoff_secs: parse_duration_or_default(
+            max_retry_backoff_secs: Secs(parse_duration_or_default(
                 &dto.max_retry_backoff,
                 &default_metadata_max_resolve_retry_backoff(),
                 false,
-            ),
+            )),
             max_retry_backoff: dto.max_retry_backoff.clone(),
-            min_retry_base_secs: parse_duration_or_default(
+            min_retry_base_secs: Secs(parse_duration_or_default(
                 &dto.min_retry_base,
                 &default_metadata_resolve_min_retry_base(),
                 false,
-            ),
+            )),
             min_retry_base: dto.min_retry_base.clone(),
             exhaustion_reset_gap_secs: parse_duration_or_default(
                 &dto.exhaustion_reset_gap,

@@ -130,6 +130,7 @@ async fn deferred_provider_open_forces_identity_when_original_mode_preserves_ori
         &fingerprint,
         &stream_channel,
         &HeaderMap::new(),
+        None,
     )
     .expect("deferred provider open context");
 

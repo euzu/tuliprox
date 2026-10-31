@@ -12,7 +12,12 @@ use log::log_enabled;
 use regex::Regex;
 use reqwest::header::HeaderMap;
 use shared::{error::string_to_io_error, model::format_elapsed_time, utils::sanitize_sensitive_info};
-use std::{collections::HashMap, io::Error, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::{Error, ErrorKind},
+    path::PathBuf,
+    sync::Arc,
+};
 use url::Url;
 
 pub(super) fn is_failover_redirect(url: &Url, patterns: &[Arc<Regex>]) -> bool {
@@ -92,6 +97,31 @@ async fn get_remote_content_with_manual_redirects_and_headers_and_options(
         }
     }
     Err(string_to_io_error("Text response body retry attempts exhausted"))
+}
+
+/// Whether following a redirect from `from` to `to` moves the request from `https` to plain `http`.
+pub(super) fn is_https_downgrade(from: &Url, to: &Url) -> bool {
+    from.scheme().eq_ignore_ascii_case("https") && to.scheme().eq_ignore_ascii_case("http")
+}
+
+/// Refuses a redirect that downgrades `https` to `http` when `options` ask for it.
+///
+/// The message names the two schemes and hosts only, never the path or query, so a token carried in
+/// either cannot reach a log through this error.
+pub(super) fn reject_https_downgrade(from: &Url, to: &Url, options: RequestFetchOptions) -> Result<(), Error> {
+    if options.rejects_https_downgrade() && is_https_downgrade(from, to) {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "Refusing redirect from {}://{} to {}://{}: it would downgrade https to http",
+                from.scheme(),
+                from.host_str().unwrap_or("?"),
+                to.scheme(),
+                to.host_str().unwrap_or("?")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn same_origin(lhs: &Url, rhs: &Url) -> bool {
@@ -263,4 +293,54 @@ pub async fn download_text_content_with_manual_redirects_and_headers_and_options
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_https_downgrade, reject_https_downgrade};
+    use crate::utils::request::RequestFetchOptions;
+    use std::io::ErrorKind;
+    use url::Url;
+
+    fn url(value: &str) -> Url { Url::parse(value).expect("test url parses") }
+
+    #[test]
+    fn only_https_to_http_is_a_downgrade() {
+        assert!(is_https_downgrade(&url("https://a.example/x"), &url("http://a.example/x")));
+        assert!(is_https_downgrade(&url("HTTPS://a.example/x"), &url("HTTP://b.example/y")));
+        assert!(!is_https_downgrade(&url("http://a.example/x"), &url("https://a.example/x")));
+        assert!(!is_https_downgrade(&url("http://a.example/x"), &url("http://b.example/x")));
+        assert!(!is_https_downgrade(&url("https://a.example/x"), &url("https://b.example/x")));
+    }
+
+    #[test]
+    fn the_default_options_still_follow_a_downgrade() {
+        let result = reject_https_downgrade(
+            &url("https://a.example/x"),
+            &url("http://a.example/x"),
+            RequestFetchOptions::default(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn a_downgrade_is_rejected_when_requested_and_the_message_hides_the_query() {
+        let options = RequestFetchOptions::default().with_reject_https_downgrade(true);
+        let error = reject_https_downgrade(
+            &url("https://a.example/x?token=abc"),
+            &url("http://b.example/y?token=abc"),
+            options,
+        )
+        .expect_err("a downgrade must be refused");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        let message = error.to_string();
+        assert!(message.contains("a.example") && message.contains("b.example"));
+        assert!(!message.contains("abc") && !message.contains("/y"), "message leaked url detail: {message}");
+    }
+
+    #[test]
+    fn an_upgrade_is_allowed_even_when_downgrades_are_rejected() {
+        let options = RequestFetchOptions::default().with_reject_https_downgrade(true);
+        assert!(reject_https_downgrade(&url("http://a.example/"), &url("https://a.example/"), options).is_ok());
+    }
 }

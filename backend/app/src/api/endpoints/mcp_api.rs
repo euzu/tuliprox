@@ -7,7 +7,7 @@
 
 use super::{
     mcp_redact::{redact_json_body, REDACT_BODY_LIMIT},
-    mcp_tools::{find_tool, McpTool, McpToolKind, McpToolMethod, MCP_TOOLS},
+    mcp_tools::{plugin_tools, McpTool, McpToolKind, McpToolMethod, McpToolRef, OwnedMcpTool, ToolView},
 };
 use crate::{
     api::{auth_middleware::validator_authenticated, endpoints::v1_api::API_V1_PATH, model::AppState},
@@ -23,7 +23,7 @@ use axum::{
 use http_body_util::BodyExt;
 use log::{info, warn};
 use serde_json::{json, Map, Value};
-use shared::utils::concat_path_leading_slash;
+use shared::{model::PluginRpcErrorDto, utils::concat_path_leading_slash};
 use std::{fmt::Write as _, sync::Arc};
 use tower::ServiceExt;
 
@@ -58,6 +58,9 @@ struct McpState {
     read_only: bool,
     allowed_origins: Vec<String>,
     max_response_bytes: usize,
+    /// Read live for the plugin switches (`mcp.plugin_tools`, `mcp.read_only`)
+    /// and the plugin host, so a config change or an approval counts at call time.
+    app_state: Arc<AppState>,
 }
 
 /// Web auth disabled means no permission layer protects the write routes, so
@@ -87,8 +90,13 @@ where
             concat_path_leading_slash(web_ui_path, MCP_PATH)
         );
     }
-    let state =
-        Arc::new(McpState::new(v1_router.clone().with_state(Arc::clone(app_state)), mcp, read_only, web_ui_path));
+    let state = Arc::new(McpState::new(
+        v1_router.clone().with_state(Arc::clone(app_state)),
+        mcp,
+        read_only,
+        web_ui_path,
+        Arc::clone(app_state),
+    ));
     info!(
         "MCP endpoint: POST {} ({})",
         concat_path_leading_slash(web_ui_path, MCP_PATH),
@@ -98,14 +106,31 @@ where
 }
 
 impl McpState {
-    fn new(router: Router, config: &McpConfig, read_only: bool, web_ui_path: &str) -> Self {
+    fn new(router: Router, config: &McpConfig, read_only: bool, web_ui_path: &str, app_state: Arc<AppState>) -> Self {
         Self {
             router,
             api_prefix: concat_path_leading_slash(web_ui_path, API_V1_PATH),
             read_only,
             allowed_origins: config.allowed_origins.clone(),
             max_response_bytes: config.max_response_bytes,
+            app_state,
         }
+    }
+
+    /// Read-only as of now: the startup decision, or `mcp.read_only` set since
+    /// (a config without `mcp` counts as read-only). Never less strict than the
+    /// startup decision.
+    fn effective_read_only(&self) -> bool {
+        self.read_only || self.app_state.app_config.config.load().mcp.as_ref().is_none_or(|mcp| mcp.read_only)
+    }
+
+    /// The tools of this request. The plugin tools need all three switches:
+    /// `mcp.plugin_tools` is read here, the export's `mcp: true` and the admin's
+    /// approval by the plugin host, so each is re-checked on every list and call.
+    fn tool_view(&self) -> ToolView {
+        let plugin_tools_enabled =
+            self.app_state.app_config.config.load().mcp.as_ref().is_some_and(|mcp| mcp.enabled && mcp.plugin_tools);
+        ToolView::new(plugin_tools_enabled, || plugin_tools(&self.app_state))
     }
 }
 
@@ -202,7 +227,7 @@ async fn handle_message(state: &McpState, headers: &HeaderMap, body: &[u8]) -> O
     Some(match method {
         "initialize" => rpc_result(id, initialize_result(params)),
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, json!({ "tools": tools_list(state.read_only) })),
+        "tools/list" => rpc_result(id, json!({ "tools": tools_list(&state.tool_view(), state.effective_read_only()) })),
         "tools/call" => match call_tool(state, headers, params).await {
             Ok(result) => rpc_result(id, result),
             Err(message) => rpc_error(id, INVALID_PARAMS, message),
@@ -221,18 +246,14 @@ fn initialize_result(params: Option<&Value>) -> Value {
     })
 }
 
-fn visible_tools(read_only: bool) -> impl Iterator<Item = &'static McpTool> {
-    MCP_TOOLS.iter().filter(move |tool| !read_only || tool.kind == McpToolKind::Read)
-}
-
-fn tools_list(read_only: bool) -> Vec<Value> {
-    visible_tools(read_only)
+fn tools_list(view: &ToolView, read_only: bool) -> Vec<Value> {
+    view.visible(read_only)
         .map(|tool| {
             json!({
-                "name": tool.name,
-                "description": tool.description,
+                "name": tool.name(),
+                "description": tool.description(),
                 "inputSchema": tool.schema(),
-                "annotations": { "readOnlyHint": tool.kind == McpToolKind::Read },
+                "annotations": { "readOnlyHint": tool.kind() == McpToolKind::Read },
             })
         })
         .collect()
@@ -241,10 +262,20 @@ fn tools_list(read_only: bool) -> Vec<Value> {
 /// `Err` is a JSON-RPC protocol error (-32602); everything the REST route
 /// answers, failures included, is an `isError` tool result instead.
 async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>) -> Result<Value, String> {
+    call_tool_in(state, &state.tool_view(), headers, params).await
+}
+
+/// [`call_tool`] over `view`, the tools resolved for this request.
+async fn call_tool_in(
+    state: &McpState,
+    view: &ToolView,
+    headers: &HeaderMap,
+    params: Option<&Value>,
+) -> Result<Value, String> {
     let params = params.and_then(Value::as_object).ok_or("params must be an object")?;
     let name = params.get("name").and_then(Value::as_str).ok_or("params.name is required")?;
-    let tool = find_tool(name).ok_or_else(|| format!("Unknown tool: {name}"))?;
-    if state.read_only && tool.kind == McpToolKind::Write {
+    let tool = view.find(name).ok_or_else(|| format!("Unknown tool: {name}"))?;
+    if state.effective_read_only() && tool.kind() == McpToolKind::Write {
         return Err(format!("Tool '{name}' is not available in read-only mode"));
     }
     let arguments = match params.get("arguments") {
@@ -252,13 +283,17 @@ async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>
         Some(Value::Object(arguments)) => Some(arguments),
         Some(_) => return Ok(tool_result(true, "arguments must be an object")),
     };
-    let tool_request = match build_tool_request(tool, arguments, &state.api_prefix) {
+    let tool_request = match tool {
+        McpToolRef::Builtin(tool) => build_tool_request(tool, arguments, &state.api_prefix),
+        McpToolRef::Plugin(tool) => Ok(build_plugin_request(tool, arguments, &state.api_prefix)),
+    };
+    let tool_request = match tool_request {
         Ok(tool_request) => tool_request,
         Err(message) => return Ok(tool_result(true, &message)),
     };
 
     let mut request = Request::builder()
-        .method(tool.method.as_http())
+        .method(tool.method().as_http())
         .uri(&tool_request.uri)
         .header(header::ACCEPT, "application/json");
     if let Some(authorization) = headers.get(header::AUTHORIZATION) {
@@ -280,24 +315,68 @@ async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>
         Err(never) => match never {},
     };
     let status = response.status();
-    let text = if !tool.redact_secrets {
-        let bytes = read_capped(response.into_body(), state.max_response_bytes).await;
-        body_to_text(&bytes, state.max_response_bytes)
+    // A plugin's answer is capped at the rpc result limit, whatever `max_response_bytes` is.
+    let max_bytes = match tool {
+        McpToolRef::Builtin(_) => state.max_response_bytes,
+        McpToolRef::Plugin(_) => state.max_response_bytes.min(PLUGIN_RESULT_MAX_BYTES),
+    };
+    let retry_after = match tool {
+        McpToolRef::Plugin(_) => retry_after_secs(response.headers()),
+        McpToolRef::Builtin(_) => None,
+    };
+    let text = if !tool.redact_secrets() {
+        let bytes = read_capped(response.into_body(), max_bytes).await;
+        body_to_text(&bytes, max_bytes)
     } else if status.is_success() {
         // Redaction needs the whole document; truncation applies to the redacted text.
         let bytes = read_capped(response.into_body(), REDACT_BODY_LIMIT).await;
-        body_to_text(redact_json_body(&bytes).as_bytes(), state.max_response_bytes)
+        body_to_text(redact_json_body(&bytes).as_bytes(), max_bytes)
+    } else if matches!(tool, McpToolRef::Plugin(_)) {
+        // The rpc route's `PluginRpcErrorDto` (already sanitized and scrubbed of
+        // the plugin's secrets) tells the model what to fix; any other body of a
+        // plugin tool is not forwarded.
+        let bytes = read_capped(response.into_body(), PLUGIN_ERROR_BODY_LIMIT).await;
+        plugin_error_text(&bytes, max_bytes)
     } else {
         // An error body of a redacted tool is not forwarded; the status is enough.
         String::new()
     };
-    Ok(if status.is_success() {
+    let mut result = if status.is_success() {
         tool_result(false, &text)
-    } else if text.is_empty() {
-        tool_result(true, &format!("HTTP {status}"))
     } else {
-        tool_result(true, &format!("HTTP {status}: {text}"))
-    })
+        let mut message = if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") };
+        if let Some(seconds) = retry_after {
+            let _ = write!(message, " (retry after {seconds}s)");
+        }
+        tool_result(true, &message)
+    };
+    if let McpToolRef::Plugin(plugin_tool) = tool {
+        result["_meta"] = json!({ "tuliprox/plugin": plugin_tool.plugin_id });
+    }
+    Ok(result)
+}
+
+/// The rpc route's result limit (plan §7: plugin tool results are capped at it).
+const PLUGIN_RESULT_MAX_BYTES: usize = 256 * 1024;
+
+/// The most of an rpc error body that is read: the DTO is a message and a list of fields.
+const PLUGIN_ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+/// `Retry-After` of a `429`, when it is whole seconds.
+fn retry_after_secs(headers: &HeaderMap) -> Option<u64> {
+    headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim().parse().ok()
+}
+
+/// The JSON of an rpc error body, redacted like a result; empty when the body is
+/// not a `PluginRpcErrorDto` (the permission layers answer in other shapes).
+fn plugin_error_text(body: &[u8], max_bytes: usize) -> String {
+    let Ok(error) = serde_json::from_slice::<PluginRpcErrorDto>(body) else {
+        return String::new();
+    };
+    let Ok(error) = serde_json::to_vec(&error) else {
+        return String::new();
+    };
+    body_to_text(redact_json_body(&error).as_bytes(), max_bytes)
 }
 
 fn tool_result(is_error: bool, text: &str) -> Value {
@@ -341,6 +420,14 @@ fn body_to_text(bytes: &[u8], max: usize) -> String {
 struct ToolRequest {
     uri: String,
     body: Option<Vec<u8>>,
+}
+
+/// A plugin tool's arguments are the rpc payload as they are: the route
+/// validates them against the export's `input_schema`, so no argument is
+/// mapped to a path or a query here.
+fn build_plugin_request(tool: &OwnedMcpTool, arguments: Option<&Map<String, Value>>, api_prefix: &str) -> ToolRequest {
+    let body = arguments.map_or_else(|| "{}".to_string(), |arguments| Value::Object(arguments.clone()).to_string());
+    ToolRequest { uri: format!("{api_prefix}{}", tool.path), body: Some(body.into_bytes()) }
 }
 
 fn build_tool_request(
@@ -429,7 +516,7 @@ fn expand_path<'a>(template: &'a str, arguments: &Map<String, Value>) -> Result<
 /// Percent-encodes everything that is not unreserved so a value can never
 /// introduce a separator, a query or a fragment. `.` and `..` are encoded as
 /// well, otherwise they would be dot segments.
-fn encode_path_segment(value: &str) -> String {
+pub(super) fn encode_path_segment(value: &str) -> String {
     if value == "." || value == ".." {
         return value.replace('.', "%2E");
     }
@@ -438,7 +525,10 @@ fn encode_path_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::mcp_tools::{find_tool, MCP_TOOLS},
+        *,
+    };
     use crate::{
         api::{
             endpoints::{
@@ -588,9 +678,11 @@ mod tests {
 
     #[test]
     fn read_only_hides_write_tools() {
-        assert!(visible_tools(true).all(|tool| tool.kind == McpToolKind::Read));
-        assert!(visible_tools(false).any(|tool| tool.kind == McpToolKind::Write));
-        let names: Vec<_> = tools_list(true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
+        let view = ToolView::default();
+        assert!(view.visible(true).all(|tool| tool.kind() == McpToolKind::Read));
+        assert!(view.visible(false).any(|tool| tool.kind() == McpToolKind::Write));
+        let names: Vec<_> =
+            tools_list(&view, true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
         assert!(names.contains(&"get_status".to_string()));
         assert!(!names.contains(&"update_playlists".to_string()));
     }
@@ -689,7 +781,10 @@ mod tests {
 
     #[test]
     fn playlist_tools_are_listed_read_only_with_redaction() {
-        let names: Vec<_> = tools_list(true).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect();
+        let names: Vec<_> = tools_list(&ToolView::default(), true)
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
         for name in PLAYLIST_TOOLS {
             assert!(names.contains(&name.to_string()), "{name} missing in read-only tools/list");
             let tool = tool(name);
@@ -1192,7 +1287,7 @@ mod tests {
         let router = Router::new()
             .route("/api/v1/config", axum::routing::get(move || async move { (config_status, config_body) }))
             .route("/api/v1/status", axum::routing::get(move || async move { secret_body }));
-        McpState::new(router, &McpConfig::from(enabled(true)), true, "")
+        McpState::new(router, &McpConfig::from(enabled(true)), true, "", create_test_app_state(Config::default()))
     }
 
     async fn call_stub(state: &McpState, name: &str) -> Value {
@@ -1236,5 +1331,297 @@ mod tests {
         );
         let reply = call_stub(&stub_state("{}", StatusCode::OK), "get_status").await;
         assert!(tool_text(&reply).contains("\"password\":\"pw\""), "{}", tool_text(&reply));
+    }
+
+    // ---- plugin tools -----------------------------------------------------
+
+    fn plugin_tool(name: &str, kind: McpToolKind) -> OwnedMcpTool {
+        OwnedMcpTool {
+            name: name.to_string(),
+            description: "[plugin demo@1.0.0] Ping".to_string(),
+            input_schema: json!({ "type": "object", "properties": { "league": { "type": "string" } } }),
+            method: McpToolMethod::Post,
+            path: "/plugins/demo/rpc/ping".to_string(),
+            kind,
+            redact_secrets: true,
+            plugin_id: "demo".to_string(),
+        }
+    }
+
+    fn plugin_view(tools: Vec<OwnedMcpTool>) -> ToolView { ToolView::new(true, || tools) }
+
+    fn plugin_state(router: Router, read_only: bool, max_response_bytes: usize) -> McpState {
+        let dto = shared::model::McpConfigDto {
+            enabled: true,
+            read_only,
+            plugin_tools: true,
+            max_response_bytes,
+            ..Default::default()
+        };
+        let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+        McpState::new(router, &McpConfig::from(dto), read_only, "", create_test_app_state(config))
+    }
+
+    fn rpc_router<H, T>(handler: H) -> Router
+    where
+        H: axum::handler::Handler<T, ()>,
+        T: 'static,
+    {
+        Router::new().route("/api/v1/plugins/demo/rpc/ping", axum::routing::post(handler))
+    }
+
+    async fn call_plugin(state: &McpState, view: &ToolView, name: &str, arguments: Value) -> Result<Value, String> {
+        let params = json!({ "name": name, "arguments": arguments });
+        call_tool_in(state, view, &HeaderMap::new(), Some(&params)).await
+    }
+
+    fn listed(view: &ToolView, read_only: bool) -> Vec<String> {
+        tools_list(view, read_only).iter().map(|tool| tool["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    fn result_text(reply: &Value) -> &str { reply["content"][0]["text"].as_str().expect("tool text") }
+
+    #[test]
+    fn plugin_tools_are_absent_while_the_global_switch_is_off() {
+        let asked = std::cell::Cell::new(false);
+        let view = ToolView::new(false, || {
+            asked.set(true);
+            vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]
+        });
+        assert!(!asked.get(), "the plugin host is not asked while mcp.plugin_tools is off");
+        assert!(view.find("plugin_demo_ping").is_none());
+        assert!(!listed(&view, false).contains(&"plugin_demo_ping".to_string()));
+        assert_eq!(listed(&view, false).len(), MCP_TOOLS.len());
+    }
+
+    #[tokio::test]
+    async fn a_plugin_tool_that_is_not_listed_cannot_be_called() {
+        let state = plugin_state(rpc_router(|| async { "{}" }), false, 262_144);
+        let off = ToolView::new(false, || vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let err = call_plugin(&state, &off, "plugin_demo_ping", json!({})).await.unwrap_err();
+        assert_eq!(err, "Unknown tool: plugin_demo_ping");
+    }
+
+    #[test]
+    fn the_switch_on_lists_plugin_tools_beside_the_built_ins() {
+        let view = plugin_view(vec![
+            plugin_tool("plugin_demo_ping", McpToolKind::Read),
+            plugin_tool("plugin_demo_reset", McpToolKind::Write),
+        ]);
+        let list = tools_list(&view, false);
+        let ping = list.iter().find(|tool| tool["name"] == "plugin_demo_ping").expect("listed");
+        assert_eq!(ping["description"], "[plugin demo@1.0.0] Ping");
+        assert_eq!(ping["inputSchema"]["properties"]["league"]["type"], "string");
+        assert_eq!(ping["annotations"]["readOnlyHint"], true);
+        let reset = list.iter().find(|tool| tool["name"] == "plugin_demo_reset").expect("listed");
+        assert_eq!(reset["annotations"]["readOnlyHint"], false);
+        assert!(listed(&view, false).contains(&"get_status".to_string()));
+    }
+
+    #[test]
+    fn a_plugin_tool_never_shadows_a_built_in() {
+        let mut shadow = plugin_tool("get_status", McpToolKind::Read);
+        shadow.path = "/plugins/demo/rpc/get-status".to_string();
+        let view = plugin_view(vec![shadow]);
+        assert!(matches!(view.find("get_status"), Some(McpToolRef::Builtin(_))));
+        assert_eq!(listed(&view, false).iter().filter(|name| *name == "get_status").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_write_plugin_tool_is_absent_and_rejected_while_read_only() {
+        let view = plugin_view(vec![
+            plugin_tool("plugin_demo_ping", McpToolKind::Read),
+            plugin_tool("plugin_demo_reset", McpToolKind::Write),
+        ]);
+        let names = listed(&view, true);
+        assert!(names.contains(&"plugin_demo_ping".to_string()));
+        assert!(!names.contains(&"plugin_demo_reset".to_string()));
+
+        let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&hit);
+        let state = plugin_state(
+            rpc_router(move || {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    "{}"
+                }
+            }),
+            true,
+            262_144,
+        );
+        let err = call_plugin(&state, &view, "plugin_demo_reset", json!({})).await.unwrap_err();
+        assert_eq!(err, "Tool 'plugin_demo_reset' is not available in read-only mode");
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "a rejected call never reaches the route");
+
+        // The same tool is listed and callable once MCP is read/write.
+        assert!(listed(&view, false).contains(&"plugin_demo_reset".to_string()));
+        let state = plugin_state(rpc_router(|| async { "{}" }), false, 262_144);
+        let reply = call_plugin(&state, &view, "plugin_demo_reset", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], false, "{reply}");
+    }
+
+    #[tokio::test]
+    async fn read_only_set_after_startup_still_rejects_write_plugin_tools() {
+        // Started read/write; the live config now says read-only.
+        let dto =
+            shared::model::McpConfigDto { enabled: true, read_only: true, plugin_tools: true, ..Default::default() };
+        let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+        let state = McpState::new(
+            rpc_router(|| async { "{}" }),
+            &McpConfig::from(dto),
+            false,
+            "",
+            create_test_app_state(config),
+        );
+        assert!(state.effective_read_only());
+        let view = plugin_view(vec![plugin_tool("plugin_demo_reset", McpToolKind::Write)]);
+        assert!(call_plugin(&state, &view, "plugin_demo_reset", json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn plugin_results_are_redacted_and_tagged_with_the_plugin() {
+        let state = plugin_state(
+            rpc_router(|| async { r#"{"api_key":"k-123","password":"hunter2","fixtures":[{"home":"A"}]}"# }),
+            true,
+            262_144,
+        );
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], false);
+        let text = result_text(&reply);
+        for leaked in ["k-123", "hunter2"] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+        let parsed: Value = serde_json::from_str(text).expect("redacted JSON");
+        assert_eq!(parsed["fixtures"][0]["home"], "A");
+        assert_eq!(reply["_meta"], json!({ "tuliprox/plugin": "demo" }));
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn a_plugin_tool_is_mapped_to_a_forced_redaction_post_of_the_rpc_route() {
+        for (kind, mapped) in [
+            (tuliprox_plugins::PluginMcpToolKind::Read, McpToolKind::Read),
+            (tuliprox_plugins::PluginMcpToolKind::Write, McpToolKind::Write),
+        ] {
+            let tool = OwnedMcpTool::from(&tuliprox_plugins::PluginMcpTool {
+                name: "plugin_demo_ping".to_string(),
+                description: "[plugin demo@1.0.0]".to_string(),
+                input_schema: json!({ "type": "object" }),
+                plugin_id: "demo".to_string(),
+                method: "ping-it".to_string(),
+                kind,
+            });
+            assert!(tool.redact_secrets);
+            assert_eq!(tool.method, McpToolMethod::Post);
+            assert_eq!(tool.path, "/plugins/demo/rpc/ping-it");
+            assert_eq!(tool.kind, mapped);
+            assert_eq!(tool.plugin_id, "demo");
+        }
+    }
+
+    #[tokio::test]
+    async fn arguments_are_the_rpc_body_as_they_are() {
+        let state = plugin_state(
+            rpc_router(|body: Bytes| async move {
+                let seen: Value = serde_json::from_slice(&body).expect("the body is JSON");
+                axum::Json(json!({ "seen": seen }))
+            }),
+            true,
+            262_144,
+        );
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        // No path or query mapping: whatever the keys are, the body is the plugin's business.
+        let arguments = json!({ "league": "epl", "limit": 5, "nested": { "a": [1, 2] }, "id": "x" });
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", arguments.clone()).await.unwrap();
+        let parsed: Value = serde_json::from_str(result_text(&reply)).unwrap();
+        assert_eq!(parsed["seen"], arguments);
+
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", Value::Null).await.unwrap();
+        let parsed: Value = serde_json::from_str(result_text(&reply)).unwrap();
+        assert_eq!(parsed["seen"], json!({}));
+    }
+
+    #[test]
+    fn a_plugin_request_goes_to_the_rpc_route() {
+        let tool = plugin_tool("plugin_demo_ping", McpToolKind::Read);
+        let request = build_plugin_request(&tool, Some(&args(json!({ "league": "epl" }))), "/ui/api/v1");
+        assert_eq!(request.uri, "/ui/api/v1/plugins/demo/rpc/ping");
+        assert_eq!(serde_json::from_slice::<Value>(&request.body.unwrap()).unwrap(), json!({ "league": "epl" }));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_result_is_capped_at_256_kib_whatever_the_configured_limit() {
+        let big = format!("\"{}\"", "a".repeat(300 * 1024));
+        let state = plugin_state(
+            rpc_router(move || {
+                let big = big.clone();
+                async move { big }
+            }),
+            true,
+            10 * 1024 * 1024,
+        );
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read)]);
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        let text = result_text(&reply);
+        assert!(text.contains("[truncated: response exceeded 262144 bytes]"));
+        assert!(text.len() < PLUGIN_RESULT_MAX_BYTES + 100);
+        assert_eq!(reply["_meta"]["tuliprox/plugin"], "demo");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_error_reaches_the_model_with_its_fields_and_the_retry_hint() {
+        let router = Router::new()
+            .route(
+                "/api/v1/plugins/demo/rpc/ping",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        axum::Json(PluginRpcErrorDto {
+                            error: "the payload does not match the input schema".to_string(),
+                            fields: vec![shared::model::PluginFieldErrorDto {
+                                path: "league".to_string(),
+                                message: "is required".to_string(),
+                            }],
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/plugins/demo/rpc/busy",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(header::RETRY_AFTER, "3")],
+                        axum::Json(PluginRpcErrorDto { error: "slow down".to_string(), fields: Vec::new() }),
+                    )
+                }),
+            )
+            .route(
+                "/api/v1/plugins/demo/rpc/denied",
+                axum::routing::post(|| async { (StatusCode::FORBIDDEN, "no token: s3") }),
+            );
+        let state = plugin_state(router, true, 262_144);
+        let mut busy = plugin_tool("plugin_demo_busy", McpToolKind::Read);
+        busy.path = "/plugins/demo/rpc/busy".to_string();
+        let mut denied = plugin_tool("plugin_demo_denied", McpToolKind::Read);
+        denied.path = "/plugins/demo/rpc/denied".to_string();
+        let view = plugin_view(vec![plugin_tool("plugin_demo_ping", McpToolKind::Read), busy, denied]);
+
+        let reply = call_plugin(&state, &view, "plugin_demo_ping", json!({})).await.unwrap();
+        assert_eq!(reply["isError"], true);
+        let text = result_text(&reply);
+        assert!(text.starts_with("HTTP 422 Unprocessable Entity: "), "{text}");
+        assert!(text.contains("the payload does not match the input schema") && text.contains("is required"), "{text}");
+        assert_eq!(reply["_meta"]["tuliprox/plugin"], "demo");
+
+        let reply = call_plugin(&state, &view, "plugin_demo_busy", json!({})).await.unwrap();
+        let text = result_text(&reply);
+        assert!(text.contains("slow down") && text.ends_with("(retry after 3s)"), "{text}");
+
+        // A body that is not an rpc error (a permission layer's) is not forwarded.
+        let reply = call_plugin(&state, &view, "plugin_demo_denied", json!({})).await.unwrap();
+        assert_eq!(result_text(&reply), "HTTP 403 Forbidden");
     }
 }

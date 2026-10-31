@@ -58,6 +58,12 @@ normal tuliprox -> tuliprox-session
 normal tuliprox -> tuliprox-dvr
 normal tuliprox -> tuliprox-hls
 normal tuliprox -> tuliprox-processing
+normal tuliprox -> tuliprox-plugins
+normal tuliprox-plugins -> shared
+normal tuliprox-plugins -> tuliprox-core
+normal tuliprox-plugins -> tuliprox-plugin-api
+# The plugin KV store (plan §18 Q10). `btree` has no workspace deps, so no cycle.
+normal tuliprox-plugins -> tuliprox-btree
 normal tuliprox -> tuliprox-metadata
 # Background metadata resolution. Sits above the pipeline: it implements
 # `MetadataUpdateSink`, which `processing` declares.
@@ -66,6 +72,10 @@ normal tuliprox-metadata -> tuliprox-core
 normal tuliprox-metadata -> tuliprox-processing
 normal tuliprox-metadata -> tuliprox-repository
 normal tuliprox-metadata -> tuliprox-session
+# `enrich-metadata` in the background worker (plan §6, W5), behind the
+# optional `plugins` feature the binary turns on. `plugins` depends on
+# shared/core only, so no cycle.
+normal tuliprox-metadata -> tuliprox-plugins
 # Playlist curation owns the source-neutral matching/projection kernel and
 # translates its concrete Trakt edge into that trusted representation.
 normal tuliprox-curation -> shared

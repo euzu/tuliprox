@@ -1,0 +1,25 @@
+# The registry rejects a component whose exports are not all used by a hook,
+# so every scenario manifest declares all of them; the settings pick the
+# scenario, and a hook without its setting changes nothing.
+id: pipe-dedupe
+name: "Pipeline probe - resolve-duplicates strategy"
+version: 0.1.0
+api_version: 1
+hooks:
+  - playlist.loaded
+  - playlist.before-filter
+  - playlist.after-filter
+  - playlist.before-rename
+  - playlist.after-rename
+  - playlist.before-map
+  - playlist.after-map
+  - playlist.after-sort
+  - playlist.sort-key
+  - playlist.assign-chno
+  - playlist.resolve-duplicates
+  - playlist.merge-groups
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

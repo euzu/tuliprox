@@ -46,6 +46,37 @@ pub fn push_log_entry(entry: LogEntry) {
     let _ = get_log_broadcaster().send(entry);
 }
 
+/// Selects log entries by the target of the record that produced them.
+///
+/// `plugin::demo` matches that target exactly. A value ending in `*` is a prefix match, so `plugin::*` selects every
+/// plugin. An empty value means no filter, so [`LogTargetFilter::parse`] returns `None` for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogTargetFilter {
+    Exact(String),
+    Prefix(String),
+}
+
+impl LogTargetFilter {
+    /// `None` for an empty value (no filtering).
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        Some(value.strip_suffix('*').map_or_else(|| Self::Exact(value.to_string()), |p| Self::Prefix(p.to_string())))
+    }
+
+    pub fn matches(&self, target: &str) -> bool {
+        match self {
+            Self::Exact(exact) => target == exact,
+            Self::Prefix(prefix) => target.starts_with(prefix.as_str()),
+        }
+    }
+
+    /// Entry-level check for an optional filter: no filter matches everything.
+    pub fn accepts(filter: Option<&Self>, target: &str) -> bool { filter.is_none_or(|filter| filter.matches(target)) }
+}
+
 pub fn get_log_history() -> Vec<LogEntry> { get_log_buffer().read().iter().cloned().collect() }
 
 pub fn subscribe_logs() -> tokio::sync::broadcast::Receiver<LogEntry> { get_log_broadcaster().subscribe() }
@@ -407,6 +438,37 @@ mod tests {
     #![allow(clippy::items_after_statements)]
     use super::*;
     use log::Level;
+
+    #[test]
+    fn target_filter_exact_match() {
+        let filter = LogTargetFilter::parse("plugin::demo");
+        assert_eq!(filter, Some(LogTargetFilter::Exact("plugin::demo".to_string())));
+        assert!(LogTargetFilter::accepts(filter.as_ref(), "plugin::demo"));
+        assert!(!LogTargetFilter::accepts(filter.as_ref(), "plugin::demo2"));
+        assert!(!LogTargetFilter::accepts(filter.as_ref(), "plugin::dem"));
+        assert!(!LogTargetFilter::accepts(filter.as_ref(), "tuliprox::api"));
+    }
+
+    #[test]
+    fn target_filter_prefix_match() {
+        let filter = LogTargetFilter::parse("plugin::*");
+        assert_eq!(filter, Some(LogTargetFilter::Prefix("plugin::".to_string())));
+        assert!(LogTargetFilter::accepts(filter.as_ref(), "plugin::demo"));
+        assert!(LogTargetFilter::accepts(filter.as_ref(), "plugin::other"));
+        assert!(!LogTargetFilter::accepts(filter.as_ref(), "plugin"));
+        assert!(!LogTargetFilter::accepts(filter.as_ref(), "tuliprox::plugin::demo"));
+    }
+
+    #[test]
+    fn target_filter_absent_matches_everything() {
+        assert_eq!(LogTargetFilter::parse(""), None);
+        assert_eq!(LogTargetFilter::parse("   "), None);
+        assert!(LogTargetFilter::accepts(None, "plugin::demo"));
+        assert!(LogTargetFilter::accepts(None, ""));
+        // A bare `*` is a prefix match on the empty prefix: every target.
+        let all = LogTargetFilter::parse("*");
+        assert!(LogTargetFilter::accepts(all.as_ref(), "anything"));
+    }
 
     #[test]
     fn apply_level_spec_tracks_highest_level_from_module_rules() {

@@ -1,7 +1,7 @@
 use crate::{
     api::model::AppState,
     auth::TokenVerifier,
-    utils::{get_log_history, subscribe_logs},
+    utils::{get_log_history, subscribe_logs, LogTargetFilter},
 };
 use axum::{
     extract::{
@@ -22,6 +22,8 @@ use std::sync::Arc;
 pub struct LogWsQuery {
     pub token: Option<String>,
     pub min_level: Option<String>,
+    /// Exact log target, or a prefix when it ends with `*` (`plugin::*`). Absent: every target.
+    pub target: Option<String>,
 }
 
 /// The verifier this socket authenticates against.
@@ -90,6 +92,8 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
     let verifier = get_token_verifier(&app_state, auth_required);
     let mut is_authorized = !auth_required;
     let mut min_level: Option<LogLevel> = query.min_level.as_deref().and_then(|s| s.parse().ok());
+    // The `Filter` socket message carries only `min_level`; the target stays what the connection asked for.
+    let target_filter = query.target.as_deref().and_then(LogTargetFilter::parse);
 
     if !is_authorized {
         if let Some(token) = query.token.as_deref() {
@@ -105,8 +109,13 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
 
     // Send history
     let history = get_log_history();
-    let filtered_history: Vec<_> =
-        history.into_iter().filter(|e| min_level.is_none_or(|lvl| e.level.matches(lvl))).collect();
+    let filtered_history: Vec<_> = history
+        .into_iter()
+        .filter(|e| {
+            min_level.is_none_or(|lvl| e.level.matches(lvl))
+                && LogTargetFilter::accepts(target_filter.as_ref(), &e.target)
+        })
+        .collect();
 
     if let Ok(history_json) = serde_json::to_string(&LogWsMessage::History(filtered_history)) {
         if socket.send(Message::Text(history_json.into())).await.is_err() {
@@ -121,7 +130,9 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
             broadcast_res = rx.recv() => {
                 match broadcast_res {
                     Ok(entry) => {
-                        if min_level.is_none_or(|lvl| entry.level.matches(lvl)) {
+                        if min_level.is_none_or(|lvl| entry.level.matches(lvl))
+                            && LogTargetFilter::accepts(target_filter.as_ref(), &entry.target)
+                        {
                             if let Ok(entry_json) = serde_json::to_string(&LogWsMessage::Entry(entry)) {
                                 if socket.send(Message::Text(entry_json.into())).await.is_err() {
                                     break;
@@ -201,6 +212,11 @@ mod tests {
         let query: LogWsQuery = serde_html_form::from_str("token=secret123&min_level=warn").unwrap();
         assert_eq!(query.token.as_deref(), Some("secret123"));
         assert_eq!(query.min_level.as_deref(), Some("warn"));
+        assert_eq!(query.target, None);
+
+        let query: LogWsQuery = serde_html_form::from_str("target=plugin%3A%3Ademo&min_level=info").unwrap();
+        assert_eq!(query.target.as_deref(), Some("plugin::demo"));
+        assert_eq!(query.token, None);
     }
 
     #[test]

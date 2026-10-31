@@ -1,0 +1,139 @@
+// Plugin UI (W6b): install review, slots, frames, config extensions and the
+// plugin metric cards. Plugin frames bring their own styles inside the
+// sandbox; this only lays out the host side.
+
+.tp__plugin-badge {
+  display: inline-block;
+  padding: 0 var(--margin-mini);
+  border: 1px solid var(--theme-brand-border-soft);
+  border-radius: var(--border-radius-small);
+  font-size: var(--font-size-xs);
+  color: var(--theme-brand-text-muted);
+}
+
+.tp__plugin--disabled {
+  opacity: 0.55;
+  filter: grayscale(1);
+}
+
+.tp__plugin__reason {
+  color: var(--theme-brand-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.tp__plugin-frame {
+  background: transparent;
+}
+
+.tp__plugin-slot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+
+  &__item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--margin-micro);
+  }
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: var(--margin-mini);
+  }
+}
+
+.tp__plugin-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: var(--margin-small);
+  }
+
+  &__body {
+    flex: 1;
+    min-height: 0;
+  }
+}
+
+.tp__plugin-ext {
+  margin-top: var(--margin-default);
+
+  &__divider {
+    display: flex;
+    align-items: center;
+    gap: var(--margin-mini);
+    border-top: 1px solid var(--theme-brand-border-soft);
+    padding-top: var(--margin-mini);
+  }
+
+  &__fields {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+
+  &__error {
+    color: var(--theme-brand-danger);
+    font-size: var(--font-size-sm);
+  }
+}
+
+.tp__source-editor__plugin-tile {
+  position: absolute;
+  border: 1px dashed var(--theme-brand-border);
+  border-radius: var(--border-radius);
+  background: var(--theme-brand-surface);
+}
+
+.tp__epg__plugin-overlay {
+  border-top: 1px solid var(--theme-brand-border-soft);
+  background: var(--theme-brand-surface);
+}
+
+.tp__status-card--info { border-left: 3px solid var(--theme-brand-info); }
+.tp__status-card--warn { border-left: 3px solid var(--theme-brand-warning); }
+.tp__status-card--error { border-left: 3px solid var(--theme-brand-danger); }
+
+.tp__plugin-upload {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+
+  &__warning {
+    padding: var(--margin-mini) var(--margin-small);
+    border-radius: var(--border-radius-small);
+    border-left: 3px solid var(--theme-brand-warning);
+    background: var(--theme-brand-surface-soft);
+
+    &--network {
+      border-left-color: var(--theme-brand-danger);
+    }
+  }
+
+  &__capabilities {
+    margin: 0;
+    padding-left: var(--margin-default);
+  }
+
+  &__error {
+    color: var(--theme-brand-danger);
+  }
+
+  &__mcp {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--margin-mini);
+  }
+}
+
+.tp__plugin-uninstall {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+}

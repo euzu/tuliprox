@@ -1,4 +1,7 @@
-use crate::{model::StreamInfo, utils::is_blank_optional_string};
+use crate::{
+    model::{PluginMetricDto, StreamInfo},
+    utils::is_blank_optional_string,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -22,6 +25,10 @@ pub struct StatusCheck {
     /// A diagnostic counter, not a connection-failure metric.
     #[serde(default)]
     pub reentry_suppressed_total: u64,
+    /// The throttled `collect-metrics` snapshot of the plugins (plan §7
+    /// *Dashboard metrics*); absent without plugins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_metrics: Vec<PluginMetricDto>,
 }
 
 impl Default for StatusCheck {
@@ -38,6 +45,7 @@ impl Default for StatusCheck {
             active_provider_connections: None,
             active_user_streams: Vec::new(),
             reentry_suppressed_total: 0,
+            plugin_metrics: Vec::new(),
         }
     }
 }

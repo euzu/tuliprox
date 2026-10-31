@@ -8,6 +8,7 @@ use crate::{
             log_ws_api::log_ws_api_register,
             m3u_api::m3u_api_register,
             mcp_api::mcp_api_register_if_enabled,
+            plugins_ui_api::plugins_ui_frames_register,
             provider_resolve_api::provider_resolve_api_register,
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
@@ -195,6 +196,7 @@ fn spawn_metadata_trigger_update(
                             .with_provider_manager(app_state_clone.active_provider.clone())
                             .with_maintenance(Arc::clone(&app_state_clone.maintenance))
                             .with_metadata_manager(app_state_clone.metadata_manager.clone())
+                            .with_plugins(crate::api::model::share_plugins(&app_state_clone.plugins))
                             .with_pre_processed_inputs(pre_processed_inputs.clone())
                             .with_acquired_permit(lock),
                         )
@@ -323,7 +325,7 @@ async fn create_shared_data(
         Arc::new(ArcSwapOption::from(None))
     };
 
-    let cache = create_cache(&config);
+    let cache = Arc::new(ArcSwapOption::from(create_cache(&config)));
     let event_manager = Arc::new(EventManager::with_capacity(config.event_channel_capacity as usize));
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     active_provider.bind_event_manager(&event_manager);
@@ -368,6 +370,7 @@ async fn create_shared_data(
     })?;
 
     let maintenance = load_maintenance(app_config).await;
+    let plugins = crate::api::model::load_validated_plugins(app_config, Some(&cache)).await?;
 
     let app_state = AppState {
         app_config: Arc::clone(app_config),
@@ -378,7 +381,7 @@ async fn create_shared_data(
             resource_client_no_redirect,
             resource_public_client_no_redirect,
         )),
-        cache: Arc::new(ArcSwapOption::from(cache)),
+        cache,
         shared_stream_manager,
         hls: HlsState::new(hls_proxy),
         stalker_resolve_coordinator: crate::api::model::StalkerResolveCoordinator::default(),
@@ -402,6 +405,7 @@ async fn create_shared_data(
         auth: AuthState::new(token_revocations),
         playlist_updates: PlaylistUpdateControl::new(Arc::clone(forced_targets), manual_update_sender),
         maintenance,
+        plugins,
     };
 
     Ok((app_state, manual_update_rx))
@@ -443,6 +447,7 @@ async fn run_manual_update_worker(
             .with_provider_manager(Arc::clone(&app_state.active_provider))
             .with_maintenance(Arc::clone(&app_state.maintenance))
             .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
+            .with_plugins(crate::api::model::share_plugins(&app_state.plugins))
             .with_acquired_permit(permit),
         )
         .await;
@@ -521,7 +526,8 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                     .with_disabled_headers(disabled_headers)
                     .with_provider_manager(provider_manager)
                     .with_maintenance(Arc::clone(&app_state_clone.maintenance))
-                    .with_metadata_manager(metadata_manager),
+                    .with_metadata_manager(metadata_manager)
+                    .with_plugins(crate::api::model::share_plugins(&app_state_clone.plugins)),
             )
             .await;
         });
@@ -748,6 +754,9 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             router = router.merge(mcp_router);
         }
         router = router.merge(v1_router);
+        // Plugin UI frames: unauthenticated by design (an iframe `src` carries no
+        // token); every response carries the sandboxing frame CSP (plan §9).
+        router = router.merge(plugins_ui_frames_register(web_ui_path.as_str()));
         if !web_ui_path.is_empty() {
             router = router.merge(index_register_with_path(&web_dir_path, web_ui_path.as_str()));
         }
@@ -812,6 +821,11 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Web UI can also reach a configured channel. Everything defaults to
     // unsubscribed, so this is inert until `notify_on` asks for it.
     crate::api::tasks::spawn_notification_bridge(&app_state, &app_state.cancel_tokens.load().recordings);
+    // The plugin side of both (plan §7): bus events to plugins exporting
+    // `on-event`, and plugins exporting `send-notification` as messaging
+    // channels. Both follow registry reloads and are inert with plugins off.
+    crate::api::tasks::spawn_plugin_event_bridge(&app_state, &app_state.cancel_tokens.load().recordings);
+    crate::api::model::register_plugin_notifier(&app_state.plugins, &app_state.cancel_tokens.load().recordings);
 
     // Emitted here rather than at the top of `main`: the bridge above is what
     // turns a bus event into a notification, and a `system.started` published
@@ -1159,6 +1173,7 @@ mod tests {
                 config: Arc::new(ArcSwap::from_pointee(Config::default())),
                 sources: Arc::new(ArcSwap::from_pointee(sources)),
                 hdhomerun: Arc::new(ArcSwapOption::empty()),
+                plugins: Arc::default(),
                 api_proxy: Arc::new(ArcSwapOption::empty()),
                 file_locks: Arc::new(FileLockManager::default()),
                 paths: Arc::new(ArcSwap::from_pointee(shared::model::ConfigPaths {
@@ -1234,6 +1249,7 @@ mod tests {
                 auth: crate::api::model::AuthState::for_tests(),
                 playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
                 maintenance: crate::api::model::create_test_maintenance(""),
+                plugins: crate::api::model::AppPlugins::default(),
             })
         }
 

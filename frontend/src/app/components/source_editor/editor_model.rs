@@ -19,11 +19,15 @@ pub enum BlockType {
     InputPlex,
     InputStalker,
     InputStaged,
+    /// YAML-only until W6b: a `type: plugin` input, kept intact but not offered in the sidebar.
+    InputPlugin,
     Target,
     OutputM3u,
     OutputXtream,
     OutputHdHomeRun,
     OutputStrm,
+    /// YAML-only until W6b: a `type: plugin` output, kept intact but not offered in the sidebar.
+    OutputPlugin,
 }
 
 // Define string constants
@@ -36,11 +40,13 @@ impl BlockType {
     pub const INPUT_PLEX: &'static str = "InputPlex";
     pub const INPUT_STALKER: &'static str = "InputStalker";
     pub const INPUT_STAGED: &'static str = "InputStaged";
+    pub const INPUT_PLUGIN: &'static str = "InputPlugin";
     pub const TARGET: &'static str = "Target";
     pub const OUTPUT_M3U: &'static str = "OutputM3u";
     pub const OUTPUT_XTREAM: &'static str = "OutputXtream";
     pub const OUTPUT_HDHOMERUN: &'static str = "OutputHdHomeRun";
     pub const OUTPUT_STRM: &'static str = "OutputStrm";
+    pub const OUTPUT_PLUGIN: &'static str = "OutputPlugin";
 
     pub fn is_input(&self) -> bool {
         matches!(
@@ -53,13 +59,17 @@ impl BlockType {
                 | Self::InputPlex
                 | Self::InputStalker
                 | Self::InputStaged
+                | Self::InputPlugin
         )
     }
 
     pub fn is_target(&self) -> bool { matches!(self, Self::Target) }
 
     pub fn is_output(&self) -> bool {
-        matches!(self, Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm)
+        matches!(
+            self,
+            Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm | Self::OutputPlugin
+        )
     }
 
     pub fn is_chainable_input(&self) -> bool { matches!(self, Self::InputM3u | Self::InputXtream) }
@@ -83,11 +93,13 @@ impl From<&str> for BlockType {
             BlockType::INPUT_PLEX => BlockType::InputPlex,
             BlockType::INPUT_STALKER => BlockType::InputStalker,
             BlockType::INPUT_STAGED => BlockType::InputStaged,
+            BlockType::INPUT_PLUGIN => BlockType::InputPlugin,
             BlockType::TARGET => BlockType::Target,
             BlockType::OUTPUT_M3U => BlockType::OutputM3u,
             BlockType::OUTPUT_XTREAM => BlockType::OutputXtream,
             BlockType::OUTPUT_HDHOMERUN => BlockType::OutputHdHomeRun,
             BlockType::OUTPUT_STRM => BlockType::OutputStrm,
+            BlockType::OUTPUT_PLUGIN => BlockType::OutputPlugin,
             _ => BlockType::Target, // fallback
         }
     }
@@ -108,6 +120,7 @@ impl From<InputType> for BlockType {
             InputType::Plex => BlockType::InputPlex,
             InputType::Stalker | InputType::StalkerBatch => BlockType::InputStalker,
             InputType::Staged => BlockType::InputStaged,
+            InputType::Plugin => BlockType::InputPlugin,
         }
     }
 }
@@ -124,11 +137,13 @@ impl fmt::Display for BlockType {
             BlockType::InputPlex => Self::INPUT_PLEX,
             BlockType::InputStalker => Self::INPUT_STALKER,
             BlockType::InputStaged => Self::INPUT_STAGED,
+            BlockType::InputPlugin => Self::INPUT_PLUGIN,
             BlockType::Target => Self::TARGET,
             BlockType::OutputM3u => Self::OUTPUT_M3U,
             BlockType::OutputXtream => Self::OUTPUT_XTREAM,
             BlockType::OutputHdHomeRun => Self::OUTPUT_HDHOMERUN,
             BlockType::OutputStrm => Self::OUTPUT_STRM,
+            BlockType::OutputPlugin => Self::OUTPUT_PLUGIN,
         };
         write!(f, "{s}")
     }

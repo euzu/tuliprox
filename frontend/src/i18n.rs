@@ -141,6 +141,56 @@ pub fn i18n_provider(props: &I18nProviderProps) -> Html {
 #[hook]
 pub fn use_translation() -> YewI18n { use_context::<YewI18n>().expect("No I18n context provided") }
 
+/// The language the UI is shown in and its text direction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveLocale {
+    /// The language code, such as `en` or `pt-BR`.
+    pub code: String,
+    /// `ltr` or `rtl`.
+    pub dir: &'static str,
+}
+
+impl ActiveLocale {
+    fn from_state(state: &LanguageState) -> Self {
+        let rtl = state.languages.iter().any(|language| language.code == state.active && language.is_rtl());
+        Self { code: state.active.clone(), dir: if rtl { "rtl" } else { "ltr" } }
+    }
+}
+
+impl Default for ActiveLocale {
+    fn default() -> Self { Self { code: "en".to_string(), dir: "ltr" } }
+}
+
+/// The active locale, which changes when the user switches the language.
+#[hook]
+pub fn use_active_locale() -> ActiveLocale {
+    use_context::<LanguageState>().as_ref().map(ActiveLocale::from_state).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod active_locale_tests {
+    use super::{ActiveLocale, LanguageInfo, LanguageState};
+    use std::rc::Rc;
+    use yew::Callback;
+
+    fn state(active: &str) -> LanguageState {
+        let language =
+            |code: &str, dir: &str| LanguageInfo { code: code.to_string(), label: String::new(), dir: dir.to_string() };
+        LanguageState {
+            languages: Rc::new(vec![language("en", "ltr"), language("ar", "rtl")]),
+            active: active.to_string(),
+            on_change: Callback::noop(),
+        }
+    }
+
+    #[test]
+    fn the_direction_follows_the_language_manifest() {
+        assert_eq!(ActiveLocale::from_state(&state("ar")), ActiveLocale { code: "ar".to_string(), dir: "rtl" });
+        assert_eq!(ActiveLocale::from_state(&state("en")).dir, "ltr");
+        assert_eq!(ActiveLocale::from_state(&state("xx")).dir, "ltr");
+    }
+}
+
 #[cfg(test)]
 mod locale_file_tests {
     use serde::de::{Deserializer, MapAccess, Visitor};

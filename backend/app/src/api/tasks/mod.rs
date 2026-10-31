@@ -19,6 +19,8 @@ mod config_watch;
 mod hdhomerun_ssdp;
 mod library_scan;
 mod notification_bridge;
+mod plugin_event_bridge;
+mod plugin_tasks;
 mod scheduler;
 mod xtream_expiry;
 
@@ -26,6 +28,8 @@ pub(in crate::api) use config_watch::*;
 pub(in crate::api) use hdhomerun_ssdp::*;
 pub(in crate::api) use library_scan::*;
 pub(in crate::api) use notification_bridge::*;
+pub(in crate::api) use plugin_event_bridge::*;
+pub(in crate::api) use plugin_tasks::*;
 pub(in crate::api) use scheduler::*;
 pub(in crate::api) use xtream_expiry::*;
 

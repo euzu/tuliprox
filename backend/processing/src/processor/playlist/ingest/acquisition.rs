@@ -1,4 +1,5 @@
 use super::{
+    super::transform::group_mapped_items,
     apply_playlist_fetch_outcome, apply_staged_overlay_groups, cluster_is_configured, collect_effective_skip_clusters,
     filter_skipped_clusters_from_source, neutralize_overlaid_cluster_facts, report_force_updates,
     should_apply_staged_overlay, stalker_checkpoint_message,
@@ -18,8 +19,9 @@ use log::{debug, warn};
 use shared::{
     error::TuliproxError,
     model::{
-        ClusterFlags, EventMessage, EventSink, InputRefreshPolicy, InputType, PlaylistUpdateDataSource,
-        PlaylistUpdateProgressEvent, ProviderFetchFailure,
+        ClusterFlags, EventMessage, EventSink, HookCtx, InputRefreshPolicy, InputType, PlaylistItem,
+        PlaylistUpdateDataSource, PlaylistUpdateProgressEvent, PluginAbort, PluginHook, PluginHost, PluginInputRequest,
+        PluginRunReport, ProviderFetchFailure, VirtualId,
     },
     utils::sanitize_sensitive_info,
 };
@@ -28,8 +30,8 @@ use tuliprox_core::model::{AppConfig, ConfigInput};
 use tuliprox_iptv::{
     error::ProviderErrorKind,
     provider::{
-        BatchContainerProvider, M3uProvider, PlaylistFetchRequest, PlaylistProvider, UnsupportedProvider,
-        XtreamProvider,
+        BatchContainerProvider, M3uProvider, PlaylistFetch, PlaylistFetchRequest, PlaylistProvider,
+        UnsupportedProvider, XtreamProvider,
     },
     xtream,
 };
@@ -61,11 +63,12 @@ impl InputAcquisition {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-async fn playlist_download_from_input<E: EventSink>(
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
     client: &reqwest::Client,
     app_config: &Arc<AppConfig>,
     events: &E,
+    plugins: &P,
     execution: PlaylistUpdateExecutionRef<'_>,
     input: &ConfigInput,
     stalker_refresh_mode: StalkerRefreshMode,
@@ -172,6 +175,7 @@ async fn playlist_download_from_input<E: EventSink>(
         }
         InputType::Library => LibraryProvider.fetch(&request).await,
         InputType::Plex | InputType::Emby | InputType::Jellyfin => MediaServerProvider.fetch(&request).await,
+        InputType::Plugin => plugin_playlist_fetch(plugins, input).await,
         InputType::Staged => {
             UnsupportedProvider::new(
                 "staged",
@@ -230,12 +234,45 @@ async fn playlist_download_from_input<E: EventSink>(
     )
 }
 
+/// `type: plugin`: the playlist is whatever the named plugin's `fetch-playlist` returns, grouped the
+/// way a parsed M3U is. The plugin gets the input's `url` and credentials as configured (all optional
+/// for a plugin input). A plugin `Err`, trap or timeout fails the input like an unreachable provider;
+/// the downstream path (persist, cache status, `on-playlist-loaded`) is the M3U one.
+async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) -> PlaylistFetch {
+    let Some(plugin) = input.plugin.as_deref() else {
+        return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+            "plugin input '{}' does not name a plugin",
+            input.name
+        )));
+    };
+    let ctx = HookCtx::new("").with_input(&input.name);
+    let request = PluginInputRequest {
+        input_name: &input.name,
+        url: &input.url,
+        username: input.username.as_deref(),
+        password: input.password.as_deref(),
+        options: &[],
+    };
+    match plugins.fetch_playlist(plugin, &ctx, &request).await {
+        Ok(items) => PlaylistFetch::groups(group_mapped_items(items)),
+        Err(err) => PlaylistFetch::failed(TuliproxError::Download(format!(
+            "plugin input '{}': {}",
+            input.name,
+            sanitize_sensitive_info(&err)
+        ))),
+    }
+}
+
 /// `invalidate_input_cache_status` performs a non-atomic file I/O sequence
 /// (`input_cache::load_input_status` + `input_cache::save_input_status`).
 /// Call this only while holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
-pub(crate) async fn invalidate_input_cache_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn invalidate_input_cache_status<
+    E: EventSink + Clone + 'static,
+    M: MetadataUpdateSink,
+    P: PluginHost,
+>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
 ) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
@@ -247,8 +284,8 @@ pub(crate) async fn invalidate_input_cache_status<E: EventSink + Clone + 'static
     }
 }
 
-pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
     match load_input_playlist(&ctx.config, input, None).await {
@@ -258,8 +295,8 @@ pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
 ) -> InputDownloadResult {
@@ -273,6 +310,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
             quality_rejections: Vec::new(),
             accepted_empty_clusters: ClusterFlags::empty(),
             input_telemetry: None,
+            plugins: PluginRunReport::default(),
         };
     }
 
@@ -316,6 +354,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
                 &ctx.client,
                 &ctx.config,
                 &ctx.events,
+                &ctx.plugins,
                 PlaylistUpdateExecutionRef { run_id: &ctx.run_id, execution_order: ctx.execution_order },
                 input,
                 ctx.stalker_refresh_mode,
@@ -363,6 +402,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
                         &ctx.client,
                         &ctx.config,
                         &ctx.events,
+                        &ctx.plugins,
                         PlaylistUpdateExecutionRef { run_id: &ctx.run_id, execution_order: ctx.execution_order },
                         input,
                         ctx.stalker_refresh_mode,
@@ -457,6 +497,20 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         }
     }
 
+    // `on-playlist-loaded`, once per input, after the staged overlay so a plugin
+    // sees what the targets would otherwise consume. A staged input is hooked as
+    // part of the provider input it overlays, never on its own.
+    let mut plugins = PluginRunReport::default();
+    if error.is_none() && input.staged.is_none() {
+        match apply_playlist_loaded_hook(&ctx.plugins, &input.name, playlist, &mut plugins).await {
+            Ok(hooked) => playlist = hooked,
+            Err((original, abort)) => {
+                playlist = original;
+                error = Some(TuliproxError::Plugin(abort.to_string()));
+            }
+        }
+    }
+
     if input.input_type == InputType::M3u {
         let alias_errors = download_m3u_alias_playlists(ctx, input).await;
         playlist_download_result.download_err.extend(alias_errors);
@@ -500,11 +554,79 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         quality_rejections: playlist_download_result.quality_rejections,
         accepted_empty_clusters,
         input_telemetry: playlist_download_result.input_telemetry,
+        plugins,
     }
 }
 
-async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+/// Run `on-playlist-loaded` over the items of `playlist` that a plugin's scope
+/// matches (plan §7 *Sync/async boundary*).
+///
+/// Disk-backed sources are only scanned (`items()`) to find out whether
+/// anything matches; when nothing does, the source is returned untouched.
+/// Otherwise the groups are materialized, the matching items alone go to the
+/// hook, and the result is written back into an in-memory source: dropped
+/// items disappear, edited items stay in their original position and are
+/// regrouped by their (possibly rewritten) group. The dispatcher only drops
+/// and edits in place, so survivors keep their relative order; they are
+/// re-associated with their slot by the host-owned virtual id and origin
+/// stream id (neither can be changed by a plugin).
+///
+/// A [`PluginAbort`] hands the unchanged source back with the abort, so the
+/// input fails through the normal error path with its data intact.
+pub(crate) async fn apply_playlist_loaded_hook<P: PluginHost>(
+    plugins: &P,
+    input_name: &str,
+    mut playlist: PlaylistSource,
+    report: &mut PluginRunReport,
+) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
+    let ctx = HookCtx::new("").with_input(input_name);
+    let Some(scopes) = plugins.scope(PluginHook::PlaylistLoaded, &ctx) else {
+        return Ok(playlist);
+    };
+    if !scopes.is_all() && !playlist.items().any(|item| scopes.matches(&item)) {
+        return Ok(playlist);
+    }
+
+    let groups = playlist.take_groups();
+    let mut slots: Vec<Option<PlaylistItem>> = Vec::new();
+    let mut matched: Vec<usize> = Vec::new();
+    let mut selected: Vec<PlaylistItem> = Vec::new();
+    let mut original_ids: Vec<(VirtualId, Arc<str>)> = Vec::new();
+    for item in groups.into_iter().flat_map(|group| group.channels) {
+        if scopes.matches(&item) {
+            matched.push(slots.len());
+            original_ids.push((item.header.virtual_id, Arc::clone(&item.header.input_stream_id)));
+            selected.push(item);
+            slots.push(None);
+        } else {
+            slots.push(Some(item));
+        }
+    }
+
+    let outcome = plugins.on_playlist_loaded(&ctx, &mut selected, report).await;
+    if let Err(abort) = outcome {
+        // The input fails; hand back whatever is left so nothing is lost.
+        for (slot, item) in matched.into_iter().zip(selected) {
+            slots[slot] = Some(item);
+        }
+        let rest = group_mapped_items(slots.into_iter().flatten().collect());
+        return Err((MemoryPlaylistSource::new(rest).into_source(), abort));
+    }
+
+    let mut survivors = selected.into_iter().peekable();
+    for (slot, original_id) in matched.into_iter().zip(original_ids) {
+        if survivors.peek().is_some_and(|item| {
+            (item.header.virtual_id, &item.header.input_stream_id) == (original_id.0, &original_id.1)
+        }) {
+            slots[slot] = survivors.next();
+        }
+    }
+    let items: Vec<PlaylistItem> = slots.into_iter().flatten().collect();
+    Ok(MemoryPlaylistSource::new(group_mapped_items(items)).into_source())
+}
+
+async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
 ) -> Vec<TuliproxError> {
     let Some(aliases) = input.get_enabled_aliases() else { return vec![] };

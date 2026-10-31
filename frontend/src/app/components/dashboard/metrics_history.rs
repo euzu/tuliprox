@@ -1,17 +1,104 @@
-use crate::app::components::StatusContext;
-use shared::model::{StatusCheck, SystemInfo};
-use std::{collections::VecDeque, rc::Rc};
+use crate::app::components::{use_plugin_ui, StatusContext};
+use gloo_timers::future::TimeoutFuture;
+use shared::model::{PluginMetricDto, StatusCheck, SystemInfo};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, VecDeque},
+    rc::Rc,
+};
 use yew::prelude::*;
 
 const HISTORY_LEN: usize = 40;
+/// Points kept per plugin metric.
+const PLUGIN_HISTORY_LEN: usize = 60;
+/// How often the plugin metrics are read while the stats are shown.
+const PLUGIN_METRICS_POLL_MS: u32 = 10_000;
+/// How often when none came back: no plugin reports any, or the route is not there.
+const PLUGIN_METRICS_IDLE_POLL_MS: u32 = 30_000;
 
 fn rc_identity_key<T>(value: &Option<Rc<T>>) -> Option<usize> { value.as_ref().map(|rc| Rc::as_ptr(rc) as usize) }
 
-fn push_capped(buffer: &mut VecDeque<f64>, value: f64) {
-    if buffer.len() == HISTORY_LEN {
+fn push_capped_to(buffer: &mut VecDeque<f64>, value: f64, cap: usize) {
+    while buffer.len() >= cap {
         buffer.pop_front();
     }
     buffer.push_back(value);
+}
+
+fn push_capped(buffer: &mut VecDeque<f64>, value: f64) { push_capped_to(buffer, value, HISTORY_LEN); }
+
+/// The number a plugin metric `value` shows, when it shows one: `12`, `3.5`, `42%`.
+pub fn numeric_metric_value(value: &str) -> Option<f64> {
+    let text = value.trim();
+    text.strip_suffix('%').unwrap_or(text).trim().parse::<f64>().ok().filter(|number| number.is_finite())
+}
+
+/// A rolling series per numeric plugin metric, keyed by the metric key.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct PluginMetricsHistory {
+    pub series: BTreeMap<String, VecDeque<f64>>,
+}
+
+impl PluginMetricsHistory {
+    /// Appends the numeric values of one sample. A metric that is not in the
+    /// sample any more loses its series.
+    pub fn record(&mut self, metrics: &[PluginMetricDto]) {
+        self.series.retain(|key, _| metrics.iter().any(|metric| &metric.key == key));
+        for metric in metrics {
+            if let Some(number) = numeric_metric_value(&metric.value) {
+                push_capped_to(self.series.entry(metric.key.clone()).or_default(), number, PLUGIN_HISTORY_LEN);
+            }
+        }
+    }
+}
+
+/// The latest plugin metrics with their history.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct PluginMetricsState {
+    pub latest: Vec<PluginMetricDto>,
+    pub history: PluginMetricsHistory,
+}
+
+impl Reducible for PluginMetricsState {
+    type Action = Vec<PluginMetricDto>;
+
+    fn reduce(self: Rc<Self>, sample: Vec<PluginMetricDto>) -> Rc<Self> {
+        let mut history = self.history.clone();
+        history.record(&sample);
+        Rc::new(Self { latest: sample, history })
+    }
+}
+
+/// Polls `GET /api/v1/plugins/metrics` while the component is mounted. The
+/// route belongs to another wave: when it is missing, or fails, the list is
+/// empty and nothing is reported.
+#[hook]
+pub fn use_plugin_metrics() -> Rc<PluginMetricsState> {
+    let ui = use_plugin_ui();
+    let state = use_reducer(PluginMetricsState::default);
+    {
+        let dispatcher = state.dispatcher();
+        let service = ui.map(|ui| ui.service);
+        use_effect_with((), move |()| {
+            let cancelled = Rc::new(Cell::new(false));
+            if let Some(service) = service {
+                let cancelled = Rc::clone(&cancelled);
+                yew::platform::spawn_local(async move {
+                    while !cancelled.get() {
+                        let sample = service.metrics().await;
+                        if cancelled.get() {
+                            break;
+                        }
+                        let wait = if sample.is_empty() { PLUGIN_METRICS_IDLE_POLL_MS } else { PLUGIN_METRICS_POLL_MS };
+                        dispatcher.dispatch(sample);
+                        TimeoutFuture::new(wait).await;
+                    }
+                });
+            }
+            move || cancelled.set(true)
+        });
+    }
+    Rc::new((*state).clone())
 }
 
 /// Rolling time-series of the key server metrics, fed by the streaming status updates.
@@ -96,8 +183,59 @@ pub fn use_metrics_history() -> Rc<MetricsHistory> {
 
 #[cfg(test)]
 mod tests {
-    use super::MetricsHistory;
-    use shared::model::{StatusCheck, SystemInfo};
+    use super::{numeric_metric_value, MetricsHistory, PluginMetricsState, PLUGIN_HISTORY_LEN};
+    use shared::model::{PluginMetricDto, StatusCheck, SystemInfo};
+    use std::rc::Rc;
+    use yew::Reducible;
+
+    fn metric(key: &str, value: &str) -> PluginMetricDto {
+        PluginMetricDto {
+            key: key.to_string(),
+            plugin: "demo".to_string(),
+            label: key.to_string(),
+            value: value.to_string(),
+            unit: None,
+            severity: None,
+        }
+    }
+
+    #[test]
+    fn numeric_values_are_read_with_or_without_a_percent_sign() {
+        assert_eq!(numeric_metric_value("12"), Some(12.0));
+        assert_eq!(numeric_metric_value(" 3.5 "), Some(3.5));
+        assert_eq!(numeric_metric_value("42%"), Some(42.0));
+        assert_eq!(numeric_metric_value("-1"), Some(-1.0));
+        assert_eq!(numeric_metric_value("12 ms"), None);
+        assert_eq!(numeric_metric_value("ok"), None);
+        assert_eq!(numeric_metric_value(""), None);
+        assert_eq!(numeric_metric_value("NaN"), None);
+        assert_eq!(numeric_metric_value("inf"), None);
+    }
+
+    #[test]
+    fn plugin_series_are_capped_at_sixty_points() {
+        let mut state = Rc::new(PluginMetricsState::default());
+        for n in 0..(PLUGIN_HISTORY_LEN + 25) {
+            state = state.reduce(vec![metric("demo.queue", &n.to_string())]);
+        }
+        let series = &state.history.series["demo.queue"];
+        assert_eq!(series.len(), 60);
+        assert_eq!(series.front().copied(), Some(25.0));
+        assert_eq!(series.back().copied(), Some(84.0));
+    }
+
+    #[test]
+    fn only_numeric_values_get_a_series_and_vanished_metrics_lose_theirs() {
+        let state =
+            Rc::new(PluginMetricsState::default()).reduce(vec![metric("demo.n", "5"), metric("demo.text", "healthy")]);
+        assert!(state.history.series.contains_key("demo.n"));
+        assert!(!state.history.series.contains_key("demo.text"));
+        assert_eq!(state.latest.len(), 2);
+        let state = state.reduce(vec![metric("demo.text", "healthy")]);
+        assert!(state.history.series.is_empty());
+        let state = state.reduce(Vec::new());
+        assert_eq!(state.latest, Vec::new());
+    }
 
     fn sample_system(
         cpu_usage: f32,

@@ -927,6 +927,7 @@ mod tests {
             })),
             sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
             hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {

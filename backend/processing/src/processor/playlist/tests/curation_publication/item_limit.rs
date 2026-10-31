@@ -242,7 +242,7 @@ async fn curation_production_wiring_does_not_fall_back_to_the_generic_client() {
         accepted_empty_clusters: ClusterFlags::empty(),
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
     };
-    let (result, _) = finalize_prepared_target(Arc::clone(&run.context), prepared).await;
+    let (result, _, _) = finalize_prepared_target(Arc::clone(&run.context), prepared).await;
     assert!(result.is_ok());
     assert!(
         server.requests.lock().unwrap().is_empty(),
@@ -266,7 +266,7 @@ async fn curation_failure_respects_empty_input_authorization() {
             accepted_empty_clusters: if authorized { ClusterFlags::Vod } else { ClusterFlags::empty() },
             library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         };
-        let (result, _) =
+        let (result, _, _) =
             target::finalize_prepared_target_with_tmdb(Arc::clone(&run.context), prepared, Some(&run.tmdb_client))
                 .await;
         assert_eq!(result.is_err(), authorized, "ordinary M3U persistence still rejects an empty playlist");

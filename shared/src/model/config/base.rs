@@ -11,8 +11,8 @@ use crate::{
     },
     model::{
         ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, McpConfigDto,
-        MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto,
-        VideoConfigDto, WebUiConfigDto,
+        MessagingConfigDto, MetadataUpdateConfigDto, PluginsConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
+        ScheduleConfigDto, VideoConfigDto, WebUiConfigDto,
     },
     utils::is_blank_optional_string,
 };
@@ -109,6 +109,8 @@ pub struct ConfigDto {
     pub library: Option<LibraryConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<PluginsConfigDto>,
 }
 
 impl Default for ConfigDto {
@@ -148,6 +150,7 @@ impl Default for ConfigDto {
             ipcheck: None,
             library: None,
             mcp: None,
+            plugins: None,
         }
     }
 }
@@ -226,6 +229,8 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             library: Option<LibraryConfigDto>,
             #[serde(default)]
             mcp: Option<McpConfigDto>,
+            #[serde(default)]
+            plugins: Option<PluginsConfigDto>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -265,6 +270,7 @@ impl<'de> serde::Deserialize<'de> for ConfigDto {
             ipcheck: raw.ipcheck,
             library: raw.library,
             mcp: raw.mcp,
+            plugins: raw.plugins,
         })
     }
 }

@@ -30,6 +30,9 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
             | BlockType::InputPlex
             | BlockType::InputStalker
             | BlockType::InputStaged
+            | BlockType::InputPlugin
+            // Plugin outputs are edited in the YAML until W6b; the block keeps the DTO as it is.
+            | BlockType::OutputPlugin
             | BlockType::Target => html! {},
             BlockType::OutputM3u => {
                 let output = props.output.as_ref().and_then(|to| {

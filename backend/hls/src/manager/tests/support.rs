@@ -66,6 +66,7 @@ pub(in crate::manager::tests) fn test_app_config(config: Config) -> AppConfig {
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(empty_paths())),

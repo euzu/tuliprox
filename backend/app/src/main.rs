@@ -592,8 +592,13 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
     let storage_dir = arc_swap::ArcSwapAny::load(cfg.config.as_ref()).storage_dir.clone();
     let maintenance_path = std::path::PathBuf::from(storage_dir).join(tuliprox_core::model::MAINTENANCE_FILE);
     let maintenance = Arc::new(tuliprox_core::model::MaintenanceRegistry::load_read_only(maintenance_path).await);
-    exec_processing(ProcessingRun::new(client, cfg, targets, shared::model::NoopSink).with_maintenance(maintenance))
-        .await;
+    let plugins = crate::api::model::load_validated_plugins(&cfg, None).await.unwrap_or_else(|err| exit!("{err}"));
+    exec_processing(
+        ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)
+            .with_maintenance(maintenance)
+            .with_plugins(plugins),
+    )
+    .await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

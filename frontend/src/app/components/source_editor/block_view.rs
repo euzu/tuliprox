@@ -1,8 +1,10 @@
+use super::layout::PLUGIN_TILE_WIDTH;
 use crate::{
-    app::components::{Block, BlockId, BlockInstance, PortStatus},
+    app::components::{Block, BlockId, BlockInstance, PluginSlot, PortStatus},
     html_if,
     i18n::use_translation,
 };
+use shared::model::PluginSlotDto;
 use web_sys::{HtmlElement, MouseEvent, TouchEvent};
 use yew::{
     classes, component, html, use_effect_with, use_mut_ref, use_node_ref, Callback, Html, Properties, TargetCast,
@@ -28,6 +30,31 @@ pub struct BlockProps {
     pub(crate) on_touch_start: Callback<(BlockId, TouchEvent)>,
     pub(crate) on_connection_drop: Callback<BlockId>,  // to_id
     pub(crate) on_connection_start: Callback<BlockId>, // from_id
+}
+
+#[derive(Properties, PartialEq)]
+pub struct PluginTileProps {
+    /// Screen position of the tile, as for a block (pan applied, zoom not).
+    pub position: (f32, f32),
+    pub zoom_factor: f32,
+}
+
+/// The canvas block of the plugins that contribute to the `source-editor-tile`
+/// slot. It is placed like a graph block and scales with the canvas, but it has
+/// no ports and is not part of the saved sources.
+#[component]
+pub fn PluginTileView(props: &PluginTileProps) -> Html {
+    let (x, y) = props.position;
+    let style = format!(
+        "position:absolute;top:0;left:0;width:{PLUGIN_TILE_WIDTH}px;\
+         transform:translate3d({x}px,{y}px,0) scale({});transform-origin:top left",
+        props.zoom_factor
+    );
+    html! {
+        <div class="tp__source-editor__plugin-tile no-select" style={style}>
+            <PluginSlot slot={PluginSlotDto::SourceEditorTile} />
+        </div>
+    }
 }
 
 #[component]

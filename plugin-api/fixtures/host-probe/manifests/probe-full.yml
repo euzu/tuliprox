@@ -1,0 +1,15 @@
+id: probe-full
+name: Host probe (storage, network, image cache)
+version: 0.1.0
+api_version: 1
+capabilities:
+  network: true
+  storage: true
+  image_cache: true
+hooks:
+  - playlist.after-filter
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

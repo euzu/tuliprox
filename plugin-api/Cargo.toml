@@ -1,0 +1,19 @@
+[package]
+name = "tuliprox-plugin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tuliprox plugin contract: the WIT package and, behind `host`, its wasmtime host bindings"
+
+[lints]
+workspace = true
+
+[features]
+# Generates the wasmtime host bindings. The WIT alone (`wit/`) is all a guest
+# SDK needs, so the runtime is not pulled in by default.
+host = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http"]
+
+[dependencies]
+wasmtime = { workspace = true, optional = true, features = ["component-model", "async", "runtime", "std"] }
+wasmtime-wasi = { workspace = true, optional = true, features = ["p2"] }
+wasmtime-wasi-http = { workspace = true, optional = true, features = ["p2"] }

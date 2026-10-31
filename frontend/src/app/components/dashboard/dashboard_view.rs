@@ -2,14 +2,14 @@ use crate::{
     app::{
         components::{
             Card, CreditsActionCard, DiscordActionCard, DocumentationActionCard, GithubActionCard, IpinfoActionCard,
-            MaintenanceActionCard, UserActionCard, VersionActionCard,
+            MaintenanceActionCard, PluginSlot, UserActionCard, VersionActionCard,
         },
         context::StatusContext,
     },
     hooks::use_service_context,
     i18n::use_translation,
 };
-use shared::model::Permission;
+use shared::model::{Permission, PluginSlotDto};
 use yew::prelude::*;
 
 #[component]
@@ -36,6 +36,7 @@ pub fn DashboardView() -> Html {
               <Card><IpinfoActionCard /></Card>
               <Card><CreditsActionCard /></Card>
               if can_see_maintenance { <Card><MaintenanceActionCard /></Card> }
+              <PluginSlot slot={PluginSlotDto::DashboardCard} card={true} />
             </div>
         </div>
       </div>

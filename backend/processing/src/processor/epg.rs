@@ -3,12 +3,14 @@ use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use shared::{
     model::{
-        ConfigTargetOptions, EpgChannel, EpgNamePrefix, EpgSmartMatchConfigDto, PlaylistGroup, PlaylistItem,
-        XtreamCluster,
+        ConfigTargetOptions, EpgChannel, EpgNamePrefix, EpgProgramme, EpgSmartMatchConfigDto, HookCtx, PlaylistGroup,
+        PlaylistItem, PluginChannelProgrammes, PluginEpgChannel, PluginHook, PluginHost, PluginMatchRequest,
+        PluginRunReport, XtreamCluster,
     },
     utils::{Internable, CONSTANTS},
 };
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -19,16 +21,23 @@ use tuliprox_core::{
 };
 
 const MIN_FUZZY_SCORE_MARGIN: u16 = 3;
+/// Candidates a `match-channel` plugin is shown per unresolved channel.
+const MATCH_SHORTLIST_LEN: usize = 5;
+/// Neighbours read from one phonetic / prefix / core bucket when building a shortlist.
+const MATCH_BUCKET_SCAN: usize = 256;
 
 /// Target options that control how matched guide ids are written back to live channels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EpgAssignOptions {
     pub clear_invalid_epg_ids: bool,
     pub adopt_guide_id_case: bool,
+    /// `false` while the input is in maintenance (`MaintenanceGate`): no EPG
+    /// plugin hook runs for it.
+    pub plugin_hooks: bool,
 }
 
 impl Default for EpgAssignOptions {
-    fn default() -> Self { Self { clear_invalid_epg_ids: false, adopt_guide_id_case: true } }
+    fn default() -> Self { Self { clear_invalid_epg_ids: false, adopt_guide_id_case: true, plugin_hooks: true } }
 }
 
 impl EpgAssignOptions {
@@ -36,6 +45,7 @@ impl EpgAssignOptions {
         options.map_or_else(Self::default, |options| Self {
             clear_invalid_epg_ids: options.clear_invalid_epg_ids(),
             adopt_guide_id_case: options.adopt_guide_epg_id_case(),
+            plugin_hooks: true,
         })
     }
 }
@@ -76,6 +86,26 @@ struct FuzzyCandidate {
     score: u16,
 }
 
+/// What the EPG plugin hooks need while one input's guide is parsed and matched.
+///
+/// It rides on [`EpgIdCache`] because the cache is the one value that already
+/// reaches the streaming parser (`TVGuide::process_epg_file` / `process_ics_file`)
+/// through `filter_merged_with_icon_overrides`, whose signature is shared with
+/// the rest of the crate. `Default` is "no hooks": the parser then behaves exactly
+/// as it did before plugins existed.
+#[derive(Debug, Default)]
+pub struct EpgHookState {
+    /// `EpgAssignOptions::plugin_hooks`: `false` while the input is in maintenance.
+    pub(crate) enabled: bool,
+    /// The input the guide belongs to (`HookCtx::input`).
+    pub(crate) input: String,
+    /// Keep the guide channels that matched a playlist name ambiguously, so a
+    /// `match-channel` plugin can still pick one of them in the second pass.
+    pub(crate) keep_match_candidates: bool,
+    /// What `on-epg-loaded` / `transform-programmes` did, collected by the parser.
+    pub(crate) report: PluginRunReport,
+}
+
 #[derive(Debug, Default)]
 struct MatchRequirement {
     missing_id: bool,
@@ -103,6 +133,8 @@ pub struct EpgIdCache {
     pub metaphone: DoubleMetaphone,
     pub smart_match_enabled: bool, // smart match is enabled, normalizing names
     pub fuzzy_match_enabled: bool, // fuzzy matching enabled
+    /// EPG plugin hook state; see [`EpgHookState`].
+    pub(crate) hooks: EpgHookState,
 }
 
 impl EpgIdCache {
@@ -136,6 +168,7 @@ impl EpgIdCache {
             smart_match_enabled: normalize_config.enabled,
             fuzzy_match_enabled: normalize_config.enabled && normalize_config.fuzzy_matching,
             smart_match_config: normalize_config,
+            hooks: EpgHookState::default(),
         }
     }
 
@@ -177,6 +210,17 @@ impl EpgIdCache {
                 });
             needs_smart_match.then(|| id.as_ref().map(|id| with_folded_epg_id(id, |folded| folded.intern()))).flatten()
         }));
+        if self.hooks.keep_match_candidates {
+            // An ambiguous key has no winner, so nothing above selects its candidates,
+            // and those are exactly what a `match-channel` plugin chooses among.
+            for (key, entry) in &self.normalized {
+                if entry.is_none() {
+                    if let Some(candidates) = self.match_candidates.get(key) {
+                        selected.extend(candidates.keys().filter(|id| available_epg_ids.contains(*id)).cloned());
+                    }
+                }
+            }
+        }
         selected
     }
 
@@ -579,6 +623,131 @@ impl EpgIdCache {
         let kind = self.match_ranks.get(&normalized)?.kind;
         Some((Arc::clone(epg_id), kind))
     }
+
+    /// The normalized key a playlist channel name is matched under, `None` when
+    /// the name normalizes to nothing.
+    fn match_key(&self, name: &str) -> Option<Arc<str>> {
+        let key = self.normalize(name).intern();
+        (!key.is_empty()).then_some(key)
+    }
+
+    /// Top-`limit` guide channels a `match-channel` plugin may pick for the
+    /// playlist key `key`, best first.
+    ///
+    /// Only guide channels that are available (`processed`: retained, with
+    /// programmes) qualify, since an id without programmes would be cleared
+    /// again. They come from the built-in index: the candidates the matcher
+    /// ranked for `key` but could not decide (ambiguity), and the guide ids that
+    /// resolved for neighbouring playlist keys (same phonetic code, same
+    /// three-letter prefix or same country-less core), scored by name similarity.
+    fn match_shortlist(
+        &self,
+        key: &Arc<str>,
+        guide_channels: &HashMap<Arc<str>, &EpgChannel>,
+        limit: usize,
+    ) -> Vec<PluginEpgChannel> {
+        // folded id -> (best score, the guide's own spelling of the id)
+        let mut scored: HashMap<Arc<str>, (u16, Arc<str>)> = HashMap::new();
+        let mut offer = |epg_id: &Arc<str>, score: u16| {
+            if !self.contains_processed_epg_id(epg_id) {
+                return;
+            }
+            let folded = with_folded_epg_id(epg_id, |folded| folded.intern());
+            let entry = scored.entry(folded).or_insert_with(|| (score, Arc::clone(epg_id)));
+            if score > entry.0 {
+                *entry = (score, Arc::clone(epg_id));
+            }
+        };
+
+        if let Some(candidates) = self.match_candidates.get(key) {
+            for candidate in candidates.values() {
+                offer(&candidate.epg_id, candidate.rank.score);
+            }
+        }
+
+        let mut neighbours: HashSet<&Arc<str>> = HashSet::new();
+        if let Some(keys) = self.phonetics.get(&self.phonetic(key)) {
+            neighbours.extend(keys.iter().take(MATCH_BUCKET_SCAN));
+        }
+        if let Some(keys) = candidate_prefix(key).and_then(|prefix| self.prefixes.get(&prefix)) {
+            neighbours.extend(keys.iter().take(MATCH_BUCKET_SCAN));
+        }
+        let (core, _) = self.split_country(key);
+        if let Some(keys) = self.cores.get(core) {
+            neighbours.extend(keys.iter().take(MATCH_BUCKET_SCAN));
+        }
+        for neighbour in neighbours {
+            if neighbour == key {
+                continue;
+            }
+            if let Some(Some(epg_id)) = self.normalized.get(neighbour) {
+                offer(epg_id, similarity_score(key, neighbour));
+            }
+        }
+
+        let mut ranked: Vec<(Arc<str>, u16, Arc<str>)> =
+            scored.into_iter().map(|(folded, (score, epg_id))| (folded, score, epg_id)).collect();
+        ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(folded, _, epg_id)| {
+                let guide = guide_channels.get(&folded);
+                let mut names: Vec<String> =
+                    guide.and_then(|guide| guide.title.as_ref()).map(ToString::to_string).into_iter().collect();
+                let mut registered: Vec<&Arc<str>> = self.guide_names.get(&folded).into_iter().flatten().collect();
+                registered.sort();
+                for name in registered.into_iter().map(ToString::to_string) {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                PluginEpgChannel {
+                    id: epg_id.to_string(),
+                    names,
+                    icon: guide.and_then(|guide| guide.icon.as_ref()).map(ToString::to_string),
+                }
+            })
+            .collect()
+    }
+
+    /// The rank a plugin's answer for `key` gets when it passes the same safety
+    /// gates a built-in fuzzy match does, or `None` when it must be ignored.
+    ///
+    /// The guide channel has to be available, and neither its id nor any of its
+    /// registered names may contradict the playlist name on country or on the
+    /// digits in it (the `TF1` / `TF1+1` rule of `select_unambiguous_candidate`).
+    /// A plugin can therefore choose among candidates, never override those rules.
+    fn plugin_match_rank(&self, key: &str, epg_id: &str) -> Option<SmartMatchRank> {
+        if !self.contains_processed_epg_id(epg_id) {
+            return None;
+        }
+        let folded = with_folded_epg_id(epg_id, |folded| folded.intern());
+        let normalized_id = self.normalize(epg_id);
+        let (playlist_core, playlist_country) = self.split_country(key);
+        let names = self.guide_names.get(&folded);
+        let best = std::iter::once(normalized_id.as_str())
+            .chain(names.into_iter().flatten().map(AsRef::as_ref))
+            .filter_map(|guide_name| {
+                let (guide_core, guide_country) = self.split_country(guide_name);
+                (countries_compatible(playlist_country, guide_country)
+                    && numeric_signature_matches(playlist_core, guide_core))
+                .then(|| similarity_score(playlist_core, guide_core))
+            })
+            .max()?;
+        Some(SmartMatchRank { kind: SmartMatchKind::Fuzzy, score: best, source_priority: 0, source_order: 0 })
+    }
+
+    /// Record a plugin's accepted answer as the match of `key`, so every channel
+    /// with that name resolves through the ordinary `matched_epg_id` path.
+    fn apply_plugin_match(&mut self, key: &Arc<str>, epg_id: &Arc<str>, rank: SmartMatchRank) -> bool {
+        let Some(entry) = self.normalized.get_mut(key) else {
+            return false;
+        };
+        entry.replace(Arc::clone(epg_id));
+        self.match_ranks.insert(Arc::clone(key), rank);
+        true
+    }
 }
 
 fn candidate_precedes(left: &FuzzyCandidate, right: &FuzzyCandidate) -> bool {
@@ -686,6 +855,17 @@ impl EpgAssignmentStats {
             ChannelEpgAssignment::Unresolved => self.unresolved += 1,
         }
     }
+
+    /// A channel counted as unresolved was resolved afterwards (`match-channel`).
+    fn resolve_late(&mut self, assignment: ChannelEpgAssignment) {
+        if matches!(assignment, ChannelEpgAssignment::Unresolved) {
+            return;
+        }
+        self.unresolved = self.unresolved.saturating_sub(1);
+        // `record` counts the channel again.
+        self.live = self.live.saturating_sub(1);
+        self.record(assignment);
+    }
 }
 
 fn assign_smart_epg_id(chan: &mut PlaylistItem, id_cache: &EpgIdCache) -> ChannelEpgAssignment {
@@ -778,6 +958,9 @@ fn has_processed_epg(item: &PlaylistItem, id_cache: &EpgIdCache) -> bool {
     item.header.epg_channel_id.as_deref().is_some_and(|id| id_cache.contains_processed_epg_id(id))
 }
 
+/// `smart_pass` is `false` when the built-in matcher already ran over this channel
+/// (the two-pass `match-channel` flow); only the post-processing is done then.
+#[allow(clippy::too_many_arguments, reason = "the per-channel state of one pass; bundling it only moves the list")]
 fn assign_live_channel_epg(
     channel: &mut PlaylistItem,
     id_cache: &EpgIdCache,
@@ -786,8 +969,9 @@ fn assign_live_channel_epg(
     icon_assigned: &mut HashSet<Arc<str>>,
     stats: &mut EpgAssignmentStats,
     options: EpgAssignOptions,
+    smart_pass: bool,
 ) {
-    if id_cache.smart_match_enabled {
+    if smart_pass && id_cache.smart_match_enabled {
         stats.record(assign_smart_epg_id(channel, id_cache));
     }
     let has_epg = has_processed_epg(channel, id_cache);
@@ -797,6 +981,104 @@ fn assign_live_channel_epg(
     assign_epg_icon(channel, guide_channels, icon_override_channels, icon_assigned);
     if options.clear_invalid_epg_ids && !has_epg {
         channel.header.epg_channel_id = None;
+    }
+}
+
+/// The second pass of `match-channel` (plan §7 *Sync/async boundary*, pattern 2).
+///
+/// `unresolved` are the positions, in `fp.items_mut()` order, of the live channels
+/// the built-in matcher left without a guide id. They are grouped by normalized
+/// name, so a name that repeats costs one request, and each group with a
+/// non-empty shortlist is asked in ONE batched plugin call. An answer counts only
+/// when it names a candidate of that request's shortlist and passes
+/// [`EpgIdCache::plugin_match_rank`]; it is then recorded as the match of that
+/// name and applied to every channel with the name through the built-in
+/// `assign_smart_epg_id`. Everything else about the channel (guide-id case
+/// adoption, icons, `clear_invalid_epg_ids`) runs afterwards exactly as for a
+/// built-in match.
+async fn resolve_unresolved_with_plugins<P: PluginHost>(
+    plugins: &P,
+    fp: &mut FetchedPlaylist<'_>,
+    id_cache: &mut EpgIdCache,
+    guide_channels: &HashMap<Arc<str>, &EpgChannel>,
+    unresolved: &[usize],
+    stats: &mut EpgAssignmentStats,
+    report: &mut PluginRunReport,
+) {
+    let wanted: HashSet<usize> = unresolved.iter().copied().collect();
+    let input = fp.input.name.to_string();
+    let ctx = HookCtx::new("").with_input(&input);
+    let mut key_at: HashMap<usize, Arc<str>> = HashMap::with_capacity(wanted.len());
+    let mut applied: HashSet<Arc<str>> = HashSet::new();
+    {
+        let mut seen: HashSet<Arc<str>> = HashSet::new();
+        let mut keys: Vec<Arc<str>> = Vec::new();
+        let mut items: Vec<Cow<'_, PlaylistItem>> = Vec::new();
+        let mut shortlists: Vec<Vec<PluginEpgChannel>> = Vec::new();
+        for (at, item) in fp.items().enumerate() {
+            if !wanted.contains(&at) {
+                continue;
+            }
+            let Some(key) = id_cache.match_key(&item.header.name) else {
+                continue;
+            };
+            key_at.insert(at, Arc::clone(&key));
+            if !seen.insert(Arc::clone(&key)) {
+                continue;
+            }
+            let shortlist = id_cache.match_shortlist(&key, guide_channels, MATCH_SHORTLIST_LEN);
+            if shortlist.is_empty() {
+                continue;
+            }
+            keys.push(key);
+            items.push(item);
+            shortlists.push(shortlist);
+        }
+        if keys.is_empty() {
+            return;
+        }
+        let requests: Vec<PluginMatchRequest<'_>> =
+            items.iter().zip(shortlists).map(|(item, candidates)| PluginMatchRequest { item, candidates }).collect();
+        let answers = plugins.match_channels(&ctx, &requests, report).await;
+        if answers.len() != requests.len() {
+            warn!(
+                "match-channel plugins answered {} of {} requests for input '{input}'; the answers are ignored",
+                answers.len(),
+                requests.len()
+            );
+            return;
+        }
+        let mut ignored = 0usize;
+        for ((key, request), answer) in keys.iter().zip(&requests).zip(answers) {
+            let Some(answer) = answer else {
+                continue;
+            };
+            let Some(candidate) =
+                request.candidates.iter().find(|candidate| candidate.id.eq_ignore_ascii_case(&answer))
+            else {
+                ignored += 1;
+                continue;
+            };
+            let epg_id = candidate.id.as_str().intern();
+            match id_cache.plugin_match_rank(key, &epg_id) {
+                Some(rank) if id_cache.apply_plugin_match(key, &epg_id, rank) => {
+                    applied.insert(Arc::clone(key));
+                }
+                _ => ignored += 1,
+            }
+        }
+        if ignored > 0 {
+            debug!("Ignored {ignored} match-channel answers for input '{input}' outside the shortlist or the matcher's rules");
+        }
+    }
+    if applied.is_empty() {
+        return;
+    }
+    for (at, channel) in fp.items_mut().enumerate() {
+        if !wanted.contains(&at) || !key_at.get(&at).is_some_and(|key| applied.contains(key)) {
+            continue;
+        }
+        stats.resolve_late(assign_smart_epg_id(channel, id_cache));
     }
 }
 
@@ -881,16 +1163,24 @@ pub(crate) fn adopt_guide_live_epg_id_case(fp: &mut FetchedPlaylist<'_>, epg: &[
 /// let mut id_cache = EpgIdCache::new(None);
 /// assign_channel_epg(&mut new_epg, &mut playlist, &mut id_cache, false);
 /// ```
-async fn assign_channel_epg(
+async fn assign_channel_epg<P: PluginHost>(
+    plugins: &P,
     new_epg: &mut Vec<Epg>,
     fp: &mut FetchedPlaylist<'_>,
     id_cache: &mut EpgIdCache,
     options: EpgAssignOptions,
 ) {
+    if fp.epg.is_none() {
+        return;
+    }
+    // `match-channel` needs the smart matcher's index for its shortlists.
+    let match_hook =
+        options.plugin_hooks && id_cache.smart_match_enabled && plugins.wants(PluginHook::MatchChannel, "");
+    id_cache.hooks.keep_match_candidates = match_hook;
     let Some(tv_guide) = &fp.epg else {
         return;
     };
-    let mut merged_epg = tv_guide.filter_merged_with_icon_overrides(id_cache).await;
+    let mut merged_epg = tv_guide.filter_merged_with_icon_overrides(plugins, id_cache).await;
 
     let mut stats = EpgAssignmentStats::default();
     if fp.is_memory() {
@@ -908,6 +1198,39 @@ async fn assign_channel_epg(
             .collect::<HashSet<_>>();
         let mut icon_assigned = HashSet::with_capacity(guide_channels.len());
 
+        // Pass 1 (only with a `match-channel` plugin): the built-in matcher alone,
+        // to learn which live channels it left unresolved. Without the hook the
+        // matcher and the post-processing share one pass, as they always did.
+        let mut unresolved = Vec::new();
+        if match_hook {
+            let mut position = 0usize;
+            fp.items_mut().for_each(|channel| {
+                let at = position;
+                position += 1;
+                if is_live_epg_item(channel) {
+                    let assignment = assign_smart_epg_id(channel, id_cache);
+                    stats.record(assignment);
+                    if matches!(assignment, ChannelEpgAssignment::Unresolved) {
+                        unresolved.push(at);
+                    }
+                }
+            });
+            if !unresolved.is_empty() {
+                let mut report = PluginRunReport::default();
+                resolve_unresolved_with_plugins(
+                    plugins,
+                    fp,
+                    id_cache,
+                    &guide_channels,
+                    &unresolved,
+                    &mut stats,
+                    &mut report,
+                )
+                .await;
+                id_cache.hooks.report.merge(report);
+            }
+        }
+
         let mut process_channel = |channel: &mut PlaylistItem| {
             if !is_live_epg_item(channel) {
                 return;
@@ -920,6 +1243,7 @@ async fn assign_channel_epg(
                 &mut icon_assigned,
                 &mut stats,
                 options,
+                !match_hook,
             );
         };
 
@@ -952,30 +1276,125 @@ async fn assign_channel_epg(
 /// ```text
 /// let mut playlist = FetchedPlaylist::default();
 /// let mut epg_data = Vec::new();
-/// process_playlist_epg(&mut playlist, &mut epg_data, false);
+/// process_playlist_epg(&NoPlugins, &mut playlist, &mut epg_data, false);
 /// ```
-pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Epg>, options: EpgAssignOptions) {
+///
+/// `plugins` reaches the streaming parser (`on-epg-loaded`,
+/// `transform-programmes`); this fn is also the Phase 3 site of the two-pass
+/// `match-channel` call over the channels the built-in matcher left unresolved.
+/// Returns what the EPG plugin hooks did, for the target's report; the hook
+/// context has no target (`ctx.target` is empty, `ctx.input` is the input).
+pub async fn process_playlist_epg<P: PluginHost>(
+    plugins: &P,
+    fp: &mut FetchedPlaylist<'_>,
+    epg: &mut Vec<Epg>,
+    options: EpgAssignOptions,
+) -> PluginRunReport {
+    let mut report = PluginRunReport::default();
+    assign_playlist_epg(plugins, fp, epg, options, &mut report).await;
+    report
+}
+
+/// `enrich-programmes` over the EPG sources one input contributed to a target
+/// (`new_epg[input_epg_start..]`), per channel, between `process_playlist_epg`
+/// and the `AfterEpg` mapping.
+///
+/// Every channel of `epg[..].children` goes to the plugins in ONE
+/// `PluginHost::enrich_programmes` call, and the programmes come back sorted by
+/// start with the host's spelling of the channel id attached.
+///
+/// Injected programmes are plain `EpgChannel::programmes`, so they take the
+/// ordinary `spill_epg_to_disk` -> `finish_into_disk` -> `merge_epg_trees` path.
+/// The hook adds programmes to channels, never channels, so the playlist
+/// `source_ordinal` order of the generated XMLTV (`epg_repository.rs`) is
+/// untouched. The one rule that applies to an injected programme is the merge's:
+/// it collapses an EXACT `(start, stop)` collision with an existing programme of
+/// the channel, keeping the existing one and backfilling only what it lacks.
+pub async fn enrich_playlist_programmes<P: PluginHost>(
+    plugins: &P,
+    ctx: &HookCtx<'_>,
+    epg: &mut [Epg],
+    report: &mut PluginRunReport,
+) {
+    if !plugins.wants(PluginHook::EnrichProgrammes, ctx.target) {
+        return;
+    }
+    let mut places: Vec<(usize, usize)> = Vec::new();
+    let mut channels: Vec<PluginChannelProgrammes> = Vec::new();
+    for (source_index, source) in epg.iter_mut().enumerate() {
+        for (child_index, child) in source.children.iter_mut().enumerate() {
+            let channel = Arc::make_mut(child);
+            places.push((source_index, child_index));
+            channels.push(PluginChannelProgrammes {
+                channel_id: Arc::clone(&channel.id),
+                programmes: std::mem::take(&mut channel.programmes),
+            });
+        }
+    }
+    if channels.is_empty() {
+        return;
+    }
+
+    plugins.enrich_programmes(ctx, &mut channels, report).await;
+
+    for ((source_index, child_index), entry) in places.into_iter().zip(channels) {
+        let PluginChannelProgrammes { channel_id, mut programmes } = entry;
+        programmes.sort_by_key(|programme| programme.start);
+        let channel = Arc::make_mut(&mut epg[source_index].children[child_index]);
+        channel.programmes = programmes.into_iter().map(|programme| with_channel_id(programme, &channel_id)).collect();
+    }
+}
+
+/// `programme` with the host's spelling of its channel id attached (the id is
+/// transient and private, so a programme that carries another one is rebuilt).
+fn with_channel_id(programme: EpgProgramme, channel_id: &Arc<str>) -> EpgProgramme {
+    if programme.get_transient_channel_id() == channel_id {
+        return programme;
+    }
+    let EpgProgramme {
+        start, stop, title, desc, catchup_id, categories, is_live, is_new, previously_shown, icon, ..
+    } = programme;
+    let mut rebuilt = EpgProgramme::new_all(start, stop, Arc::clone(channel_id), title, desc, catchup_id);
+    rebuilt.categories = categories;
+    rebuilt.is_live = is_live;
+    rebuilt.is_new = is_new;
+    rebuilt.previously_shown = previously_shown;
+    rebuilt.icon = icon;
+    rebuilt
+}
+
+async fn assign_playlist_epg<P: PluginHost>(
+    plugins: &P,
+    fp: &mut FetchedPlaylist<'_>,
+    epg: &mut Vec<Epg>,
+    options: EpgAssignOptions,
+    report: &mut PluginRunReport,
+) {
     if fp.input.epg.is_none() {
         return;
     }
     // collect all epg_channel ids
     let mut id_cache = EpgIdCache::new(fp.input.epg.as_ref());
     id_cache.collect_epg_id(fp);
+    id_cache.hooks.enabled = options.plugin_hooks;
+    id_cache.hooks.input = fp.input.name.to_string();
 
     if id_cache.is_empty() && !id_cache.smart_match_enabled && !options.clear_invalid_epg_ids {
         debug!("No epg ids found for input {}", fp.input.name);
     } else {
-        assign_channel_epg(epg, fp, &mut id_cache, options).await;
+        assign_channel_epg(plugins, epg, fp, &mut id_cache, options).await;
     }
+    report.merge(std::mem::take(&mut id_cache.hooks.report));
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{EpgChannel, EpgProgramme, HookCtx, PluginChannelProgrammes, PluginEpgChannel, PluginHook, PluginHost};
     use crate::{fetched_playlist::FetchedPlaylist, parser::xmltv::TVGuide};
     use rand::{distr::Alphanumeric, Rng};
     use rphonetic::{DoubleMetaphone, Encoder};
     use shared::{
-        model::{ConfigInputDto, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType},
+        model::{ConfigInputDto, NoPlugins, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType},
         utils::Internable,
     };
     use std::{
@@ -1073,6 +1492,16 @@ mod tests {
         smart_matching: bool,
         clear_invalid_epg_ids: bool,
     ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
+        run_xmltv_matches_with(&NoPlugins, xmltv, channels, smart_matching, clear_invalid_epg_ids).await
+    }
+
+    async fn run_xmltv_matches_with<P: PluginHost>(
+        plugins: &P,
+        xmltv: &str,
+        channels: &[(&str, Option<&str>)],
+        smart_matching: bool,
+        clear_invalid_epg_ids: bool,
+    ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
         let dir = tempdir().unwrap();
         let epg_path = dir.path().join("smart-match.xml");
         fs::write(&epg_path, xmltv).unwrap();
@@ -1108,7 +1537,7 @@ mod tests {
         let mut epg = Vec::new();
 
         let options = super::EpgAssignOptions { clear_invalid_epg_ids, ..super::EpgAssignOptions::default() };
-        super::process_playlist_epg(&mut playlist, &mut epg, options).await;
+        super::process_playlist_epg(plugins, &mut playlist, &mut epg, options).await;
         let assigned_ids = playlist.items_mut().map(|item| item.header.epg_channel_id.clone()).collect();
         (assigned_ids, epg)
     }
@@ -1323,6 +1752,7 @@ mod tests {
             let mut epg = Vec::new();
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut epg,
                 super::EpgAssignOptions { clear_invalid_epg_ids: false, ..super::EpgAssignOptions::default() },
@@ -1430,7 +1860,7 @@ mod tests {
             let mut epg = Vec::new();
             let options = super::EpgAssignOptions { adopt_guide_id_case: false, ..super::EpgAssignOptions::default() };
 
-            super::process_playlist_epg(&mut playlist, &mut epg, options).await;
+            super::process_playlist_epg(&NoPlugins, &mut playlist, &mut epg, options).await;
 
             let updated = playlist.items_mut().next().unwrap();
             assert_eq!(updated.header.epg_channel_id.as_deref(), Some("usa4k.us"));
@@ -1502,6 +1932,7 @@ mod tests {
             let mut epg = Vec::new();
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut epg,
                 super::EpgAssignOptions { clear_invalid_epg_ids: true, ..super::EpgAssignOptions::default() },
@@ -1558,6 +1989,7 @@ mod tests {
                 FetchedPlaylist { input: &input, source: MemoryPlaylistSource::new(groups).into_source(), epg: None };
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut Vec::new(),
                 super::EpgAssignOptions { clear_invalid_epg_ids: true, ..super::EpgAssignOptions::default() },
@@ -1618,6 +2050,7 @@ mod tests {
             };
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut Vec::new(),
                 super::EpgAssignOptions { clear_invalid_epg_ids: false, ..super::EpgAssignOptions::default() },
@@ -1657,6 +2090,7 @@ mod tests {
             };
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut Vec::new(),
                 super::EpgAssignOptions { clear_invalid_epg_ids: true, ..super::EpgAssignOptions::default() },
@@ -1805,6 +2239,7 @@ mod tests {
             let mut epg = Vec::new();
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut epg,
                 super::EpgAssignOptions { clear_invalid_epg_ids: false, ..super::EpgAssignOptions::default() },
@@ -1848,6 +2283,7 @@ mod tests {
             let mut epg = Vec::new();
 
             super::process_playlist_epg(
+                &NoPlugins,
                 &mut playlist,
                 &mut epg,
                 super::EpgAssignOptions { clear_invalid_epg_ids: false, ..super::EpgAssignOptions::default() },
@@ -1859,6 +2295,282 @@ mod tests {
             assert_eq!(epg[0].children[0].id.as_ref(), "f1.calendar");
             assert_eq!(epg[0].children[0].programmes.len(), 1);
         });
+    }
+
+    /// A host scripted per hook, standing in for a real plugin.
+    #[derive(Clone, Default)]
+    struct ScriptedHost {
+        /// `match-channel` answers every request with this id.
+        match_answer: Option<String>,
+        /// The candidate ids each `match-channel` request was shown.
+        shortlists: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        /// `on-epg-loaded` renames every channel to this.
+        rename_to: Option<String>,
+        /// `transform-programmes` appends this category to every programme.
+        category: Option<String>,
+        /// `enrich-programmes` injects a programme starting here, in the spelling `inject_as`.
+        inject_start: Option<i64>,
+        inject_as: String,
+    }
+
+    #[allow(clippy::unused_async_trait_impl, reason = "a scripted host answers without awaiting")]
+    impl PluginHost for ScriptedHost {
+        fn wants(&self, hook: PluginHook, _target: &str) -> bool {
+            match hook {
+                PluginHook::MatchChannel => self.match_answer.is_some(),
+                PluginHook::EpgLoaded => self.rename_to.is_some(),
+                PluginHook::TransformProgrammes => self.category.is_some(),
+                PluginHook::EnrichProgrammes => self.inject_start.is_some(),
+                _ => false,
+            }
+        }
+
+        async fn match_channels(
+            &self,
+            ctx: &HookCtx<'_>,
+            requests: &[shared::model::PluginMatchRequest<'_>],
+            _report: &mut shared::model::PluginRunReport,
+        ) -> Vec<Option<String>> {
+            assert_eq!(ctx.target, "", "EPG hooks have an empty target");
+            let mut seen = self.shortlists.lock().expect("lock");
+            for request in requests {
+                seen.push(request.candidates.iter().map(|candidate| candidate.id.clone()).collect());
+            }
+            vec![self.match_answer.clone(); requests.len()]
+        }
+
+        async fn on_epg_loaded(
+            &self,
+            _ctx: &HookCtx<'_>,
+            channels: &mut Vec<PluginEpgChannel>,
+            _report: &mut shared::model::PluginRunReport,
+        ) {
+            if let Some(name) = &self.rename_to {
+                for channel in channels.iter_mut() {
+                    channel.names = vec![name.clone()];
+                }
+            }
+        }
+
+        async fn transform_programmes(
+            &self,
+            _ctx: &HookCtx<'_>,
+            programmes: &mut Vec<EpgProgramme>,
+            _report: &mut shared::model::PluginRunReport,
+        ) {
+            if let Some(category) = &self.category {
+                for programme in programmes.iter_mut() {
+                    programme
+                        .categories
+                        .push(shared::model::EpgCategory { value: category.as_str().intern(), lang: None });
+                }
+            }
+        }
+
+        async fn enrich_programmes(
+            &self,
+            _ctx: &HookCtx<'_>,
+            channels: &mut [PluginChannelProgrammes],
+            _report: &mut shared::model::PluginRunReport,
+        ) {
+            let Some(start) = self.inject_start else {
+                return;
+            };
+            for channel in channels.iter_mut().take(1) {
+                // Appended last and under another spelling of the channel id.
+                channel.programmes.push(EpgProgramme::new_all(
+                    start,
+                    start + 10,
+                    self.inject_as.as_str().intern(),
+                    Some("Injected".intern()),
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+
+    /// Two guide ids that both carry the display name "TF1", so the built-in matcher
+    /// has no winner for "FR|TF1": the shape a `match-channel` plugin is asked about.
+    fn ambiguous_cache() -> super::EpgIdCache {
+        let mut cache = smart_cache_with_country_suffix();
+        cache.insert_normalized("FR|TF1", None);
+        let display_name = cache.normalize_candidates(["TF1"]);
+        assert!(cache.match_epg_channel_candidates(&"opaque-a".intern(), &display_name, 0, 0));
+        assert!(cache.match_epg_channel_candidates(&"opaque-b".intern(), &display_name, 0, 0));
+        cache.finalize_matches(&HashSet::from(["opaque-a".intern(), "opaque-b".intern()]));
+        for id in ["opaque-a", "opaque-b"] {
+            cache.insert_processed_epg_id(id);
+            cache.register_guide_names(id, ["TF1"]);
+        }
+        cache
+    }
+
+    #[test]
+    fn a_shortlist_holds_the_ambiguous_candidates_best_first_and_respects_the_limit() {
+        let cache = ambiguous_cache();
+        let key = cache.match_key("FR|TF1").expect("key");
+        assert_eq!(cache.normalized.get(&key).map(Option::is_none), Some(true), "the built-in matcher left it open");
+
+        let ids = |limit| {
+            cache
+                .match_shortlist(&key, &HashMap::new(), limit)
+                .into_iter()
+                .map(|channel| channel.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(5), ["opaque-a", "opaque-b"], "equal scores order by id");
+        assert_eq!(ids(1), ["opaque-a"]);
+        assert_eq!(ids(0).len(), 0);
+    }
+
+    #[test]
+    fn ambiguous_candidates_stay_selected_only_while_a_match_plugin_is_asked() {
+        let mut cache = ambiguous_cache();
+        let available = HashSet::from(["opaque-a".intern(), "opaque-b".intern()]);
+        assert!(!cache.selected_epg_ids(&available).contains("opaque-a"));
+
+        cache.hooks.keep_match_candidates = true;
+        let selected = cache.selected_epg_ids(&available);
+        assert!(selected.contains("opaque-a") && selected.contains("opaque-b"));
+    }
+
+    #[test]
+    fn a_plugin_answer_obeys_availability_and_the_digit_rule() {
+        let mut cache = smart_cache(80, 95);
+        for (id, name) in [("sport.one", "Sport 1"), ("sport.two", "Sport 2")] {
+            cache.insert_processed_epg_id(id);
+            cache.register_guide_names(id, [name]);
+        }
+        let key = cache.match_key("Sport 1").expect("key");
+        let cases = [
+            ("same digits, id in another case", "SPORT.ONE", true),
+            ("a different digit", "sport.two", false),
+            ("not an available guide channel", "sport.three", false),
+        ];
+        for (name, id, accepted) in cases {
+            assert_eq!(cache.plugin_match_rank(&key, id).is_some(), accepted, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_second_pass_applies_an_answer_only_from_the_shortlist() {
+        let cases = [
+            ("a shortlisted id", "opaque-b", Some("opaque-b")),
+            ("another case of a shortlisted id", "OPAQUE-A", Some("opaque-a")),
+            ("an id outside the shortlist", "opaque-z", None),
+        ];
+        for (name, answer, expected) in cases {
+            let host = ScriptedHost { match_answer: Some(answer.to_string()), ..ScriptedHost::default() };
+            let mut cache = ambiguous_cache();
+            let input = ConfigInput::from(ConfigInputDto::default());
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("FR|TF1", None)],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let mut playlist =
+                FetchedPlaylist { input: &input, source: MemoryPlaylistSource::new(groups).into_source(), epg: None };
+            let mut stats = super::EpgAssignmentStats::default();
+            let mut report = shared::model::PluginRunReport::default();
+
+            super::resolve_unresolved_with_plugins(
+                &host,
+                &mut playlist,
+                &mut cache,
+                &HashMap::new(),
+                &[0],
+                &mut stats,
+                &mut report,
+            )
+            .await;
+
+            let assigned = playlist.items_mut().next().and_then(|item| item.header.epg_channel_id.clone());
+            assert_eq!(assigned.as_deref(), expected, "{name}");
+            assert_eq!(
+                host.shortlists.lock().expect("lock").as_slice(),
+                [vec!["opaque-a".to_string(), "opaque-b".to_string()]],
+                "{name}: one batched call, one request, the whole shortlist"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_match_plugin_the_matcher_runs_in_one_pass_as_before() {
+        let xmltv = r#"<tv><channel id="tf1.fr"><display-name>TF1</display-name></channel>
+<programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="tf1.fr"><title>News</title></programme></tv>"#;
+        let host = ScriptedHost::default();
+        let (with_host, _) = run_xmltv_matches_with(&host, xmltv, &[("TF1", None)], true, false).await;
+        let (plain, _) = run_smart_xmltv_matches(xmltv, &[("TF1", None)]).await;
+        assert_eq!(with_host, plain);
+        assert!(host.shortlists.lock().expect("lock").is_empty(), "no request was made");
+    }
+
+    #[tokio::test]
+    async fn parsing_hooks_rename_channels_and_rewrite_programmes() {
+        let xmltv = r#"<tv><channel id="demo.channel"><display-name>Demo</display-name></channel>
+<programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel"><title>Show</title><category>News</category></programme></tv>"#;
+        let host = ScriptedHost {
+            rename_to: Some("Renamed".to_string()),
+            category: Some("Plugin".to_string()),
+            ..ScriptedHost::default()
+        };
+        let (_, epg) = run_xmltv_matches_with(&host, xmltv, &[("Demo", Some("demo.channel"))], false, false).await;
+        let channel = &epg[0].children[0];
+        assert_eq!(channel.title.as_deref(), Some("Renamed"));
+        let categories: Vec<&str> = channel.programmes[0].categories.iter().map(|category| &*category.value).collect();
+        assert_eq!(categories, ["News", "Plugin"]);
+
+        let (_, epg) = run_xmltv_matches_with(&NoPlugins, xmltv, &[("Demo", Some("demo.channel"))], false, false).await;
+        assert_eq!(epg[0].children[0].title.as_deref(), Some("Demo"));
+        assert_eq!(epg[0].children[0].programmes[0].categories.len(), 1);
+    }
+
+    fn epg_source(channels: &[(&str, &[i64])]) -> tuliprox_core::model::Epg {
+        let children = channels
+            .iter()
+            .map(|(id, starts)| {
+                let id: Arc<str> = id.intern();
+                let mut channel = EpgChannel::new(Arc::clone(&id));
+                channel.programmes = starts
+                    .iter()
+                    .map(|&start| EpgProgramme::new_all(start, start + 10, Arc::clone(&id), None, None, None))
+                    .collect();
+                Arc::new(channel)
+            })
+            .collect();
+        tuliprox_core::model::Epg { priority: 0, logo_override: false, attributes: None, children }
+    }
+
+    #[tokio::test]
+    async fn enriched_programmes_come_back_sorted_with_the_hosts_channel_id() {
+        let host = ScriptedHost { inject_start: Some(50), inject_as: "DEMO".to_string(), ..ScriptedHost::default() };
+        let mut epg = vec![epg_source(&[("Demo", &[100, 200]), ("Other", &[300])])];
+        let ctx = HookCtx::new("target");
+        let mut report = shared::model::PluginRunReport::default();
+
+        super::enrich_playlist_programmes(&host, &ctx, &mut epg, &mut report).await;
+
+        let demo = &epg[0].children[0];
+        assert_eq!(demo.programmes.iter().map(|programme| programme.start).collect::<Vec<_>>(), [50, 100, 200]);
+        assert!(demo.programmes.iter().all(|programme| programme.get_transient_channel_id().as_ref() == "Demo"));
+        assert_eq!(epg[0].children[1].programmes.len(), 1, "the other channel is untouched");
+    }
+
+    #[tokio::test]
+    async fn without_an_enrich_plugin_the_programmes_are_not_touched() {
+        let mut epg = vec![epg_source(&[("Demo", &[200, 100])])];
+        let shared_channel = Arc::clone(&epg[0].children[0]);
+        let mut report = shared::model::PluginRunReport::default();
+
+        super::enrich_playlist_programmes(&NoPlugins, &HookCtx::new("target"), &mut epg, &mut report).await;
+
+        assert!(Arc::ptr_eq(&epg[0].children[0], &shared_channel), "no copy-on-write, no reorder");
+        assert_eq!(
+            epg[0].children[0].programmes.iter().map(|programme| programme.start).collect::<Vec<_>>(),
+            [200, 100]
+        );
     }
 
     #[test]

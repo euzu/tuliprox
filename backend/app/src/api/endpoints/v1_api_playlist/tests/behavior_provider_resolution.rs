@@ -212,6 +212,7 @@ fn resolve_provider_url_passthrough_for_ambiguous_target_request() {
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(sources)),
         hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::empty()),
         file_locks: Arc::new(crate::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {

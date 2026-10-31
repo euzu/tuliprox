@@ -1,0 +1,42 @@
+[package]
+name = "tuliprox-plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The wasm plugin host: loads components, runs playlist stage hooks under epoch and memory limits"
+
+[lints]
+workspace = true
+
+[dependencies]
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-plugin-api = { workspace = true, features = ["host"] }
+tuliprox-btree = { workspace = true }
+# `cranelift` + `pulley`: native code where Cranelift can host it, the Pulley
+# interpreter on the rest (armv7), as proven by the W0 spike.
+wasmtime = { workspace = true, features = ["component-model", "async", "cranelift", "pulley", "runtime", "std", "pooling-allocator"] }
+wasmtime-wasi = { workspace = true, features = ["p2"] }
+wasmtime-wasi-http = { workspace = true, features = ["p2"] }
+arc-swap.workspace = true
+bytes.workspace = true
+http = "1"
+http-body-util = "0.1.5"
+log.workspace = true
+# Watches the plugins directory for hot reload (registry). Same version as `app`.
+notify = "8.2.0"
+reqwest = { version = "0.13.5", default-features = false }
+regex.workspace = true
+semver = "1"
+serde.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# `.tlpx` packages (W6b upload). `deflate` is pure Rust; zip 2.6.1's
+# `deflate-flate2` alone does not enable its flate2 dependency.
+zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
+tokio = { workspace = true, features = ["time", "sync", "rt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }

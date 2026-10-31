@@ -2,7 +2,7 @@ use crate::model::macros;
 use regex::Regex;
 use shared::{
     foundation::Filter,
-    model::{ConfigSortDto, ConfigSortRuleDto, ItemField, SortOrder, SortTarget},
+    model::{ConfigSortDto, ConfigSortRuleDto, ItemField, PluginRef, SortOrder, SortTarget},
 };
 use std::sync::Arc;
 
@@ -49,17 +49,27 @@ impl From<&ConfigSortRule> for ConfigSortRuleDto {
 pub struct ConfigSort {
     pub match_as_ascii: bool,
     pub rules: Vec<ConfigSortRule>,
+    /// The plugin that supplies a sort key per channel (`sort-key`).
+    pub strategy: Option<PluginRef>,
 }
 
 macros::from_impl!(ConfigSort);
 impl From<&ConfigSortDto> for ConfigSort {
     fn from(dto: &ConfigSortDto) -> Self {
-        Self { match_as_ascii: dto.match_as_ascii, rules: dto.rules.iter().map(Into::into).collect() }
+        Self {
+            match_as_ascii: dto.match_as_ascii,
+            rules: dto.rules.iter().map(Into::into).collect(),
+            strategy: dto.strategy.clone(),
+        }
     }
 }
 
 impl From<&ConfigSort> for ConfigSortDto {
     fn from(instance: &ConfigSort) -> Self {
-        Self { match_as_ascii: instance.match_as_ascii, rules: instance.rules.iter().map(Into::into).collect() }
+        Self {
+            match_as_ascii: instance.match_as_ascii,
+            rules: instance.rules.iter().map(Into::into).collect(),
+            strategy: instance.strategy.clone(),
+        }
     }
 }

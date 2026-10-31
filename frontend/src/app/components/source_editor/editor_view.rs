@@ -1,10 +1,12 @@
 use crate::{
     app::{
         components::{
-            bouquet_editor::TargetBouquetView, can_connect, source_editor::layout::layout, Block, BlockId,
-            BlockInstance, BlockType, BlockView, Connection, EditMode, InputRow, PortStatus, SourceEditorContext,
-            SourceEditorForm, SourceEditorSidebar, TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT,
-            BLOCK_WIDTH,
+            bouquet_editor::TargetBouquetView,
+            can_connect,
+            source_editor::layout::{layout, plugin_tile_origin},
+            use_plugin_ui, Block, BlockId, BlockInstance, BlockType, BlockView, Connection, EditMode, InputRow,
+            PluginTileView, PortStatus, SourceEditorContext, SourceEditorForm, SourceEditorSidebar, TextButton,
+            BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT, BLOCK_WIDTH,
         },
         ConfigContext, PlaylistContext,
     },
@@ -17,8 +19,8 @@ use gloo_timers::callback::Timeout;
 use shared::{
     model::{
         permission::Permission, ConfigInputDto, ConfigInputStagedDto, ConfigSourceDto, ConfigTargetDto,
-        HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto,
-        TargetOutputDto, XtreamTargetOutputDto,
+        HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, PluginSlotDto, PluginTargetOutputDto,
+        SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
     },
     utils::BATCH_SCHEME_PREFIX,
 };
@@ -372,6 +374,7 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputPlex => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plex))),
         BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
         BlockType::InputStaged => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Staged))),
+        BlockType::InputPlugin => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plugin))),
         BlockType::Target => {
             let dto = ConfigTargetDto { name: String::new(), ..ConfigTargetDto::default() };
             BlockInstance::Target(Rc::new(dto))
@@ -384,6 +387,9 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
             BlockInstance::Output(Rc::new(TargetOutputDto::HdHomeRun(HdHomeRunTargetOutputDto::default())))
         }
         BlockType::OutputStrm => BlockInstance::Output(Rc::new(TargetOutputDto::Strm(StrmTargetOutputDto::default()))),
+        BlockType::OutputPlugin => {
+            BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(PluginTargetOutputDto::default())))
+        }
     }
 }
 
@@ -404,6 +410,9 @@ fn create_output_instance(output: &TargetOutputDto) -> (BlockInstance, BlockType
         }
         TargetOutputDto::HdHomeRun(dto) => {
             (BlockInstance::Output(Rc::new(TargetOutputDto::HdHomeRun(dto.clone()))), BlockType::OutputHdHomeRun)
+        }
+        TargetOutputDto::Plugin(dto) => {
+            (BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(dto.clone()))), BlockType::OutputPlugin)
         }
     }
 }
@@ -431,6 +440,9 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
         }
         BlockType::InputStaged => {
             input.input_type = InputType::Staged;
+        }
+        BlockType::InputPlugin => {
+            input.input_type = InputType::Plugin;
         }
         _ => {}
     }
@@ -639,6 +651,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let services = use_service_context();
     let can_write_sources = services.auth.has_permission(Permission::SourceWrite);
     let translate = use_translation();
+    let plugin_ui = use_plugin_ui();
 
     let force_update = use_state(|| 0);
     // ----------------- virtual canvas offset -----------------
@@ -2336,6 +2349,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 // Render blocks with canvas offset
                 for b in editor_state.blocks.iter() {
                     { render_block(b) }
+                }
+
+                // The canvas block of the plugins that contribute a source editor tile.
+                if plugin_ui.as_ref().is_some_and(|ui| ui.has_contributions(PluginSlotDto::SourceEditorTile)) {
+                    <PluginTileView
+                        position={screen_from_world(plugin_tile_origin(&editor_state.blocks), (canvas_off_x, canvas_off_y), zoom_factor)}
+                        zoom_factor={zoom_factor}
+                    />
                 }
             </div>
             </div>

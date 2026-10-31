@@ -1,6 +1,6 @@
 use super::{
-    CompiledRegex, Filter, ItemField, Leaf, Node, NodeId, NumericOperator, PlaylistItemType, PresenceOperator,
-    StringOperator,
+    CompiledRegex, Filter, ItemField, Leaf, NoPluginCalls, Node, NodeId, NumericOperator, PlaylistItemType,
+    PluginCallDecisions, PresenceOperator, StringOperator,
 };
 use crate::foundation::value_provider::ValueProvider;
 use log::{log_enabled, trace, Level};
@@ -59,9 +59,11 @@ fn string_caption_matches(provider: &ValueProvider<'_>, op: StringOperator, valu
 }
 
 impl Leaf {
-    /// Evaluates a comparison; the leaves carry no children.
-    fn matches(&self, provider: &ValueProvider) -> bool {
+    /// Evaluates a comparison; the leaves carry no children. `item` is the position of the
+    /// evaluated item in the batch `decisions` was prepared for.
+    fn matches<D: PluginCallDecisions + ?Sized>(&self, provider: &ValueProvider, decisions: &D, item: usize) -> bool {
         match self {
+            Self::PluginCall { call, .. } => decisions.decision(*call, item),
             Self::FieldComparison(field, rewc) => {
                 let (is_match, value) = if field == &ItemField::Caption {
                     get_caption(provider, rewc)
@@ -167,24 +169,50 @@ impl Filter {
     /// evaluates a filter. The remainder of a deeper tree is walked iteratively.
     const RECURSIVE_EVAL_DEPTH: usize = 256;
 
-    pub fn filter(&self, provider: &ValueProvider) -> bool {
-        self.eval_node(self.root(), provider, Self::RECURSIVE_EVAL_DEPTH)
+    /// Evaluates the filter with every `plugin.<id>.<fn>(...)` term answering `false`.
+    pub fn filter(&self, provider: &ValueProvider) -> bool { self.filter_with(provider, &NoPluginCalls, 0) }
+
+    /// Evaluates the filter for the item at position `item` of the batch `decisions` was
+    /// prepared for. Plugin terms read their answer from `decisions`; no plugin runs here.
+    pub fn filter_with<D: PluginCallDecisions + ?Sized>(
+        &self,
+        provider: &ValueProvider,
+        decisions: &D,
+        item: usize,
+    ) -> bool {
+        self.eval_node_with(self.root(), provider, decisions, item, Self::RECURSIVE_EVAL_DEPTH)
     }
 
+    #[cfg(test)]
     pub(super) fn eval_node(&self, id: NodeId, provider: &ValueProvider, budget: usize) -> bool {
+        self.eval_node_with(id, provider, &NoPluginCalls, 0, budget)
+    }
+
+    #[cfg(test)]
+    pub(super) fn eval_iterative(&self, root: NodeId, provider: &ValueProvider) -> bool {
+        self.eval_iterative_with(root, provider, &NoPluginCalls, 0)
+    }
+
+    fn eval_node_with<D: PluginCallDecisions + ?Sized>(
+        &self,
+        id: NodeId,
+        provider: &ValueProvider,
+        decisions: &D,
+        item: usize,
+        budget: usize,
+    ) -> bool {
         if budget == 0 {
-            return self.eval_iterative(id, provider);
+            return self.eval_iterative_with(id, provider, decisions, item);
         }
+        let eval = |id: NodeId| self.eval_node_with(id, provider, decisions, item, budget - 1);
         match self.node(id) {
-            Some(Node::Leaf(leaf_id)) => self.leaf(*leaf_id).is_some_and(|leaf| leaf.matches(provider)),
-            Some(Node::Group(inner)) => self.eval_node(*inner, provider, budget - 1),
-            Some(Node::Not(inner)) => !self.eval_node(*inner, provider, budget - 1),
-            Some(Node::And(left, right)) => {
-                self.eval_node(*left, provider, budget - 1) && self.eval_node(*right, provider, budget - 1)
+            Some(Node::Leaf(leaf_id)) => {
+                self.leaf(*leaf_id).is_some_and(|leaf| leaf.matches(provider, decisions, item))
             }
-            Some(Node::Or(left, right)) => {
-                self.eval_node(*left, provider, budget - 1) || self.eval_node(*right, provider, budget - 1)
-            }
+            Some(Node::Group(inner)) => eval(*inner),
+            Some(Node::Not(inner)) => !eval(*inner),
+            Some(Node::And(left, right)) => eval(*left) && eval(*right),
+            Some(Node::Or(left, right)) => eval(*left) || eval(*right),
             None => false,
         }
     }
@@ -192,7 +220,13 @@ impl Filter {
     /// Walks the subtree with an explicit stack, so its depth is not limited by the native
     /// stack. `and`/`or` still short-circuit: the right operand is only scheduled once the
     /// left result leaves the outcome open.
-    pub(super) fn eval_iterative(&self, root: NodeId, provider: &ValueProvider) -> bool {
+    fn eval_iterative_with<D: PluginCallDecisions + ?Sized>(
+        &self,
+        root: NodeId,
+        provider: &ValueProvider,
+        decisions: &D,
+        item: usize,
+    ) -> bool {
         enum Step {
             Eval(NodeId),
             Not,
@@ -236,7 +270,7 @@ impl Filter {
 
             match self.node(id) {
                 Some(Node::Leaf(leaf_id)) => {
-                    results.push(self.leaf(*leaf_id).is_some_and(|leaf| leaf.matches(provider)));
+                    results.push(self.leaf(*leaf_id).is_some_and(|leaf| leaf.matches(provider, decisions, item)));
                 }
                 Some(Node::Group(inner)) => steps.push(Step::Eval(*inner)),
                 Some(Node::Not(inner)) => {

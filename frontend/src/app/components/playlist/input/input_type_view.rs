@@ -21,6 +21,9 @@ pub const fn input_type_label_key(input_type: InputType) -> &'static str {
         InputType::Jellyfin => "LABEL.JELLYFIN",
         InputType::Plex => "LABEL.PLEX",
         InputType::Staged => "LABEL.STAGED",
+        // Reuses the existing label until W6b adds a type-specific key (the i18n files are the
+        // orchestrator's).
+        InputType::Plugin => "LABEL.PLUGINS",
     }
 }
 

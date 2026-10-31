@@ -29,6 +29,7 @@ fn test_provider_stream_factory_options_propagate_buffer_max_bytes() {
         stream_channel: None,
         connect_failure_stage: None,
         content_representation: ProviderContentRepresentationMode::PreserveOrigin,
+        plugin_headers: None,
     });
     assert_eq!(options.get_buffer_max_bytes(), 4096);
     assert_eq!(options.get_buffer_size(), 1024);
@@ -64,6 +65,7 @@ fn test_shared_streams_do_not_use_provider_buffer_wrapper() {
         stream_channel: None,
         connect_failure_stage: None,
         content_representation: ProviderContentRepresentationMode::PreserveOrigin,
+        plugin_headers: None,
     });
 
     assert!(
@@ -119,6 +121,7 @@ fn test_provider_stream_factory_options_builds_connect_failed_stream_info_from_h
         }),
         connect_failure_stage: Some(FailureStage::ProviderOpen),
         content_representation: ProviderContentRepresentationMode::PreserveOrigin,
+        plugin_headers: None,
     });
 
     let info = options.build_connect_failed_stream_info("provider-a".intern()).expect("history context");

@@ -11,6 +11,16 @@ const BLOCK_WIDTH: f32 = 200.0;
 const INPUT_VERTICAL_STEP_BASE: f32 = BLOCK_HEIGHT + Y_GAP * 2.0;
 const INPUT_BATCH_EXTRA_HEIGHT: f32 = 16.0;
 
+/// Width of the canvas tile that hosts the plugin frames of the `source-editor-tile` slot.
+pub const PLUGIN_TILE_WIDTH: f32 = 360.0;
+
+/// Where the plugin tile sits on the canvas: below the lowest block, at the left edge.
+/// It is not part of the graph, so [`layout`] leaves it alone and it follows pan and zoom.
+pub fn plugin_tile_origin(blocks: &[Block]) -> (f32, f32) {
+    let bottom = blocks.iter().map(|block| block.position.1).fold(0.0_f32, f32::max);
+    (CANVAS_OFFSET, bottom + BLOCK_HEIGHT + Y_GAP * 2.0)
+}
+
 struct TargetBlock {
     id: BlockId,
     outputs: Option<Vec<BlockId>>,

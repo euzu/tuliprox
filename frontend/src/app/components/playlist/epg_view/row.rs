@@ -26,6 +26,8 @@ pub(super) struct EpgRowProps {
     pub can_record: bool,
     /// `(channel key, programme index)`
     pub on_record: Callback<(usize, usize)>,
+    /// `(channel key, Some(programme index))`: the programme the user clicked.
+    pub on_focus: Callback<(usize, Option<usize>)>,
 }
 
 impl PartialEq for EpgRowProps {
@@ -38,6 +40,7 @@ impl PartialEq for EpgRowProps {
             && self.row_style == other.row_style
             && self.can_record == other.can_record
             && self.on_record == other.on_record
+            && self.on_focus == other.on_focus
     }
 }
 
@@ -74,10 +77,13 @@ pub(super) fn EpgRow(props: &EpgRowProps) -> Html {
             } else {
                 html! {}
             };
+            let on_focus = props.on_focus.clone();
+            let focus_key = channel.key;
             html! {
                 <>
                 <div class={classes!("tp__epg__program", is_active.then_some("tp__epg__program-active"))}
-                     style={format!("left:{left}px;width:{width}px")} title={programme.title.to_string()}>
+                     style={format!("left:{left}px;width:{width}px")} title={programme.title.to_string()}
+                     onclick={Callback::from(move |_: MouseEvent| on_focus.emit((focus_key, Some(idx))))}>
                     <div class="tp__epg__program-time">{ &*programme.time_label }</div>
                     <div class="tp__epg__program-title">{ &*programme.title }</div>
                 </div>

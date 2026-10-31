@@ -332,6 +332,7 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
 
     let properties = VideoStreamProperties {
         name: movie.title.clone().into(),
+        plugin_fingerprint: None,
         category_id: 0,
         stream_id: 0,
         stream_icon: poster.unwrap_or("").to_owned().into(),
@@ -490,6 +491,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
 
     let properties = SeriesStreamProperties {
         name: series.title.clone().into(),
+        plugin_fingerprint: None,
         category_id: 0,
         series_id: 0,
         backdrop_path: series

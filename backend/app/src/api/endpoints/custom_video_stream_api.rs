@@ -670,6 +670,7 @@ mod tests {
             })),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::from_pointee(api_proxy)),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -752,6 +753,7 @@ mod tests {
             auth: crate::api::model::AuthState::for_tests(),
             playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
             maintenance: crate::api::model::create_test_maintenance(""),
+            plugins: crate::api::model::AppPlugins::default(),
         })
     }
 

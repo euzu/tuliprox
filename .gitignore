@@ -56,6 +56,9 @@ backend/app/Cargo.lock
 !README.md
 !CHANGELOG.md
 !CONTRIBUTING.md
+!plugin-system-plan.md
+!plugin-system-phases.md
+!plugin-system-history.md
 
 # Ignore ai documentation files
 # no ai files

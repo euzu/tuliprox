@@ -261,6 +261,7 @@ mod tests {
             read_only: false,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
+            plugin_tools: false,
         };
         let mut config = ConfigDto { mcp: Some(mcp.clone()), ..ConfigDto::default() };
 
@@ -295,6 +296,7 @@ mod tests {
             read_only: false,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
+            plugin_tools: false,
         };
         let mut config = ConfigDto::default();
 

@@ -34,7 +34,7 @@ impl InputUpdateCapabilities {
             return Self::Disabled;
         }
         match input_type {
-            InputType::Xtream | InputType::Stalker | InputType::M3u => Self::Manual {
+            InputType::Xtream | InputType::Stalker | InputType::M3u | InputType::Plugin => Self::Manual {
                 policies: &[InputRefreshPolicy::NORMAL, InputRefreshPolicy::REFRESH, InputRefreshPolicy::FORCE],
             },
             InputType::Plex | InputType::Jellyfin | InputType::Emby => {
@@ -88,6 +88,7 @@ mod tests {
             (InputType::XtreamBatch, 0),
             (InputType::StalkerBatch, 0),
             (InputType::Staged, 0),
+            (InputType::Plugin, 3),
         ];
         for (input_type, count) in cases {
             let capabilities = InputUpdateCapabilities::for_input_type(input_type, true);

@@ -902,7 +902,8 @@
       "QUEUE_CAPACITY": "Tamaño de la cola de eventos acotada (mínimo 16). Si se llena, los eventos se descartan y se cuentan; las descargas nunca esperan.",
       "FRESHNESS_SECS": "Segundos tras los cuales una medición se informa como desconocida (null) en lugar de buena o mala.",
       "WINDOW_SECS": "Duración en segundos de la ventana móvil usada para los agregados."
-    }
+    },
+    "PLUGIN_SECRET_ENV_HINT": "Guarde los secretos como referencias ${env:VAR} en lugar de valores literales. La referencia se resuelve al cargar el plugin y nunca se muestra aquí."
   },
   "HINT": {
     "CONFIG": {
@@ -2004,7 +2005,48 @@
     "SYSLOG_LOG_LEVEL": "Nivel de registro de Syslog",
     "SYSLOG_MAX_MESSAGE_LEN": "Longitud máxima del mensaje",
     "SYSLOG_PORT": "Puerto de Syslog",
-    "SYSLOG_QUEUE_CAPACITY": "Capacidad de cola"
+    "SYSLOG_QUEUE_CAPACITY": "Capacidad de cola",
+    "PLUGINS": "Plugins",
+    "PLUGIN_STATE_DISCOVERED": "Detectado",
+    "PLUGIN_STATE_INVALID": "No válido",
+    "PLUGIN_STATE_PENDING_APPROVAL": "Pendiente de aprobación",
+    "PLUGIN_STATE_APPROVED": "Aprobado",
+    "PLUGIN_STATE_LOADED": "Cargado",
+    "PLUGIN_STATE_FAILED": "Fallido",
+    "PLUGIN_HOOKS": "Hooks",
+    "PLUGIN_CALLS": "Llamadas",
+    "PLUGIN_FAILURES": "Fallos",
+    "PLUGIN_BUDGET_SKIPS": "Omisiones por presupuesto",
+    "PLUGIN_LAST_ERROR": "Último error",
+    "PLUGIN_HOOK": "Hook",
+    "PLUGIN_KEPT": "Conservados",
+    "PLUGIN_DROPPED": "Descartados",
+    "PLUGIN_MODIFIED": "Modificados",
+    "PLUGIN_ERRORS": "Errores",
+    "PLUGIN_DURATION_MS": "Duración (ms)",
+    "PLUGIN_TASKS": "Tareas",
+    "PLUGIN_NO_TASKS": "No se declaran tareas",
+    "PLUGIN_SECRET_SET": "Definido",
+    "PLUGIN_SECRET_NOT_SET": "No definido",
+    "PLUGIN_SECRET_NEW_VALUE": "Introduzca un nuevo valor (déjelo vacío para conservar el actual)",
+    "PLUGIN_LOGS": "Registros del plugin",
+    "PLUGIN_INSTALL": "Instalar plugin",
+    "PLUGIN_UPLOAD": "Subir",
+    "PLUGIN_APPROVE_INSTALL": "Aprobar e instalar",
+    "PLUGIN_FILE": "Paquete del plugin (.tlpx)",
+    "PLUGIN_CAPABILITIES": "Capacidades solicitadas",
+    "PLUGIN_NO_CAPABILITIES": "Ninguna. Este plugin no pide permisos especiales.",
+    "PLUGIN_NETWORK_WARNING_TITLE": "Acceso a la red sin restricciones",
+    "PLUGIN_CUSTOM_UI": "Interfaz de usuario propia",
+    "PLUGIN_RPC_EXPORTS": "Funciones invocables",
+    "PLUGIN_SECRETS": "Ajustes secretos",
+    "PLUGIN_REPLACES": "Sustituye a la versión instalada",
+    "PLUGIN_AUTHOR": "Autor",
+    "PLUGIN_HOMEPAGE": "Página web",
+    "PLUGIN_EXPOSE_MCP": "Exponer a MCP (los asistentes de IA pueden llamarlas sin supervisión)",
+    "PLUGIN_UNINSTALL": "Desinstalar",
+    "PLUGIN_PURGE_DATA": "Eliminar también los datos guardados",
+    "PLUGIN_REENABLE": "Volver a activar"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Portapapeles no compatible.\nSu navegador o el contexto actual no permite el acceso al portapapeles.\nUtilice HTTPS o localhost.",
@@ -2277,7 +2319,26 @@
     },
     "USER_BOUQUET": {
       "FAIL": "¡No se pudieron descargar los bouquets de usuario!"
-    }
+    },
+    "PLUGIN_LOAD_FAILED": "No se pudieron cargar los plugins:",
+    "PLUGIN_LIST_EMPTY": "No se encontraron plugins.",
+    "PLUGIN_STATS_UNAVAILABLE": "Estadísticas no disponibles.",
+    "PLUGIN_SETTINGS_LOAD_FAILED": "No se pudo cargar la configuración del plugin:",
+    "PLUGIN_SETTINGS_SAVED": "Configuración del plugin guardada.",
+    "PLUGIN_SETTINGS_NO_SCHEMA": "Este plugin no incluye un esquema de configuración, así que sus ajustes se muestran solo en modo lectura.",
+    "PLUGIN_SCHEMA_UNSUPPORTED": "El esquema de configuración usa una construcción que el formulario no puede mostrar:",
+    "PLUGIN_LOGS_LOAD_FAILED": "No se pudieron cargar los registros del plugin:",
+    "PLUGIN_CUSTOM_UI_WARNING": "Este plugin incluye su propia interfaz. Se ejecuta aislado, pero puede llamar a sus funciones declaradas con tus permisos y abrir páginas externas desde su marco.",
+    "PLUGIN_SECRETS_HINT": "Este plugin pide estos ajustes secretos, como tokens de API:",
+    "PLUGIN_UPLOAD_HINT": "Elige un paquete .tlpx. Se comprueba y se te muestra para revisarlo; no se instala nada hasta que lo apruebes.",
+    "PLUGIN_UPLOAD_FAILED": "El paquete fue rechazado:",
+    "PLUGIN_INSTALLED": "Plugin aprobado e instalado (todavía no activado)",
+    "PLUGIN_ENABLED": "Plugin activado",
+    "PLUGIN_DISABLED": "Plugin desactivado",
+    "PLUGIN_UNINSTALLED": "Plugin desinstalado",
+    "PLUGIN_UNINSTALL_CONFIRM": "Esto elimina el plugin y su entrada en config.yml. No se puede deshacer.",
+    "PLUGIN_PURGE_HINT": "Déjalo desactivado para conservar los datos del plugin, por ejemplo si piensas reinstalarlo.",
+    "PLUGIN_FRAME_INVALID": "No se puede mostrar esta página del plugin."
   },
   "SETUP": {
     "DESC": {
@@ -2299,7 +2360,8 @@
       "UNKNOWN": "Configure este paso de instalación.",
       "VIDEO": "Configure los ajustes de vídeo.",
       "WEB_UI": "Configure los ajustes de la WebUI.",
-      "WELCOME": "Cree el primer usuario de la WebUI. Estas credenciales se escribirán en user.txt."
+      "WELCOME": "Cree el primer usuario de la WebUI. Estas credenciales se escribirán en user.txt.",
+      "PLUGINS": "Configura los plugins que has instalado."
     },
     "LABEL": {
       "API": "API",
@@ -2330,7 +2392,8 @@
       "WEBUI_USER": "Usuario de WebUI",
       "WEBUI_USERNAME": "Nombre de usuario de WebUI",
       "WEB_UI": "Web-Ui",
-      "WELCOME": "Bienvenido"
+      "WELCOME": "Bienvenido",
+      "PLUGINS": "Plugins"
     },
     "MSG": {
       "COMPLETE_RESTART_HINT": "Instalación completada correctamente. Reinicie la aplicación/contenedor para continuar.",

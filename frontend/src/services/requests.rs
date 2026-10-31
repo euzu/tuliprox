@@ -6,7 +6,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use shared::utils::{bin_deserialize, bin_serialize, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON};
 use std::{collections::HashMap, sync::OnceLock};
-use web_sys::window;
+use web_sys::{window, FormData};
 
 enum RequestMethod {
     Get,
@@ -334,6 +334,36 @@ where
     T: DeserializeOwned + 'static + std::fmt::Debug,
 {
     request(RequestMethod::Get, url, (), content_type, response_type, None, None).await.map(|response| response.body)
+}
+
+/// A response the caller decodes itself: the status and the body text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+/// `POST` a `multipart/form-data` body and hand back the status and the body
+/// text, so the caller can read the error body of a `422`.
+///
+/// No `Content-Type` is set: the browser derives it from the `FormData`,
+/// including the boundary the body needs. A header set here would drop it.
+pub async fn request_post_form(url: &str, form: FormData) -> Result<RawResponse, Error> {
+    let mut request = Request::post(url).header("Accept", CONTENT_TYPE_JSON);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+    let request = request.body(form).map_err(|err| {
+        error!("Failed to attach the form body: {err}");
+        Error::RequestError
+    })?;
+    let response = request.send().await.map_err(|err| {
+        error!("{err}");
+        Error::RequestError
+    })?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Ok(RawResponse { status, body })
 }
 
 pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {

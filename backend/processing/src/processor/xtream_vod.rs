@@ -11,15 +11,18 @@ use crate::{
 };
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use shared::{
     defaults::default_probe_user_priority,
     error::TuliproxError,
     foundation::ValueProvider,
     model::{
-        EventSink, MediaQuality, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
-        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
+        EventSink, HookCtx, MediaQuality, PlaylistItem, PlaylistItemHeader, PlaylistItemType, PluginHook, PluginHost,
+        PluginRunReport, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
+        XtreamPlaylistItem, XtreamVideoInfo,
     },
+    utils::Internable,
 };
 use std::{
     collections::HashSet,
@@ -57,8 +60,8 @@ use tuliprox_session::ActiveProviderManager;
 create_resolve_options_function_for_xtream_target!(vod);
 
 #[allow(clippy::too_many_lines)]
-pub async fn playlist_resolve_vod<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub async fn playlist_resolve_vod<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     provider_fpl: &mut FetchedPlaylist<'_>,
@@ -110,8 +113,8 @@ fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processe
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     _errors: &mut Vec<TuliproxError>,
     fpl: &mut FetchedPlaylist<'_>,
     resolve_options: ResolveOptions,
@@ -131,8 +134,8 @@ async fn playlist_resolve_vod_info<E: EventSink + Clone + 'static, M: MetadataUp
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: ResolveOptions,
@@ -417,8 +420,8 @@ fn check_resolve_tmdb(
     }
 }
 
-fn queue_background_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+fn queue_background_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -505,8 +508,8 @@ fn queue_background_vod_info<E: EventSink + Clone + 'static, M: MetadataUpdateSi
     }
 }
 
-async fn update_vod_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn update_vod_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,
@@ -519,6 +522,7 @@ async fn update_vod_info_immediate<E: EventSink + Clone + 'static, M: MetadataUp
         fetch_info || reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_vod_metadata(
+        &ctx.plugins,
         &ctx.config,
         &ctx.client,
         input,
@@ -545,8 +549,13 @@ async fn update_vod_info_immediate<E: EventSink + Clone + 'static, M: MetadataUp
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
 /// * `resolve_missing_facts` - If true, resolves missing TMDB/date facts from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
+/// * `plugins` - runs `enrich-metadata` after the provider fetch and the TMDB fact patch and before
+///   persistence, non-fatally (see [`enrich_resolved_metadata`]). Both callers reach it through the
+///   `MaintenanceGate`: `playlist_resolve` skips inputs in maintenance (`target.rs`) and the background
+///   worker requeues them (`task_processing.rs`).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
-pub async fn update_vod_metadata(
+pub async fn update_vod_metadata<P: PluginHost>(
+    plugins: &P,
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
@@ -795,7 +804,15 @@ pub async fn update_vod_metadata(
         out.store(has_tmdb && has_date, Ordering::Relaxed);
     }
 
-    // 3. Probe (if enabled globally in config)
+    // 3. `enrich-metadata` plugins, over the resolved info. A probe-only pass keeps what an earlier pass settled.
+    if fetch_info || resolve_missing_facts {
+        let item = metadata_hook_item(input, XtreamCluster::Video, &id, &display_title, existing_item.as_ref());
+        if enrich_resolved_metadata(plugins, &input.name, &item, &mut properties).await {
+            properties_updated = true;
+        }
+    }
+
+    // 4. Probe (if enabled globally in config)
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if do_probe && ffprobe_enabled {
         // Ensure details struct exists before probing
@@ -959,7 +976,7 @@ pub async fn update_vod_metadata(
         }
     }
 
-    // 4. Persist if updated
+    // 5. Persist if updated
     if properties_updated || fetched_new {
         if save {
             if let Some(stream_id) = stream_id_opt {
@@ -981,4 +998,275 @@ pub async fn update_vod_metadata(
     }
 
     Ok(None)
+}
+
+/// Resolved metadata a plugin may amend through `enrich-metadata`.
+///
+/// The record travels to the guest as its own JSON. What comes back is parsed
+/// into a fresh record and [`restore_identity`](Self::restore_identity) puts the
+/// host-owned identity back, so a plugin changes the descriptive fields and never
+/// the key the record is stored under.
+pub(crate) trait EnrichableMetadata: Serialize + DeserializeOwned + PartialEq + Clone {
+    /// Copy the fields a plugin must not change from `original`.
+    fn restore_identity(&mut self, original: &Self);
+
+    /// The plugin fingerprint stored with the persisted record, if any.
+    ///
+    /// `VideoStreamProperties` and `SeriesStreamProperties` store it in
+    /// `plugin_fingerprint`; the defaults store nothing.
+    fn plugin_fingerprint(&self) -> Option<&str> { None }
+
+    /// Record the fingerprint of the plugins that enriched this record. `true`
+    /// when the record changed because of it (and so needs persisting).
+    fn set_plugin_fingerprint(&mut self, _fingerprint: Option<String>) -> bool { false }
+}
+
+impl EnrichableMetadata for VideoStreamProperties {
+    fn restore_identity(&mut self, original: &Self) {
+        self.stream_id = original.stream_id;
+        self.category_id = original.category_id;
+    }
+
+    fn plugin_fingerprint(&self) -> Option<&str> { self.plugin_fingerprint.as_deref() }
+
+    fn set_plugin_fingerprint(&mut self, fingerprint: Option<String>) -> bool {
+        let fingerprint: Option<Arc<str>> = fingerprint.map(Arc::from);
+        std::mem::replace(&mut self.plugin_fingerprint, fingerprint.clone()) != fingerprint
+    }
+}
+
+/// The channel an `enrich-metadata` plugin sees for the item being resolved: its
+/// name and title, the cluster, and the input it belongs to. The stored playlist
+/// row is used for what it knows (group, logo, url); the persisted properties are
+/// NOT copied into it, because the metadata JSON is the hook's payload.
+pub(crate) fn metadata_hook_item(
+    input: &ConfigInput,
+    cluster: XtreamCluster,
+    id: &ProviderIdType,
+    title: &str,
+    existing: Option<&XtreamPlaylistItem>,
+) -> PlaylistItem {
+    let mut header = PlaylistItemHeader {
+        input_name: Arc::clone(&input.name),
+        xtream_cluster: cluster,
+        item_type: PlaylistItemType::from(cluster),
+        title: title.intern(),
+        name: title.intern(),
+        ..PlaylistItemHeader::default()
+    };
+    if let ProviderIdType::Id(provider_id) = id {
+        header.input_stream_id = provider_id.to_string().intern();
+    }
+    if let Some(existing) = existing {
+        header.name = Arc::clone(&existing.name);
+        header.title = Arc::clone(&existing.title);
+        header.group = Arc::clone(&existing.group);
+        header.logo = Arc::clone(&existing.logo);
+        header.url = Arc::clone(&existing.url);
+        header.virtual_id = existing.virtual_id;
+        header.category_id = existing.category_id;
+    }
+    PlaylistItem { header }
+}
+
+/// Run the `enrich-metadata` plugins over a resolved VOD / series record.
+///
+/// Non-fatal, like TMDB: a plugin failure is handled (logged, counted, breaker)
+/// inside the host, and JSON that does not parse back into the record is
+/// ignored with a warning. Skipped when no plugin runs the hook, or when the
+/// record already carries the fingerprint of the plugins that would run now.
+/// Returns whether the record changed and needs persisting. The hook has no
+/// target (`ctx.target` is empty), only the input.
+pub(crate) async fn enrich_resolved_metadata<P: PluginHost, T: EnrichableMetadata>(
+    plugins: &P,
+    input: &str,
+    item: &PlaylistItem,
+    properties: &mut T,
+) -> bool {
+    if !plugins.wants(PluginHook::EnrichMetadata, "") {
+        return false;
+    }
+    let fingerprint = plugins.fingerprint(PluginHook::EnrichMetadata);
+    if fingerprint.is_some() && properties.plugin_fingerprint() == fingerprint.as_deref() {
+        return false;
+    }
+    let json = match serde_json::to_string(properties) {
+        Ok(json) => json,
+        Err(err) => {
+            warn!("enrich-metadata skipped for '{}' of input '{input}': {err}", item.header.title);
+            return false;
+        }
+    };
+    let ctx = HookCtx::new("").with_input(input);
+    let mut report = PluginRunReport::default();
+    let amended = plugins.enrich_metadata(&ctx, item, &json, &mut report).await;
+    let mut changed = apply_amended_metadata(properties, amended.as_deref(), &item.header.title);
+    changed |= properties.set_plugin_fingerprint(fingerprint);
+    changed
+}
+
+/// Put the plugins' amended JSON into `properties`. `None` (no plugin changed
+/// it) and JSON that is not a valid record leave `properties` as they were; the
+/// latter is warned about. Returns whether `properties` changed.
+fn apply_amended_metadata<T: EnrichableMetadata>(properties: &mut T, amended: Option<&str>, title: &str) -> bool {
+    let Some(amended) = amended else {
+        return false;
+    };
+    match serde_json::from_str::<T>(amended) {
+        Ok(mut parsed) => {
+            parsed.restore_identity(properties);
+            if parsed == *properties {
+                return false;
+            }
+            *properties = parsed;
+            true
+        }
+        Err(err) => {
+            warn!("Ignoring the metadata an enrich-metadata plugin returned for '{title}': {err}");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod enrich_metadata_tests {
+    use super::*;
+    use serde::Deserialize;
+
+    /// A host whose `enrich-metadata` answers `reply` and counts its calls.
+    #[derive(Clone)]
+    struct Probe {
+        reply: Option<String>,
+        fingerprint: Option<String>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Probe {
+        fn new(reply: Option<&str>) -> Self {
+            Self {
+                reply: reply.map(ToString::to_string),
+                fingerprint: Some("fp-1".to_string()),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize { self.calls.load(Ordering::Relaxed) }
+    }
+
+    #[allow(clippy::unused_async_trait_impl, reason = "a scripted host answers without awaiting")]
+    impl PluginHost for Probe {
+        fn wants(&self, hook: PluginHook, _target: &str) -> bool { hook == PluginHook::EnrichMetadata }
+
+        fn fingerprint(&self, _hook: PluginHook) -> Option<String> { self.fingerprint.clone() }
+
+        async fn enrich_metadata(
+            &self,
+            ctx: &HookCtx<'_>,
+            _item: &PlaylistItem,
+            _metadata_json: &str,
+            _report: &mut PluginRunReport,
+        ) -> Option<String> {
+            assert_eq!(ctx.target, "");
+            assert_eq!(ctx.input, Some("provider"));
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.reply.clone()
+        }
+    }
+
+    fn video() -> VideoStreamProperties {
+        VideoStreamProperties {
+            name: "Heat".into(),
+            stream_id: 7,
+            category_id: 3,
+            details: Some(VideoStreamDetailProperties { plot: Some("A heist.".into()), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    fn item() -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: "Heat".into(),
+                xtream_cluster: XtreamCluster::Video,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn the_record_round_trips_through_json() {
+        let original = video();
+        let json = serde_json::to_string(&original).expect("serialize");
+        assert_eq!(serde_json::from_str::<VideoStreamProperties>(&json).expect("deserialize"), original);
+    }
+
+    #[tokio::test]
+    async fn an_amended_field_is_applied_and_the_identity_is_kept() {
+        let mut amended = video();
+        amended.details.as_mut().expect("details").plot = Some("A heist, amended.".into());
+        amended.stream_id = 999; // a plugin must not re-key the record
+        amended.category_id = 998;
+        let reply = serde_json::to_string(&amended).expect("serialize");
+        let probe = Probe::new(Some(&reply));
+
+        let mut properties = video();
+        assert!(enrich_resolved_metadata(&probe, "provider", &item(), &mut properties).await);
+        assert_eq!(properties.details.as_ref().and_then(|d| d.plot.as_deref()), Some("A heist, amended."));
+        assert_eq!((properties.stream_id, properties.category_id), (7, 3));
+    }
+
+    #[tokio::test]
+    async fn invalid_json_a_failed_call_and_an_unchanged_answer_leave_the_record_alone() {
+        let cases = [
+            ("not json", Some("{ nope".to_string())),
+            ("wrong shape", Some("[1, 2, 3]".to_string())),
+            ("plugin failed or changed nothing", None),
+            ("identical", Some(serde_json::to_string(&video()).expect("serialize"))),
+        ];
+        for (name, reply) in cases {
+            let probe = Probe::new(reply.as_deref());
+            let mut properties = video();
+            let changed = enrich_resolved_metadata(&probe, "provider", &item(), &mut properties).await;
+            assert!(!changed, "{name}: reported a change");
+            assert_eq!(properties, video(), "{name}: record modified");
+            assert_eq!(probe.calls(), 1, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_plugin_means_no_call() {
+        let mut properties = video();
+        assert!(!enrich_resolved_metadata(&shared::model::NoPlugins, "provider", &item(), &mut properties).await);
+        assert_eq!(properties, video());
+    }
+
+    /// A record that carries the current fingerprint is not sent again.
+    #[tokio::test]
+    async fn a_matching_stored_fingerprint_skips_the_call() {
+        #[derive(Clone, PartialEq, Serialize, Deserialize)]
+        struct Stamped {
+            fingerprint: Option<String>,
+        }
+        impl EnrichableMetadata for Stamped {
+            fn restore_identity(&mut self, _original: &Self) {}
+            fn plugin_fingerprint(&self) -> Option<&str> { self.fingerprint.as_deref() }
+            fn set_plugin_fingerprint(&mut self, fingerprint: Option<String>) -> bool {
+                std::mem::replace(&mut self.fingerprint, fingerprint.clone()) != fingerprint
+            }
+        }
+
+        let probe = Probe::new(None);
+        let mut record = Stamped { fingerprint: None };
+        assert!(enrich_resolved_metadata(&probe, "provider", &item(), &mut record).await, "stamping persists");
+        assert_eq!(record.fingerprint.as_deref(), Some("fp-1"));
+        assert_eq!(probe.calls(), 1);
+
+        assert!(!enrich_resolved_metadata(&probe, "provider", &item(), &mut record).await);
+        assert_eq!(probe.calls(), 1, "same fingerprint: skipped");
+
+        let newer = Probe { fingerprint: Some("fp-2".to_string()), ..probe.clone() };
+        assert!(enrich_resolved_metadata(&newer, "provider", &item(), &mut record).await);
+        assert_eq!(probe.calls(), 2, "a new fingerprint runs again");
+        assert_eq!(record.fingerprint.as_deref(), Some("fp-2"));
+    }
 }

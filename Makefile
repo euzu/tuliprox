@@ -221,6 +221,12 @@ testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<n
 		$(if $(RUN_ID),--run-id $(RUN_ID),)
 	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
 
+.PHONY: plugin-fixtures
+plugin-fixtures: ## Build the wasm plugin test fixtures (wasm32-wasip2) into target/plugin-fixtures
+	@echo "==> Building plugin test fixtures (wasm32-wasip2)"
+	@./bin/build_plugin_fixture.sh
+	@echo "✅ Plugin fixtures written to target/plugin-fixtures/plugins"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"

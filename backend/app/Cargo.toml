@@ -15,6 +15,12 @@ workspace = true
 # expanded at the call site; cargo-machete's heuristic cannot see through it.
 ignored = ["paste"]
 
+[features]
+# The wasm plugin host (wasmtime). On by default; a build without it compiles
+# every pipeline hook site away.
+default = ["plugins"]
+plugins = ["dep:tuliprox-plugins", "tuliprox-metadata/plugins"]
+
 [dependencies]
 lol_html = "3.0.2"
 shared = { workspace = true }
@@ -24,6 +30,7 @@ tuliprox-iptv = { workspace = true }
 tuliprox-library = { workspace = true }
 tuliprox-messaging = { workspace = true }
 tuliprox-processing = { workspace = true }
+tuliprox-plugins = { workspace = true, optional = true }
 tuliprox-auth = { workspace = true }
 tuliprox-config-loader = { workspace = true }
 tuliprox-dvr = { workspace = true }
@@ -43,7 +50,7 @@ url.workspace = true
 chrono.workspace = true
 iana-time-zone = "0.1.65"
 cron.workspace = true
-axum = { version = "0.8.9" , features = ["macros", "default", "ws"]}
+axum = { version = "0.8.9" , features = ["macros", "default", "ws", "multipart"]}
 serde_html_form = "0.4.1"
 tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["cors", "auth", "fs", "compression-full", "trace"] }

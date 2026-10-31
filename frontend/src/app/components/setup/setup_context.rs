@@ -23,6 +23,7 @@ const MCP: &str = "mcp";
 const SOURCES: &str = "sources";
 const API_USERS: &str = "api_users";
 const SCHEDULES: &str = "schedules";
+const PLUGINS: &str = "plugins";
 const FINISH: &str = "finish";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -44,12 +45,14 @@ pub enum SetupStep {
     Sources,
     ApiUsers,
     Schedules,
+    /// Shown only when a plugin contributes a `setup-wizard-step`.
+    Plugins,
     Finish,
 }
 
 impl SetupStep {
     #[cfg(test)]
-    pub const ALL_VARIANTS: [Self; 18] = [
+    pub const ALL_VARIANTS: [Self; 19] = [
         Self::Welcome,
         Self::Api,
         Self::WebUi,
@@ -67,10 +70,11 @@ impl SetupStep {
         Self::Sources,
         Self::ApiUsers,
         Self::Schedules,
+        Self::Plugins,
         Self::Finish,
     ];
 
-    pub const ORDER: [Self; 18] = [
+    pub const ORDER: [Self; 19] = [
         Self::Welcome,
         Self::Api,
         Self::WebUi,
@@ -88,35 +92,33 @@ impl SetupStep {
         Self::Sources,
         Self::ApiUsers,
         Self::Schedules,
+        Self::Plugins,
         Self::Finish,
     ];
 
     pub fn all() -> &'static [Self] { &Self::ORDER }
 
+    /// The steps the wizard goes through: the plugin step only when a plugin has one.
+    pub fn visible(plugin_step: bool) -> Vec<Self> {
+        Self::ORDER.into_iter().filter(|step| plugin_step || *step != Self::Plugins).collect()
+    }
+
+    /// The step after this one, skipping the plugin step when there is none.
+    pub fn next_visible(self, plugin_step: bool) -> Option<Self> {
+        let steps = Self::visible(plugin_step);
+        let index = steps.iter().position(|step| *step == self)?;
+        steps.get(index + 1).copied()
+    }
+
+    /// The step before this one, skipping the plugin step when there is none.
+    pub fn prev_visible(self, plugin_step: bool) -> Option<Self> {
+        let steps = Self::visible(plugin_step);
+        let index = steps.iter().position(|step| *step == self)?;
+        index.checked_sub(1).and_then(|previous| steps.get(previous).copied())
+    }
+
     pub fn index(self) -> usize {
         Self::all().iter().position(|step| *step == self).expect("SetupStep::ORDER must include all variants")
-    }
-
-    pub fn position(self) -> usize { self.index() + 1 }
-
-    pub fn total() -> usize { Self::ORDER.len() }
-
-    pub fn next(self) -> Option<Self> {
-        let index = self.index();
-        if index + 1 < Self::ORDER.len() {
-            Some(Self::ORDER[index + 1])
-        } else {
-            None
-        }
-    }
-
-    pub fn prev(self) -> Option<Self> {
-        let index = self.index();
-        if index == 0 {
-            None
-        } else {
-            Some(Self::ORDER[index - 1])
-        }
     }
 
     pub const fn title_key(self) -> &'static str {
@@ -138,6 +140,7 @@ impl SetupStep {
             Self::Sources => "SETUP.LABEL.SOURCES",
             Self::ApiUsers => "SETUP.LABEL.API_USERS",
             Self::Schedules => "SETUP.LABEL.SCHEDULES",
+            Self::Plugins => "SETUP.LABEL.PLUGINS",
             Self::Finish => "SETUP.LABEL.FINISH",
         }
     }
@@ -161,6 +164,7 @@ impl SetupStep {
             Self::Sources => "SETUP.DESC.SOURCES",
             Self::ApiUsers => "SETUP.DESC.API_USERS",
             Self::Schedules => "SETUP.DESC.SCHEDULES",
+            Self::Plugins => "SETUP.DESC.PLUGINS",
             Self::Finish => "SETUP.DESC.FINISH",
         }
     }
@@ -181,7 +185,7 @@ impl SetupStep {
             Self::Library => Some(ConfigPage::Library),
             Self::Mcp => Some(ConfigPage::Mcp),
             Self::Schedules => Some(ConfigPage::Schedules),
-            Self::Welcome | Self::Sources | Self::ApiUsers | Self::Finish => None,
+            Self::Welcome | Self::Sources | Self::ApiUsers | Self::Plugins | Self::Finish => None,
         }
     }
 }
@@ -206,6 +210,7 @@ impl SetupStep {
             SetupStep::Sources => SOURCES,
             SetupStep::ApiUsers => API_USERS,
             SetupStep::Schedules => SCHEDULES,
+            SetupStep::Plugins => PLUGINS,
             SetupStep::Finish => FINISH,
         }
     }
@@ -243,9 +248,23 @@ pub struct SetupContext {
     pub config_forms: UseStateHandle<SetupConfigFormState>,
     pub sources: UseStateHandle<SourcesConfigDto>,
     pub api_users: UseStateHandle<Vec<TargetUserDto>>,
+    /// A plugin contributes a wizard step, so the plugin step is part of the wizard.
+    pub plugin_step: bool,
     pub is_submitting: UseStateHandle<bool>,
     pub is_completed: UseStateHandle<bool>,
     pub submit_error: UseStateHandle<Option<String>>,
+}
+
+impl SetupContext {
+    /// The 1-based position of a step among the steps the wizard shows.
+    pub fn step_position(&self, step: SetupStep) -> usize {
+        SetupStep::visible(self.plugin_step).iter().position(|visible| *visible == step).map_or(0, |index| index + 1)
+    }
+
+    /// The number of steps the wizard shows.
+    pub fn step_total(&self) -> usize { SetupStep::visible(self.plugin_step).len() }
+
+    pub fn next_step(&self, step: SetupStep) -> Option<SetupStep> { step.next_visible(self.plugin_step) }
 }
 
 impl PartialEq for SetupContext {
@@ -266,5 +285,26 @@ mod tests {
 
         assert_eq!(order_set, all_variants_set);
         assert_eq!(order_set.len(), SetupStep::ORDER.len());
+    }
+
+    #[test]
+    fn the_plugin_step_sits_between_schedules_and_finish_and_is_skipped_without_plugins() {
+        assert_eq!(SetupStep::Plugins.next_visible(true), Some(SetupStep::Finish));
+        assert_eq!(SetupStep::Plugins.prev_visible(true), Some(SetupStep::Schedules));
+
+        assert_eq!(SetupStep::Schedules.next_visible(true), Some(SetupStep::Plugins));
+        assert_eq!(SetupStep::Schedules.next_visible(false), Some(SetupStep::Finish));
+        assert_eq!(SetupStep::Finish.prev_visible(true), Some(SetupStep::Plugins));
+        assert_eq!(SetupStep::Finish.prev_visible(false), Some(SetupStep::Schedules));
+        assert_eq!(SetupStep::Finish.next_visible(true), None);
+        assert_eq!(SetupStep::Welcome.prev_visible(false), None);
+    }
+
+    #[test]
+    fn the_visible_steps_drop_the_plugin_step_only_when_there_is_none() {
+        assert_eq!(SetupStep::visible(true).len(), SetupStep::ORDER.len());
+        assert_eq!(SetupStep::visible(false).len(), SetupStep::ORDER.len() - 1);
+        assert!(!SetupStep::visible(false).contains(&SetupStep::Plugins));
+        assert_eq!(SetupStep::visible(false).last(), Some(&SetupStep::Finish));
     }
 }

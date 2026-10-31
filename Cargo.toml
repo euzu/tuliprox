@@ -1,5 +1,5 @@
 [workspace]
-members = ["backend/*", "frontend", "shared", "tools/tuliprox-testkit"]
+members = ["backend/*", "frontend", "plugin-api", "shared", "tools/tuliprox-testkit"]
 exclude = ["vendor/reqwest"]
 resolver = "2"
 
@@ -39,6 +39,15 @@ tuliprox-parser = { version = "3", path = "backend/parser" }
 tuliprox-metadata = { version = "3", path = "backend/metadata" }
 tuliprox-messaging = { version = "3", path = "backend/messaging" }
 tuliprox-processing = { version = "3", path = "backend/processing" }
+tuliprox-plugins = { version = "3", path = "backend/plugins" }
+tuliprox-plugin-api = { version = "3", path = "plugin-api" }
+# Plugin runtime (W0 spike): default features off. `wasmtime-wasi-http` must not
+# enable `default-send-request`, which pulls ring + webpki-roots and calls
+# `rustls::ClientConfig::builder()` - a runtime panic with both ring and
+# aws-lc-rs in the graph. The host implements `send_request` itself.
+wasmtime = { version = "50.0.1", default-features = false }
+wasmtime-wasi = { version = "50.0.1", default-features = false }
+wasmtime-wasi-http = { version = "50.0.1", default-features = false }
 tuliprox-btree = { version = "3", path = "backend/btree" }
 tuliprox-config-loader = { version = "3", path = "backend/config-loader" }
 tuliprox-session = { version = "3", path = "backend/session" }
