@@ -52,7 +52,7 @@ pub fn epg_source_list(sources: &[EpgSourceAnalytics], now: u64, translate: &Yew
                 };
 
                 html! {
-                    <div class="tp__playlist-stats__source-list-row" key={src.label.clone()}>
+                    <div class="tp__playlist-stats__source-list-row" key={format!("{}/{}", src.input, src.label)}>
                         <div class="source-info">
                             <span class="source-name">{&src.label}</span>
                             <span class="source-meta">{meta_text}</span>

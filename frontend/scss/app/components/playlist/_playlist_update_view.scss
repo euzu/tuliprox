@@ -235,11 +235,12 @@
     --text-button-color: var(--text-color);
     --text-button-hover-background-color: var(--theme-brand-primary-soft);
     --text-button-hover-color: var(--text-color);
-    --text-button-active-background-color: var(--theme-brand-primary);
-    --text-button-active-hover-background-color: var(--theme-brand-primary);
+    // Same surface/text pair the theme uses for hovered text buttons, so the label stays readable in every theme.
+    --text-button-active-background-color: var(--theme-brand-primary-hover);
+    --text-button-active-hover-background-color: var(--theme-brand-primary-hover);
     --text-button-active-border-color: var(--input-focus-border-color);
-    --text-button-active-color: var(--text-color);
-    --text-button-active-hover-color: var(--text-color);
+    --text-button-active-color: var(--theme-brand-text);
+    --text-button-active-hover-color: var(--theme-brand-text);
     min-height: 2rem;
     padding: var(--padding-micro) var(--padding-small);
     border-radius: var(--border-radius);

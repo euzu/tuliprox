@@ -40,7 +40,8 @@ pub fn datetime_to_instant<Z: TimeZone>(datetime: DateTime<Z>) -> Instant {
 
 /// Pass a zone-aware `now` (e.g. `Local::now()`): a fixed offset would keep the pre-DST offset after a switch.
 pub fn next_schedule_run<Z: TimeZone>(schedule: &Schedule, now: &DateTime<Z>) -> Option<DateTime<Z>> {
-    schedule.after(now).next()
+    // During a repeated DST hour a local wall time maps to two instants; never hand out one that is not in the future.
+    schedule.after(now).find(|next| next > now)
 }
 
 pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cancel: &CancellationToken) {
@@ -435,6 +436,17 @@ mod tests {
             let next = next_schedule_run(&schedule, &now).expect("next run");
             assert_eq!(next.with_timezone(&chrono::Utc).to_rfc3339(), expected_utc, "{now_utc}");
         }
+    }
+
+    #[test]
+    fn test_next_schedule_run_is_in_the_future_during_the_repeated_dst_hour() {
+        // 2026-10-25 Europe/Berlin repeats 02:00-03:00; 01:30 UTC is the second 02:30 (CET).
+        let schedule = Schedule::from_str("0 45 2 * * * *").expect("valid cron");
+        let berlin = chrono_tz::Europe::Berlin;
+        let now = DateTime::parse_from_rfc3339("2026-10-25T01:30:00Z").expect("valid rfc3339").with_timezone(&berlin);
+        let next = next_schedule_run(&schedule, &now).expect("next run");
+        assert!(next > now, "next run {next} must not lie before {now}");
+        assert_eq!(next.with_timezone(&chrono::Utc).to_rfc3339(), "2026-10-25T01:45:00+00:00");
     }
 
     #[test]

@@ -69,12 +69,20 @@ impl TargetAnalyticsInput {
 
 /// Quotes a field per RFC 4180: if it contains commas, double quotes, CR, or LF,
 /// it is wrapped in double quotes and inner quotes are doubled.
+/// Fields starting with `=`, `+`, `-` or `@` get a leading `'` so spreadsheets do not evaluate them as formulas.
 pub fn push_csv_field(out: &mut String, field: &str) {
+    let formula_guard = field.starts_with(['=', '+', '-', '@']);
     if field.contains([',', '"', '\r', '\n']) {
         out.push('"');
+        if formula_guard {
+            out.push('\'');
+        }
         out.push_str(&field.replace('"', "\"\""));
         out.push('"');
     } else {
+        if formula_guard {
+            out.push('\'');
+        }
         out.push_str(field);
     }
 }
@@ -102,6 +110,10 @@ fn build_epg_lookup(new_epg: &[Epg]) -> HashMap<String, EpgGuideChannelRef<'_>> 
     for epg in new_epg {
         let input_name = epg.input_name.as_deref().unwrap_or("");
         for (i, channel) in epg.children.iter().enumerate() {
+            // Channels without programmes are not written to the published EPG, so they do not count as mapped.
+            if channel.programmes.is_empty() {
+                continue;
+            }
             let source_idx = epg.channel_sources.as_ref().and_then(|sources| sources.get(i).copied()).unwrap_or(0);
             let max_stop = channel.programmes.iter().map(|p| p.stop).max();
             let folded_id = with_folded_epg_id(&channel.id, ToString::to_string);
@@ -562,6 +574,16 @@ mod tests {
         push_unmapped_csv_row(&mut csv, "News", "Channel 2", None, "provider2");
         let expected = "group,name,epg_channel_id,input\n\"Sports, HD\",\"Channel \"\"1\"\"\",ch1.guide,provider1\nNews,Channel 2,,provider2\n";
         assert_eq!(csv, expected);
+
+        let mut guarded = String::new();
+        push_csv_field(&mut guarded, "=SUM(A1)");
+        assert_eq!(guarded, "'=SUM(A1)");
+        let mut guarded_quoted = String::new();
+        push_csv_field(&mut guarded_quoted, "-a,b");
+        assert_eq!(guarded_quoted, "\"'-a,b\"");
+        let mut plain = String::new();
+        push_csv_field(&mut plain, "a-b");
+        assert_eq!(plain, "a-b");
     }
 
     #[test]

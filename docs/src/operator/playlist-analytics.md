@@ -123,5 +123,7 @@ Returns summary analytics, next scheduled update times, and execution details fo
 Streams the stored CSV file of live channels without guide data for the given target ID.
 
 - **Permission**: `playlist.read`
-- **Response**: `text/csv; charset=utf-8` stream with `Content-Disposition: attachment; filename="{target_name}_unmapped.csv"`.
+- **Response**: `text/csv; charset=utf-8` stream with
+  `Content-Disposition: attachment; filename="{sanitized_target_name}-unmapped.csv"`; when sanitizing leaves an empty
+  name, the file is named `target-{target_id}-unmapped.csv`.
 - **Status Codes**: `200 OK` on success, `404 Not Found` if no unmapped CSV exists.

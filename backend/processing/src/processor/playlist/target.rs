@@ -564,9 +564,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        let (empty_analytics, empty_csv) =
-            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
-        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, true).await;
+        // Nothing is published, so the previous analytics and unmapped CSV stay as they are.
         return (Ok(()), errors);
     }
 
@@ -580,9 +578,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        let (empty_analytics, empty_csv) =
-            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
-        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, true).await;
+        // Nothing is published, so the previous analytics and unmapped CSV stay as they are.
         return (Ok(()), errors);
     }
     if views.publication_plan != PlaylistPublicationPlan::Ordinary {
