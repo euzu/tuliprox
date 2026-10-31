@@ -143,7 +143,7 @@
     overflow-x: auto;
     background-color: var(--log-console-background-color);
     color: var(--log-console-text-color);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-family: size.$mono-font;
     font-size: 0.78rem;
     line-height: 1.4;
     padding: var(--padding-small);

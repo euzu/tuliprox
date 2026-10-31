@@ -112,21 +112,16 @@ impl NavAccess {
     }
 }
 
-/// One navigation entry; the collapsed sidebar may show another icon than the expanded one.
+/// One navigation entry, shown with the same icon in the expanded and the collapsed sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NavEntry {
     view: ViewType,
     icon: &'static str,
-    collapsed_icon: &'static str,
     label_key: &'static str,
 }
 
 impl NavEntry {
-    const fn new(view: ViewType, icon: &'static str, label_key: &'static str) -> Self {
-        Self { view, icon, collapsed_icon: icon, label_key }
-    }
-
-    const fn collapsed_icon(self, collapsed_icon: &'static str) -> Self { Self { collapsed_icon, ..self } }
+    const fn new(view: ViewType, icon: &'static str, label_key: &'static str) -> Self { Self { view, icon, label_key } }
 }
 
 /// Entries the user may see. A titled section is a collapsible panel when expanded and is preceded by a spacer
@@ -173,6 +168,7 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
             Some("LABEL.PLAYLIST"),
             &[
                 (access.playlist_write, NavEntry::new(ViewType::PlaylistUpdate, "Refresh", "LABEL.UPDATE")),
+                (access.playlist_read, NavEntry::new(ViewType::PlaylistStats, "Stats", "LABEL.PLAYLIST_STATS")),
                 (access.playlist_read, NavEntry::new(ViewType::PlaylistExplorer, "Live", "LABEL.PLAYLIST_VIEWER")),
                 (access.epg_read, NavEntry::new(ViewType::PlaylistEpg, "Epg", "LABEL.PLAYLIST_EPG")),
                 (
@@ -186,14 +182,9 @@ fn nav_sections(access: &NavAccess) -> Vec<NavSection> {
             &[
                 (
                     access.show_recording,
-                    NavEntry::new(ViewType::RecordingLibrary, "DVR", "LABEL.RECORDING_LIBRARY")
-                        .collapsed_icon("LibraryOutline"),
+                    NavEntry::new(ViewType::RecordingLibrary, "VideoLibrary", "LABEL.RECORDING_LIBRARY"),
                 ),
-                (
-                    access.show_recording,
-                    NavEntry::new(ViewType::RecordingRules, "DVR", "LABEL.RECORDING_RULES")
-                        .collapsed_icon("ScheduleOutline"),
-                ),
+                (access.show_recording, NavEntry::new(ViewType::RecordingRules, "Calendar", "LABEL.RECORDING_RULES")),
             ],
         ),
     ];
@@ -354,7 +345,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                         let label = translate.t(entry.label_key);
                         html! {
                             <IconButton class={format!("tp__app-sidebar-menu--{}{}", entry.view, if active_menu == entry.view { " active" } else { "" })}
-                                icon={entry.collapsed_icon} name={entry.view.to_string()} hint={label.clone()} aria_label={label}
+                                icon={entry.icon} name={entry.view.to_string()} hint={label.clone()} aria_label={label}
                                 onclick={&handle_menu_click}></IconButton>
                         }
                     }) }
@@ -518,6 +509,7 @@ mod tests {
                 ViewType::SourceEditor,
                 ViewType::FailoverGroups,
                 ViewType::PlaylistUpdate,
+                ViewType::PlaylistStats,
                 ViewType::PlaylistExplorer,
                 ViewType::PlaylistEpg,
                 ViewType::PlaylistSettings,
@@ -534,7 +526,13 @@ mod tests {
         let playlist_reader = NavAccess { playlist_read: true, ..NavAccess::default() };
         assert_eq!(
             views(&nav_sections(&playlist_reader)),
-            vec![ViewType::Dashboard, ViewType::FailoverGroups, ViewType::PlaylistExplorer, ViewType::PlaylistSettings]
+            vec![
+                ViewType::Dashboard,
+                ViewType::FailoverGroups,
+                ViewType::PlaylistStats,
+                ViewType::PlaylistExplorer,
+                ViewType::PlaylistSettings
+            ]
         );
 
         let epg_reader = NavAccess { epg_read: true, ..NavAccess::default() };
@@ -551,18 +549,13 @@ mod tests {
     }
 
     #[test]
-    fn nav_recording_entries_use_other_icons_when_collapsed() {
+    fn nav_recording_entries_use_existing_icons() {
         let sections = nav_sections(&NavAccess { show_recording: true, ..NavAccess::default() });
         let recording = sections.last().expect("recording section");
         assert_eq!(recording.title_key, Some("LABEL.RECORDING"));
         assert_eq!(
-            recording.entries.iter().map(|entry| (entry.icon, entry.collapsed_icon)).collect::<Vec<_>>(),
-            vec![("DVR", "LibraryOutline"), ("DVR", "ScheduleOutline")]
+            recording.entries.iter().map(|entry| entry.icon).collect::<Vec<_>>(),
+            vec!["VideoLibrary", "Calendar"]
         );
-        assert!(nav_sections(&full_access())
-            .iter()
-            .flat_map(|section| &section.entries)
-            .filter(|entry| !matches!(entry.view, ViewType::RecordingLibrary | ViewType::RecordingRules))
-            .all(|entry| entry.icon == entry.collapsed_icon));
     }
 }

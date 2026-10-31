@@ -32,13 +32,15 @@ impl TVGuide {
             };
             match &epg_source.kind {
                 PersistedEpgSourceKind::Xmltv => {
-                    Self::process_epg_file(id_cache, epg_source, source_order, &mut accumulator).await;
+                    Self::process_epg_file(id_cache, epg_source, source_order, epg_source.source_idx, &mut accumulator)
+                        .await;
                 }
                 PersistedEpgSourceKind::Ics { channel_id, channel_title, match_names, config } => {
                     Self::process_ics_file(
                         id_cache,
                         epg_source,
                         source_order,
+                        epg_source.source_idx,
                         &mut accumulator,
                         IcsPersistedSource {
                             channel_id,

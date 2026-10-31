@@ -1,6 +1,6 @@
 use super::{BPlusTree, VirtualIdRecord};
-use std::{collections::HashMap, sync::Mutex};
 use shared::model::{M3uPlaylistItem, PlaylistItem, PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem};
+use std::{collections::HashMap, sync::Mutex};
 use tokio::sync::RwLock;
 use tuliprox_core::model::ConfigTarget;
 

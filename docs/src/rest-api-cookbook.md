@@ -407,6 +407,35 @@ Notes:
 - Field tables, EPG `issue` values and the response shapes are described in the
   [MCP operator reference](operator/mcp.md#41-reading-stored-playlists).
 
+## Example 13: Query target analytics and export unmapped channels
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+AUTH=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/json")
+
+# Retrieve analytics summary and next scheduled update for all targets
+curl -s "${AUTH[@]}" "$BASE_URL/api/v1/playlist/analytics" | jq .
+
+# Download unmapped live channels CSV for target ID 1
+curl -s -H "Authorization: Bearer $TOKEN" \
+    "$BASE_URL/api/v1/playlist/analytics/1/unmapped.csv" -o unmapped_channels.csv
+```
+
+Typical use:
+
+- inspect per-target item counts (live, VOD, series, episodes), input-to-output ratios, and EPG coverage
+- monitor EPG source health, failure timestamps, and guide horizon windows
+- export channels lacking EPG data for offline mapping adjustments
+
+Notes:
+
+- Requires `playlist.read` permission.
+- Targets that have not yet undergone a refresh cycle return `analytics: null`.
+- The CSV export endpoint validates the target ID against configuration and returns HTTP 404 if no unmapped CSV is available.
+
 ## Maintenance mode
 
 An input can be taken out of service while its provider is down. While an input is in maintenance:
@@ -664,6 +693,8 @@ form's scheduled interval, never as a hard block.
 | `GET` | `/api/v1/playlist/items` | Paged, filtered stored records of one target or input (`playlist.read`) |
 | `GET` | `/api/v1/playlist/epg/channels` | Paged EPG channels of a target with issue filters (`playlist.read`) |
 | `GET` | `/api/v1/playlist/epg/channel` | Programmes of one EPG channel of a target (`playlist.read`) |
+| `GET` | `/api/v1/playlist/analytics` | Target content and EPG analytics with next scheduled runs (`playlist.read`) |
+| `GET` | `/api/v1/playlist/analytics/{target_id}/unmapped.csv` | Export unmapped live channels for a target as CSV (`playlist.read`) |
 | `POST` | `/api/v1/playlist/series_info/{virtual_id}/{provider_id}` | Series metadata lookup |
 | `POST` | `/api/v1/playlist/series/episode/{virtual_id}` | Episode item lookup |
 | `POST` | `/api/v1/playlist/filter/preview` | Dry-run a filter DSL expression against a target's stored playlist |

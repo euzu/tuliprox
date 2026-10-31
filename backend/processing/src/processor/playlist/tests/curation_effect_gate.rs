@@ -94,6 +94,12 @@ pub(super) fn file_snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>
             if entry_path.is_dir() {
                 collect(root, &entry_path, snapshot);
             } else {
+                let name = entry_path.file_name();
+                if name == Some(std::ffi::OsStr::new(tuliprox_repository::TARGET_ANALYTICS_FILE))
+                    || name == Some(std::ffi::OsStr::new(tuliprox_repository::TARGET_ANALYTICS_UNMAPPED_FILE))
+                {
+                    continue;
+                }
                 snapshot.insert(
                     entry_path.strip_prefix(root).expect("snapshot path under root").to_path_buf(),
                     std::fs::read(&entry_path).expect("snapshot file"),
@@ -236,6 +242,7 @@ async fn assert_curation_preserves_empty_mixed_output_guard(canonical: Option<sh
         processing: PipelineStats::default(),
         accepted_empty_clusters: ClusterFlags::Vod,
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
+        analytics_input: TargetAnalyticsInput::default(),
     };
 
     let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
@@ -327,6 +334,7 @@ async fn complete_empty_curation_publishes_empty_watch_group_state() {
         processing: PipelineStats::default(),
         accepted_empty_clusters: ClusterFlags::empty(),
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
+        analytics_input: TargetAnalyticsInput::default(),
     };
     let (result, errors) = finalize_prepared_target(Arc::new(context), prepared).await;
     server.await.expect("Trakt server should finish");

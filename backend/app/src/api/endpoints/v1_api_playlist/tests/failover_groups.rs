@@ -18,6 +18,8 @@ fn test_epg(channel_id: &str, title: &str, programme_title: &str) -> Epg {
             icon: None,
             programmes: vec![programme],
         })],
+        channel_sources: None,
+        input_name: None,
     }
 }
 

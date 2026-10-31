@@ -77,13 +77,17 @@ You must point the flag directly at the corresponding `.db` file inside your `st
 
 **Where the files live** (`<storage_dir>` = `storage_dir` from `config.yml`; spaces in target names become `_`):
 
-| Location                              | Files                                                                                          |
-|:--------------------------------------|:-----------------------------------------------------------------------------------------------|
-| `<storage_dir>/<target_name>/xtream/` | `live.db`, `video.db`, `series.db` (one per cluster), `epg.db`                                 |
-| `<storage_dir>/<target_name>/m3u/`    | `m3u.db`, `epg.db`                                                                             |
-| `<storage_dir>/<target_name>/`        | `id_mapping.db`                                                                                |
-| `<storage_dir>/input_<input_name>/`   | `m3u_<input_name>.db` (M3U inputs), `metadata_retry_state.db`, `vod_info.db`, `series_info.db` |
-| `<storage_dir>/`                      | `qos_snapshot.db`                                                                              |
+| Location                              | Files                                                                                                         |
+|:--------------------------------------|:--------------------------------------------------------------------------------------------------------------|
+| `<storage_dir>/<target_name>/xtream/` | `live.db`, `video.db`, `series.db` (one per cluster), `epg.db`                                                |
+| `<storage_dir>/<target_name>/m3u/`    | `m3u.db`, `epg.db`                                                                                            |
+| `<storage_dir>/<target_name>/`        | `id_mapping.db`, `analytics.json`, `analytics_unmapped.csv`                                                   |
+| `<storage_dir>/input_<input_name>/`   | `status.json`, `m3u_<input_name>.db` (M3U inputs), `metadata_retry_state.db`, `vod_info.db`, `series_info.db` |
+| `<storage_dir>/`                      | `qos_snapshot.db`                                                                                             |
+
+Target analytics files (`analytics.json` and `analytics_unmapped.csv`) are written atomically during target finalization
+and drive the **Playlist > Stats** Web UI view. In `<storage_dir>/input_<input_name>/status.json`, the `epg_sources` array
+records per-source download status, timestamps, and failure details with credentials stripped.
 
 The EPG database and the playlist databases are **per target**, not per input. Which dump flag to use depends on the
 target output type:

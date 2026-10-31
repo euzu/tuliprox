@@ -10,7 +10,7 @@ use crate::{
     },
     utils::exit,
 };
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::{DateTime, Local, TimeZone};
 use cron::Schedule;
 use shared::{
     model::{EventMessage, ScheduleTaskType, ScheduledTaskFailure},
@@ -24,8 +24,8 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
-    // Convert DateTime<FixedOffset> to SystemTime
+pub fn datetime_to_instant<Z: TimeZone>(datetime: DateTime<Z>) -> Instant {
+    // Convert DateTime to SystemTime
     let target_system_time: SystemTime = datetime.into();
 
     // Get the current SystemTime
@@ -36,6 +36,12 @@ pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
 
     // Get the current Instant and add the duration to calculate the target Instant
     Instant::now() + duration_until
+}
+
+/// Pass a zone-aware `now` (e.g. `Local::now()`): a fixed offset would keep the pre-DST offset after a switch.
+pub fn next_schedule_run<Z: TimeZone>(schedule: &Schedule, now: &DateTime<Z>) -> Option<DateTime<Z>> {
+    // During a repeated DST hour a local wall time maps to two instants; never hand out one that is not in the future.
+    schedule.after(now).find(|next| next > now)
 }
 
 pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cancel: &CancellationToken) {
@@ -112,10 +118,8 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cance
 async fn start_playlist_trigger(expression: &str, cancel: CancellationToken, tx: mpsc::Sender<()>) {
     match Schedule::from_str(expression) {
         Ok(schedule) => {
-            let offset = *Local::now().offset();
             loop {
-                let mut upcoming = schedule.upcoming(offset).take(1);
-                if let Some(datetime) = upcoming.next() {
+                if let Some(datetime) = next_schedule_run(&schedule, &Local::now()) {
                     tokio::select! {
                         biased;
                         () = cancel.cancelled() => break,
@@ -220,30 +224,26 @@ async fn start_scheduler(
     cancel: CancellationToken,
 ) {
     match Schedule::from_str(expression) {
-        Ok(schedule) => {
-            let offset = *Local::now().offset();
-            loop {
-                let mut upcoming = schedule.upcoming(offset).take(1);
-                if let Some(datetime) = upcoming.next() {
-                    tokio::select! {
-                        () = tokio::time::sleep_until(tokio::time::Instant::from(datetime_to_instant(datetime))) => {
-                            match task_type {
-                                ScheduleTaskType::PlaylistUpdate => unreachable!("handled by channel-based path"),
-                                ScheduleTaskType::LibraryScan => {
-                                    run_library_scan(&client, &app_state);
-                                }
-                                ScheduleTaskType::GeoIpUpdate => {
-                                    run_geoip_update(&app_state, expression);
-                                }
+        Ok(schedule) => loop {
+            if let Some(datetime) = next_schedule_run(&schedule, &Local::now()) {
+                tokio::select! {
+                    () = tokio::time::sleep_until(tokio::time::Instant::from(datetime_to_instant(datetime))) => {
+                        match task_type {
+                            ScheduleTaskType::PlaylistUpdate => unreachable!("handled by channel-based path"),
+                            ScheduleTaskType::LibraryScan => {
+                                run_library_scan(&client, &app_state);
+                            }
+                            ScheduleTaskType::GeoIpUpdate => {
+                                run_geoip_update(&app_state, expression);
                             }
                         }
-                        () = cancel.cancelled() => {
-                            break;
-                        }
+                    }
+                    () = cancel.cancelled() => {
+                        break;
                     }
                 }
             }
-        }
+        },
         Err(err) => exit!("Failed to start scheduler: {err}"),
     }
 }
@@ -357,8 +357,8 @@ pub fn exec_interner_prune(app_state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::tasks::{datetime_to_instant, drain_pending_playlist_triggers};
-    use chrono::Local;
+    use crate::api::tasks::{datetime_to_instant, drain_pending_playlist_triggers, next_schedule_run};
+    use chrono::{DateTime, FixedOffset, Local};
     use cron::Schedule;
     use std::{
         str::FromStr,
@@ -390,10 +390,8 @@ mod tests {
 
         let start = std::time::Instant::now();
         if let Ok(schedule) = Schedule::from_str(expression) {
-            let offset = *Local::now().offset();
             loop {
-                let mut upcoming = schedule.upcoming(offset).take(1);
-                if let Some(datetime) = upcoming.next() {
+                if let Some(datetime) = next_schedule_run(&schedule, &Local::now()) {
                     tokio::time::sleep_until(tokio::time::Instant::from(datetime_to_instant(datetime))).await;
                     run_me();
                 }
@@ -406,6 +404,49 @@ mod tests {
 
         assert!(runs.load(Ordering::Acquire) == 6, "Failed to run");
         assert!(duration.as_secs() > 4, "Failed time");
+    }
+
+    #[test]
+    fn test_next_schedule_run_returns_expected_time() {
+        let schedule = Schedule::from_str("0 0 12 * * * *").expect("valid cron");
+        let offset = FixedOffset::east_opt(0).expect("utc offset");
+        let now = DateTime::parse_from_rfc3339("2026-10-31T10:00:00Z").expect("valid rfc3339").with_timezone(&offset);
+        let next = next_schedule_run(&schedule, &now).expect("next run");
+        assert_eq!(next.to_rfc3339(), "2026-10-31T12:00:00+00:00");
+
+        let after_noon =
+            DateTime::parse_from_rfc3339("2026-10-31T13:00:00Z").expect("valid rfc3339").with_timezone(&offset);
+        let next_day = next_schedule_run(&schedule, &after_noon).expect("next day run");
+        assert_eq!(next_day.to_rfc3339(), "2026-11-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn test_next_schedule_run_follows_dst_switches() {
+        // A job planned for 08:00 must run at 08:00 wall-clock time on both sides of a DST switch,
+        // so the zone (not a fixed offset captured at start) has to drive the calculation.
+        let schedule = Schedule::from_str("0 0 8 * * * *").expect("valid cron");
+        let berlin = chrono_tz::Europe::Berlin;
+        for (now_utc, expected_utc) in [
+            // 2026-10-25: CEST (+02:00) -> CET (+01:00) at 01:00 UTC
+            ("2026-10-25T05:30:00Z", "2026-10-25T07:00:00+00:00"),
+            // 2026-03-29: CET (+01:00) -> CEST (+02:00) at 01:00 UTC
+            ("2026-03-29T05:30:00Z", "2026-03-29T06:00:00+00:00"),
+        ] {
+            let now = DateTime::parse_from_rfc3339(now_utc).expect("valid rfc3339").with_timezone(&berlin);
+            let next = next_schedule_run(&schedule, &now).expect("next run");
+            assert_eq!(next.with_timezone(&chrono::Utc).to_rfc3339(), expected_utc, "{now_utc}");
+        }
+    }
+
+    #[test]
+    fn test_next_schedule_run_is_in_the_future_during_the_repeated_dst_hour() {
+        // 2026-10-25 Europe/Berlin repeats 02:00-03:00; 01:30 UTC is the second 02:30 (CET).
+        let schedule = Schedule::from_str("0 45 2 * * * *").expect("valid cron");
+        let berlin = chrono_tz::Europe::Berlin;
+        let now = DateTime::parse_from_rfc3339("2026-10-25T01:30:00Z").expect("valid rfc3339").with_timezone(&berlin);
+        let next = next_schedule_run(&schedule, &now).expect("next run");
+        assert!(next > now, "next run {next} must not lie before {now}");
+        assert_eq!(next.with_timezone(&chrono::Utc).to_rfc3339(), "2026-10-25T01:45:00+00:00");
     }
 
     #[test]

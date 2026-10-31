@@ -13,7 +13,7 @@ fn rendered_tags(node: &yew::Html) -> Vec<&yew::virtual_dom::VTag> {
 
 #[test]
 fn actual_table_markup_projects_callbacks_ids_keys_and_empty_colspan() {
-    use super::{table_markup, TableDefinition};
+    use super::{table_markup, RowInteraction, TableDefinition};
     use crate::app::components::{visible_columns, TableColumn};
     use shared::model::TableLayoutPreferencesDto;
     use std::cell::RefCell;
@@ -48,7 +48,7 @@ fn actual_table_markup_projects_callbacks_ids_keys_and_empty_colspan() {
         column_visibility: [("password".into(), false)].into(),
     };
     let visible = visible_columns(&definition.columns, &layout);
-    let markup = table_markup(&definition, &visible, None, Callback::noop(), String::new());
+    let markup = table_markup(&definition, &visible, None, Callback::noop(), String::new(), &RowInteraction::NONE);
     assert_eq!(*header_calls.borrow(), vec![2, 0]);
     assert_eq!(*data_calls.borrow(), vec![2, 0]);
     let tags = rendered_tags(&markup);
@@ -65,8 +65,25 @@ fn actual_table_markup_projects_callbacks_ids_keys_and_empty_colspan() {
         assert_eq!(keys, ids);
     }
     assert!(tags.iter().any(|tag| tag.tag() == "tr" && tag.key.as_ref().is_some_and(|key| key.to_string() == "row-1")));
+    assert!(!tags.iter().any(|tag| tag.tag() == "tr" && tag.attributes.iter().any(|(key, _)| key == "class")));
+
+    let on_click = Callback::noop();
+    let selected = AttrValue::from("row-1");
+    let interactive = table_markup(
+        &definition,
+        &visible,
+        None,
+        Callback::noop(),
+        String::new(),
+        &RowInteraction { on_click: Some(&on_click), selected_key: Some(&selected) },
+    );
+    assert!(rendered_tags(&interactive).iter().any(|tag| tag.tag() == "tr"
+        && tag.attributes.iter().any(|(key, value)| {
+            key == "class" && value.contains("tp__table__row--clickable") && value.contains("tp__table__row--selected")
+        })));
+
     definition.items = None;
-    let empty = table_markup(&definition, &visible, None, Callback::noop(), String::new());
+    let empty = table_markup(&definition, &visible, None, Callback::noop(), String::new(), &RowInteraction::NONE);
     assert!(rendered_tags(&empty)
         .iter()
         .any(|tag| tag.tag() == "td" && tag.attributes.iter().any(|(key, value)| key == "colspan" && value == "2")));

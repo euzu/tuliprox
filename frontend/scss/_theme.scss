@@ -25,13 +25,13 @@ body {
   --mobile-size: size.$mobile-breakpoint;
   --dashboard-mobile-size: size.$dashboard-mobile-breakpoint;
   --sidebar-width-expanded: 240px;
-  --sidebar-width-collapsed: 36px;
+  --sidebar-width-collapsed: 50px;
   --max-view-width: size.$dashboard-mobile-breakpoint;
   --max-table-cell-width: 240px;
   --max-dialog-card-height: 300px;
   --media-size-mobile: 600px;
   --app-header-height: 56px;
-  --scrollbar-width: 8px;
+  --scrollbar-width: 6px;
   --scrollbar-border-radius: 4px;
   --action-card-width: 380px;
 
@@ -327,7 +327,8 @@ body {
   --theme-brand-popup-shadow: var(--theme-palette-shadow-popup);
   --theme-brand-card-shadow: var(--theme-palette-shadow-card);
   --theme-brand-scrollbar-track-shadow: var(--theme-palette-shadow-scrollbar-track);
-  --theme-brand-scrollbar-handle: var(--theme-palette-scrollbar-handle);
+  // Tinted with the theme's primary color instead of the flat grey palette value, so it matches every theme.
+  --theme-brand-scrollbar-handle: color-mix(in srgb, var(--theme-brand-primary) 55%, var(--theme-brand-surface-muted));
   --theme-brand-tab-header-shadow: var(--theme-palette-shadow-tab-header);
   --theme-brand-field-code-shadow: var(--theme-palette-shadow-field-code);
   --theme-brand-toggle-shadow: var(--theme-palette-shadow-toggle);
@@ -622,6 +623,23 @@ body {
   --tag-video-border-color: var(--theme-brand-info);
   --tag-series-background-color: var(--theme-brand-series-surface);
   --tag-series-border-color: var(--theme-brand-quaternary);
+
+  --cluster-live-color: var(--theme-brand-info);
+  --cluster-vod-color: var(--theme-brand-quaternary);
+  --cluster-series-color: var(--theme-brand-warning);
+
+  --playlist-stats-live-color: var(--cluster-live-color);
+  --playlist-stats-vod-color: var(--cluster-vod-color);
+  --playlist-stats-series-color: var(--cluster-series-color);
+  --playlist-stats-epg-color: var(--theme-brand-positive);
+  --playlist-stats-catchup-color: var(--theme-brand-text-muted);
+  --playlist-stats-track-color: var(--theme-brand-border-table);
+  --playlist-stats-link-color: var(--theme-brand-info);
+  --playlist-stats-warn-color: var(--theme-brand-warning);
+  --playlist-stats-ok-color: var(--theme-brand-positive);
+  --playlist-stats-ok-surface: var(--theme-brand-positive-soft);
+  --playlist-stats-error-color: var(--theme-brand-danger);
+  --playlist-stats-error-surface: color-mix(in srgb, var(--theme-brand-danger-strong) 18%, transparent);
 
   --toastr-success-color: var(--theme-brand-text-inverse);
   --toastr-success-background-color: color-mix(in srgb, var(--theme-brand-positive) 70%, transparent);

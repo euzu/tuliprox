@@ -1,5 +1,6 @@
 mod content_cluster;
 mod css;
+mod download;
 mod format;
 mod portal;
 mod storage;
@@ -7,6 +8,7 @@ mod storage;
 use crate::i18n::YewI18n;
 pub(crate) use content_cluster::content_cluster_presentation;
 pub use css::*;
+pub use download::*;
 pub use format::*;
 pub use portal::*;
 use shared::model::{PlaylistItemType, StreamInfo};

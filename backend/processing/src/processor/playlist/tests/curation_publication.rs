@@ -270,10 +270,13 @@ impl Publication {
                 logo_override: false,
                 attributes: None,
                 children: vec![Arc::new(channel)],
+                channel_sources: None,
+                input_name: None,
             }],
             processing: PipelineStats::default(),
             accepted_empty_clusters: ClusterFlags::empty(),
             library_empty: tuliprox_repository::LibraryEmptyPublication::None,
+            analytics_input: TargetAnalyticsInput::default(),
         };
         let (result, errors) = tokio::time::timeout(
             Duration::from_secs(5),

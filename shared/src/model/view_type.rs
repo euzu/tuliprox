@@ -11,6 +11,7 @@ const USERS: &str = "users";
 const PLANS: &str = "plans";
 const CONFIG: &str = "config";
 const PLAYLIST_UPDATE: &str = "playlist_update";
+const PLAYLIST_STATS: &str = "playlist_stats";
 const PLAYLIST_SETTINGS: &str = "playlist_settings";
 const PLAYLIST_EXPLORER: &str = "playlist_explorer";
 const PLAYLIST_EPG: &str = "playlist_epg";
@@ -35,6 +36,7 @@ pub enum ViewType {
     Config,
     SourceEditor,
     PlaylistUpdate,
+    PlaylistStats,
     PlaylistSettings,
     PlaylistExplorer,
     PlaylistEpg,
@@ -59,6 +61,7 @@ impl ViewType {
             ViewType::Config => CONFIG,
             ViewType::SourceEditor => SOURCE_EDITOR,
             ViewType::PlaylistUpdate => PLAYLIST_UPDATE,
+            ViewType::PlaylistStats => PLAYLIST_STATS,
             ViewType::PlaylistSettings => PLAYLIST_SETTINGS,
             ViewType::PlaylistExplorer => PLAYLIST_EXPLORER,
             ViewType::PlaylistEpg => PLAYLIST_EPG,
@@ -86,6 +89,7 @@ impl FromStr for ViewType {
             CONFIG => Ok(ViewType::Config),
             SOURCE_EDITOR => Ok(ViewType::SourceEditor),
             PLAYLIST_UPDATE => Ok(ViewType::PlaylistUpdate),
+            PLAYLIST_STATS => Ok(ViewType::PlaylistStats),
             PLAYLIST_SETTINGS => Ok(ViewType::PlaylistSettings),
             PLAYLIST_EXPLORER => Ok(ViewType::PlaylistExplorer),
             PLAYLIST_EPG => Ok(ViewType::PlaylistEpg),
@@ -144,6 +148,12 @@ mod tests {
     fn logs_route_round_trips() {
         assert_eq!(ViewType::Logs.as_str(), "logs");
         assert_eq!(ViewType::from_str("logs").unwrap(), ViewType::Logs);
+    }
+
+    #[test]
+    fn playlist_stats_route_round_trips() {
+        assert_eq!(ViewType::PlaylistStats.as_str(), "playlist_stats");
+        assert_eq!(ViewType::from_str("playlist_stats").unwrap(), ViewType::PlaylistStats);
     }
 
     #[test]

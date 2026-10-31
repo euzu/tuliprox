@@ -192,7 +192,14 @@ async fn xtream_short_epg_returns_imported_ics_programme_for_matching_channel_id
     let epg_path = xtream_get_epg_file_path_for_target(&xtream_storage);
     epg_write_file(
         &target.name,
-        &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
+        &Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![Arc::new(channel)],
+            channel_sources: None,
+            input_name: None,
+        },
         &epg_path,
         &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
         None,
@@ -343,7 +350,14 @@ async fn build_short_epg_app_state(
     let epg_path = xtream_get_epg_file_path_for_target(&xtream_storage);
     epg_write_file(
         &target.name,
-        &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
+        &Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![Arc::new(channel)],
+            channel_sources: None,
+            input_name: None,
+        },
         &epg_path,
         &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
         None,

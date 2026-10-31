@@ -488,13 +488,18 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         .prepare_access_lease_manifest_publication(access_lease_id, &proxy_session_id, started_at_ms)
         .await
     else {
-        // Failure can close the attempt before publication is prepared. Resolve it
-        // through the same lease-specific fallback as a failure observed in the loop.
+        // A terminal commit or start failure can close live publication before
+        // preparation. Resolve the current lease as in the publication loop.
         let lease = app_state
             .hls
             .proxy
             .access_lease_response_snapshot(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
             .await;
+        if let Some(response) = lease.as_ref().and_then(|lease| {
+            super::hls_terminal_playback_response(app_state, lease, &proxy_session_id, access_lease_id)
+        }) {
+            return Some(response);
+        }
         if lease.as_ref().is_some_and(|lease| {
             lease.state == HlsAccessLeaseState::Pending
                 && lease.last_manifest_snapshot.is_none()

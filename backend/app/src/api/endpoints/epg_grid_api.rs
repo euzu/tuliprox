@@ -414,6 +414,8 @@ mod tests {
                         Arc::new(EpgChannel { id: id.intern(), title: None, icon: None, programmes: vec![programme] })
                     })
                     .collect(),
+                channel_sources: None,
+                input_name: None,
             }
         }
 

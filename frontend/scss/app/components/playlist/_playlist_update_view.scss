@@ -127,7 +127,18 @@
     min-width: 0;
   }
 
+  // Round status indicator like the health badge; each status modifier sets `--status-color`.
+  &__status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--status-color);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-color) 25%, transparent);
+  }
+
   &__pipeline-status {
+    --status-color: var(--modest-text-color);
     display: inline-flex;
     align-items: center;
     gap: var(--padding-mini);
@@ -147,12 +158,14 @@
 
     &--accepted,
     &--persisted-ok {
+      --status-color: var(--theme-brand-positive);
       color: var(--success-color);
       background-color: var(--success-background-color);
-      border-color: var(--ok-color);
+      border-color: color-mix(in srgb, var(--ok-color) 40%, transparent);
     }
 
     &--rejected {
+      --status-color: var(--theme-brand-warning);
       color: var(--warn-color);
       background-color: var(--warn-background-color);
       border-color: var(--warn-color);
@@ -160,18 +173,21 @@
 
     &--cached,
     &--updating {
+      --status-color: var(--active-color);
       color: var(--active-color);
       background-color: var(--success-background-color);
       border-color: var(--active-color);
     }
 
     &--queued {
+      --status-color: var(--tag-status-pending-color);
       color: var(--tag-status-pending-color);
       background-color: var(--tag-status-pending-background-color);
       border-color: var(--tag-status-pending-border-color);
     }
 
     &--error {
+      --status-color: var(--theme-brand-danger);
       color: var(--error-color);
       background-color: var(--error-background-color);
       border-color: var(--error-color);
@@ -181,6 +197,15 @@
       color: var(--modest-text-color);
       border-color: var(--modest-text-color);
     }
+  }
+
+  // Cluster chips stay neutral; only the status dot carries the result color,
+  // so they do not compete with the input status badge.
+  &__pipeline-status.tp__playlist-update-view__cluster-chip {
+    color: var(--text-color);
+    background-color: var(--table-header-background-color);
+    border-color: var(--table-border-color);
+
   }
 
   &__input-targets {
@@ -202,6 +227,27 @@
     min-width: 0;
   }
 
+  // Target toggles are compact buttons that use the primary color when selected.
+  &__target-toggle.tp__text-button {
+    // Hover must stay weaker than the selected state, otherwise a hovered button looks selected.
+    --text-button-background-color: transparent;
+    --text-button-border-color: var(--table-border-color);
+    --text-button-color: var(--text-color);
+    --text-button-hover-background-color: var(--theme-brand-primary-soft);
+    --text-button-hover-color: var(--text-color);
+    // Same surface/text pair the theme uses for hovered text buttons, so the label stays readable in every theme.
+    --text-button-active-background-color: var(--theme-brand-primary-hover);
+    --text-button-active-hover-background-color: var(--theme-brand-primary-hover);
+    --text-button-active-border-color: var(--input-focus-border-color);
+    --text-button-active-color: var(--theme-brand-text);
+    --text-button-active-hover-color: var(--theme-brand-text);
+    min-height: 2rem;
+    padding: var(--padding-micro) var(--padding-small);
+    border-radius: var(--border-radius);
+    font-size: var(--font-size-norm);
+    font-weight: normal;
+  }
+
   &__target-toggle {
     max-width: 100%;
     max-height: none;
@@ -210,10 +256,6 @@
     span:last-child {
       min-width: 0;
       overflow-wrap: anywhere;
-    }
-
-    &.mixed {
-      border-style: dashed;
     }
 
     &:focus-visible {

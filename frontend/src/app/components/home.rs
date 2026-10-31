@@ -8,9 +8,9 @@ use crate::{
             recording::{RecordingLibraryView, RecordingRulesView},
             theme::Theme,
             AppIcon, DashboardView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, LogsView,
-            NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView,
-            RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
-            UserlistView, WebsocketStatus,
+            NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistStatsView,
+            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView,
+            ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, FailoverGroupsNavigation, PlaylistContext, StatusContext},
     },
@@ -95,6 +95,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::Config => access.can_read_config,
         ViewType::SourceEditor => access.can_read_sources,
         ViewType::PlaylistUpdate => access.can_write_playlist,
+        ViewType::PlaylistStats => access.can_read_playlist,
         ViewType::PlaylistSettings => access.can_read_sources || access.can_read_playlist,
         ViewType::PlaylistExplorer => access.can_read_playlist,
         ViewType::PlaylistEpg => access.can_read_epg,
@@ -118,6 +119,7 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::Plans,
         ViewType::SourceEditor,
         ViewType::PlaylistUpdate,
+        ViewType::PlaylistStats,
         ViewType::PlaylistSettings,
         ViewType::PlaylistExplorer,
         ViewType::PlaylistEpg,
@@ -630,6 +632,13 @@ pub fn Home() -> Html {
                                          </ErrorBoundary>
                                        </Panel>
                                        })}
+                                       { html_if!(can_read_playlist, {
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistStats.intern()} active={view_page.clone()}>
+                                         <ErrorBoundary name={translate.t("LABEL.PLAYLIST_STATS")}>
+                                           <PlaylistStatsView/>
+                                         </ErrorBoundary>
+                                       </Panel>
+                                       })}
                                        { html_if!(can_read_sources || can_read_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistSettings.intern()} active={view_page.clone()}>
                                          <ErrorBoundary name={translate.t("LABEL.PLAYLIST")}>
@@ -857,5 +866,14 @@ mod tests {
             resolve_home_view(Some(ViewType::RecordingRuleForm), ViewType::Dashboard, access),
             ViewType::Dashboard
         );
+    }
+
+    #[test]
+    fn is_allowed_home_view_playlist_stats_requires_playlist_read() {
+        let mut access = full_access();
+        assert!(is_allowed_home_view(ViewType::PlaylistStats, access));
+
+        access.can_read_playlist = false;
+        assert!(!is_allowed_home_view(ViewType::PlaylistStats, access));
     }
 }

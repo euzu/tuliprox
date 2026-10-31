@@ -1196,7 +1196,14 @@ mod tests {
         let epg_path = dir.path().join("epg.db");
         epg_write_file(
             "ics-target",
-            &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
+            &Epg {
+                priority: 0,
+                logo_override: false,
+                attributes: None,
+                children: vec![Arc::new(channel)],
+                channel_sources: None,
+                input_name: None,
+            },
             &epg_path,
             &HashMap::<Arc<str>, Arc<str>>::new(),
             None,
@@ -2159,6 +2166,8 @@ mod tests {
                     programmes: vec![EpgProgramme::new(10, 20, "a.channel".intern())],
                 }),
             ],
+            channel_sources: None,
+            input_name: None,
         };
 
         // In playlist order: "a.channel" is ordinal 1, "Z.Channel" is ordinal 2

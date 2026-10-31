@@ -32,3 +32,5 @@ pub const FILE_FAILOVER_GROUPS_MEMBER: &str = "failover_groups.member.db";
 pub const FILE_FAILOVER_GROUPS_ALIAS: &str = "failover_groups.alias.db";
 pub const FILE_FAILOVER_GROUPS_CATALOG: &str = "failover_groups.catalog.db";
 pub const FILE_FAILOVER_GROUPS_META: &str = "failover_groups.meta.json";
+pub const TARGET_ANALYTICS_FILE: &str = "analytics.json";
+pub const TARGET_ANALYTICS_UNMAPPED_FILE: &str = "analytics_unmapped.csv";

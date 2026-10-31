@@ -167,6 +167,7 @@ impl TVGuide {
         id_cache: &mut EpgIdCache,
         epg_source: &PersistedEpgSource,
         source_order: usize,
+        source_idx: usize,
         accumulator: &mut EpgMergeAccumulator,
     ) -> bool {
         let epg_attrib_id = EPG_ATTRIB_ID.intern();
@@ -223,6 +224,7 @@ impl TVGuide {
                                 accumulator.upsert_channel(
                                     epg_source.priority,
                                     source_order,
+                                    source_idx,
                                     epg_source.logo_override,
                                     EpgChannel {
                                         id: Arc::clone(&tag_epg_id),

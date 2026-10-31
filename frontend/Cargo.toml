@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 blake3.workspace = true
-shared = { version = "3.3.172", path = "../shared" }
+shared = { version = "3.3.175", path = "../shared" }
 chrono.workspace = true
 yew = "0.23.0"
 yew-router = "0.20.0"
@@ -44,7 +44,7 @@ strum_macros.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.104"
-features = ["AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "VisualViewport", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "PointerEvent", "HtmlElement", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "ResizeObserver", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
+features = ["AbortController", "AbortSignal", "Blob", "BlobPropertyBag", "ReadableStream", "ReadableStreamDefaultReader", "Document", "Element", "Node", "Window", "VisualViewport", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "HtmlAnchorElement", "DomRect", "PointerEvent", "HtmlElement", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "ResizeObserver", "MutationObserver", "MutationObserverInit", "Url", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList", "Selection"]
 
 [dev-dependencies]
 web-sys = { version = "0.3.104", features = ["EventInit", "MessageEventInit"] }
