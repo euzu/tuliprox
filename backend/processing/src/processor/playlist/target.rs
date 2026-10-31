@@ -597,6 +597,16 @@ pub(super) fn process_target_failover_groups(
     batch
 }
 
+/// Nothing is published: keep the previous metrics and CSV, only record the run.
+async fn record_unchanged_target_analytics(
+    config: &tuliprox_core::model::Config,
+    target_name: &str,
+    analytics_input: &TargetAnalyticsInput,
+) {
+    let (empty_analytics, empty_csv) = compute_target_analytics(&config.storage_dir, analytics_input, &[], &[]);
+    persist_target_analytics(config, target_name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged).await;
+}
+
 pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
@@ -624,11 +634,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        // Nothing is published: keep the previous metrics and CSV, only record the run.
-        let (empty_analytics, empty_csv) =
-            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
-        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
-            .await;
+        record_unchanged_target_analytics(&config, &target.name, &prepared.analytics_input).await;
         return (Ok(()), errors);
     }
 
@@ -645,11 +651,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        // Nothing is published: keep the previous metrics and CSV, only record the run.
-        let (empty_analytics, empty_csv) =
-            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
-        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
-            .await;
+        record_unchanged_target_analytics(&config, &target.name, &prepared.analytics_input).await;
         return (Ok(()), errors);
     }
     if views.publication_plan != PlaylistPublicationPlan::Ordinary {
