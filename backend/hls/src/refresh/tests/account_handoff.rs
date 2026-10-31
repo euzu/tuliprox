@@ -55,6 +55,88 @@ fn handoff_startup_account(session: &mut crate::HlsSession, generation: u64, now
     ));
 }
 
+// Sliding live windows keep stable resource identities while request tokens change.
+fn reentry_manifest(first: u64, short_segment: Option<u64>, token: &str) -> super::FetchedOriginManifest {
+    use std::fmt::Write as _;
+    let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+    for sequence in first..first + 4 {
+        let duration_ms = if Some(sequence) == short_segment { 5_000 } else { 6_000 };
+        writeln!(body, "#EXTINF:{}.{:03},\n{sequence}.ts?token={token}", duration_ms / 1_000, duration_ms % 1_000)
+            .unwrap();
+    }
+    super::fetched_manifest(&body)
+}
+
+async fn assert_reentry_commits_sliding_windows(first: u64, rebase: u64, proxy_start: u64, short: Option<u64>) {
+    let session = test_session();
+    let mut request = test_origin_refresh_request(Arc::clone(&session));
+    let mut state = session.write().await;
+    state.proxy_next_seq = Some(proxy_start);
+    handoff_startup_account(&mut state, 1, 0);
+    let baseline = reentry_manifest(first, short, "original");
+    super::commit_fetched_manifest(&mut state, &baseline, &request, 0).unwrap();
+    for segment in state.segments.values_mut() {
+        segment.status = crate::SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: 1_000 };
+    }
+    state.activity.last_authorized_media_at_ms = Some(1_000);
+    state.render_and_store_manifest(1_000).unwrap();
+    // A late origin commit does not renew the real media-activity anchor.
+    super::commit_fetched_manifest(&mut state, &baseline, &request, 17_000).unwrap();
+    assert_eq!(state.account_binding_protection(21_000), crate::HlsAccountBindingProtection::Expired);
+    let epoch = state.origin_epoch;
+    let cached = state.segments.clone();
+    let owner = crate::origin::build_hls_origin_session_owner(&state.proxy_session_id);
+    state.restart_admitted_origin_account(crate::HlsOriginAccountBinding::rebound(
+        Arc::from("input"),
+        Arc::from("account-2"),
+        owner,
+        2,
+        21_000,
+    ));
+    request.manifest_commit_requirement = super::HlsManifestCommitRequirement::FreshCommitRequired {
+        reason: crate::HlsFreshManifestRequiredReason::ExpiredRevalidation,
+    };
+    super::commit_fetched_manifest(&mut state, &reentry_manifest(rebase, short, "rebound"), &request, 22_000)
+        .expect("same-host reentry keeps its complete four-segment window");
+    let expected_start = proxy_start + rebase - first;
+    assert_eq!(state.live_origin_sequences(), (expected_start..expected_start + 4).collect::<Vec<_>>());
+    assert_eq!(state.origin_epoch, epoch);
+    for seq in expected_start..proxy_start + 4 {
+        assert_eq!(state.segments[&seq].cache_key, cached[&seq].cache_key);
+        assert_eq!(state.segments[&seq].status, cached[&seq].status);
+    }
+    for segment in state.segments.values_mut() {
+        segment.status = crate::SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: 22_001 };
+    }
+    state.render_and_store_manifest(22_001).unwrap();
+    let anchor = state.origin_account_binding.as_ref().unwrap().startup_protection;
+    request.manifest_commit_requirement = super::HlsManifestCommitRequirement::CommittedManifestAllowed;
+    for now in [26_000, 27_000] {
+        super::commit_fetched_manifest(&mut state, &reentry_manifest(rebase + 1, short, "next"), &request, now)
+            .expect("the successor window must not become contradictory replay");
+        for segment in state.segments.values_mut() {
+            segment.status = crate::SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: now };
+        }
+        let rendered = state.render_and_store_manifest(now).unwrap();
+        assert_eq!(rendered.segment_proxy_seqs.len(), 4);
+        assert_eq!(state.origin_seq_highwater, Some(rebase + 4));
+        assert_eq!(state.proxy_next_seq, Some(expected_start + 5));
+        assert_eq!(state.origin_epoch, epoch);
+        assert_eq!(state.activity.last_authorized_media_at_ms, Some(1_000));
+        assert_eq!(state.origin_account_binding.as_ref().unwrap().startup_protection, anchor);
+    }
+}
+
+#[tokio::test]
+async fn reentry_commit_preserves_two_cached_segments() {
+    assert_reentry_commits_sliding_windows(100, 102, 10, None).await;
+}
+
+#[tokio::test]
+async fn reentry_commit_preserves_three_cached_segments_with_short_tail() {
+    assert_reentry_commits_sliding_windows(100, 101, 20, Some(104)).await;
+}
+
 #[tokio::test]
 async fn published_rebase_continuation_reuses_cached_media_after_admitted_account_restart() {
     let session = test_session();
