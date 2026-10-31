@@ -56,6 +56,53 @@ fn handoff_startup_account(session: &mut crate::HlsSession, generation: u64, now
 }
 
 #[tokio::test]
+async fn published_rebase_continuation_reuses_cached_media_after_admitted_account_restart() {
+    let session = test_session();
+    let mut request = test_origin_refresh_request(Arc::clone(&session));
+    request.manifest_commit_requirement = super::HlsManifestCommitRequirement::FreshCommitRequired {
+        reason: crate::HlsFreshManifestRequiredReason::ExpiredRevalidation,
+    };
+    let mut current = session.write().await;
+    handoff_startup_account(&mut current, 1, 0);
+    super::commit_fetched_manifest(&mut current, &super::fetched_manifest(STARTUP_MANIFEST_202), &request, 9_000)
+        .unwrap();
+    for segment in current.segments.values_mut() {
+        segment.status = crate::SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: 12_000 };
+    }
+    current.render_and_store_manifest(12_000).unwrap();
+    let epoch = current.origin_epoch;
+    let cached = current.segments[&1].clone();
+    let owner = crate::origin::build_hls_origin_session_owner(&current.proxy_session_id);
+    current.restart_admitted_origin_account(crate::HlsOriginAccountBinding::rebound(
+        Arc::from("input"),
+        Arc::from("account-2"),
+        owner,
+        2,
+        46_000,
+    ));
+
+    let next = super::fetched_manifest(STARTUP_MANIFEST_203);
+    super::commit_fetched_manifest(&mut current, &next, &request, 46_000).unwrap();
+
+    assert_eq!(current.live_origin_sequences(), &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(current.origin_epoch, epoch);
+    assert_eq!(current.origin_seq_highwater, Some(208));
+    assert_eq!(current.proxy_next_seq, Some(7));
+    assert_eq!(current.segments[&1].cache_key, cached.cache_key);
+    assert_eq!(current.segments[&1].status, cached.status);
+    assert!(!current.segments[&6].discontinuity_before);
+    assert!(current.origin_account_manifest_pending.is_none());
+    let anchor = current.origin_account_binding.as_ref().unwrap().startup_protection;
+    assert_eq!(anchor.unwrap().anchored_at_ms, 46_000);
+    current.render_and_store_manifest(46_000).expect("cached overlap already contains a usable entry window");
+
+    super::commit_fetched_manifest(&mut current, &next, &request, 47_000).unwrap();
+    assert_eq!(current.origin_epoch, epoch);
+    assert_eq!(current.proxy_next_seq, Some(7));
+    assert_eq!(current.origin_account_binding.as_ref().unwrap().startup_protection, anchor);
+}
+
+#[tokio::test]
 async fn account_handoff_preserves_unpublished_overlap_and_allows_startup_render() {
     let session = test_session();
     let request = test_origin_refresh_request(Arc::clone(&session));

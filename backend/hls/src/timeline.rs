@@ -416,9 +416,9 @@ impl HlsSession {
         Ok(())
     }
 
-    /// Applies a deliberately fresh baseline without reusing sequence evidence from an older epoch.
+    /// Revalidates an origin baseline, retaining overlap proven to continue the current epoch.
     ///
-    /// A retained timeline is separated with an explicit discontinuity. If only stale baseline metadata remains,
+    /// Otherwise a retained timeline is separated with an explicit discontinuity. If only stale baseline metadata remains,
     /// the epoch still advances, but no synthetic discontinuity is added ahead of the first media ever published by
     /// this session. `retained_head_in_use` keeps the published head for viewers
     /// that still hold media protection on the retained timeline.
@@ -438,14 +438,15 @@ impl HlsSession {
                 }
             }
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
-        } else if self.last_rendered_manifest.is_none()
-            && draft.published_resource_history.is_empty()
-            && draft.origin_epoch_effective_host_id == Some(effective_host_id)
-            && draft.pending_handoff_discontinuity_sequence.is_none()
-            && !draft.pending_origin_epoch_handoff
+        } else if draft.can_continue_origin_manifest(manifest, effective_host_id)
+            || (self.last_rendered_manifest.is_none()
+                && draft.published_resource_history.is_empty()
+                && draft.origin_epoch_effective_host_id == Some(effective_host_id)
+                && draft.pending_handoff_discontinuity_sequence.is_none()
+                && !draft.pending_origin_epoch_handoff)
         {
-            // Unpublished overlap still needs its refreshed fetch references. Treating it
-            // as published handoff history would trim the very media needed for startup.
+            // Revalidation does not invalidate verified current overlap. Unpublished
+            // overlap also needs refreshed fetch references rather than prefix trimming.
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
         } else {
             draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::Rebase { retained_head_in_use })?;
@@ -605,6 +606,37 @@ fn handoff_preview_from_draft(
 }
 
 impl TimelineDraft {
+    fn can_continue_origin_manifest(&self, manifest: &ParsedOriginManifest, effective_host_id: u64) -> bool {
+        let Some(highwater) = self.origin_seq_highwater else { return false };
+        if self.origin_epoch_effective_host_id != Some(effective_host_id)
+            || self.pending_handoff_discontinuity_sequence.is_some()
+            || self.pending_origin_epoch_handoff
+            || manifest.segments.first().is_none_or(|segment| segment.origin_seq > highwater)
+            || manifest.segments.last().is_none_or(|segment| segment.origin_seq < highwater)
+        {
+            return false;
+        }
+
+        let mut previous_proxy_seq: Option<u64> = None;
+        for parsed in &manifest.segments {
+            match self.classify_candidate_segment(parsed, effective_host_id) {
+                Ok(CandidateSegmentDisposition::CurrentMapping(proxy_seq)) if parsed.origin_seq <= highwater => {
+                    if previous_proxy_seq.is_some_and(|previous| previous.checked_add(1) != Some(proxy_seq))
+                        || self.segments[&proxy_seq].duration_ms != parsed.duration_ms
+                    {
+                        return false;
+                    }
+                    previous_proxy_seq = Some(proxy_seq);
+                }
+                Ok(CandidateSegmentDisposition::New) if parsed.origin_seq > highwater => {}
+                _ => return false,
+            }
+        }
+        // The overlap must reach the current tail; a historical match alone
+        // cannot establish continuity or insert media before newer proxy entries.
+        previous_proxy_seq.and_then(|seq| seq.checked_add(1)) == self.proxy_next_seq
+    }
+
     fn apply_manifest(
         &mut self,
         manifest: &ParsedOriginManifest,
@@ -1130,11 +1162,135 @@ mod tests {
         state.apply_origin_manifest(&baseline).expect("baseline maps");
         publish_ready_manifest(&mut state, 1);
         let rebase = rebase_overlap_manifest(182_139, &["182139.ts", "182140.ts", "182141.ts", "182142.ts"]);
+        state.mark_pending_origin_epoch_handoff_discontinuity(0);
         state
             .apply_origin_rebase_manifest(&rebase, effective_origin_host_id("origin.example.com"), false)
             .expect("rebase trims the two retained resources");
         assert_eq!(state.live_origin_sequences(), &[4, 5]);
         state
+    }
+
+    #[test]
+    fn rebase_continuation_reuses_cached_overlap_without_starting_an_epoch() {
+        for retained_head_in_use in [false, true] {
+            let mut state = session();
+            let baseline = rebase_overlap_manifest(37, &["alpha.ts", "beta.ts", "gamma.ts", "delta.ts"]);
+            state.apply_origin_manifest(&baseline).unwrap();
+            publish_ready_manifest(&mut state, 1);
+            let epoch = state.origin_epoch;
+            let cached = [state.segments[&2].clone(), state.segments[&3].clone()];
+            let next =
+                rebase_overlap_manifest(39, &["gamma.ts?token=new", "delta.ts?token=new", "epsilon.ts", "zeta.ts"]);
+
+            state
+                .apply_origin_rebase_manifest(
+                    &next,
+                    effective_origin_host_id("origin.example.com"),
+                    retained_head_in_use,
+                )
+                .expect("a verified sliding window continues the current timeline");
+
+            assert_eq!(state.live_origin_sequences(), &[2, 3, 4, 5]);
+            assert_eq!(state.origin_epoch, epoch);
+            assert_eq!(state.origin_seq_highwater, Some(42));
+            assert_eq!(state.proxy_next_seq, Some(6));
+            for (seq, previous) in [2, 3].into_iter().zip(&cached) {
+                let current = &state.segments[&seq];
+                assert_eq!(current.cache_key, previous.cache_key);
+                assert_eq!(current.origin_key, previous.origin_key);
+                assert_eq!(current.status, previous.status);
+                assert!(std::sync::Arc::ptr_eq(&current.access, &previous.access));
+                assert!(current.origin_fetch_ref.as_ref().unwrap().resolved_origin_url.ends_with("?token=new"));
+            }
+            assert!(!state.segments[&4].discontinuity_before);
+
+            state
+                .apply_origin_rebase_manifest(
+                    &next,
+                    effective_origin_host_id("origin.example.com"),
+                    retained_head_in_use,
+                )
+                .expect("repeated revalidation reuses the same complete window");
+            assert_eq!(state.live_origin_sequences(), &[2, 3, 4, 5]);
+            assert_eq!(state.origin_epoch, epoch);
+            assert_eq!(state.proxy_next_seq, Some(6));
+        }
+    }
+
+    #[test]
+    fn rebase_continuation_does_not_reuse_a_different_or_unproven_origin_baseline() {
+        for case in ["host", "handoff", "restart", "duration", "gap", "collected"] {
+            let mut state = session();
+            state.apply_origin_manifest(&rebase_overlap_manifest(37, &["37.ts", "38.ts", "39.ts", "40.ts"])).unwrap();
+            publish_ready_manifest(&mut state, 1);
+            let epoch = state.origin_epoch;
+            let mut host = effective_origin_host_id("origin.example.com");
+            let mut next = rebase_overlap_manifest(39, &["39.ts", "40.ts", "41.ts", "42.ts"]);
+            match case {
+                "host" => host = effective_origin_host_id("other.example.com"),
+                "handoff" => state.mark_pending_origin_epoch_handoff_discontinuity(0),
+                "restart" => next = rebase_overlap_manifest(1, &["39.ts", "40.ts", "41.ts", "42.ts"]),
+                "duration" => next.segments[0].duration_ms = 6_000,
+                "gap" => next = rebase_overlap_manifest(60, &["60.ts", "61.ts", "62.ts", "63.ts"]),
+                "collected" => {
+                    state.segments.retain(|seq, _| *seq < 2);
+                    state.origin_to_proxy.retain(|_, seq| *seq < 2);
+                }
+                _ => unreachable!(),
+            }
+
+            state.apply_origin_rebase_manifest(&next, host, false).unwrap();
+
+            assert_eq!(state.origin_epoch, epoch + 1, "{case}: retain the real rebase path");
+            assert_eq!(state.live_origin_sequences(), if case == "gap" { &[4, 5, 6, 7][..] } else { &[4, 5][..] });
+            assert!(state.segments[&4].discontinuity_before, "{case}");
+        }
+    }
+
+    #[test]
+    fn rebase_continuation_preserves_atomic_resource_and_replay_rejections() {
+        for case in ["uri", "range", "replay"] {
+            let mut state = session();
+            state.apply_origin_manifest(&rebase_overlap_manifest(37, &["37.ts", "38.ts", "39.ts", "40.ts"])).unwrap();
+            publish_ready_manifest(&mut state, 1);
+            let before = super::TimelineDraft::from(&state);
+            let previous = state.last_rendered_manifest.clone();
+            let mut next = rebase_overlap_manifest(39, &["39.ts", "40.ts", "41.ts", "42.ts"]);
+            match case {
+                "uri" => next.segments[0].resolved_origin_url = "http://origin.example.com/changed.ts".into(),
+                "range" => next.segments[0].origin_byte_range = Some(super::ParsedByteRange { offset: 0, length: 512 }),
+                "replay" => next.segments[3].resolved_origin_url = "http://origin.example.com/live/final/38.ts".into(),
+                _ => unreachable!(),
+            }
+
+            let error = state
+                .apply_origin_rebase_manifest(&next, effective_origin_host_id("origin.example.com"), false)
+                .unwrap_err();
+            if case == "replay" {
+                assert!(matches!(
+                    error,
+                    TimelineMapError::PublishedResourceReplay {
+                        decision: super::HlsResourceReplayDecision::RejectContradictoryOrder,
+                        ..
+                    }
+                ));
+            } else {
+                assert_eq!(
+                    error,
+                    TimelineMapError::OriginSequenceResourceConflict {
+                        existing_proxy_seq: 2,
+                        candidate_origin_seq: 39
+                    }
+                );
+            }
+            assert_eq!(state.origin_epoch, before.origin_epoch);
+            assert_eq!(state.origin_seq_highwater, before.origin_seq_highwater);
+            assert_eq!(state.proxy_next_seq, before.proxy_next_seq);
+            assert_eq!(state.origin_to_proxy, before.origin_to_proxy);
+            assert_eq!(state.live_origin_sequences(), before.origin_window_proxy_seqs);
+            assert_eq!(state.segments, before.segments);
+            assert_eq!(state.last_rendered_manifest, previous);
+        }
     }
 
     #[test]
@@ -1291,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn rebase_overlapping_the_retained_timeline_keeps_its_published_head() {
+    fn rebase_continuation_overlapping_the_retained_timeline_reuses_its_current_window() {
         let mut session = session();
         session.apply_origin_manifest(&six_segment_manifest(0)).expect("baseline maps");
         publish_ready_manifest(&mut session, 1);
@@ -1299,8 +1455,10 @@ mod tests {
         let host_id = effective_origin_host_id("origin.example.com");
         session.apply_origin_rebase_manifest(&six_segment_manifest(3), host_id, false).expect("rebase maps");
 
-        assert_eq!(session.publishable_origin_head_proxy_seq, Some(0));
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(3));
         assert_eq!(session.publishable_origin_tail_proxy_seq, Some(8));
+        assert_eq!(session.live_origin_sequences(), &[3, 4, 5, 6, 7, 8]);
+        assert_eq!(session.origin_epoch, 0);
     }
 
     #[test]
