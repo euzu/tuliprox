@@ -1,0 +1,7 @@
+body { font-family: system-ui, sans-serif; margin: 0; padding: 8px; color: var(--text-color, #222); background: transparent; }
+h1 { font-size: 1rem; margin: 0 0 4px; }
+h2 { font-size: 0.85rem; margin: 8px 0 2px; }
+.row { margin: 2px 0; }
+.buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+button { cursor: pointer; padding: 4px 10px; }
+pre { margin: 4px 0; padding: 6px; background: rgba(127, 127, 127, 0.15); overflow: auto; max-height: 240px; white-space: pre-wrap; word-break: break-word; }

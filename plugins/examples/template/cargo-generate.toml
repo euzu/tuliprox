@@ -1,0 +1,10 @@
+[template]
+# Render with `cargo generate --path plugins/examples/template` (or with
+# bin/new-plugin.sh, which needs no cargo-generate). Placeholders used:
+# {{project-name}} (the plugin id, also the package name) and {{sdk_path}}
+# (the absolute path of the tuliprox plugins/plugin-sdk/ directory).
+ignore = [".git", "target", "Cargo.lock"]
+
+[placeholders.sdk_path]
+type = "string"
+prompt = "Absolute path to the tuliprox plugins/plugin-sdk/ directory (for example /home/you/tuliprox/plugin-sdk)"

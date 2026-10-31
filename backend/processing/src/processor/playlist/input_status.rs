@@ -1,13 +1,13 @@
 use super::{InputDownloadResult, InputJobResult, MetadataUpdateSink, PlaylistProcessingContext};
 use crate::input_cache::{load_input_status, resolve_input_storage_path, save_input_status};
-use shared::model::{EventSink, PersistedPlaylistUpdateInputResult, PlaylistUpdateState};
+use shared::model::{EventSink, PersistedPlaylistUpdateInputResult, PlaylistUpdateState, PluginHost};
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) async fn persist_input_job_result<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(super) async fn persist_input_job_result<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     result: &InputJobResult,
 ) {
     // Successful in-run reuse has no new acquisition facts and must not replace the
@@ -18,8 +18,8 @@ pub(super) async fn persist_input_job_result<E: EventSink + Clone + 'static, M: 
     }
 }
 
-pub(super) async fn complete_staged_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(super) async fn complete_staged_input<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &tuliprox_core::model::ConfigInput,
     result: &mut InputDownloadResult,
 ) {
@@ -40,8 +40,8 @@ pub(super) async fn complete_staged_input<E: EventSink + Clone + 'static, M: Met
     }
 }
 
-pub(super) async fn persist_input_completion<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(super) async fn persist_input_completion<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input_id: u16,
     input_name: &Arc<str>,
     state: PlaylistUpdateState,

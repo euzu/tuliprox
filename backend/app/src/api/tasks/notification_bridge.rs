@@ -393,7 +393,11 @@ fn priority_fallback_notification(
 }
 
 fn scheduled_task_notification(id: EventId, failure: &ScheduledTaskFailure, severity: Severity) -> NotificationEvent {
-    let title = format!("Scheduled {:?} failed", failure.task);
+    // A plugin task shares `PluginTask`; the plugin and task name say which.
+    let title = failure.plugin_task.as_ref().map_or_else(
+        || format!("Scheduled {:?} failed", failure.task),
+        |plugin_task| format!("Scheduled {:?} {plugin_task} failed", failure.task),
+    );
     let mut body = format!("{title}\n\n{}", failure.error);
     if let Some(schedule) = &failure.schedule {
         let _ = write!(body, "\n\nSchedule: {schedule}");
@@ -680,6 +684,20 @@ mod tests {
         .expect("mapped");
         assert_eq!(event.id, registry::PLAYLIST_UPDATE_COMPLETED);
         assert_eq!(event.severity, Severity::Info);
+    }
+
+    #[test]
+    fn a_failed_plugin_task_names_the_plugin_and_the_task() {
+        let failure = ScheduledTaskFailure::for_plugin_task("sports", "refresh", "boom".to_string())
+            .with_schedule("0 0 4 * * *".to_string());
+        let event = to_notification(&EventMessage::ScheduledTaskFailed(failure)).expect("mapped");
+        assert_eq!(event.title, "Scheduled PluginTask plugin:sports/refresh failed");
+        assert!(event.body.contains("boom"));
+        assert!(event.body.contains("Schedule: 0 0 4 * * *"));
+
+        let built_in = ScheduledTaskFailure::new(shared::model::ScheduleTaskType::GeoIpUpdate, "boom".to_string());
+        let event = to_notification(&EventMessage::ScheduledTaskFailed(built_in)).expect("mapped");
+        assert_eq!(event.title, "Scheduled GeoIpUpdate failed");
     }
 
     #[test]

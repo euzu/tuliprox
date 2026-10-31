@@ -41,6 +41,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppCon
         config: Arc::new(ArcSwap::from_pointee(Config { custom_stream_response_enabled: true, ..Default::default() })),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::from(Some(Arc::new(api_proxy)))),
         file_locks: Arc::new(crate::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
@@ -288,6 +289,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }
 

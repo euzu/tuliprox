@@ -8,7 +8,7 @@ use shared::{
     error::TuliproxError,
     model::{
         ClusterFlags, EventMessage, EventSink, InputRefreshPolicy, InputType, PlaylistGroup, PlaylistUpdateDataSource,
-        PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, XtreamCluster,
+        PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PluginHost, XtreamCluster,
     },
 };
 use std::collections::HashSet;
@@ -146,8 +146,8 @@ pub(crate) fn collect_effective_skip_clusters(input: &ConfigInput) -> Vec<Xtream
     xtream::get_skip_cluster(input)
 }
 
-pub(super) fn report_forced_update_request<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(super) fn report_forced_update_request<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     refresh_policy: InputRefreshPolicy,
 ) {

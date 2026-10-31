@@ -1,0 +1,25 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="" tvg-name="Planet Football" tvg-logo="" group-title="Sports",Planet Football
+http://127.0.0.1:18970/stream/planet-football.ts
+#EXTINF:-1 tvg-id="laliga.tv.es" tvg-name="LaLiga TV HD" tvg-logo="" group-title="Sport HD",LaLiga TV HD
+http://127.0.0.1:18970/stream/laliga-tv.ts
+#EXTINF:-1 tvg-id="tnt.sports.1.uk" tvg-name="TNT Sports 1" tvg-logo="http://127.0.0.1:18970/logos/tnt-sports.png" group-title="UK Sports",TNT Sports 1
+http://127.0.0.1:18970/stream/tnt-sports-1.ts
+#EXTINF:-1 tvg-id="sky.sports.premierleague.uk" tvg-name="Sky Sports Premier League" tvg-logo="" group-title="UK Sports",Sky Sports Premier League
+http://127.0.0.1:18970/stream/sky-sports-premier-league.ts
+#EXTINF:-1 tvg-id="espn.nba.us" tvg-name="ESPN NBA" tvg-logo="http://127.0.0.1:18970/logos/espn.png" group-title="Sport HD",ESPN NBA
+http://127.0.0.1:18970/stream/espn-nba.ts
+#EXTINF:-1 tvg-id="nba.tv.us" tvg-name="NBA TV" tvg-logo="" group-title="Sport HD",NBA TV
+http://127.0.0.1:18970/stream/nba-tv.ts
+#EXTINF:-1 tvg-id="nfl.network.us" tvg-name="NFL Network" tvg-logo="" group-title="UK Sports",NFL Network
+http://127.0.0.1:18970/stream/nfl-network.ts
+#EXTINF:-1 tvg-id="eurosport.tennis" tvg-name="Eurosport Tennis" tvg-logo="http://127.0.0.1:18970/logos/eurosport.png" group-title="Sport HD",Eurosport Tennis
+http://127.0.0.1:18970/stream/eurosport-tennis.ts
+#EXTINF:-1 tvg-id="" tvg-name="Arena Highlights" tvg-logo="http://127.0.0.1:18970/logos/arena.png" group-title="UK Sports",Arena Highlights
+http://127.0.0.1:18970/stream/arena-highlights.ts
+#EXTINF:-1 tvg-id="bbc.one.uk" tvg-name="BBC One" tvg-logo="http://127.0.0.1:18970/logos/bbc.png" group-title="News",BBC One
+http://127.0.0.1:18970/stream/bbc-one.ts
+#EXTINF:-1 tvg-id="cnn.us" tvg-name="CNN International" tvg-logo="http://127.0.0.1:18970/logos/cnn.png" group-title="News",CNN International
+http://127.0.0.1:18970/stream/cnn.ts
+#EXTINF:-1 tvg-id="movie.max" tvg-name="Movie Max" tvg-logo="" group-title="Movies",Movie Max
+http://127.0.0.1:18970/stream/movie-max.ts

@@ -11,7 +11,7 @@ use shared::{
     model::{
         ClusterFlags, EventMessage, EventSink, InputRefreshPolicy, InputStats, InputType, PlaylistStats,
         PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
-        PlaylistUpdateState, SourceStats, TargetStats,
+        PlaylistUpdateState, PluginHost, PluginRunReport, SourceStats, TargetStats,
     },
     utils::sanitize_sensitive_info,
 };
@@ -49,6 +49,9 @@ pub(crate) struct InputDownloadResult {
     pub(crate) quality_rejections: Vec<ClusterUpdateRejection>,
     pub(crate) accepted_empty_clusters: ClusterFlags,
     pub(crate) input_telemetry: Option<PlaylistUpdateInputTelemetry>,
+    /// What the `on-playlist-loaded` hook did to this input. Each target that
+    /// consumes the input adds it to its own report once.
+    pub(crate) plugins: PluginRunReport,
 }
 
 impl InputDownloadResult {
@@ -86,6 +89,7 @@ pub(crate) struct InputJobResult {
     pub(crate) accepted_empty_clusters: ClusterFlags,
     pub(crate) had_quality_rejections: bool,
     pub(crate) input_telemetry: Option<PlaylistUpdateInputTelemetry>,
+    pub(crate) plugins: PluginRunReport,
 }
 
 impl InputJobResult {
@@ -111,9 +115,9 @@ impl InputCompletionFacts {
     }
 }
 
-pub(crate) async fn process_input_job<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+pub(crate) async fn process_input_job<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     index: usize,
-    ctx: &PlaylistProcessingContext<E, M>,
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
     process_parallel: bool,
 ) -> InputJobResult {
@@ -126,9 +130,9 @@ pub(crate) async fn process_input_job<E: EventSink + Clone + 'static, M: Metadat
     .await
 }
 
-pub(crate) async fn process_input_job_inner<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+pub(crate) async fn process_input_job_inner<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     index: usize,
-    ctx: &PlaylistProcessingContext<E, M>,
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
 ) -> InputJobResult {
     let start_time = Instant::now();
@@ -180,6 +184,7 @@ pub(crate) async fn process_input_job_inner<E: EventSink + Clone + 'static, M: M
         accepted_empty_clusters: download.accepted_empty_clusters,
         had_quality_rejections,
         input_telemetry: download.input_telemetry,
+        plugins: download.plugins,
     }
 }
 
@@ -197,6 +202,7 @@ pub(crate) fn panicked_input_job(index: usize, input: &ConfigInput) -> InputJobR
         accepted_empty_clusters: ClusterFlags::empty(),
         had_quality_rejections: false,
         input_telemetry: None,
+        plugins: PluginRunReport::default(),
     }
 }
 
@@ -248,9 +254,9 @@ pub(in crate::processor::playlist) fn report_input_completion<E: EventSink>(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     source_idx: usize,
-    ctx: Arc<PlaylistProcessingContext<E, M>>,
+    ctx: Arc<PlaylistProcessingContext<E, M, P>>,
 ) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
     log_memory_snapshot(format!("source[{source_idx}] start").as_str());
     let sources = ctx.config.sources.load();
@@ -300,6 +306,7 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
 
         let mut blockers = Vec::new();
         let mut accepted_empty_clusters = ClusterFlags::empty();
+        let mut input_plugins: HashMap<Arc<str>, PluginRunReport> = HashMap::new();
         for mut result in job_results {
             super::super::input_status::persist_input_job_result(&ctx, &result).await;
             report_input_job_completion(&ctx.events, &ctx.run_id, ctx.execution_order, &result);
@@ -311,6 +318,9 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
                     (sources.get_input_by_name(&result.input_name), result.source.take())
                 {
                     source_playlists.push(FetchedPlaylist { input, source, epg: result.epg });
+                    if !result.plugins.is_empty() {
+                        input_plugins.insert(Arc::clone(&result.input_name), std::mem::take(&mut result.plugins));
+                    }
                 }
             } else {
                 blockers.push(result.input_name);
@@ -351,6 +361,7 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
                     &mut errors,
                     accepted_empty_clusters,
                     process_parallel,
+                    &input_plugins,
                 )
                 .await;
             }
@@ -363,8 +374,8 @@ pub(crate) async fn process_source<E: EventSink + Clone + 'static, M: MetadataUp
     (ordered_input_stats, target_stats, errors)
 }
 
-pub(crate) async fn download_input_epg<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn download_input_epg<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &Arc<ConfigInput>,
     error_list: &mut Vec<TuliproxError>,
 ) -> Option<TVGuide> {
@@ -379,13 +390,19 @@ pub(crate) async fn download_input_epg<E: EventSink + Clone + 'static, M: Metada
     let mut discarded = CountingEpgSink::new();
     let outcome = provider.fetch(&EpgFetchRequest::new(input), &mut discarded).await;
     error_list.extend(provider.take_errors());
-    match outcome {
+    let guide = match outcome {
         Ok(outcome) => outcome.into_guide(),
         Err(err) => {
             error_list.push(err);
             None
         }
+    };
+    if input.input_type == InputType::Plugin {
+        // `fetch-epg` of the providing plugin joins the guide as one more source, so its programmes
+        // take the normal EPG path.
+        return super::super::plugin_epg::with_plugin_epg(ctx, input, guide, error_list).await;
     }
+    guide
 }
 
 pub(crate) fn create_broadcast_callback<E: EventSink + Clone + 'static>(
@@ -444,7 +461,7 @@ pub(crate) fn create_input_stat(
 
 // Written out rather than derived: `#[derive(Clone)]` would demand `M: Clone`,
 // but the sink is held behind an `Arc` and is cloneable whatever `M` is.
-impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingContext<E, M> {
+impl<E: EventSink + Clone, M: MetadataUpdateSink, P: PluginHost> Clone for PlaylistProcessingContext<E, M, P> {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),
@@ -467,11 +484,12 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingCo
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance.clone(),
+            plugins: self.plugins.clone(),
         }
     }
 }
 
-impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> PlaylistProcessingContext<E, M> {
+impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> PlaylistProcessingContext<E, M, P> {
     pub fn is_input_in_maintenance(&self, input_name: &str) -> bool {
         self.maintenance.as_ref().is_some_and(|gate| gate.is_in_maintenance(input_name))
     }
@@ -517,8 +535,8 @@ impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> PlaylistProcessingCo
     }
 }
 
-pub(crate) async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    processing_ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn process_sources<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    processing_ctx: &PlaylistProcessingContext<E, M, P>,
 ) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let mut async_tasks = JoinSet::new();
     let sources = processing_ctx.config.sources.load();

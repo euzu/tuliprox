@@ -336,7 +336,8 @@ pub(crate) use self::{
     stalker::resolve_initial_stalker_playback_url,
     strategy::resolve_redirect_location,
     streaming::{
-        get_hls_playback_ttl_secs, record_connect_failed_attempt, resolve_request_url_for_logging,
-        resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect, stream_response,
+        get_hls_playback_ttl_secs, plugin_upstream_headers, record_connect_failed_attempt,
+        resolve_request_url_for_logging, resolve_stream_user_agent_index, should_allow_exhausted_shared_reconnect,
+        stream_response,
     },
 };

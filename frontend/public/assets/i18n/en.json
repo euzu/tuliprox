@@ -902,7 +902,8 @@
       "QUEUE_CAPACITY": "Size of the bounded event queue (minimum 16). When it is full, events are dropped and counted; fetches never wait.",
       "FRESHNESS_SECS": "Seconds after which a measurement is reported as unknown (null) instead of good or bad.",
       "WINDOW_SECS": "Length in seconds of the rolling window used for the aggregates."
-    }
+    },
+    "PLUGIN_SECRET_ENV_HINT": "Store secrets as ${env:VAR} references instead of literal values. A reference is resolved when the plugin loads and is never shown here."
   },
   "HINT": {
     "CONFIG": {
@@ -2004,7 +2005,48 @@
     "SYSLOG_LOG_LEVEL": "Syslog Log Level",
     "SYSLOG_MAX_MESSAGE_LEN": "Max Message Length",
     "SYSLOG_PORT": "Syslog Port",
-    "SYSLOG_QUEUE_CAPACITY": "Queue Capacity"
+    "SYSLOG_QUEUE_CAPACITY": "Queue Capacity",
+    "PLUGINS": "Plugins",
+    "PLUGIN_STATE_DISCOVERED": "Discovered",
+    "PLUGIN_STATE_INVALID": "Invalid",
+    "PLUGIN_STATE_PENDING_APPROVAL": "Pending approval",
+    "PLUGIN_STATE_APPROVED": "Approved",
+    "PLUGIN_STATE_LOADED": "Loaded",
+    "PLUGIN_STATE_FAILED": "Failed",
+    "PLUGIN_HOOKS": "Hooks",
+    "PLUGIN_CALLS": "Calls",
+    "PLUGIN_FAILURES": "Failures",
+    "PLUGIN_BUDGET_SKIPS": "Budget skips",
+    "PLUGIN_LAST_ERROR": "Last error",
+    "PLUGIN_HOOK": "Hook",
+    "PLUGIN_KEPT": "Kept",
+    "PLUGIN_DROPPED": "Dropped",
+    "PLUGIN_MODIFIED": "Modified",
+    "PLUGIN_ERRORS": "Errors",
+    "PLUGIN_DURATION_MS": "Duration (ms)",
+    "PLUGIN_TASKS": "Tasks",
+    "PLUGIN_NO_TASKS": "No tasks declared",
+    "PLUGIN_SECRET_SET": "Set",
+    "PLUGIN_SECRET_NOT_SET": "Not set",
+    "PLUGIN_SECRET_NEW_VALUE": "Enter a new value (leave empty to keep the current one)",
+    "PLUGIN_LOGS": "Plugin logs",
+    "PLUGIN_INSTALL": "Install plugin",
+    "PLUGIN_UPLOAD": "Upload",
+    "PLUGIN_APPROVE_INSTALL": "Approve and install",
+    "PLUGIN_FILE": "Plugin package (.tlpx)",
+    "PLUGIN_CAPABILITIES": "Requested capabilities",
+    "PLUGIN_NO_CAPABILITIES": "None. This plugin asks for no special permissions.",
+    "PLUGIN_NETWORK_WARNING_TITLE": "Unrestricted network access",
+    "PLUGIN_CUSTOM_UI": "Custom user interface",
+    "PLUGIN_RPC_EXPORTS": "Callable functions",
+    "PLUGIN_SECRETS": "Secret settings",
+    "PLUGIN_REPLACES": "Replaces installed version",
+    "PLUGIN_AUTHOR": "Author",
+    "PLUGIN_HOMEPAGE": "Homepage",
+    "PLUGIN_EXPOSE_MCP": "Expose to MCP (AI assistants can call these unattended)",
+    "PLUGIN_UNINSTALL": "Uninstall",
+    "PLUGIN_PURGE_DATA": "Also delete stored data",
+    "PLUGIN_REENABLE": "Re-enable"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2277,7 +2319,26 @@
     },
     "USER_BOUQUET": {
       "FAIL": "Failed to download user bouquets!"
-    }
+    },
+    "PLUGIN_LOAD_FAILED": "Failed to load the plugins:",
+    "PLUGIN_LIST_EMPTY": "No plugins found.",
+    "PLUGIN_STATS_UNAVAILABLE": "Statistics unavailable.",
+    "PLUGIN_SETTINGS_LOAD_FAILED": "Failed to load the plugin settings:",
+    "PLUGIN_SETTINGS_SAVED": "Plugin settings saved.",
+    "PLUGIN_SETTINGS_NO_SCHEMA": "This plugin ships no settings schema, so its settings are shown read-only.",
+    "PLUGIN_SCHEMA_UNSUPPORTED": "The settings schema uses a construct the form cannot render:",
+    "PLUGIN_LOGS_LOAD_FAILED": "Could not load the plugin logs:",
+    "PLUGIN_CUSTOM_UI_WARNING": "This plugin ships its own UI. It runs sandboxed, but can call its declared functions with your permissions and can open external pages from its frame.",
+    "PLUGIN_SECRETS_HINT": "This plugin asks for these secret settings, such as API tokens:",
+    "PLUGIN_UPLOAD_HINT": "Choose a .tlpx package. It is checked and shown to you for review; nothing is installed until you approve it.",
+    "PLUGIN_UPLOAD_FAILED": "The package was rejected:",
+    "PLUGIN_INSTALLED": "Plugin approved and installed (not enabled yet)",
+    "PLUGIN_ENABLED": "Plugin enabled",
+    "PLUGIN_DISABLED": "Plugin disabled",
+    "PLUGIN_UNINSTALLED": "Plugin uninstalled",
+    "PLUGIN_UNINSTALL_CONFIRM": "This removes the plugin and its entry in config.yml. It cannot be undone.",
+    "PLUGIN_PURGE_HINT": "Leave this off to keep the plugin's stored data, for example if you plan to reinstall it.",
+    "PLUGIN_FRAME_INVALID": "This plugin page cannot be displayed."
   },
   "SETUP": {
     "DESC": {
@@ -2299,7 +2360,8 @@
       "UNKNOWN": "Configure this setup step.",
       "VIDEO": "Configure video settings.",
       "WEB_UI": "Configure WebUI settings.",
-      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt."
+      "WELCOME": "Create the first WebUI user. These credentials will be written to user.txt.",
+      "PLUGINS": "Configure the plugins you have installed."
     },
     "LABEL": {
       "API": "API",
@@ -2330,7 +2392,8 @@
       "WEBUI_USER": "WebUI User",
       "WEBUI_USERNAME": "WebUI Username",
       "WEB_UI": "Web-Ui",
-      "WELCOME": "Welcome"
+      "WELCOME": "Welcome",
+      "PLUGINS": "Plugins"
     },
     "MSG": {
       "COMPLETE_RESTART_HINT": "Setup completed successfully. Restart the application/container to continue.",

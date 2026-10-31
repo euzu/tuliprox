@@ -1,7 +1,7 @@
 use crate::{
     error::TuliproxError,
     foundation::{apply_templates_to_pattern, get_filter, Filter},
-    model::{ItemField, PatternTemplate, Prepare, PrepareAll, TemplateValue},
+    model::{ItemField, PatternTemplate, PluginRef, Prepare, PrepareAll, TemplateValue},
 };
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -171,6 +171,11 @@ pub struct ConfigSortDto {
     pub match_as_ascii: bool,
     #[serde(default)]
     pub rules: Vec<ConfigSortRuleDto>,
+    /// `plugin:<id>`: a plugin supplies a sort key per channel (`sort-key`).
+    /// The host stable-sorts the channels of each group by that key after the
+    /// `rules`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<PluginRef>,
 }
 
 impl Prepare for ConfigSortDto {

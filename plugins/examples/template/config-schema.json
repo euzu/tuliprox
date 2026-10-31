@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "title": "My plugin",
+  "properties": {
+    "rename_from": {
+      "type": "string",
+      "title": "Group to rename",
+      "description": "The exact playlist group name to match after filtering. Empty disables the rename.",
+      "default": ""
+    },
+    "rename_to": {
+      "type": "string",
+      "title": "New group name",
+      "default": ""
+    },
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "A write-only secret: masked when read back, redacted from logs, no default.",
+      "writeOnly": true
+    }
+  }
+}

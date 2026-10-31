@@ -206,6 +206,7 @@ fn test_app_config() -> Arc<AppConfig> {
         config: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::Config::default())),
         sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
         hdhomerun: Arc::new(arc_swap::ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(arc_swap::ArcSwapOption::empty()),
         file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
         paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {

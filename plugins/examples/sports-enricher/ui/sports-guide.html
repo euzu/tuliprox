@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sports Guide</title>
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<h1 id="heading"></h1>
+<div class="row">
+  <label for="league" id="league-label"></label>
+  <select id="league"></select>
+  <button id="reload" type="button" class="primary"></button>
+  <span id="updated" class="muted"></span>
+</div>
+<div id="message" class="notice" hidden></div>
+<table id="table" hidden>
+  <thead><tr id="head"></tr></thead>
+  <tbody id="body"></tbody>
+</table>
+<script src="../../_sdk/bridge.js"></script>
+<script src="common.js"></script>
+<script src="sports-guide.js"></script>
+</body>
+</html>

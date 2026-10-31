@@ -8,6 +8,10 @@ use std::{
 };
 
 const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
+/// Suffix of a cache file still being written. A writer renames it into place
+/// when complete, so [`LRUResourceCache::scan`] drops any it finds: a crash
+/// left it half written.
+pub const CACHE_PARTIAL_SUFFIX: &str = ".partial";
 
 #[inline]
 fn encode_cache_key(key: &str) -> String { encode_base64_hash(key) }
@@ -94,6 +98,10 @@ impl LRUResourceCache {
             if let Some(os_file_name) = path.file_name() {
                 let file_name = String::from(os_file_name.to_string_lossy());
                 if file_name == CACHEDIR_TAG {
+                    return;
+                }
+                if file_name.ends_with(CACHE_PARTIAL_SUFFIX) {
+                    let _ = std::fs::remove_file(&path);
                     return;
                 }
                 let (key, mime_type) = if let Some((part1, part2)) = file_name.split_once('.') {
@@ -244,5 +252,26 @@ impl LRUResourceCache {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LRUResourceCache, CACHE_PARTIAL_SUFFIX};
+
+    #[tokio::test]
+    async fn scan_drops_half_written_files_and_keeps_complete_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("complete"), b"12345").unwrap();
+        let partial = dir.path().join(format!("crashed{CACHE_PARTIAL_SUFFIX}"));
+        std::fs::write(&partial, b"12").unwrap();
+
+        let mut cache = LRUResourceCache::new(1024, &dir.path().to_string_lossy());
+        cache.scan().unwrap();
+
+        assert!(cache.cache.contains_key("complete"));
+        assert!(!cache.cache.keys().any(|key| key.starts_with("crashed")), "a partial is never adopted");
+        assert_eq!(cache.current_size, 5);
+        assert!(!partial.exists(), "the scan removes the partial");
     }
 }

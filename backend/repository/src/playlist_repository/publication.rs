@@ -238,7 +238,7 @@ pub(super) fn validate_force_empty_output_filters(
         let output_name = match output {
             TargetOutput::M3u(_) => "M3U",
             TargetOutput::Strm(_) => "STRM",
-            TargetOutput::Xtream(_) | TargetOutput::HdHomeRun(_) => continue,
+            TargetOutput::Xtream(_) | TargetOutput::HdHomeRun(_) | TargetOutput::Plugin(_) => continue,
         };
         let Some(filtered_playlist) = prepared_output else {
             continue;

@@ -1,0 +1,12 @@
+// The fixture's own composite world: the five EPG / metadata hook interfaces
+// of the frozen contract in one component. Nothing here redefines the contract.
+package tuliprox:epg-probe@0.0.0;
+
+world epg-probe {
+  include tuliprox:plugin/base@1.0.0;
+  export tuliprox:plugin/epg-load-hooks@1.0.0;
+  export tuliprox:plugin/epg-transform-hooks@1.0.0;
+  export tuliprox:plugin/epg-enrich-hooks@1.0.0;
+  export tuliprox:plugin/epg-match-hooks@1.0.0;
+  export tuliprox:plugin/metadata-hooks@1.0.0;
+}

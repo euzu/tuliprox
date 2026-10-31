@@ -37,6 +37,7 @@ mod no_submit_form;
 mod number_input;
 mod panel;
 mod playlist;
+mod plugins;
 mod popup_menu;
 mod radio_button_group;
 mod range_slider;
@@ -90,4 +91,4 @@ pub(crate) use self::{
     task_status_badge::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*,
     userlist::*, websocket_status::*,
 };
-pub use self::{confirm_dialog::*, content_dialog::*, table::*};
+pub use self::{confirm_dialog::*, content_dialog::*, plugins::*, table::*};

@@ -345,6 +345,7 @@ mod tests {
             config: Arc::new(ArcSwap::default()),
             sources: Arc::new(ArcSwap::default()),
             hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
             api_proxy: Arc::new(ArcSwapOption::default()),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {

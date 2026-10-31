@@ -96,11 +96,15 @@ fn schedules_changed_detects_task_type_changes() {
         schedule: "0 0 3 * * * *".to_string(),
         task_type: ScheduleTaskType::PlaylistUpdate,
         targets: None,
+        plugin: None,
+        task: None,
     }];
     let b = vec![ScheduleConfig {
         schedule: "0 0 3 * * * *".to_string(),
         task_type: ScheduleTaskType::GeoIpUpdate,
         targets: None,
+        plugin: None,
+        task: None,
     }];
     assert!(schedules_changed(&a, &b));
 }
@@ -112,11 +116,15 @@ fn schedules_changed_treats_same_entries_as_unchanged() {
             schedule: "0 0 3 * * * *".to_string(),
             task_type: ScheduleTaskType::GeoIpUpdate,
             targets: None,
+            plugin: None,
+            task: None,
         },
         ScheduleConfig {
             schedule: "0 0 8 * * * *".to_string(),
             task_type: ScheduleTaskType::PlaylistUpdate,
             targets: Some(vec!["a".to_string(), "b".to_string()]),
+            plugin: None,
+            task: None,
         },
     ];
     let b = vec![
@@ -124,11 +132,15 @@ fn schedules_changed_treats_same_entries_as_unchanged() {
             schedule: "0 0 8 * * * *".to_string(),
             task_type: ScheduleTaskType::PlaylistUpdate,
             targets: Some(vec!["b".to_string(), "a".to_string()]),
+            plugin: None,
+            task: None,
         },
         ScheduleConfig {
             schedule: "0 0 3 * * * *".to_string(),
             task_type: ScheduleTaskType::GeoIpUpdate,
             targets: None,
+            plugin: None,
+            task: None,
         },
     ];
     assert!(!schedules_changed(&a, &b));

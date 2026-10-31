@@ -104,6 +104,34 @@ pub fn create_public_http_client_no_redirect(app_config: &AppConfig) -> Result<C
     builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create public-only HTTP client: {err}")))
 }
 
+/// Creates the no-redirect client that plugin outbound traffic uses.
+///
+/// It inherits the application's configured proxy, TLS settings (including the insecure-certificate
+/// switch), user agent policy and connection pool, exactly like the other no-redirect clients, so
+/// plugin requests leave the host the way operator-configured traffic does.
+///
+/// It deliberately has **no** `ResourceDestinationResolver` and no `PublicIpResolver`: plugin
+/// destinations are unrestricted by design. The admin grants a plugin the `network` capability, and a
+/// plugin may then reach public, private and loopback hosts alike; destination authorization is not
+/// the transport's job (plugin design, section 9). The resource clients above must never be used for
+/// plugin traffic, and this one must never be used for provider or EPG resource URLs, which are
+/// untrusted input that the resolver exists to constrain.
+///
+/// Redirects are not followed here: the caller drives them through the manual redirect loop, which
+/// strips credentials on a cross-origin hop. The client's own retry is off, because retry is owned by
+/// the caller. Unlike the general clients it never falls back to an unconfigured client: if the
+/// configured proxy or TLS setup cannot be built, construction fails.
+pub fn create_plugin_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
+    let config = app_config.config.load();
+    let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .http1_only();
+    if config.connect_timeout_secs > 0 {
+        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+    }
+    builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create plugin HTTP client: {err}")))
+}
+
 fn build_http_client_with_fallback(
     mut builder: reqwest::ClientBuilder,
     config: &Arc<Config>,

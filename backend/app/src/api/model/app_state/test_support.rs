@@ -17,6 +17,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(crate::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(shared::model::ConfigPaths {
@@ -91,6 +92,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         auth: AuthState::for_tests(),
         playlist_updates: PlaylistUpdateControl::for_tests(),
         maintenance,
+        plugins: super::AppPlugins::default(),
     })
 }
 

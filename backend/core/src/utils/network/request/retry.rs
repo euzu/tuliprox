@@ -1,6 +1,8 @@
 use super::{
     execute_attempt_request, format_http_status, format_request_target_for_logging, get_client_request,
-    is_failover_redirect, prepare_input_request_headers, prepare_physical_request_attempt,
+    is_failover_redirect,
+    jitter::{JitterSource, JitterStrategy},
+    prepare_input_request_headers, prepare_physical_request_attempt, reject_https_downgrade,
     resolve_attempt_target_at_provider_index, same_origin, strip_sensitive_headers_for_cross_origin_redirect,
     text_response_error_log_label, AttemptTarget, ProviderFailoverResponse, RequestFetchOptions,
     TextContentBodyOptions, TextContentRetryOwner,
@@ -13,7 +15,7 @@ use log::{debug, error, log_enabled, warn, Level};
 use reqwest::{header::HeaderMap, StatusCode};
 use shared::{
     error::string_to_io_error,
-    model::{OnConnectErrorPolicy, ProviderUrlSelectionPolicy},
+    model::{Millis, OnConnectErrorPolicy, ProviderUrlSelectionPolicy},
     utils::sanitize_sensitive_info,
 };
 use std::{
@@ -311,6 +313,21 @@ pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32
     } else {
         delay as u64
     }
+}
+
+/// [`calculate_retry_backoff`] followed by jitter.
+///
+/// Opt-in: nothing in the request stack calls it, so existing callers keep their deterministic delays.
+/// The jitter is applied after the exponential growth, so with `Full` or `Equal` the result never
+/// exceeds what [`calculate_retry_backoff`] returns. The random source is injected.
+pub fn calculate_retry_backoff_with_jitter(
+    base_delay_ms: u64,
+    multiplier: f64,
+    attempt: u32,
+    strategy: JitterStrategy,
+    source: &(impl JitterSource + ?Sized),
+) -> u64 {
+    strategy.apply(Millis::new(calculate_retry_backoff(base_delay_ms, multiplier, attempt)), source).get()
 }
 
 /// Sends a request with retry logic and optional provider failover support.
@@ -872,6 +889,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                             ))
                                         })?;
 
+                                    reject_https_downgrade(&response_base_url, &next_url, options)?;
                                     if !same_origin(&response_base_url, &next_url) {
                                         strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
                                     }
@@ -1132,4 +1150,26 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
     // - 429 Too Many Requests
     // - 408 Request Timeout
     // - 407 Proxy Authentication Required
+}
+
+#[cfg(test)]
+mod jitter_backoff_tests {
+    use super::{calculate_retry_backoff, calculate_retry_backoff_with_jitter};
+    use crate::utils::request::{jitter::FixedSequenceJitter, JitterStrategy};
+
+    #[test]
+    fn no_jitter_returns_the_deterministic_backoff() {
+        let source = FixedSequenceJitter::new([1]);
+        assert_eq!(calculate_retry_backoff(100, 2.0, 3), 800);
+        assert_eq!(calculate_retry_backoff_with_jitter(100, 2.0, 3, JitterStrategy::None, &source), 800);
+    }
+
+    #[test]
+    fn jitter_is_drawn_from_the_grown_delay_and_never_exceeds_it() {
+        let source = FixedSequenceJitter::new([250, 10_000]);
+        assert_eq!(calculate_retry_backoff_with_jitter(100, 2.0, 3, JitterStrategy::Full, &source), 250);
+        assert_eq!(calculate_retry_backoff_with_jitter(100, 2.0, 3, JitterStrategy::Full, &source), 800);
+        let equal = FixedSequenceJitter::new([0]);
+        assert_eq!(calculate_retry_backoff_with_jitter(100, 2.0, 3, JitterStrategy::Equal, &equal), 400);
+    }
 }

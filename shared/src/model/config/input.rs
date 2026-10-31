@@ -3,7 +3,10 @@ use crate::{
     defaults::{default_as_true, is_true, is_zero_i16, is_zero_u16},
     error::TuliproxError,
     model::{config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, StalkerInputConfigDto},
-    utils::{arc_str_serde, deserialize_timestamp, is_blank_optional_string, Internable},
+    utils::{
+        arc_str_option_serde, arc_str_serde, deserialize_timestamp, is_blank_optional_arc_str,
+        is_blank_optional_string, Internable,
+    },
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -127,6 +130,12 @@ pub struct ConfigInputDto {
     /// is `Stalker` or `StalkerBatch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalker: Option<StalkerInputConfigDto>,
+    /// Id of the plugin that provides this input. Set if and only if
+    /// `input_type` is `Plugin` (checked in `prepare`). For a plugin input
+    /// `url`, `username` and `password` are optional and are handed to the
+    /// plugin as they are.
+    #[serde(default, skip_serializing_if = "is_blank_optional_arc_str", with = "arc_str_option_serde")]
+    pub plugin: Option<Arc<str>>,
 }
 
 impl Default for ConfigInputDto {
@@ -159,6 +168,7 @@ impl Default for ConfigInputDto {
             provider: None,
             playback_provider: None,
             stalker: None,
+            plugin: None,
         }
     }
 }

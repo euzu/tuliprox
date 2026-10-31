@@ -1,0 +1,11 @@
+id: probe-timeout
+name: Host probe (200 ms deadline)
+version: 0.1.0
+api_version: 1
+hooks:
+  - playlist.after-filter
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 200
+  max_instances: 4
+  fail_mode: continue

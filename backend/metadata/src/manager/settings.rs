@@ -76,8 +76,8 @@ impl MetadataUpdateRuntimeSettings {
         Self {
             queue_log_interval: Duration::from_secs(cfg.log.queue_interval_secs.max(1)),
             progress_log_interval: Duration::from_secs(cfg.log.progress_interval_secs.max(1)),
-            max_resolve_retry_backoff_secs: cfg.resolve.max_retry_backoff_secs.max(1),
-            resolve_min_retry_base_secs: cfg.resolve.min_retry_base_secs.max(1),
+            max_resolve_retry_backoff_secs: cfg.resolve.max_retry_backoff_secs.get().max(1),
+            resolve_min_retry_base_secs: cfg.resolve.min_retry_base_secs.get().max(1),
             max_attempts_resolve: cfg.resolve.max_attempts.max(1),
             max_attempts_probe: cfg.probe.max_attempts.max(1),
             resolve_exhaustion_reset_gap_secs: to_i64(cfg.resolve.exhaustion_reset_gap_secs),

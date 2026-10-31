@@ -1,0 +1,575 @@
+use crate::{
+    app::components::{
+        plugins::{
+            plugin_logs::PluginLogs, plugin_settings::PluginSettings, plugin_slot::use_plugin_ui,
+            plugin_upload::PluginUpload,
+        },
+        Card, Chip, ContentDialog, LoadingIndicator, NoContent, TextButton, ToggleSwitch,
+    },
+    hooks::use_service_context,
+    i18n::{use_translation, YewI18n},
+    model::{DialogAction, DialogActions, DialogResult},
+    services::PluginService,
+};
+use shared::model::{Permission, PluginHookStats, PluginStateDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto};
+use std::rc::Rc;
+use web_sys::HtmlInputElement;
+use yew::{
+    classes, component, html, platform::spawn_local, use_effect_with, use_state, Callback, Event, Html, Properties,
+    TargetCast,
+};
+
+/// The i18n key of a lifecycle state.
+fn state_label_key(state: PluginStateDto) -> &'static str {
+    match state {
+        PluginStateDto::Discovered => "LABEL.PLUGIN_STATE_DISCOVERED",
+        PluginStateDto::Invalid => "LABEL.PLUGIN_STATE_INVALID",
+        PluginStateDto::PendingApproval => "LABEL.PLUGIN_STATE_PENDING_APPROVAL",
+        PluginStateDto::Approved => "LABEL.PLUGIN_STATE_APPROVED",
+        PluginStateDto::Loaded => "LABEL.PLUGIN_STATE_LOADED",
+        PluginStateDto::Enabled => "LABEL.ENABLED",
+        PluginStateDto::Disabled => "LABEL.DISABLED",
+        PluginStateDto::Failed => "LABEL.PLUGIN_STATE_FAILED",
+    }
+}
+
+/// The pill style of a lifecycle state, from the shared task-status pill.
+fn state_modifier(state: PluginStateDto) -> &'static str {
+    match state {
+        PluginStateDto::Enabled => "tp__task-status--active",
+        PluginStateDto::Loaded | PluginStateDto::Approved => "tp__task-status--done",
+        PluginStateDto::PendingApproval => "tp__task-status--waiting",
+        PluginStateDto::Discovered => "tp__task-status--pending",
+        PluginStateDto::Disabled => "tp__task-status--paused",
+        PluginStateDto::Invalid | PluginStateDto::Failed => "tp__task-status--failed",
+    }
+}
+
+/// Whether the enable switch does anything: a plugin that is waiting for
+/// approval, or that failed validation, cannot be enabled (the server answers
+/// `409`), so its switch is read-only.
+const fn can_toggle(state: PluginStateDto) -> bool {
+    matches!(
+        state,
+        PluginStateDto::Loaded | PluginStateDto::Enabled | PluginStateDto::Disabled | PluginStateDto::Failed
+    )
+}
+
+/// One plugin with what the list loads for it besides the summary. Stats and
+/// tasks are `None` when their request failed, as it does for a plugin that
+/// never loaded.
+#[derive(Clone, PartialEq)]
+struct PluginEntry {
+    summary: PluginSummaryDto,
+    stats: Option<PluginStatsDto>,
+    tasks: Option<Vec<PluginTaskDto>>,
+}
+
+async fn load_entries(service: Rc<PluginService>) -> Result<Vec<PluginEntry>, String> {
+    let summaries = service.list().await.map_err(|err| err.to_string())?;
+    let mut entries = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        let stats = service.get_stats(&summary.id).await.ok();
+        let tasks = service.get_tasks(&summary.id).await.ok();
+        entries.push(PluginEntry { summary, stats, tasks });
+    }
+    Ok(entries)
+}
+
+fn render_task_summary(translate: &YewI18n, tasks: &[PluginTaskDto]) -> Html {
+    html! {
+        <div class="tp__plugins__tasks">
+            <h4>{ format!("{} ({})", translate.t("LABEL.PLUGIN_TASKS"), tasks.len()) }</h4>
+            if tasks.is_empty() {
+                <span class="tp__plugins__muted">{ translate.t("LABEL.PLUGIN_NO_TASKS") }</span>
+            } else {
+                <ul>
+                    { for tasks.iter().map(|task| html! {
+                        <li key={task.id.clone()}>
+                            { task.title.clone() }
+                            if let Some(schedule) = task.default_schedule.as_ref() {
+                                { " - " }<code>{ schedule.clone() }</code>
+                            }
+                        </li>
+                    }) }
+                </ul>
+            }
+        </div>
+    }
+}
+
+fn render_hook_row(hook: &PluginHookStats) -> Html {
+    html! {
+        <tr key={hook.hook.clone()}>
+            <td>{ hook.hook.clone() }</td>
+            <td>{ hook.kept }</td>
+            <td>{ hook.dropped }</td>
+            <td>{ hook.modified }</td>
+            <td>{ hook.errors }</td>
+            <td>{ hook.duration_ms }</td>
+        </tr>
+    }
+}
+
+fn render_stats(translate: &YewI18n, stats: Option<&PluginStatsDto>) -> Html {
+    let Some(stats) = stats else {
+        return html! { <span class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_STATS_UNAVAILABLE") }</span> };
+    };
+    html! {
+        <div class="tp__plugins__stats">
+            <div class="tp__plugins__counters">
+                <span>{ format!("{}: {}", translate.t("LABEL.PLUGIN_CALLS"), stats.calls) }</span>
+                <span>{ format!("{}: {}", translate.t("LABEL.PLUGIN_FAILURES"), stats.failures) }</span>
+                <span>{ format!("{}: {}", translate.t("LABEL.PLUGIN_BUDGET_SKIPS"), stats.budget_skips) }</span>
+            </div>
+            if let Some(error) = stats.last_error.as_ref() {
+                <div class="tp__plugins__last-error tp__input-error">
+                    { format!("{}: {error}", translate.t("LABEL.PLUGIN_LAST_ERROR")) }
+                </div>
+            }
+            if !stats.hooks.is_empty() {
+                <table class="tp__plugins__hook-stats">
+                    <thead>
+                        <tr>
+                            <th>{ translate.t("LABEL.PLUGIN_HOOK") }</th>
+                            <th>{ translate.t("LABEL.PLUGIN_KEPT") }</th>
+                            <th>{ translate.t("LABEL.PLUGIN_DROPPED") }</th>
+                            <th>{ translate.t("LABEL.PLUGIN_MODIFIED") }</th>
+                            <th>{ translate.t("LABEL.PLUGIN_ERRORS") }</th>
+                            <th>{ translate.t("LABEL.PLUGIN_DURATION_MS") }</th>
+                        </tr>
+                    </thead>
+                    <tbody>{ for stats.hooks.iter().map(render_hook_row) }</tbody>
+                </table>
+            }
+        </div>
+    }
+}
+
+/// What a row can do. The write controls (`can_write`) are shown only to users
+/// with `SystemWrite`; `busy` locks them while an action runs. `generation`
+/// changes after every action, so a switch the server refused snaps back.
+struct RowActions<'a> {
+    can_write: bool,
+    busy: bool,
+    generation: u32,
+    on_settings: &'a Callback<(String, String)>,
+    on_logs: &'a Callback<String>,
+    on_toggle: &'a Callback<(String, bool)>,
+    on_uninstall: &'a Callback<(String, String)>,
+}
+
+fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'_>, logs_open: bool) -> Html {
+    let summary = &entry.summary;
+    let on_logs = actions.on_logs;
+    let on_settings = actions.on_settings;
+    let toggle_logs = {
+        let on_logs = on_logs.clone();
+        let id = summary.id.clone();
+        Callback::from(move |_: String| on_logs.emit(id.clone()))
+    };
+    let open_settings = {
+        let on_settings = on_settings.clone();
+        let id = summary.id.clone();
+        let name = summary.name.clone();
+        Callback::from(move |_: String| on_settings.emit((id.clone(), name.clone())))
+    };
+    let toggle = {
+        let on_toggle = actions.on_toggle.clone();
+        let id = summary.id.clone();
+        Callback::from(move |enabled: bool| on_toggle.emit((id.clone(), enabled)))
+    };
+    let reenable = {
+        let on_toggle = actions.on_toggle.clone();
+        let id = summary.id.clone();
+        Callback::from(move |_: String| on_toggle.emit((id.clone(), true)))
+    };
+    let uninstall = {
+        let on_uninstall = actions.on_uninstall.clone();
+        let id = summary.id.clone();
+        let name = summary.name.clone();
+        Callback::from(move |_: String| on_uninstall.emit((id.clone(), name.clone())))
+    };
+    html! {
+        <Card key={summary.id.clone()} class="tp__plugins__card">
+            <div class="tp__plugins__header">
+                <h3>{ summary.name.clone() }</h3>
+                if let Some(version) = summary.version.as_ref() {
+                    <span class="tp__plugins__version">{ format!("{} {version}", translate.t("LABEL.VERSION")) }</span>
+                }
+                <span class={classes!("tp__task-status", state_modifier(summary.state))}>
+                    { translate.t(state_label_key(summary.state)) }
+                </span>
+                <TextButton
+                    name={format!("settings-{}", summary.id)}
+                    icon="Settings"
+                    title={translate.t("LABEL.SETTINGS")}
+                    onclick={open_settings}
+                />
+                <TextButton
+                    name={format!("logs-{}", summary.id)}
+                    icon="Log"
+                    title={translate.t("LABEL.LOGS")}
+                    onclick={toggle_logs}
+                />
+                if actions.can_write {
+                    <ToggleSwitch
+                        key={format!("{}-{}", summary.id, actions.generation)}
+                        value={summary.enabled}
+                        readonly={actions.busy || !can_toggle(summary.state)}
+                        aria_label={format!("{} {}", translate.t("LABEL.ENABLED"), summary.name)}
+                        on_change={toggle}
+                    />
+                    if summary.state == PluginStateDto::Failed {
+                        <TextButton
+                            name={format!("reenable-{}", summary.id)}
+                            icon="Refresh"
+                            title={translate.t("LABEL.PLUGIN_REENABLE")}
+                            disabled={actions.busy}
+                            onclick={reenable}
+                        />
+                    }
+                    <TextButton
+                        name={format!("uninstall-{}", summary.id)}
+                        icon="Delete"
+                        title={translate.t("LABEL.PLUGIN_UNINSTALL")}
+                        aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_UNINSTALL"), summary.name)}
+                        disabled={actions.busy}
+                        onclick={uninstall}
+                    />
+                }
+            </div>
+            if let Some(description) = summary.description.as_ref() {
+                <p class="tp__plugins__description">{ description.clone() }</p>
+            }
+            if let Some(failure) = summary.failure.as_ref() {
+                <div class="tp__plugins__failure tp__input-error" role="alert">{ failure.clone() }</div>
+            }
+            if !summary.hooks.is_empty() {
+                <div class="tp__plugins__chips">
+                    <span>{ translate.t("LABEL.PLUGIN_HOOKS") }</span>
+                    { for summary.hooks.iter().map(|hook| html! { <Chip key={hook.clone()} label={hook.clone()} /> }) }
+                </div>
+            }
+            { render_stats(translate, entry.stats.as_ref()) }
+            if let Some(tasks) = entry.tasks.as_ref() {
+                { render_task_summary(translate, tasks) }
+            }
+            if logs_open {
+                <PluginLogs key={summary.id.clone()} plugin_id={summary.id.clone()} />
+            }
+        </Card>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct PluginUninstallProps {
+    plugin_name: String,
+    /// `true` when the stored data should be deleted too (`purge_kv`).
+    on_confirm: Callback<bool>,
+    on_cancel: Callback<()>,
+}
+
+/// The uninstall confirmation, with the "also delete stored data" choice off by default.
+#[component]
+fn PluginUninstall(props: &PluginUninstallProps) -> Html {
+    let translate = use_translation();
+    let purge = use_state(|| false);
+    let on_purge = {
+        let purge = purge.clone();
+        Callback::from(move |event: Event| {
+            let input: HtmlInputElement = event.target_unchecked_into();
+            purge.set(input.checked());
+        })
+    };
+    let on_result = {
+        let on_confirm = props.on_confirm.clone();
+        let on_cancel = props.on_cancel.clone();
+        let purge = purge.clone();
+        Callback::from(move |result: DialogResult| match result {
+            DialogResult::Ok => on_confirm.emit(*purge),
+            DialogResult::Cancel => on_cancel.emit(()),
+        })
+    };
+    let actions = DialogActions {
+        left: Some(vec![DialogAction::new_focused(
+            "cancel",
+            "LABEL.CANCEL",
+            DialogResult::Cancel,
+            Some("Close".to_owned()),
+            Some("secondary".to_owned()),
+        )]),
+        right: vec![DialogAction::new(
+            "uninstall",
+            "LABEL.PLUGIN_UNINSTALL",
+            DialogResult::Ok,
+            Some("Delete".to_owned()),
+            Some("primary".to_owned()),
+        )],
+    };
+    let content = html! {
+        <div class="tp__plugin-uninstall">
+            <h2>{ format!("{} - {}", translate.t("LABEL.PLUGIN_UNINSTALL"), props.plugin_name) }</h2>
+            <p>{ translate.t("MESSAGES.PLUGIN_UNINSTALL_CONFIRM") }</p>
+            <label class="tp__plugin-uninstall__purge">
+                <input type="checkbox" checked={*purge} onchange={on_purge} />
+                { " " }{ translate.t("LABEL.PLUGIN_PURGE_DATA") }
+            </label>
+            <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_PURGE_HINT") }</p>
+        </div>
+    };
+    html! {
+        <ContentDialog
+            content={content}
+            actions={actions}
+            close_on_backdrop_click={false}
+            close_on_confirm={false}
+            on_confirm={on_result}
+        />
+    }
+}
+
+/// The Plugin Manager page: every plugin with its state, hook statistics and
+/// tasks, a settings dialog per plugin, and, for users with `SystemWrite`, the
+/// install dialog, an enable switch and Uninstall per plugin.
+#[component]
+pub fn PluginsView() -> Html {
+    let translate = use_translation();
+    let services = use_service_context();
+
+    let entries = use_state(|| None::<Rc<Vec<PluginEntry>>>);
+    let loading = use_state(|| true);
+    let error = use_state(|| None::<String>);
+    let reload = use_state(|| 0_u32);
+    let settings_for = use_state(|| None::<(String, String)>);
+    let logs_for = use_state(|| None::<String>);
+    let show_upload = use_state(|| false);
+    let uninstall_for = use_state(|| None::<(String, String)>);
+    // An action is in flight: the write controls wait for it.
+    let acting = use_state(|| false);
+    let can_write = services.auth.has_permission(Permission::SystemWrite);
+    let plugin_ui = use_plugin_ui();
+
+    {
+        let entries = entries.clone();
+        let loading = loading.clone();
+        let error = error.clone();
+        let service = services.plugins.clone();
+        use_effect_with(*reload, move |generation| {
+            loading.set(true);
+            // After an install, enable, disable or uninstall the slots change too.
+            let refresh_slots = (*generation > 0).then(|| plugin_ui.map(|ui| ui.refresh)).flatten();
+            spawn_local(async move {
+                match load_entries(service).await {
+                    Ok(loaded) => {
+                        entries.set(Some(Rc::new(loaded)));
+                        error.set(None);
+                        if let Some(refresh) = refresh_slots {
+                            refresh.emit(());
+                        }
+                    }
+                    Err(message) => error.set(Some(message)),
+                }
+                loading.set(false);
+            });
+            || ()
+        });
+    }
+
+    let on_refresh = {
+        let reload = reload.clone();
+        Callback::from(move |_: String| reload.set(*reload + 1))
+    };
+    let on_open_settings = {
+        let settings_for = settings_for.clone();
+        Callback::from(move |target: (String, String)| settings_for.set(Some(target)))
+    };
+    // One plugin's log is open at a time; its button toggles it.
+    let on_toggle_logs = {
+        let logs_for = logs_for.clone();
+        Callback::from(move |id: String| {
+            let open = logs_for.as_deref() == Some(id.as_str());
+            logs_for.set((!open).then_some(id));
+        })
+    };
+    let on_close_settings = {
+        let settings_for = settings_for.clone();
+        Callback::from(move |()| settings_for.set(None))
+    };
+    let on_toggle = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let acting = acting.clone();
+        let reload = reload.clone();
+        Callback::from(move |(id, enabled): (String, bool)| {
+            if *acting {
+                return;
+            }
+            acting.set(true);
+            let next = *reload + 1;
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let reload = reload.clone();
+            spawn_local(async move {
+                match services.plugins.set_enabled(&id, enabled).await {
+                    Ok(summary) => {
+                        let key = if enabled { "MESSAGES.PLUGIN_ENABLED" } else { "MESSAGES.PLUGIN_DISABLED" };
+                        services.toastr.success(format!("{}: {}", translate.t(key), summary.name));
+                    }
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+                reload.set(next);
+            });
+        })
+    };
+    let on_uninstall = {
+        let uninstall_for = uninstall_for.clone();
+        Callback::from(move |target: (String, String)| uninstall_for.set(Some(target)))
+    };
+    let on_cancel_uninstall = {
+        let uninstall_for = uninstall_for.clone();
+        Callback::from(move |()| uninstall_for.set(None))
+    };
+    let on_confirm_uninstall = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let uninstall_for = uninstall_for.clone();
+        let acting = acting.clone();
+        let reload = reload.clone();
+        Callback::from(move |purge_kv: bool| {
+            let Some((id, name)) = (*uninstall_for).clone() else {
+                return;
+            };
+            uninstall_for.set(None);
+            acting.set(true);
+            let next = *reload + 1;
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let reload = reload.clone();
+            spawn_local(async move {
+                match services.plugins.uninstall(&id, purge_kv).await {
+                    Ok(()) => {
+                        services.toastr.success(format!("{}: {name}", translate.t("MESSAGES.PLUGIN_UNINSTALLED")));
+                    }
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+                reload.set(next);
+            });
+        })
+    };
+    let on_open_upload = {
+        let show_upload = show_upload.clone();
+        Callback::from(move |_: String| show_upload.set(true))
+    };
+    let on_close_upload = {
+        let show_upload = show_upload.clone();
+        Callback::from(move |()| show_upload.set(false))
+    };
+    let on_installed = {
+        let reload = reload.clone();
+        Callback::from(move |()| reload.set(*reload + 1))
+    };
+
+    let body = if let Some(message) = error.as_ref() {
+        html! {
+            <div class="tp__plugins__error tp__input-error" role="alert">
+                { format!("{} {message}", translate.t("MESSAGES.PLUGIN_LOAD_FAILED")) }
+            </div>
+        }
+    } else if let Some(entries) = entries.as_ref() {
+        if entries.is_empty() {
+            html! { <NoContent text={translate.t("MESSAGES.PLUGIN_LIST_EMPTY")} /> }
+        } else {
+            html! {
+                <>{ for entries.iter().map(|entry| {
+                    let logs_open = logs_for.as_deref() == Some(entry.summary.id.as_str());
+                    let actions = RowActions {
+                        can_write,
+                        busy: *acting,
+                        generation: *reload,
+                        on_settings: &on_open_settings,
+                        on_logs: &on_toggle_logs,
+                        on_toggle: &on_toggle,
+                        on_uninstall: &on_uninstall,
+                    };
+                    render_entry(&translate, entry, &actions, logs_open)
+                }) }</>
+            }
+        }
+    } else {
+        html! {}
+    };
+
+    html! {
+        <div class="tp__config-view tp__plugins">
+            <div class="tp__config-view__header">
+                <h1>{ translate.t("LABEL.PLUGINS") }</h1>
+                <div class="tp__config-view__header-tools">
+                    if can_write {
+                        <TextButton name="install" icon="Add" title={translate.t("LABEL.PLUGIN_INSTALL")}
+                            disabled={*acting} onclick={on_open_upload} />
+                    }
+                    <TextButton name="refresh" icon="Refresh" title={translate.t("LABEL.REFRESH")}
+                        disabled={*loading} onclick={on_refresh} />
+                </div>
+            </div>
+            <LoadingIndicator loading={*loading} />
+            <div class="tp__config-view__body">{ body }</div>
+            if can_write && *show_upload {
+                <PluginUpload on_close={on_close_upload} on_installed={on_installed} />
+            }
+            if let Some((_, plugin_name)) = (*uninstall_for).clone() {
+                <PluginUninstall plugin_name={plugin_name} on_confirm={on_confirm_uninstall}
+                    on_cancel={on_cancel_uninstall} />
+            }
+            if let Some((plugin_id, plugin_name)) = (*settings_for).clone() {
+                <PluginSettings key={plugin_id.clone()} plugin_id={plugin_id.clone()} plugin_name={plugin_name}
+                    on_close={on_close_settings} />
+            }
+        </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_STATES: [PluginStateDto; 8] = [
+        PluginStateDto::Discovered,
+        PluginStateDto::Invalid,
+        PluginStateDto::PendingApproval,
+        PluginStateDto::Approved,
+        PluginStateDto::Loaded,
+        PluginStateDto::Enabled,
+        PluginStateDto::Disabled,
+        PluginStateDto::Failed,
+    ];
+
+    #[test]
+    fn every_state_has_its_own_label_key() {
+        let mut keys = ALL_STATES.iter().map(|state| state_label_key(*state)).collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), ALL_STATES.len());
+    }
+
+    #[test]
+    fn only_a_plugin_that_can_run_has_a_live_switch() {
+        let live: Vec<_> = ALL_STATES.into_iter().filter(|state| can_toggle(*state)).collect();
+        assert_eq!(
+            live,
+            [PluginStateDto::Loaded, PluginStateDto::Enabled, PluginStateDto::Disabled, PluginStateDto::Failed]
+        );
+        assert!(!can_toggle(PluginStateDto::PendingApproval) && !can_toggle(PluginStateDto::Invalid));
+    }
+
+    #[test]
+    fn failed_and_invalid_share_the_failure_style() {
+        assert_eq!(state_modifier(PluginStateDto::Failed), state_modifier(PluginStateDto::Invalid));
+        assert_ne!(state_modifier(PluginStateDto::Enabled), state_modifier(PluginStateDto::Failed));
+    }
+}

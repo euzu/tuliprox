@@ -1,4 +1,4 @@
-use crate::model::InputType;
+use crate::model::{InputType, PluginRunReport};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::Display;
 
@@ -88,6 +88,9 @@ pub struct PipelineStats {
     pub matched_mapping_rules: usize,
     pub emitted_items: usize,
     pub mapping_diagnostics: usize,
+    /// What the target's plugins did, and which plugins ran.
+    #[serde(default, skip_serializing_if = "PluginRunReport::is_empty")]
+    pub plugins: PluginRunReport,
 }
 
 impl PipelineStats {
@@ -100,6 +103,7 @@ impl PipelineStats {
             && self.matched_mapping_rules == 0
             && self.emitted_items == 0
             && self.mapping_diagnostics == 0
+            && self.plugins.is_empty()
     }
 }
 

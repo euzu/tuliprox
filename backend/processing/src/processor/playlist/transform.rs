@@ -1,6 +1,9 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
-use shared::model::PlaylistEntry;
+use shared::{
+    foundation::{NoPluginCalls, PluginCallBatch, PluginCallDecisions},
+    model::{HookCtx, PlaylistEntry, PluginAbort, PluginHook, PluginHost, PluginRunReport},
+};
 
 pub(crate) fn retain_playlist_items(
     source: &mut PlaylistSource,
@@ -65,10 +68,12 @@ pub struct PipelineOutcome {
     pub filter: Option<FilterOutcome>,
     pub rename: Option<RenameOutcome>,
     pub mapping: Option<MappingStageOutcome>,
+    pub plugins: PluginRunReport,
 }
 
 impl PipelineOutcome {
     pub(crate) fn merge(&mut self, other: Self) {
+        self.plugins.merge(other.plugins);
         if let Some(value) = other.filter {
             let outcome = self.filter.get_or_insert_with(FilterOutcome::default);
             outcome.inspected += value.inspected;
@@ -102,6 +107,7 @@ impl PipelineOutcome {
             matched_mapping_rules: self.mapping.as_ref().map_or(0, |outcome| outcome.matched_rules),
             emitted_items: self.mapping.as_ref().map_or(0, |outcome| outcome.emitted_items),
             mapping_diagnostics: self.mapping.as_ref().map_or(0, |outcome| outcome.diagnostics),
+            plugins: self.plugins.clone(),
         }
     }
 }
@@ -357,10 +363,58 @@ impl TransformBuffer {
     pub(crate) fn new(items: Vec<PlaylistItem>) -> Self { Self { items, grouping: GroupingPolicy::ExactCategory } }
 
     pub(crate) fn apply_filter(&mut self, target: &ConfigTarget) -> FilterOutcome {
+        self.apply_filter_with(target, &NoPluginCalls)
+    }
+
+    /// [`Self::apply_filter`] with the answers of the filter's `plugin.<id>.<fn>(…)`
+    /// terms, prepared by [`Self::prepare_filter_calls`] over the items in their
+    /// current order. `retain` visits them in that order, so the running count is
+    /// the item index the decisions are aligned to.
+    pub(crate) fn apply_filter_with<D: PluginCallDecisions>(
+        &mut self,
+        target: &ConfigTarget,
+        decisions: &D,
+    ) -> FilterOutcome {
         let mut outcome = FilterOutcome::default();
-        self.items.retain(|item| outcome.record(target.filter(&ValueProvider { pli: item, match_as_ascii: false })));
+        let mut index = 0;
+        self.items.retain(|item| {
+            let provider = ValueProvider { pli: item, match_as_ascii: false };
+            let keep =
+                target.filter.processing.as_ref().is_none_or(|filter| filter.filter_with(&provider, decisions, index));
+            index += 1;
+            outcome.record(keep)
+        });
         self.normalize_filter_grouping();
         outcome
+    }
+
+    /// The prepare half of the processing filter's plugin terms (plan §7,
+    /// pattern 2): one `eval-filter-batch` per term over the buffered items, in
+    /// order. `None` when the filter has no plugin term, so ordinary filters
+    /// never build a batch. A failed call answers `false` for every item and is
+    /// counted in `report`.
+    pub(crate) async fn prepare_filter_calls<P: PluginHost>(
+        &self,
+        target: &ConfigTarget,
+        plugins: &P,
+        ctx: &HookCtx<'_>,
+        report: &mut PluginRunReport,
+    ) -> Option<PluginCallBatch> {
+        let mut calls = target.filter.processing.as_ref()?.plugin_calls().peekable();
+        calls.peek()?;
+        let items: Vec<&PlaylistItem> = self.items.iter().collect();
+        let mut batch = PluginCallBatch::new(items.len());
+        for call in calls {
+            let decisions = plugins.eval_filter_batch(call.plugin, call.func, call.args, ctx, &items, report).await;
+            if !batch.set(call.index, decisions) {
+                log::warn!(
+                    "plugin {} filter function {} returned the wrong number of decisions; the term is false",
+                    call.plugin,
+                    call.func
+                );
+            }
+        }
+        Some(batch)
     }
 
     pub(crate) fn normalize_filter_grouping(&mut self) {
@@ -409,6 +463,27 @@ impl TransformBuffer {
     }
 
     pub(crate) fn into_groups(self) -> Vec<PlaylistGroup> { group_items(self.items, self.grouping) }
+
+    /// Run a plugin stage hook over the buffer (plan §7 *Dispatcher*). The
+    /// host drops and rewrites items in place; a rewritten `group` is
+    /// regrouped here, by the buffer, never by the host. The buffer keeps the
+    /// grouping policy of the stage it is in: a hook before the filter or
+    /// between stages must not switch it.
+    pub(crate) async fn run_playlist_hook<P: PluginHost>(
+        &mut self,
+        plugins: &P,
+        hook: PluginHook,
+        ctx: &HookCtx<'_>,
+        report: &mut PluginRunReport,
+    ) -> Result<(), PluginAbort> {
+        let mut run = PluginRunReport::default();
+        plugins.on_stage(hook, ctx, &mut self.items, &mut run).await?;
+        if run.hooks.iter().any(|stats| stats.modified > 0) {
+            self.reorder_for_grouping();
+        }
+        report.merge(run);
+        Ok(())
+    }
 }
 
 pub(crate) fn group_items(items: Vec<PlaylistItem>, policy: GroupingPolicy) -> Vec<PlaylistGroup> {
@@ -439,29 +514,89 @@ pub(crate) fn group_items(items: Vec<PlaylistItem>, policy: GroupingPolicy) -> V
     groups.into_values().collect()
 }
 
-pub(crate) fn execute_pipeline_on_items(
-    items: Vec<PlaylistItem>,
+fn apply_stage(
+    buffer: &mut TransformBuffer,
+    outcome: &mut PipelineOutcome,
     target: &ConfigTarget,
-    pipe: &[TransformStage],
-) -> (Vec<PlaylistGroup>, PipelineOutcome) {
-    let mut buffer = TransformBuffer::new(items);
-    let mut outcome = PipelineOutcome::default();
-    for stage in pipe {
-        match stage {
-            TransformStage::Filter => {
-                if target.filter.processing.is_some() {
-                    outcome.filter = Some(buffer.apply_filter(target));
-                } else {
-                    buffer.normalize_filter_grouping();
-                }
+    stage: TransformStage,
+    filter_calls: Option<&PluginCallBatch>,
+) {
+    match stage {
+        TransformStage::Filter => {
+            if target.filter.processing.is_some() {
+                outcome.filter = Some(match filter_calls {
+                    Some(decisions) => buffer.apply_filter_with(target, decisions),
+                    None => buffer.apply_filter(target),
+                });
+            } else {
+                buffer.normalize_filter_grouping();
             }
-            TransformStage::Rename => outcome.rename = buffer.apply_rename(target),
-            TransformStage::Map => outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing),
         }
+        TransformStage::Rename => outcome.rename = buffer.apply_rename(target),
+        TransformStage::Map => outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing),
     }
-    (buffer.into_groups(), outcome)
 }
 
+/// Runs the target's transform stages over one input's items, awaiting plugin
+/// stage hooks between them.
+///
+/// The stages themselves stay synchronous; only the loop is async. With
+/// [`NoPlugins`] `wants` is constant `false`, so no hook future is ever built.
+pub(crate) async fn execute_pipeline_on_items<P: PluginHost>(
+    items: Vec<PlaylistItem>,
+    target: &ConfigTarget,
+    input: &str,
+    pipe: &[TransformStage],
+    plugins: &P,
+) -> Result<(Vec<PlaylistGroup>, PipelineOutcome), PluginAbort> {
+    let ctx = HookCtx::new(&target.name).with_input(input);
+    run_stages(TransformBuffer::new(items), target, pipe, plugins, &ctx, true).await
+}
+
+/// The stage loop of both async pipelines. Stage hooks run only when
+/// `stage_hooks` is set; the processing filter's plugin terms are always
+/// prepared right before the Filter stage, over the items as that stage sees
+/// them.
+async fn run_stages<P: PluginHost>(
+    mut buffer: TransformBuffer,
+    target: &ConfigTarget,
+    pipe: &[TransformStage],
+    plugins: &P,
+    ctx: &HookCtx<'_>,
+    stage_hooks: bool,
+) -> Result<(Vec<PlaylistGroup>, PipelineOutcome), PluginAbort> {
+    let mut outcome = PipelineOutcome::default();
+    for &stage in pipe {
+        let (before, after) = stage_hook_pair(stage);
+        if stage_hooks && plugins.wants(before, &target.name) {
+            buffer.run_playlist_hook(plugins, before, ctx, &mut outcome.plugins).await?;
+        }
+        let filter_calls = if stage == TransformStage::Filter {
+            buffer.prepare_filter_calls(target, plugins, ctx, &mut outcome.plugins).await
+        } else {
+            None
+        };
+        apply_stage(&mut buffer, &mut outcome, target, stage, filter_calls.as_ref());
+        if stage_hooks && plugins.wants(after, &target.name) {
+            buffer.run_playlist_hook(plugins, after, ctx, &mut outcome.plugins).await?;
+        }
+    }
+    Ok((buffer.into_groups(), outcome))
+}
+
+/// The `(before, after)` plugin hooks around a transform stage, so the hooks
+/// follow `execution_plan.transform_stages` whatever order the target uses.
+const fn stage_hook_pair(stage: TransformStage) -> (PluginHook, PluginHook) {
+    match stage {
+        TransformStage::Filter => (PluginHook::BeforeFilter, PluginHook::AfterFilter),
+        TransformStage::Rename => (PluginHook::BeforeRename, PluginHook::AfterRename),
+        TransformStage::Map => (PluginHook::BeforeMap, PluginHook::AfterMap),
+    }
+}
+
+/// The stage pipeline for already-grouped items, such as resolved series
+/// episodes. Deliberately hook-free and synchronous: stage hooks fire once per
+/// input in [`execute_pipeline_on_items`], not again for every episode list.
 pub(crate) fn execute_pipeline_on_groups(
     groups: Vec<PlaylistGroup>,
     target: &ConfigTarget,
@@ -470,16 +605,47 @@ pub(crate) fn execute_pipeline_on_groups(
     if pipe.is_empty() {
         return (groups, PipelineOutcome::default());
     }
-    execute_pipeline_on_items(groups.into_iter().flat_map(|group| group.channels).collect(), target, pipe)
+    let mut buffer = TransformBuffer::new(groups.into_iter().flat_map(|group| group.channels).collect());
+    let mut outcome = PipelineOutcome::default();
+    for &stage in pipe {
+        apply_stage(&mut buffer, &mut outcome, target, stage, None);
+    }
+    (buffer.into_groups(), outcome)
 }
 
-pub(crate) fn execute_pipe<'a>(
+/// [`execute_pipeline_on_groups`] for a caller that has the plugin host, such
+/// as series-episode resolution. Still no stage hooks, but the processing
+/// filter's `plugin.<id>.<fn>(…)` terms get real decisions; through the sync
+/// variant they answer `false`, and an `AND` term would drop every episode.
+/// Filter terms are fail-open, so this cannot abort.
+pub(crate) async fn execute_pipeline_on_groups_with_filter_calls<P: PluginHost>(
+    groups: Vec<PlaylistGroup>,
+    target: &ConfigTarget,
+    input: &str,
+    pipe: &[TransformStage],
+    plugins: &P,
+) -> (Vec<PlaylistGroup>, PipelineOutcome) {
+    let has_plugin_terms =
+        target.filter.processing.as_ref().is_some_and(|filter| filter.plugin_calls().next().is_some());
+    if !has_plugin_terms {
+        return execute_pipeline_on_groups(groups, target, pipe);
+    }
+    let buffer = TransformBuffer::new(groups.into_iter().flat_map(|group| group.channels).collect());
+    let ctx = HookCtx::new(&target.name).with_input(input);
+    match run_stages(buffer, target, pipe, plugins, &ctx, false).await {
+        Ok(result) => result,
+        Err(_) => unreachable!("only stage hooks can abort, and none run here"),
+    }
+}
+
+pub(crate) async fn execute_pipe<'a, P: PluginHost>(
     target: &ConfigTarget,
     pipe: &ProcessingPipe,
     fpl: &mut FetchedPlaylist<'a>,
     duplicates: &mut HashSet<UUIDType>,
     consume_source: bool,
     bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
+    plugins: &P,
 ) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let mut source = if consume_source {
         if fpl.is_memory() {
@@ -537,7 +703,9 @@ pub(crate) fn execute_pipe<'a>(
         );
     }
 
-    let (groups, outcome) = execute_pipeline_on_items(items, target, pipe);
+    let (groups, outcome) = execute_pipeline_on_items(items, target, &fpl.input.name, pipe, plugins)
+        .await
+        .map_err(|abort| TuliproxError::Plugin(abort.to_string()))?;
     let new_fpl = FetchedPlaylist {
         input: fpl.input,
         source: MemoryPlaylistSource::new(groups).into_source(),

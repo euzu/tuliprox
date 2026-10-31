@@ -6,13 +6,57 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+/// Longest text a plugin may put in a toast, before the plugin name is added.
+const PLUGIN_TOAST_MAX_CHARS: usize = 300;
+/// A plugin may show a toast every two seconds, with a burst of three.
+const PLUGIN_TOAST_BURST: u32 = 3;
+const PLUGIN_TOAST_PER_SECOND: f64 = 0.5;
+
+/// A token bucket over a caller-supplied clock in milliseconds, so a limit can
+/// be tested without waiting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenBucket {
+    capacity: f64,
+    per_ms: f64,
+    tokens: f64,
+    last_ms: f64,
+}
+
+impl TokenBucket {
+    /// A full bucket holding `burst` tokens and refilling `per_second` of them.
+    pub fn new(burst: u32, per_second: f64, now_ms: f64) -> Self {
+        let capacity = f64::from(burst);
+        Self { capacity, per_ms: per_second / 1000.0, tokens: capacity, last_ms: now_ms }
+    }
+
+    /// Takes one token if there is one.
+    pub fn try_take(&mut self, now_ms: f64) -> bool {
+        let elapsed = (now_ms - self.last_ms).max(0.0);
+        self.last_ms = now_ms;
+        self.tokens = (self.tokens + elapsed * self.per_ms).min(self.capacity);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// The text of a plugin toast: plain text (control characters other than
+/// newlines dropped), cut at 300 characters, prefixed with the plugin name.
+pub fn plugin_toast_text(plugin_name: &str, message: &str) -> String {
+    let text: String = message.chars().filter(|c| !c.is_control() || *c == '\n').take(PLUGIN_TOAST_MAX_CHARS).collect();
+    format!("{plugin_name}: {text}")
+}
+
 struct ToastTimer {
     timeout: Option<Timeout>,
     remaining_ms: u32,
     started_at: f64,
 }
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum ToastType {
     Success,
     Error,
@@ -73,6 +117,8 @@ pub struct ToastrService {
     pub state: Rc<RefCell<ToastrState>>,
     subscriber: ToastrSubscriber,
     timers: Rc<RefCell<HashMap<u32, ToastTimer>>>,
+    /// One bucket per plugin id, shared by all frames of a plugin.
+    plugin_buckets: RefCell<HashMap<String, TokenBucket>>,
 }
 
 impl Default for ToastrService {
@@ -86,6 +132,7 @@ impl ToastrService {
             state: Rc::new(RefCell::new(ToastrState::default())),
             subscriber: Rc::new(RefCell::new(None)),
             timers: Rc::new(RefCell::new(HashMap::new())),
+            plugin_buckets: RefCell::new(HashMap::new()),
         }
     }
 
@@ -189,6 +236,28 @@ impl ToastrService {
         self.show_with_options(msg, ToastType::Warning, options);
     }
 
+    /// A toast a plugin frame asked for. Rate-limited per plugin; returns
+    /// whether it was shown (anything over the limit is dropped).
+    pub fn plugin_toast(&self, plugin_id: &str, plugin_name: &str, toast_type: ToastType, message: &str) -> bool {
+        let now = js_sys::Date::now();
+        let allowed = self
+            .plugin_buckets
+            .borrow_mut()
+            .entry(plugin_id.to_owned())
+            .or_insert_with(|| TokenBucket::new(PLUGIN_TOAST_BURST, PLUGIN_TOAST_PER_SECOND, now))
+            .try_take(now);
+        if allowed {
+            let text = plugin_toast_text(plugin_name, message);
+            match toast_type {
+                ToastType::Success => self.success(text),
+                ToastType::Error => self.error(text),
+                ToastType::Info => self.info(text),
+                ToastType::Warning => self.warning(text),
+            }
+        }
+        allowed
+    }
+
     // manual close
     pub fn dismiss(&self, id: u32) {
         self.timers.borrow_mut().remove(&id);
@@ -197,5 +266,49 @@ impl ToastrService {
         if let Some(subscriber) = self.subscriber.borrow().as_ref() {
             subscriber(state.toasts.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bucket_allows_the_burst_then_refills_over_time() {
+        let mut bucket = TokenBucket::new(3, 0.5, 0.0);
+        assert!(bucket.try_take(0.0));
+        assert!(bucket.try_take(0.0));
+        assert!(bucket.try_take(0.0));
+        assert!(!bucket.try_take(0.0));
+        assert!(!bucket.try_take(1_900.0));
+        assert!(bucket.try_take(2_100.0));
+        assert!(!bucket.try_take(2_100.0));
+    }
+
+    #[test]
+    fn bucket_never_holds_more_than_its_burst() {
+        let mut bucket = TokenBucket::new(2, 10.0, 0.0);
+        assert!(bucket.try_take(0.0));
+        // A long pause refills to the capacity, not beyond.
+        assert!(bucket.try_take(1_000_000.0));
+        assert!(bucket.try_take(1_000_000.0));
+        assert!(!bucket.try_take(1_000_000.0));
+    }
+
+    #[test]
+    fn bucket_ignores_a_clock_that_goes_backwards() {
+        let mut bucket = TokenBucket::new(1, 1.0, 5_000.0);
+        assert!(bucket.try_take(5_000.0));
+        assert!(!bucket.try_take(1_000.0));
+    }
+
+    #[test]
+    fn plugin_toast_text_is_cut_prefixed_and_plain() {
+        assert_eq!(plugin_toast_text("Sports", "hello"), "Sports: hello");
+        assert_eq!(plugin_toast_text("P", "a\u{7}b\nc"), "P: ab\nc");
+        let long = "x".repeat(500);
+        assert_eq!(plugin_toast_text("P", &long), format!("P: {}", "x".repeat(300)));
+        let wide = "\u{e9}".repeat(400);
+        assert_eq!(plugin_toast_text("P", &wide).chars().count(), 3 + 300);
     }
 }

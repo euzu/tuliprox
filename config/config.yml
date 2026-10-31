@@ -192,3 +192,24 @@ library:
 
     # Group name for series in M3U/Xtream playlist
     series_category: "Local Series"
+
+# WebAssembly plugins (experimental). Each plugin is a folder <directory>/<id>/
+# holding manifest.yml and plugin.wasm. A relative directory resolves against
+# this file's directory. Off by default.
+#plugins:
+#  enabled: false
+#  directory: plugins
+#  # Global clamps. A plugin's manifest `resources:` request is clamped to these.
+#  max_total_memory: 512MB   # all live plugin instances together; instantiation waits for room
+#  max_memory: 128MB         # ceiling for one instance (manifest max_memory_mb)
+#  max_exec: 5s              # ceiling for one hook call (manifest max_exec_ms); ms units allowed
+#  max_task_exec: 10m        # ceiling for one scheduled plugin task run
+#  max_instances: 4          # ceiling for concurrent instances of one plugin
+#  batch_size: 500           # items sent to a plugin per hook call (1-10000)
+#  plugins:
+#    - id: sports-enricher   # must match the plugin folder and its manifest id
+#      enabled: true
+#      priority: 100         # lower runs first when several plugins share a hook
+#      settings:             # validated against the plugin's config-schema.json
+#        leagues: [premier-league, bundesliga]
+#        api_token: ${env:SPORTS_API_TOKEN}   # keep secrets in the environment, never inline

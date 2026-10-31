@@ -3,7 +3,7 @@ use shared::{
     error::TuliproxError,
     model::{
         EventMessage, EventSink, LibraryScanResult, PlaylistUpdateProgressDetail, PlaylistUpdateProgressEvent,
-        PlaylistUpdateState, SourceStats,
+        PlaylistUpdateState, PluginHost, SourceStats,
     },
 };
 use std::{future::Future, io};
@@ -39,8 +39,8 @@ async fn rebuild_after_scan<T>(
     Ok(rebuild())
 }
 
-pub(super) async fn process_manual_update<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(super) async fn process_manual_update<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     update_guard: Option<&UpdateGuard>,
 ) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let LibraryUpdateMode::Rescan { input_id } = ctx.library_update_mode else {

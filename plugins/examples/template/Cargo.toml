@@ -1,0 +1,25 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "tuliprox plugin: renames one playlist group in the after-filter stage"
+
+# A plugin is its own workspace: it targets wasm32-wasip2 and is not a member of
+# the tuliprox workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The tuliprox plugin SDK, from the tuliprox checkout that bin/new-plugin.sh rendered
+# this crate from. Keep the dependency name: the SDK macros expand to ::tuliprox_plugin_sdk.
+tuliprox-plugin-sdk = { path = "{{sdk_path}}" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

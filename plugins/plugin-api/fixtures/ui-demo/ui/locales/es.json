@@ -1,0 +1,14 @@
+{
+  "hello": "Hola desde el plugin ui-demo",
+  "tab.title": "Demo de interfaz",
+  "toast.msg": "Aviso enviado desde el marco de demostración",
+  "slot.menu": "Menú de demostración",
+  "slot.config-section": "Sección de configuración de demostración",
+  "slot.config-tab": "Pestaña de configuración de demostración",
+  "slot.source-editor-tile": "Mosaico de fuente de demostración",
+  "slot.dashboard-card": "Tarjeta de panel de demostración",
+  "slot.playlist-explorer-action": "Acción del explorador de demostración",
+  "slot.channel-detail-panel": "Panel de canal de demostración",
+  "slot.epg-overlay": "Superposición de EPG de demostración",
+  "slot.setup-wizard-step": "Paso del asistente de demostración"
+}

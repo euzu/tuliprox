@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "title": "HF EPG Matcher",
+  "properties": {
+    "model_id": {
+      "type": "string",
+      "title": "Model id",
+      "description": "HuggingFace sentence-similarity model, requested as POST {api_base_url}/models/{model_id}.",
+      "default": "sentence-transformers/all-MiniLM-L6-v2"
+    },
+    "hf_token": {
+      "type": "string",
+      "title": "HuggingFace token",
+      "description": "Sent as a bearer token. Write-only: it is masked when read back. Use ${env:HF_TOKEN} to keep it out of config.yml.",
+      "writeOnly": true
+    },
+    "threshold": {
+      "type": "number",
+      "title": "Confidence threshold",
+      "description": "A guide channel is accepted when its best similarity score is at least this value.",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.6
+    },
+    "batch_size": {
+      "type": "integer",
+      "title": "Batch size",
+      "description": "Most candidate names sent to the model in one request. A longer shortlist is split over several requests.",
+      "minimum": 1,
+      "maximum": 64,
+      "default": 16
+    },
+    "api_base_url": {
+      "type": "string",
+      "title": "API base URL",
+      "description": "Root of the inference API. The default is the local mock of this example (mock/hf_api.py); use https://api-inference.huggingface.co for the real service.",
+      "default": "http://127.0.0.1:18971"
+    }
+  }
+}

@@ -252,6 +252,7 @@ fn output_names_are_pinned() {
         (TargetType::M3u, "m3u"),
         (TargetType::Strm, "strm"),
         (TargetType::HdHomeRun, "hdhomerun"),
+        (TargetType::Plugin, "plugin"),
     ];
     assert_eq!(expected.len(), TargetType::iter().count(), "every output variant is pinned");
     for (output, name) in expected {

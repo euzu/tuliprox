@@ -1,0 +1,72 @@
+# Sports Enricher: the plugin plan's section 13 A example. Every hook here is
+# implemented in src/ and the macro checks this list against the impls at compile time.
+id: sports-enricher
+name: Sports Enricher
+version: 1.0.0
+api_version: 1
+author: tuliprox contributors
+homepage: https://github.com/tuliprox/tuliprox
+description: Groups sport channels by sport, orders them by fixtures, adds logos, synthetic programmes and documentary metadata.
+
+capabilities:
+  network: true       # the sports API and its logos
+  storage: true       # the KV cache of fixtures
+  epg_write: true     # synthetic Home vs Away programmes
+  image_cache: true   # team and league logos through the host image cache
+
+hooks:
+  - playlist.after-filter
+  - playlist.after-sort
+  - playlist.enrich-metadata
+  - epg.enrich-programmes
+  - events.on-event
+  - metrics.collect
+  - tasks.run
+  - rpc.call
+
+events:
+  - playlist.update
+
+tasks:
+  - id: refresh-fixtures
+    title: Refresh fixture cache
+    default_schedule: "0 */15 * * * *"
+    max_exec_ms: 60000
+    concurrency: skip
+
+# The host matches `groups` against the group a channel has when the hook runs. after-filter sees the
+# provider's sport groups, after-sort sees the groups this plugin created (Football, Basketball, ...),
+# so the pattern names those too. A plain "(?i)sport" would make after-sort a no-op.
+scope:
+  groups: ["(?i)sport|football|soccer|basketball|american football|ice hockey|baseball|tennis|rugby|cricket|golf|motorsport|combat"]
+
+ui:
+  config_section:
+    schema: config-schema.json
+  locales: [en, de, fr]
+  contributions:
+    - slot: menu
+      title: Sports Guide
+      title_key: menu.title
+      icon: trophy
+      element: ui/sports-guide.html
+    - slot: source-editor-tile
+      title: Sports Enricher
+      title_key: tile.title
+      element: ui/sports-tile.html
+    - slot: epg-overlay
+      title: Match facts
+      title_key: overlay.title
+      element: ui/epg-overlay.html
+  rpc_exports:
+    - name: get-fixtures
+      kind: read
+      mcp: true
+      description: Upcoming fixtures for the tracked leagues, optionally for one league or one EPG channel.
+      input_schema: rpc/get-fixtures.schema.json
+
+resources:
+  max_memory_mb: 64
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

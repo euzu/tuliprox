@@ -12,6 +12,15 @@ use tuliprox_core::model::{AppConfig, HttpClients, MaintenanceGate, UpdateGuard}
 use tuliprox_repository::PlaylistStorageState;
 use tuliprox_session::{ActiveProviderManager, ConnectionManager, EventManager};
 
+/// The plugin host `enrich-metadata` runs with: the same handle the playlist
+/// pipeline uses (`None` while `plugins.enabled` is off).
+#[cfg(feature = "plugins")]
+pub type WorkerPlugins = Option<tuliprox_plugins::PluginSystem>;
+
+/// Built without the `plugins` feature: the hook compiles away.
+#[cfg(not(feature = "plugins"))]
+pub type WorkerPlugins = shared::model::NoPlugins;
+
 /// Everything the metadata worker reads from the running server.
 #[derive(Clone)]
 pub struct MetadataUpdateCtx<E: EventSink> {
@@ -31,6 +40,8 @@ pub struct MetadataUpdateCtx<E: EventSink> {
     pub http_clients: Arc<HttpClients>,
     /// Inputs in maintenance; their tasks wait instead of contacting the provider.
     pub maintenance: Arc<dyn MaintenanceGate>,
+    /// The plugin host for `enrich-metadata`.
+    pub plugins: WorkerPlugins,
 }
 
 /// The instantiation the long-lived worker stores.

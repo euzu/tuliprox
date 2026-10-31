@@ -8,12 +8,19 @@ description = "Background metadata resolution: series, VOD and live detail fetch
 [lints]
 workspace = true
 
+[features]
+# `enrich-metadata` in the background worker (plan §6). Enabled by the binary
+# together with its own `plugins` feature, so `ctx::WorkerPlugins` and the
+# binary's `AppPlugins` are always the same type.
+plugins = ["dep:tuliprox-plugins"]
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
 tuliprox-processing = { workspace = true }
 tuliprox-repository = { workspace = true }
 tuliprox-session = { workspace = true }
+tuliprox-plugins = { workspace = true, optional = true }
 arc-swap.workspace = true
 chrono.workspace = true
 dashmap.workspace = true

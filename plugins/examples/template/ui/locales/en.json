@@ -1,0 +1,5 @@
+{
+  "menu.title": "My plugin",
+  "menu.hint": "This page is served by the plugin inside a sandboxed frame.",
+  "menu.toast": "Hello from my plugin"
+}

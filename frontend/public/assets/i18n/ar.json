@@ -902,7 +902,8 @@
       "QUEUE_CAPACITY": "حجم قائمة الأحداث المحدودة (الحد الأدنى 16). عند امتلائها تُهمل الأحداث وتُحسب؛ ولا تنتظر الطلبات أبدًا.",
       "FRESHNESS_SECS": "عدد الثواني التي بعدها يُعرض القياس كقيمة غير معروفة (null) بدلًا من جيد أو سيئ.",
       "WINDOW_SECS": "مدة النافذة المتحركة بالثواني المستخدمة في التجميعات."
-    }
+    },
+    "PLUGIN_SECRET_ENV_HINT": "خزِّن الأسرار كمراجع ${env:VAR} بدلًا من القيم الحرفية. يُحلَّل المرجع عند تحميل الإضافة ولا يُعرض هنا أبدًا."
   },
   "HINT": {
     "CONFIG": {
@@ -2004,7 +2005,48 @@
     "SYSLOG_LOG_LEVEL": "مستوى سجل Syslog",
     "SYSLOG_MAX_MESSAGE_LEN": "أقصى طول للرسالة",
     "SYSLOG_PORT": "منفذ Syslog",
-    "SYSLOG_QUEUE_CAPACITY": "سعة قائمة الانتظار"
+    "SYSLOG_QUEUE_CAPACITY": "سعة قائمة الانتظار",
+    "PLUGINS": "الإضافات",
+    "PLUGIN_STATE_DISCOVERED": "مُكتشَف",
+    "PLUGIN_STATE_INVALID": "غير صالح",
+    "PLUGIN_STATE_PENDING_APPROVAL": "بانتظار الموافقة",
+    "PLUGIN_STATE_APPROVED": "معتمد",
+    "PLUGIN_STATE_LOADED": "مُحمَّل",
+    "PLUGIN_STATE_FAILED": "فشل",
+    "PLUGIN_HOOKS": "الخطافات",
+    "PLUGIN_CALLS": "الاستدعاءات",
+    "PLUGIN_FAILURES": "حالات الفشل",
+    "PLUGIN_BUDGET_SKIPS": "التخطيات بسبب الميزانية",
+    "PLUGIN_LAST_ERROR": "آخر خطأ",
+    "PLUGIN_HOOK": "الخطاف",
+    "PLUGIN_KEPT": "مُبقى",
+    "PLUGIN_DROPPED": "مُسقَط",
+    "PLUGIN_MODIFIED": "مُعدَّل",
+    "PLUGIN_ERRORS": "الأخطاء",
+    "PLUGIN_DURATION_MS": "المدة (مللي ثانية)",
+    "PLUGIN_TASKS": "المهام",
+    "PLUGIN_NO_TASKS": "لا توجد مهام معلنة",
+    "PLUGIN_SECRET_SET": "مُعيَّن",
+    "PLUGIN_SECRET_NOT_SET": "غير مُعيَّن",
+    "PLUGIN_SECRET_NEW_VALUE": "أدخل قيمة جديدة (اتركه فارغًا للاحتفاظ بالقيمة الحالية)",
+    "PLUGIN_LOGS": "سجلات الإضافة",
+    "PLUGIN_INSTALL": "تثبيت إضافة",
+    "PLUGIN_UPLOAD": "رفع",
+    "PLUGIN_APPROVE_INSTALL": "الموافقة والتثبيت",
+    "PLUGIN_FILE": "حزمة الإضافة (.tlpx)",
+    "PLUGIN_CAPABILITIES": "الصلاحيات المطلوبة",
+    "PLUGIN_NO_CAPABILITIES": "لا شيء. لا تطلب هذه الإضافة أي أذونات خاصة.",
+    "PLUGIN_NETWORK_WARNING_TITLE": "وصول غير مقيد إلى الشبكة",
+    "PLUGIN_CUSTOM_UI": "واجهة مستخدم مخصصة",
+    "PLUGIN_RPC_EXPORTS": "الدوال القابلة للاستدعاء",
+    "PLUGIN_SECRETS": "الإعدادات السرية",
+    "PLUGIN_REPLACES": "يستبدل الإصدار المثبت",
+    "PLUGIN_AUTHOR": "المؤلف",
+    "PLUGIN_HOMEPAGE": "الصفحة الرئيسية",
+    "PLUGIN_EXPOSE_MCP": "إتاحتها عبر MCP (يمكن لمساعدي الذكاء الاصطناعي استدعاؤها دون إشراف)",
+    "PLUGIN_UNINSTALL": "إلغاء التثبيت",
+    "PLUGIN_PURGE_DATA": "حذف البيانات المخزنة أيضًا",
+    "PLUGIN_REENABLE": "إعادة التفعيل"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "الحافظة غير مدعومة.\nمتصفحك أو السياق الحالي لا يسمح بالوصول إلى الحافظة.\nيرجى استخدام HTTPS أو localhost.",
@@ -2277,7 +2319,26 @@
     },
     "USER_BOUQUET": {
       "FAIL": "فشل تنزيل باقات المستخدم!"
-    }
+    },
+    "PLUGIN_LOAD_FAILED": "فشل تحميل الإضافات:",
+    "PLUGIN_LIST_EMPTY": "لم يتم العثور على إضافات.",
+    "PLUGIN_STATS_UNAVAILABLE": "الإحصائيات غير متاحة.",
+    "PLUGIN_SETTINGS_LOAD_FAILED": "فشل تحميل إعدادات الإضافة:",
+    "PLUGIN_SETTINGS_SAVED": "تم حفظ إعدادات الإضافة.",
+    "PLUGIN_SETTINGS_NO_SCHEMA": "لا تتضمن هذه الإضافة مخطط إعدادات، لذا تُعرض إعداداتها للقراءة فقط.",
+    "PLUGIN_SCHEMA_UNSUPPORTED": "يستخدم مخطط الإعدادات بنية لا يستطيع النموذج عرضها:",
+    "PLUGIN_LOGS_LOAD_FAILED": "تعذّر تحميل سجلات الإضافة:",
+    "PLUGIN_CUSTOM_UI_WARNING": "تأتي هذه الإضافة بواجهتها الخاصة. تعمل في بيئة معزولة، لكنها تستطيع استدعاء دوالها المعلنة بصلاحياتك وفتح صفحات خارجية داخل إطارها.",
+    "PLUGIN_SECRETS_HINT": "تطلب هذه الإضافة الإعدادات السرية التالية، مثل رموز API:",
+    "PLUGIN_UPLOAD_HINT": "اختر حزمة ‎.tlpx‎. سيتم فحصها وعرضها عليك للمراجعة، ولن يُثبَّت شيء حتى توافق عليها.",
+    "PLUGIN_UPLOAD_FAILED": "تم رفض الحزمة:",
+    "PLUGIN_INSTALLED": "تمت الموافقة على الإضافة وتثبيتها (لم تُفعَّل بعد)",
+    "PLUGIN_ENABLED": "تم تفعيل الإضافة",
+    "PLUGIN_DISABLED": "تم تعطيل الإضافة",
+    "PLUGIN_UNINSTALLED": "تم إلغاء تثبيت الإضافة",
+    "PLUGIN_UNINSTALL_CONFIRM": "سيؤدي هذا إلى إزالة الإضافة وإدخالها في config.yml. لا يمكن التراجع عن ذلك.",
+    "PLUGIN_PURGE_HINT": "اتركه غير مفعّل للاحتفاظ ببيانات الإضافة، مثلًا إذا كنت تنوي إعادة تثبيتها.",
+    "PLUGIN_FRAME_INVALID": "لا يمكن عرض صفحة الإضافة هذه."
   },
   "SETUP": {
     "DESC": {
@@ -2299,7 +2360,8 @@
       "UNKNOWN": "تكوين خطوة الإعداد هذه.",
       "VIDEO": "تكوين إعدادات الفيديو.",
       "WEB_UI": "تكوين إعدادات WebUI.",
-      "WELCOME": "أنشئ أول مستخدم WebUI. سيتم كتابة بيانات الاعتماد هذه في user.txt."
+      "WELCOME": "أنشئ أول مستخدم WebUI. سيتم كتابة بيانات الاعتماد هذه في user.txt.",
+      "PLUGINS": "اضبط الإضافات التي قمت بتثبيتها."
     },
     "LABEL": {
       "API": "API",
@@ -2330,7 +2392,8 @@
       "WEBUI_USER": "مستخدم WebUI",
       "WEBUI_USERNAME": "اسم مستخدم WebUI",
       "WEB_UI": "Web-Ui",
-      "WELCOME": "مرحبًا"
+      "WELCOME": "مرحبًا",
+      "PLUGINS": "الإضافات"
     },
     "MSG": {
       "COMPLETE_RESTART_HINT": "تم الإعداد بنجاح. أعد تشغيل التطبيق/الحاوية للمتابعة.",

@@ -32,7 +32,14 @@ num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
 numeric_comparison = { numeric_field ~ num_op ~ number }
 set_values = { regexp ~ ("," ~ regexp)* }
 set_comparison = { field ~ ^"in" ~ "[" ~ set_values ~ "]" }
-comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison }
+plugin_ident = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+plugin_name = ${ ^"plugin" ~ "." ~ plugin_ident ~ "." ~ plugin_ident }
+plugin_bool = @{ (^"true" | ^"false") ~ !(ASCII_ALPHANUMERIC | "_" | "-") }
+plugin_number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+plugin_arg = { regexp | plugin_bool | plugin_number }
+plugin_args = { plugin_arg ~ ("," ~ plugin_arg)* }
+plugin_call = { plugin_name ~ "(" ~ plugin_args? ~ ")" }
+comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | presence_comparison | string_comparison | plugin_call }
 bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
@@ -196,6 +203,33 @@ fn get_parser_set_comparison(expr: Pair<Rule>, templates: Option<&[PatternTempla
         return Err(TuliproxError::FilterParse("empty value list in IN comparison".to_string()));
     }
     Ok(Leaf::SetComparison(field, values))
+}
+
+/// `plugin.<id>.<fn>(literal, ...)`. Arguments are literals only, so the term is a leaf and
+/// never nests. Strings keep their text, numbers and booleans are carried as written (booleans
+/// lowercased), because the plugin receives every argument as a string. The `call` index is
+/// assigned by [`FilterBuilder::leaf`].
+fn get_parser_plugin_call(expr: Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<Leaf, TuliproxError> {
+    let mut expr_inner = expr.into_inner();
+    let name = next_rule(&mut expr_inner, "plugin call")?;
+    let mut idents = name.into_inner();
+    let plugin = next_rule(&mut idents, "plugin call")?.as_str().to_string();
+    let func = next_rule(&mut idents, "plugin call")?.as_str().to_string();
+    let mut args = Vec::new();
+    if let Some(list) = expr_inner.next() {
+        for arg in list.into_inner() {
+            let literal = next_rule(&mut arg.into_inner(), "plugin call argument")?;
+            args.push(match literal.as_rule() {
+                Rule::regexp => get_parser_string_value(&literal, templates)?,
+                Rule::plugin_bool => literal.as_str().to_ascii_lowercase(),
+                Rule::plugin_number => literal.as_str().to_string(),
+                _ => {
+                    return Err(TuliproxError::FilterParse(format!("unexpected plugin argument: {}", literal.as_str())))
+                }
+            });
+        }
+    }
+    Ok(Leaf::PluginCall { call: 0, plugin, func, args })
 }
 
 fn get_filter_item_type(text_item_type: &str) -> Option<PlaylistItemType> {
@@ -367,6 +401,7 @@ fn parse_leaf(comparison: Pair<Rule>, templates: Option<&[PatternTemplate]>) -> 
         Rule::presence_comparison => get_parser_presence_comparison(pair),
         Rule::numeric_comparison => get_parser_numeric_comparison(pair),
         Rule::set_comparison => get_parser_set_comparison(pair, templates),
+        Rule::plugin_call => get_parser_plugin_call(pair, templates),
         _ => Err(TuliproxError::FilterParse(format!("did not expect rule: {pair:?}"))),
     }
 }
@@ -393,6 +428,9 @@ fn unresolved_template_placeholders(input: &str) -> Vec<String> {
 }
 
 /// Deepest parenthesis nesting in `filter_text`, ignoring parentheses inside a quoted regex.
+///
+/// The parentheses of a `plugin.<id>.<fn>(...)` call count as one level: they cannot nest
+/// (arguments are literals), so the scan overstates the parse tree's depth by at most one.
 ///
 /// pest itself recurses per `expr_group` while building the parse tree, before any of this
 /// crate's code runs, and pest 2.9.5 does not probe the stack on musl. The nesting has to be

@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>My plugin</title>
+</head>
+<body>
+<h1 id="title"></h1>
+<p id="hint"></p>
+<p>Slot: <code id="slot"></code>, locale: <code id="locale"></code></p>
+<button id="toast" type="button">Show toast</button>
+<!-- The frame CSP allows scripts from 'self' only: no inline scripts. The bridge
+     is served by tuliprox at /plugins/_sdk/bridge.js; ../../ from this frame
+     (/plugins/<id>/ui/) reaches it. -->
+<script src="../../_sdk/bridge.js"></script>
+<script src="menu.js"></script>
+</body>
+</html>

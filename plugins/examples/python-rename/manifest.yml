@@ -1,0 +1,21 @@
+# Python example: renames one playlist group in the after-filter stage. Same contract as the Rust template.
+id: python-rename
+name: Python rename example
+version: 0.1.0
+api_version: 1
+author: Your Name <you@example.com>
+description: >
+  Renames the group named by rename_from to rename_to. Written in Python and built with componentize-py.
+
+hooks:
+  - playlist.after-filter
+
+ui:
+  config_section:
+    schema: config-schema.json
+
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 2
+  fail_mode: continue

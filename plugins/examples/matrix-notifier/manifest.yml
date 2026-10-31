@@ -1,0 +1,23 @@
+id: matrix-notifier
+name: Matrix Notifier
+version: 0.1.0
+api_version: 1
+author: tuliprox
+description: >
+  Delivers tuliprox notifications to a Matrix room through the client-server
+  API. Routing, quiet hours, suppression and retries come from the host's
+  messaging outbox; this plugin only speaks Matrix.
+capabilities:
+  notifications: true
+  network: true
+  storage: true
+hooks:
+  - notifications.send
+  - events.on-event
+events:
+  - playlist.update
+  - user.connection.changed
+  - stream.probe.failed
+ui:
+  config_section:
+    schema: config-schema.json

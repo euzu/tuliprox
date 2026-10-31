@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "title": "Sports Enricher",
+  "properties": {
+    "api_key": {
+      "type": "string",
+      "title": "API key",
+      "description": "Bearer token of the sports API. Write-only: it is masked when settings are read back.",
+      "writeOnly": true
+    },
+    "api_base_url": {
+      "type": "string",
+      "title": "API base URL",
+      "description": "Base URL of the sports API, without a trailing slash.",
+      "default": "http://127.0.0.1:18970"
+    },
+    "leagues": {
+      "type": "array",
+      "title": "Leagues",
+      "description": "League ids to track, in display order (epl, laliga, nba). Empty tracks all three.",
+      "items": { "type": "string" },
+      "default": ["epl", "laliga", "nba"]
+    },
+    "group_emoji": {
+      "type": "boolean",
+      "title": "Group emoji",
+      "description": "Prefix the regrouped sport groups with an emoji (for example Football).",
+      "default": true
+    }
+  }
+}

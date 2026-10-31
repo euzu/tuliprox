@@ -1,0 +1,9 @@
+// The fixture's own composite world: an input provider and an output generator
+// in one component. Nothing here redefines the contract.
+package tuliprox:provider-probe@0.0.0;
+
+world provider-probe {
+  include tuliprox:plugin/base@1.0.0;
+  export tuliprox:plugin/input-provider@1.0.0;
+  export tuliprox:plugin/output-generator@1.0.0;
+}

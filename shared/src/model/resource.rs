@@ -13,6 +13,17 @@ struct LegacyResourceLocator {
     url: String,
 }
 
+/// Host-relative paths this server serves itself: library thumbnails, and the
+/// sealed resource-route links `cache-image` hands to plugins. Outputs turn them
+/// into links on the user's server base URL rather than treating them as an
+/// upstream destination.
+pub const INTERNAL_RESOURCE_PREFIXES: [&str; 2] = ["/api/v1/library/thumbnail/", "/api/v1/playlist/resource/"];
+
+/// Whether `resource_url` is one of the [`INTERNAL_RESOURCE_PREFIXES`] paths.
+pub fn is_internal_resource_path(resource_url: &str) -> bool {
+    INTERNAL_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.starts_with(prefix))
+}
+
 /// Decodes stored resource locators without accepting an invalid locator as a URL.
 pub fn persisted_resource_url(value: &str) -> Option<Cow<'_, str>> {
     if !value.starts_with("resource://") {

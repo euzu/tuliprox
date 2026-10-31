@@ -1,0 +1,27 @@
+# Demo source for the HF EPG Matcher. Replace @DEMO_DIR@ with the absolute path of this demo/ directory
+# (CHECKS.md has the sed one-liner).
+#
+# The EPG settings live on the INPUT (`epg:`), not on the target. Smart match is on with fuzzy matching
+# OFF, so the built-in matcher only resolves exact names and "BBC Too" / "Channel Fore" are left for
+# the plugin. The plugin is asked while the guide's channel list is read, with the guide channels whose
+# names share a matcher bucket with the playlist name ("BBC Too" ~ "BBC Two"), so the demo would also
+# match without the exact "BBC Two" / "Channel Four" channels.
+inputs:
+  - name: uk-demo
+    type: m3u
+    url: file://@DEMO_DIR@/playlist.m3u
+    epg:
+      sources:
+        - url: file://@DEMO_DIR@/guide.xml
+      smart_match:
+        enabled: true
+        fuzzy_matching: false
+sources:
+  - inputs:
+      - uk-demo
+    targets:
+      - name: hf-demo
+        output:
+          - type: xtream
+          - type: m3u
+            filename: hf-demo.m3u

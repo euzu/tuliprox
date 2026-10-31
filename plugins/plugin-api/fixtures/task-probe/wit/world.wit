@@ -1,0 +1,8 @@
+// The fixture's own world: the `tasks` interface of the frozen contract and
+// nothing else. Nothing here redefines the contract.
+package tuliprox:task-probe@0.0.0;
+
+world task-probe {
+  include tuliprox:plugin/base@1.0.0;
+  export tuliprox:plugin/tasks@1.0.0;
+}

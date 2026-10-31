@@ -23,6 +23,7 @@ mod hls_state;
 mod http_clients;
 mod network_access;
 mod playlist_update_control;
+mod plugin_state;
 mod recording_state;
 mod reload;
 mod resource_cache;
@@ -35,8 +36,8 @@ mod view;
 #[cfg(test)]
 pub use self::test_support::{create_test_app_state, create_test_maintenance};
 pub use self::{
-    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, recording_state::*,
-    reload::*, resource_cache::*, view::*,
+    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, plugin_state::*,
+    recording_state::*, reload::*, resource_cache::*, view::*,
 };
 
 /// Root server state. It always lives behind one `Arc<AppState>` and is never
@@ -64,6 +65,8 @@ pub struct AppState {
     pub playlist_updates: PlaylistUpdateControl,
     /// Inputs taken out of service; read on every new stream request.
     pub maintenance: Arc<MaintenanceRegistry>,
+    /// Plugin hooks handed to every playlist update this server runs.
+    pub plugins: AppPlugins,
 }
 
 impl AppState {

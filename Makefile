@@ -221,6 +221,24 @@ testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<n
 		$(if $(RUN_ID),--run-id $(RUN_ID),)
 	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
 
+.PHONY: plugin-fixtures
+plugin-fixtures: ## Build the wasm plugin test fixtures (wasm32-wasip2) into target/plugin-fixtures
+	@echo "==> Building plugin test fixtures (wasm32-wasip2)"
+	@./bin/build_plugin_fixture.sh
+	@echo "✅ Plugin fixtures written to target/plugin-fixtures/plugins"
+
+PLUGIN_EXAMPLES := sports-enricher hf-epg-matcher matrix-notifier
+
+.PHONY: plugin-examples
+plugin-examples: ## Build + package the example plugins and the rendered template (wasm32-wasip2) into target/plugin-examples
+	@echo "==> Building example plugins (wasm32-wasip2)"
+	@for example in $(PLUGIN_EXAMPLES); do ./bin/package-plugin.sh plugins/examples/$$example || exit 1; done
+	@echo "==> Rendering and building the plugin template"
+	@rm -rf target/plugin-examples/template
+	@./bin/new-plugin.sh my-plugin target/plugin-examples/template/my-plugin
+	@./bin/package-plugin.sh target/plugin-examples/template/my-plugin
+	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"

@@ -1,7 +1,7 @@
 use crate::{
     api::{
         model::AppState,
-        tasks::{spawn_library_scan, LibraryScanTaskOptions},
+        tasks::{run_plugin_task, spawn_library_scan, LibraryScanTaskOptions, TaskTrigger},
     },
     model::{AppConfig, ProcessTargets, ScheduleConfig},
     processing::{
@@ -52,6 +52,15 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cance
                 .as_ref()
                 .and_then(|reverse_proxy| reverse_proxy.geoip.as_ref())
                 .is_some_and(|geoip| geoip.enabled),
+            // A plugin's `tasks:` entry (plan §7 *Scheduled plugin tasks*); the
+            // post-load check already rejected an unknown plugin or task.
+            ScheduleTaskType::PluginTask => {
+                #[cfg(feature = "plugins")]
+                let plugins_on = app_state.plugins.is_some();
+                #[cfg(not(feature = "plugins"))]
+                let plugins_on = false;
+                plugins_on && schedule.plugin.is_some() && schedule.task.is_some()
+            }
         };
         if !task_enabled {
             log::info!("Skipping disabled scheduled task {:?} ({})", schedule.task_type, schedule.schedule);
@@ -66,6 +75,7 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cance
         let app_state_clone = Arc::clone(app_state);
         let http_client = client.clone();
         let cancel_token = cancel.clone();
+        let plugin_task = schedule.plugin.clone().zip(schedule.task.clone());
 
         match task_type {
             ScheduleTaskType::PlaylistUpdate => {
@@ -96,9 +106,17 @@ pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cance
                     .await;
                 });
             }
-            ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate => {
+            ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate | ScheduleTaskType::PluginTask => {
                 tokio::spawn(async move {
-                    start_scheduler(http_client, expression.as_str(), task_type, app_state_clone, cancel_token).await;
+                    start_scheduler(
+                        http_client,
+                        expression.as_str(),
+                        task_type,
+                        plugin_task,
+                        app_state_clone,
+                        cancel_token,
+                    )
+                    .await;
                 });
             }
         }
@@ -207,6 +225,7 @@ async fn run_playlist_update_inner(
         .with_provider_manager(Arc::clone(&app_state.active_provider))
         .with_maintenance(Arc::clone(&app_state.maintenance))
         .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
+        .with_plugins(crate::api::model::share_plugins(&app_state.plugins))
         .with_acquired_permit(permit),
     )
     .await;
@@ -216,6 +235,7 @@ async fn start_scheduler(
     client: reqwest::Client,
     expression: &str,
     task_type: ScheduleTaskType,
+    plugin_task: Option<(String, String)>,
     app_state: Arc<AppState>,
     cancel: CancellationToken,
 ) {
@@ -234,6 +254,11 @@ async fn start_scheduler(
                                 }
                                 ScheduleTaskType::GeoIpUpdate => {
                                     run_geoip_update(&app_state, expression);
+                                }
+                                ScheduleTaskType::PluginTask => {
+                                    if let Some((plugin, task)) = &plugin_task {
+                                        run_scheduled_plugin_task(&app_state, plugin, task, datetime.timestamp(), expression);
+                                    }
                                 }
                             }
                         }
@@ -269,6 +294,17 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
             }
         }
     }
+}
+
+/// Spawned, not awaited: a task can run for minutes, and the cron loop must
+/// keep its next fire (the task's own `concurrency` policy decides what a
+/// fire during a run does).
+fn run_scheduled_plugin_task(app_state: &Arc<AppState>, plugin: &str, task: &str, at: i64, schedule: &str) {
+    let app_state = Arc::clone(app_state);
+    let (plugin, task, schedule) = (plugin.to_string(), task.to_string(), schedule.to_string());
+    tokio::spawn(async move {
+        let _ = run_plugin_task(&app_state, &plugin, &task, TaskTrigger::Scheduled { at }, Some(&schedule)).await;
+    });
 }
 
 fn run_geoip_update(app_state: &Arc<AppState>, schedule: &str) {

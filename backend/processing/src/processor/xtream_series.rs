@@ -3,10 +3,11 @@ use crate::{
     metadata_sink::MetadataUpdateSink,
     processor::{
         create_resolve_options_function_for_xtream_target,
-        playlist::{execute_pipeline_on_groups, PlaylistProcessingContext, ProcessingPipe},
-        process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
-        FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
-        FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
+        playlist::{execute_pipeline_on_groups_with_filter_calls, PlaylistProcessingContext, ProcessingPipe},
+        process_foreground_retry_once, select_cancel_token,
+        xtream_vod::{enrich_resolved_metadata, metadata_hook_item, EnrichableMetadata},
+        ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE,
+        FOREGROUND_MIN_RETRY_DELAY_SECS, FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
     },
 };
 use log::{debug, error, info, log_enabled, trace, warn, Level};
@@ -17,8 +18,8 @@ use shared::{
     error::TuliproxError,
     foundation::ValueProvider,
     model::{
-        EventSink, MediaQuality, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties,
-        StreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
+        EventSink, MediaQuality, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, PluginHost,
+        PluginRunReport, SeriesStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
     },
 };
 use std::{
@@ -79,17 +80,17 @@ impl SeriesProbeSettings {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
-) {
+) -> PluginRunReport {
     // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
     if processed_fpl.input.has_flag(ConfigInputFlags::SkipSeries) {
-        return;
+        return PluginRunReport::default();
     }
 
     let mut resolve_options = get_resolve_series_options(target, processed_fpl);
@@ -99,7 +100,7 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     }
     provider_fpl.source.release_resources(XtreamCluster::Series);
 
-    playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target).await;
+    let episode_report = playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target).await;
 
     if provider_fpl.is_memory() {
         sync_resolved_series_properties(provider_fpl, processed_fpl);
@@ -108,17 +109,18 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     if let Err(err) = provider_fpl.source.obtain_resources().await {
         errors.push(err);
     }
+    episode_report
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     _errors: &mut Vec<TuliproxError>,
     fpl: &mut FetchedPlaylist<'_>,
     resolve_options: ResolveOptions,
     pipe: &ProcessingPipe,
     target: &ConfigTarget,
-) {
+) -> PluginRunReport {
     let filter = |pli: &PlaylistItem| {
         pli.header.xtream_cluster == XtreamCluster::Series && pli.header.item_type == PlaylistItemType::SeriesInfo
     };
@@ -136,12 +138,16 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
         process_immediate_series_info(ctx, fpl, filter, &resolve_options, skip_resolve, resolve_tmdb_enabled).await
     };
 
-    // Apply pipe transformations to new groups
-    let (new_playlist, pipeline_outcome) = execute_pipeline_on_groups(groups_to_add, target, pipe);
+    // Apply pipe transformations to new groups. No stage hooks here; filter
+    // plugin terms are evaluated for the episodes.
+    let (new_playlist, pipeline_outcome) =
+        execute_pipeline_on_groups_with_filter_calls(groups_to_add, target, &fpl.input.name, pipe, &ctx.plugins).await;
     debug!("Resolved series pipeline outcome: {pipeline_outcome:?}");
 
     // Apply resolved episodes to playlist
     fpl.extend_playlist(new_playlist);
+    // The episodes' filter-call stats belong to the target's report.
+    pipeline_outcome.plugins
 }
 
 fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
@@ -158,8 +164,8 @@ fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, proce
     );
 }
 
-fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -250,8 +256,8 @@ fn queue_background_series_info<E: EventSink + Clone + 'static, M: MetadataUpdat
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     fpl: &mut FetchedPlaylist<'_>,
     filter: impl Fn(&PlaylistItem) -> bool,
     resolve_options: &ResolveOptions,
@@ -481,7 +487,9 @@ async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: Metada
     }
 
     if !batch.is_empty() {
-        // Release lock before final persist
+        // Release the open query (its shared sidecar lock) and the file lock before the
+        // final persist: the writer's exclusive sidecar lock would otherwise wait forever.
+        drop(db_query_holder.take());
         _db_lock_holder = None;
 
         let updates: Vec<(u32, SeriesStreamProperties)> = batch
@@ -535,8 +543,8 @@ fn expand_series_item(pli: &PlaylistItem, input: &ConfigInput) -> Option<Playlis
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_series_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn update_series_info_immediate<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     active_provider: &Arc<ActiveProviderManager>,
     input: &ConfigInput,
     pli: &PlaylistItem,
@@ -549,6 +557,7 @@ async fn update_series_info_immediate<E: EventSink + Clone + 'static, M: Metadat
     let resolve_missing_facts = reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_series_metadata(
+        &ctx.plugins,
         &ctx.config,
         &ctx.client,
         input,
@@ -645,8 +654,13 @@ fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
 /// * `resolve_missing_facts` - If true, resolves missing TMDB/date facts from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
+/// * `plugins` - runs `enrich-metadata` after the provider fetch and the TMDB fact patch and before
+///   persistence, non-fatally (see `enrich_resolved_metadata`). Both callers reach it through the
+///   `MaintenanceGate`: `playlist_resolve` skips inputs in maintenance (`target.rs`) and the background
+///   worker requeues them (`task_processing.rs`).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
-pub async fn update_series_metadata(
+pub async fn update_series_metadata<P: PluginHost>(
+    plugins: &P,
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
@@ -894,7 +908,16 @@ pub async fn update_series_metadata(
         out.store(has_tmdb && has_date, Ordering::Relaxed);
     }
 
-    // 3. Probe Episodes (if enabled)
+    // 3. `enrich-metadata` plugins, over the resolved info. A probe-only pass keeps what an earlier pass settled.
+    if fetch_info || resolve_missing_facts {
+        let title = playlist_title.map_or_else(|| properties.name.to_string(), ToString::to_string);
+        let item = metadata_hook_item(input, XtreamCluster::Series, &id, &title, existing_item.as_ref());
+        if enrich_resolved_metadata(plugins, &input.name, &item, &mut properties).await {
+            properties_updated = true;
+        }
+    }
+
+    // 4. Probe Episodes (if enabled)
     if do_probe && app_config.is_ffprobe_enabled().await {
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
@@ -1081,7 +1104,7 @@ pub async fn update_series_metadata(
         }
     }
 
-    // 4. Persist
+    // 5. Persist
     if properties_updated || fetched_new {
         if save {
             if let Some(series_id) = series_id_opt {
@@ -1103,4 +1126,18 @@ pub async fn update_series_metadata(
     }
 
     Ok(None)
+}
+
+impl EnrichableMetadata for SeriesStreamProperties {
+    fn restore_identity(&mut self, original: &Self) {
+        self.series_id = original.series_id;
+        self.category_id = original.category_id;
+    }
+
+    fn plugin_fingerprint(&self) -> Option<&str> { self.plugin_fingerprint.as_deref() }
+
+    fn set_plugin_fingerprint(&mut self, fingerprint: Option<String>) -> bool {
+        let fingerprint: Option<Arc<str>> = fingerprint.map(Arc::from);
+        std::mem::replace(&mut self.plugin_fingerprint, fingerprint.clone()) != fingerprint
+    }
 }

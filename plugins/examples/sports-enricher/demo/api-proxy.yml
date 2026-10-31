@@ -1,0 +1,19 @@
+# Fragment of api-proxy.yml: one user for the `sports` target, so the served outputs can be read with curl.
+server:
+  - name: default
+    protocol: http
+    host: 127.0.0.1
+    port: "18980"
+    timezone: UTC
+    message: Sports Enricher demo
+user:
+  - target: sports
+    credentials:
+      - username: demo
+        password: demo
+        proxy: reverse
+        server: default
+        exp_date: 0
+        max_connections: 0
+        status: Active
+        soft_connections: 0

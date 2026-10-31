@@ -7,6 +7,7 @@ pub struct McpConfig {
     pub read_only: bool,
     pub allowed_origins: Vec<String>,
     pub max_response_bytes: usize,
+    pub plugin_tools: bool,
 }
 
 macros::from_impl!(McpConfig);
@@ -18,6 +19,7 @@ impl From<&McpConfigDto> for McpConfig {
             read_only: dto.read_only,
             allowed_origins: dto.allowed_origins.clone(),
             max_response_bytes: dto.max_response_bytes,
+            plugin_tools: dto.plugin_tools,
         }
     }
 }
@@ -29,6 +31,7 @@ impl From<&McpConfig> for McpConfigDto {
             read_only: config.read_only,
             allowed_origins: config.allowed_origins.clone(),
             max_response_bytes: config.max_response_bytes,
+            plugin_tools: config.plugin_tools,
         }
     }
 }
@@ -44,6 +47,7 @@ mod tests {
             read_only: false,
             allowed_origins: vec!["https://claude.ai".to_string()],
             max_response_bytes: 4096,
+            plugin_tools: true,
         };
         let config = McpConfig::from(&dto);
         assert_eq!(McpConfigDto::from(&config), dto);
@@ -55,5 +59,6 @@ mod tests {
         assert!(!config.enabled);
         assert!(config.read_only);
         assert_eq!(config.max_response_bytes, 262_144);
+        assert!(!config.plugin_tools);
     }
 }
