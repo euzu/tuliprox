@@ -26,3 +26,6 @@ pub const STALKER_EPISODE_FILE: &str = "stalker_episode";
 pub const STALKER_SEASONS_FILE: &str = "stalker_seasons";
 pub const STALKER_SERIES_ROOTS_FILE: &str = "stalker_series_roots";
 pub const STALKER_EPG_FILE: &str = "stalker_epg";
+
+pub const TARGET_ANALYTICS_FILE: &str = "analytics.json";
+pub const TARGET_ANALYTICS_UNMAPPED_FILE: &str = "analytics_unmapped.csv";

@@ -50,6 +50,7 @@ async fn curation_tmdb_client_construction_reports_safe_phases_and_continues_pub
                     processing: PipelineStats::default(),
                     accepted_empty_clusters: ClusterFlags::empty(),
                     library_empty: tuliprox_repository::LibraryEmptyPublication::None,
+                    analytics_input: TargetAnalyticsInput::default(),
                 };
                 let (result, errors) = tokio::time::timeout(
                     Duration::from_secs(5),

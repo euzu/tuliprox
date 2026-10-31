@@ -22,6 +22,15 @@ impl From<EpgSourceTypeDto> for EpgSourceType {
     }
 }
 
+impl From<EpgSourceType> for EpgSourceTypeDto {
+    fn from(value: EpgSourceType) -> Self {
+        match value {
+            EpgSourceType::Xmltv => Self::Xmltv,
+            EpgSourceType::Ics => Self::Ics,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EpgSource {
     pub source_type: EpgSourceType,

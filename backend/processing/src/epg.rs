@@ -183,6 +183,41 @@ async fn cleanup_unlisted_epg_files(
     Ok(())
 }
 
+pub fn epg_source_label(raw_url: &str) -> String {
+    if raw_url.eq_ignore_ascii_case("auto") {
+        return "auto".to_string();
+    }
+    if let Some(file_path) = raw_url.strip_prefix("file://") {
+        if let Some(name) = std::path::Path::new(file_path).file_name().and_then(|s| s.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+        return "file".to_string();
+    }
+    if let Ok(parsed) = reqwest::Url::parse(raw_url) {
+        if let Some(host) = parsed.host_str() {
+            return host.to_string();
+        }
+        if let Some(name) = std::path::Path::new(parsed.path()).file_name().and_then(|s| s.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    if let Some(name) = std::path::Path::new(raw_url).file_name().and_then(|s| s.to_str()) {
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    "epg".to_string()
+}
+
+enum EpgFetchOutcome {
+    Success { source_idx: usize, label: String, timestamp: u64 },
+    Failure { source_idx: usize, label: String, timestamp: u64, error: String },
+}
+
 pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: &PlaylistProcessingContext<E, M>,
     input: &ConfigInput,
@@ -198,21 +233,57 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
             let mut errors = vec![];
             let mut file_paths = vec![];
             let mut stored_file_paths = vec![];
+            let mut fetch_outcomes = Vec::with_capacity(epg_config.sources.len());
 
-            for epg_source in &epg_config.sources {
+            for (source_idx, epg_source) in epg_config.sources.iter().enumerate() {
+                let label = epg_source_label(&epg_source.url);
+                let now = shared::utils::current_time_secs();
                 match download_epg_file(epg_source, ctx, input, headers, storage_dir).await {
                     Ok(file_path) => {
+                        fetch_outcomes.push(EpgFetchOutcome::Success { source_idx, label, timestamp: now });
                         stored_file_paths.push(file_path.clone());
-                        match persisted_source_from_config(epg_source, file_path) {
+                        match persisted_source_from_config(epg_source, source_idx, file_path) {
                             Ok(persisted) => file_paths.push(persisted),
                             Err(err) => errors.push(err),
                         }
                     }
                     Err(err) => {
+                        let err_str = err.to_string();
+                        let sanitized = sanitize_sensitive_info(&err_str);
+                        let short_err = sanitized.chars().take(200).collect::<String>();
+                        fetch_outcomes.push(EpgFetchOutcome::Failure {
+                            source_idx,
+                            label,
+                            timestamp: now,
+                            error: short_err,
+                        });
                         errors.push(err);
                     }
                 }
             }
+
+            let input_storage = crate::input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
+            let mut input_status = crate::input_cache::load_input_status_async(&input_storage).await;
+            for outcome in fetch_outcomes {
+                match outcome {
+                    EpgFetchOutcome::Success { source_idx, label, timestamp } => {
+                        crate::input_cache::update_epg_source_success(&mut input_status, source_idx, label, timestamp);
+                    }
+                    EpgFetchOutcome::Failure { source_idx, label, timestamp, error } => {
+                        crate::input_cache::update_epg_source_failure(
+                            &mut input_status,
+                            source_idx,
+                            label,
+                            timestamp,
+                            error,
+                        );
+                    }
+                }
+            }
+            if input_status.epg_sources.len() > epg_config.sources.len() {
+                input_status.epg_sources.truncate(epg_config.sources.len());
+            }
+            crate::input_cache::save_input_status_async(&input_storage, &input_status).await;
 
             for suffix in ["_epg.xml", "_epg.ics"] {
                 if let Err(err) = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, suffix).await {
@@ -240,12 +311,12 @@ async fn persisted_epg_for_maintenance<E: EventSink + Clone + 'static, M: Metada
     debug!("Input '{}' is in maintenance; using its persisted epg", input.name);
     let mut errors = vec![];
     let mut file_paths = vec![];
-    for epg_source in &epg_config.sources {
+    for (source_idx, epg_source) in epg_config.sources.iter().enumerate() {
         let Ok(path) = get_input_raw_epg_file_path(epg_source, input, storage_dir).await else {
             continue;
         };
         if tokio::fs::metadata(&path).await.is_ok_and(|metadata| metadata.is_file()) {
-            match persisted_source_from_config(epg_source, path) {
+            match persisted_source_from_config(epg_source, source_idx, path) {
                 Ok(persisted) => file_paths.push(persisted),
                 Err(err) => errors.push(err),
             }
@@ -260,6 +331,7 @@ async fn persisted_epg_for_maintenance<E: EventSink + Clone + 'static, M: Metada
 
 fn persisted_source_from_config(
     epg_source: &EpgSource,
+    source_idx: usize,
     file_path: PathBuf,
 ) -> Result<PersistedEpgSource, TuliproxError> {
     let kind = match epg_source.source_type {
@@ -278,7 +350,13 @@ fn persisted_source_from_config(
         }
     };
 
-    Ok(PersistedEpgSource { file_path, priority: epg_source.priority, logo_override: epg_source.logo_override, kind })
+    Ok(PersistedEpgSource {
+        file_path,
+        priority: epg_source.priority,
+        logo_override: epg_source.logo_override,
+        kind,
+        source_idx,
+    })
 }
 
 #[cfg(test)]
@@ -395,5 +473,21 @@ mod tests {
         });
 
         assert_eq!(epg_download_limit(&epg_source), Some(123));
+    }
+
+    #[test]
+    fn test_epg_error_truncation_multibyte_utf8() {
+        // Multi-byte Unicode: Euro symbol € is 3 bytes (0xE2, 0x82, 0xAC).
+        // 250 Euro characters = 750 bytes. Byte slicing at [..200] would split in the middle of a char and panic.
+        let raw = "€".repeat(250);
+        let truncated: String = raw.chars().take(200).collect();
+        assert_eq!(truncated.chars().count(), 200);
+        assert_eq!(truncated, "€".repeat(200));
+
+        // Mixed 4-byte emoji and ASCII
+        let mixed = format!("Error: {}", "🔥".repeat(250));
+        let truncated_mixed: String = mixed.chars().take(200).collect();
+        assert_eq!(truncated_mixed.chars().count(), 200);
+        assert!(truncated_mixed.starts_with("Error: 🔥"));
     }
 }

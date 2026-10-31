@@ -198,6 +198,20 @@
 
 ## 🌟 New Features
 
+- **Playlist target analytics and stats view.** A new Web UI page "Playlist > Stats" (directly below "Update",
+  requiring `playlist.read`) displays per-target statistics computed on every playlist update:
+  live channel, movie, series, and resolved episode counts alongside group and category totals, catch-up channels
+  with maximum archive duration, input-versus-output kept ratios per cluster, top live groups, and comprehensive EPG
+  coverage. The EPG panel shows mapped versus unmapped live channels, guide horizon window (duration and end date),
+  per-source EPG fetch status (label, type, guide days, last success/failure timestamps, mapped count, status badge),
+  missing EPG counts by group, and a CSV export for unmapped live channels. An "All targets" summary table highlights
+  target status (`OK`, `EPG stale`, `Error`, or `No data`). Each target stores its metrics in `analytics.json` and
+  unmapped channels in `analytics_unmapped.csv`, while input `status.json` records per-source EPG fetch history
+  (source label only, credentials never stored). Endpoints `GET /api/v1/playlist/analytics` and
+  `GET /api/v1/playlist/analytics/{target_id}/unmapped.csv` expose this data via the REST API. Episodes are counted
+  only when resolved during the update; partially resolved series show a lower bound such as "16+",
+  and without any resolved series the value is displayed as "—".
+
 - **Mapper rules can be written in Rhai.** A mapper entry accepts an optional `type`: `dsl` (default, the existing
   mapper language) or `rhai`. Rhai rules receive the channel as `item` (`item.group = "News"`, `item.chno = 42`,
   `item["Caption"] = "Renamed"`) and the mapping environment as `ctx` (`ctx.regex`, `ctx.template`, `ctx.favourite`).
@@ -1265,6 +1279,21 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Playlist Update: "All" selects, status badges use status dots.** Clicking "All" under "Affected targets" now
+  always selects every target instead of toggling all of them off on a second click; single targets still switch on
+  and off. Status badges (input result, cluster chips, update details) show a round status dot in front of the label,
+  like the health badge, instead of mixed leading and trailing check marks. Cluster chips are neutral, target buttons
+  use the theme's primary color when selected, and the scrollbar is narrower and tinted with the theme color.
+
+- **Recording entries visible in the collapsed sidebar.** The collapsed sidebar referenced the icons `LibraryOutline`
+  and `ScheduleOutline`, which do not exist, so the Recordings and Recording rules buttons were blank. Both sidebar
+  modes now use `VideoLibrary` and `Calendar`.
+
+- **Scheduled tasks keep their local time across DST switches.** The scheduler fixed the UTC offset when it started,
+  so after a daylight saving switch a job planned for 08:00 ran at 07:00 (autumn) or 09:00 (spring) until the next
+  restart. Each run is now calculated in the local time zone, including the switch. The time zone is the one of the
+  process (`TZ` in Docker, default `UTC`).
 
 - **Image/resource proxy fails fast on upstream errors and limits per-host concurrency.** The image/resource proxy
   no longer retries a failing upstream image three times (each failing image could block a browser slot for minutes),

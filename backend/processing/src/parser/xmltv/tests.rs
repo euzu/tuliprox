@@ -22,7 +22,7 @@ where
 }
 
 fn xmltv_source(file_path: PathBuf, priority: i16, logo_override: bool) -> PersistedEpgSource {
-    PersistedEpgSource { file_path, priority, logo_override, kind: PersistedEpgSourceKind::Xmltv }
+    PersistedEpgSource { file_path, priority, logo_override, kind: PersistedEpgSourceKind::Xmltv, source_idx: 0 }
 }
 
 fn dummy_policy_source(priority: i16, source_order: usize, title: &str) -> EpgDummyPolicySource {
