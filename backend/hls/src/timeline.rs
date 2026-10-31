@@ -685,6 +685,7 @@ impl TimelineDraft {
                 || self.should_start_new_origin_epoch_for_rollover(manifest);
         let mut segments = Vec::with_capacity(manifest.segments.len());
         let mut trimmed_published_prefix = false;
+        let mut has_new_resource = false;
         let mut overlaps_publishable_tail = false;
         let mut first_published_overlap = None;
 
@@ -699,7 +700,9 @@ impl TimelineDraft {
             }
             match disposition {
                 CandidateSegmentDisposition::CurrentMapping(proxy_seq) if !explicit_handoff => {
-                    if trimmed_published_prefix {
+                    // A prior epoch's prefix may lead into current overlap. New
+                    // media before that overlap would contradict proxy order.
+                    if trimmed_published_prefix && has_new_resource {
                         return Err(TimelineMapError::PublishedResourceReplay {
                             previous_proxy_tail: self.proxy_next_seq.and_then(|next| next.checked_sub(1)),
                             existing_proxy_seq: proxy_seq,
@@ -731,7 +734,10 @@ impl TimelineDraft {
                         resource_identity.semantic_key(),
                     ));
                 }
-                CandidateSegmentDisposition::New => segments.push(parsed),
+                CandidateSegmentDisposition::New => {
+                    has_new_resource = true;
+                    segments.push(parsed);
+                }
             }
         }
 
@@ -1104,6 +1110,140 @@ mod tests {
         normal_manifest(&format!(
             "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:{first_sequence}\n{segments}"
         ))
+    }
+
+    fn rebase_overlap_manifest(
+        first_sequence: u64,
+        resources: &[&str],
+    ) -> tuliprox_parser::hls::origin_manifest::ParsedOriginManifest {
+        use std::fmt::Write as _;
+        let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:7\n#EXT-X-MEDIA-SEQUENCE:{first_sequence}\n");
+        for resource in resources {
+            writeln!(body, "#EXTINF:7,\n{resource}").unwrap();
+        }
+        normal_manifest(&body)
+    }
+
+    fn rebase_overlap_session() -> HlsSession {
+        let mut state = session();
+        let baseline = rebase_overlap_manifest(182_137, &["182137.ts", "182138.ts", "182139.ts", "182140.ts"]);
+        state.apply_origin_manifest(&baseline).expect("baseline maps");
+        publish_ready_manifest(&mut state, 1);
+        let rebase = rebase_overlap_manifest(182_139, &["182139.ts", "182140.ts", "182141.ts", "182142.ts"]);
+        state
+            .apply_origin_rebase_manifest(&rebase, effective_origin_host_id("origin.example.com"), false)
+            .expect("rebase trims the two retained resources");
+        assert_eq!(state.live_origin_sequences(), &[4, 5]);
+        state
+    }
+
+    #[test]
+    fn rebase_overlap_retains_current_mappings_after_the_trimmed_prefix() {
+        for old_media_collected in [false, true] {
+            let mut state = rebase_overlap_session();
+            if old_media_collected {
+                state.segments.retain(|seq, _| *seq >= 4);
+                state.origin_to_proxy.retain(|_, seq| *seq >= 4);
+            }
+            let epoch = state.origin_epoch;
+            let keys = [state.segments[&4].cache_key.clone(), state.segments[&5].cache_key.clone()];
+            let repeated = rebase_overlap_manifest(182_139, &["182139.ts", "182140.ts", "182141.ts", "182142.ts"]);
+            state.apply_origin_manifest(&repeated).expect("polling the rebased window keeps its current overlap");
+            assert_eq!(state.live_origin_sequences(), &[4, 5]);
+            assert_eq!(state.proxy_next_seq, Some(6));
+            let next = rebase_overlap_manifest(182_140, &["182140.ts", "182141.ts", "182142.ts", "182143.ts"]);
+
+            state.apply_origin_manifest(&next).expect("old prefix followed by current overlap is valid");
+
+            assert_eq!(state.live_origin_sequences(), &[4, 5, 6]);
+            assert_eq!(state.origin_epoch, epoch, "sliding overlap must not start another epoch");
+            assert_eq!(state.origin_seq_highwater, Some(182_143));
+            assert_eq!(state.proxy_next_seq, Some(7), "only the new resource gets a proxy sequence");
+            assert_eq!([state.segments[&4].cache_key.clone(), state.segments[&5].cache_key.clone()], keys);
+            assert_eq!(state.segments[&6].origin_key.host_local_sequence, 182_143);
+
+            state.apply_origin_manifest(&next).expect("repeated polling keeps the same mappings");
+            assert_eq!(state.live_origin_sequences(), &[4, 5, 6]);
+            assert_eq!(state.proxy_next_seq, Some(7));
+        }
+    }
+
+    #[test]
+    fn rebase_overlap_still_rejects_replay_conflicts_and_contradictory_order_atomically() {
+        use super::HlsResourceReplayDecision;
+
+        for (first, resources, expected) in [
+            (
+                182_139,
+                ["182139.ts", "new-140.ts", "182141.ts", "182142.ts"],
+                TimelineMapError::PublishedResourceReplay {
+                    previous_proxy_tail: Some(5),
+                    existing_proxy_seq: 4,
+                    candidate_position: 2,
+                    candidate_origin_seq: 182_141,
+                    resource_key: super::HlsMediaResourceIdentity::from_url(
+                        "http://origin.example.com/live/final/182141.ts",
+                        None,
+                    )
+                    .semantic_key(),
+                    decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+                },
+            ),
+            (
+                182_140,
+                ["182140.ts", "182141.ts", "182139.ts", "182143.ts"],
+                TimelineMapError::PublishedResourceReplay {
+                    previous_proxy_tail: Some(5),
+                    existing_proxy_seq: 2,
+                    candidate_position: 2,
+                    candidate_origin_seq: 182_142,
+                    resource_key: super::HlsMediaResourceIdentity::from_url(
+                        "http://origin.example.com/live/final/182139.ts",
+                        None,
+                    )
+                    .semantic_key(),
+                    decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+                },
+            ),
+            (
+                182_140,
+                ["182140.ts", "changed-141.ts", "182142.ts", "182143.ts"],
+                TimelineMapError::OriginSequenceResourceConflict {
+                    existing_proxy_seq: 4,
+                    candidate_origin_seq: 182_141,
+                },
+            ),
+            (
+                182_143,
+                ["182137.ts", "182138.ts", "182139.ts", "182140.ts"],
+                TimelineMapError::PublishedResourceReplay {
+                    previous_proxy_tail: Some(5),
+                    existing_proxy_seq: 0,
+                    candidate_position: 0,
+                    candidate_origin_seq: 182_143,
+                    resource_key: super::HlsMediaResourceIdentity::from_url(
+                        "http://origin.example.com/live/final/182137.ts",
+                        None,
+                    )
+                    .semantic_key(),
+                    decision: HlsResourceReplayDecision::RejectReplayOnly,
+                },
+            ),
+        ] {
+            let mut state = rebase_overlap_session();
+            let before = super::TimelineDraft::from(&state);
+            let previous = state.last_rendered_manifest.clone();
+            let candidate = rebase_overlap_manifest(first, &resources);
+
+            assert_eq!(state.apply_origin_manifest(&candidate), Err(expected), "{resources:?}");
+            assert_eq!(state.origin_epoch, before.origin_epoch);
+            assert_eq!(state.origin_seq_highwater, before.origin_seq_highwater);
+            assert_eq!(state.proxy_next_seq, before.proxy_next_seq);
+            assert_eq!(state.origin_to_proxy, before.origin_to_proxy);
+            assert_eq!(state.live_origin_sequences(), before.origin_window_proxy_seqs);
+            assert_eq!(state.segments.len(), before.segments.len());
+            assert_eq!(state.last_rendered_manifest, previous);
+        }
     }
 
     #[test]
