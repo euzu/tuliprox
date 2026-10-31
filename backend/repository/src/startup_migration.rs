@@ -1022,7 +1022,7 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
                 );
             }
             if stats.user_db_migrated {
-                info!("User DB schema migrated to V6");
+                info!("User DB schema migrated to V7");
             }
         }
         Err(err) => {

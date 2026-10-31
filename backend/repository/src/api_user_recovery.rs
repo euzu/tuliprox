@@ -785,6 +785,38 @@ mod matrix {
         crate::user_repository::StoredProxyUserCredentials::from(&super::ApiUserRecovery::from(&v7()))
     }
 
+    #[test]
+    fn api_user_recovery_matrix_runtime_writes_preserve_optional_field_positions() -> io::Result<()> {
+        for network_access in [None, Some(fixture_network_access())] {
+            for plan in [None, Some(FIXTURE_PLAN.to_string())] {
+                for filter in [None, Some(FIXTURE_FILTER.to_string())] {
+                    let mut stored = current_credentials();
+                    stored.network_access = network_access.clone();
+                    stored.plan = plan.clone();
+                    stored.filter = filter;
+
+                    let encoded = rmp_serde::to_vec(&stored).map_err(io::Error::other)?;
+                    let decoded: StoredApiUserV7 = rmp_serde::from_slice(&encoded).map_err(io::Error::other)?;
+                    assert_eq!(super::ApiUserRecovery::from(&decoded), super::ApiUserRecovery::from(&stored));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn api_user_recovery_matrix_runtime_reader_accepts_omitted_trailing_fields() -> io::Result<()> {
+        let legacy = v5();
+        let encoded = rmp_serde::to_vec(&legacy).map_err(io::Error::other)?;
+        let decoded: crate::user_repository::StoredProxyUserCredentials =
+            rmp_serde::from_slice(&encoded).map_err(io::Error::other)?;
+        assert_eq!(
+            super::ApiUserRecovery::from(&decoded),
+            super::ApiUserRecovery::from(&StoredApiUserV7::from_v5(&legacy))
+        );
+        Ok(())
+    }
+
     /// Writes the database the way the code at `container_version` would have.
     ///
     /// Container 1 is produced by writing a v2 file and patching the version
@@ -1072,6 +1104,42 @@ mod matrix {
             "adoption happens once; later opens must find a tracked database"
         );
         assert_eq!(repository.load()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn api_user_recovery_matrix_runtime_save_does_not_repeat_migration_on_restart() -> io::Result<()> {
+        for container_version in SUPPORTED_CONTAINER_VERSIONS {
+            let case = case(container_version, 5)?;
+            assert!(startup_migration::migrate_user_db_schema(&case.db_path, &case.guard_path)?);
+            let root = case.db_path.parent().expect("fixture database must have a parent directory");
+            {
+                let (mut repository, report) = super::ApiUserRepository::open(&case.db_path, root)?;
+                assert_eq!(report.action, tuliprox_btree::RecoveryOpenAction::Adopted);
+                let users = repository.load()?;
+                repository.commit(users)?;
+            }
+            let before_restart = std::fs::read(&case.db_path)?;
+            let expected = super::ApiUserRecovery::from(&StoredApiUserV7::from_v5(&v5()));
+
+            for _ in 0..2 {
+                assert!(
+                    !startup_migration::migrate_user_db_schema(&case.db_path, &case.guard_path)?,
+                    "container v{container_version}: a runtime save must not trigger another schema migration"
+                );
+                assert_eq!(
+                    std::fs::read(&case.db_path)?,
+                    before_restart,
+                    "startup must not rewrite a current database"
+                );
+                let (mut repository, report) = super::ApiUserRepository::open(&case.db_path, root)?;
+                assert_eq!(report.action, tuliprox_btree::RecoveryOpenAction::Opened);
+                let users = repository.load()?;
+                assert_eq!(users.len(), 1);
+                assert_eq!(users[0].0, FIXTURE_KEY);
+                assert_eq!(super::ApiUserRecovery::from(&users[0].1), expected);
+            }
+        }
         Ok(())
     }
 
