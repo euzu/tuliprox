@@ -14,8 +14,13 @@ The frame loads the host-provided client from tuliprox. The client defines
 `window.tuliprox`:
 
 ```html
-<script src="/plugins/_sdk/bridge.js"></script>
+<script src="_sdk/bridge.js"></script>
 ```
+
+The path is relative to a page at the root of `ui/`, so it works under any
+`web_ui_path`. A page in a subdirectory climbs to the root first (for example
+`../_sdk/bridge.js`). The name `ui/_sdk/` is reserved: the host serves the
+bridge there, and a package that contains it is refused.
 
 The client posts `ready` on load. The parent answers with `init`, and
 `window.tuliprox.ready` resolves then.
@@ -38,7 +43,7 @@ separate file under the plugin's `ui/` directory and load it with a relative
   </head>
   <body>
     <h1 id="title"></h1>
-    <script src="/plugins/_sdk/bridge.js"></script>
+    <script src="_sdk/bridge.js"></script>
     <script src="sports-guide.js"></script>
   </body>
 </html>

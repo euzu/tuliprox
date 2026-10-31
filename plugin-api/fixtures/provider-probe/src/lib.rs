@@ -7,6 +7,10 @@
 //!   `provider-probe`), one `name|group|url` line per channel, and a trailer
 //!   `# end <count>`. Nothing time-dependent, so the same items always give the
 //!   same bytes.
+//!
+//! Attack switches for the isolation tests: setting `mode: loop` makes
+//! `fetch-playlist` spin forever; the output option `render_bytes` makes
+//! `render-batch` return that many bytes.
 
 wit_bindgen::generate!({
     path: ["../../wit", "wit"],
@@ -26,8 +30,10 @@ use tuliprox::plugin::{
 const DEFAULT_COUNT: usize = 5;
 
 static COUNT: Mutex<Option<usize>> = Mutex::new(None);
+static SPIN: Mutex<bool> = Mutex::new(false);
 // Per instance, and an output file has an instance of its own.
 static RENDERED: Mutex<usize> = Mutex::new(0);
+static RENDER_BYTES: Mutex<usize> = Mutex::new(0);
 
 struct ProviderProbe;
 
@@ -41,6 +47,9 @@ impl lifecycle::Guest for ProviderProbe {
         let configured = parsed.get("count").and_then(Value::as_u64).and_then(|count| usize::try_from(count).ok());
         if let Ok(mut guard) = COUNT.lock() {
             *guard = configured;
+        }
+        if let Ok(mut guard) = SPIN.lock() {
+            *guard = parsed.get("mode").and_then(Value::as_str) == Some("loop");
         }
         host::log(LogLevel::Debug, "provider-probe initialised");
         Ok(())
@@ -67,6 +76,12 @@ fn channel(index: usize, input_name: &str) -> Channel {
 
 impl input_provider::Guest for ProviderProbe {
     fn fetch_playlist(req: input_provider::InputRequest) -> Result<Vec<Channel>, String> {
+        if SPIN.lock().is_ok_and(|spin| *spin) {
+            let mut ticks: u64 = 0;
+            loop {
+                ticks = core::hint::black_box(ticks.wrapping_add(1));
+            }
+        }
         Ok((0..count()).map(|index| channel(index, &req.input_name)).collect())
     }
 
@@ -80,6 +95,15 @@ impl output_generator::Guest for ProviderProbe {
         if let Ok(mut rendered) = RENDERED.lock() {
             *rendered = 0;
         }
+        let render_bytes = req
+            .options
+            .iter()
+            .find(|(key, _)| key == "render_bytes")
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .unwrap_or_default();
+        if let Ok(mut bytes) = RENDER_BYTES.lock() {
+            *bytes = render_bytes;
+        }
         let title = req
             .options
             .iter()
@@ -89,6 +113,10 @@ impl output_generator::Guest for ProviderProbe {
     }
 
     fn render_batch(channels: Vec<Channel>) -> Result<Vec<u8>, String> {
+        let flood = RENDER_BYTES.lock().map(|bytes| *bytes).unwrap_or_default();
+        if flood > 0 {
+            return Ok(vec![b'x'; flood]);
+        }
         if let Ok(mut rendered) = RENDERED.lock() {
             *rendered += channels.len();
         }

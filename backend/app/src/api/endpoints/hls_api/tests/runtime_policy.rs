@@ -21,6 +21,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn assert_runtime_policy_ter
 
 #[tokio::test]
 async fn resource_access_denial_commits_and_preserves_user_exhausted_tail() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
     let fixture = runtime_policy_endpoint_fixture(true).await;
     let session = fixture
         .app_state

@@ -66,6 +66,7 @@ fn target(address: SocketAddr) -> HlsOriginResourceFetchTarget {
 fn clients() -> HlsOriginResourceClients {
     HlsOriginResourceClients {
         session: None,
+        retry_work: None,
         client: reqwest::Client::builder().no_proxy().build().expect("client"),
         no_redirect_client: reqwest::Client::builder().no_proxy().build().expect("client"),
         use_manual_redirects: false,

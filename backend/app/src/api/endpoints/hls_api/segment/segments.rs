@@ -330,13 +330,15 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_segment_fetch_context(
 ) -> SegmentFetchContext {
     let preacquired_provider_handle = preacquired_provider_handle
         .map(|handle| tuliprox_session::ManagedProviderHandle::new(Arc::clone(&app_state.active_provider), handle));
-    let (headers, origin_provider_session_headers, origin_policy, reservation_ttl_secs) = {
+    let (headers, origin_provider_session_headers, origin_policy, reservation_ttl_secs, playback_kind, account_runtime) = {
         let session = session.read().await;
         (
             session.origin_request_headers.clone(),
             session.origin_provider_session_headers.clone(),
             session.effective_origin_acquire_policy_or_default(),
             session.account_overlap_timing().reservation_ttl_secs(),
+            session.origin_playback_kind(),
+            session.origin_account_runtime.clone(),
         )
     };
     let mut origin_io = HlsOriginIoContext {
@@ -349,8 +351,8 @@ pub(in crate::api::endpoints::hls_api) async fn build_hls_segment_fetch_context(
         preacquired_provider_handle: None,
         started_generation: None,
         prepared_account: None,
-        playback_kind: session.read().await.origin_playback_kind(),
-        account_runtime: session.read().await.origin_account_runtime.clone(),
+        playback_kind,
+        account_runtime,
     };
     if let Some(provider_handle) = preacquired_provider_handle {
         origin_io = origin_io.with_managed_provider_handle(provider_handle);

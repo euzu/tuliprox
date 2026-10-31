@@ -45,3 +45,21 @@ mappings:
     #         match {
     #           epg => @Name = epg.1
     #         }
+
+    # A mapper rule may be written in Rhai instead of the mapper DSL: set `type: rhai`.
+    # `filter` is shared by both kinds; existing rules without `type` keep running as the DSL.
+    # - id: rhai-sample
+    #   mapper:
+    #     - name: tag sports channels
+    #       filter: 'Group ~ ".*Sports.*"'
+    #       type: rhai
+    #       script: |
+    #         if item.name.contains("Live") {
+    #             item.group = "Live Sports HD";
+    #         }
+    #
+    #         let year = ctx.regex(item.title, "(?P<year>\\d{4})");
+    #         if !year.is_empty() {
+    #             item.group = "Movies " + year["year"];
+    #             ctx.favourite(item, "By year");
+    #         }

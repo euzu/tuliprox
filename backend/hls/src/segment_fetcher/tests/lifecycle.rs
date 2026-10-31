@@ -18,6 +18,105 @@ struct InvalidatingPrepare {
     handoff: bool,
 }
 
+#[tokio::test]
+async fn terminal_segment_commit_releases_its_reservation_but_preserves_protected_work() {
+    use crate::{
+        manifest_fetch::HlsManifestAttemptContext, origin::finish_failed_hls_start,
+        origin_attempt::tests::bound_origin_io, HlsManifestCommitRequirement, HlsOriginResourceFetchError,
+    };
+    use std::sync::{atomic::Ordering, Arc};
+    use tuliprox_core::model::PlaybackKind;
+    use tuliprox_session::{ConnectionKind, PlaybackLeaseRef};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Protection {
+        None,
+        ActivePlayback,
+        OriginWork,
+        Successor,
+    }
+
+    for protection in [Protection::None, Protection::ActivePlayback, Protection::OriginWork, Protection::Successor] {
+        let server = spawn_segment_server(0).await;
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy { permanent_failure_segment_threshold: 1, ..Default::default() };
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        let (mut io, _) = bound_origin_io(&context.session).await;
+        let binding = context.session.read().await.origin_account_binding.clone().unwrap();
+        let provider = io
+            .ctx
+            .active_provider
+            .acquire_exact_connection_with_lease_for_session(
+                &binding.account_name,
+                &io.client_addr,
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(PlaybackLeaseRef::new(&binding.session_owner, PlaybackKind::LiveHls)),
+            )
+            .unwrap();
+        let tag = io
+            .ctx
+            .active_provider
+            .reserve_hls_start(&binding.session_owner, &provider, Duration::from_secs(60))
+            .unwrap();
+        context.session.write().await.origin_account_binding.as_mut().unwrap().provider_binding_tag = Some(tag);
+        io.ctx.connection_manager.release_provider_handle(Some(provider));
+        assert_eq!(io.ctx.active_provider.get_provider_connections_count(), 0);
+        assert!(io.ctx.active_provider.should_reuse_playback_provider(&binding.session_owner, &binding.account_name));
+        let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.unwrap();
+        io.prepared_account = Some(HlsOriginAccountSnapshot::from_session(&*context.session.read().await));
+        let attempt = Arc::new(HlsManifestAttemptContext::new(
+            HlsManifestCommitRequirement::CommittedManifestAllowed,
+            false,
+            None,
+        ));
+        let completion = {
+            let mut state = context.session.write().await;
+            state.origin_refresh.attempt = Some(Arc::clone(&attempt));
+            for (seq, entry) in &mut state.segments {
+                if *seq != snapshot.proxy_seq {
+                    entry.status = SegmentCacheStatus::FailedPermanent { failed_at_ms: 10, status: None };
+                }
+            }
+            worker.apply_segment_fetch_result(
+                &mut state,
+                &snapshot,
+                &policy,
+                Err(HlsOriginResourceFetchError::RetryableStatus(axum::http::StatusCode::SERVICE_UNAVAILABLE)),
+                20,
+            )
+        };
+        let generation = completion.recovery_generation.unwrap();
+        assert_eq!(generation, snapshot.origin_work_generation + 1, "the failure invalidates queued work");
+        finish_failed_hls_start(Some(&io), &context.session, Some(snapshot.origin_work_generation)).await;
+        assert!(!attempt.failed(), "the old fetch generation cannot finalize the current start");
+        {
+            let mut state = context.session.write().await;
+            match protection {
+                Protection::None => {}
+                Protection::ActivePlayback => state.activity.active_access_lease_count = 1,
+                Protection::OriginWork => {
+                    state.activity.active_origin_work_count.store(1, Ordering::Release);
+                }
+                Protection::Successor => state.invalidate_queued_origin_work(),
+            }
+        }
+        finish_failed_hls_start(Some(&io), &context.session, Some(generation)).await;
+        let released = matches!(protection, Protection::None);
+        assert_eq!(
+            context.session.read().await.origin_account_binding.as_ref().unwrap().is_detached(),
+            released,
+            "{protection:?}"
+        );
+        assert_eq!(
+            io.ctx.active_provider.should_reuse_playback_provider(&binding.session_owner, &binding.account_name),
+            !released,
+            "{protection:?}"
+        );
+    }
+}
+
 impl HlsOriginAccountRuntime for InvalidatingPrepare {
     fn prepare<'a>(
         &'a self,
@@ -229,7 +328,7 @@ async fn account_handoff_during_segment_prepare_blocks_old_origin_request() {
     let snapshot = worker.next_fetch_snapshot(&context, 10, &policy).await.expect("segment snapshot");
     let replacement_lease = Arc::new(HlsOriginAccountIoLease::active_for_test(&replacement, 1));
     let read_blocker = context.session.read().await;
-    let mut fetch = Box::pin(super::super::fetch_segment_with_retries_into_cache(&context, &snapshot, &policy));
+    let mut fetch = Box::pin(super::super::fetch_segment_with_retries_into_cache(&context, &snapshot, &policy, None));
     assert!(futures::poll!(fetch.as_mut()).is_pending());
     let mut handoff = Box::pin(context.session.write());
     assert!(futures::poll!(handoff.as_mut()).is_pending());

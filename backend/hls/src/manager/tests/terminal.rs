@@ -1214,6 +1214,7 @@ async fn hls_terminal_commit_protection_capacity_has_typed_unavailable_outcome()
         ))
         .await
         .expect("terminal preparation");
+    let commits = session.read().await.subscribe_terminal_commits();
 
     assert_eq!(
         commit_terminal_plan(
@@ -1239,6 +1240,7 @@ async fn hls_terminal_commit_protection_capacity_has_typed_unavailable_outcome()
             ..
         }
     ));
+    assert!(commits.has_changed().unwrap(), "TerminalUnavailable is a completed state change too");
     let session = session.read().await;
     assert_eq!(session.terminal_tail_protection_count(), HLS_TERMINAL_TAIL_PROTECTION_CAPACITY);
     assert!(session.terminal_tail_protection(&lease_id).is_none());
@@ -1276,6 +1278,8 @@ async fn unavailable_after_expired_splice_deadline_still_rejects_recovered_origi
 #[tokio::test]
 async fn final_terminal_authorization_rejects_every_positive_reserve_and_unknown_zero() {
     let (manager, session, proxy, lease, preparation, plan) = prepared_terminal_commit_fixture("final-zero-gate").await;
+    let mut commits = session.read().await.subscribe_terminal_commits();
+    assert!(!commits.has_changed().unwrap(), "preparation is not a terminal commit");
     let margin = preparation.reserve.transition_margin.as_millis();
     let acquisition = crate::recovery_timing::HlsTerminalCommitAcquisitionBudgetMs::from_retry_policy().as_millis();
     for (reserve_ms, known) in [(margin + acquisition, true), (margin, true), (1, true), (0, false)] {
@@ -1290,9 +1294,15 @@ async fn final_terminal_authorization_rejects_every_positive_reserve_and_unknown
             manager.access_lease_response_snapshot(&lease, &proxy, 2_000).await.unwrap().playback_mode,
             HlsLeasePlaybackMode::Live
         );
+        assert!(!commits.has_changed().unwrap(), "rejected commits must not wake requests");
     }
     assert_eq!(
         commit_terminal_plan(&manager, &session, &lease, &proxy, &preparation, 2_000, plan),
         HlsTerminalCommitOutcome::Committed
     );
+    assert!(commits.has_changed().unwrap());
+    commits.borrow_and_update();
+    assert!(!commits.has_changed().unwrap());
+    drop(commits);
+    assert_eq!(session.read().await.terminal_commit_observer_count_for_test(), 0);
 }

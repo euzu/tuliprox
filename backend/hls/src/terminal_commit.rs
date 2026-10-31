@@ -38,7 +38,7 @@ pub(super) struct HlsTerminalCommitClock {
     /// timers and leaves the wall clock behind, so a loop that sleeps until a
     /// wall-clock deadline never reaches it and spins until its budget is gone.
     /// Anchoring both to tokio's clock makes such a test deterministic.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     virtual_origin: std::sync::Mutex<Option<(u64, tokio::time::Instant)>>,
 }
 
@@ -46,7 +46,7 @@ impl Default for HlsTerminalCommitClock {
     fn default() -> Self {
         Self {
             fixed_now_ms: AtomicU64::new(HLS_TERMINAL_COMMIT_LIVE_CLOCK),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             virtual_origin: std::sync::Mutex::new(None),
         }
     }
@@ -54,7 +54,7 @@ impl Default for HlsTerminalCommitClock {
 
 impl HlsTerminalCommitClock {
     pub(super) fn now_ms(&self) -> u64 {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((base_ms, origin)) = *self.virtual_origin.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
         {
             let elapsed = tokio::time::Instant::now().saturating_duration_since(origin).as_millis();
@@ -69,7 +69,7 @@ impl HlsTerminalCommitClock {
     }
 
     /// Anchor this clock to tokio's, so `tokio::time::advance` moves it too.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn follow_tokio_clock(&self, base_ms: u64) {
         *self.virtual_origin.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((base_ms, tokio::time::Instant::now()));

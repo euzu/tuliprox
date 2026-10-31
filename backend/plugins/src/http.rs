@@ -504,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn a_scheme_other_than_http_is_an_invalid_uri() {
         let client = reqwest::Client::new();
-        let request = client.get("file:///etc/passwd").build().unwrap();
+        let request = reqwest::Request::new(reqwest::Method::GET, "file:///etc/passwd".parse().unwrap());
         assert!(matches!(
             perform(&client, request, Timeouts::default(), 1024).await,
             Err(Error::HttpRequestUriInvalid)

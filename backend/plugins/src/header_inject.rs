@@ -38,6 +38,12 @@ const HEADER_CLAMP: Duration = Duration::from_millis(50);
 /// entry that expires first, so churn never grows it.
 const MAX_CACHED_ENTRIES: usize = 4096;
 
+/// What one plugin's answer may carry: headers kept (the excess is dropped), and
+/// the length of one name and one value.
+const MAX_INJECTED_HEADERS: usize = 32;
+const MAX_HEADER_NAME_BYTES: usize = 256;
+const MAX_HEADER_VALUE_BYTES: usize = 4096;
+
 /// Names the host never lets a plugin set (case-insensitive), besides `Proxy-*`:
 /// they change message framing or the connection, not the request's identity.
 const DENIED_HEADERS: [&str; 8] =
@@ -53,6 +59,10 @@ fn is_denied(name: &str) -> bool {
 fn rejection(name: &str, value: &str) -> Option<&'static str> {
     if is_denied(name) {
         Some("on the denylist")
+    } else if name.len() > MAX_HEADER_NAME_BYTES {
+        Some("header name exceeds limit")
+    } else if value.len() > MAX_HEADER_VALUE_BYTES {
+        Some("header value exceeds limit")
     } else if HeaderName::from_bytes(name.as_bytes()).is_err() {
         Some("not a valid header name")
     } else if HeaderValue::from_str(value).is_err() {
@@ -65,16 +75,28 @@ fn rejection(name: &str, value: &str) -> Option<&'static str> {
 /// The headers of one plugin's answer that may be sent. A dropped header is
 /// logged by name only: values can be credentials.
 fn screen(plugin: &str, headers: Vec<(String, String)>) -> Vec<(String, String)> {
-    headers
-        .into_iter()
-        .filter(|(name, value)| match rejection(name, value) {
+    let mut screened = Vec::with_capacity(headers.len().min(MAX_INJECTED_HEADERS));
+    let mut dropped_excess = 0;
+    for (name, value) in headers {
+        match rejection(&name, &value) {
             Some(reason) => {
                 log::debug!("[plugin:{plugin}] dropped injected header `{name}`: {reason}");
-                false
             }
-            None => true,
-        })
-        .collect()
+            None => {
+                if screened.len() < MAX_INJECTED_HEADERS {
+                    screened.push((name, value));
+                } else {
+                    dropped_excess += 1;
+                }
+            }
+        }
+    }
+    if dropped_excess > 0 {
+        log::warn!(
+            "[plugin:{plugin}] dropped {dropped_excess} excess injected headers beyond cap of {MAX_INJECTED_HEADERS}"
+        );
+    }
+    screened
 }
 
 /// Set `extra` on `headers`: a name already present (case-insensitive) is
@@ -317,6 +339,20 @@ mod tests {
             screened,
             vec![("X-Edge-Probe".to_string(), "1".to_string()), ("Authorization".to_string(), "Bearer t".to_string())]
         );
+    }
+
+    #[test]
+    fn screen_caps_header_count_name_length_and_value_length() {
+        let long_name = format!("X-{}", "a".repeat(255)); // 257 bytes > 256
+        let long_val = "v".repeat(4097); // 4097 bytes > 4 KiB
+        let mut headers = vec![(long_name, "ok".to_string()), ("X-Long-Val".to_string(), long_val)];
+        for i in 0..40 {
+            headers.push((format!("X-Hdr-{i}"), format!("val-{i}")));
+        }
+        let screened = screen("p", headers);
+        assert_eq!(screened.len(), 32);
+        assert_eq!(screened[0], ("X-Hdr-0".to_string(), "val-0".to_string()));
+        assert_eq!(screened[31], ("X-Hdr-31".to_string(), "val-31".to_string()));
     }
 
     #[test]

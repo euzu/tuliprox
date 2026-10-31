@@ -1876,17 +1876,39 @@ async fn xtream_player_api(
     let result = match action {
         crate::model::XC_ACTION_GET_LIVE_STREAMS => skip_flag_optional!(
             skip_live,
-            xtream_load_rewrite_playlist(XtreamCluster::Live, &app_state.app_config, &target, category_id, &user).await
+            xtream_load_rewrite_playlist(
+                XtreamCluster::Live,
+                &app_state.app_config,
+                &app_state.playlists,
+                &target,
+                category_id,
+                &user
+            )
+            .await
         ),
         crate::model::XC_ACTION_GET_VOD_STREAMS => skip_flag_optional!(
             skip_vod,
-            xtream_load_rewrite_playlist(XtreamCluster::Video, &app_state.app_config, &target, category_id, &user)
-                .await
+            xtream_load_rewrite_playlist(
+                XtreamCluster::Video,
+                &app_state.app_config,
+                &app_state.playlists,
+                &target,
+                category_id,
+                &user
+            )
+            .await
         ),
         crate::model::XC_ACTION_GET_SERIES => skip_flag_optional!(
             skip_series,
-            xtream_load_rewrite_playlist(XtreamCluster::Series, &app_state.app_config, &target, category_id, &user)
-                .await
+            xtream_load_rewrite_playlist(
+                XtreamCluster::Series,
+                &app_state.app_config,
+                &app_state.playlists,
+                &target,
+                category_id,
+                &user
+            )
+            .await
         ),
         _ => Some(Err(TuliproxError::ApiXtream(format!("Unknown api call: {action} for target: {}", target.name)))),
     };

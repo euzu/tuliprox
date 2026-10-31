@@ -46,6 +46,14 @@ where
         media_duration_ms: None,
     };
     let clients = HlsOriginResourceClients {
+        retry_work: crate::HlsOriginRetryWork::for_resource(
+            &context.session,
+            context.origin_io.as_ref().map(|io| &io.ctx.active_provider),
+            policy,
+            resource_kind,
+            HlsResourceFetchSource::Normal,
+        )
+        .await,
         session: Some(context.session.clone()),
         client: context.client.clone(),
         no_redirect_client: context.no_redirect_client.clone(),

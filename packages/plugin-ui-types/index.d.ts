@@ -1,7 +1,7 @@
 /**
  * Type definitions for the tuliprox sandboxed-frame bridge (host ABI 1).
  *
- * A plugin UI frame loads `/plugins/_sdk/bridge.js`, which defines
+ * A plugin UI frame loads `_sdk/bridge.js` (relative to `ui/`), which defines
  * `window.tuliprox`. This module describes that object, the messages exchanged
  * with the parent window, the slot contexts, and the plugin DTOs a frame can
  * see. Wire shapes mirror `shared/src/model/plugins_dto.rs`.
@@ -243,7 +243,7 @@ export type ParentToFrameMessage =
 export type TuliproxEvent = "init" | "locale" | "theme" | "context";
 
 /**
- * The frame-side client that `/plugins/_sdk/bridge.js` defines as
+ * The frame-side client that `_sdk/bridge.js` defines as
  * `window.tuliprox`. It is built on `parent.postMessage`, and the frame never
  * holds a token.
  */
@@ -280,7 +280,7 @@ export interface Tuliprox {
 
 declare global {
   interface Window {
-    /** Defined by `/plugins/_sdk/bridge.js` inside a plugin UI frame. */
+    /** Defined by `_sdk/bridge.js` inside a plugin UI frame. */
     tuliprox: Tuliprox;
   }
 }

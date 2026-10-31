@@ -21,6 +21,7 @@ impl TVGuide {
         id_cache: &mut EpgIdCache,
         epg_source: &PersistedEpgSource,
         source_order: usize,
+        source_idx: usize,
         accumulator: &mut EpgMergeAccumulator,
         source: IcsPersistedSource<'_>,
     ) -> bool {
@@ -80,9 +81,10 @@ impl TVGuide {
                 }
                 id_cache.hooks.report.merge(report);
                 id_cache.insert_processed_epg_id(channel_id);
-                accumulator.add_channel_with_programmes(
+                accumulator.add_channel_with_programmes_and_source_idx(
                     epg_source.priority,
                     source_order,
+                    source_idx,
                     epg_source.logo_override,
                     channel,
                 );

@@ -4,6 +4,8 @@
 //! it has not been built these tests print a note and pass, so a plain
 //! `cargo test` works on a machine without the `wasm32-wasip2` target.
 
+mod common;
+
 use serde_json::Map;
 use shared::{
     model::{HookCtx, PlaylistItem, PlaylistItemHeader, PluginHook, PluginHost, PluginRunReport},
@@ -29,8 +31,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 fn load_fixture() -> Option<PluginSystem> {
     let directory = fixture_dir();
     if !directory.join("rename-group/plugin.wasm").is_file() {
-        eprintln!("skipped: fixture not built; run bin/build_plugin_fixture.sh");
-        return None;
+        return common::skip_missing_fixture("skipped: fixture not built; run bin/build_plugin_fixture.sh");
     }
     // Approval is by config entry: rename-group runs only when listed.
     let entry = PluginEntry { id: "rename-group".to_string(), enabled: true, priority: 0, settings: Map::new() };

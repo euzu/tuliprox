@@ -547,14 +547,14 @@ fn new_transaction_id() -> io::Result<u64> {
 }
 
 #[cfg(unix)]
-pub(super) fn sync_parent_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     File::open(parent)?.sync_all()
 }
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> { Ok(()) }
+pub(crate) fn sync_parent_directory(_path: &Path) -> io::Result<()> { Ok(()) }
 
 pub(crate) fn invalidate_sorted_index(database: &Path) -> io::Result<()> {
     let index = crate::common::get_file_path_for_db_index(database);
@@ -748,6 +748,40 @@ pub(super) fn leave_uncommitted_test_wal_after_database_write(database: &Path) -
     });
     match commit_result {
         Err(error) if !error.to_string().contains("test fault after database write") => Err(io::Error::new(
+            error.kind(),
+            format!("test commit for {} failed before the requested boundary: {error}", database.display()),
+        )),
+        Err(error) if !wal_path(database).try_exists()? => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "test commit for {} reached the requested boundary without leaving an active WAL: {error}",
+                database.display()
+            ),
+        )),
+        Err(_) => Ok(()),
+        Ok(()) => Err(io::Error::other(format!("test commit for {} unexpectedly completed", database.display()))),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn leave_committed_test_wal(database: &Path) -> io::Result<()> {
+    let mut header_page = [0u8; PAGE_SIZE];
+    File::open(database)?.read_exact(&mut header_page)?;
+    let mut updated_header = DatabaseHeader::decode(&header_page)?;
+    updated_header.generation = updated_header
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("test database generation overflow"))?;
+    let prepared = [(0, updated_header.encode()?)];
+    let commit_result = commit_prepared_pages_with_hook(database, &prepared, |boundary| {
+        if boundary == CommitBoundary::CommitSynced {
+            Err(io::Error::other("test fault after commit sync"))
+        } else {
+            Ok(())
+        }
+    });
+    match commit_result {
+        Err(error) if !error.to_string().contains("test fault after commit sync") => Err(io::Error::new(
             error.kind(),
             format!("test commit for {} failed before the requested boundary: {error}", database.display()),
         )),

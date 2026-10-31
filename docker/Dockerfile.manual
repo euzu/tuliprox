@@ -1,4 +1,4 @@
-FROM alpine:latest AS tz-prep
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS tz-prep
 
 ARG TZ=UTC
 ENV TZ=${TZ}
@@ -12,10 +12,10 @@ RUN apk add --no-cache tzdata \
   && cp /etc/ssl/certs/ca-certificates.crt /output/etc/ssl/certs/ca-certificates.crt
 
 # Fetch static FFmpeg binaries
-FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
 
 # Binary selector stage
-FROM alpine:latest AS binary-selector
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS binary-selector
 
 ARG TARGETARCH
 
@@ -58,7 +58,7 @@ COPY ./resources ./resources
 CMD ["/app/tuliprox", "-s", "-p", "/app/config"]
 
 # Alpine Final container
-FROM alpine:latest AS alpine-final
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS alpine-final
 
 ARG TZ=UTC
 ENV TZ=${TZ}

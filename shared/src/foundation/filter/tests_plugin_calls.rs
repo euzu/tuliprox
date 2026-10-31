@@ -1,7 +1,10 @@
 //! `plugin.<id>.<fn>(literal, ...)` terms: syntax, the call index, and evaluation from a
 //! batch prepared before the evaluator runs.
 
-use super::{get_filter, Filter, FilterBuilder, Leaf, NoPluginCalls, PluginCallBatch, PluginCallDecisions};
+use super::{
+    get_filter, get_target_processing_filter, Filter, FilterBuilder, Leaf, NoPluginCalls, PluginCallBatch,
+    PluginCallDecisions,
+};
 use crate::{
     foundation::value_provider::ValueProvider,
     model::{PlaylistItem, PlaylistItemHeader},
@@ -12,9 +15,11 @@ fn mock(name: &str, group: &str) -> PlaylistItem {
     PlaylistItem { header: PlaylistItemHeader { name: name.into(), group: group.intern(), ..Default::default() } }
 }
 
-fn parse(text: &str) -> Filter { get_filter(text, None).unwrap_or_else(|e| panic!("{text} should parse: {e}")) }
+fn parse(text: &str) -> Filter {
+    get_target_processing_filter(text, None).unwrap_or_else(|e| panic!("{text} should parse: {e}"))
+}
 
-fn accepts(text: &str) -> bool { get_filter(text, None).is_ok() }
+fn accepts(text: &str) -> bool { get_target_processing_filter(text, None).is_ok() }
 
 fn eval_with<D: PluginCallDecisions>(filter: &Filter, item: &PlaylistItem, decisions: &D, index: usize) -> bool {
     filter.filter_with(&ValueProvider { pli: item, match_as_ascii: false }, decisions, index)
@@ -35,6 +40,15 @@ fn args_of(filter: &Filter) -> Vec<String> {
 // ---------------------------------------------------------------------------------------------
 // Syntax
 // ---------------------------------------------------------------------------------------------
+
+#[test]
+fn get_filter_rejects_plugin_calls_outside_target_processing() {
+    let err = get_filter(r#"plugin.my-plugin.name_contains("Sport")"#, None).expect_err("should reject plugin call");
+    assert!(
+        err.to_string().contains("plugin.my-plugin.name_contains() is only allowed in a target's processing filter"),
+        "unexpected error message: {err}"
+    );
+}
 
 #[test]
 fn a_plugin_call_parses_into_a_leaf_with_literal_arguments() {

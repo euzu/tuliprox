@@ -78,11 +78,13 @@ pub(crate) async fn run_plugin_task(
     match plugins.run_task(plugin, task, trigger).await {
         TaskOutcome::Ran(run) => {
             if let Some(error) = &run.error {
-                let mut failure = ScheduledTaskFailure::for_plugin_task(plugin, task, error.clone());
-                if let Some(schedule) = schedule {
-                    failure = failure.with_schedule(schedule.to_string());
+                if matches!(trigger, TaskTrigger::Scheduled { .. }) {
+                    let mut failure = ScheduledTaskFailure::for_plugin_task(plugin, task, error.clone());
+                    if let Some(schedule) = schedule {
+                        failure = failure.with_schedule(schedule.to_string());
+                    }
+                    let _ = app_state.event_manager.send_event(EventMessage::ScheduledTaskFailed(failure));
                 }
-                let _ = app_state.event_manager.send_event(EventMessage::ScheduledTaskFailed(failure));
             }
             PluginTaskResult::Ran(run)
         }
@@ -105,4 +107,85 @@ pub(crate) async fn run_plugin_task(
     _schedule: Option<&str>,
 ) -> PluginTaskResult {
     PluginTaskResult::Unknown("this build has no plugin support".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{api::model::create_test_app_state_with_plugins, model::Config};
+    use shared::model::EventMessage;
+    use std::{path::PathBuf, sync::Arc};
+    use tuliprox_core::model::{PluginEntry, PluginsConfig};
+    use tuliprox_plugins::{PluginServices, PluginSystem};
+
+    fn fixture_dir() -> PathBuf {
+        std::env::var_os("TULIPROX_PLUGIN_FIXTURES").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugin-fixtures/plugins"),
+            Into::into,
+        )
+    }
+
+    fn test_app_state() -> Option<Arc<AppState>> {
+        let fixture = fixture_dir().join("task-probe");
+        if !fixture.join("plugin.wasm").is_file() {
+            return None;
+        }
+        let data = tempfile::tempdir().expect("data dir");
+        let config = PluginsConfig {
+            enabled: true,
+            directory: fixture_dir().to_string_lossy().to_string(),
+            plugins: vec![PluginEntry {
+                id: "task-probe".to_string(),
+                enabled: true,
+                priority: 0,
+                settings: serde_json::Map::new(),
+            }],
+            ..PluginsConfig::default()
+        };
+        let services = PluginServices::new(reqwest::Client::new(), data.path().to_path_buf());
+        let system = PluginSystem::load(&config, services).expect("load").expect("enabled");
+        Some(create_test_app_state_with_plugins(Config::default(), Some(system)))
+    }
+
+    #[tokio::test]
+    async fn manual_task_failure_does_not_emit_scheduled_task_failed() {
+        let Some(app_state) = test_app_state() else {
+            eprintln!("skipped: task-probe fixture not built");
+            return;
+        };
+        let mut events = app_state.event_manager.get_event_channel();
+
+        let result = run_plugin_task(&app_state, "task-probe", "fail", TaskTrigger::Manual, None).await;
+        assert!(matches!(result, PluginTaskResult::Ran(ref run) if run.error.is_some()));
+
+        let mut found_failure = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, EventMessage::ScheduledTaskFailed(_)) {
+                found_failure = true;
+            }
+        }
+        assert!(!found_failure, "manual task failure must not emit ScheduledTaskFailed");
+    }
+
+    #[tokio::test]
+    async fn scheduled_task_failure_emits_scheduled_task_failed() {
+        let Some(app_state) = test_app_state() else {
+            eprintln!("skipped: task-probe fixture not built");
+            return;
+        };
+        let mut events = app_state.event_manager.get_event_channel();
+
+        let result =
+            run_plugin_task(&app_state, "task-probe", "fail", TaskTrigger::Scheduled { at: 1 }, Some("0 * * * *"))
+                .await;
+        assert!(matches!(result, PluginTaskResult::Ran(ref run) if run.error.is_some()));
+
+        let mut found_failure = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, EventMessage::ScheduledTaskFailed(_)) {
+                found_failure = true;
+            }
+        }
+        assert!(found_failure, "scheduled task failure must emit ScheduledTaskFailed");
+    }
 }

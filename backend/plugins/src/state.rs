@@ -12,6 +12,7 @@ use crate::{
     kv::KvStores,
     logs::LogRegistry,
     manifest::Capabilities,
+    runtime::{POOL_CORE_INSTANCES_PER_SLOT, POOL_TABLES_PER_SLOT},
 };
 use arc_swap::ArcSwapOption;
 use shared::{error::TuliproxError, model::Millis};
@@ -179,6 +180,12 @@ pub(crate) struct PluginEnv {
     pub(crate) kv_generation: Arc<AtomicU64>,
 }
 
+/// Per-`Store` limits, for the on-demand allocator (pool fallback, armv7), which
+/// the pooling allocator's per-slot limits in `runtime.rs` do not cover. Memories
+/// match `max_memories_per_component`, instances and tables its per-slot sizes.
+const STORE_LIMIT_TABLE_ELEMENTS: usize = 10_000;
+const STORE_LIMIT_MEMORIES: usize = 1;
+
 /// Per-`Store` state: a fresh one per guest instance.
 pub(crate) struct HostState {
     pub(crate) env: Arc<PluginEnv>,
@@ -204,7 +211,14 @@ impl HostState {
             wasi: WasiCtx::builder().build(),
             http_ctx: WasiHttpCtx::new(),
             table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new().memory_size(memory_bytes).trap_on_grow_failure(true).build(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(memory_bytes)
+                .memories(STORE_LIMIT_MEMORIES)
+                .tables(usize::try_from(POOL_TABLES_PER_SLOT).unwrap_or(usize::MAX))
+                .instances(usize::try_from(POOL_CORE_INSTANCES_PER_SLOT).unwrap_or(usize::MAX))
+                .table_elements(STORE_LIMIT_TABLE_ELEMENTS)
+                .trap_on_grow_failure(true)
+                .build(),
         }
     }
 }
@@ -216,5 +230,55 @@ impl WasiView for HostState {
 impl WasiHttpView for HostState {
     fn http(&mut self) -> WasiHttpCtxView<'_> {
         WasiHttpCtxView { ctx: &mut self.http_ctx, table: &mut self.table, hooks: &mut self.http_hooks }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmtime::ResourceLimiter;
+
+    #[test]
+    fn host_state_store_limits_are_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Shared::new(PluginServices::new(reqwest::Client::new(), dir.path().to_path_buf())));
+        let env = shared.env_for(&Arc::from("p"), Capabilities::default(), Arc::from("{}"), Arc::from([])).unwrap();
+        let mut state = HostState::new(env, 1024 * 1024);
+
+        assert_eq!(state.limits.instances(), 8, "POOL_CORE_INSTANCES_PER_SLOT");
+        assert_eq!(state.limits.tables(), 4, "POOL_TABLES_PER_SLOT");
+        assert_eq!(state.limits.memories(), 1);
+        assert!(state.limits.table_growing(0, 10_000, None).unwrap());
+        assert!(state.limits.table_growing(0, 10_001, None).is_err());
+    }
+
+    /// `(module (table 1 funcref) (func (export "grow") (param i32) (result i32)
+    /// (table.grow 0 (ref.null func) (local.get 0))))`. A Rust guest cannot emit
+    /// `table.grow` (no stable intrinsic), so the flood is a core module.
+    const TABLE_GROW: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+        0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type: (i32) -> i32
+        0x03, 0x02, 0x01, 0x00, // function 0 has type 0
+        0x04, 0x04, 0x01, 0x70, 0x00, 0x01, // table 0: funcref, min 1
+        0x07, 0x08, 0x01, 0x04, b'g', b'r', b'o', b'w', 0x00, 0x00, // export "grow"
+        0x0a, 0x0b, 0x01, 0x09, 0x00, 0xd0, 0x70, 0x20, 0x00, 0xfc, 0x0f, 0x00, 0x0b, // table.grow
+    ];
+
+    #[test]
+    fn a_guest_cannot_flood_a_table_past_the_store_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Shared::new(PluginServices::new(reqwest::Client::new(), dir.path().to_path_buf())));
+        let env = shared.env_for(&Arc::from("p"), Capabilities::default(), Arc::from("{}"), Arc::from([])).unwrap();
+        let engine = wasmtime::Engine::default();
+        let mut store = wasmtime::Store::new(&engine, HostState::new(env, 1024 * 1024));
+        store.limiter(|state| &mut state.limits);
+        let module = wasmtime::Module::new(&engine, TABLE_GROW).expect("module");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instance");
+        let grow = instance.get_typed_func::<i32, i32>(&mut store, "grow").expect("grow");
+
+        // 1 + 9_000 elements is within the 10_000 limit; the next 1_000 are not, and neither is a flood.
+        assert_eq!(grow.call(&mut store, 9_000).expect("within the limit"), 1);
+        assert!(grow.call(&mut store, 1_000).is_err(), "10_001 elements are over the limit");
+        assert!(grow.call(&mut store, i32::MAX).is_err(), "a flood is refused, not allocated");
     }
 }

@@ -104,6 +104,8 @@ install_ui_demo() {
 install_ui_demo
 
 install_manifests host-probe "$out/build/$target/release/plugin_fixture_host_probe.wasm"
+install_manifests provider-probe "$out/build/$target/release/plugin_fixture_provider_probe.wasm"
+install_manifests ui-demo "$out/build/$target/release/plugin_fixture_ui_demo.wasm"
 install_manifests epg-probe "$out/build/$target/release/plugin_fixture_epg_probe.wasm"
 install_manifests pipeline-probe "$out/build/$target/release/plugin_fixture_pipeline_probe.wasm"
 install_manifests event-probe "$out/build/$target/release/plugin_fixture_event_probe.wasm"

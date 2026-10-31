@@ -1,7 +1,7 @@
 /*
  * tuliprox plugin frame bridge, ABI 1.
  *
- * Served at /plugins/_sdk/bridge.js and loaded by the plugin's own frame
+ * Served at /plugins/{id}/ui/_sdk/bridge.js and loaded by the plugin's own frame
  * documents. A classic ES2017 script with no imports. It never touches the
  * network: its only channel is postMessage to the tuliprox page that created
  * the frame, which performs every rpc call with its own credentials.

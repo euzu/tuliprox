@@ -152,6 +152,11 @@ impl PlaylistItemType {
     /// True for concrete series item types (`Series` or `LocalSeries`); excludes the `SeriesInfo` containers.
     pub fn is_series(&self) -> bool { matches!(self, PlaylistItemType::Series | PlaylistItemType::LocalSeries) }
 
+    /// True for series info container types (`SeriesInfo` or `LocalSeriesInfo`).
+    pub fn is_series_info(&self) -> bool {
+        matches!(self, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
+    }
+
     /// Controls address tracking only.
     /// Do not use this to decide whether a playback request should use session-based admission
     /// or whether a logical playback must stay on the same provider account.

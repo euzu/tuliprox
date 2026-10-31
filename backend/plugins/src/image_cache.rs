@@ -83,7 +83,7 @@ impl Accounting {
     fn reserve(&mut self, plugin: &Arc<str>, url: &str, size: u64, quota: u64) -> Result<(), String> {
         let account = self.plugins.entry(Arc::clone(plugin)).or_default();
         let previous = account.urls.get(url).copied().unwrap_or(0);
-        let used = account.used - previous + size;
+        let used = account.used.saturating_sub(previous).saturating_add(size);
         if used > quota {
             return Err(format!("image cache quota of {quota} bytes would be exceeded ({used} bytes)"));
         }
@@ -95,7 +95,7 @@ impl Accounting {
     fn release(&mut self, plugin: &str, url: &str) {
         if let Some(account) = self.plugins.get_mut(plugin) {
             if let Some(size) = account.urls.remove(url) {
-                account.used -= size;
+                account.used = account.used.saturating_sub(size);
             }
         }
     }
@@ -345,5 +345,27 @@ mod tests {
         assert_eq!(images.usage().used_bytes, 5);
         assert!(shared.write().await.get_content(other).is_none());
         assert!(images.admit(&shared, other, "image/png", Bytes::new(), 10).await.is_err());
+    }
+
+    #[test]
+    fn accounting_reserve_and_release_use_saturating_arithmetic() {
+        let mut accounting = Accounting::default();
+        let p = plugin("p");
+        accounting.reserve(&p, "http://a.png", 100, 1000).unwrap();
+        assert_eq!(accounting.used("p"), 100);
+
+        if let Some(account) = accounting.plugins.get_mut(&p) {
+            account.used = 50;
+        }
+        accounting.release("p", "http://a.png");
+        assert_eq!(accounting.used("p"), 0);
+
+        let mut accounting2 = Accounting::default();
+        accounting2.reserve(&p, "http://a.png", 100, 1000).unwrap();
+        if let Some(account) = accounting2.plugins.get_mut(&p) {
+            account.used = 20;
+        }
+        accounting2.reserve(&p, "http://a.png", 50, 1000).unwrap();
+        assert_eq!(accounting2.used("p"), 50);
     }
 }

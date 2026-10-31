@@ -106,7 +106,7 @@ fn finish_into_disk_writes_a_real_temp_tree() {
             icon: None,
             programmes: vec![shared::model::EpgProgramme::new(i64::from(i), i64::from(i + 1), id)],
         };
-        acc.upsert_channel(i16::try_from(i).unwrap_or(0), 0, false, ch);
+        acc.upsert_channel(i16::try_from(i).unwrap_or(0), 0, 0, false, ch);
     }
 
     let dir = tempfile::tempdir().unwrap();

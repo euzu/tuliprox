@@ -55,6 +55,11 @@ impl RequestFetchOptions {
         Self { attempt_idle_timeout: Some(timeout.max(Duration::from_millis(1))), ..Self::default() }
     }
 
+    pub const fn with_header_timeout_only(mut self) -> Self {
+        self.header_timeout_only = true;
+        self
+    }
+
     pub const fn with_content_coding(mut self, content_coding: OutboundContentCodingPolicy) -> Self {
         self.content_coding = content_coding;
         self

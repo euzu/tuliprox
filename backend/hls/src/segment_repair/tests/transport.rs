@@ -27,6 +27,7 @@ fn repair_prewarm_candidates_include_only_ready_clear_origin_ts_media() {
             origin_byte_range: None,
             map_ref: None,
             encryption: None,
+            retained_resource_identity: None,
             origin_fetch_ref: None,
             status: SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: 1 },
             last_rendered_at_ms: Some(1),

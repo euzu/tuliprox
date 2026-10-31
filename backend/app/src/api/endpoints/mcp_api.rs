@@ -127,10 +127,18 @@ impl McpState {
     /// The tools of this request. The plugin tools need all three switches:
     /// `mcp.plugin_tools` is read here, the export's `mcp: true` and the admin's
     /// approval by the plugin host, so each is re-checked on every list and call.
-    fn tool_view(&self) -> ToolView {
+    ///
+    /// Async because the plugin host reads `approvals.json` and the schema files
+    /// after a registry change: that runs on the blocking pool.
+    async fn tool_view(&self) -> ToolView {
         let plugin_tools_enabled =
             self.app_state.app_config.config.load().mcp.as_ref().is_some_and(|mcp| mcp.enabled && mcp.plugin_tools);
-        ToolView::new(plugin_tools_enabled, || plugin_tools(&self.app_state))
+        if !plugin_tools_enabled {
+            return ToolView::default();
+        }
+        let app_state = Arc::clone(&self.app_state);
+        let plugin = tokio::task::spawn_blocking(move || plugin_tools(&app_state)).await.unwrap_or_default();
+        ToolView::new(true, || plugin)
     }
 }
 
@@ -227,7 +235,9 @@ async fn handle_message(state: &McpState, headers: &HeaderMap, body: &[u8]) -> O
     Some(match method {
         "initialize" => rpc_result(id, initialize_result(params)),
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, json!({ "tools": tools_list(&state.tool_view(), state.effective_read_only()) })),
+        "tools/list" => {
+            rpc_result(id, json!({ "tools": tools_list(&state.tool_view().await, state.effective_read_only()) }))
+        }
         "tools/call" => match call_tool(state, headers, params).await {
             Ok(result) => rpc_result(id, result),
             Err(message) => rpc_error(id, INVALID_PARAMS, message),
@@ -262,7 +272,7 @@ fn tools_list(view: &ToolView, read_only: bool) -> Vec<Value> {
 /// `Err` is a JSON-RPC protocol error (-32602); everything the REST route
 /// answers, failures included, is an `isError` tool result instead.
 async fn call_tool(state: &McpState, headers: &HeaderMap, params: Option<&Value>) -> Result<Value, String> {
-    call_tool_in(state, &state.tool_view(), headers, params).await
+    call_tool_in(state, &state.tool_view().await, headers, params).await
 }
 
 /// [`call_tool`] over `view`, the tools resolved for this request.
@@ -1380,6 +1390,26 @@ mod tests {
     }
 
     fn result_text(reply: &Value) -> &str { reply["content"][0]["text"].as_str().expect("tool text") }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn plugin_tools_are_derived_on_the_blocking_pool() {
+        use crate::api::model::{counting_runtime, create_test_app_state_with_plugins, create_test_plugin_system};
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, threads) = counting_runtime();
+        runtime.block_on(async {
+            let dto = shared::model::McpConfigDto { enabled: true, plugin_tools: true, ..Default::default() };
+            let config = Config { mcp: Some(McpConfig::from(dto.clone())), ..Config::default() };
+            let app_state = create_test_app_state_with_plugins(config, Some(create_test_plugin_system(dir.path())));
+            let state = McpState::new(rpc_router(|| async { "{}" }), &McpConfig::from(dto), true, "", app_state);
+            let before = threads.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(listed(&state.tool_view().await, true).iter().all(|name| !name.starts_with("plugin_")));
+            assert!(
+                threads.load(std::sync::atomic::Ordering::SeqCst) > before,
+                "approvals were read on the async thread"
+            );
+        });
+    }
 
     #[test]
     fn plugin_tools_are_absent_while_the_global_switch_is_off() {

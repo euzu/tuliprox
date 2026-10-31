@@ -15,10 +15,7 @@ use log::{error, warn};
 use shared::{
     concat_string,
     error::{str_to_io_error, string_to_io_error, TuliproxError},
-    model::{
-        LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties,
-        XtreamCluster,
-    },
+    model::{LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, StreamProperties, XtreamCluster},
     utils::{m3u_flussonic_live_file_index_key, m3u_stream_url_identity, PROVIDER_SCHEME_PREFIX},
 };
 use std::{
@@ -277,9 +274,7 @@ pub async fn m3u_write_playlist(
     let m3u_playlist = new_playlist
         .iter()
         .flat_map(|pg| &pg.channels)
-        .filter(|&pli| {
-            !matches!(pli.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
-        })
+        .filter(|&pli| !pli.header.item_type.is_series_info())
         .map(M3uPlaylistItem::from)
         .collect::<Vec<M3uPlaylistItem>>();
 

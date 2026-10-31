@@ -89,6 +89,9 @@ pub(crate) async fn with_plugin_epg<E: EventSink + Clone + 'static, M: MetadataU
         priority: 0,
         logo_override: false,
         kind: PersistedEpgSourceKind::Xmltv,
+        // Not a configured `epg.sources` entry: keep its channels out of the
+        // per-source analytics of the input's own sources.
+        source_idx: usize::MAX,
     });
     Some(TVGuide::new(sources).with_file_locks(Arc::clone(&ctx.config.file_locks)))
 }
@@ -125,7 +128,7 @@ async fn fetch_to_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P:
     let channels = ctx.plugins.fetch_epg(plugin, &hook_ctx, &request).await?;
 
     let _lock = ctx.config.file_locks.write_lock(path).await;
-    if channels.iter().all(|(_, programmes)| programmes.is_empty()) {
+    if channels.is_empty() {
         return remove_if_present(path).await;
     }
     let path = path.to_path_buf();
@@ -259,6 +262,30 @@ mod tests {
         ]
     }
 
+    fn fresh_channels() -> Vec<(PluginEpgChannel, Vec<EpgProgramme>)> {
+        let mut programme = EpgProgramme::new_all(
+            4_102_444_800,
+            4_102_448_400,
+            "Chan.One".intern(),
+            Some("News".intern()),
+            Some("The day's news".intern()),
+            Some("cu-1".intern()),
+        );
+        programme.categories = vec![EpgCategory { value: "News".intern(), lang: Some("en".intern()) }];
+        programme.is_live = true;
+        vec![
+            (
+                PluginEpgChannel {
+                    id: "Chan.One".to_string(),
+                    names: vec!["Channel One".to_string()],
+                    icon: Some("http://host/one.png".to_string()),
+                },
+                vec![programme],
+            ),
+            (PluginEpgChannel { id: "Chan.Two".to_string(), names: vec![], icon: None }, vec![]),
+        ]
+    }
+
     #[test]
     fn the_document_has_every_channel_and_escapes_text() {
         let xml = String::from_utf8(xmltv_document(&channels()).unwrap()).unwrap();
@@ -282,15 +309,15 @@ mod tests {
     async fn the_xmltv_parser_reads_the_written_file_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PLUGIN_EPG_FILE);
-        write_atomically(&path, &channels()).unwrap();
+        write_atomically(&path, &fresh_channels()).unwrap();
         assert!(!tmp_path_for(&path).exists(), "the temp file is renamed away");
 
         let read = parse_xmltv_for_web_ui_from_file(&path).await.unwrap();
         let one = read.iter().find(|channel| &*channel.id == "Chan.One").expect("channel one is read back");
         assert_eq!(one.programmes.len(), 1);
         let programme = &one.programmes[0];
-        assert_eq!((programme.start, programme.stop), (1_700_000_000, 1_700_003_600));
-        assert_eq!(programme.title.as_deref(), Some("News & <Weather>"));
+        assert_eq!((programme.start, programme.stop), (4_102_444_800, 4_102_448_400));
+        assert_eq!(programme.title.as_deref(), Some("News"));
         assert!(programme.is_live);
     }
 
@@ -312,5 +339,192 @@ mod tests {
         std::fs::write(&path, "<tv/>").unwrap();
         assert!(is_fresh(&path, 3600).await);
         assert!(!is_fresh(&path, 0).await, "cache_duration 0 always refetches");
+    }
+
+    #[tokio::test]
+    async fn fetch_to_file_writes_file_when_channels_exist_without_programmes() {
+        use crate::processor::playlist::ingest::PlaylistProcessingContext;
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use shared::model::{ConfigPaths, HookCtx, PluginInputRequest};
+        use std::sync::Arc;
+        use tuliprox_core::{
+            model::{AppConfig, Config, ConfigInput, ProcessTargets, SourcesConfig},
+            utils::FileLockManager,
+        };
+
+        #[derive(Clone)]
+        struct EpgHost;
+        #[allow(clippy::unused_async_trait_impl)]
+        impl PluginHost for EpgHost {
+            async fn fetch_epg(
+                &self,
+                _plugin: &str,
+                _ctx: &HookCtx<'_>,
+                _request: &PluginInputRequest<'_>,
+            ) -> Result<Vec<(PluginEpgChannel, Vec<EpgProgramme>)>, String> {
+                Ok(vec![(
+                    PluginEpgChannel { id: "Chan.One".to_string(), names: vec!["Channel One".to_string()], icon: None },
+                    vec![],
+                )])
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epg.xml");
+        std::fs::write(&path, "<tv/>").unwrap();
+
+        let app_config = AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::new()),
+        };
+
+        let ctx: PlaylistProcessingContext<shared::model::NoopSink, crate::metadata_sink::NoopMetadataSink, _> =
+            PlaylistProcessingContext {
+                client: reqwest::Client::new(),
+                run_id: "test-epg-run".into(),
+                execution_order: crate::processor::playlist::PlaylistUpdateRunOrder::from(1),
+                config: Arc::new(app_config),
+                user_targets: Arc::new(ProcessTargets {
+                    enabled: false,
+                    inputs: Vec::new(),
+                    targets: Vec::new(),
+                    target_names: Vec::new(),
+                }),
+                events: shared::model::NoopSink,
+                playlist_state: None,
+                disabled_headers: None,
+                processed_inputs: Arc::default(),
+                input_completions: Arc::default(),
+                input_locks: Arc::default(),
+                provider_manager: None,
+                metadata_manager: None,
+                pre_processed_inputs: None,
+                stalker_refresh_mode: crate::processor::stalker_refresh::StalkerRefreshMode::Complete,
+                partial_refresh: Arc::default(),
+                had_quality_rejections: Arc::default(),
+                input_refresh: None,
+                library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
+                maintenance: None,
+                plugins: EpgHost,
+            };
+
+        let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };
+        fetch_to_file(&ctx, &input, "plugin", &path).await.unwrap();
+
+        assert!(path.exists(), "epg file must exist when channels exist even without programmes");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"<channel id="Chan.One">"#));
+    }
+
+    #[tokio::test]
+    async fn fetch_to_file_deletes_file_when_channels_are_empty() {
+        use crate::processor::playlist::ingest::PlaylistProcessingContext;
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use shared::model::{ConfigPaths, HookCtx, PluginInputRequest};
+        use std::sync::Arc;
+        use tuliprox_core::{
+            model::{AppConfig, Config, ConfigInput, ProcessTargets, SourcesConfig},
+            utils::FileLockManager,
+        };
+
+        #[derive(Clone)]
+        struct EmptyEpgHost;
+        #[allow(clippy::unused_async_trait_impl)]
+        impl PluginHost for EmptyEpgHost {
+            async fn fetch_epg(
+                &self,
+                _plugin: &str,
+                _ctx: &HookCtx<'_>,
+                _request: &PluginInputRequest<'_>,
+            ) -> Result<Vec<(PluginEpgChannel, Vec<EpgProgramme>)>, String> {
+                Ok(vec![])
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epg.xml");
+        std::fs::write(&path, "<tv/>").unwrap();
+
+        let app_config = AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            plugins: Arc::default(),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::new()),
+        };
+
+        let ctx: PlaylistProcessingContext<shared::model::NoopSink, crate::metadata_sink::NoopMetadataSink, _> =
+            PlaylistProcessingContext {
+                client: reqwest::Client::new(),
+                run_id: "test-epg-run".into(),
+                execution_order: crate::processor::playlist::PlaylistUpdateRunOrder::from(1),
+                config: Arc::new(app_config),
+                user_targets: Arc::new(ProcessTargets {
+                    enabled: false,
+                    inputs: Vec::new(),
+                    targets: Vec::new(),
+                    target_names: Vec::new(),
+                }),
+                events: shared::model::NoopSink,
+                playlist_state: None,
+                disabled_headers: None,
+                processed_inputs: Arc::default(),
+                input_completions: Arc::default(),
+                input_locks: Arc::default(),
+                provider_manager: None,
+                metadata_manager: None,
+                pre_processed_inputs: None,
+                stalker_refresh_mode: crate::processor::stalker_refresh::StalkerRefreshMode::Complete,
+                partial_refresh: Arc::default(),
+                had_quality_rejections: Arc::default(),
+                input_refresh: None,
+                library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
+                maintenance: None,
+                plugins: EmptyEpgHost,
+            };
+
+        let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };
+        fetch_to_file(&ctx, &input, "plugin", &path).await.unwrap();
+
+        assert!(!path.exists(), "epg file must be deleted when channels are empty");
     }
 }

@@ -4,7 +4,7 @@ use crate::{
             plugin_logs::PluginLogs, plugin_settings::PluginSettings, plugin_slot::use_plugin_ui,
             plugin_upload::PluginUpload,
         },
-        Card, Chip, ContentDialog, LoadingIndicator, NoContent, TextButton, ToggleSwitch,
+        Card, Chip, ContentDialog, LoadingIndicator, NoContent, Table, TableDefinition, TextButton, ToggleSwitch,
     },
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
@@ -15,8 +15,8 @@ use shared::model::{Permission, PluginHookStats, PluginStateDto, PluginStatsDto,
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::{
-    classes, component, html, platform::spawn_local, use_effect_with, use_state, Callback, Event, Html, Properties,
-    TargetCast,
+    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_state, Callback, Event, Html,
+    Properties, TargetCast,
 };
 
 /// The i18n key of a lifecycle state.
@@ -98,17 +98,56 @@ fn render_task_summary(translate: &YewI18n, tasks: &[PluginTaskDto]) -> Html {
     }
 }
 
-fn render_hook_row(hook: &PluginHookStats) -> Html {
-    html! {
-        <tr key={hook.hook.clone()}>
-            <td>{ hook.hook.clone() }</td>
-            <td>{ hook.kept }</td>
-            <td>{ hook.dropped }</td>
-            <td>{ hook.modified }</td>
-            <td>{ hook.errors }</td>
-            <td>{ hook.duration_ms }</td>
-        </tr>
+crate::app::components::define_table_columns! {
+    enum HookColumn {
+        Hook => ("hook", "LABEL.PLUGIN_HOOK") { can_hide: false },
+        Kept => ("kept", "LABEL.PLUGIN_KEPT"),
+        Dropped => ("dropped", "LABEL.PLUGIN_DROPPED"),
+        Modified => ("modified", "LABEL.PLUGIN_MODIFIED"),
+        Errors => ("errors", "LABEL.PLUGIN_ERRORS"),
+        Duration => ("duration_ms", "LABEL.PLUGIN_DURATION_MS"),
     }
+}
+
+#[derive(Properties, PartialEq)]
+struct HookStatsTableProps {
+    /// Keyed by the hook name (unique per plugin).
+    hooks: Vec<PluginHookStats>,
+}
+
+/// The per-hook counters of one plugin, in the shared `Table`.
+#[component]
+fn HookStatsTable(props: &HookStatsTableProps) -> Html {
+    let translate = use_translation();
+    let columns = use_memo((), |()| HookColumn::columns());
+    let render_header_cell = {
+        let translate = translate.clone();
+        Callback::<usize, Html>::from(move |col: usize| match HookColumn::from_index(col) {
+            Some(column) => html! { {translate.t(column.header_label())} },
+            None => html! {},
+        })
+    };
+    let render_data_cell = Callback::<(usize, usize, Rc<PluginHookStats>), Html>::from(
+        |(_, col, hook): (usize, usize, Rc<PluginHookStats>)| match HookColumn::from_index(col) {
+            Some(HookColumn::Hook) => html! { {hook.hook.clone()} },
+            Some(HookColumn::Kept) => html! { {hook.kept} },
+            Some(HookColumn::Dropped) => html! { {hook.dropped} },
+            Some(HookColumn::Modified) => html! { {hook.modified} },
+            Some(HookColumn::Errors) => html! { {hook.errors} },
+            Some(HookColumn::Duration) => html! { {hook.duration_ms} },
+            None => html! {},
+        },
+    );
+    let definition = use_memo(props.hooks.clone(), |hooks| TableDefinition::<PluginHookStats> {
+        table_id: "plugins.hook_stats".into(),
+        columns: columns.clone(),
+        row_key: Callback::from(|(_, item): (usize, Rc<PluginHookStats>)| item.hook.clone().into()),
+        items: if hooks.is_empty() { None } else { Some(Rc::new(hooks.iter().cloned().map(Rc::new).collect())) },
+        on_sort: Callback::noop(),
+        render_header_cell,
+        render_data_cell,
+    });
+    html! { <Table::<PluginHookStats> definition={definition} /> }
 }
 
 fn render_stats(translate: &YewI18n, stats: Option<&PluginStatsDto>) -> Html {
@@ -128,19 +167,7 @@ fn render_stats(translate: &YewI18n, stats: Option<&PluginStatsDto>) -> Html {
                 </div>
             }
             if !stats.hooks.is_empty() {
-                <table class="tp__plugins__hook-stats">
-                    <thead>
-                        <tr>
-                            <th>{ translate.t("LABEL.PLUGIN_HOOK") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_KEPT") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_DROPPED") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_MODIFIED") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_ERRORS") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_DURATION_MS") }</th>
-                        </tr>
-                    </thead>
-                    <tbody>{ for stats.hooks.iter().map(render_hook_row) }</tbody>
-                </table>
+                <HookStatsTable hooks={stats.hooks.clone()} />
             }
         </div>
     }

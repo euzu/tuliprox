@@ -100,14 +100,19 @@ impl InputUpdateCardInteractionState {
 }
 
 enum InputUpdateCardAction {
-    ToggleTarget(u16),
-    ToggleAll(Vec<u16>),
+    /// A target button is a selection, not a toggle: it selects only this target.
+    SelectTarget(u16),
+    /// "All" is a selection, not a toggle: it always selects every target.
+    SelectAll(Vec<u16>),
     SelectPolicy(InputRefreshPolicy),
     SyncPolicy(InputUpdateCapabilities),
     BeginSubmission(WebSocketConnectionContext),
     CancelSubmission(WebSocketConnectionContext),
     ConnectionChanged,
-    FinishSubmission { connection_context: WebSocketConnectionContext, outcome: PlaylistUpdateActionOutcome },
+    FinishSubmission {
+        connection_context: WebSocketConnectionContext,
+        outcome: PlaylistUpdateActionOutcome,
+    },
 }
 
 fn target_selection_state(selected_target_ids: &[u16], target_ids: &[u16]) -> TargetSelectionState {
@@ -127,23 +132,11 @@ fn reduce_input_update_card_state(
     action: InputUpdateCardAction,
 ) -> InputUpdateCardInteractionState {
     match action {
-        InputUpdateCardAction::ToggleTarget(target_id) if !state.is_submitting() => {
-            if let Some(index) = state.controls.selected_target_ids.iter().position(|selected| *selected == target_id) {
-                state.controls.selected_target_ids.remove(index);
-            } else {
-                state.controls.selected_target_ids.push(target_id);
-            }
+        InputUpdateCardAction::SelectTarget(target_id) if !state.is_submitting() => {
+            state.controls.selected_target_ids = vec![target_id];
         }
-        InputUpdateCardAction::ToggleAll(target_ids) if !state.is_submitting() => {
-            state.controls.selected_target_ids = if target_selection_state(
-                &state.controls.selected_target_ids,
-                &target_ids,
-            ) == TargetSelectionState::All
-            {
-                Vec::new()
-            } else {
-                target_ids
-            };
+        InputUpdateCardAction::SelectAll(target_ids) if !state.is_submitting() => {
+            state.controls.selected_target_ids = target_ids;
         }
         InputUpdateCardAction::SelectPolicy(policy) if !state.is_submitting() => state.controls.policy = policy,
         InputUpdateCardAction::SyncPolicy(capabilities) => {
@@ -164,8 +157,8 @@ fn reduce_input_update_card_state(
                 state.controls.policy = InputRefreshPolicy::NORMAL;
             }
         }
-        InputUpdateCardAction::ToggleTarget(_)
-        | InputUpdateCardAction::ToggleAll(_)
+        InputUpdateCardAction::SelectTarget(_)
+        | InputUpdateCardAction::SelectAll(_)
         | InputUpdateCardAction::SelectPolicy(_)
         | InputUpdateCardAction::BeginSubmission(_)
         | InputUpdateCardAction::CancelSubmission(_)
@@ -328,17 +321,6 @@ impl ClusterSummaryStatus {
         }
     }
 
-    const fn symbol(self) -> &'static str {
-        match self {
-            Self::Accepted => "✓",
-            Self::Rejected => "⚠",
-            Self::Cached => "●",
-            Self::TechnicalError | Self::PersistedFailed => "✕",
-            Self::PersistedOk => "✓",
-            Self::NotRequested | Self::Unavailable => "–",
-        }
-    }
-
     const fn modifier(self) -> &'static str {
         match self {
             Self::Accepted => "tp__playlist-update-view__pipeline-status--accepted",
@@ -478,14 +460,9 @@ const fn source_label_key(source: InputDataSourceView) -> &'static str {
     }
 }
 
-const fn input_status_symbol(status: InputUpdateCardStatus) -> &'static str {
-    match status {
-        InputUpdateCardStatus::Ready => "–",
-        InputUpdateCardStatus::Queued | InputUpdateCardStatus::Updating => "●",
-        InputUpdateCardStatus::Success => "✓",
-        InputUpdateCardStatus::Partial => "⚠",
-        InputUpdateCardStatus::Failed => "✕",
-    }
+/// Round status indicator in front of a status label; its color comes from the badge's status modifier.
+fn status_dot() -> Html {
+    html! { <span class="tp__playlist-update-view__status-dot" aria-hidden="true" /> }
 }
 
 fn card_status_badge(view: &InputUpdateRunView, translate: impl Fn(&str) -> String) -> Html {
@@ -503,8 +480,8 @@ fn card_status_badge(view: &InputUpdateRunView, translate: impl Fn(&str) -> Stri
             aria-live="polite"
             aria-atomic="true"
         >
+            {status_dot()}
             {translate(status.label_key())}
-            <span aria-hidden="true">{input_status_symbol(status)}</span>
         </span>
     }
 }
@@ -608,7 +585,7 @@ fn cluster_details(
             <header>
                 <h4 id={heading_id}>{translate(cluster_label_key(cluster.cluster))}</h4>
                 <span class={classes!("tp__playlist-update-view__pipeline-status", status.modifier())}>
-                    <span aria-hidden="true">{status.symbol()}</span>
+                    {status_dot()}
                     {translate(status.label_key())}
                 </span>
             </header>
@@ -774,8 +751,13 @@ fn input_content(
                 <div class="tp__playlist-update-view__cluster-chips" role="list">
                     if view.cluster_results.is_empty() && !catalog_clusters.is_empty() {
                         {for catalog_clusters.iter().map(|cluster| html! {
-                            <span class={classes!("tp__playlist-update-view__pipeline-status", InputUpdateCardStatus::Ready.modifier())} role="listitem"
+                            <span class={classes!(
+                                    "tp__playlist-update-view__pipeline-status",
+                                    "tp__playlist-update-view__cluster-chip",
+                                    InputUpdateCardStatus::Ready.modifier(),
+                                )} role="listitem"
                                 aria-label={translate(cluster_label_key(*cluster))}>
+                                {status_dot()}
                                 <span>{translate(cluster_label_key(*cluster))}</span>
                             </span>
                         })}
@@ -790,14 +772,15 @@ fn input_content(
                                 <span
                                     class={classes!(
                                         "tp__playlist-update-view__pipeline-status",
+                                        "tp__playlist-update-view__cluster-chip",
                                         cluster_status.modifier(),
                                     )}
                                     role="listitem"
                                     aria-label={format!("{cluster_label}: {state_label}")}
                                     title={state_label}
                                 >
+                                    {status_dot()}
                                     <span>{cluster_label}</span>
-                                    <span aria-hidden="true">{cluster_status.symbol()}</span>
                                 </span>
                             }
                         })}
@@ -823,8 +806,8 @@ fn input_content(
                             <header>
                                 <h4>{translate("LABEL.INPUT")}</h4>
                                 <span class={classes!("tp__playlist-update-view__pipeline-status", view.input_state.modifier())}>
+                                    {status_dot()}
                                     {translate(view.input_state.label_key())}
-                                    <span aria-hidden="true">{input_status_symbol(view.input_state)}</span>
                                 </span>
                             </header>
                             <dl>
@@ -928,10 +911,10 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
         })
     };
 
-    let on_toggle_all = {
+    let on_select_all = {
         let state = state.clone();
         let target_ids = target_ids.clone();
-        Callback::from(move |_| state.dispatch(InputUpdateCardAction::ToggleAll(target_ids.clone())))
+        Callback::from(move |_| state.dispatch(InputUpdateCardAction::SelectAll(target_ids.clone())))
     };
 
     let on_start = {
@@ -1096,13 +1079,12 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                         class={classes!(
                                             "tp__playlist-update-view__target-toggle",
                                             (all_selection == TargetSelectionState::All).then_some("active"),
-                                            (all_selection == TargetSelectionState::Mixed).then_some("mixed"),
                                         ).to_string()}
                                         title={translate.t("LABEL.ALL")}
                                         aria_label={Some(translate.t("LABEL.ALL"))}
                                         aria_pressed={Some(all_selection.aria_pressed().to_string())}
                                         disabled={state.is_submitting() || !model.capabilities.rebuilds_targets()}
-                                        onclick={on_toggle_all}
+                                        onclick={on_select_all}
                                     />
                                     {for view.target_results.iter().map(|target| {
                                         let selected = state.controls.selected_target_ids.contains(&target.target_id);
@@ -1121,7 +1103,7 @@ pub fn InputUpdateCard(props: &InputUpdateCardProps) -> Html {
                                                 aria_label={Some(target.target_name.clone())}
                                                 aria_pressed={Some(selection.aria_pressed().to_string())}
                                                 disabled={state.is_submitting() || !model.capabilities.rebuilds_targets()}
-                                                onclick={move |_| state.dispatch(InputUpdateCardAction::ToggleTarget(target_id))}
+                                                onclick={move |_| state.dispatch(InputUpdateCardAction::SelectTarget(target_id))}
                                             />
                                         }
                                     })}
@@ -1549,8 +1531,6 @@ mod tests {
         assert!(summary.contains("\"LABEL.INPUT\""));
         assert!(source.contains("<details class=\"tp__playlist-update-view__update-details\">"));
         assert!(source.contains("cluster.refresh_policy.or(view.refresh_policy)"));
-        assert_eq!(input_status_symbol(InputUpdateCardStatus::Partial), "⚠");
-        assert_eq!(input_status_symbol(InputUpdateCardStatus::Failed), "✕");
         assert_ne!(ClusterSummaryStatus::Rejected, ClusterSummaryStatus::TechnicalError);
     }
 
@@ -1794,32 +1774,25 @@ mod tests {
     }
 
     #[test]
-    fn playlist_update_view_all_selection_covers_full_mixed_empty_and_toggle_rules() {
+    fn playlist_update_view_target_buttons_select_one_target_and_all_selects_every_target() {
         let targets = vec![1, 2, 3];
         let initial = InputUpdateCardInteractionState::from_model(&card(7, &targets));
         assert_eq!(target_selection_state(&initial.controls.selected_target_ids, &targets), TargetSelectionState::All);
 
-        let empty = reduce(initial, InputUpdateCardAction::ToggleAll(targets.clone()));
-        assert_eq!(target_selection_state(&empty.controls.selected_target_ids, &targets), TargetSelectionState::Empty);
+        // A target button selects only that target, also when it was already selected.
+        let single = reduce(initial, InputUpdateCardAction::SelectTarget(2));
+        assert_eq!(single.controls.selected_target_ids, vec![2]);
+        let still_single = reduce(single.clone(), InputUpdateCardAction::SelectTarget(2));
+        assert_eq!(still_single.controls.selected_target_ids, vec![2]);
+        let other = reduce(still_single, InputUpdateCardAction::SelectTarget(3));
+        assert_eq!(other.controls.selected_target_ids, vec![3]);
+        assert_eq!(target_selection_state(&other.controls.selected_target_ids, &targets), TargetSelectionState::Mixed);
 
-        let all = reduce(empty, InputUpdateCardAction::ToggleAll(targets.clone()));
-        let mixed = reduce(all, InputUpdateCardAction::ToggleTarget(2));
-        assert_eq!(target_selection_state(&mixed.controls.selected_target_ids, &targets), TargetSelectionState::Mixed);
-
-        let individually_restored = reduce(mixed.clone(), InputUpdateCardAction::ToggleTarget(2));
-        assert_eq!(
-            target_selection_state(&individually_restored.controls.selected_target_ids, &targets),
-            TargetSelectionState::All
-        );
-        let cleared = reduce(individually_restored, InputUpdateCardAction::ToggleAll(targets.clone()));
-        assert_eq!(cleared.controls.selected_target_ids.len(), 0);
-        assert_eq!(
-            target_selection_state(&cleared.controls.selected_target_ids, &targets),
-            TargetSelectionState::Empty
-        );
-
-        let restored = reduce(mixed, InputUpdateCardAction::ToggleAll(targets.clone()));
-        assert_eq!(restored.controls.selected_target_ids, targets);
+        // "All" always selects every target; clicking it again keeps them selected.
+        let all = reduce(other, InputUpdateCardAction::SelectAll(targets.clone()));
+        assert_eq!(all.controls.selected_target_ids, targets);
+        let still_all = reduce(all, InputUpdateCardAction::SelectAll(targets.clone()));
+        assert_eq!(still_all.controls.selected_target_ids, targets);
     }
 
     #[test]
@@ -1848,7 +1821,7 @@ mod tests {
         let first = InputUpdateCardInteractionState::from_model(&card(7, &[1, 2]));
         let second = InputUpdateCardInteractionState::from_model(&card(8, &[3, 4]));
 
-        let first = reduce(first, InputUpdateCardAction::ToggleTarget(1));
+        let first = reduce(first, InputUpdateCardAction::SelectTarget(2));
 
         assert_eq!(first.controls.selected_target_ids, vec![2]);
         assert_eq!(second.controls.selected_target_ids, vec![3, 4]);
@@ -1945,7 +1918,8 @@ mod tests {
                                 || expected.contains(&policy_id(policy)))
                     );
                     assert!(!can_start_update(&state, &model, false));
-                    let empty_selection = reduce(state, InputUpdateCardAction::ToggleAll(vec![3, 9]));
+                    let mut empty_selection = state;
+                    empty_selection.controls.selected_target_ids.clear();
                     assert!(!can_start_update(&empty_selection, &model, true));
                 }
             }
@@ -1963,7 +1937,8 @@ mod tests {
         assert_eq!(policy_options(model.capabilities, state.controls.policy, str::to_owned)[0].id, "rescan");
         let submitting = reduce(state.clone(), InputUpdateCardAction::BeginSubmission(connection(1)));
         assert!(!can_start_update(&submitting, &model, true));
-        let empty = reduce(state, InputUpdateCardAction::ToggleAll(vec![3, 9]));
+        let mut empty = state;
+        empty.controls.selected_target_ids.clear();
         assert!(!can_start_update(&empty, &model, true));
     }
 

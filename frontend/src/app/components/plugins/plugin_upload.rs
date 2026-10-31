@@ -102,6 +102,14 @@ fn render_custom_ui(translate: &YewI18n, review: &PluginUploadReviewDto) -> Html
     }
 }
 
+/// The i18n key of an rpc export kind.
+fn rpc_kind_label_key(kind: PluginRpcKindDto) -> &'static str {
+    match kind {
+        PluginRpcKindDto::Read => "LABEL.PLUGIN_RPC_READ",
+        PluginRpcKindDto::Write => "LABEL.PLUGIN_RPC_WRITE",
+    }
+}
+
 fn render_rpc_exports(translate: &YewI18n, review: &PluginUploadReviewDto) -> Html {
     if review.rpc_exports.is_empty() {
         return html! {};
@@ -113,7 +121,7 @@ fn render_rpc_exports(translate: &YewI18n, review: &PluginUploadReviewDto) -> Ht
                 { for review.rpc_exports.iter().map(|export| html! {
                     <li key={export.name.clone()}>
                         <code>{ export.name.clone() }</code>{ " " }
-                        { match export.kind { PluginRpcKindDto::Read => "read", PluginRpcKindDto::Write => "write" } }
+                        { translate.t(rpc_kind_label_key(export.kind)) }
                         if let Some(description) = export.description.as_ref() {
                             { ": " }{ description.clone() }
                         }

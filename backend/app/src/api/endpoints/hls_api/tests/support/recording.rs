@@ -142,7 +142,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn cache_recording_test_item
             .playlists
             .cache_playlist(
                 &target.name,
-                PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage { live, vod, series })),
+                PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage::from_trees(live, vod, series))),
             )
             .await;
     } else {

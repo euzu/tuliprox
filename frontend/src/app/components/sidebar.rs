@@ -311,6 +311,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                           <MenuItem class={if is_active(ViewType::PlaylistUpdate) { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::PlaylistRead), {
+                          <MenuItem class={if is_active(ViewType::PlaylistStats) { "active" } else {""}} icon="Stats" name={ViewType::PlaylistStats.to_string()} label={translate.t("LABEL.PLAYLIST_STATS")} onclick={&handle_menu_click}></MenuItem>
+                      })}
+                      {html_if!(auth.has_permission(Permission::PlaylistRead), {
                           <>
                           <MenuItem class={if is_active(ViewType::PlaylistExplorer) { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
                           </>
@@ -325,8 +328,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 show_recording,
                 {
                     <CollapsePanel title={translate.t("LABEL.RECORDING")}>
-                      <MenuItem class={if is_active(ViewType::RecordingLibrary) { "active" } else {""}} icon="DVR" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
-                      <MenuItem class={if is_active(ViewType::RecordingRules) { "active" } else {""}} icon="DVR" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if is_active(ViewType::RecordingLibrary) { "active" } else {""}} icon="VideoLibrary" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if is_active(ViewType::RecordingRules) { "active" } else {""}} icon="Calendar" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
                     </CollapsePanel>
                 }
             )}
@@ -399,6 +402,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if is_active(ViewType::PlaylistUpdate) { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} hint={translate.t("LABEL.UPDATE")} aria_label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::PlaylistRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistStats, if is_active(ViewType::PlaylistStats) { " active" } else {""})} icon="Stats" name={ViewType::PlaylistStats.to_string()} hint={translate.t("LABEL.PLAYLIST_STATS")} aria_label={translate.t("LABEL.PLAYLIST_STATS")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_permission(Permission::PlaylistRead), {
                <>
                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if is_active(ViewType::PlaylistExplorer) { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} hint={translate.t("LABEL.PLAYLIST_VIEWER")} aria_label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></IconButton>
                </>
@@ -409,8 +415,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(show_recording, {
                 <>
                 <span class="tp__app-sidebar__content-space"></span>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if is_active(ViewType::RecordingLibrary) { " active" } else {""})} icon="LibraryOutline" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if is_active(ViewType::RecordingRules) { " active" } else {""})} icon="ScheduleOutline" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if is_active(ViewType::RecordingLibrary) { " active" } else {""})} icon="VideoLibrary" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if is_active(ViewType::RecordingRules) { " active" } else {""})} icon="Calendar" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
                 </>
             })}
             {html_if!(!plugin_entries.is_empty(), {

@@ -31,5 +31,6 @@ hyper-util = { version = "0.1.20", features = ["server", "server-auto", "tokio"]
 tower-service = "0.3.3"
 
 [dev-dependencies]
+tuliprox-mpegts.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = "0.1.19"

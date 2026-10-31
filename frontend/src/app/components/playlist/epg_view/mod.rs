@@ -1244,7 +1244,7 @@ pub fn EpgView() -> Html {
                                  }}>
                                 <div class="tp__epg__channel-icon">
                                     { if let Some(icon) = &ch.icon {
-                                        html! { <img src={icon.to_string()} alt={ch.title.to_string()} /> }
+                                        html! { <img src={icon.to_string()} alt={ch.title.to_string()} loading="lazy" decoding="async" /> }
                                       } else { html!{} }
                                     }
                                 </div>

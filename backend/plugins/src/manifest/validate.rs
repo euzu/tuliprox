@@ -143,6 +143,11 @@ fn check_hooks(names: &[String], errors: &mut Errors) -> Vec<HookId> {
     let mut hooks = Vec::with_capacity(names.len());
     for name in names {
         match HookId::parse(name) {
+            Ok(HookId::EpgResolveConflict) => {
+                errors.push(
+                    "hook `epg.resolve-conflict` is not supported yet: planned for a later ABI 1.x release".to_string(),
+                );
+            }
             Ok(hook) => {
                 if !hooks.contains(&hook) {
                     hooks.push(hook);

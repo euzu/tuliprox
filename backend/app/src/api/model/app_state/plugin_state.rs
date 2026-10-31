@@ -162,6 +162,13 @@ pub fn validate_plugin_schedules(
     let mut problems = Vec::new();
     for schedule in schedules {
         let is_task = schedule.task_type == ScheduleTaskType::PluginTask;
+        // The scheduler skips a plugin task whose expression does not parse (it never ends the process for
+        // one), so the operator hears about it here.
+        if is_task {
+            if let Err(err) = <cron::Schedule as std::str::FromStr>::from_str(&schedule.schedule) {
+                problems.push(format!("schedule `{}`: invalid cron expression: {err}", schedule.schedule));
+            }
+        }
         match (is_task, schedule.plugin.as_deref(), schedule.task.as_deref()) {
             (true, Some(plugin), Some(task)) => {
                 #[cfg(feature = "plugins")]
@@ -195,9 +202,7 @@ pub fn validate_plugin_schedules(
 /// Checks every target's plugin references against the loaded plugins (plan
 /// §18 *Validation timing*): the strategy refs (`plugin:<id>`) and the
 /// `plugin.<id>.<fn>(…)` terms of the processing filter must name a loaded
-/// plugin that provides the hook. Plugin terms anywhere else (persist or
-/// output filters) are rejected: those filters evaluate without plugins, so the
-/// term would always be `false`. The function name is not checked; the
+/// plugin that provides the hook. The function name is not checked; the
 /// manifest does not declare it.
 ///
 /// With plugins disabled nothing provides anything, so any reference fails.
@@ -223,12 +228,24 @@ pub fn validate_plugin_refs<P: shared::model::PluginHost>(
             }
         }
         for output in target.plugin_outputs() {
-            if let (Some(format), Some(provided)) = (output.format.as_deref(), plugins.output_format(&output.plugin)) {
-                if provided != format {
-                    problems.push(format!(
-                        "target {}: plugin {} renders `{provided}`, not `{format}`",
-                        target.name, output.plugin
-                    ));
+            if let Some(format) = output.format.as_deref() {
+                match plugins.output_format(&output.plugin) {
+                    Some(provided) => {
+                        if provided != format {
+                            problems.push(format!(
+                                "target {}: plugin {} renders `{provided}`, not `{format}`",
+                                target.name, output.plugin
+                            ));
+                        }
+                    }
+                    None => {
+                        if plugins.provides(PluginHook::RenderOutput, &output.plugin) {
+                            problems.push(format!(
+                                "target {}: plugin {} declares no output format, but output asks for `{format}`",
+                                target.name, output.plugin
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -242,20 +259,96 @@ pub fn validate_plugin_refs<P: shared::model::PluginHost>(
                 }
             }
         }
-        let other_filters =
-            target.filter.persist.iter().chain(target.output.iter().filter_map(|output| output.filter()));
-        for filter in other_filters {
-            if let Some(call) = filter.plugin_calls().next() {
-                problems.push(format!(
-                    "target {}: plugin.{}.{} is only allowed in the processing filter",
-                    target.name, call.plugin, call.func
-                ));
-            }
-        }
     }
     if problems.is_empty() {
         Ok(())
     } else {
         Err(shared::error::TuliproxError::ConfigSource(format!("invalid plugin references: {}", problems.join("; "))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::{PluginHook, PluginHost};
+    use tuliprox_core::model::{ConfigSource, ConfigTarget, PluginTargetOutput, SourcesConfig, TargetOutput};
+
+    #[derive(Clone)]
+    struct TestHost {
+        output_format: Option<String>,
+    }
+
+    impl PluginHost for TestHost {
+        fn provides(&self, hook: PluginHook, plugin: &str) -> bool {
+            hook == PluginHook::RenderOutput && plugin == "custom-out"
+        }
+
+        fn output_format(&self, plugin: &str) -> Option<String> {
+            if plugin == "custom-out" {
+                self.output_format.clone()
+            } else {
+                None
+            }
+        }
+    }
+
+    fn sources_with_output(format: Option<&str>) -> SourcesConfig {
+        let mut target = ConfigTarget::from(&shared::model::ConfigTargetDto::default());
+        target.name = "t1".into();
+        target.output = vec![TargetOutput::Plugin(PluginTargetOutput {
+            plugin: "custom-out".into(),
+            format: format.map(String::from),
+            filename: None,
+            options: vec![],
+            filter: None,
+        })];
+        SourcesConfig {
+            sources: vec![ConfigSource { inputs: vec![], targets: vec![target.into()] }],
+            ..SourcesConfig::default()
+        }
+    }
+
+    fn plugin_task_schedule(expression: &str) -> tuliprox_core::model::ScheduleConfig {
+        tuliprox_core::model::ScheduleConfig {
+            schedule: expression.to_string(),
+            task_type: shared::model::ScheduleTaskType::PluginTask,
+            targets: None,
+            plugin: Some("sports".to_string()),
+            task: Some("refresh".to_string()),
+        }
+    }
+
+    #[test]
+    fn validate_plugin_schedules_rejects_an_invalid_cron_expression_with_a_clear_message() {
+        // No plugin host: only the shape and the expression are checked.
+        let plugins = AppPlugins::default();
+        let err = validate_plugin_schedules(&plugins, &[plugin_task_schedule("every day at noon")])
+            .expect_err("an unparsable expression is a config error");
+        let message = err.to_string();
+        assert!(message.contains("schedule `every day at noon`: invalid cron expression"), "{message}");
+        validate_plugin_schedules(&plugins, &[plugin_task_schedule("0 0 4 * * * *")]).expect("a valid expression");
+    }
+
+    #[test]
+    fn validate_plugin_refs_rejects_target_format_when_plugin_declares_none() {
+        let host = TestHost { output_format: None };
+        let sources = sources_with_output(Some("csv"));
+        let err = validate_plugin_refs(&host, &sources).expect_err("should reject format when plugin declares none");
+        assert!(err.to_string().contains("target t1: plugin custom-out"));
+    }
+
+    #[test]
+    fn validate_plugin_refs_allows_target_to_omit_format() {
+        let host = TestHost { output_format: Some("tsv".into()) };
+        let sources = sources_with_output(None);
+        assert!(validate_plugin_refs(&host, &sources).is_ok());
+    }
+
+    #[test]
+    fn validate_plugin_refs_rejects_mismatched_target_format() {
+        let host = TestHost { output_format: Some("tsv".into()) };
+        let sources = sources_with_output(Some("csv"));
+        let err = validate_plugin_refs(&host, &sources).expect_err("should reject mismatched format");
+        assert!(err.to_string().contains("plugin custom-out renders `tsv`, not `csv`"));
     }
 }

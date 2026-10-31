@@ -243,7 +243,7 @@ pub(crate) struct PluginRecord {
 }
 
 impl PluginRecord {
-    fn new(id: &str, dir: PathBuf, priority: i32) -> Self {
+    pub(crate) fn new(id: &str, dir: PathBuf, priority: i32) -> Self {
         // Stays open until `reset_breaker` or a reload replaces the record: the
         // trip is followed by `force_open`, which has no cool-down.
         let policy = CircuitBreakerPolicy { failure_threshold: BREAKER_THRESHOLD, ..CircuitBreakerPolicy::default() };
@@ -1043,12 +1043,10 @@ impl Registry {
     /// their compiled component. Synchronous, like [`Registry::load`].
     pub(crate) fn reload(&self, config: &PluginsConfig) {
         let mut remembered = lock(&self.config);
-        let directory_changed = remembered.directory != config.directory;
         remembered.clone_from(config);
         self.rescan(&remembered);
-        if directory_changed {
-            self.rewatch(&remembered.directory);
-        }
+        // Also when the directory did not change: a watch that failed earlier is retried here.
+        self.rewatch(&remembered.directory);
     }
 
     /// Re-scan with the config of the last scan (the watcher's trigger).
@@ -1069,7 +1067,9 @@ impl Registry {
         self.generation.send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    /// Follow `directory` if the watcher is running and it moved.
+    /// Follow `directory` if the watcher is running and it is not the one
+    /// watched. A failed `watch` keeps the watcher, watching nothing (an empty
+    /// `dir`), so the next call tries again.
     fn rewatch(&self, directory: &str) {
         let mut guard = lock(&self.watch);
         let Some(active) = guard.as_mut() else {
@@ -1083,8 +1083,8 @@ impl Registry {
         match active.watcher.watch(&target, RecursiveMode::Recursive) {
             Ok(()) => active.dir = target,
             Err(err) => {
-                log::warn!("plugins will no longer hot reload, cannot watch {}: {err}", target.display());
-                *guard = None;
+                log::warn!("failed to watch plugin directory {}: {err}", target.display());
+                active.dir = PathBuf::new();
             }
         }
     }
@@ -1581,5 +1581,23 @@ mod tests {
         // a scan reads every file; reads must not re-trigger it
         assert!(!is_change(EventKind::Access(AccessKind::Open(AccessMode::Read))));
         assert!(!is_change(EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))));
+    }
+
+    #[test]
+    fn failed_rewatch_keeps_the_watcher_and_the_next_reload_retries() {
+        let fixture = Fixture::new();
+        let config = PluginsConfig { directory: fixture.plugins.path().display().to_string(), ..Default::default() };
+        let registry = Arc::new(fixture.registry(&config));
+        registry.watch().unwrap();
+
+        let later = fixture.plugins.path().join("later");
+        let missing = PluginsConfig { directory: later.display().to_string(), ..Default::default() };
+        registry.reload(&missing);
+        assert!(lock(&registry.watch).is_some(), "a failed watch must not drop the watcher");
+
+        // The same directory again, now present: the reload watches it.
+        std::fs::create_dir(&later).unwrap();
+        registry.reload(&missing);
+        assert_eq!(lock(&registry.watch).as_ref().map(|active| active.dir.clone()), Some(later));
     }
 }

@@ -33,8 +33,12 @@ mod test_support;
 mod tests;
 mod view;
 
+#[cfg(all(test, feature = "plugins"))]
+pub use self::test_support::create_test_plugin_system;
 #[cfg(test)]
-pub use self::test_support::{create_test_app_state, create_test_maintenance};
+pub use self::test_support::{
+    counting_runtime, create_test_app_state, create_test_app_state_with_plugins, create_test_maintenance,
+};
 pub use self::{
     auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, plugin_state::*,
     recording_state::*, reload::*, resource_cache::*, view::*,

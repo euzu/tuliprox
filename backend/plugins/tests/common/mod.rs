@@ -22,6 +22,13 @@ pub struct Probe {
     pub data: TempDir,
 }
 
+/// Announces that a fixture is missing: skips locally or panics when `CI=true`.
+pub fn skip_missing_fixture<T>(message: &str) -> Option<T> {
+    assert!(std::env::var("CI").as_deref() != Ok("true"), "{message}");
+    eprintln!("{message}");
+    None
+}
+
 /// The plugins directory of the built fixtures, or `None` (after saying so).
 pub fn fixture_dir() -> Option<PathBuf> {
     let directory = std::env::var_os("TULIPROX_PLUGIN_FIXTURES").map_or_else(
@@ -31,8 +38,7 @@ pub fn fixture_dir() -> Option<PathBuf> {
     if directory.join("probe-full/plugin.wasm").is_file() {
         Some(directory)
     } else {
-        eprintln!("skipped: fixture not built; run bin/build_plugin_fixture.sh");
-        None
+        skip_missing_fixture("skipped: fixture not built; run bin/build_plugin_fixture.sh")
     }
 }
 

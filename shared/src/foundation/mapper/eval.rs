@@ -435,6 +435,7 @@ impl Expression {
                     }
                     return Undefined;
                 }
+
                 if matches!(name, BuiltInFunction::TitleCase) {
                     // Evaluate the arguments here instead of using the compacted list below, so the acronym options keep
                     // their original position and an undefined text argument cannot turn the options into the text.
@@ -475,6 +476,7 @@ impl Expression {
                         Err(failure) => failure,
                     };
                 }
+
                 let mut evaluated_args: Vec<EvalResult> = args.iter().map(|a| a.eval(ctx, accessor)).collect();
                 for arg in &evaluated_args {
                     if arg.is_error() {

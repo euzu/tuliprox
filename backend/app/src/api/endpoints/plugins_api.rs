@@ -6,6 +6,8 @@
 //! Plugins off (`plugins.enabled: false`, or a build without the `plugins`
 //! feature) answers the list with `[]` and every id route with `404`.
 
+#[cfg(feature = "plugins")]
+use super::plugins_settings_api::read_plugin_settings;
 use super::{
     plugins_install_api::install_routes, plugins_metrics_api::get_plugins_metrics,
     plugins_settings_api::put_plugin_settings, plugins_tasks_api::post_plugin_task_run,
@@ -66,8 +68,10 @@ async fn get_plugin_stats(State(app_state): State<Arc<AppState>>, Path(id): Path
 
 #[cfg(feature = "plugins")]
 async fn get_plugin_settings(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let config = app_state.app_config.plugins.load();
-    found(app_state.plugins.as_ref().and_then(|plugins| plugins.api_settings(&id, config.as_deref())))
+    let Some(plugins) = app_state.plugins.clone() else {
+        return found::<()>(None);
+    };
+    found(read_plugin_settings(plugins, id, app_state.app_config.plugins.load_full()).await)
 }
 
 #[cfg(feature = "plugins")]
@@ -128,6 +132,29 @@ mod tests {
         let (status, body) = call(&router(&dir), "/plugins").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(serde_json::from_slice::<Vec<PluginSummaryDto>>(&body).unwrap(), Vec::new());
+    }
+
+    #[cfg(feature = "plugins")]
+    #[test]
+    fn settings_read_the_schema_file_on_the_blocking_pool() {
+        use crate::api::model::{counting_runtime, create_test_app_state_with_plugins, create_test_plugin_system};
+        let dir = TempDir::new().unwrap();
+        let (runtime, threads) = counting_runtime();
+        runtime.block_on(async {
+            let system = create_test_plugin_system(dir.path());
+            let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
+            let router =
+                plugins_api_register_unprotected().with_state(create_test_app_state_with_plugins(config, Some(system)));
+            let before = threads.load(std::sync::atomic::Ordering::SeqCst);
+            let (status, body) = call(&router, "/plugins/demo/settings").await;
+            assert_eq!(status, StatusCode::OK);
+            let settings: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(settings["schema"], serde_json::json!({"type": "object"}));
+            assert!(
+                threads.load(std::sync::atomic::Ordering::SeqCst) > before,
+                "the schema was read on the async thread"
+            );
+        });
     }
 
     #[tokio::test]

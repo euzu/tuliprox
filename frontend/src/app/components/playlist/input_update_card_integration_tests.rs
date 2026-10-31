@@ -149,7 +149,7 @@ fn playlist_update_view_target_rules_do_not_become_input_or_action_capabilities(
     let m3u = &cards[0];
     let state = reduce_input_update_card_state(
         InputUpdateCardInteractionState::from_model(m3u),
-        InputUpdateCardAction::ToggleTarget(20),
+        InputUpdateCardAction::SelectTarget(3),
     );
     assert_eq!(selected_current_target_ids(m3u, &state.controls.selected_target_ids), [3]);
     assert_eq!(sources, before);
@@ -184,7 +184,7 @@ fn playlist_update_view_same_names_keep_real_card_state_and_actions_independent_
         .collect::<HashMap<_, _>>();
     let untouched = states.get(&7).expect("Xtream state").clone();
     let m3u = states.remove(&41).expect("M3U state");
-    let m3u = reduce_input_update_card_state(m3u, InputUpdateCardAction::ToggleTarget(20));
+    let m3u = reduce_input_update_card_state(m3u, InputUpdateCardAction::SelectTarget(3));
     let m3u = reduce_input_update_card_state(m3u, InputUpdateCardAction::SelectPolicy(InputRefreshPolicy::REFRESH));
     assert_eq!(m3u.controls.selected_target_ids, [3]);
     assert_eq!(states.get(&7), Some(&untouched));

@@ -37,6 +37,9 @@ pub(crate) const KNOWN_CONFIG_SECTIONS: [&str; 15] = [
 const FALLBACK_LOCALE: &str = "en";
 /// A schema or locale file larger than this is refused.
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+/// The `ui/` entry the host reserves for the frame bridge.
+const UI_RESERVED_DIR: &str = "_sdk";
+
 /// The settings key under which `ui.config_extensions` values are stored.
 pub(crate) const EXTENSION_KEY: &str = "ext";
 
@@ -168,6 +171,11 @@ fn read_locale(dir: &Path, locale: &str) -> Result<Map<String, Value>, String> {
 pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<String>, Vec<String>> {
     let mut problems = Vec::new();
 
+    // `ui/_sdk/` is where the host serves the frame bridge (`_sdk/bridge.js`).
+    if fs::symlink_metadata(dir.join("ui").join(UI_RESERVED_DIR)).is_ok() {
+        problems.push(format!("`ui/{UI_RESERVED_DIR}` is reserved for the host and must not be in the package"));
+    }
+
     // Step 4: settings schemas and extension fragments.
     let mut schemas = Vec::new();
     for relative in settings_schema_paths(manifest) {
@@ -246,6 +254,17 @@ mod tests {
             fs::write(target, content).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn a_package_file_under_ui_sdk_is_refused() {
+        let manifest = manifest("");
+        let dir = package(&[("ui/_sdk/bridge.js", "evil()")]);
+        let problems = check_package(dir.path(), &manifest).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("ui/_sdk"), "{problems:?}");
+        let clean = package(&[("ui/index.html", "<p>")]);
+        assert!(check_package(clean.path(), &manifest).is_ok());
     }
 
     #[test]

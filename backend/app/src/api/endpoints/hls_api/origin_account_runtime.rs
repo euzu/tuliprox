@@ -129,7 +129,40 @@ pub(super) async fn prepare_hls_origin_runtime(
                     .as_ref()
                     .and_then(tuliprox_session::ManagedProviderHandle::handle)
                     .and_then(|handle| handle.binding_tag);
-                if previous.as_ref().is_some_and(|previous| previous.account_name != binding.account_name) {
+                let admitted_restart = current.origin_playback_kind() == PlaybackKind::LiveHls
+                    && prepared
+                        .preacquired_origin_account_handle
+                        .as_ref()
+                        .and_then(tuliprox_session::ManagedProviderHandle::handle)
+                        .is_some()
+                    && previous.as_ref().is_some_and(|previous| {
+                        if !previous.is_detached() {
+                            return false;
+                        }
+                        let failed_start = matches!(
+                            previous.binding_mode,
+                            HlsOriginAccountBindingMode::Detached {
+                                reason: HlsOriginAccountDetachedReason::Cleanup,
+                                ..
+                            }
+                        ) && current
+                            .origin_refresh
+                            .attempt
+                            .as_ref()
+                            .is_some_and(|attempt| attempt.failed() && !attempt.active_live_playback);
+                        failed_start
+                            || matches!(
+                                current.account_binding_protection(now_ms),
+                                HlsAccountBindingProtection::Expired
+                            )
+                    });
+                if admitted_restart {
+                    // A detached start re-entering after expiry has obtained a
+                    // real allocation. Its next accepted manifest starts a new
+                    // window; polling without admission keeps the original anchor.
+                    current.restart_admitted_origin_account(binding);
+                    current.origin_control.path_condition = tuliprox_hls::api::HlsOriginPathCondition::ProgressExpected;
+                } else if previous.as_ref().is_some_and(|previous| previous.account_name != binding.account_name) {
                     current.handoff_origin_account(binding);
                 } else {
                     current.replace_origin_account_binding(Some(binding));
@@ -196,6 +229,13 @@ async fn prepare_hls_origin_runtime_locked(
     if reacquire_detached_binding {
         log_hls_origin_binding_reacquire_started(session, work_kind).await;
     }
+    let preferred_account = existing_binding
+        .as_ref()
+        .filter(|binding| {
+            binding.is_detached()
+                && hls_origin_account_status(&app_state.hls_ctx(), binding) == HlsOriginAccountStatus::Known
+        })
+        .map(|binding| Arc::clone(&binding.account_name));
     if let Some(binding) = existing_binding {
         if binding.is_active()
             || !matches!(hls_origin_account_status(&app_state.hls_ctx(), &binding), HlsOriginAccountStatus::Known)
@@ -247,6 +287,7 @@ async fn prepare_hls_origin_runtime_locked(
         work_kind,
         work_class,
         playback_kind,
+        preferred_account.as_ref(),
         now_ms,
     )
     .await
@@ -325,6 +366,7 @@ async fn prepare_hls_origin_runtime_locked(
             work_kind,
             work_class,
             playback_kind,
+            None,
             now_ms,
         )
         .await
@@ -618,7 +660,15 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
                 current_time_millis(),
             )
             .await
-            .map_err(|_| HlsBoundAccountAcquireErrorKind::Unavailable)?;
+            .map_err(|error| match error {
+                HlsOriginRuntimeAcquireError::NoAccountAvailable {
+                    reason: HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted,
+                } => HlsBoundAccountAcquireErrorKind::Exhausted,
+                HlsOriginRuntimeAcquireError::NoAccountAvailable {
+                    reason: HlsOriginRuntimeNoAccountReason::OriginBindingPreempted,
+                } => HlsBoundAccountAcquireErrorKind::Detached,
+                HlsOriginRuntimeAcquireError::Fatal(_) => HlsBoundAccountAcquireErrorKind::Unavailable,
+            })?;
             // Drop releases unused allocations synchronously, including cancellation after prepare.
             let managed = prepared.preacquired_origin_account_handle;
             let entry = LiveHlsOriginEntry::parse_with_provider_configs(
@@ -628,12 +678,18 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
             )
             .ok_or(HlsBoundAccountAcquireErrorKind::Unavailable)?;
             let snapshot = prepared.snapshot;
-            let (pending, origin_headers) = {
+            let (pending, origin_headers, reservation_ttl_secs, playback_kind, account_runtime) = {
                 let current = session.read().await;
                 if current.is_gc_marked_for_removal() || !snapshot.matches_session(&current) {
                     return Err(HlsBoundAccountAcquireErrorKind::StoreRace);
                 }
-                (current.origin_account_manifest_pending.is_some(), current.origin_request_headers.clone())
+                (
+                    current.origin_account_manifest_pending.is_some(),
+                    current.origin_request_headers.clone(),
+                    current.account_overlap_timing().reservation_ttl_secs(),
+                    current.origin_playback_kind(),
+                    current.origin_account_runtime.clone(),
+                )
             };
             drop(managed);
             if work == HlsOriginAccountWork::Media && pending {
@@ -643,12 +699,12 @@ impl HlsOriginAccountRuntime for AppHlsOriginAccountRuntime {
                     allow_grace: class.allows_grace(),
                     priority: policy.priority,
                     connection_kind: policy.connection_kind,
-                    reservation_ttl_secs: session.read().await.account_overlap_timing().reservation_ttl_secs(),
+                    reservation_ttl_secs,
                     preacquired_provider_handle: None,
                     started_generation: None,
                     prepared_account: None,
-                    playback_kind: session.read().await.origin_playback_kind(),
-                    account_runtime: session.read().await.origin_account_runtime.clone(),
+                    playback_kind,
+                    account_runtime,
                 };
                 let manifest_commit_requirement = tuliprox_hls::api::hls_manifest_commit_requirement(
                     session,

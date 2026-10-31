@@ -14,6 +14,7 @@ serde_html_form = "0.4.1"
 shared = { workspace = true }
 tuliprox-mpegts = { workspace = true }
 tuliprox-media-server = { workspace = true }
+tuliprox-scripting = { workspace = true }
 aes = "0.8.4"
 arc-swap.workspace = true
 async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }

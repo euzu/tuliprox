@@ -41,6 +41,7 @@ pub(crate) async fn record_retryable_manifest_attempt_failure(
     let Some(ctx) = context.availability_runtime.as_ref().and_then(crate::hls_ctx::WeakHlsCtx::upgrade) else {
         return;
     };
+    ctx.hls_proxy.sync_recovery_binding_protection(&ctx.active_provider, &context.session, now_ms).await;
     let registration = register_terminal_reserve_reevaluation(ctx.clone(), Arc::clone(&context.session)).await;
     let _ = commit_post_refresh_terminal_fallback(ctx, Arc::clone(&context.session), action, registration).await;
 }

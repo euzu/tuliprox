@@ -129,12 +129,15 @@ semantics.
 | **`id`**             | String | **Mandatory.** The unique identifier of the mapping.                                                                                                                                                                                                                   |
 | **`match_as_ascii`** | Bool   | If `true`, Tuliprox normalizes (de-unicodes) values on-the-fly during regex evaluation, e.g., `Cinéma` is treated as `Cinema`. The actual assignment in the DSL, however, retains the original accents! Default is `false`.                                            |
 | **`stage`**          | Enum   | When the block runs. `processing` (default) places the block at the `M` position of the target's `processing_order`; `after_epg` runs once EPG channel IDs and logos are enriched. Counters always run after the final merge and sort regardless of the block's stage. |
-| **`mapper`**         | List   | A list of scripts (executed sequentially) containing the DSL logic. The list can optionally be gated by a `filter`. [See Mapper DSL](#21-the-mapper-dsl-mapper).                                                                                                       |
+| **`mapper`**         | List   | A list of scripts (executed sequentially) containing DSL or Rhai logic, selected per entry by its `type`. The list can optionally be gated by a `filter`. [See Mapper DSL](#21-the-mapper-dsl-mapper) and [Rhai scripts](#23-rhai-scripts-type-rhai).                  |
 | **`counter`**        | List   | Logic for assigning channel numbers sequentially. [See Counters](#22-counters-sequential-numbering-counter).                                                                                                                                                           |
 
 Each mapper entry may include an optional `name`. Names do not affect matching or execution order; they make startup
 errors and runtime diagnostics easier to identify. Existing unnamed entries remain valid and use their one-based list
 position in diagnostics.
+
+Each mapper entry also carries an optional `type` that selects the language of its `script`. See
+[Rhai scripts](#23-rhai-scripts-type-rhai).
 
 Mappings are parsed and compiled when configuration is loaded. A processing run reads an immutable shared snapshot, so
 hot reloads cannot partially replace a mapping while a target is being processed. Runtime diagnostics are summarized per
@@ -422,6 +425,191 @@ used when numbering must follow the final output order.
 
 `tvg-id` remains the EPG channel ID (`epg_channel_id`) and should not be used
 for channel numbering.
+
+---
+
+## 2.3 Rhai Scripts (`type: rhai`)
+
+A mapper rule may be written in [Rhai](https://rhai.rs) instead of the mapper DSL. Set `type: rhai` and put the
+program in `script`. Omit `type` (or set `type: dsl`) to keep the mapper DSL; every existing mapping file keeps its
+current meaning.
+
+```yaml
+mappings:
+  mapping:
+    - id: sports
+      mapper:
+        - name: favourite sports channels
+          filter: 'Group ~ ".*Sports.*"'
+          type: rhai
+          script: |
+            if item.name.contains("Live") {
+                item.group = "Live Sports HD";
+            }
+```
+
+`filter` works exactly as for DSL rules, and both kinds may be mixed in one `mapper` list. Rhai scripts are compiled
+when the configuration loads, so a syntax error fails the load with the mapping id and rule name instead of failing
+during a playlist refresh. A running refresh keeps using the snapshot it started with.
+
+### The `item` variable
+
+`item` is the channel being mapped. Read and write its fields with property or index syntax; both resolve the same
+field names as the DSL, including aliases such as `epg_id`.
+
+```rhai
+item.group = "Live Sports HD";
+item["Caption"] = "Renamed";      // writes both name and title, like @Caption
+item.chno = 42;                   // numeric
+item.chno = "7";                 // a numeric string is accepted too
+let current = item.name;          // read as a string
+let number = item.chno;           // read as an integer
+```
+
+The writable fields are the same as the DSL: `name`, `title`, `caption`, `group`, `id`, `chno`, `logo`, `logo_small`,
+`parent_code`, `audio_track`, `time_shift`, `rec`, `url`, `epg_channel_id`/`epg_id` and `genre`. `input` and `type` are
+read-only. Both the property and the index form go through the same field lookup, so `item.NAME`, `item.name` and
+`item["NAME"]` address the same field. Reading a field the item does not carry yields `()`, so a missing EPG id is
+testable; writing an unknown or read-only field is a runtime error that is logged as a mapping diagnostic and skips
+the rest of the script; assignments that ran before the error stay applied.
+
+### The `ctx` variable
+
+Templates, regular expressions and favourite aliases belong to the mapping rather than to one channel, so they are
+methods on `ctx`:
+
+```rhai
+// Regex: indexed and named captures, empty map when nothing matches
+let m = ctx.regex(item.title, "(?P<show>.+) - (\\d{4})$");
+if !m.is_empty() {
+    item.group = m["show"];
+    item.title = m["2"];
+}
+
+// Template from template.yml; () when the name is unknown
+let quality = ctx.template("quality");
+if quality != () {
+    item.title = item.title + " " + quality;
+}
+
+// Add the current channel to another group as an alias row
+ctx.favourite(item, "Favourites");
+```
+
+`ctx.regex` applies `match_as_ascii` of the mapping block. `ctx.favourite` copies the channel, sets the new group and a
+derived UUID, and appends it as an extra playlist row, identical to the DSL's `add_favourite`. Series and local-series
+items are skipped.
+
+### Differences from the DSL
+
+* `!template!` text substitution in the script source is not performed, because it would rewrite program text. Use
+  `ctx.template(name)`.
+* `print` writes at `trace` level. `capitalize` and `title_case` apply the same casing rules as in the DSL to string
+  arguments, including `title_case(text, ["HD", "UK"])`, which keeps the listed acronyms as written. Unlike the DSL
+  functions they accept only strings, not numbers or `()`; convert a number with `to_string()` first.
+* A script must not replace `item` or `ctx` with another value. Replacing `item` discards the channel with a
+  diagnostic; alias rows created with `ctx.favourite` before that point are kept. Replacing `ctx` produces a
+  diagnostic and loses all alias rows created so far. Shadowing either variable with `let` is harmless: the host
+  still finds the original binding and keeps the channel and context.
+* Assigning a valid field that the item cannot carry — `genre` on a live channel, a non-numeric `chno`, or a value
+  that is neither a string nor an integer, such as `()` from a regex capture that did not match — is reported as a
+  diagnostic and the script continues, exactly like the DSL. Assigning an unknown or read-only field stops the script.
+* Scripts cannot read or write files, open connections, import modules or call `eval`. Operation count, call depth,
+  string, array and map sizes are bounded, so a runaway loop stops with a diagnostic.
+* The Web UI shows a Rhai script as written; it does not parse or validate it, and the mapping file is not editable
+  there. The backend compiles the script when the configuration is loaded (startup or hot reload) and logs the
+  mapping id, the rule name and the position on failure.
+
+### Examples
+
+Extract a two-letter country prefix from the channel name into the group and set the remaining text as the caption.
+
+```rhai
+// example: country-prefix
+let m = ctx.regex(item.name, "^(?P<country>[A-Z]{2}):\\s*(?P<rest>.+)$");
+if !m.is_empty() {
+    item.group = "Sport " + m["country"];
+    item.caption = m["rest"];
+}
+```
+
+Strip a resolution suffix from the title to set the caption and append the quality tag to the group.
+
+```rhai
+// example: quality-suffix
+let m = ctx.regex(item.title, "^(?P<base>.+?)\\s+(?P<quality>UHD|FHD|HD|SD|4K)$");
+if !m.is_empty() {
+    item.caption = m["base"];
+    item.group = item.group + " " + m["quality"];
+}
+```
+
+Add an alias row to the "Favourites" group whenever the channel name contains "Sport".
+
+```rhai
+// example: favourites
+if item.name.contains("Sport") {
+    ctx.favourite(item, "Favourites");
+}
+```
+
+Add an offset of 1000 to all existing channel numbers while leaving unnumbered channels untouched.
+
+```rhai
+// example: channel-offset
+if item.chno > 0 {
+    item.chno = item.chno + 1000;
+}
+```
+
+Assign channels that lack an EPG channel identifier to a dedicated fallback group.
+
+```rhai
+// example: missing-epg
+if item.epg_channel_id == () || item.epg_channel_id == "" {
+    item.group = "No EPG";
+}
+```
+
+Normalize channel names to title case using the built-in helper function.
+
+```rhai
+// example: title-case
+item.caption = title_case(item.name);
+```
+
+Append the "quality" template to the title when the template is defined in the configuration.
+
+```rhai
+// example: template-suffix
+let quality = ctx.template("quality");
+if quality != () {
+    item.title = item.title + " " + quality;
+}
+```
+
+A complete `mapping.yml` combining multiple Rhai script rules in a single mapping definition:
+
+```yaml
+mappings:
+  mapping:
+    - id: sports_and_epg
+      mapper:
+        - name: favourite sports channels
+          filter: 'Group ~ ".*Sports.*"'
+          type: rhai
+          script: |
+            if item.name.contains("Sport") {
+                ctx.favourite(item, "Favourites");
+            }
+        - name: flag missing epg
+          filter: 'Group ~ ".*"'
+          type: rhai
+          script: |
+            if item.epg_channel_id == () || item.epg_channel_id == "" {
+                item.group = "No EPG";
+            }
+```
 
 ---
 

@@ -1,8 +1,19 @@
-[target.x86_64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+# The images are pinned in docker/cross so Dependabot keeps them current together with docker/cross.Dockerfile.
+[target.x86_64-unknown-linux-musl.dockerfile]
+file = "docker/cross/x86_64-unknown-linux-musl.Dockerfile"
+context = "docker/cross"
 
-[target.aarch64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+[target.aarch64-unknown-linux-musl.dockerfile]
+file = "docker/cross/aarch64-unknown-linux-musl.Dockerfile"
+context = "docker/cross"
+
+[target.armv7-unknown-linux-musleabihf.dockerfile]
+file = "docker/cross/armv7-unknown-linux-musleabihf.Dockerfile"
+context = "docker/cross"
+
+[target.x86_64-pc-windows-gnu.dockerfile]
+file = "docker/cross/x86_64-pc-windows-gnu.Dockerfile"
+context = "docker/cross"
 
 [build.env]
 passthrough = ["SOURCE_DATE_EPOCH"]

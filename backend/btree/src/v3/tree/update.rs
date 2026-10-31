@@ -1,9 +1,9 @@
 use super::{
-    commit_ordered_page_refs_under_existing_lock, encode_value, invalid_data, invalid_input, query_transaction,
-    recover_pending_under_existing_lock, stage_delete, stage_upsert, validate_transaction_links, verify_full,
-    with_exclusive_sidecar, BPlusTree, BPlusTreeMetadata, BPlusTreeQuery, BPlusTreeUpdate, DatabaseHeader,
-    DatabaseImage, ExclusiveSidecarGuard, FlushPolicy, WalOperationError, WalOutcome, WriteScratch, WriteTransaction,
-    PAGE_SIZE,
+    commit_ordered_page_refs_under_existing_lock, encode_value, invalid_data, invalid_input, is_verified,
+    mark_verified, query_transaction, recover_pending_under_existing_lock, stage_delete, stage_upsert,
+    validate_transaction_links, verify_full, with_exclusive_sidecar, BPlusTree, BPlusTreeMetadata, BPlusTreeQuery,
+    BPlusTreeUpdate, DatabaseHeader, DatabaseImage, ExclusiveSidecarGuard, FlushPolicy, VerifiedIdentity,
+    WalOperationError, WalOutcome, WriteScratch, WriteTransaction, PAGE_SIZE,
 };
 use crate::{
     codec::{binary_serialize, binary_serialize_into},
@@ -18,6 +18,18 @@ pub(super) struct ActiveBatch {
     pub(super) _guard: ExclusiveSidecarGuard,
 }
 
+fn verify_if_needed<K, V>(filepath: &Path, query: &mut BPlusTreeQuery<K, V>) -> io::Result<VerifiedIdentity>
+where
+    K: Ord + for<'de> Deserialize<'de> + Clone,
+{
+    let identity = VerifiedIdentity::from_header(&query.header);
+    if !is_verified(filepath, identity) {
+        let _ = verify_full(query)?;
+        mark_verified(filepath, identity);
+    }
+    Ok(identity)
+}
+
 impl<K, V> BPlusTreeUpdate<K, V>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -25,16 +37,13 @@ where
 {
     pub fn try_new(filepath: &Path) -> io::Result<Self> {
         let mut query = BPlusTreeQuery::<K, V>::try_new(filepath)?;
-        let _ = verify_full(&mut query)?;
-        let database_id = query.header.database_id;
-        let verified_generation = query.header.generation;
-        let verified_next_page_id = query.header.next_page_id;
+        let identity = verify_if_needed(filepath, &mut query)?;
         drop(query);
         Ok(Self {
             filepath: filepath.to_path_buf(),
-            database_id,
-            verified_generation,
-            verified_next_page_id,
+            database_id: identity.database_id,
+            verified_generation: identity.generation,
+            verified_next_page_id: identity.next_page_id,
             flush_policy: FlushPolicy::Immediate,
             active: None,
             scratch: WriteScratch::default(),
@@ -62,10 +71,10 @@ where
             || header.next_page_id != self.verified_next_page_id
         {
             let mut query = BPlusTreeQuery::<K, V>::from_file_unlocked(File::open(&self.filepath)?)?;
-            let _ = verify_full(&mut query)?;
-            self.database_id = query.header.database_id;
-            self.verified_generation = query.header.generation;
-            self.verified_next_page_id = query.header.next_page_id;
+            let identity = verify_if_needed(&self.filepath, &mut query)?;
+            self.database_id = identity.database_id;
+            self.verified_generation = identity.generation;
+            self.verified_next_page_id = identity.next_page_id;
         }
         let transaction = WriteTransaction::new(header, base.as_slice().len())?;
         self.active = Some(ActiveBatch { base, transaction, _guard: guard });
@@ -339,11 +348,13 @@ where
         let committed_header = DatabaseHeader::decode(prepared[0].1)?;
         let committed_generation = committed_header.generation;
         let committed_next_page_id = committed_header.next_page_id;
+        let committed_identity = VerifiedIdentity::from_header(&committed_header);
         let result = commit_ordered_page_refs_under_existing_lock(&self.filepath, &prepared);
         match result {
             Ok(()) => {
                 self.verified_generation = committed_generation;
                 self.verified_next_page_id = committed_next_page_id;
+                mark_verified(&self.filepath, committed_identity);
                 Ok(())
             }
             Err(error) => {
@@ -354,6 +365,7 @@ where
                 if outcome == Some(WalOutcome::CommittedCleanupPending) {
                     self.verified_generation = committed_generation;
                     self.verified_next_page_id = committed_next_page_id;
+                    mark_verified(&self.filepath, committed_identity);
                 }
                 if let Err(recovery_error) = recover_pending_under_existing_lock(&self.filepath) {
                     log::error!(

@@ -35,6 +35,17 @@ const PROVIDER_ID_KEY: &str = "provider-id";
 /// title, but a plugin that supplies no group has no title convention to read.
 const DEFAULT_GROUP: &str = "Uncategorized";
 
+/// Channels one `fetch-playlist` / `fetch-epg` call may return; beyond that the
+/// call fails like a trap.
+const MAX_RETURNED_CHANNELS: usize = 1_000_000;
+
+fn check_channels(what: &str, returned: usize) -> Result<(), CallError> {
+    if returned > MAX_RETURNED_CHANNELS {
+        return Err(CallError::Trap(format!("{what} returned {returned} channels (cap {MAX_RETURNED_CHANNELS})")));
+    }
+    Ok(())
+}
+
 /// The enabled plugin `plugin` that runs `input.fetch`.
 fn provider<'d>(
     dispatcher: &'d HookDispatcher<'_>,
@@ -115,6 +126,7 @@ async fn call_fetch_playlist(
     let channels = call_with_deadline(limits, guest.call_fetch_playlist(live.armed(), &wit_request(request))).await;
     host_fns::end_call(live.store_mut().data_mut()).await;
     let channels = channels?.map_err(|err| CallError::Trap(format!("fetch-playlist returned err: {err}")))?;
+    check_channels("fetch-playlist", channels.len())?;
     Ok(channels_to_items(request.input_name, channels))
 }
 
@@ -204,6 +216,7 @@ async fn call_fetch_epg(
     let returned = call_with_deadline(limits, guest.call_fetch_epg(live.armed(), &wit_request(request))).await;
     host_fns::end_call(live.store_mut().data_mut()).await;
     let returned = returned?.map_err(|err| CallError::Trap(format!("fetch-epg returned err: {err}")))?;
+    check_channels("fetch-epg", returned.len())?;
     Ok(returned
         .into_iter()
         .map(|(channel, programmes)| {
@@ -239,6 +252,13 @@ mod tests {
             input_stream_id: String::new(),
             extra: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_call_may_return_at_most_a_million_channels() {
+        assert!(check_channels("fetch-playlist", MAX_RETURNED_CHANNELS).is_ok());
+        let err = check_channels("fetch-epg", MAX_RETURNED_CHANNELS + 1).unwrap_err();
+        assert!(matches!(err, CallError::Trap(ref message) if message.contains("fetch-epg returned 1000001")), "{err}");
     }
 
     #[test]

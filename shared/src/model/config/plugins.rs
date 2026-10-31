@@ -20,7 +20,7 @@ pub const DEFAULT_PLUGINS_MAX_EXEC: &str = "5s";
 pub const DEFAULT_PLUGINS_MAX_TASK_EXEC: &str = "10m";
 /// Default for `plugins.stream_header_ttl`: how long injected upstream headers
 /// are reused per (plugin, user, channel) before the plugin is asked again.
-pub const DEFAULT_PLUGINS_STREAM_HEADER_TTL: &str = "60s";
+pub const DEFAULT_PLUGINS_STREAM_HEADER_TTL: &str = "1m";
 /// Default for `plugins.max_instances`: concurrent instances of one plugin.
 pub const DEFAULT_PLUGINS_MAX_INSTANCES: u16 = 4;
 /// Default for `plugins.batch_size`: items sent to a plugin per hook call.

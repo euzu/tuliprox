@@ -1,6 +1,7 @@
 //! One metadata-only window plan for accelerated, untagged live playlists.
 use crate::{
     media_reserve::HlsManifestCommitIdentity, HlsAccessLease, HlsAccessLeaseState, HlsSession, HlsSessionMode,
+    SegmentCacheStatus,
 };
 use tuliprox_core::model::StripConfig;
 
@@ -20,6 +21,8 @@ pub struct HlsLiveWindowPlan {
     pub source_commit_identity: Option<HlsManifestCommitIdentity>,
     origin_sequences: Vec<u64>,
     strip: StripConfig,
+    view: HlsLiveWindowView,
+    recovered_startup: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,12 +51,15 @@ impl HlsLiveWindowView {
 
 impl HlsLiveWindowPlan {
     pub fn is_current(&self, session: &HlsSession) -> bool {
-        session.uses_fast_start_live_window()
-            && self.origin_commits == session.origin_manifest_commits()
-            && self.origin_work_generation == session.activity.origin_work_generation
-            && self.source_commit_identity == session.live_window_source_identity()
-            && self.origin_sequences.as_slice() == session.live_origin_sequences()
-            && self.strip == session.live_window_strip
+        session.plan_live_window(self.view).as_ref() == Some(self)
+    }
+
+    pub(crate) fn is_startup_recovery(&self) -> bool { self.recovered_startup }
+
+    pub(crate) fn is_ready(&self, session: &HlsSession) -> bool {
+        self.visible.iter().all(|seq| {
+            session.segments.get(seq).is_some_and(|entry| matches!(entry.status, SegmentCacheStatus::Ready { .. }))
+        })
     }
 }
 
@@ -84,8 +90,9 @@ impl HlsSession {
             })
     }
 
-    /// Entry selection uses only origin metadata. Active slides may retain cached
-    /// predecessors from this view to preserve three target durations.
+    /// Entry selection follows origin metadata unless a selected fetch failed.
+    /// Recovery may consume the stripped reserve, but never crosses a failed
+    /// object or changes an active lease's published window.
     pub fn plan_live_window(&self, view: HlsLiveWindowView) -> Option<HlsLiveWindowPlan> {
         if !self.uses_fast_start_live_window()
             || self.live_origin_sequences().is_empty()
@@ -96,6 +103,7 @@ impl HlsSession {
             return None;
         }
         let origin = self.live_origin_sequences();
+        let mut recovered_startup = false;
         let (visible, hidden_tail, effective_strip_segments) = match view {
             HlsLiveWindowView::Entry => {
                 let strip = crate::initial_strip::initial_hls_strip_segments_for_durations(
@@ -103,7 +111,26 @@ impl HlsSession {
                     &self.origin_window_durations_ms,
                 );
                 let end = origin.len().saturating_sub(strip);
-                (origin[end.saturating_sub(3)..end].to_vec(), origin[end..].to_vec(), strip)
+                let start = end.saturating_sub(crate::renderer::MIN_VISIBLE_SEGMENTS);
+                if origin[start..end].iter().any(|seq| self.live_startup_segment_failed(*seq)) {
+                    recovered_startup = true;
+                    let runs = origin[start..].split(|seq| self.live_startup_segment_failed(*seq));
+                    let mut selected = &origin[0..0];
+                    for run in runs {
+                        if run.len() >= crate::renderer::MIN_VISIBLE_SEGMENTS {
+                            selected = &run[..crate::renderer::MIN_VISIBLE_SEGMENTS];
+                            break;
+                        }
+                        if run.len() > selected.len() {
+                            selected = run;
+                        }
+                    }
+                    let last = selected.last()?;
+                    let selected_end = origin.iter().position(|seq| seq == last)? + 1;
+                    (selected.to_vec(), origin[selected_end..].to_vec(), origin.len() - selected_end)
+                } else {
+                    (origin[start..end].to_vec(), origin[end..].to_vec(), strip)
+                }
             }
             HlsLiveWindowView::Active { first_published } => {
                 let available = origin.iter().copied().filter(|seq| *seq >= first_published).collect::<Vec<_>>();
@@ -124,7 +151,26 @@ impl HlsSession {
             source_commit_identity: self.live_window_source_identity(),
             origin_sequences: origin.to_vec(),
             strip: self.live_window_strip.clone(),
+            view,
+            recovered_startup,
         })
+    }
+
+    pub(crate) fn live_startup_segment_failed(&self, seq: u64) -> bool {
+        self.segments.get(&seq).is_none_or(|entry| {
+            matches!(
+                entry.status,
+                SegmentCacheStatus::FailedPermanent { .. }
+                    | SegmentCacheStatus::FailedRetryable { .. }
+                    | SegmentCacheStatus::Expired
+            )
+        })
+    }
+
+    pub fn live_startup_segments_exhausted(&self) -> bool {
+        self.uses_fast_start_live_window()
+            && !self.live_origin_sequences().is_empty()
+            && self.start_segments_exhausted()
     }
 
     pub fn plan_live_window_for_lease(&mut self, lease: &HlsAccessLease) -> Option<HlsLiveWindowPlan> {
@@ -161,6 +207,19 @@ impl HlsSession {
         issued_at_ms: u64,
         snapshot: &crate::media_reserve::HlsLeaseManifestSnapshot,
     ) {
+        if snapshot
+            .startup_revisions
+            .as_ref()
+            .and_then(|publication| publication.window_plan.as_ref())
+            .is_some_and(|window| window.plan.is_startup_recovery())
+            && snapshot.visible_segments.len() < crate::renderer::MIN_VISIBLE_SEGMENTS
+        {
+            let visible = snapshot.visible_proxy_seqs().collect::<Vec<_>>();
+            if self.last_warned_short_startup_window.as_ref() != Some(&visible) {
+                crate::short_manifest::log_short_window_warning(self, visible.len(), "startup window recovered");
+                self.last_warned_short_startup_window = Some(visible);
+            }
+        }
         let demand = self.live_window_demands.entry(lease_id.clone()).or_insert_with(|| HlsLiveWindowDemand {
             issued_at_ms,
             view: HlsLiveWindowView::Entry,

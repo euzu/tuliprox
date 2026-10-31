@@ -87,6 +87,14 @@
         &:nth-child(even) {
           background-color: var(--table-alternate-background-color);
         }
+        &.tp__table__row--clickable {
+          cursor: pointer;
+        }
+        &.tp__table__row--clickable:hover,
+        &.tp__table__row--selected {
+          background-color: var(--menu-item-hover-background-color);
+          color: var(--menu-item-hover-color);
+        }
         &:not(:last-child) {
           border-bottom: 1px solid var(--border-color);
         }

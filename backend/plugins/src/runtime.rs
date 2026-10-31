@@ -235,9 +235,9 @@ const POOL_MIN_SLOTS: u32 = 4;
 const POOL_MAX_SLOTS: u32 = 64;
 /// Core instances one component may hold (the main module plus the
 /// `wit-component` shim and fixup modules).
-const POOL_CORE_INSTANCES_PER_SLOT: u32 = 8;
+pub(crate) const POOL_CORE_INSTANCES_PER_SLOT: u32 = 8;
 /// Tables across those core instances (one funcref table per module).
-const POOL_TABLES_PER_SLOT: u32 = 4;
+pub(crate) const POOL_TABLES_PER_SLOT: u32 = 4;
 
 /// `bytes` in whole MiB, rounded up.
 fn mib_ceil(bytes: u64) -> u32 { u32::try_from(bytes.div_ceil(MIB)).unwrap_or(u32::MAX) }
@@ -463,7 +463,10 @@ impl CpuBudget {
                 Ok(UpdateDeadline::Interrupt)
             } else {
                 remaining.store(left - 1, Ordering::Relaxed);
-                Ok(UpdateDeadline::Yield(1))
+                // Not `UpdateDeadline::Yield`: that re-queues the guest at once, and tokio polls its timer
+                // and I/O driver only every 61 polls, so a few spinning guests would delay every timer
+                // by 61 slices (about 600 ms). `yield_now` defers the guest until after the driver ran.
+                Ok(UpdateDeadline::YieldCustom(1, Box::pin(tokio::task::yield_now())))
             }
         });
         budget.arm(store);

@@ -129,6 +129,39 @@ targets:
 8. Segment and MAP requests activate or refresh the lease. When the player stops, the lease idles and is later removed.
 9. When no usable lease and no origin/cache work remain, the shared session is eligible for cleanup.
 
+The local master only prepares access: it neither contacts the origin nor reserves provider capacity. Its existing
+access-lease entry timeout is unchanged. Loading the session URL in time begins processing under the configured manifest
+budget (`initial_manifest_wait_timeout_secs`, 90 seconds by default), even if the original entry deadline passes meanwhile.
+
+The first accepted origin media manifest establishes one shared start anchor. For its target duration `T`, the account is
+hard-active through `1T`, then soft-active through `3T`; its provider reservation expires at `3T + 1s`. The reservation is
+installed before the manifest allocation is released, so the first segment fetches retain admission. An allocation and its
+reservation represent one logical slot for `hls-cache:<proxy_session_id>`, including parallel viewers and origin requests.
+
+Manifest polling, additional access leases, retries, and a target-duration change cannot extend this initial window.
+Authorized media activity renews protection through the normal media paths. Soft overlap and reclaim still apply; active
+origin work prevents displacement. An already admitted resource fetch keeps its slot throughout preparation, transfer,
+backoff, retries and required processing under one fixed overall deadline. This work right is stored on the same provider
+lease and counts no additional slot. Once it ends, only normal protection or another admitted operation remains.
+New independent work after normal expiry must obtain ordinary provider admission; it cannot extend an old retry right.
+After completed playback becomes idle and its protection expires, a new successful admission starts a new window at its
+first accepted manifest. Binding replacement or polling without a new allocation retains the previous anchor.
+
+When a start exhausts its admission retry budget and has neither a usable window nor preparation still in flight, Tuliprox
+wakes waiting requests and releases its reservation immediately. Capacity denial uses `provider_connections_exhausted`:
+enabled custom video with an asset returns a finite manifest with accessible media; disabled video uses
+`custom_stream_response_error_status` (default `502`); an enabled but missing asset falls back to `503`. Repeated access to
+that failed lease does not start new retries. A fresh master may start again after capacity becomes available. Cancelling
+one viewer does not terminate another viewer's shared work, and stale cleanup cannot release a successor binding.
+Running account provisioning is a provisional result and keeps Pending/Idle leases retryable, including when provisioning
+media is unavailable. Only an explicit capacity failure selects the provider-exhausted video; generic preparation failures
+use the channel-unavailable response.
+
+The resource deadline is captured from the existing resource retry budget. Playlist polling, additional viewers and
+changes to target duration or timeout configuration do not renew it. Each attempt also keeps its individual timeouts.
+For direct transient delivery the body retains the work right until EOF, timeout or cancellation; exposed bytes are never
+replayed by a new complete retry. A cancelled viewer leaves shared downloads needed by other viewers running.
+
 ```mermaid
 flowchart TD
     A["Generated HLS live URL"] --> B["User and target checks"]

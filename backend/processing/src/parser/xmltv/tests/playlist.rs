@@ -134,6 +134,8 @@ fn epg_priority_merge_flatten_uses_same_backfill_rules() {
                 None,
                 vec![epg_programme("demo.channel", 10, 20, Some("High Show"), None)],
             ))],
+            channel_sources: None,
+            input_name: None,
         },
         Epg {
             logo_override: false,
@@ -145,6 +147,8 @@ fn epg_priority_merge_flatten_uses_same_backfill_rules() {
                 Some("http://low/icon.png"),
                 vec![epg_programme("demo.channel", 20, 30, Some("Low Show"), None)],
             ))],
+            channel_sources: None,
+            input_name: None,
         },
     ])
     .expect("flattened epg");
@@ -169,6 +173,8 @@ fn epg_priority_merge_flatten_keeps_shared_arc_channels() {
         priority: 0,
         attributes: None,
         children: vec![Arc::clone(&shared_channel)],
+        channel_sources: None,
+        input_name: None,
     }])
     .expect("flattened epg");
 
@@ -376,6 +382,7 @@ fn ics_dummy_policy_fills_after_real_programme_merge_without_overwriting_xmltv()
                         ..IcsEpgSourceConfig::default()
                     }),
                 },
+                source_idx: 1,
             },
         ]);
         let mut id_cache = EpgIdCache::new(None);

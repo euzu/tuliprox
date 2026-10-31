@@ -18,8 +18,12 @@ The repository ships with various helper scripts located under `bin/` to simplif
 * `bin/build_docs.sh`: Script to handle mdBook generation.
 * `bin/build_fe.sh`: The shared entry point for building docs plus frontend assets.
 * `bin/build_local.sh`: Compiles the backend locally.
-* `bin/build_docker.sh`: Executes the multi-stage Docker build pipeline.
-* `bin/release.sh`: Orchestrates a full production release build.
+* `bin/build_docker.sh`: Builds the release bundles and the Docker images.
+
+Releases are built by CI. Every merge into `master` raises the minor version, tags the release and publishes a
+GitHub release with one bundle per platform: `x86_64` and `aarch64` Linux (musl), `armv7` Linux (musl) and `x86_64`
+Windows. Each bundle contains the binary, the Web UI (`web/`) and the `resources/` directory, the same files as the
+Docker image. GitHub attaches the source code archives itself.
 
 This project uses a `Makefile` to automate development tasks, tool installations, and build processes. This ensures a
 consistent
@@ -42,6 +46,10 @@ environment across different machines.
 * `make lint`: Runs clippy to find common mistakes and improve code quality.
 * `make lint-fix`: Automatically applies clippy suggestions (where possible).
 * `make markdown-lint`: Checks all .md files for formatting consistency.
+* `make i18n-check`: Reports every locale whose translation keys differ from `en.json`. Requires
+  [jq](https://jqlang.org), which `make install-tools` does not install (for example `sudo apt install jq` or
+  `brew install jq`).
+* `make pre-merge-check`: Verifies a merged tree: architecture gates, clippy, locale keys, and all workspace tests.
 
 **Formatting**:
 

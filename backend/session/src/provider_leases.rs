@@ -14,11 +14,9 @@
 //!   never confirmed / failed / expired -> removed
 //! ```
 //!
-//! A lease only reserves capacity against other playbacks once real media activity
-//! confirmed it *and* the endpoint configured a reconnect window. A manifest
-//! response with HTTP 200 is not playback: treating it as one let abandoned starts
-//! and manifest retries pile up reservations that outlived the streams they belonged
-//! to and blocked unrelated clients behind the same reverse proxy.
+//! Confirmed media with a reconnect window reserves capacity. Shared live HLS may
+//! additionally grant a bounded start reservation while its manifest allocation
+//! still owns the slot. This does not confirm media and cannot be renewed by polls.
 
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
@@ -200,6 +198,7 @@ impl ProviderAffinities {
 #[derive(Debug, Clone)]
 pub enum ProviderLeaseState {
     Starting { expires_at: TokioInstant },
+    HlsStarting { expires_at: TokioInstant },
     Active { request_id: PlaybackRequestId, expires_at: TokioInstant },
     Idle { expires_at: TokioInstant },
 }
@@ -217,13 +216,17 @@ impl ProviderLeaseState {
 
     fn expires_at(&self) -> TokioInstant {
         match self {
-            Self::Starting { expires_at } | Self::Active { expires_at, .. } | Self::Idle { expires_at } => *expires_at,
+            Self::Starting { expires_at }
+            | Self::HlsStarting { expires_at }
+            | Self::Active { expires_at, .. }
+            | Self::Idle { expires_at } => *expires_at,
         }
     }
 
     pub fn as_log_state(&self) -> &'static str {
         match self {
             Self::Starting { .. } => "starting",
+            Self::HlsStarting { .. } => "hls-starting",
             Self::Active { .. } => "active",
             Self::Idle { .. } => "idle",
         }
@@ -326,12 +329,20 @@ pub struct ProviderSlotLease {
     pub idle_ttl_secs: u64,
     pub created_at: TokioInstant,
     pub last_activity_at: TokioInstant,
+    /// Independently identified, fixed deadlines of admitted shared-HLS work.
+    work_rights: HashMap<PlaybackRequestId, TokioInstant>,
 }
 
 impl ProviderSlotLease {
     /// True when this lease holds a slot back for its playback against others.
     #[inline]
-    fn reserves_capacity(&self) -> bool { self.state.is_confirmed() && self.idle_ttl_secs > 0 }
+    pub fn reserves_capacity(&self) -> bool {
+        let now = TokioInstant::now();
+        ((self.state.is_confirmed() || matches!(self.state, ProviderLeaseState::HlsStarting { .. }))
+            && self.idle_ttl_secs > 0
+            && self.state.expires_at() > now)
+            || self.work_rights.values().any(|deadline| *deadline > now)
+    }
 
     pub fn idle_ttl_remaining_ms(&self, now: TokioInstant) -> u64 {
         self.state
@@ -346,13 +357,17 @@ impl ProviderSlotLease {
     #[inline]
     pub fn contains_request(&self, request_id: PlaybackRequestId) -> bool { self.request_ids.contains(&request_id) }
 
+    fn effective_expiry(&self) -> TokioInstant {
+        self.work_rights.values().copied().max().unwrap_or_else(|| self.state.expires_at()).max(self.state.expires_at())
+    }
+
     /// True once the lease's deadline has passed.
     ///
     /// A running `Active` stream without a reconnect window is exempt: only an
     /// explicit finish/release may end it, never wall-clock expiry.
     #[inline]
     fn is_expired(&self, now: TokioInstant) -> bool {
-        self.state.expires_at() <= now
+        self.effective_expiry() <= now
             && !matches!(self.state, ProviderLeaseState::Active { .. } if self.idle_ttl_secs == 0)
     }
 }
@@ -437,7 +452,7 @@ impl ProviderLeaseTable {
 
     fn remove_lease(&mut self, id: PlaybackLeaseId) -> Option<ProviderSlotLease> {
         let lease = self.leases.remove(&id)?;
-        self.expirations.remove(&(lease.state.expires_at(), id));
+        self.expirations.remove(&(lease.effective_expiry(), id));
         Self::deindex(&mut self.by_owner, &mut self.by_provider, &lease);
         self.affinity.orphan(&lease);
         self.released_providers.push(Arc::clone(&lease.provider_name));
@@ -536,23 +551,25 @@ impl ProviderLeaseTable {
                 self.remove_lease(id);
             }
             if let Some(lease) = self.leases.get_mut(&id) {
-                self.expirations.remove(&(lease.state.expires_at(), id));
+                self.expirations.remove(&(lease.effective_expiry(), id));
                 if lease.provider_name != *provider_name {
                     Self::rebind_lease_provider(&mut self.by_owner, &mut self.by_provider, lease, provider_name);
                     lease.binding_generation = lease.binding_generation.saturating_add(1);
                     lease.request_ids.clear();
                     lease.request_tokens.clear();
+                    lease.work_rights.clear();
                     lease.created_at = now;
                     lease.idle_ttl_secs = 0;
                     lease.state = ProviderLeaseState::Starting { expires_at: Self::startup_expiry(now, 0) };
-                } else if lease.state.is_idle() {
+                } else if lease.state.is_idle() && !lease.work_rights.values().any(|deadline| *deadline > now) {
                     lease.binding_generation = lease.binding_generation.saturating_add(1);
                     lease.request_ids.clear();
                     lease.request_tokens.clear();
+                    lease.work_rights.clear();
                     lease.created_at = now;
                     lease.state =
                         ProviderLeaseState::Starting { expires_at: Self::startup_expiry(now, lease.idle_ttl_secs) };
-                } else if !lease.state.is_confirmed() {
+                } else if matches!(lease.state, ProviderLeaseState::Starting { .. }) {
                     lease.state = ProviderLeaseState::Starting {
                         expires_at: Self::startup_expiry(lease.created_at, lease.idle_ttl_secs),
                     };
@@ -563,7 +580,7 @@ impl ProviderLeaseTable {
                 lease.request_id = request_id;
                 lease.request_ids.insert(request_id);
                 lease.last_activity_at = now;
-                self.expirations.insert((lease.state.expires_at(), id));
+                self.expirations.insert((lease.effective_expiry(), id));
                 return id;
             }
         }
@@ -581,9 +598,10 @@ impl ProviderLeaseTable {
             idle_ttl_secs: 0,
             created_at: now,
             last_activity_at: now,
+            work_rights: HashMap::new(),
         };
         let id = lease.id;
-        self.expirations.insert((lease.state.expires_at(), id));
+        self.expirations.insert((lease.effective_expiry(), id));
         Self::index(&mut self.by_owner, &mut self.by_provider, &lease);
         self.leases.insert(id, lease);
         id
@@ -614,7 +632,7 @@ impl ProviderLeaseTable {
             if lease.provider_name != *provider_name || !lease.contains_request(request_id) {
                 return None;
             }
-            self.expirations.remove(&(lease.state.expires_at(), id));
+            self.expirations.remove(&(lease.effective_expiry(), id));
             let was_confirmed = lease.state.is_confirmed();
             // The renewing endpoint may know the true media kind (VOD/Series/HLS via
             // classification), so adopt it — but never downgrade a reconnect-capable
@@ -625,7 +643,10 @@ impl ProviderLeaseTable {
             }
             lease.last_activity_at = now;
             lease.idle_ttl_secs = idle_ttl_secs;
-            lease.state = if was_confirmed {
+            lease.state = if matches!(lease.state, ProviderLeaseState::HlsStarting { .. }) {
+                // Only media confirmation may replace this fixed start deadline.
+                lease.state.clone()
+            } else if was_confirmed {
                 ProviderLeaseState::Active {
                     request_id: lease.request_id,
                     expires_at: Self::confirmed_expiry(now, idle_ttl_secs),
@@ -633,7 +654,7 @@ impl ProviderLeaseTable {
             } else {
                 ProviderLeaseState::Starting { expires_at: Self::startup_expiry(lease.created_at, idle_ttl_secs) }
             };
-            self.expirations.insert((lease.state.expires_at(), id));
+            self.expirations.insert((lease.effective_expiry(), id));
             if was_confirmed {
                 self.affinity.remember(lease, now);
             }
@@ -666,10 +687,91 @@ impl ProviderLeaseTable {
         self.begin_owner(owner, provider_name, kind, request_id)
     }
 
+    /// Grants a fixed HLS start window after admission, without confirming media.
+    /// The caller must hold the capacity transition and prove a live allocation.
+    pub(super) fn reserve_hls_start(
+        &mut self,
+        owner: &str,
+        provider_name: &Arc<str>,
+        request_id: PlaybackRequestId,
+        ttl: Duration,
+    ) -> Option<ProviderBindingTag> {
+        if ttl.is_zero() {
+            return None;
+        }
+        let id = self.begin_owner(owner, provider_name, PlaybackKind::LiveHls, request_id);
+        let lease = self.leases.get_mut(&id)?;
+        if !lease.state.is_confirmed() && !matches!(lease.state, ProviderLeaseState::HlsStarting { .. }) {
+            self.expirations.remove(&(lease.effective_expiry(), id));
+            lease.idle_ttl_secs = ttl.as_secs().saturating_add(u64::from(ttl.subsec_nanos() > 0));
+            lease.state = ProviderLeaseState::HlsStarting {
+                expires_at: TokioInstant::now() + ttl.min(Duration::from_secs(MAX_DEADLINE_OFFSET_SECS)),
+            };
+            self.expirations.insert((lease.effective_expiry(), id));
+        }
+        Some(ProviderBindingTag::new(id, lease.binding_generation))
+    }
+
+    /// A new operation cannot borrow an expired normal reservation from other
+    /// operations. A first grant may instead use an admitted live allocation.
+    pub(super) fn grant_work_right(
+        &mut self,
+        owner: &str,
+        provider: &Arc<str>,
+        tag: ProviderBindingTag,
+        work_id: PlaybackRequestId,
+        deadline: TokioInstant,
+        owns_allocation: bool,
+    ) -> bool {
+        let now = TokioInstant::now();
+        let Some(id) = self.by_owner.get(owner).copied() else { return false };
+        let Some(lease) = self.leases.get_mut(&id) else { return false };
+        if deadline <= now
+            || lease.kind != PlaybackKind::LiveHls
+            || lease.provider_name != *provider
+            || tag != ProviderBindingTag::new(id, lease.binding_generation)
+            || (!((lease.state.is_confirmed() || matches!(lease.state, ProviderLeaseState::HlsStarting { .. }))
+                && lease.idle_ttl_secs > 0
+                && lease.state.expires_at() > now)
+                && !(owns_allocation && lease.work_rights.values().all(|deadline| *deadline <= now)))
+        {
+            return false;
+        }
+        self.expirations.remove(&(lease.effective_expiry(), id));
+        lease.work_rights.entry(work_id).or_insert(deadline);
+        self.expirations.insert((lease.effective_expiry(), id));
+        true
+    }
+
+    pub(super) fn release_work_right(
+        &mut self,
+        owner: &str,
+        provider: &Arc<str>,
+        tag: ProviderBindingTag,
+        work_id: PlaybackRequestId,
+    ) {
+        let Some(id) = self.by_owner.get(owner).copied() else { return };
+        let Some(lease) = self.leases.get_mut(&id) else { return };
+        if lease.provider_name != *provider || tag != ProviderBindingTag::new(id, lease.binding_generation) {
+            return;
+        }
+        self.expirations.remove(&(lease.effective_expiry(), id));
+        lease.work_rights.remove(&work_id);
+        self.expirations.insert((lease.effective_expiry(), id));
+        self.prune(TokioInstant::now());
+    }
+
+    pub(super) fn has_work_right(&self, owner: &str, tag: ProviderBindingTag, work_id: PlaybackRequestId) -> bool {
+        self.lease_of_owner(owner).is_some_and(|lease| {
+            tag == ProviderBindingTag::new(lease.id, lease.binding_generation)
+                && lease.work_rights.get(&work_id).is_some_and(|deadline| *deadline > TokioInstant::now())
+        })
+    }
+
     /// Records confirmed media activity for a playback owner.
     ///
-    /// Only a confirmed lease with a reconnect window may reserve provider capacity
-    /// against other playbacks.
+    /// Confirms real media; the explicit HLS start grant reserves capacity without
+    /// calling this path or creating provider affinity.
     pub fn confirm_owner(&mut self, owner: &str) -> Option<PlaybackLeaseId> {
         let id = self.by_owner.get(owner).copied()?;
         self.apply_confirmation(id, true)
@@ -716,7 +818,7 @@ impl ProviderLeaseTable {
             return None;
         }
         let lease = self.leases.get_mut(&id)?;
-        self.expirations.remove(&(lease.state.expires_at(), id));
+        self.expirations.remove(&(lease.effective_expiry(), id));
         lease.last_activity_at = now;
         if !reserve {
             lease.idle_ttl_secs = 0;
@@ -725,7 +827,7 @@ impl ProviderLeaseTable {
             request_id: lease.request_id,
             expires_at: Self::confirmed_expiry(now, lease.idle_ttl_secs),
         };
-        self.expirations.insert((lease.state.expires_at(), id));
+        self.expirations.insert((lease.effective_expiry(), id));
         self.affinity.remember(lease, now);
         Some(id)
     }
@@ -752,10 +854,10 @@ impl ProviderLeaseTable {
                 && lease.kind.is_reconnect_capable()
                 && ttl > 0;
             if keep {
-                self.expirations.remove(&(lease.state.expires_at(), id));
+                self.expirations.remove(&(lease.effective_expiry(), id));
                 lease.idle_ttl_secs = ttl;
                 lease.state = ProviderLeaseState::Idle { expires_at: deadline_after(now, ttl) };
-                self.expirations.insert((lease.state.expires_at(), id));
+                self.expirations.insert((lease.effective_expiry(), id));
                 self.affinity.remember(lease, now);
             }
             (keep, Arc::clone(&lease.provider_name))
@@ -841,10 +943,10 @@ impl ProviderLeaseTable {
                 && lease.kind.is_reconnect_capable()
                 && ttl > 0;
             if keep {
-                self.expirations.remove(&(lease.state.expires_at(), id));
+                self.expirations.remove(&(lease.effective_expiry(), id));
                 lease.idle_ttl_secs = ttl;
                 lease.state = ProviderLeaseState::Idle { expires_at: deadline_after(now, ttl) };
-                self.expirations.insert((lease.state.expires_at(), id));
+                self.expirations.insert((lease.effective_expiry(), id));
                 self.affinity.remember(lease, now);
             }
             (keep, Arc::clone(&lease.provider_name))
@@ -916,7 +1018,7 @@ impl ProviderLeaseTable {
         for id in ids {
             let Some(lease) = self.leases.get(id) else { continue };
             match lease.state {
-                ProviderLeaseState::Starting { .. } => usage.starting += 1,
+                ProviderLeaseState::Starting { .. } | ProviderLeaseState::HlsStarting { .. } => usage.starting += 1,
                 ProviderLeaseState::Active { .. } => usage.active += 1,
                 ProviderLeaseState::Idle { .. } => usage.idle += 1,
             }
@@ -924,10 +1026,10 @@ impl ProviderLeaseTable {
         usage
     }
 
-    /// Confirmed leases that reserve a slot on this provider for somebody else.
+    /// Confirmed leases and explicit HLS start grants reserving a foreign slot.
     ///
     /// Unconfirmed `Starting` leases and leases without a reconnect window are
-    /// excluded: a manifest response alone is not playback. `counted_owners` already
+    /// excluded. `counted_owners` already
     /// hold a real allocation, so their lease is the same slot and must not be added
     /// on top of the connection counter.
     pub fn foreign_reserved_slots(

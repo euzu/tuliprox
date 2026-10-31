@@ -100,10 +100,26 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
     process_parallel: bool,
     input_plugins: &HashMap<Arc<str>, PluginRunReport>,
 ) -> Vec<TargetStats> {
+    let mut analytics_info = collect_source_analytics_info(playlists);
+    let storage_dir = {
+        let config = ctx.config.config.load();
+        config.storage_dir.clone()
+    };
+    let mut input_statuses = HashMap::with_capacity(analytics_info.inputs.len());
+    for input_info in &analytics_info.inputs {
+        if input_info.epg.is_some() {
+            let input_storage = tuliprox_repository::build_input_storage_path(&input_info.name, &storage_dir);
+            let status = crate::input_cache::load_input_status_async(&input_storage).await;
+            input_statuses.insert(input_info.name.clone(), status);
+        }
+    }
+    analytics_info.input_statuses = Arc::new(input_statuses);
+    let analytics_info = Arc::new(analytics_info);
     if !process_parallel {
         let mut target_stats = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
             let consume_input_source = index + 1 == targets.len();
+            let prepare_started = Instant::now();
             let result = prepare_playlist_for_target(
                 ctx,
                 playlists,
@@ -113,6 +129,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                 accepted_empty_clusters,
                 consume_input_source,
                 input_plugins,
+                &analytics_info,
             )
             .await;
             match result {
@@ -131,6 +148,13 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     }
                 }
                 Err(mut target_errors) => {
+                    record_failed_target_analytics(
+                        &ctx.config.config.load_full(),
+                        &target.name,
+                        &analytics_info,
+                        prepare_started,
+                    )
+                    .await;
                     target_stats.push(TargetStats::failure(&target.name));
                     errors.append(&mut target_errors);
                 }
@@ -158,6 +182,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
         let (completion, receiver) = watch::channel(false);
         completion_receivers.push(receiver);
 
+        let prepare_started = Instant::now();
         match prepare_playlist_for_target(
             ctx,
             playlists,
@@ -167,6 +192,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             accepted_empty_clusters,
             false,
             input_plugins,
+            &analytics_info,
         )
         .await
         {
@@ -203,6 +229,13 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             }
             Err(target_errors) => {
                 completion.send_replace(true);
+                record_failed_target_analytics(
+                    &ctx.config.config.load_full(),
+                    &target.name,
+                    &analytics_info,
+                    prepare_started,
+                )
+                .await;
                 results.push(TargetJobResult {
                     index,
                     name: target.name.clone(),
@@ -267,6 +300,21 @@ pub(crate) struct PreparedTarget {
     pub(crate) epg: Vec<Epg>,
     pub(crate) processing: PipelineStats,
     pub(crate) accepted_empty_clusters: ClusterFlags,
+    pub(crate) analytics_input: TargetAnalyticsInput,
+}
+
+async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
+    target_name: &str,
+) -> Result<Option<tuliprox_core::model::TargetBouquetFilter>, TuliproxError> {
+    let bouquet_file = tuliprox_repository::load_target_bouquet(&ctx.config, target_name).await?;
+    let bouquet_filter =
+        bouquet_file.and_then(|file| tuliprox_core::model::TargetBouquetFilter::from_dto(file.bouquet));
+    if let Some(ref filter) = bouquet_filter {
+        let (live, vod, series) = filter.cluster_counts();
+        debug!("Loaded target bouquet for '{target_name}': live={live:?}, vod={vod:?}, series={series:?}");
+    }
+    Ok(bouquet_filter)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -284,6 +332,7 @@ pub(crate) async fn prepare_playlist_for_target<
     accepted_empty_clusters: ClusterFlags,
     consume_input_source: bool,
     input_plugins: &HashMap<Arc<str>, PluginRunReport>,
+    analytics_info: &Arc<SourceAnalyticsInfo>,
 ) -> Result<PreparedTarget, Vec<TuliproxError>> {
     debug_if_enabled!("Processing order is {}", &target.processing_order);
     log_memory_snapshot(format!("target '{}' start", target.name).as_str());
@@ -299,18 +348,11 @@ pub(crate) async fn prepare_playlist_for_target<
     // still needs its own Force contract; it cannot borrow Library's filter permission.
     let mut non_library_inputs_populated = true;
 
+    let analytics_input = TargetAnalyticsInput { started: Instant::now(), source_info: Arc::clone(analytics_info) };
+
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
-
-    let bouquet_file =
-        tuliprox_repository::load_target_bouquet(&ctx.config, &target.name).await.map_err(|err| vec![err])?;
-    let bouquet_filter =
-        bouquet_file.and_then(|file| tuliprox_core::model::TargetBouquetFilter::from_dto(file.bouquet));
-    if let Some(ref filter) = bouquet_filter {
-        let (live, vod, series) = filter.cluster_counts();
-        debug!("Loaded target bouquet for '{}': live={:?}, vod={:?}, series={:?}", target.name, live, vod, series);
-    }
-
+    let bouquet_filter = load_target_bouquet_filter(ctx, &target.name).await.map_err(|err| vec![err])?;
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
@@ -344,7 +386,8 @@ pub(crate) async fn prepare_playlist_for_target<
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         processed_fpl.sort_by_provider_ordinal();
-        playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl, &mut aggregate_outcome.plugins)
+            .await;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str(),
         );
@@ -411,6 +454,7 @@ pub(crate) async fn prepare_playlist_for_target<
         epg: new_epg,
         processing: aggregate_outcome.to_stats(),
         accepted_empty_clusters,
+        analytics_input,
     })
 }
 
@@ -820,6 +864,7 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     tmdb_client: Option<&reqwest::Client>,
     report: &mut PluginRunReport,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
+    let config = ctx.config.config.load_full();
     let target = &prepared.target;
     let mut new_playlist = prepared.playlist;
     let mut new_epg = prepared.epg;
@@ -837,6 +882,11 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
+        // Nothing is published: keep the previous metrics and CSV, only record the run.
+        let (empty_analytics, empty_csv) =
+            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
+        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
+            .await;
         return (Ok(()), errors);
     }
 
@@ -856,6 +906,11 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
+        // Nothing is published: keep the previous metrics and CSV, only record the run.
+        let (empty_analytics, empty_csv) =
+            compute_target_analytics(&config.storage_dir, &prepared.analytics_input, &[], &[]);
+        persist_target_analytics(&config, &target.name, empty_analytics, &empty_csv, TargetAnalyticsOutcome::Unchanged)
+            .await;
         return (Ok(()), errors);
     }
     if views.publication_plan != PlaylistPublicationPlan::Ordinary {
@@ -889,7 +944,11 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     };
     retain_epg_referenced_by_groups(&finalized_base, &mut new_epg);
 
-    let merged_epg = if ctx.config.config.load().disk_based_processing {
+    let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
+    let (analytics_dto, unmapped_csv) =
+        compute_target_analytics(&config.storage_dir, &prepared.analytics_input, watch_playlist, &new_epg);
+
+    let merged_epg = if config.disk_based_processing {
         // Per-source drain to disk, then multi-way merge. Errors are pushed
         // to `errors` rather than `?` because the function returns
         // `(Result, Vec<TuliproxError>)`, not `Result` directly. We must
@@ -904,6 +963,14 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
             Err(err) => {
                 let result_error = TuliproxError::new(err.kind(), err.message());
                 errors.push(err);
+                persist_target_analytics(
+                    &config,
+                    &target.name,
+                    analytics_dto,
+                    &unmapped_csv,
+                    TargetAnalyticsOutcome::Failed,
+                )
+                .await;
                 step.stop("EPG spill failed; skipping persist to preserve existing EPG");
                 log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
                 return (Err(vec![result_error]), errors);
@@ -931,6 +998,8 @@ async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdate
     // plugin seam, so they render here, each failing on its own.
     let result =
         super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result).await;
+    let outcome = if result.is_ok() { TargetAnalyticsOutcome::Published } else { TargetAnalyticsOutcome::Failed };
+    persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, outcome).await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
     if result.is_ok() && process_watch(&ctx.config, &ctx.events, target, watch_playlist).await {
         step.tick("group watches");
@@ -948,12 +1017,13 @@ pub(crate) async fn playlist_resolve<E: EventSink + Clone + 'static, M: Metadata
     pipe: &ProcessingPipe,
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
+    report: &mut PluginRunReport,
 ) {
     // Resolve and probe talk to the provider; an input in maintenance keeps what it has.
     if ctx.is_input_in_maintenance(&processed_fpl.input.name) {
         return;
     }
-    playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
+    playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl, report).await;
     playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
     playlist_probe(ctx, target, processed_fpl).await;
 }
@@ -1347,9 +1417,7 @@ fn item_subject_uuid(item: &PlaylistItem) -> UUIDType {
 fn selected_series_parent_keys(playlist: &[PlaylistGroup], selected_subjects: &HashSet<UUIDType>) -> HashSet<Arc<str>> {
     let mut parent_keys = HashSet::new();
     for item in playlist.iter().flat_map(|group| &group.channels) {
-        if !matches!(item.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
-            || !selected_subjects.contains(&item_subject_uuid(item))
-        {
+        if !item.header.item_type.is_series_info() || !selected_subjects.contains(&item_subject_uuid(item)) {
             continue;
         }
         parent_keys.insert(item.get_uuid().intern());

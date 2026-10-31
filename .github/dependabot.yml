@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci (chore): "
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    # One grouped pull request keeps the cross images in docker/cross and docker/cross.Dockerfile on the same digest.
+    directories:
+      - /docker
+      - /docker/cross
+    target-branch: develop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci (chore): "
+    groups:
+      docker:
+        patterns:
+          - "*"

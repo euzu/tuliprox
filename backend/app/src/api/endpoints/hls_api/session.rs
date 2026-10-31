@@ -666,17 +666,38 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     work_kind: HlsOriginWorkKind,
     work_class: HlsOriginWorkClass,
     playback_kind: PlaybackKind,
+    preferred_account: Option<&Arc<str>>,
     now_ms: u64,
 ) -> Result<HlsOriginRuntimeAllocation, HlsOriginRuntimeAcquireError> {
     let session_owner = build_hls_origin_session_owner(proxy_session_id);
-    let Some(provider_handle) = app_state.active_provider.acquire_connection_with_lease_for_session(
-        &input.name,
-        &fingerprint.addr,
-        allow_grace,
-        priority,
-        connection_kind,
-        Some(PlaybackLeaseRef::new(&session_owner, playback_kind)),
-    ) else {
+    let lease = PlaybackLeaseRef::new(&session_owner, playback_kind);
+    let provider_handle = preferred_account
+        .and_then(|account| {
+            let handle = app_state.active_provider.try_acquire_exact_connection_with_lease_for_session(
+                account,
+                &fingerprint.addr,
+                priority,
+                connection_kind,
+                Some(lease),
+            );
+            debug!(
+                "HLS origin account preference tried: account={} result={}",
+                sanitize_sensitive_info(account.as_ref()),
+                if handle.is_some() { "reused" } else { "unavailable" }
+            );
+            handle
+        })
+        .or_else(|| {
+            app_state.active_provider.acquire_connection_with_lease_for_session(
+                &input.name,
+                &fingerprint.addr,
+                allow_grace,
+                priority,
+                connection_kind,
+                Some(lease),
+            )
+        });
+    let Some(provider_handle) = provider_handle else {
         debug!(
             "HLS origin account acquire unavailable: work={} work_class={} grace={}",
             work_kind.as_log_value(),
@@ -821,6 +842,7 @@ pub(super) async fn log_hls_origin_binding_reacquire_failed(session: &HlsSession
 pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &Arc<AppState>, now_ms: u64) {
     let sessions = app_state.hls.proxy.sessions().list_sessions().await;
     for session in sessions {
+        app_state.hls.proxy.sync_recovery_binding_protection(&app_state.active_provider, &session, now_ms).await;
         let binding = {
             let mut session_guard = session.write().await;
             let Some(binding) = session_guard.origin_account_binding.clone() else {
@@ -841,10 +863,36 @@ pub(super) async fn detach_unprotected_hls_origin_account_bindings(app_state: &A
             // A retained session can contain delivery from an earlier playback.
             // Give each newly published binding its own bounded start window;
             // healthy preparation leaves pinned_at_ms unchanged.
-            let starting_window_expired = now_ms > binding.pinned_at_ms.saturating_add(starting_window_ms);
-            let media_window_expired = session_guard.activity.last_delivered_media_at_ms.is_none_or(|last| {
-                now_ms > last.saturating_add(timing.hard_active_window_ms).saturating_add(timing.soft_active_window_ms)
-            });
+            let opening_deadline_ms = binding.pinned_at_ms.saturating_add(starting_window_ms);
+            // A slow manifest must leave one bounded media-preparation window after its
+            // first commit. Refreshes and repeated preparation never move this anchor.
+            let delivered_on_binding =
+                session_guard.activity.last_delivered_media_at_ms.is_some_and(|last| last >= binding.pinned_at_ms);
+            let startup_deadline_ms = if delivered_on_binding {
+                opening_deadline_ms
+            } else {
+                binding.startup_media_deadline_ms.unwrap_or(opening_deadline_ms).max(opening_deadline_ms)
+            };
+            let (starting_window_expired, media_window_expired) =
+                if session_guard.origin_playback_kind() == PlaybackKind::LiveHls {
+                    (
+                        now_ms > opening_deadline_ms,
+                        matches!(
+                            protection,
+                            HlsAccountBindingProtection::NoMediaYet | HlsAccountBindingProtection::Expired
+                        ),
+                    )
+                } else {
+                    (
+                        now_ms > startup_deadline_ms,
+                        session_guard.activity.last_delivered_media_at_ms.is_none_or(|last| {
+                            now_ms
+                                > last
+                                    .saturating_add(timing.hard_active_window_ms)
+                                    .saturating_add(timing.soft_active_window_ms)
+                        }),
+                    )
+                };
             if !starting_window_expired
                 || !media_window_expired
                 || session_guard.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0
@@ -1039,24 +1087,37 @@ async fn restore_hls_origin_policy_preempt_candidate_reservation<C: HlsOriginRes
     let account_name = candidate.account_name();
     let session_owner = candidate.session_owner();
     let cleared_tag = candidate.cleared_binding_tag();
-    app_state.active_provider.refresh_identified_provider_reservation(
-        account_name,
-        session_owner,
-        playback_kind,
-        candidate.reservation_ttl_secs(),
-    );
-    let new_tag = app_state.active_provider.binding_tag_for_owner(session_owner);
     let Some(session) = app_state.hls.proxy.sessions().get_by_proxy_session_id(candidate.proxy_session_id()).await
     else {
         return;
     };
     let mut session_guard = session.write().await;
+    let startup =
+        session_guard.origin_account_binding.as_ref().and_then(|binding| binding.startup_protection).filter(|start| {
+            session_guard.activity.last_authorized_media_at_ms.is_none_or(|at| at <= start.anchored_at_ms)
+        });
     if let Some(binding) = session_guard.origin_account_binding.as_mut() {
         if binding.account_name == *account_name
             && binding.session_owner == session_owner
             && binding.provider_binding_tag == cleared_tag
         {
-            binding.provider_binding_tag = new_tag;
+            binding.provider_binding_tag =
+                if let (PlaybackKind::LiveHls, Some(start), Some(tag)) = (playback_kind, startup, cleared_tag) {
+                    app_state.active_provider.restore_hls_start_reservation(
+                        session_owner,
+                        account_name,
+                        tag,
+                        Duration::from_millis(start.reservation_deadline_ms().saturating_sub(current_time_millis())),
+                    )
+                } else {
+                    app_state.active_provider.refresh_identified_provider_reservation(
+                        account_name,
+                        session_owner,
+                        playback_kind,
+                        candidate.reservation_ttl_secs(),
+                    );
+                    app_state.active_provider.binding_tag_for_owner(session_owner)
+                };
         }
     }
 }
@@ -1262,10 +1323,14 @@ pub(super) async fn find_hls_account_overlap_candidate(
         if !matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active) {
             continue;
         }
-        if session_guard.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        if session_guard.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) > 0
+            || session_guard.origin_binding_recovery_protected(now_ms)
+        {
             continue;
         }
-        let timing = session_guard.account_overlap_timing();
+        let timing = session_guard
+            .account_binding_activity()
+            .map_or_else(|| session_guard.account_overlap_timing(), |(_, timing)| timing);
         let protection = session_guard.account_binding_protection(now_ms);
         debug!(
             "HLS account protection classified: proxy_session={} state={} target_duration_ms={}",
@@ -1276,7 +1341,7 @@ pub(super) async fn find_hls_account_overlap_candidate(
         let HlsAccountBindingProtection::SoftActive { reclaim_until_ms } = protection else {
             continue;
         };
-        let last_media_at_ms = session_guard.activity.last_authorized_media_at_ms.unwrap_or_default();
+        let last_media_at_ms = session_guard.effective_account_binding_activity(now_ms).map_or(0, |(at, _)| at);
         let capacity = hls_soft_overlap_capacity_for_target_duration(
             tuliprox_target_user_connection_capacity,
             origin_input_account_connection_capacity,
@@ -1793,19 +1858,27 @@ pub(super) async fn prepare_hls_transient_origin_io_for_authorized_resource_work
     if binding.is_detached() {
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     }
-    let policy = hls_effective_origin_acquire_policy(session).await;
+    let (policy, reservation_ttl_secs, playback_kind, account_runtime) = {
+        let session = session.read().await;
+        (
+            session.effective_origin_acquire_policy_or_default(),
+            session.account_overlap_timing().reservation_ttl_secs(),
+            session.origin_playback_kind(),
+            session.origin_account_runtime.clone(),
+        )
+    };
     let origin_io = HlsOriginIoContext {
         ctx: app_state.hls_ctx(),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
         priority: policy.priority,
         connection_kind: policy.connection_kind,
-        reservation_ttl_secs: hls_origin_account_reservation_ttl_secs_for_session(session).await,
+        reservation_ttl_secs,
         preacquired_provider_handle: None,
         started_generation: None,
         prepared_account: None,
-        playback_kind: session.read().await.origin_playback_kind(),
-        account_runtime: session.read().await.origin_account_runtime.clone(),
+        playback_kind,
+        account_runtime,
     };
     let lease_guard =
         begin_hls_origin_account_io_bounded(&origin_io, session, &binding, hls_object_body_deadline(origin_timeout_ms))

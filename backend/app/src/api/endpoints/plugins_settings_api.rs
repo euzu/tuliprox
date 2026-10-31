@@ -27,12 +27,25 @@ use serde_json::{Map, Value};
 #[cfg(feature = "plugins")]
 use shared::{
     error::TuliproxError,
-    model::{PluginEntryDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginsConfigDto},
+    model::{PluginEntryDto, PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginsConfigDto},
 };
 #[cfg(feature = "plugins")]
 use std::sync::Arc;
 #[cfg(feature = "plugins")]
 use tuliprox_core::model::{PluginEntry, PluginsConfig};
+#[cfg(feature = "plugins")]
+use tuliprox_plugins::PluginSystem;
+
+/// `PluginSystem::api_settings` on the blocking pool: it reads the package's
+/// schema files. `None` for an unknown id.
+#[cfg(feature = "plugins")]
+pub(super) async fn read_plugin_settings(
+    plugins: PluginSystem,
+    id: String,
+    config: Option<Arc<PluginsConfig>>,
+) -> Option<PluginSettingsDto> {
+    tokio::task::spawn_blocking(move || plugins.api_settings(&id, config.as_deref())).await.ok().flatten()
+}
 
 #[cfg(feature = "plugins")]
 fn error_response(status: StatusCode, error: impl Into<String>) -> Response {
@@ -176,7 +189,7 @@ pub(super) async fn put_plugin_settings(
     reload_plugins(&app_state.plugins, &app_state.app_config).await;
     log::info!("Settings of plugin `{id}` saved");
 
-    let Some(mut answer) = plugins.api_settings(&id, Some(&saved)) else {
+    let Some(mut answer) = read_plugin_settings(plugins.clone(), id, Some(Arc::new(saved))).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     answer.warnings = warnings;

@@ -98,6 +98,7 @@ mod account_health;
 mod allocation;
 mod capacity;
 mod leases;
+pub use leases::ProviderWorkReservation;
 mod preemption;
 mod release;
 mod shared;

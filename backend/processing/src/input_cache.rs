@@ -5,7 +5,6 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tuliprox_repository::{build_input_storage_path, get_input_storage_path};
 
@@ -26,6 +25,17 @@ pub struct ClusterStatus {
     pub last_update: Option<PersistedPlaylistUpdateClusterSnapshot>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct EpgSourceFetchStatus {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct InputStatus {
     #[serde(default)]
@@ -33,6 +43,35 @@ pub struct InputStatus {
     /// Last input completion for every input type; never used to establish cache validity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input_update: Option<PersistedPlaylistUpdateInputResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epg_sources: Vec<EpgSourceFetchStatus>,
+}
+
+pub fn update_epg_source_success(status: &mut InputStatus, index: usize, label: String, timestamp: u64) {
+    if status.epg_sources.len() <= index {
+        status.epg_sources.resize(index + 1, EpgSourceFetchStatus::default());
+    }
+    let entry = &mut status.epg_sources[index];
+    entry.label = label;
+    entry.fetched_at = Some(timestamp);
+    entry.failed_at = None;
+    entry.error = None;
+}
+
+pub fn update_epg_source_failure(
+    status: &mut InputStatus,
+    index: usize,
+    label: String,
+    timestamp: u64,
+    error_msg: String,
+) {
+    if status.epg_sources.len() <= index {
+        status.epg_sources.resize(index + 1, EpgSourceFetchStatus::default());
+    }
+    let entry = &mut status.epg_sources[index];
+    entry.label = label;
+    entry.failed_at = Some(timestamp);
+    entry.error = Some(error_msg);
 }
 
 pub async fn resolve_input_storage_path(storage_dir: &str, input_name: &str) -> PathBuf {
@@ -57,6 +96,25 @@ pub fn load_input_status(path: &Path) -> InputStatus {
     InputStatus::default()
 }
 
+pub async fn load_input_status_async(path: &Path) -> InputStatus {
+    let status_path = path.join(STATUS_FILE);
+    match tokio::fs::read_to_string(&status_path).await {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(status) => status,
+            Err(e) => {
+                warn!("Failed to parse input status file {}: {e}", status_path.display());
+                InputStatus::default()
+            }
+        },
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to read input status file {}: {e}", status_path.display());
+            }
+            InputStatus::default()
+        }
+    }
+}
+
 pub fn save_input_status(path: &Path, status: &InputStatus) {
     let status_path = path.join(STATUS_FILE);
     if let Some(parent) = status_path.parent() {
@@ -75,6 +133,24 @@ pub fn save_input_status(path: &Path, status: &InputStatus) {
     }
 }
 
+pub async fn save_input_status_async(path: &Path, status: &InputStatus) {
+    let status_path = path.join(STATUS_FILE);
+    if let Some(parent) = status_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            error!("Failed to create input storage directory {}: {e}", parent.display());
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(status) {
+        Ok(content) => {
+            if let Err(e) = tokio::fs::write(&status_path, content).await {
+                error!("Failed to write input status file {}: {e}", status_path.display());
+            }
+        }
+        Err(e) => error!("Failed to serialize input status: {e}"),
+    }
+}
+
 pub fn is_cache_valid(status: &InputStatus, cluster: &str, cache_duration_seconds: u64) -> bool {
     if cache_duration_seconds == 0 {
         return false;
@@ -83,7 +159,7 @@ pub fn is_cache_valid(status: &InputStatus, cluster: &str, cache_duration_second
         if cluster_status.status != ClusterState::Ok {
             return false;
         }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = shared::utils::current_time_secs();
         if now >= cluster_status.timestamp {
             return now - cluster_status.timestamp < cache_duration_seconds;
         }
@@ -94,7 +170,7 @@ pub fn is_cache_valid(status: &InputStatus, cluster: &str, cache_duration_second
 }
 
 pub fn update_cluster_status(status: &mut InputStatus, cluster: &str, state: ClusterState) {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = shared::utils::current_time_secs();
     status.clusters.insert(cluster.to_string(), ClusterStatus { status: state, timestamp: now, last_update: None });
 }
 
@@ -174,6 +250,31 @@ mod tests {
         assert_eq!(live.timestamp, 17);
         assert_eq!(live.last_update, None);
         assert_eq!(status.last_input_update, None);
+        assert_eq!(status.epg_sources, []);
+    }
+
+    #[test]
+    fn epg_sources_update_tracks_success_and_failure() {
+        let mut status = InputStatus::default();
+        super::update_epg_source_success(&mut status, 0, "guide1.xml".to_string(), 100);
+        super::update_epg_source_failure(&mut status, 1, "guide2.xml".to_string(), 105, "network error".to_string());
+
+        assert_eq!(status.epg_sources.len(), 2);
+        assert_eq!(status.epg_sources[0].label, "guide1.xml");
+        assert_eq!(status.epg_sources[0].fetched_at, Some(100));
+        assert_eq!(status.epg_sources[0].failed_at, None);
+        assert_eq!(status.epg_sources[0].error, None);
+
+        assert_eq!(status.epg_sources[1].label, "guide2.xml");
+        assert_eq!(status.epg_sources[1].fetched_at, None);
+        assert_eq!(status.epg_sources[1].failed_at, Some(105));
+        assert_eq!(status.epg_sources[1].error.as_deref(), Some("network error"));
+
+        // Success resolves previous error
+        super::update_epg_source_success(&mut status, 1, "guide2.xml".to_string(), 110);
+        assert_eq!(status.epg_sources[1].fetched_at, Some(110));
+        assert_eq!(status.epg_sources[1].failed_at, None);
+        assert_eq!(status.epg_sources[1].error, None);
     }
 
     #[test]

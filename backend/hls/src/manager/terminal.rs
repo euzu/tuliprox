@@ -724,7 +724,12 @@ impl HlsProxyManager {
             return outcome;
         }
         session.live_window_demands.remove(lease_id);
-        Self::finish_terminal_commit(leases, session, proxy_session_id, preparation);
+        let tail = if let (HlsTerminalLeaseDecision::Tail(plan), false) = (decision, protection_capacity_exceeded) {
+            Some(plan.as_ref())
+        } else {
+            None
+        };
+        Self::finish_terminal_commit(leases, session, command, tail, now_ms);
         HlsTerminalCommitOutcome::Committed
     }
 
@@ -759,16 +764,19 @@ impl HlsProxyManager {
             return outcome;
         }
         session.live_window_demands.remove(lease_id);
-        Self::finish_terminal_commit(leases, session, proxy_session_id, &command.preparation);
+        Self::finish_terminal_commit(leases, session, command, None, now_ms);
         HlsTerminalCommitOutcome::Committed
     }
 
     fn finish_terminal_commit(
         leases: &mut HlsAccessLeaseStore,
         session: &mut super::super::HlsSession,
-        proxy_session_id: &ProxySessionId,
-        preparation: &crate::lease::HlsTerminalTailPreparation,
+        command: &HlsTerminalCommitCommand,
+        tail: Option<&crate::terminal_tail::HlsTerminalTailPlan>,
+        now_ms: u64,
     ) {
+        let proxy_session_id = &command.key.proxy_session_id;
+        let preparation = &command.preparation;
         if !preparation.trigger.is_runtime_policy() && preparation.reserve.is_exhausted() {
             session.require_live_entry_revalidation(preparation.origin_progress_generation);
         }
@@ -778,6 +786,24 @@ impl HlsProxyManager {
         } else {
             super::super::origin_progress::HlsOriginProgressPhase::TerminalPartial
         };
+        if let Some(plan) = tail {
+            log::debug!(
+                "HLS runtime custom tail committed: proxy_session={} lease={} reason={} \
+                 generation={} base_proxy_tail={} asset_revision={:016x} \
+                 position_ms={} reserve_ms={} snapshot_generation={}",
+                crate::safe_proxy_session_id(proxy_session_id),
+                crate::safe_hls_access_lease_id(&command.key.lease_id),
+                preparation.trigger.reason().as_label(),
+                plan.generation.0,
+                plan.base_manifest.last_proxy_seq,
+                plan.media_preparation_key().asset.revision,
+                preparation.reserve.conservative_playback_position_ms,
+                preparation.reserve.guaranteed_reserve_ms,
+                preparation.manifest_snapshot_generation
+            );
+        }
+        session.notify_terminal_commit();
+        crate::availability::binding_protection::after_terminal_commit(leases, session, now_ms);
     }
 
     fn schedule_terminal_commit_retry(

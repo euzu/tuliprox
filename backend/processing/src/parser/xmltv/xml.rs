@@ -215,6 +215,7 @@ impl TVGuide {
             accumulator.upsert_channel(
                 epg_source.priority,
                 source_order,
+                epg_source.source_idx,
                 epg_source.logo_override,
                 EpgChannel {
                     id: Arc::clone(&tag_epg_id),
@@ -435,9 +436,10 @@ fn rewrite_channel_tag(tag: &mut XmlTag, channel: &PluginEpgChannel) {
     tag.icon = XmlTagIcon::Undefined;
 }
 
-/// One XMLTV source parsed with plugin hooks: the channel list is buffered up to
-/// the first `<programme>` (XMLTV puts every `<channel>` first), `on-epg-loaded`
-/// runs over it, and only then do the channels reach the matcher. Programmes are
+/// One XMLTV source parsed with plugin hooks: when `on-epg-loaded` is subscribed,
+/// the channel list is buffered up to the first `<programme>` (XMLTV puts every
+/// `<channel>` first), `on-epg-loaded` runs over it, and only then do the channels
+/// reach the matcher. Otherwise channels are accepted while streaming. Programmes are
 /// built as they stream past and `transform-programmes` is awaited per
 /// [`EPG_HOOK_BATCH`], never over the whole source.
 struct HookedPass<'a, P: PluginHost> {
@@ -487,38 +489,44 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
     async fn run<R: AsyncRead + Unpin>(mut self, content: R) -> usize {
         let mut stream = TvGuideStream::new(content);
         let mut tags: Vec<XmlTag> = Vec::new();
-        let mut channel_tags: Vec<XmlTag> = Vec::new();
-        // Everything read from the first `<programme>` on, in file order.
-        let mut held: Vec<XmlTag> = Vec::new();
         let mut open = true;
-        while open && held.is_empty() {
-            open = stream.next_tags(&mut tags).await;
-            for tag in tags.drain(..) {
-                if !held.is_empty() {
-                    held.push(tag);
-                } else if tag.name.as_ref() == EPG_TAG_CHANNEL {
-                    channel_tags.push(tag);
-                } else if tag.name.as_ref() == EPG_TAG_TV {
-                    self.set_attributes(tag);
-                } else if tag.name.as_ref() == EPG_TAG_PROGRAMME {
-                    held.push(tag);
+
+        if self.hooks.loaded {
+            let mut channel_tags: Vec<XmlTag> = Vec::new();
+            // Everything read from the first `<programme>` on, in file order.
+            let mut held: Vec<XmlTag> = Vec::new();
+            while open && held.is_empty() {
+                open = stream.next_tags(&mut tags).await;
+                for tag in tags.drain(..) {
+                    if !held.is_empty() {
+                        held.push(tag);
+                    } else if tag.name.as_ref() == EPG_TAG_CHANNEL {
+                        channel_tags.push(tag);
+                    } else if tag.name.as_ref() == EPG_TAG_TV {
+                        self.set_attributes(tag);
+                    } else if tag.name.as_ref() == EPG_TAG_PROGRAMME {
+                        held.push(tag);
+                    }
                 }
+            }
+
+            self.on_epg_loaded(&mut channel_tags).await;
+            for tag in channel_tags {
+                self.accept_channel(tag);
+            }
+            for tag in held {
+                self.tag(tag).await;
             }
         }
 
-        if self.hooks.loaded {
-            self.on_epg_loaded(&mut channel_tags).await;
-        }
-        for tag in channel_tags {
-            self.accept_channel(tag);
-        }
-        for tag in held {
-            self.tag(tag).await;
-        }
         while open {
             open = stream.next_tags(&mut tags).await;
             for tag in tags.drain(..) {
-                self.tag(tag).await;
+                if tag.name.as_ref() == EPG_TAG_TV {
+                    self.set_attributes(tag);
+                } else {
+                    self.tag(tag).await;
+                }
             }
         }
         self.flush().await;
@@ -762,5 +770,88 @@ where
         // any handler output. Without this, `buf` grows monotonically over the
         // whole file, defeating the 64 KiB pre-allocation above.
         buf.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::NoPlugins;
+    use std::{
+        path::PathBuf,
+        pin::Pin,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        task::{Context, Poll},
+    };
+    use tokio::io::{AsyncRead, ReadBuf};
+    use tuliprox_core::model::{PersistedEpgSource, PersistedEpgSourceKind};
+
+    struct StepReader {
+        step: usize,
+        chunk1: &'static [u8],
+        chunk2: &'static [u8],
+        acc_ptr: usize,
+        accepted_at_step_2: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for StepReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.step == 0 {
+                self.step = 1;
+                buf.put_slice(self.chunk1);
+                Poll::Ready(Ok(()))
+            } else if self.step == 1 {
+                self.step = 2;
+                let count = unsafe { (*(self.acc_ptr as *const EpgMergeAccumulator)).channels.len() };
+                self.accepted_at_step_2.store(count, Ordering::SeqCst);
+                buf.put_slice(self.chunk2);
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hooked_pass_streams_channels_when_only_transform_is_active() {
+        let mut id_cache = EpgIdCache::new(None);
+        id_cache.insert_channel_epg_id("demo.channel");
+        let mut accumulator = EpgMergeAccumulator::new();
+        let acc_ptr = &raw const accumulator as usize;
+
+        let epg_source = PersistedEpgSource {
+            file_path: PathBuf::from("guide.xml"),
+            priority: 0,
+            logo_override: false,
+            kind: PersistedEpgSourceKind::Xmltv,
+            source_idx: 0,
+        };
+
+        let hooks = GuideHooks { loaded: false, transform: true };
+        let pass = HookedPass::new(&NoPlugins, hooks, &mut id_cache, &mut accumulator, &epg_source, 0, "input");
+
+        let accepted_at_step_2 = Arc::new(AtomicUsize::new(usize::MAX));
+        let reader = StepReader {
+            step: 0,
+            chunk1: b"<tv><channel id=\"demo.channel\"><display-name>Demo</display-name></channel>",
+            chunk2: b"<programme channel=\"demo.channel\" start=\"20261031000000 +0000\" stop=\"20261031010000 +0000\"><title>Show</title></programme></tv>",
+            acc_ptr,
+            accepted_at_step_2: Arc::clone(&accepted_at_step_2),
+        };
+
+        let accepted = pass.run(reader).await;
+        assert_eq!(accepted, 1);
+        assert_eq!(
+            accepted_at_step_2.load(Ordering::SeqCst),
+            1,
+            "channel must be accepted while streaming before programme chunk is read"
+        );
     }
 }

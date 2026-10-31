@@ -258,11 +258,12 @@ impl HlsSegmentWorkerPool {
         }
         let has_access =
             has_work && self.access_leases.write().await.has_usable_access_lease_for_session(&proxy_id, now_ms);
-        let preparation_failed = has_access
-            && crate::origin_account_runtime::prepare_media_origin(context.origin_io.as_ref(), &context.session)
-                .await
-                .is_err();
-        if has_access && !preparation_failed {
+        let preparation = if has_access {
+            crate::origin_account_runtime::prepare_media_origin(context.origin_io.as_ref(), &context.session).await
+        } else {
+            Ok(())
+        };
+        if has_access && preparation.is_ok() {
             let mut session = context.session.write().await;
             // Preparation can invalidate the queue while renewing an account.
             // Replan the current qualified window in the new work generation.
@@ -280,7 +281,20 @@ impl HlsSegmentWorkerPool {
             barrier.prepared.notify_one();
             barrier.proceed.notified().await;
         }
-        if preparation_failed {
+        if let Err(kind) = preparation {
+            {
+                let session = context.session.read().await;
+                if session.activity.origin_work_generation == queued_generation {
+                    session
+                        .record_start_provider_failure(&crate::HlsOriginResourceFetchError::ProviderUnavailable(kind));
+                }
+            }
+            crate::origin::finish_failed_hls_start(
+                context.origin_io.as_ref(),
+                &context.session,
+                Some(queued_generation),
+            )
+            .await;
             return;
         }
         loop {
@@ -332,6 +346,18 @@ impl HlsSegmentWorkerPool {
             self.access_leases.write().await.has_usable_access_lease_for_session(&proxy_session_id, now_ms);
         let mut session = context.session.write().await;
         if session.is_gc_marked_for_removal() {
+            return None;
+        }
+        if session.origin_playback_kind() == tuliprox_core::model::PlaybackKind::LiveHls
+            && session
+                .origin_refresh
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| !attempt.active_live_playback && attempt.provider_failure().is_some())
+            && !session.has_usable_start_window(now_ms)
+        {
+            // Do not start fresh admission budgets while the other in-flight
+            // work of an exhausted start settles.
             return None;
         }
         let initial_barrier = session.startup.as_ref().is_some_and(|startup| {
@@ -427,6 +453,12 @@ impl HlsSegmentWorkerPool {
             let mut session = context.session.write().await;
             self.apply_segment_fetch_result(&mut session, &snapshot, &policy, result, finished_at_ms)
         };
+        if let Some(generation) = completion.recovery_generation {
+            // A terminal failure can invalidate queued work during this commit.
+            // Cleanup belongs to its resulting generation, not the old fetch.
+            crate::origin::finish_failed_hls_start(context.origin_io.as_ref(), &context.session, Some(generation))
+                .await;
+        }
         if let Some(recovery_generation) = completion.recovery_generation {
             if let Some(recovery) = self.revision_recovery.get() {
                 let session_id = context.session.read().await.proxy_session_id.clone();
@@ -469,6 +501,12 @@ impl HlsSegmentWorkerPool {
         }
         if let Some(notifier) = notifier {
             notifier.notify_waiters();
+        }
+        if let Some(io) = context.origin_io.as_ref() {
+            io.ctx
+                .hls_proxy
+                .sync_recovery_binding_protection(&io.ctx.active_provider, &context.session, finished_at_ms)
+                .await;
         }
         if let (Some(coordinator), Some(proxy_session_id)) =
             (self.availability_reevaluations.as_ref(), completion.evidence_changed_for.as_ref())

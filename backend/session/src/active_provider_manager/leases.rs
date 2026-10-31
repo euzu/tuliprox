@@ -18,6 +18,27 @@ pub(super) enum OwnerProviderPin {
     Preferred(Arc<str>),
 }
 
+/// One operation's right on a specific provider binding. Drop is synchronous so
+/// cancellation and aborted futures use exactly the same release transition.
+pub struct ProviderWorkReservation {
+    manager: Arc<ActiveProviderManager>,
+    owner: Arc<str>,
+    provider: Arc<str>,
+    tag: ProviderBindingTag,
+    id: PlaybackRequestId,
+}
+
+impl ProviderWorkReservation {
+    pub fn is_current(&self) -> bool { self.manager.read_leases().has_work_right(&self.owner, self.tag, self.id) }
+}
+
+impl Drop for ProviderWorkReservation {
+    fn drop(&mut self) {
+        let _transition = self.manager.lock_capacity_transition();
+        self.manager.write_leases().release_work_right(&self.owner, &self.provider, self.tag, self.id);
+    }
+}
+
 impl<'a> PlaybackLeaseRef<'a> {
     /// Compatibility view of a bare session owner: one request, live TS semantics.
     pub fn for_session_owner(owner: &'a str) -> Self { Self::new(owner, PlaybackKind::LiveTs) }
@@ -42,6 +63,32 @@ impl ManagedProviderHandle {
 }
 
 impl ActiveProviderManager {
+    pub fn reserve_hls_origin_work(
+        self: &Arc<Self>,
+        owner: &str,
+        provider: &Arc<str>,
+        tag: ProviderBindingTag,
+        deadline: tokio::time::Instant,
+    ) -> Option<ProviderWorkReservation> {
+        let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        let owns_allocation = self.has_active_owner_for_provider(provider, owner);
+        let mut leases = self.write_leases();
+        Self::prune_expired_leases(&mut leases);
+        let id = PlaybackRequestId::next();
+        if !leases.grant_work_right(owner, provider, tag, id, deadline, owns_allocation) {
+            return None;
+        }
+        Some(ProviderWorkReservation {
+            manager: Arc::clone(self),
+            owner: Arc::from(owner),
+            provider: Arc::clone(provider),
+            tag,
+            id,
+        })
+    }
     pub(super) fn get_affinity_ttl(cfg: &AppConfig) -> ProviderAffinityTtl {
         ProviderAffinityTtl(cfg.config.load().get_provider_affinity_ttl_secs())
     }
@@ -63,7 +110,7 @@ impl ActiveProviderManager {
             Self::prune_expired_leases(&mut leases);
             let lease_pin = leases
                 .lease_of_owner(session_owner)
-                .map(|lease| (Arc::clone(&lease.provider_name), lease.state.is_confirmed()));
+                .map(|lease| (Arc::clone(&lease.provider_name), lease.reserves_capacity()));
             (lease_pin, leases.affinity_provider_for_owner(session_owner))
         };
         // The lease lock is released before the connection lock is taken.
@@ -192,7 +239,9 @@ impl ActiveProviderManager {
         let already_reserves = {
             let mut leases = self.write_leases();
             Self::prune_expired_leases(&mut leases);
-            leases.lease_of_owner(owner).is_some_and(|lease| lease.state.is_confirmed() && lease.idle_ttl_secs > 0)
+            leases
+                .lease_of_owner(owner)
+                .is_some_and(super::super::provider_leases::ProviderSlotLease::reserves_capacity)
         };
         if already_reserves || self.confirmation_reserve_allowed(provider_name, owner) {
             requested_ttl_secs
@@ -261,6 +310,64 @@ impl ActiveProviderManager {
         let _transition = self.lock_capacity_transition();
         let mut leases = self.write_leases();
         leases.release_matching_owner(session_owner, provider_name, binding_tag);
+    }
+
+    /// Transfers an admitted shared live-HLS start into a bounded reservation.
+    /// The allocation remains counted until the caller releases its handle, so a
+    /// competing acquire can never observe a gap between allocation and reservation.
+    pub fn reserve_hls_start(
+        &self,
+        owner: &str,
+        handle: &tuliprox_core::model::ProviderHandle,
+        ttl: std::time::Duration,
+    ) -> Option<ProviderBindingTag> {
+        let request_id = handle.playback_request_id?;
+        let provider = handle.allocation.get_provider_name()?;
+        let _transition = self.lock_capacity_transition();
+        if self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        let admitted = self.read_connections().single.get(&handle.allocation_id).is_some_and(|connection| {
+            connection.session_owner.as_deref() == Some(owner)
+                && connection.playback_request_id == Some(request_id)
+                && connection.allocation.get_provider_name().as_ref() == Some(&provider)
+        });
+        if !admitted {
+            return None;
+        }
+        let mut leases = self.write_leases();
+        if leases.lease_of_owner(owner).is_some_and(|lease| {
+            Some(ProviderBindingTag::new(lease.id, lease.binding_generation)) != handle.binding_tag
+        }) {
+            return None;
+        }
+        leases.reserve_hls_start(owner, &provider, request_id, ttl)
+    }
+
+    /// Restores only a cleared start reservation after a failed HLS handoff.
+    /// The caller fences the original binding; capacity is admitted again here.
+    pub fn restore_hls_start_reservation(
+        &self,
+        owner: &str,
+        provider: &Arc<str>,
+        cleared: ProviderBindingTag,
+        ttl: std::time::Duration,
+    ) -> Option<ProviderBindingTag> {
+        let _transition = self.lock_capacity_transition();
+        if ttl.is_zero() || self.is_shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        {
+            let mut leases = self.write_leases();
+            Self::prune_expired_leases(&mut leases);
+            if let Some(lease) = leases.lease_of_owner(owner) {
+                return (ProviderBindingTag::new(lease.id, lease.binding_generation) == cleared).then_some(cleared);
+            }
+        }
+        if !self.confirmation_reserve_allowed(provider, owner) {
+            return None;
+        }
+        self.write_leases().reserve_hls_start(owner, provider, PlaybackRequestId::next(), ttl)
     }
 
     /// Confirms real media activity for a playback lease. Only a confirmed lease may

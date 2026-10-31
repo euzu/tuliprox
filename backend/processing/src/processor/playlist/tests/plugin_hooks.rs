@@ -9,7 +9,7 @@ use shared::{
         ConfigTargetDto, DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy, HookCtx, NoPlugins, PlaylistGroup,
         PlaylistItem, PlaylistItemHeader, PluginAbort, PluginChnoMap, PluginDuplicateGroup, PluginGroupMerge,
         PluginHook, PluginHookStats, PluginHost, PluginKeepers, PluginRef, PluginRunReport, PluginScope, PluginScopes,
-        PluginSortKeys, XtreamCluster,
+        PluginSortKeys, VirtualId, XtreamCluster,
     },
     utils::Internable,
 };
@@ -560,4 +560,188 @@ async fn playlist_loaded_hook_is_a_no_op_without_plugins() {
         .unwrap_or_else(|(_, abort)| panic!("no abort expected: {abort}"));
 
     assert_eq!(layout(&hooked.take_groups()), ["Scoped one:keep1,drop1,keep2", "Other:other1,drop2"]);
+}
+
+#[tokio::test]
+async fn playlist_loaded_hook_realigns_duplicate_or_empty_ids_without_shifting_slots() {
+    let host = Spy::new(Plan { loaded_drop: Some("drop"), ..Plan::default() });
+    let mut item1 = named_item("drop1", "Scoped A");
+    item1.header.input_stream_id = "".intern();
+    item1.header.virtual_id = VirtualId::default();
+
+    let mut item2 = named_item("other2", "Other A");
+    item2.header.input_stream_id = "".intern();
+    item2.header.virtual_id = VirtualId::default();
+
+    let mut item3 = named_item("keep3", "Scoped B");
+    item3.header.input_stream_id = "".intern();
+    item3.header.virtual_id = VirtualId::default();
+
+    let source = MemoryPlaylistSource::new(vec![
+        PlaylistGroup {
+            id: 1,
+            title: "Scoped A".intern(),
+            channels: vec![item1, item2],
+            xtream_cluster: XtreamCluster::Live,
+        },
+        PlaylistGroup { id: 2, title: "Scoped B".intern(), channels: vec![item3], xtream_cluster: XtreamCluster::Live },
+    ])
+    .into_source();
+
+    let mut hooked = apply_playlist_loaded_hook(&host, "provider", source, &mut PluginRunReport::default())
+        .await
+        .unwrap_or_else(|(_, abort)| panic!("no abort expected: {abort}"));
+
+    assert_eq!(layout(&hooked.take_groups()), ["Other A:other2", "Scoped B:keep3"]);
+}
+
+#[derive(Clone, Default)]
+struct FilterSpy;
+
+impl PluginHost for FilterSpy {
+    fn eval_filter_batch(
+        &self,
+        _plugin: &str,
+        _func: &str,
+        _args: &[String],
+        _ctx: &HookCtx<'_>,
+        items: &[&PlaylistItem],
+        report: &mut PluginRunReport,
+    ) -> impl Future<Output = Vec<bool>> + Send {
+        let mut stats = PluginHookStats::new("test-filter-plugin", PluginHook::FilterEval);
+        stats.kept = items.len() as u64;
+        report.record(&stats);
+        let decisions = vec![true; items.len()];
+        async move { decisions }
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() {
+    use crate::{
+        fetched_playlist::FetchedPlaylist,
+        processor::{
+            playlist::{ingest::PlaylistProcessingContext, PlaylistUpdateRunOrder, ProcessingPipe},
+            stalker_refresh::StalkerRefreshMode,
+            xtream_series::playlist_resolve_series,
+        },
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::{
+        foundation::get_target_processing_filter,
+        model::{
+            ConfigPaths, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
+            SeriesStreamProperties, StreamProperties,
+        },
+    };
+    use tuliprox_core::{
+        model::{AppConfig, Config, ConfigInput, ProcessTargets, SourcesConfig},
+        utils::FileLockManager,
+    };
+
+    let host = FilterSpy;
+    let filter = get_target_processing_filter("plugin.test-filter-plugin.keep()", None).unwrap();
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.filter.processing = Some(filter);
+
+    let episodes = vec![SeriesStreamDetailEpisodeProperties { id: 101, ..Default::default() }];
+    let series_props = SeriesStreamProperties {
+        series_id: 100,
+        details: Some(SeriesStreamDetailProperties::new(None, Vec::new(), Some(episodes))),
+        ..Default::default()
+    };
+    let item = PlaylistItem {
+        header: PlaylistItemHeader {
+            id: "100".intern(),
+            name: "Show 1".intern(),
+            title: "Show 1".intern(),
+            group: "Shows".intern(),
+            item_type: PlaylistItemType::SeriesInfo,
+            xtream_cluster: XtreamCluster::Series,
+            additional_properties: Some(StreamProperties::Series(Box::new(series_props))),
+            ..Default::default()
+        },
+    };
+    let group =
+        PlaylistGroup { id: 1, title: "Shows".intern(), channels: vec![item], xtream_cluster: XtreamCluster::Series };
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
+    let app_config = AppConfig {
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+        hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
+        api_proxy: Arc::new(ArcSwapOption::default()),
+        file_locks: Arc::new(FileLockManager::default()),
+        paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        })),
+        custom_stream_response: Arc::new(ArcSwapOption::default()),
+        access_token_secret: [0; 32],
+        encrypt_secret: [0; 16],
+        media_tools: Arc::new(tuliprox_core::model::MediaToolCapabilities::new()),
+    };
+
+    let ctx: PlaylistProcessingContext<shared::model::NoopSink, crate::metadata_sink::NoopMetadataSink, _> =
+        PlaylistProcessingContext {
+            client: reqwest::Client::new(),
+            run_id: "test-series-report".into(),
+            execution_order: PlaylistUpdateRunOrder::from(1),
+            config: Arc::new(app_config),
+            user_targets: Arc::new(ProcessTargets {
+                enabled: false,
+                inputs: Vec::new(),
+                targets: Vec::new(),
+                target_names: Vec::new(),
+            }),
+            events: shared::model::NoopSink,
+            playlist_state: None,
+            disabled_headers: None,
+            processed_inputs: Arc::default(),
+            input_completions: Arc::default(),
+            input_locks: Arc::default(),
+            provider_manager: None,
+            metadata_manager: None,
+            pre_processed_inputs: None,
+            stalker_refresh_mode: StalkerRefreshMode::Complete,
+            partial_refresh: Arc::default(),
+            had_quality_rejections: Arc::default(),
+            input_refresh: None,
+            library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
+            maintenance: None,
+            plugins: host,
+        };
+
+    let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };
+    let mut provider_fpl = FetchedPlaylist {
+        input: &input,
+        source: MemoryPlaylistSource::new(vec![group.clone()]).into_source(),
+        epg: None,
+    };
+    let mut processed_fpl =
+        FetchedPlaylist { input: &input, source: MemoryPlaylistSource::new(vec![group]).into_source(), epg: None };
+
+    let mut errors = Vec::new();
+    let pipe: ProcessingPipe = vec![TransformStage::Filter];
+    let mut report = PluginRunReport::default();
+
+    playlist_resolve_series(&ctx, &target, &mut errors, &pipe, &mut provider_fpl, &mut processed_fpl, &mut report)
+        .await;
+
+    assert!(!report.hooks.is_empty(), "series episode plugin report must be merged into target's report");
+    assert_eq!(report.hooks[0].plugin, "test-filter-plugin");
+    assert_eq!(report.hooks[0].hook, PluginHook::FilterEval.as_str());
+    assert_eq!(report.hooks[0].kept, 1);
 }

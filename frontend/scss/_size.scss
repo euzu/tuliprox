@@ -19,6 +19,8 @@ $form-max-grid-cells-small-screen: 2;
 
 $playlist-categories-grid-cell-width: 400px;
 
+$mono-font: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
 @mixin fixed-width($width) {
   width: $width;
   min-width: $width;

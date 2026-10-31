@@ -56,7 +56,13 @@ fn render_content(card: &InputUpdateCardModel, view: &InputUpdateRunView) -> Htm
     )
 }
 
-fn assert_rendered_cluster_badges(node: &VNode, modifier: &str, symbol: char, label: &str) {
+fn has_status_dot(badge: &yew::virtual_dom::VTag) -> bool {
+    tags(badge.children().unwrap())
+        .into_iter()
+        .any(|tag| has_attribute(tag, "class", "tp__playlist-update-view__status-dot"))
+}
+
+fn assert_rendered_cluster_badges(node: &VNode, modifier: &str, label: &str) {
     let badges: Vec<_> = tags(node)
         .into_iter()
         .filter(|tag| {
@@ -73,15 +79,13 @@ fn assert_rendered_cluster_badges(node: &VNode, modifier: &str, symbol: char, la
             .attributes
             .iter()
             .any(|(key, value)| key == "class" && value.split_whitespace().any(|class| class == modifier)));
-        assert!(visible_text(badge.children().unwrap(), true).contains(symbol));
+        assert!(has_status_dot(badge), "every status badge leads with a status dot");
         if has_attribute(badge, "role", "listitem") {
             assert!(has_attribute(badge, "title", label));
         } else {
             assert!(visible_text(badge.children().unwrap(), true).contains(label));
         }
     }
-    assert_eq!(visible_text(node, false).matches(symbol).count(), 3, "details remain collapsed");
-    assert_eq!(visible_text(node, true).matches(symbol).count(), 6);
 }
 
 #[test]
@@ -128,7 +132,6 @@ fn input_update_card_persisted_failed_badges_match_live_errors_after_reload() {
             assert_rendered_cluster_badges(
                 &render_content(&cards[0], &view),
                 "tp__playlist-update-view__pipeline-status--error",
-                '✕',
                 "LABEL.UPDATE_STATUS_FAILED",
             );
         }
@@ -163,7 +166,6 @@ fn input_update_card_persisted_failed_quality_rejection_keeps_warning_badges() {
     assert_rendered_cluster_badges(
         &render_content(&cards[0], &view),
         "tp__playlist-update-view__pipeline-status--rejected",
-        '⚠',
         "MESSAGES.PLAYLIST_UPDATE.CLUSTER_REJECTED",
     );
 }
@@ -209,7 +211,7 @@ fn pipeline_transparency_input_update_card_series_failure_survives_reload_and_fo
             })
             .unwrap();
         assert!(badge.attributes.iter().any(|(key, value)| key == "class" && value.contains("pipeline-status--error")));
-        assert!(visible_text(badge.children().unwrap(), false).contains('✕'));
+        assert!(has_status_dot(badge));
         let details = tags(&node)
             .into_iter()
             .find(|tag| has_attribute(tag, "aria-labelledby", "input-update-card-17-series-details"))
@@ -298,7 +300,11 @@ fn content_badge_labels(card: &InputUpdateCardModel, view: &InputUpdateRunView) 
         .into_iter()
         .filter(|tag| has_attribute(tag, "role", "listitem"))
         .map(|tag| {
-            let label = tags(tag.children().unwrap()).into_iter().find(|tag| tag.tag() == "span").unwrap();
+            // Decorative children (cluster dot, status symbol) are aria-hidden; the label is the visible text span.
+            let label = tags(tag.children().unwrap())
+                .into_iter()
+                .find(|tag| tag.tag() == "span" && !has_attribute(tag, "aria-hidden", "true"))
+                .unwrap();
             visible_text(label.children().unwrap(), false)
         })
         .collect()
@@ -516,13 +522,13 @@ fn pipeline_transparency_input_update_card_provider_content_keeps_source_cache_a
 #[test]
 fn input_update_card_general_status_keeps_colors_in_details_without_becoming_a_content_badge() {
     for input_type in [InputType::M3u, InputType::Library, InputType::Plex] {
-        for (state, modifier, symbol) in [
-            (InputUpdateCardStatus::Ready, "neutral", "–"),
-            (InputUpdateCardStatus::Queued, "queued", "●"),
-            (InputUpdateCardStatus::Updating, "updating", "●"),
-            (InputUpdateCardStatus::Success, "accepted", "✓"),
-            (InputUpdateCardStatus::Partial, "rejected", "⚠"),
-            (InputUpdateCardStatus::Failed, "error", "✕"),
+        for (state, modifier) in [
+            (InputUpdateCardStatus::Ready, "neutral"),
+            (InputUpdateCardStatus::Queued, "queued"),
+            (InputUpdateCardStatus::Updating, "updating"),
+            (InputUpdateCardStatus::Success, "accepted"),
+            (InputUpdateCardStatus::Partial, "rejected"),
+            (InputUpdateCardStatus::Failed, "error"),
         ] {
             let (card, mut view) = card_view(input_type);
             view.input_state = state;
@@ -536,7 +542,7 @@ fn input_update_card_general_status_keeps_colors_in_details_without_becoming_a_c
             assert!(!badges.iter().any(|badge| has_attribute(badge, "role", "listitem")));
             for badge in badges {
                 let text = visible_text(badge.children().unwrap(), true);
-                assert!(text.contains(state.label_key()) && text.contains(symbol), "{text}");
+                assert!(text.contains(state.label_key()) && has_status_dot(badge), "{text}");
             }
             assert!(!all_tags.iter().any(|tag| tag
                 .attributes
@@ -594,10 +600,8 @@ fn input_update_card_header_badges_share_geometry_and_have_no_input_prefix() {
                 &format!("tp__playlist-update-view__pipeline-status {}", status.modifier())
             ));
             assert!(!badge.attributes.iter().any(|(name, _)| name == "style"));
-            assert_eq!(
-                visible_text(&rendered, true),
-                format!("{} {}", status.label_key(), input_status_symbol(status))
-            );
+            assert_eq!(visible_text(&rendered, true).trim(), status.label_key());
+            assert!(has_status_dot(badge));
         }
     }
 }

@@ -19,5 +19,8 @@ pub use expression::{
     BinaryOperator, CompiledRegex, Filter, FilterBuilder, Leaf, LeafId, NoPluginCalls, Node, NodeId, NumericOperator,
     PluginCallBatch, PluginCallDecisions, PluginCallRef, PresenceOperator, StringOperator,
 };
-pub use parser::{get_filter, get_filter_detailed, FilterParsePosition};
+pub use parser::{
+    get_filter, get_filter_detailed, get_target_processing_filter, get_target_processing_filter_detailed,
+    FilterParsePosition,
+};
 pub use templates::{apply_templates_to_pattern, apply_templates_to_pattern_single, prepare_templates};

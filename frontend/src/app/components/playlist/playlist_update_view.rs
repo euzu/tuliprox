@@ -956,7 +956,8 @@ mod tests {
         assert!(!targets.contains("icon="));
         assert!(targets.contains("(all_selection == TargetSelectionState::All).then_some(\"active\")"));
         assert!(!targets.contains("(all_selection != TargetSelectionState::Empty).then_some(\"active\")"));
-        assert!(targets.contains("(all_selection == TargetSelectionState::Mixed).then_some(\"mixed\")"));
+        // Target buttons are selections; a partial selection is not drawn as a "mixed" All button.
+        assert!(!targets.contains("then_some(\"mixed\")"));
         assert!(targets.contains("selected.then_some(\"active\")"));
         assert!(targets.contains("aria_pressed={Some(all_selection.aria_pressed().to_string())}"));
         assert!(targets.contains("aria_pressed={Some(selection.aria_pressed().to_string())}"));

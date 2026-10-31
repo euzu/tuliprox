@@ -59,6 +59,8 @@ mod disk_epg_wireup_tests {
                     })
                 })
                 .collect(),
+            channel_sources: None,
+            input_name: None,
         }
     }
 

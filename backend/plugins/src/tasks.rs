@@ -22,6 +22,7 @@ use crate::{
     manifest::{Concurrency, Task},
     registry::{LoadedPlugin, PluginRecord, RegistrySnapshot},
     runtime::{call_with_deadline, CallError},
+    state::PluginEnv,
     system::PluginSystem,
 };
 use shared::model::{PluginHook, PluginTaskRunDto};
@@ -335,28 +336,7 @@ impl PluginSystem {
         };
 
         let secrets = &loaded.env.secrets;
-        let (summary, error, guest_ran) = match ended {
-            Ended::Done(Ok(Ok(summary))) => {
-                record.report(Ok(()));
-                (Some(summary), None, true)
-            }
-            // The guest answered `err`: a normal failed run, not a broken
-            // plugin, so it does not feed the breaker (a trap or deadline does).
-            Ended::Done(Ok(Err(message))) => {
-                record.report(Ok(()));
-                (None, Some(message), true)
-            }
-            Ended::Done(Err(err)) => {
-                record.report(Err(&err));
-                let ran = !matches!(err, CallError::Budget { .. } | CallError::Instantiate(_));
-                (None, Some(err.to_string()), ran)
-            }
-            Ended::Reloaded => (None, Some("cancelled by a plugin reload".to_string()), true),
-        };
-        if guest_ran {
-            // The run may have written KV: later hook results can differ.
-            loaded.env.kv_generation.fetch_add(1, Ordering::Relaxed);
-        }
+        let (summary, error) = handle_task_ended(record, &loaded.env, ended);
 
         let run = PluginTaskRunDto {
             plugin: record.id.to_string(),
@@ -408,6 +388,35 @@ async fn call_task(
     let result = call_with_deadline(limits, guest.call_run(live.armed(), context)).await;
     host_fns::end_call(live.store_mut().data_mut()).await;
     result
+}
+
+/// The summary or error of a run that `ended`, after feeding the breaker and,
+/// when the guest ran, bumping `kv_generation`. A run cancelled by a reload did
+/// not run the guest to its end, so it counts as neither.
+fn handle_task_ended(record: &PluginRecord, env: &PluginEnv, ended: Ended) -> (Option<String>, Option<String>) {
+    let (summary, error, guest_ran) = match ended {
+        Ended::Done(Ok(Ok(summary))) => {
+            record.report(Ok(()));
+            (Some(summary), None, true)
+        }
+        // The guest answered `err`: a normal failed run, not a broken
+        // plugin, so it does not feed the breaker (a trap or deadline does).
+        Ended::Done(Ok(Err(message))) => {
+            record.report(Ok(()));
+            (None, Some(message), true)
+        }
+        Ended::Done(Err(err)) => {
+            record.report(Err(&err));
+            let ran = !matches!(err, CallError::Budget { .. } | CallError::Instantiate(_));
+            (None, Some(err.to_string()), ran)
+        }
+        Ended::Reloaded => (None, Some("cancelled by a plugin reload".to_string()), false),
+    };
+    if guest_ran {
+        // The run may have written KV: later hook results can differ.
+        env.kv_generation.fetch_add(1, Ordering::Relaxed);
+    }
+    (summary, error)
 }
 
 #[cfg(test)]
@@ -521,5 +530,27 @@ mod tests {
         assert!(cut.len() <= MAX_RESULT_BYTES + '…'.len_utf8());
         assert!(cut.ends_with('…'));
         assert_eq!(result_text("short", &[]), "short");
+    }
+
+    #[test]
+    fn a_task_cancelled_by_a_reload_does_not_bump_the_kv_generation() {
+        use crate::{
+            manifest::Capabilities,
+            state::{PluginServices, Shared},
+        };
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Shared::new(PluginServices::new(reqwest::Client::new(), dir.path().to_path_buf())));
+        let env = shared.env_for(&Arc::from("p"), Capabilities::default(), Arc::from("{}"), Arc::from([])).unwrap();
+        let record = PluginRecord::new("p", PathBuf::from("p"), 100);
+
+        assert_eq!(env.kv_generation.load(Ordering::Relaxed), 0);
+        let (_summary, error) = handle_task_ended(&record, &env, Ended::Reloaded);
+        assert_eq!(error.as_deref(), Some("cancelled by a plugin reload"));
+        assert_eq!(env.kv_generation.load(Ordering::Relaxed), 0, "kv_generation must not bump on reload cancellation");
+
+        let (summary, _) = handle_task_ended(&record, &env, Ended::Done(Ok(Ok("done".to_string()))));
+        assert_eq!(summary.as_deref(), Some("done"));
+        assert_eq!(env.kv_generation.load(Ordering::Relaxed), 1, "a finished run still bumps it");
     }
 }

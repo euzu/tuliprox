@@ -707,6 +707,8 @@ async fn protected_register_mirrors_the_inspection_routes() {
         ("/playlist/items?cluster=live", StatusCode::BAD_REQUEST),
         ("/playlist/epg/channels?target=m3u-target", StatusCode::OK),
         ("/playlist/epg/channel?target=m3u-target&channel_id=x", StatusCode::OK),
+        ("/playlist/analytics", StatusCode::OK),
+        ("/playlist/analytics/999/unmapped.csv", StatusCode::NOT_FOUND),
     ] {
         let response = router
             .clone()

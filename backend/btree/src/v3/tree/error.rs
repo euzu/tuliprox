@@ -1,5 +1,5 @@
 #[derive(Debug)]
-pub(in crate::v3) enum PublishDatabaseError {
+pub(crate) enum PublishDatabaseError {
     NotPublished(io::Error),
     PublishedDurabilityUnknown(io::Error),
 }

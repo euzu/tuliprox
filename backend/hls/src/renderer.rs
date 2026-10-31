@@ -10,7 +10,7 @@ use tuliprox_core::{
     utils::{format_hls_duration_ms, hls_target_duration_secs},
 };
 
-const MIN_VISIBLE_SEGMENTS: usize = 3;
+pub(crate) const MIN_VISIBLE_SEGMENTS: usize = 3;
 const TARGET_VISIBLE_SEGMENTS: usize = 6;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -99,7 +99,8 @@ impl HlsManifestRenderer {
         if !plan.is_current(session) {
             return Err(RenderError::InvalidState);
         }
-        let minimum = if session.allows_short_origin_windows() { 1 } else { MIN_VISIBLE_SEGMENTS };
+        let minimum =
+            if session.allows_short_origin_windows() || plan.is_startup_recovery() { 1 } else { MIN_VISIBLE_SEGMENTS };
         let startup = session.startup.as_ref().ok_or(RenderError::InvalidState)?;
         let head = plan.visible.first().ok_or(RenderError::NoRenderableWindow)?;
         if plan.visible.len() < minimum
@@ -111,6 +112,7 @@ impl HlsManifestRenderer {
                 .visible
                 .iter()
                 .all(|seq| session.segments.get(seq).is_some_and(|entry| is_renderable(entry, session)))
+            || (plan.is_startup_recovery() && !plan.is_ready(session))
         {
             return Err(RenderError::NoRenderableWindow);
         }

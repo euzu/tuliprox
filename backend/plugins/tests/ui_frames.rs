@@ -98,7 +98,8 @@ fn the_frame_headers_are_the_frozen_six() {
     assert_eq!(
         PluginSystem::FRAME_CSP,
         "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-         connect-src 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+         font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; \
+         sandbox allow-scripts"
     );
     assert_eq!(get("x-content-type-options"), Some("nosniff"));
     assert_eq!(get("referrer-policy"), Some("no-referrer"));

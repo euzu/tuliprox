@@ -223,6 +223,11 @@ impl HlsProxyManager {
             HlsLifecycleEventKey::SessionIdle { proxy_session_id } => {
                 self.handle_session_idle_lifecycle_event(&proxy_session_id, now_ms).await;
             }
+            HlsLifecycleEventKey::OriginBindingProtection { proxy_session_id } => {
+                if let Some(session) = self.sessions.get_by_proxy_session_id(&proxy_session_id).await {
+                    self.sync_recovery_binding_protection(active_provider, &session, now_ms).await;
+                }
+            }
         }
     }
 

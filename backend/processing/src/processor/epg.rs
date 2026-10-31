@@ -1101,7 +1101,7 @@ pub(crate) fn retain_epg_referenced_by_groups(groups: &[PlaylistGroup], epg: &mu
         })
         .collect::<HashSet<_>>();
     for source in epg {
-        source.children.retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+        source.retain_children(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
     }
 }
 
@@ -1261,8 +1261,8 @@ async fn assign_channel_epg<P: PluginHost>(
     if let Some((mut epg_source, _)) = merged_epg.take() {
         let referenced_epg_ids = referenced_live_epg_ids(fp);
         epg_source
-            .children
-            .retain(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+            .retain_children(|channel| with_folded_epg_id(&channel.id, |folded| referenced_epg_ids.contains(folded)));
+        epg_source.input_name = Some(Arc::from(fp.input.name.as_ref()));
         new_epg.push(epg_source);
     }
 }
@@ -1305,11 +1305,13 @@ pub async fn process_playlist_epg<P: PluginHost>(
 ///
 /// Injected programmes are plain `EpgChannel::programmes`, so they take the
 /// ordinary `spill_epg_to_disk` -> `finish_into_disk` -> `merge_epg_trees` path.
-/// The hook adds programmes to channels, never channels, so the playlist
-/// `source_ordinal` order of the generated XMLTV (`epg_repository.rs`) is
-/// untouched. The one rule that applies to an injected programme is the merge's:
-/// it collapses an EXACT `(start, stop)` collision with an existing programme of
-/// the channel, keeping the existing one and backfilling only what it lacks.
+/// The hook replaces each channel's programmes with the guest's enriched list
+/// (which receives the existing programmes to inspect, modify, or extend), never
+/// adding new channels, so the playlist `source_ordinal` order of the generated
+/// XMLTV (`epg_repository.rs`) is untouched. The one rule that applies to an
+/// injected programme across multiple sources is the merge's: it collapses an
+/// EXACT `(start, stop)` collision with an existing programme of the channel,
+/// keeping the existing one and backfilling only what it lacks.
 pub async fn enrich_playlist_programmes<P: PluginHost>(
     plugins: &P,
     ctx: &HookCtx<'_>,
@@ -1430,6 +1432,7 @@ mod tests {
                 match_names,
                 config: Box::new(IcsEpgSourceConfig::default()),
             },
+            source_idx: 0,
         }])
     }
 
@@ -1528,6 +1531,7 @@ mod tests {
             priority: 0,
             logo_override: false,
             kind: PersistedEpgSourceKind::Xmltv,
+            source_idx: 0,
         }]);
         let mut playlist = FetchedPlaylist {
             input: &input,
@@ -1743,6 +1747,7 @@ mod tests {
                 priority: 0,
                 logo_override: true,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -1815,6 +1820,8 @@ mod tests {
             logo_override: false,
             attributes: None,
             children: vec![Arc::new(shared::model::EpgChannel::new("USA4K.us".intern()))],
+            channel_sources: None,
+            input_name: None,
         }];
 
         super::adopt_guide_live_epg_id_case(&mut playlist, &epg);
@@ -1855,6 +1862,7 @@ mod tests {
                     priority: 0,
                     logo_override: false,
                     kind: PersistedEpgSourceKind::Xmltv,
+                    source_idx: 0,
                 }])),
             };
             let mut epg = Vec::new();
@@ -1923,6 +1931,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -2042,6 +2051,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -2082,6 +2092,7 @@ mod tests {
                 priority: 0,
                 logo_override: false,
                 kind: PersistedEpgSourceKind::Xmltv,
+                source_idx: 0,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -2540,7 +2551,14 @@ mod tests {
                 Arc::new(channel)
             })
             .collect();
-        tuliprox_core::model::Epg { priority: 0, logo_override: false, attributes: None, children }
+        tuliprox_core::model::Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children,
+            channel_sources: None,
+            input_name: None,
+        }
     }
 
     #[tokio::test]

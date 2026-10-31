@@ -30,6 +30,23 @@ pub struct TableDefinition<T: PartialEq + Clone + 'static> {
 #[derive(Properties, Clone, PartialEq)]
 pub struct TableProps<T: PartialEq + Clone + 'static> {
     pub definition: Rc<TableDefinition<T>>,
+    /// Makes whole rows clickable (hover highlight, pointer) and reports the clicked item.
+    #[prop_or_default]
+    pub on_row_click: Option<Callback<Rc<T>>>,
+    /// Row key (as produced by `row_key`) of the row to highlight as selected.
+    #[prop_or_default]
+    pub selected_row_key: Option<AttrValue>,
+}
+
+/// Row interaction options of a [`Table`]; empty for read-only tables.
+struct RowInteraction<'a, T> {
+    on_click: Option<&'a Callback<Rc<T>>>,
+    selected_key: Option<&'a AttrValue>,
+}
+
+#[cfg(test)]
+impl<T> RowInteraction<'_, T> {
+    const NONE: Self = Self { on_click: None, selected_key: None };
 }
 
 fn has_table_items<T: PartialEq + Clone + 'static>(items: &Option<Rc<Vec<Rc<T>>>>) -> bool {
@@ -85,7 +102,14 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
     }
     html! { <div class="tp__table"><TableShell table_id={props.definition.table_id.clone()} columns={props.definition.columns.clone()}
         show_columns={has_table_items(&props.definition.items)}>
-        {table_markup(&props.definition, &visible, *sort_state, on_header_click, translate.t("LABEL.NO_CONTENT"))}
+        {table_markup(
+            &props.definition,
+            &visible,
+            *sort_state,
+            on_header_click,
+            translate.t("LABEL.NO_CONTENT"),
+            &RowInteraction { on_click: props.on_row_click.as_ref(), selected_key: props.selected_row_key.as_ref() },
+        )}
     </TableShell></div> }
 }
 
@@ -95,6 +119,7 @@ fn table_markup<T: PartialEq + Clone + 'static>(
     sort_state: Option<(usize, SortOrder)>,
     on_header_click: Callback<usize>,
     no_content: String,
+    rows: &RowInteraction<'_, T>,
 ) -> Html {
     let TableDefinition { items, render_header_cell, render_data_cell, columns, row_key, .. } = definition;
     html! {
@@ -178,8 +203,19 @@ fn table_markup<T: PartialEq + Clone + 'static>(
                           <>
                           {
                             for items.as_ref().into_iter().flat_map(|list| list.iter().enumerate()).map(|(row_index, item)| {
+                                let key = row_key.emit((row_index, Rc::clone(item)));
+                                let selected = rows.selected_key.is_some_and(|selected| *selected == key);
+                                let onclick = rows.on_click.map(|on_click| {
+                                    let on_click = on_click.clone();
+                                    let item = Rc::clone(item);
+                                    Callback::from(move |_: MouseEvent| on_click.emit(Rc::clone(&item)))
+                                });
+                                let class = classes!(
+                                    onclick.is_some().then_some("tp__table__row--clickable"),
+                                    selected.then_some("tp__table__row--selected"),
+                                );
                                 html! {
-                                    <tr key={row_key.emit((row_index, Rc::clone(item))).as_str()}>
+                                    <tr key={key.as_str()} {class} {onclick}>
                                         {
                                             for visible.iter().copied().map(|col_index| {
                                                 html!{

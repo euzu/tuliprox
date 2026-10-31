@@ -6,7 +6,8 @@
 //!   `delay_ms` spins on a counter first, roughly 1e6 loop iterations per
 //!   millisecond, so a value of a few hundred runs far past the host's 50 ms
 //!   clamp. `bad_header: true` also returns a `Host` header, to exercise the
-//!   denylist.
+//!   denylist. `header_count` (a number) answers that many `X-Flood-<n>` headers
+//!   instead, to exercise the host's cap on injected headers.
 //! * `collect-metrics` answers `answer=42` and `calls=<n>`, where `n` counts
 //!   the calls so far in the plugin's KV store (one fresh instance per call, so
 //!   a static would always read 1). `delay_ms` applies here too.
@@ -64,6 +65,9 @@ impl stream_hooks::Guest for EdgeProbe {
         spin(&settings);
         if let Some(reason) = settings.get("fail").and_then(Value::as_str) {
             return Err(reason.to_string());
+        }
+        if let Some(count) = settings.get("header_count").and_then(Value::as_u64) {
+            return Ok((0..count).map(|index| (format!("X-Flood-{index}"), "v".to_string())).collect());
         }
         let mut headers =
             vec![("X-Edge-Probe".to_string(), "1".to_string()), ("X-Edge-User".to_string(), req.user.clone())];

@@ -15,6 +15,8 @@ mod access;
 mod admission;
 mod cached;
 mod canonical_owner;
+#[cfg(test)]
+pub(super) use canonical_owner::{await_hls_terminal_or_refresh, current_hls_refresh_lease};
 mod provisioning;
 mod publication;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
@@ -32,7 +34,7 @@ pub(super) use admission::{
 };
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub(super) use cached::{
-    hls_bandwidth_persistence_outcome, hls_cached_manifest_temporarily_unavailable,
+    hls_bandwidth_persistence_outcome, hls_cached_manifest_temporarily_unavailable, hls_exhausted_startup_response,
     observe_hls_lease_manifest_snapshot_derivation, read_hls_cached_manifest, spawn_hls_runtime_bandwidth_persistence,
     try_hls_cached_manifest_response, wait_for_hls_startup_evidence, HlsCachedManifestRead,
     HlsCachedManifestViewContext, HlsRuntimeBandwidthLearningContext,

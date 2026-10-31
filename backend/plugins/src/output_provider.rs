@@ -47,6 +47,18 @@ impl std::fmt::Display for Failure {
     }
 }
 
+/// The most bytes one `begin-output` / `render-batch` / `finish-output` call may
+/// return; beyond that the call fails like a trap.
+const MAX_OUTPUT_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+/// `chunk` of the guest call `what`, or a trap when it is over the cap.
+fn capped(what: &str, chunk: Vec<u8>) -> Result<Vec<u8>, CallError> {
+    if chunk.len() > MAX_OUTPUT_CHUNK_BYTES {
+        return Err(CallError::Trap(format!("{what} returned {} bytes (cap {MAX_OUTPUT_CHUNK_BYTES})", chunk.len())));
+    }
+    Ok(chunk)
+}
+
 /// The three guest calls of one output file; the wasm instance behind it is
 /// [`GuestOutput`], a test double stands in for it in the tests.
 trait Generator {
@@ -141,7 +153,8 @@ async fn drive<G: Generator + Send>(
     batch_size: usize,
     file: &mut OutputFile,
 ) -> Result<(), Failure> {
-    file.write(generator.begin().await.map_err(Failure::Plugin)?).await.map_err(Failure::Host)?;
+    let chunk = capped("begin-output", generator.begin().await.map_err(Failure::Plugin)?).map_err(Failure::Plugin)?;
+    file.write(chunk).await.map_err(Failure::Host)?;
     for batch in items.chunks(batch_size.max(1)) {
         let channels = batch
             .iter()
@@ -149,9 +162,12 @@ async fn drive<G: Generator + Send>(
             // A batch never exceeds MAX_PLUGINS_BATCH_SIZE, which fits in u32.
             .map(|(handle, item)| item_to_channel(u32::try_from(handle).unwrap_or(u32::MAX), item))
             .collect();
-        file.write(generator.render(channels).await.map_err(Failure::Plugin)?).await.map_err(Failure::Host)?;
+        let chunk = capped("render-batch", generator.render(channels).await.map_err(Failure::Plugin)?)
+            .map_err(Failure::Plugin)?;
+        file.write(chunk).await.map_err(Failure::Host)?;
     }
-    file.write(generator.finish().await.map_err(Failure::Plugin)?).await.map_err(Failure::Host)?;
+    let chunk = capped("finish-output", generator.finish().await.map_err(Failure::Plugin)?).map_err(Failure::Plugin)?;
+    file.write(chunk).await.map_err(Failure::Host)?;
     Ok(())
 }
 
@@ -301,6 +317,8 @@ mod tests {
     struct Fake {
         calls: Vec<String>,
         fail_at: Option<&'static str>,
+        /// Answers this call with a chunk one byte over the cap.
+        oversize_at: Option<&'static str>,
     }
 
     impl Fake {
@@ -308,6 +326,9 @@ mod tests {
             self.calls.push(call.to_string());
             if self.fail_at == Some(call) {
                 return Err(CallError::Trap(format!("{call} returned err: boom")));
+            }
+            if self.oversize_at == Some(call) {
+                return Ok(vec![0; MAX_OUTPUT_CHUNK_BYTES + 1]);
             }
             Ok(bytes.into_bytes())
         }
@@ -385,6 +406,33 @@ mod tests {
             assert!(!tmp_path_for(&path).exists(), "{fail_at}: temp file left behind");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous run", "{fail_at}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_chunk_over_the_cap_fails_the_output_like_a_trap() {
+        for oversize_at in ["begin", "render", "finish"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("list.txt");
+            std::fs::write(&path, "previous run").unwrap();
+            let items = items();
+            let refs: Vec<&PlaylistItem> = items.iter().collect();
+
+            let mut fake = Fake { oversize_at: Some(oversize_at), ..Fake::default() };
+            let mut file = OutputFile::create(&path).await.unwrap();
+            let failure = drive(&mut fake, &refs, 2, &mut file).await.unwrap_err();
+            file.discard().await;
+
+            assert!(matches!(failure, Failure::Plugin(CallError::Trap(_))), "{oversize_at}");
+            assert!(failure.to_string().contains("cap"), "{oversize_at}: {failure}");
+            assert!(!tmp_path_for(&path).exists(), "{oversize_at}: temp file left behind");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous run", "{oversize_at}");
+        }
+    }
+
+    #[test]
+    fn a_chunk_of_exactly_the_cap_is_accepted() {
+        assert_eq!(capped("render-batch", vec![0; MAX_OUTPUT_CHUNK_BYTES]).unwrap().len(), MAX_OUTPUT_CHUNK_BYTES);
+        assert!(capped("render-batch", vec![0; MAX_OUTPUT_CHUNK_BYTES + 1]).is_err());
     }
 
     #[tokio::test]

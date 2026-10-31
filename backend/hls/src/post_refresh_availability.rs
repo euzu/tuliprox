@@ -154,6 +154,7 @@ pub(super) async fn evaluate_active_terminal_leases_for_reevaluation(
     proxy_session_id: &ProxySessionId,
     now_ms: u64,
 ) -> HlsPostRefreshTerminalEvaluation {
+    ctx.hls_proxy.sync_recovery_binding_protection(&ctx.active_provider, session, now_ms).await;
     let leases = ctx.hls_proxy.terminal_playback_snapshots_for_session(proxy_session_id, now_ms).await;
     if leases.is_empty() {
         return HlsPostRefreshTerminalEvaluation::NoLiveLease;

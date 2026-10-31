@@ -272,7 +272,15 @@ fn can_serve_committed_manifest(
     now_ms: u64,
 ) -> bool {
     match protection {
-        HlsAccountBindingProtection::HardActive { .. } | HlsAccountBindingProtection::SoftActive { .. } => true,
+        HlsAccountBindingProtection::HardActive { .. } | HlsAccountBindingProtection::SoftActive { .. } => {
+            let start_only =
+                session.origin_account_binding.as_ref().and_then(|binding| binding.startup_protection).is_some_and(
+                    |start| session.activity.last_authorized_media_at_ms.is_none_or(|at| at <= start.anchored_at_ms),
+                );
+            // Provider start protection does not establish playback or authorize
+            // an expired committed window while its replacement media is loading.
+            !start_only || committed_manifest_valid_at(candidate, now_ms)
+        }
         HlsAccountBindingProtection::NoMediaYet => {
             matches!(policy, HlsCachedManifestPolicy::AllowInitialNoMediaYet)
                 && committed_manifest_valid_at(candidate, now_ms)

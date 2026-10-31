@@ -37,7 +37,15 @@ pub fn PlaylistMappings(props: &PlaylistMappingsProps) -> Html {
         html! {
             <div class="tp__playlist-mappings__mapping-mapper-content">
                 <FilterView filter={mapper.t_filter.clone()} />
-                <MapperScriptView script={mapper.t_script.clone()} pretty={true}/>
+                {
+                    // A Rhai program has no mapper-DSL AST to render, so its source is shown as
+                    // written. The backend compiles and validates it when the configuration loads.
+                    if mapper.mapper_type.is_dsl() {
+                        html! { <MapperScriptView script={mapper.t_script.clone()} pretty={true}/> }
+                    } else {
+                        html! { <pre class="tp__mapper-script__code">{ mapper.script.clone() }</pre> }
+                    }
+                }
             </div>
         }
     };

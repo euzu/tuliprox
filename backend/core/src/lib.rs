@@ -11,4 +11,5 @@
 pub mod response_macros;
 
 pub mod model;
+pub mod scripting;
 pub mod utils;

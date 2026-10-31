@@ -628,7 +628,7 @@ async fn provider_grace_expiry_commits_lease_bound_provider_exhausted_tail() {
         false,
     )
     .await;
-    let super::super::HlsProviderExhaustedResolution::Response(response) = response else {
+    let super::super::HlsProviderExhaustedResolution::Exhausted(response) = response else {
         panic!("expired grace must resolve to a finite response");
     };
     assert!(!response.headers().contains_key(header::LOCATION));
@@ -650,7 +650,7 @@ async fn provider_grace_expiry_commits_lease_bound_provider_exhausted_tail() {
         false,
     )
     .await;
-    let super::super::HlsProviderExhaustedResolution::Response(replay) = replay else {
+    let super::super::HlsProviderExhaustedResolution::Exhausted(replay) = replay else {
         panic!("committed provider tail must replay");
     };
     assert_eq!(replay.status(), StatusCode::OK);

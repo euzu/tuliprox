@@ -12,7 +12,54 @@ use std::sync::Arc;
 use tuliprox_hls::api::HlsProxyManager;
 use tuliprox_metadata::manager::MetadataUpdateManager;
 
+/// A current-thread runtime and a count of the threads it has started. It has no
+/// worker threads, so each one is a blocking-pool thread: a test sees that code
+/// ran `spawn_blocking` when the count grows.
+///
+/// # Panics
+/// When the runtime cannot be built.
+pub fn counting_runtime() -> (tokio::runtime::Runtime, Arc<std::sync::atomic::AtomicUsize>) {
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&started);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .build()
+        .expect("test runtime");
+    (runtime, started)
+}
+
+/// A plugin system holding the UI-only plugin `demo`, whose settings schema
+/// `config-schema.json` is a file in the package.
+///
+/// # Panics
+/// When the package cannot be written or the plugin system does not load.
+#[cfg(feature = "plugins")]
+pub fn create_test_plugin_system(root: &std::path::Path) -> tuliprox_plugins::PluginSystem {
+    let dir = root.join("plugins").join("demo");
+    std::fs::create_dir_all(&dir).expect("plugin dir");
+    std::fs::write(
+        dir.join("manifest.yml"),
+        "id: demo\nname: Demo\nversion: 1.0.0\napi_version: 1\nui:\n  config_section:\n    schema: config-schema.json\n",
+    )
+    .expect("manifest");
+    std::fs::write(dir.join("config-schema.json"), r#"{"type":"object"}"#).expect("schema");
+    let config = tuliprox_core::model::PluginsConfig {
+        enabled: true,
+        directory: root.join("plugins").to_string_lossy().to_string(),
+        ..tuliprox_core::model::PluginsConfig::default()
+    };
+    let services = tuliprox_plugins::PluginServices::new(reqwest::Client::new(), root.join("data"));
+    tuliprox_plugins::PluginSystem::load(&config, services).expect("load").expect("plugins are enabled")
+}
+
 pub fn create_test_app_state(config: Config) -> Arc<AppState> {
+    create_test_app_state_with_plugins(config, super::AppPlugins::default())
+}
+
+pub fn create_test_app_state_with_plugins(config: Config, plugins: super::AppPlugins) -> Arc<AppState> {
     let app_config = Arc::new(AppConfig {
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
@@ -92,7 +139,7 @@ pub fn create_test_app_state(config: Config) -> Arc<AppState> {
         auth: AuthState::for_tests(),
         playlist_updates: PlaylistUpdateControl::for_tests(),
         maintenance,
-        plugins: super::AppPlugins::default(),
+        plugins,
     })
 }
 

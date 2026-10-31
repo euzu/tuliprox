@@ -9,6 +9,7 @@ pub(super) async fn send(
     request: reqwest::Request,
     timeout: Duration,
     deadline: &mut Option<HlsOriginResourceBodyDeadline>,
+    #[cfg(any(test, feature = "test-support"))] barrier: Option<&super::HlsResourceRetryBarrier>,
 ) -> Result<reqwest::Response, HlsOriginResourceFetchError> {
     let mut request: axum::http::Request<reqwest::Body> =
         request.try_into().map_err(|error| transport_error(&error))?;
@@ -24,6 +25,8 @@ pub(super) async fn send(
                     return Err(HlsOriginResourceFetchError::Transport("HLS connection metadata missing".into()));
                 }
                 *deadline = Some(HlsOriginResourceBodyDeadline::new(timeout));
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(barrier) = barrier { barrier.transfer_started.notify_one(); }
                 return Ok(response);
             }
             connected = async { capture.wait_for_connection_metadata().await.is_some() } => {
@@ -33,6 +36,10 @@ pub(super) async fn send(
                 *deadline = Some(HlsOriginResourceBodyDeadline::new(timeout));
             }
         }
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(barrier) = barrier {
+        barrier.transfer_started.notify_one();
     }
     let deadline =
         deadline.ok_or_else(|| HlsOriginResourceFetchError::Transport("HLS connection deadline unavailable".into()))?;
@@ -153,7 +160,8 @@ mod deadline_tests {
                 let mut deadline = None;
                 let start = tokio::time::Instant::now();
                 let result =
-                    send(&client, client.get(&url).build().unwrap(), Duration::from_millis(350), &mut deadline).await;
+                    send(&client, client.get(&url).build().unwrap(), Duration::from_millis(350), &mut deadline, None)
+                        .await;
                 assert!(matches!(result, Err(HlsOriginResourceFetchError::Timeout)), "{result:?}");
                 assert!(start.elapsed() < Duration::from_secs(2));
                 assert!(deadline.is_some());
@@ -203,9 +211,10 @@ mod deadline_tests {
             let url = format!("https://origin.test:{}/segment", address.port());
             let mut deadline = None;
             let start = tokio::time::Instant::now();
-            let response = send(&client, client.get(url).build().unwrap(), Duration::from_millis(250), &mut deadline)
-                .await
-                .unwrap();
+            let response =
+                send(&client, client.get(url).build().unwrap(), Duration::from_millis(250), &mut deadline, None)
+                    .await
+                    .unwrap();
             assert_eq!(response.bytes().await.unwrap().as_ref(), b"ok");
             assert!(start.elapsed() >= Duration::from_millis(600));
             assert!(deadline.unwrap().remaining() > Duration::from_millis(100));
@@ -233,6 +242,7 @@ mod deadline_tests {
             client.get(format!("https://{address}/segment")).build().unwrap(),
             Duration::from_millis(100),
             &mut deadline,
+            None,
         )
         .await;
         assert!(matches!(result, Err(HlsOriginResourceFetchError::Transport(_))));
@@ -261,6 +271,7 @@ mod deadline_tests {
                 client.get(format!("http://{address}/segment")).build().unwrap(),
                 Duration::from_millis(600),
                 &mut deadline,
+                None,
             )
             .await
             .unwrap();
@@ -297,6 +308,7 @@ mod deadline_tests {
                     client.get(format!("http://{address}/segment")).build().unwrap(),
                     Duration::from_millis(timeout_ms),
                     &mut deadline,
+                    None,
                 )
                 .await
             }

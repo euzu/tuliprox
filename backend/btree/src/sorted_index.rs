@@ -1,7 +1,7 @@
 pub mod v4 {
     use crate::{
         codec::{binary_deserialize, binary_serialize},
-        v3::{BPlusTreeQuery, Locator},
+        v3::{publish_database, sync_parent_directory, temporary_path, BPlusTreeQuery, Locator},
     };
     use serde::{Deserialize, Serialize};
     use std::{
@@ -28,7 +28,7 @@ pub mod v4 {
 
     fn invalid_integer(error: TryFromIntError) -> io::Error { invalid_data(error.to_string()) }
 
-    fn header(database_id: [u8; 16], generation: u64, count: u64) -> [u8; HEADER_LEN] {
+    pub(crate) fn header(database_id: [u8; 16], generation: u64, count: u64) -> [u8; HEADER_LEN] {
         let mut bytes = [0; HEADER_LEN];
         bytes[0..4].copy_from_slice(MAGIC);
         bytes[4..8].copy_from_slice(&VERSION.to_le_bytes());
@@ -58,11 +58,14 @@ pub mod v4 {
             .ok_or_else(|| invalid_data("sorted-index u64 field is truncated"))
     }
 
-    fn decode_header(
-        mut bytes: [u8; HEADER_LEN],
-        expected_database_id: [u8; 16],
-        expected_generation: u64,
-    ) -> io::Result<u64> {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct HeaderIdentity {
+        database_id: [u8; 16],
+        generation: u64,
+        count: u64,
+    }
+
+    fn decode_header_identity(mut bytes: [u8; HEADER_LEN]) -> io::Result<HeaderIdentity> {
         if bytes[0..4] != *MAGIC
             || read_u32(&bytes, 4)? != VERSION
             || read_u32(&bytes, 8)? != TREE_VERSION
@@ -78,10 +81,27 @@ pub mod v4 {
         if crc32fast::hash(&bytes) != expected_checksum {
             return Err(invalid_data("sorted-index header checksum mismatch"));
         }
-        if bytes[16..32] != expected_database_id || read_u64(&bytes, 32)? != expected_generation {
-            return Err(invalid_data("sorted-index tree identity or generation mismatch"));
+        let mut database_id = [0u8; 16];
+        database_id.copy_from_slice(&bytes[16..32]);
+        let generation = read_u64(&bytes, 32)?;
+        let count = read_u64(&bytes, 40)?;
+        Ok(HeaderIdentity { database_id, generation, count })
+    }
+
+    fn decode_header(
+        bytes: [u8; HEADER_LEN],
+        expected_database_id: [u8; 16],
+        expected_generation: u64,
+    ) -> io::Result<(u64, bool)> {
+        let identity = decode_header_identity(bytes)?;
+        if identity.database_id != expected_database_id {
+            return Err(invalid_data("sorted-index tree identity mismatch"));
         }
-        read_u64(&bytes, 40)
+        if identity.generation > expected_generation {
+            return Err(invalid_data("sorted-index generation is newer than tree generation"));
+        }
+        let is_stale = identity.generation < expected_generation;
+        Ok((identity.count, is_stale))
     }
 
     pub struct Writer<SortKey, K> {
@@ -153,6 +173,7 @@ pub mod v4 {
         remaining_entries: u64,
         remaining_bytes: u64,
         failed: bool,
+        stale: bool,
         body: Vec<u8>,
         _marker: PhantomData<(SortKey, K)>,
     }
@@ -171,16 +192,25 @@ pub mod v4 {
             let mut input = BufReader::new(file);
             let mut encoded = [0; HEADER_LEN];
             input.read_exact(&mut encoded)?;
-            let remaining_entries = decode_header(encoded, expected_database_id, expected_generation)?;
-            Ok(Self {
+            let (remaining_entries, stale) = decode_header(encoded, expected_database_id, expected_generation)?;
+            let remaining_bytes = length - HEADER_LEN as u64;
+            Ok(Self::from_reader(input, remaining_bytes, remaining_entries, stale))
+        }
+
+        fn from_reader(input: BufReader<File>, remaining_bytes: u64, remaining_entries: u64, stale: bool) -> Self {
+            Self {
                 input,
                 remaining_entries,
-                remaining_bytes: length - HEADER_LEN as u64,
+                remaining_bytes,
                 failed: false,
+                stale,
                 body: Vec::new(),
                 _marker: PhantomData,
-            })
+            }
         }
+
+        #[inline]
+        pub(crate) fn is_stale(&self) -> bool { self.stale }
 
         #[cfg(test)]
         pub(crate) fn remaining(&self) -> u64 { self.remaining_entries }
@@ -278,6 +308,7 @@ pub mod v4 {
         reader: Reader<SortKey, K>,
         query: BPlusTreeQuery<K, V>,
         previous_sort_key: Option<SortKey>,
+        is_stale: bool,
         finished: bool,
     }
 
@@ -290,7 +321,8 @@ pub mod v4 {
         pub fn open(query: BPlusTreeQuery<K, V>, index_path: &Path) -> io::Result<Self> {
             let (database_id, generation) = query.snapshot_identity();
             let reader = Reader::open(index_path, database_id, generation)?;
-            Ok(Self { reader, query, previous_sort_key: None, finished: false })
+            let is_stale = reader.is_stale();
+            Ok(Self { reader, query, previous_sort_key: None, is_stale, finished: false })
         }
 
         #[cfg(test)]
@@ -309,29 +341,139 @@ pub mod v4 {
             if self.finished {
                 return None;
             }
-            let result = match self.reader.read_next_borrowed() {
-                Ok(Some(entry)) => {
-                    if self.previous_sort_key.as_ref().is_some_and(|previous| previous > &entry.sort_key) {
-                        Err(invalid_data("sorted-index entries are out of order"))
-                    } else {
-                        let BorrowedEntry { sort_key, primary_key, serialized_primary_key, locator } = entry;
-                        self.previous_sort_key = Some(sort_key);
-                        self.query.read_locator_value(locator, serialized_primary_key).map(|value| (primary_key, value))
+            loop {
+                let entry = match self.reader.read_next_borrowed() {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => {
+                        self.finished = true;
+                        return None;
                     }
-                }
-                Ok(None) => {
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                };
+
+                if self.previous_sort_key.as_ref().is_some_and(|previous| previous > &entry.sort_key) {
                     self.finished = true;
-                    return None;
+                    return Some(Err(invalid_data("sorted-index entries are out of order")));
                 }
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(entry) => Some(Ok(entry)),
-                Err(error) => Some(Err(error)),
+
+                let BorrowedEntry { sort_key, primary_key, serialized_primary_key, locator } = entry;
+                self.previous_sort_key = Some(sort_key);
+
+                if self.is_stale {
+                    match self.query.query_io(&primary_key) {
+                        Ok(Some(value)) => return Some(Ok((primary_key, value))),
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.finished = true;
+                            return Some(Err(error));
+                        }
+                    }
+                    continue;
+                }
+
+                let result =
+                    self.query.read_locator_value(locator, serialized_primary_key).map(|value| (primary_key, value));
+                return Some(result);
             }
         }
     }
+
+    /// In-memory snapshot of a sorted index for read-modify-write workflows.
+    ///
+    /// Every `BPlusTreeUpdate` commit deletes the sorted index file. Therefore, a stale
+    /// index only exists when the caller holding the database write lock rewrote it via
+    /// `write_merged` right after its own commit, and it must contain every key of the tree.
+    #[derive(Debug)]
+    pub struct IndexSnapshot<SortKey, K> {
+        database_id: [u8; 16],
+        generation: u64,
+        entries: Vec<(SortKey, K, Locator)>,
+    }
+
+    impl<SortKey, K> IndexSnapshot<SortKey, K>
+    where
+        SortKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+        K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    {
+        pub fn read(index_path: &Path) -> io::Result<Option<Self>> {
+            let file = match File::open(index_path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(err),
+            };
+            let length = file.metadata()?.len();
+            if length < HEADER_LEN as u64 {
+                return Err(invalid_data("sorted-index header is truncated"));
+            }
+            let mut input = BufReader::new(file);
+            let mut encoded = [0; HEADER_LEN];
+            input.read_exact(&mut encoded)?;
+            let identity = decode_header_identity(encoded)?;
+            let remaining_bytes = length - HEADER_LEN as u64;
+            let min_entry_len = (ENTRY_PREFIX_LEN + ENTRY_FIXED_BODY_LEN) as u64;
+            if identity.count > remaining_bytes / min_entry_len {
+                return Err(invalid_data("sorted-index count exceeds remaining file bytes"));
+            }
+            let mut reader = Reader::<SortKey, K>::from_reader(input, remaining_bytes, identity.count, false);
+            let count = usize::try_from(identity.count).map_err(invalid_integer)?;
+            let mut entries = Vec::with_capacity(count);
+            while let Some(entry) = reader.read_next_borrowed()? {
+                entries.push((entry.sort_key, entry.primary_key, entry.locator));
+            }
+            Ok(Some(Self { database_id: identity.database_id, generation: identity.generation, entries }))
+        }
+
+        pub fn write_merged(mut self, index_path: &Path, changed: &[(SortKey, K)]) -> io::Result<()> {
+            let mut changed_map = std::collections::BTreeMap::new();
+            for (sort_key, primary_key) in changed {
+                changed_map.insert(primary_key, sort_key);
+            }
+            if !changed_map.is_empty() {
+                self.entries.retain(|(_, primary_key, _)| !changed_map.contains_key(primary_key));
+                let dummy_locator = Locator { leaf_page_id: 1, slot_index: 0, serialized_key_crc32: 0 };
+                for (primary_key, sort_key) in changed_map {
+                    self.entries.push((sort_key.clone(), primary_key.clone(), dummy_locator));
+                }
+                self.entries.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+            }
+
+            publish_index(index_path, self.database_id, self.generation, &self.entries)
+        }
+    }
+
+    pub(crate) fn publish_index<'a, SortKey, K>(
+        destination: &Path,
+        database_id: [u8; 16],
+        generation: u64,
+        entries: impl IntoIterator<Item = &'a (SortKey, K, Locator)>,
+    ) -> io::Result<()>
+    where
+        SortKey: Serialize + 'a,
+        K: Serialize + 'a,
+    {
+        let temporary = temporary_path(destination)?;
+        let write_result = (|| -> io::Result<()> {
+            let mut writer = Writer::<SortKey, K>::new(&temporary, database_id, generation)?;
+            for (sort_key, primary_key, locator) in entries {
+                writer.push(sort_key, primary_key, *locator)?;
+            }
+            writer.finish()?;
+            Ok(())
+        })();
+
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+
+        publish_database(&temporary, destination, sync_parent_directory).map_err(io::Error::from)
+    }
 }
+
+pub(crate) use v4::publish_index;
 
 #[cfg(test)]
 mod tests {
@@ -370,7 +512,120 @@ mod tests {
         assert_eq!(entry.locator, locator);
         assert!(reader.read_next()?.is_none());
         assert!(v4::Reader::<String, u32>::open(&path, [0; 16], 9).is_err());
-        assert!(v4::Reader::<String, u32>::open(&path, database_id, 10).is_err());
+        assert!(v4::Reader::<String, u32>::open(&path, database_id, 8).is_err());
+        let stale_reader = v4::Reader::<String, u32>::open(&path, database_id, 10)?;
+        assert!(stale_reader.is_stale());
+        Ok(())
+    }
+
+    #[test]
+    fn stale_generation_by_key_read_skips_missing_keys_and_returns_sorted() -> io::Result<()> {
+        use crate::BPlusTreeUpdate;
+
+        let dir = tempdir()?;
+        let database = dir.path().join("stale_test.db");
+        let index = dir.path().join("stale_test.idx");
+
+        // Key 1 -> sort 30, Key 2 -> sort 10, Key 3 -> sort 20
+        let mut tree = V3Tree::new();
+        tree.insert(1u32, (30u32, String::from("one")));
+        tree.insert(2u32, (10u32, String::from("two")));
+        tree.insert(3u32, (20u32, String::from("three")));
+        tree.store_with_index(&database, |v| v.0)?;
+
+        let snapshot = v4::IndexSnapshot::<u32, u32>::read(&index)?.expect("snapshot exists");
+
+        // Update database in place: modify key 2 and delete key 3, incrementing generation
+        let mut updater = BPlusTreeUpdate::<u32, (u32, String)>::try_new(&database)?;
+        updater.upsert(&2, &(10, String::from("two-updated")))?;
+        updater.delete(&3)?;
+        updater.commit()?;
+
+        // Restore index snapshot (written with stale generation)
+        snapshot.write_merged(&index, &[])?;
+
+        // Index generation is now older than DB generation
+        let query = V3Query::<u32, (u32, String)>::try_new(&database)?;
+        let iterator = v4::OwnedIterator::<u32, (u32, String), u32>::open(query, &index)?;
+        let items: Vec<(u32, (u32, String))> = iterator.collect::<io::Result<Vec<_>>>()?;
+
+        // Expected order: key 2 (sort 10), key 1 (sort 30); key 3 (deleted) is skipped
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], (2, (10, String::from("two-updated"))));
+        assert_eq!(items[1], (1, (30, String::from("one"))));
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_with_replacement_of_existing_primary_key_maintains_canonical_order() -> io::Result<()> {
+        let dir = tempdir()?;
+        let index = dir.path().join("merge_test.idx");
+        let database_id = [0x42; 16];
+        let generation = 5;
+
+        let mut writer = v4::Writer::<u32, u32>::new(&index, database_id, generation)?;
+        let dummy_loc = Locator { leaf_page_id: 1, slot_index: 0, serialized_key_crc32: 0 };
+        writer.push(&10, &1, dummy_loc)?;
+        writer.push(&30, &3, dummy_loc)?;
+        writer.finish()?;
+
+        let snapshot = v4::IndexSnapshot::<u32, u32>::read(&index)?.expect("snapshot exists");
+        snapshot.write_merged(&index, &[(5, 0), (50, 1)])?;
+
+        let mut reader = v4::Reader::<u32, u32>::open(&index, database_id, generation)?;
+        let mut entries = Vec::new();
+        while let Some(entry) = reader.read_next()? {
+            entries.push((entry.sort_key, entry.primary_key));
+        }
+
+        assert_eq!(entries, vec![(5, 0), (30, 3), (50, 1)]);
+        Ok(())
+    }
+
+    #[test]
+    fn newer_index_generation_rejected() -> io::Result<()> {
+        let dir = tempdir()?;
+        let database = dir.path().join("newer_gen.db");
+        let index = dir.path().join("newer_gen.idx");
+
+        let mut tree = V3Tree::new();
+        tree.insert(1u32, String::from("one"));
+        tree.store(&database)?;
+
+        let query = V3Query::<u32, String>::try_new(&database)?;
+        let (database_id, generation) = query.snapshot_identity();
+        drop(query);
+
+        let mut writer = v4::Writer::<u32, u32>::new(&index, database_id, generation + 1)?;
+        writer.push(&1, &1, Locator { leaf_page_id: 1, slot_index: 0, serialized_key_crc32: 0 })?;
+        writer.finish()?;
+
+        let query = V3Query::<u32, String>::try_new(&database)?;
+        let Err(err) = v4::OwnedIterator::<u32, String, u32>::open(query, &index) else {
+            panic!("expected newer generation error");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("newer than tree generation"));
+        Ok(())
+    }
+
+    #[test]
+    fn database_id_mismatch_rejected() -> io::Result<()> {
+        let dir = tempdir()?;
+        let database = dir.path().join("mismatch.db");
+        let index = dir.path().join("mismatch.idx");
+
+        let mut tree = V3Tree::new();
+        tree.insert(1u32, String::from("one"));
+        tree.store(&database)?;
+
+        let mut writer = v4::Writer::<u32, u32>::new(&index, [0xaa; 16], 1)?;
+        writer.push(&1, &1, Locator { leaf_page_id: 1, slot_index: 0, serialized_key_crc32: 0 })?;
+        writer.finish()?;
+
+        let query = V3Query::<u32, String>::try_new(&database)?;
+        assert!(v4::OwnedIterator::<u32, String, u32>::open(query, &index).is_err());
         Ok(())
     }
 
@@ -462,6 +717,23 @@ mod tests {
         assert_eq!(iterator.next().transpose()?, Some((2, String::from("two"))));
         assert!(iterator.next().is_some_and(|entry| entry.is_err()));
         assert!(iterator.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_header_count_rejected() -> io::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("oversized.idx");
+        let database_id = [0x55; 16];
+        let generation = 1;
+        let encoded = v4::header(database_id, generation, 100);
+        fs::write(&path, encoded)?;
+
+        let Err(err) = v4::IndexSnapshot::<u32, u32>::read(&path) else {
+            panic!("oversized count must fail");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("sorted-index count"));
         Ok(())
     }
 }

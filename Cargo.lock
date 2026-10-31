@@ -35,6 +35,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "const-random",
  "getrandom 0.3.4",
  "once_cell",
  "version_check",
@@ -543,6 +544,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,6 +728,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "static_assertions",
+ "zmij",
+]
+
+[[package]]
 name = "compression-codecs"
 version = "0.4.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,6 +775,26 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "const-random"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
+dependencies = [
+ "const-random-macro",
+]
+
+[[package]]
+name = "const-random-macro"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
+dependencies = [
+ "getrandom 0.2.17",
+ "once_cell",
+ "tiny-keccak",
+]
 
 [[package]]
 name = "constant_time_eq"
@@ -1544,7 +1587,7 @@ checksum = "431a4c31778fde52b4400de34975f219eeca55cc829a9de157cd743a5b230ecb"
 
 [[package]]
 name = "frontend"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -2873,7 +2916,7 @@ dependencies = [
  "httparse",
  "memchr",
  "mime",
- "spin",
+ "spin 0.9.9",
  "version_check",
 ]
 
@@ -2888,6 +2931,15 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "no-std-compat"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
+dependencies = [
+ "spin 0.5.2",
+]
 
 [[package]]
 name = "nohash-hasher"
@@ -3085,6 +3137,9 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "once_cell_polyfill"
@@ -3812,6 +3867,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhai"
+version = "1.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3925b784c0bee6542637e425ed7511a63257bf11b7ecf51ffd845e2d24d9163"
+dependencies = [
+ "ahash",
+ "bitflags 2.13.2",
+ "compact_str",
+ "no-std-compat",
+ "num-traits",
+ "once_cell",
+ "rhai_codegen",
+ "smallvec",
+ "smartstring",
+ "thin-vec",
+ "web-time",
+]
+
+[[package]]
+name = "rhai_codegen"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d9661edb4a4b8145b017582d634c5eb88ff1a5284a5aa701f83a28f0657a826"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4303,7 +4388,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -4411,6 +4496,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "smartstring"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
+dependencies = [
+ "autocfg",
+ "static_assertions",
+ "version_check",
+]
+
+[[package]]
 name = "smptera-format-identifiers-rust"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4428,6 +4524,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
 name = "spin"
@@ -4462,6 +4564,12 @@ dependencies = [
  "psm",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strsim"
@@ -4620,6 +4728,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "thin-vec"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6a4b9ba8738cb4a4f399d37e266becfd475e75eb73425b87a05a2f2039ba63e"
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4689,6 +4803,15 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]
@@ -4992,7 +5115,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "aes",
  "arc-swap",
@@ -5075,7 +5198,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-auth"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "axum",
@@ -5098,7 +5221,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-btree"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -5118,7 +5241,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-config-loader"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -5138,7 +5261,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-core"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "aes",
  "arc-swap",
@@ -5183,6 +5306,7 @@ dependencies = [
  "tokio-util",
  "tuliprox-media-server",
  "tuliprox-mpegts",
+ "tuliprox-scripting",
  "url",
  "windows-sys 0.61.2",
  "zeroize",
@@ -5190,7 +5314,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-curation"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "indexmap",
  "log",
@@ -5207,7 +5331,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-dvr"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -5235,7 +5359,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-hls"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "async-compression",
@@ -5275,7 +5399,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-iptv"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5300,7 +5424,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-library"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "blake3",
  "bytes",
@@ -5327,7 +5451,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-media-server"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "bytes",
  "chrono",
@@ -5347,7 +5471,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-messaging"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5369,7 +5493,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-metadata"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5393,7 +5517,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-mpegts"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "aes",
  "bytes",
@@ -5407,7 +5531,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-parser"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -5427,7 +5551,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-plugin-api"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "wasmtime",
  "wasmtime-wasi",
@@ -5436,7 +5560,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-plugins"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -5465,7 +5589,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-processing"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -5504,7 +5628,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-repository"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -5541,8 +5665,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuliprox-scripting"
+version = "3.3.175"
+dependencies = [
+ "log",
+ "rhai",
+ "shared",
+]
+
+[[package]]
 name = "tuliprox-session"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "arc-swap",
  "axum",
@@ -5571,7 +5704,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-testkit"
-version = "3.3.170"
+version = "3.3.175"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5594,6 +5727,7 @@ dependencies = [
  "tokio-stream",
  "tokio-tungstenite 0.30.0",
  "tower-service",
+ "tuliprox-mpegts",
  "url",
 ]
 

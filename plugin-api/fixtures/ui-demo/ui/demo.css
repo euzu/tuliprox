@@ -1,4 +1,4 @@
-body { font-family: system-ui, sans-serif; margin: 0; padding: 8px; color: var(--text-color, #222); background: transparent; }
+body { font-family: system-ui, sans-serif; margin: 0; padding: 8px; color: var(--theme-brand-text, #222); background: transparent; }
 h1 { font-size: 1rem; margin: 0 0 4px; }
 h2 { font-size: 0.85rem; margin: 8px 0 2px; }
 .row { margin: 2px 0; }

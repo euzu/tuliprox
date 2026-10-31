@@ -295,6 +295,17 @@ The holdback is capped so at least three segments remain when the origin provide
 segments `0–5`, strip `0` starts at `3,4,5`; strip `1` starts at `2,3,4`. These three segments are fetched in
 chronological order with `RenderWindow` priority. Held-back newer segments are optional reserve prefetch.
 
+During pending startup or idle re-entry, failed entry segments (including origin `404`/`410` responses) are skipped in
+favor of a contiguous replacement window. Recovery can reduce the initial strip holdback and promotes needed reserve
+segments to required fetch work. Replacement segments must finish downloading before publication. If no three-segment
+window remains, one or two usable segments can start playback with the same RFC 8216 warning as a short origin window.
+If every segment in the current origin playlist has failed, pending entries and idle re-entries immediately return
+the configured `channel_unavailable` custom response. With `custom_stream_response_enabled: false`, the response uses
+`custom_stream_response_error_status` (default `502`). When custom responses are enabled but no `channel_unavailable`
+video is configured, the existing HLS fallback remains HTTP `404`.
+An idle lease's previous snapshots, playback cursor and segment bindings remain intact.
+Already published active windows keep their existing bindings and recovery behavior.
+
 After activation, strip no longer applies to that lease. Its window grows forwards up to six entries, without
 prepending segments before its previously advertised first sequence: `2,3,4` becomes `2–5`, then `2–6`, then
 `2–7`. Needed successors remain required fetch work even when reserve prefetch is disabled. Active slides retain

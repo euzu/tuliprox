@@ -29,8 +29,8 @@ use std::{
 /// `sandbox` directive gives that page an opaque origin, which keeps plugin
 /// script away from the admin token in `LocalStorage` (plan §9).
 pub(crate) const FRAME_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-                                    img-src 'self' data:; connect-src 'none'; frame-ancestors 'self'; \
-                                    sandbox allow-scripts";
+                                    img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; \
+                                    base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts";
 
 /// The largest file the frame route serves.
 pub(crate) const MAX_ASSET_BYTES: u64 = 16 * 1024 * 1024;
@@ -505,7 +505,8 @@ mod tests {
         assert_eq!(
             FRAME_CSP,
             "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-             connect-src 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+             font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; \
+             sandbox allow-scripts"
         );
         let headers = PluginSystem::frame_headers("\"1.2.3-9-5\"");
         let get = |name: &str| headers.iter().find(|(key, _)| key.as_str() == name).map(|(_, v)| v.to_str().unwrap());

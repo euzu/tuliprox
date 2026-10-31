@@ -122,12 +122,13 @@ impl PluginSystem {
 
     /// The configured settings of plugin `id` with secrets masked
     /// (see [`mask_settings`]), and the schema the package ships.
+    ///
+    /// Reads the package's schema files: call it from `tokio::task::spawn_blocking`.
     #[must_use]
     pub fn api_settings(&self, id: &str, config: Option<&PluginsConfig>) -> Option<PluginSettingsDto> {
         let snapshot = self.registry().snapshot();
         let record = snapshot.get(id)?;
-        let schema = record.manifest.as_deref().and_then(|manifest| read_settings_schema(&record.dir, manifest));
-        let paths = secret_paths_of(record);
+        let (schema, paths) = settings_inputs(record);
         let configured = config
             .and_then(|config| config.entry(id))
             .map_or_else(|| Value::Object(serde_json::Map::new()), |entry| Value::Object(entry.settings.clone()));
@@ -161,8 +162,12 @@ impl PluginSystem {
         if !incoming.is_object() {
             return Err(rejection(StatusCode::UNPROCESSABLE_ENTITY, "the settings must be a JSON object"));
         }
-        let schema = record.manifest.as_deref().and_then(|manifest| read_settings_schema(&record.dir, manifest));
-        let paths = secret_paths_of(record);
+        let (schema, paths) = {
+            let record = Arc::clone(record);
+            tokio::task::spawn_blocking(move || settings_inputs(&record)).await.map_err(|err| {
+                rejection(StatusCode::INTERNAL_SERVER_ERROR, format!("reading the settings schema failed: {err}"))
+            })?
+        };
 
         let stored = config
             .and_then(|config| config.entry(id))
@@ -390,6 +395,13 @@ pub(crate) fn read_settings_schema(dir: &Path, manifest: &Manifest) -> Option<Va
     let relative = settings_schema_path(manifest)?;
     let text = fs::read_to_string(dir.join(relative)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// The settings schema and the secret property paths of `record`. Reads package
+/// files: call it from `spawn_blocking`.
+fn settings_inputs(record: &PluginRecord) -> (Option<Value>, Vec<String>) {
+    let schema = record.manifest.as_deref().and_then(|manifest| read_settings_schema(&record.dir, manifest));
+    (schema, secret_paths_of(record))
 }
 
 /// The secret property paths of the whole settings object of `record`: its

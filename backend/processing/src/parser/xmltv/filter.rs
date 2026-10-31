@@ -44,6 +44,7 @@ impl TVGuide {
                         id_cache,
                         epg_source,
                         source_order,
+                        epg_source.source_idx,
                         &mut accumulator,
                         IcsPersistedSource {
                             channel_id,

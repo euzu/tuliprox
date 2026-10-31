@@ -111,6 +111,12 @@ async fn hls_manifest_terminal_preflight_distinguishes_bootstrap_refresh_and_inv
         HlsManifestTerminalPreflight::EvaluateTerminal
     );
 
+    lease.state = HlsAccessLeaseState::Idle;
+    assert_eq!(
+        hls_manifest_terminal_preflight(&session, &lease, 8_000).await,
+        HlsManifestTerminalPreflight::RefreshBeforeTerminalEvaluation
+    );
+
     lease.playback_mode = HlsLeasePlaybackMode::Ended;
     assert_eq!(
         hls_manifest_terminal_preflight(&session, &lease, 8_000).await,

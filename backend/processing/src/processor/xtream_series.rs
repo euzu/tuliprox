@@ -87,6 +87,7 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     pipe: &ProcessingPipe,
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
+    report: &mut shared::model::PluginRunReport,
 ) {
     // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
     if processed_fpl.input.has_flag(ConfigInputFlags::SkipSeries) {
@@ -100,7 +101,7 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     }
     provider_fpl.source.release_resources(XtreamCluster::Series);
 
-    playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target).await;
+    playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target, report).await;
 
     if provider_fpl.is_memory() {
         sync_resolved_series_properties(provider_fpl, processed_fpl);
@@ -119,6 +120,7 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     resolve_options: ResolveOptions,
     pipe: &ProcessingPipe,
     target: &ConfigTarget,
+    report: &mut shared::model::PluginRunReport,
 ) {
     let filter = |pli: &PlaylistItem| {
         pli.header.xtream_cluster == XtreamCluster::Series && pli.header.item_type == PlaylistItemType::SeriesInfo
@@ -142,6 +144,7 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     let (new_playlist, pipeline_outcome) =
         execute_pipeline_on_groups_with_filter_calls(groups_to_add, target, &fpl.input.name, pipe, &ctx.plugins).await;
     debug!("Resolved series pipeline outcome: {pipeline_outcome:?}");
+    report.merge(pipeline_outcome.plugins);
 
     // Apply resolved episodes to playlist
     fpl.extend_playlist(new_playlist);

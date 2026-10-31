@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use log::error;
 use serde_json::json;
 use shared::{
-    foundation::{get_filter_detailed, Filter, ValueProvider},
+    foundation::{get_target_processing_filter_detailed, Filter, ValueProvider},
     model::{PlaylistItem, TargetType, XtreamCluster},
 };
 use std::sync::Arc;
@@ -88,8 +88,19 @@ pub(super) async fn playlist_filter_preview(
 ) -> impl IntoResponse + Send {
     let filter = {
         let sources = app_state.app_config.sources.load();
-        match get_filter_detailed(&req.filter, sources.templates.as_deref()) {
-            Ok(filter) => filter,
+        match get_target_processing_filter_detailed(&req.filter, sources.templates.as_deref()) {
+            Ok(filter) => {
+                if filter.plugin_calls().next().is_some() {
+                    return (
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        axum::Json(json!({
+                            "error": "plugin.<id>.<fn>() terms cannot be previewed; they run only during a playlist update",
+                        })),
+                    )
+                        .into_response();
+                }
+                filter
+            }
             Err((err, position)) => {
                 return (
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -172,4 +183,29 @@ pub(super) async fn playlist_filter_preview(
     }
 
     axum::Json(response).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::model::create_test_app_state;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn filter_preview_reports_parse_error_for_plugin_call() {
+        let app_state = create_test_app_state(tuliprox_core::model::Config::default());
+        let req = FilterPreviewRequest {
+            target: 1,
+            filter: r#"plugin.my-plugin.is_match("val")"#.to_string(),
+            limit: None,
+            match_as_ascii: false,
+        };
+        let response =
+            playlist_filter_preview(axum::extract::State(app_state), axum::extract::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let err_msg = json["error"].as_str().unwrap();
+        assert_eq!(err_msg, "plugin.<id>.<fn>() terms cannot be previewed; they run only during a playlist update");
+    }
 }

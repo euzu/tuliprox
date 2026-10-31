@@ -20,6 +20,16 @@ fn cluster_is_the_single_source_of_truth_for_every_item_type() {
 }
 
 #[test]
+fn is_series_info_matches_only_series_info_types() {
+    use strum::IntoEnumIterator;
+
+    for item_type in PlaylistItemType::iter() {
+        let expected = matches!(item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo);
+        assert_eq!(item_type.is_series_info(), expected, "{item_type:?}");
+    }
+}
+
+#[test]
 fn from_stalker_uuid_is_seeded_with_input_name_not_category() {
     let mut item = StalkerPlaylistItem {
         stream_id: 42,

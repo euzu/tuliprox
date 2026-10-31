@@ -456,9 +456,11 @@ mod tests {
 
     #[test]
     fn fast_rates_round_the_wait_up_and_keep_the_remainder() {
-        // Three requests per second: a token every 333.33 ms.
-        let (limiter, clock) = new_limiter(RateLimitConfig::per_second(3, 1));
+        // Three requests per second: a token every 333.33 ms. A burst of two leaves room above
+        // one token, so the remainder is not cut off by the bucket capacity.
+        let (limiter, clock) = new_limiter(RateLimitConfig::per_second(3, 2));
         limiter.try_acquire(KEY).expect("first");
+        limiter.try_acquire(KEY).expect("second, from the burst");
         assert_eq!(retry_after(&limiter), Millis::new(334));
         clock.advance(334);
         limiter.try_acquire(KEY).expect("after the rounded-up wait");

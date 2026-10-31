@@ -157,6 +157,7 @@ pub(super) async fn install_terminal_pending_ready_base(
             origin_byte_range: None,
             map_ref: None,
             encryption: None,
+            retained_resource_identity: None,
             origin_fetch_ref: None,
             status: SegmentCacheStatus::Ready {
                 content_length: u64::try_from(base_segment_bytes.len()).unwrap_or(u64::MAX),
@@ -385,6 +386,7 @@ pub(super) async fn assert_post_refresh_registration_failure_leaves_no_unowned_l
                     origin_byte_range: None,
                     map_ref: None,
                     encryption: None,
+                    retained_resource_identity: None,
                     origin_fetch_ref: None,
                     status: SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: fixture.now_ms },
                     last_rendered_at_ms: None,

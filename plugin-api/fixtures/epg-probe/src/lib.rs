@@ -6,8 +6,11 @@
 //!
 //! * `on-epg-loaded`: `load_from` / `load_to` rename the channel whose display
 //!   name is `load_from` (ASCII case-insensitive) to the single name `load_to`.
+//!   `load_bomb` (a number) returns that many channels instead, whatever it was
+//!   sent, to exercise the host's cap on a sparse result.
 //! * `transform-programmes`: `transform_category` replaces every programme's
-//!   categories with that one value.
+//!   categories with that one value. `transform_bomb` (a number) returns that
+//!   many copies of the first programme instead.
 //! * `enrich-programmes`: `inject_title` / `inject_start` (unix seconds, 600 s
 //!   long) add one synthetic programme; `inject_channel` limits it to one channel.
 //! * `match-channels`: `match_map`, an object of playlist channel name -> guide
@@ -62,6 +65,11 @@ impl lifecycle::Guest for EpgProbe {
 impl epg_load_hooks::Guest for EpgProbe {
     fn on_epg_loaded(_source: String, channels: Vec<EpgChannel>) -> Result<Vec<EpgChannel>, String> {
         let settings = settings();
+        if let Some(count) = settings.get("load_bomb").and_then(Value::as_u64) {
+            return Ok((0..count)
+                .map(|index| EpgChannel { id: format!("bomb-{index}"), names: Vec::new(), icon: None })
+                .collect());
+        }
         let (Some(from), Some(to)) = (text(&settings, "load_from"), text(&settings, "load_to")) else {
             return Ok(Vec::new());
         };
@@ -79,7 +87,11 @@ impl epg_load_hooks::Guest for EpgProbe {
 
 impl epg_transform_hooks::Guest for EpgProbe {
     fn transform_programmes(_source: String, programmes: Vec<EpgProgramme>) -> Result<Vec<EpgProgramme>, String> {
-        let Some(category) = text(&settings(), "transform_category") else {
+        let settings = settings();
+        if let (Some(count), Some(first)) = (settings.get("transform_bomb").and_then(Value::as_u64), programmes.first()) {
+            return Ok((0..count).map(|_| first.clone()).collect());
+        }
+        let Some(category) = text(&settings, "transform_category") else {
             return Ok(programmes);
         };
         Ok(programmes

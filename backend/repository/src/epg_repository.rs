@@ -354,6 +354,8 @@ mod tests {
                     })
                 })
                 .collect(),
+            channel_sources: None,
+            input_name: None,
         }
     }
 
@@ -500,7 +502,14 @@ mod tests {
         )
         .await
         .expect("parse ICS fixture");
-        let epg = Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] };
+        let epg = Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![Arc::new(channel)],
+            channel_sources: None,
+            input_name: None,
+        };
 
         let config = Config { storage_dir: tmp.path().to_string_lossy().into_owned(), ..Config::default() };
         let target = target_with_m3u_and_xtream();
@@ -684,6 +693,8 @@ mod tests {
                     EpgProgramme::new(10, 20, "Example.Channel".intern()),
                 ],
             })],
+            channel_sources: None,
+            input_name: None,
         }
     }
 
@@ -789,6 +800,8 @@ mod tests {
                     programmes: vec![EpgProgramme::new(10, 20, "a.channel".intern())],
                 }),
             ],
+            channel_sources: None,
+            input_name: None,
         };
 
         epg_write_file("target", &epg, &path, &HashMap::new(), None, &EpgOutputOptions::default())
@@ -836,6 +849,8 @@ mod tests {
                     programmes: vec![EpgProgramme::new(10, 20, "unreferenced.channel".intern())],
                 }),
             ],
+            channel_sources: None,
+            input_name: None,
         };
 
         let mut playlist = rename_playlist(&[

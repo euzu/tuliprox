@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::VERIFY_FULL_COUNT;
 use super::{
     decode_key, invalid_data, minimum_tree_key, push_child_visits, record_page_visit, validate_leaf_backlink,
     validated_overflow_chain_pages, verify_internal_page, verify_leaf_page, BPlusTreeQuery, Compression,
@@ -233,10 +235,19 @@ fn verify_page_ownership(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn reset_verify_full_count() { VERIFY_FULL_COUNT.set(0); }
+
+#[cfg(test)]
+pub(crate) fn verify_full_count() -> usize { VERIFY_FULL_COUNT.get() }
+
 pub(crate) fn verify_full<K, V>(query: &mut BPlusTreeQuery<K, V>) -> io::Result<VerificationReport>
 where
     K: Ord + for<'de> Deserialize<'de> + Clone,
 {
+    #[cfg(test)]
+    VERIFY_FULL_COUNT.set(VERIFY_FULL_COUNT.get().saturating_add(1));
+
     let mut tree_pages = HashSet::new();
     let mut active = HashSet::new();
     let mut overflow_pages = HashSet::new();

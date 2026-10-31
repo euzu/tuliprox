@@ -8,6 +8,7 @@
 
 use crate::common::fixture_dir;
 use serde_json::Map;
+use sha2::Digest;
 use std::{fs, path::PathBuf};
 use tempfile::TempDir;
 use tuliprox_core::model::{PluginEntry, PluginsConfig};
@@ -43,6 +44,17 @@ pub fn stage(entry: Option<bool>) -> Option<Staged> {
     fs::write(plugin_dir.join("ui/assets/app.js"), "window.ok = true;").expect("script");
     fs::write(plugin_dir.join("ui/.secret.js"), "hidden").expect("dotfile");
     fs::write(plugin_dir.join("ui/data.xml"), "<x/>").expect("xml");
+
+    let wasm = fs::read(source.join("plugin.wasm")).expect("read wasm");
+    let sha256 = sha2::Sha256::digest(&wasm).iter().fold(String::new(), |mut hex, byte| {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    });
+    let approvals = serde_json::json!({
+        ID: { "wasm_sha256": sha256, "capabilities": [] }
+    });
+    fs::write(data.path().join("approvals.json"), approvals.to_string()).expect("approvals");
 
     let entries = entry
         .map(|enabled| PluginEntry { id: ID.to_string(), enabled, priority: 0, settings: Map::new() })

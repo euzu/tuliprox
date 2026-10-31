@@ -306,7 +306,7 @@ pub(crate) async fn commit_terminal_tail_if_lease_reserve_requires_cutover_detai
         return HlsDetailedTerminalResolution::resolved(HlsTerminalResolution::LiveAllowed);
     }
     let evaluation = evaluate_lease_terminal_cutover(ctx, lease, manifest, &state, now_ms);
-    log::debug!("HLS terminal reserve decision: proxy_session={} lease={} start_at_ms={:?} position_known={} position_ms={} reserve_ms={} session_target_duration_ms={} snapshot_generation={} may_publish={}",
+    log::trace!("HLS terminal reserve decision: proxy_session={} lease={} start_at_ms={:?} position_known={} position_ms={} reserve_ms={} session_target_duration_ms={} snapshot_generation={} may_publish={}",
         crate::safe_proxy_session_id(proxy_session_id), crate::safe_hls_access_lease_id(&lease.lease_id),
         lease.playback_cursor.first_segment_started_at_ms, evaluation.reserve.playback_position_known,
         evaluation.reserve.conservative_playback_position_ms, evaluation.reserve.guaranteed_reserve_ms,
@@ -619,39 +619,22 @@ pub(super) async fn commit_ready_terminal_bundle(
         Ok(plan) => {
             if preparation.required_terminal_media_key == Some(plan.media_preparation_key()) {
                 let commit_now_ms = context.ctx.hls_proxy.terminal_commit_now_ms();
-                let generation = plan.generation.0;
-                let base_proxy_tail = plan.base_manifest.last_proxy_seq;
-                let outcome = context.ctx.hls_proxy.commit_access_lease_terminal_if_generation_matches(
-                    HlsTerminalCommitRequest {
-                        session: context.session,
-                        lease_id: context.lease_id,
-                        proxy_session_id: context.proxy_session_id,
-                        preparation: &preparation,
-                        now_ms: commit_now_ms,
-                        payload: HlsTerminalCommitPayload::Tail {
-                            plan: Arc::new(plan),
-                            media_guard: base_evidence.into_commit_guard(),
-                        },
-                        asset_revision_guard: terminal_asset_revision_guard(
-                            context.ctx,
-                            expected_asset.reason,
-                            Some(expected_asset),
-                        ),
+                context.ctx.hls_proxy.commit_access_lease_terminal_if_generation_matches(HlsTerminalCommitRequest {
+                    session: context.session,
+                    lease_id: context.lease_id,
+                    proxy_session_id: context.proxy_session_id,
+                    preparation: &preparation,
+                    now_ms: commit_now_ms,
+                    payload: HlsTerminalCommitPayload::Tail {
+                        plan: Arc::new(plan),
+                        media_guard: base_evidence.into_commit_guard(),
                     },
-                );
-                if outcome == HlsTerminalCommitOutcome::Committed {
-                    debug!(
-                        "HLS runtime custom tail committed: proxy_session={} lease={} reason={} \
-                         generation={} base_proxy_tail={} asset_revision={:016x}",
-                        crate::safe_proxy_session_id(context.proxy_session_id),
-                        crate::safe_hls_access_lease_id(context.lease_id),
-                        expected_asset.reason.as_label(),
-                        generation,
-                        base_proxy_tail,
-                        expected_asset.media.revision
-                    );
-                }
-                outcome
+                    asset_revision_guard: terminal_asset_revision_guard(
+                        context.ctx,
+                        expected_asset.reason,
+                        Some(expected_asset),
+                    ),
+                })
             } else {
                 commit_terminal_unavailable(
                     context,

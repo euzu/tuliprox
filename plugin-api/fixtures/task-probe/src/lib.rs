@@ -8,6 +8,8 @@
 //! * `slow`: busy for about three seconds of wall clock, then returns
 //!   `slow done`. A second fire during that time is dropped
 //!   (`concurrency: skip`).
+//! * `spin-*`: never returns; only the `task-probe-spin` manifest declares them,
+//!   for the isolation tests.
 
 wit_bindgen::generate!({
     path: ["../../wit", "wit"],
@@ -55,6 +57,14 @@ fn busy(seconds: i64) {
     }
 }
 
+/// Never returns: the task deadline has to end it.
+fn spin() -> ! {
+    let mut ticks: u64 = 0;
+    loop {
+        ticks = core::hint::black_box(ticks.wrapping_add(1));
+    }
+}
+
 impl tasks::Guest for TaskProbe {
     fn run(ctx: TaskContext) -> Result<String, String> {
         match ctx.task_id.as_str() {
@@ -64,6 +74,7 @@ impl tasks::Guest for TaskProbe {
                 busy(SLOW_SECS);
                 Ok("slow done".to_string())
             }
+            id if id.starts_with("spin") => spin(),
             other => Err(format!("unknown task `{other}`")),
         }
     }

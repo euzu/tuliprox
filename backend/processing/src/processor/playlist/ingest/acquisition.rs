@@ -566,18 +566,37 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
 /// Otherwise the groups are materialized, the matching items alone go to the
 /// hook, and the result is written back into an in-memory source: dropped
 /// items disappear, edited items stay in their original position and are
-/// regrouped by their (possibly rewritten) group. The dispatcher only drops
-/// and edits in place, so survivors keep their relative order; they are
-/// re-associated with their slot by the host-owned virtual id and origin
-/// stream id (neither can be changed by a plugin).
+/// regrouped by their (possibly rewritten) group. Survivors keep their
+/// relative order and are re-associated with their original slot by a per-call
+/// handle assigned before the call (plugins cannot change host-owned fields).
 ///
 /// A [`PluginAbort`] hands the unchanged source back with the abort, so the
 /// input fails through the normal error path with its data intact.
+///
+/// A disk-backed source cannot be written back item by item, so the hook has to
+/// hold the whole playlist in memory, and the result stays in memory. Above
+/// [`DISK_PLAYLIST_HOOK_CEILING`] items the hook is skipped with one warning
+/// and the playlist stays on disk: a plugin never costs more memory than that.
 pub(crate) async fn apply_playlist_loaded_hook<P: PluginHost>(
+    plugins: &P,
+    input_name: &str,
+    playlist: PlaylistSource,
+    report: &mut PluginRunReport,
+) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
+    apply_playlist_loaded_hook_within(plugins, input_name, playlist, report, DISK_PLAYLIST_HOOK_CEILING).await
+}
+
+/// Items a disk-backed playlist may have for `on-playlist-loaded` to run over it.
+/// About 100 MiB of interned items at most, which the smallest supported hosts
+/// (armv7) can still take next to a processing run.
+const DISK_PLAYLIST_HOOK_CEILING: usize = 250_000;
+
+async fn apply_playlist_loaded_hook_within<P: PluginHost>(
     plugins: &P,
     input_name: &str,
     mut playlist: PlaylistSource,
     report: &mut PluginRunReport,
+    disk_ceiling: usize,
 ) -> Result<PlaylistSource, (PlaylistSource, PluginAbort)> {
     let ctx = HookCtx::new("").with_input(input_name);
     let Some(scopes) = plugins.scope(PluginHook::PlaylistLoaded, &ctx) else {
@@ -586,16 +605,31 @@ pub(crate) async fn apply_playlist_loaded_hook<P: PluginHost>(
     if !scopes.is_all() && !playlist.items().any(|item| scopes.matches(&item)) {
         return Ok(playlist);
     }
+    if !playlist.is_memory() {
+        let count = playlist.get_channel_count();
+        if count > disk_ceiling {
+            warn!(
+                "Input '{input_name}': on-playlist-loaded skipped, the disk-backed playlist has {count} items (limit \
+                 {disk_ceiling})"
+            );
+            return Ok(playlist);
+        }
+    }
 
     let groups = playlist.take_groups();
     let mut slots: Vec<Option<PlaylistItem>> = Vec::new();
     let mut matched: Vec<usize> = Vec::new();
     let mut selected: Vec<PlaylistItem> = Vec::new();
-    let mut original_ids: Vec<(VirtualId, Arc<str>)> = Vec::new();
-    for item in groups.into_iter().flat_map(|group| group.channels) {
+    let mut original_virtual_ids: Vec<VirtualId> = Vec::new();
+    for mut item in groups.into_iter().flat_map(|group| group.channels) {
         if scopes.matches(&item) {
             matched.push(slots.len());
-            original_ids.push((item.header.virtual_id, Arc::clone(&item.header.input_stream_id)));
+            original_virtual_ids.push(item.header.virtual_id);
+            // Safe to borrow virtual_id as the per-call handle: virtual ids are not
+            // assigned yet at ingest, guests never see or change virtual_id (WIT carries
+            // its own `handle`), and the original value is restored on every path.
+            let handle = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+            item.header.virtual_id = VirtualId::new(handle);
             selected.push(item);
             slots.push(None);
         } else {
@@ -606,19 +640,22 @@ pub(crate) async fn apply_playlist_loaded_hook<P: PluginHost>(
     let outcome = plugins.on_playlist_loaded(&ctx, &mut selected, report).await;
     if let Err(abort) = outcome {
         // The input fails; hand back whatever is left so nothing is lost.
-        for (slot, item) in matched.into_iter().zip(selected) {
-            slots[slot] = Some(item);
+        for mut item in selected {
+            let orig_idx = usize::try_from(item.header.virtual_id.get()).unwrap_or(usize::MAX);
+            if orig_idx < matched.len() {
+                item.header.virtual_id = original_virtual_ids[orig_idx];
+                slots[matched[orig_idx]] = Some(item);
+            }
         }
         let rest = group_mapped_items(slots.into_iter().flatten().collect());
         return Err((MemoryPlaylistSource::new(rest).into_source(), abort));
     }
 
-    let mut survivors = selected.into_iter().peekable();
-    for (slot, original_id) in matched.into_iter().zip(original_ids) {
-        if survivors.peek().is_some_and(|item| {
-            (item.header.virtual_id, &item.header.input_stream_id) == (original_id.0, &original_id.1)
-        }) {
-            slots[slot] = survivors.next();
+    for mut survivor in selected {
+        let orig_idx = usize::try_from(survivor.header.virtual_id.get()).unwrap_or(usize::MAX);
+        if orig_idx < matched.len() {
+            survivor.header.virtual_id = original_virtual_ids[orig_idx];
+            slots[matched[orig_idx]] = Some(survivor);
         }
     }
     let items: Vec<PlaylistItem> = slots.into_iter().flatten().collect();

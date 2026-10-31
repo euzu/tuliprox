@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    services::{get_base_href, request_get, request_post, Encoding},
+    services::{get_base_href, request_get, request_get_binary, request_post, Encoding},
 };
 use futures::join;
 use indexmap::IndexMap;
@@ -10,8 +10,8 @@ use shared::{
         EpgChannel, EpgChannelFilter, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest, EpgTv,
         InputRefreshOverride, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest, PlaylistUpdateRequestDto,
         PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, SeriesStreamProperties, StreamEpgItemRequest,
-        StreamEpgRequest, StreamEpgResponse, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster,
-        XtreamSeriesInfoDoc,
+        StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories, UiPlaylistGroup,
+        UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::concat_path_leading_slash,
 };
@@ -30,6 +30,7 @@ pub struct PlaylistService {
     stream_epg_path: String,
     epg_groups_path: String,
     epg_grid_path: String,
+    playlist_analytics_path: String,
 }
 impl Default for PlaylistService {
     fn default() -> Self { Self::new() }
@@ -53,6 +54,7 @@ impl PlaylistService {
             stream_epg_path: api("epg/stream"),
             epg_groups_path: api("epg/groups"),
             epg_grid_path: api("epg/grid"),
+            playlist_analytics_path: api("analytics"),
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
@@ -77,6 +79,35 @@ impl PlaylistService {
 
     pub async fn get_update_status(&self) -> Result<Option<PlaylistUpdateStatusDto>, crate::error::Error> {
         request_get(&self.playlist_update_status_path, None, None).await
+    }
+
+    pub async fn get_target_analytics(&self) -> Result<Option<TargetAnalyticsResponseDto>, Error> {
+        request_get(&self.playlist_analytics_path, None, None).await
+    }
+
+    pub fn unmapped_csv_url_from_base(base_href: &str, target_id: u16) -> String {
+        concat_path_leading_slash(base_href, &format!("api/v1/playlist/analytics/{target_id}/unmapped.csv"))
+    }
+
+    pub fn unmapped_csv_url(&self, target_id: u16) -> String {
+        Self::unmapped_csv_url_from_base(&get_base_href(), target_id)
+    }
+
+    pub async fn download_unmapped_csv(&self, target_id: u16, target_name: &str) -> Result<(), Error> {
+        let url = self.unmapped_csv_url(target_id);
+        let bytes = request_get_binary(&url).await?;
+        let mut sanitized = shared::utils::sanitize_filename_chars(target_name, true);
+        if sanitized.is_empty() {
+            sanitized = format!("target-{target_id}");
+        }
+        let filename = format!("{sanitized}-unmapped.csv");
+        crate::utils::trigger_browser_download(&bytes, &filename, "text/csv;charset=utf-8")
+    }
+
+    pub async fn update_target_by_id(&self, target_id: u16) -> Result<OperationRunAccepted, Error> {
+        let request =
+            PlaylistUpdateRequestDto { target_ids: Some(vec![target_id]), ..PlaylistUpdateRequestDto::default() };
+        self.submit_update_request(&request).await
     }
 
     async fn submit_update_request(&self, request: &PlaylistUpdateRequestDto) -> Result<OperationRunAccepted, Error> {
@@ -443,5 +474,13 @@ mod tests {
         assert_eq!(request.targets.len(), 0);
         assert_eq!(request.target_ids, None);
         assert_eq!(request.input_refresh, None);
+    }
+
+    #[test]
+    fn unmapped_csv_url_constructs_expected_endpoint_path() {
+        let url = super::PlaylistService::unmapped_csv_url_from_base("/", 42);
+        assert_eq!(url, "/api/v1/playlist/analytics/42/unmapped.csv");
+        let url_subpath = super::PlaylistService::unmapped_csv_url_from_base("/prefix/", 99);
+        assert_eq!(url_subpath, "/prefix/api/v1/playlist/analytics/99/unmapped.csv");
     }
 }

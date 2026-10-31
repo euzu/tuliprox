@@ -72,10 +72,13 @@ const RESOURCE_DESTINATION_CACHE_CAPACITY: usize = 4096;
 const RESOURCE_DESTINATION_LOOKUP_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Options applied at the final boundary of every physical request attempt.
+// Independent per-request switches set through builder methods, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RequestFetchOptions {
     stop_on_proxy_authentication_required: bool,
     pub attempt_idle_timeout: Option<Duration>,
+    header_timeout_only: bool,
     content_coding: OutboundContentCodingPolicy,
     resource_retry: ResourceRetryExecution,
     return_http_errors: bool,

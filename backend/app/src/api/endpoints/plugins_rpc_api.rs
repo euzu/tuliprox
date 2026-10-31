@@ -215,8 +215,8 @@ mod tests {
             .merge(super::super::plugins_ui_api::plugins_ui_api_register_unprotected());
     }
 
-    #[test]
-    fn the_write_check_fails_closed() {
+    #[tokio::test]
+    async fn the_write_check_fails_closed() {
         let dir = TempDir::new().unwrap();
         let app_state = state(&dir);
         assert!(RpcCaller::Open.may_write(&app_state));

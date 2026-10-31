@@ -54,6 +54,7 @@ use tuliprox_core::{
         FilterOutcome, MappingProgram, ProcessTargets, ProviderIdType, ResolveReason, ReverseProxyDisabledHeaderConfig,
         TransformStage, UpdateGuard, UpdateTask,
     },
+    scripting::MappingScriptContext,
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure},
 };
 use tuliprox_curation::{
@@ -76,6 +77,7 @@ pub fn next_playlist_update_run_order() -> PlaylistUpdateRunOrder {
     PlaylistUpdateRunOrder::from(NEXT_PLAYLIST_UPDATE_RUN_ORDER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
 }
 
+mod analytics;
 mod fetch_outcome;
 mod ingest;
 mod input_status;
@@ -87,7 +89,7 @@ mod plugin_output;
 mod target;
 mod transform;
 
-pub use self::{ingest::*, target::*, transform::*};
+pub use self::{analytics::*, ingest::*, target::*, transform::*};
 
 /// Work the composition root runs once the playlist lock is held, before the
 /// update proper starts.

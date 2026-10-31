@@ -27,7 +27,11 @@ pub(in crate::api::endpoints::hls_api) async fn mark_successful_canonical_manife
     session: &HlsSessionHandle,
     now_ms: u64,
 ) {
-    mark_hls_authorized_media_access(app_state, session, now_ms).await;
+    if session.read().await.origin_playback_kind() == tuliprox_core::model::PlaybackKind::LiveHls {
+        mark_hls_authorized_manifest_access(app_state, session, now_ms).await;
+    } else {
+        mark_hls_authorized_media_access(app_state, session, now_ms).await;
+    }
 }
 
 pub(in crate::api::endpoints::hls_api) async fn mark_hls_authorized_manifest_access(
@@ -153,11 +157,11 @@ pub(in crate::api::endpoints::hls_api) async fn hls_manifest_preflight_refresh_o
     now_ms: u64,
 ) -> Result<HlsManifestRefreshOrdering, Box<axum::response::Response>> {
     match hls_manifest_terminal_preflight(session, lease, now_ms).await {
-        HlsManifestTerminalPreflight::ServeCommittedPlayback => {
-            Err(Box::new(hls_terminal_playback_response(lease, proxy_session_id, access_lease_id).unwrap_or_else(
-                || hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::RuntimeUnavailable),
-            )))
-        }
+        HlsManifestTerminalPreflight::ServeCommittedPlayback => Err(Box::new(
+            hls_terminal_playback_response(app_state, lease, proxy_session_id, access_lease_id).unwrap_or_else(|| {
+                hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::RuntimeUnavailable)
+            }),
+        )),
         HlsManifestTerminalPreflight::BootstrapPendingLease => Ok(HlsManifestRefreshOrdering::Background),
         HlsManifestTerminalPreflight::RefreshBeforeTerminalEvaluation => {
             Ok(HlsManifestRefreshOrdering::AwaitBeforeTerminalEvaluation)
@@ -196,7 +200,7 @@ pub(in crate::api::endpoints::hls_api) async fn hls_proxy_manifest(
                 .is_some_and(HlsRuntimeCustomTailReason::permits_unpublished_lease_standalone_tail);
         if let (false, Some(response)) = (
             standalone_policy_response_required,
-            hls_terminal_playback_response(lease, &proxy_session_id, &access_lease_id),
+            hls_terminal_playback_response(&app_state, lease, &proxy_session_id, &access_lease_id),
         ) {
             return response;
         }

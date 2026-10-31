@@ -198,6 +198,30 @@
 
 ## 🌟 New Features
 
+- **Playlist target analytics and stats view.** A new Web UI page "Playlist > Stats" (directly below "Update",
+  requiring `playlist.read`) displays per-target statistics computed on every playlist update:
+  live channel, movie, series, and resolved episode counts alongside group and category totals, catch-up channels
+  with maximum archive duration, input-versus-output kept ratios per cluster, top live groups, and comprehensive EPG
+  coverage. The EPG panel shows mapped versus unmapped live channels, guide horizon window (duration and end date),
+  per-source EPG fetch status (label, type, guide days, last success/failure timestamps, mapped count, status badge),
+  missing EPG counts by group, and a CSV export for unmapped live channels. An "All targets" summary table highlights
+  target status (`OK`, `EPG stale`, `Error`, or `No data`). Each target stores its metrics in `analytics.json` and
+  unmapped channels in `analytics_unmapped.csv`, while input `status.json` records per-source EPG fetch history
+  (source label only, credentials never stored). Endpoints `GET /api/v1/playlist/analytics` and
+  `GET /api/v1/playlist/analytics/{target_id}/unmapped.csv` expose this data via the REST API. Episodes are counted
+  only when resolved during the update; partially resolved series show a lower bound such as "16+",
+  and without any resolved series the value is displayed as "—".
+
+- **Mapper rules can be written in Rhai.** A mapper entry accepts an optional `type`: `dsl` (default, the existing
+  mapper language) or `rhai`. Rhai rules receive the channel as `item` (`item.group = "News"`, `item.chno = 42`,
+  `item["Caption"] = "Renamed"`) and the mapping environment as `ctx` (`ctx.regex`, `ctx.template`, `ctx.favourite`).
+  Scripts are compiled when the configuration loads, so syntax errors report the mapping id and rule name instead of
+  failing mid-refresh. Existing mapping files are unchanged and keep running as `dsl`. The embedded runtime lives in a
+  new workspace crate, `tuliprox-scripting`, so later features (filters, renames, messaging) can reuse it. Rhai's
+  module system is compiled out, so `import` is rejected when the configuration loads and a script cannot load other
+  files from disk. The documentation's Rhai examples are executed by the test suite. See
+  [Rhai scripts](docs/src/configuration/mapping-dsl.md#23-rhai-scripts-type-rhai).
+
 - **External log shipping via syslog and NDJSON (`log.syslog`).** Application log records can now be streamed
   asynchronously over UDP to an external collector (such as Vector, rsyslog, Logstash, or Fluent Bit) without
   blocking media processing. Supports RFC 5424, RFC 3164, and NDJSON wire formats, an optional independent remote
@@ -1073,6 +1097,15 @@
 
 ## ⚙️ Optimizations
 
+- **No full database re-verification on in-place writes.** In-place database writes (stream/series info resolves, probes)
+  no longer re-verify the whole database file when its identity was already verified in this process.
+
+- **`get_series` no longer decodes episode details for the list.** The series catalog list response only needs
+  the series header fields. Reading stored series items now skips deserializing and interning season and episode details
+  via a scoped decode projection, reducing response latency on large series catalogs. Xtream list endpoints are served
+  from the memory cache when `use_memory_cache` is enabled, and the memory cache no longer holds series season/episode
+  details (series info is read from disk).
+
 - **Dependency updates.** `jsonwebtoken` 11, `quick-xml` 0.42, `tower-http` 0.7, `tokio-tungstenite` 0.30,
   `sysinfo` 0.39, `lol_html` 3, `lru` 0.19, `fancy-regex` 0.20 and `gloo-net` 0.7. The vendored `reqwest` moved to
   0.13.5 with the request-extension forwarding patch re-applied.
@@ -1246,6 +1279,32 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Playlist Update: "All" selects, status badges use status dots.** Clicking "All" under "Affected targets" now
+  always selects every target instead of toggling all of them off on a second click; single targets still switch on
+  and off. Status badges (input result, cluster chips, update details) show a round status dot in front of the label,
+  like the health badge, instead of mixed leading and trailing check marks. Cluster chips are neutral, target buttons
+  use the theme's primary color when selected, and the scrollbar is narrower and tinted with the theme color.
+
+- **Recording entries visible in the collapsed sidebar.** The collapsed sidebar referenced the icons `LibraryOutline`
+  and `ScheduleOutline`, which do not exist, so the Recordings and Recording rules buttons were blank. Both sidebar
+  modes now use `VideoLibrary` and `Calendar`.
+
+- **Scheduled tasks keep their local time across DST switches.** The scheduler fixed the UTC offset when it started,
+  so after a daylight saving switch a job planned for 08:00 ran at 07:00 (autumn) or 09:00 (spring) until the next
+  restart. Each run is now calculated in the local time zone, including the switch. The time zone is the one of the
+  process (`TZ` in Docker, default `UTC`).
+
+- **Image/resource proxy fails fast on upstream errors and limits per-host concurrency.** The image/resource proxy
+  no longer retries a failing upstream image three times (each failing image could block a browser slot for minutes),
+  fails after 15 s waiting for the response (the limit applies to waiting for the response, not to the image transfer),
+  and limits concurrent upstream fetches per host to 6 to avoid provider overload.
+
+- **Xtream list order stays sorted after stream or series info resolves.** Resolving VOD or series info updates the
+  target database in place, and every commit removed the sorted index, so later list requests returned items in
+  virtual-id order. The Xtream target write path now keeps the index (new or moved keys are merged in) and reads values
+  by primary key while the index is older than the database. Disk and memory cache list the same items in the same
+  `(source_ordinal, virtual_id)` order.
 
 - **Filters are no longer limited by the parser stack.** A filter that expanded to more than a few dozen terms was
   rejected with `stack limit reached` on the static-musl build and left the container restarting. The parser dependency
@@ -1988,6 +2047,37 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- **Docker images ship FFmpeg 9.0.2.** The bundled static `ffmpeg`/`ffprobe` moved from 7.1 to 9.0.2, and the
+  resource build uses FFmpeg 9.0. The `ffprobe` JSON fields that Tuliprox reads are unchanged.
+
+- **Release builds use pinned, reproducible inputs.** All GitHub Actions, Docker base images and the `cross` build
+  images (`docker/cross/`, referenced by `Cross.toml`) are pinned to a digest, and Dependabot proposes weekly updates
+  for them against `develop`. The release workflow builds first and then pushes the version commit and tag
+  atomically. It refuses to publish when the branch moved during the build.
+
+- **Fixed version rules for releases.** Every `develop` build raises the patch version, so a `develop` version never
+  ends in `.0`; after a master release it continues at `X.Y.1`. Every `master` build raises the minor version with
+  patch 0. Both skip versions whose tag already exists, and a re-run of a tagged commit reuses its version. After a
+  master release, CI merges the release into `develop` so the next release pull request does not conflict on the
+  version lines; when master changed more than the version in `Cargo.toml`, `Cargo.lock` or `frontend/Cargo.toml`,
+  CI stops and asks for a manual merge. Pull request CI now also runs for pull requests into `master`. The manual
+  `Version bump` input of the Docker workflow is removed.
+
+- **GitHub releases are built by CI.** A merge into `master` publishes the release with one bundle per platform:
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and `armv7-unknown-linux-musleabihf` as `.tar.gz`, and
+  `x86_64-pc-windows-gnu` as `.zip`, each with a `.sha256` file. A bundle contains the binary, `web/` and
+  `resources/`, the same files as the Docker image. Pull request CI checks the armv7 and Windows targets with
+  `cross check`, so a target that no longer builds fails before the merge. The local `bin/release.sh`,
+  `bin/inc_version.sh` and `bin/build_cross_toolchains_darwin_images.sh` are removed.
+
+- **`make pre-merge-check` and `make i18n-check`.** `pre-merge-check` runs the architecture gates, clippy, the
+  locale key check and the workspace tests on a merged tree. `i18n-check` (`bin/check-i18n.sh`) lists every missing
+  and extra translation key of every locale at once; duplicate keys stay covered by the frontend locale test.
+
+- **Pull requests get a Gitleaks privacy scan.** CI scans every pull request commit with `.gitleaks.default.toml`.
+  The optional pre-push hook in `.githooks/` runs the same scan locally, plus private `.gitleaks.*.toml` rules; see
+  `.githooks/README.md`. CI runs the workspace tests with the `dev-slim` profile (`make test-slim`).
 
 - **`AppState` groups the recording handles and wraps the network-access checks.** The recording queue and the provider
   capacity live in `AppState.recording` (`RecordingState`). `AppState::check_network_access`,

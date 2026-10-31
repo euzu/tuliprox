@@ -13,6 +13,7 @@ use self::support::{
     test_app_state_with_manual_update_sender, xmltv_source_dto,
 };
 
+mod behavior_analytics;
 mod behavior_epg_preview;
 mod behavior_inspect_routes;
 mod behavior_manual_update;

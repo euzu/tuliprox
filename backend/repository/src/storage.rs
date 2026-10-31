@@ -15,6 +15,54 @@ pub fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
     target_path.join(storage_const::FILE_ID_MAPPING)
 }
 
+pub fn get_target_analytics_file_path(target_path: &Path) -> PathBuf {
+    target_path.join(storage_const::TARGET_ANALYTICS_FILE)
+}
+
+pub fn get_target_analytics_unmapped_file_path(target_path: &Path) -> PathBuf {
+    target_path.join(storage_const::TARGET_ANALYTICS_UNMAPPED_FILE)
+}
+
+pub async fn save_target_analytics(
+    target_storage_path: &Path,
+    analytics: &shared::model::TargetAnalyticsDto,
+) -> Result<(), TuliproxError> {
+    let file_path = get_target_analytics_file_path(target_storage_path);
+    let json_bytes = serde_json::to_vec_pretty(analytics)
+        .map_err(|e| TuliproxError::RepositoryStorage(format!("Failed to serialize target analytics: {e}")))?;
+    tuliprox_core::utils::write_file_atomic(&file_path, &json_bytes)
+        .await
+        .map_err(|e| TuliproxError::RepositoryStorage(format!("Failed to write target analytics atomically: {e}")))?;
+    Ok(())
+}
+
+pub async fn load_target_analytics(
+    target_storage_path: &Path,
+) -> Result<Option<shared::model::TargetAnalyticsDto>, TuliproxError> {
+    let file_path = get_target_analytics_file_path(target_storage_path);
+    if !file_path.exists() {
+        return Ok(None);
+    }
+    let content = tokio::fs::read(&file_path).await.map_err(|e| {
+        TuliproxError::RepositoryStorage(format!("Failed to read target analytics {}: {e}", file_path.display()))
+    })?;
+    let dto = serde_json::from_slice(&content).map_err(|e| {
+        TuliproxError::RepositoryStorage(format!("Failed to parse target analytics {}: {e}", file_path.display()))
+    })?;
+    Ok(Some(dto))
+}
+
+pub async fn save_target_analytics_unmapped_csv(
+    target_storage_path: &Path,
+    csv_content: &str,
+) -> Result<(), TuliproxError> {
+    let file_path = get_target_analytics_unmapped_file_path(target_storage_path);
+    tuliprox_core::utils::write_text_file_atomic(&file_path, csv_content).await.map_err(|e| {
+        TuliproxError::RepositoryStorage(format!("Failed to write unmapped channels CSV atomically: {e}"))
+    })?;
+    Ok(())
+}
+
 pub async fn ensure_target_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
     if let Some(path) = get_target_storage_path(cfg, target_name) {
         tokio::fs::create_dir_all(&path).await.map_err(|err| {

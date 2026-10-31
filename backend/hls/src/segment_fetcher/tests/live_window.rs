@@ -12,7 +12,7 @@ use tuliprox_core::model::StripConfig;
 const MODES: [HlsStartupMode; 3] =
     [HlsStartupMode::FirstReady, HlsStartupMode::Progressive, HlsStartupMode::Optimistic];
 
-fn manifest(
+pub(super) fn manifest(
     origin: &str,
     first: u64,
     durations: &[u64],
@@ -24,7 +24,7 @@ fn manifest(
     normal_manifest(&body)
 }
 
-fn prepare_selected(session: &mut HlsSession, sequences: &[u64], mode: HlsStartupMode, complete: bool) {
+pub(super) fn prepare_selected(session: &mut HlsSession, sequences: &[u64], mode: HlsStartupMode, complete: bool) {
     let startup = session.startup.as_mut().unwrap();
     for (index, seq) in sequences.iter().enumerate() {
         let revision = startup
@@ -45,6 +45,128 @@ fn prepare_selected(session: &mut HlsSession, sequences: &[u64], mode: HlsStartu
             revision.revision().prefix_available.store(1, Ordering::Release);
         }
         startup.revisions.insert(*seq, revision);
+    }
+}
+
+#[tokio::test]
+async fn rebase_continuation_renders_the_first_refreshed_window_in_all_startup_modes() {
+    let server = spawn_segment_server(0).await;
+    for mode in MODES {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut state = context.session.write().await;
+            *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+            state.apply_origin_manifest(&manifest(&server.base_url, 37, &[7; 4])).unwrap();
+            state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+            for segment in state.segments.values_mut() {
+                segment.status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 10 };
+            }
+        }
+        install_startup(&context, &worker, mode).await;
+        let mut state = context.session.write().await;
+        prepare_selected(&mut state, &[0, 1, 2, 3], mode, true);
+        state.render_and_store_manifest(10).unwrap();
+        let epoch = state.origin_epoch;
+        let previous = state.last_rendered_manifest.clone();
+        let owner = crate::origin::build_hls_origin_session_owner(&state.proxy_session_id);
+        state.restart_admitted_origin_account(crate::HlsOriginAccountBinding::rebound(
+            std::sync::Arc::from("input"),
+            std::sync::Arc::from("account"),
+            owner,
+            1,
+            30_000,
+        ));
+
+        state
+            .apply_origin_rebase_manifest(
+                &manifest(&server.base_url, 39, &[7; 4]),
+                crate::timeline::effective_origin_host_id("127.0.0.1"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(state.live_origin_sequences(), &[2, 3, 4, 5], "{mode:?}: preserve the cached overlap");
+        assert_eq!(state.origin_epoch, epoch);
+        let plan = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+        assert_eq!(plan.visible, [2, 3, 4]);
+        assert!(matches!(
+            HlsManifestRenderer::render_live_window(&state, &plan, 20),
+            Err(crate::renderer::RenderError::NoRenderableWindow)
+        ));
+        assert_eq!(state.last_rendered_manifest, previous);
+
+        prepare_selected(&mut state, &[4], mode, true);
+        state.segments.get_mut(&4).unwrap().status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 30 };
+        let rendered = HlsManifestRenderer::render_live_window(&state, &plan, 30)
+            .expect("the first refreshed window renders as soon as its selected new segment is ready");
+        assert_eq!(rendered.segment_proxy_seqs, [2, 3, 4]);
+        assert!(rendered.body.contains("#EXT-X-MEDIA-SEQUENCE:2\n"));
+        assert_eq!(state.store_rendered_manifest(rendered), crate::RenderedManifestStoreOutcome::Stored);
+        assert_eq!(state.proxy_next_seq, Some(6));
+        assert!(matches!(state.segments[&5].status, SegmentCacheStatus::Discovered));
+    }
+}
+
+#[tokio::test]
+async fn rebase_overlap_renders_after_the_next_segment_without_weakening_window_readiness() {
+    let server = spawn_segment_server(0).await;
+    for mode in MODES {
+        let directory = tempfile::tempdir().unwrap();
+        let policy = SegmentFetchPolicy::default();
+        let (worker, context, _) = fetch_context(&server, &directory, &policy).await;
+        {
+            let mut state = context.session.write().await;
+            *state = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+            state.apply_origin_manifest(&manifest(&server.base_url, 182_137, &[7; 4])).unwrap();
+            state.live_window_strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+        }
+        install_startup(&context, &worker, mode).await;
+        let mut state = context.session.write().await;
+        prepare_selected(&mut state, &[0, 1, 2, 3], mode, true);
+        state.render_and_store_manifest(10).expect("baseline is published");
+        let previous = state.last_rendered_manifest.clone();
+        let host = crate::timeline::effective_origin_host_id("127.0.0.1");
+        // An explicit epoch handoff must still trim historical overlap.
+        state.mark_pending_origin_epoch_handoff_discontinuity(0);
+        state.apply_origin_rebase_manifest(&manifest(&server.base_url, 182_139, &[7; 4]), host, false).unwrap();
+        assert_eq!(state.live_origin_sequences(), &[4, 5]);
+        prepare_selected(&mut state, &[4, 5], mode, true);
+        for seq in [4, 5] {
+            state.segments.get_mut(&seq).unwrap().status =
+                SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 20 };
+        }
+        let too_short = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+        assert_eq!(too_short.visible, [4, 5]);
+        assert!(
+            matches!(
+                HlsManifestRenderer::render_live_window(&state, &too_short, 20),
+                Err(crate::renderer::RenderError::NoRenderableWindow)
+            ),
+            "{mode:?}: two cached segments do not weaken the regular minimum"
+        );
+        assert_eq!(state.last_rendered_manifest, previous);
+
+        state
+            .apply_origin_manifest(&manifest(&server.base_url, 182_140, &[7; 4]))
+            .expect("the next sliding origin window keeps its current overlap");
+        let ready = state.plan_live_window(HlsLiveWindowView::Entry).unwrap();
+        assert_eq!(ready.visible, [4, 5, 6]);
+        assert!(
+            matches!(
+                HlsManifestRenderer::render_live_window(&state, &ready, 30),
+                Err(crate::renderer::RenderError::NoRenderableWindow)
+            ),
+            "{mode:?}: the third segment must still become publishable"
+        );
+
+        prepare_selected(&mut state, &[6], mode, true);
+        state.segments.get_mut(&6).unwrap().status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 40 };
+        let rendered = HlsManifestRenderer::render_live_window(&state, &ready, 40).expect("current media is ready");
+        assert_eq!(rendered.segment_proxy_seqs, [4, 5, 6]);
+        assert_eq!(rendered.first_proxy_seq, 4);
+        assert_eq!(state.store_rendered_manifest(rendered), crate::RenderedManifestStoreOutcome::Stored);
+        assert_eq!(state.proxy_next_seq, Some(7));
     }
 }
 
@@ -268,7 +390,7 @@ async fn assert_live_window_http_fill(external: Option<&str>) {
 }
 
 #[tokio::test]
-async fn live_window_readiness_uses_selected_head_and_never_skips_a_failure() {
+async fn live_window_readiness_preserves_active_failures_and_invalidates_failed_entry_plans() {
     let server = spawn_segment_server(0).await;
     for mode in MODES {
         let directory = tempfile::tempdir().unwrap();
@@ -294,7 +416,10 @@ async fn live_window_readiness_uses_selected_head_and_never_skips_a_failure() {
         let origin_head = state.publishable_origin_head_proxy_seq;
         super::super::recompute_unpublished_live_head(&mut state);
         assert_eq!(state.publishable_origin_head_proxy_seq, origin_head);
-        assert_eq!(state.plan_live_window(HlsLiveWindowView::Entry).unwrap().visible, plan.visible);
+        assert!(!plan.is_current(&state));
+        assert_ne!(state.plan_live_window(HlsLiveWindowView::Entry).unwrap().visible, plan.visible);
+        let active = state.plan_live_window(HlsLiveWindowView::Active { first_published: head }).unwrap();
+        assert_eq!(active.visible.first(), Some(&head));
         state.apply_origin_manifest(&manifest(&server.base_url, 2, &[4; 6])).unwrap();
         assert!(!plan.is_current(&state));
         assert!(HlsManifestRenderer::render_live_window(&state, &plan, 0).is_err());

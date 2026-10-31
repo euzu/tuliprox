@@ -237,7 +237,7 @@ async fn hls_cache_no_media_yet_transient_manifest_is_served_for_initial_canonic
 
     assert_eq!(media_uri_count(&body), 3);
     assert!(body.contains(&access_lease_id.0));
-    assert!(session.read().await.activity.last_authorized_media_at_ms.is_some());
+    assert!(session.read().await.activity.last_authorized_media_at_ms.is_none());
 }
 
 #[tokio::test]
@@ -322,7 +322,7 @@ async fn hls_cache_no_media_yet_waits_for_first_transient_manifest_commit() {
 
     assert_eq!(media_uri_count(&body), 3);
     assert!(body.contains(&access_lease_id.0));
-    assert!(session.read().await.activity.last_authorized_media_at_ms.is_some());
+    assert!(session.read().await.activity.last_authorized_media_at_ms.is_none());
 }
 
 #[tokio::test]

@@ -1112,7 +1112,18 @@ fn apply_amended_metadata<T: EnrichableMetadata>(properties: &mut T, amended: Op
     let Some(amended) = amended else {
         return false;
     };
-    match serde_json::from_str::<T>(amended) {
+    let value: serde_json::Value = match serde_json::from_str(amended) {
+        Ok(value) => value,
+        Err(err) => {
+            warn!("Ignoring the metadata an enrich-metadata plugin returned for '{title}': {err}");
+            return false;
+        }
+    };
+    if !value.is_object() {
+        warn!("Ignoring the metadata an enrich-metadata plugin returned for '{title}': expected a JSON object");
+        return false;
+    }
+    match serde_json::from_value::<T>(value) {
         Ok(mut parsed) => {
             parsed.restore_identity(properties);
             if parsed == *properties {
@@ -1145,7 +1156,15 @@ mod enrich_metadata_tests {
         fn new(reply: Option<&str>) -> Self {
             Self {
                 reply: reply.map(ToString::to_string),
-                fingerprint: Some("fp-1".to_string()),
+                fingerprint: None,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_fingerprint(reply: Option<&str>, fingerprint: Option<&str>) -> Self {
+            Self {
+                reply: reply.map(ToString::to_string),
+                fingerprint: fingerprint.map(ToString::to_string),
                 calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
@@ -1219,7 +1238,6 @@ mod enrich_metadata_tests {
     async fn invalid_json_a_failed_call_and_an_unchanged_answer_leave_the_record_alone() {
         let cases = [
             ("not json", Some("{ nope".to_string())),
-            ("wrong shape", Some("[1, 2, 3]".to_string())),
             ("plugin failed or changed nothing", None),
             ("identical", Some(serde_json::to_string(&video()).expect("serialize"))),
         ];
@@ -1231,6 +1249,16 @@ mod enrich_metadata_tests {
             assert_eq!(properties, video(), "{name}: record modified");
             assert_eq!(probe.calls(), 1, "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_json_array_answer_leaves_the_record_alone() {
+        let probe = Probe::new(Some("[1, 2, 3]"));
+        let mut properties = video();
+        let changed = enrich_resolved_metadata(&probe, "provider", &item(), &mut properties).await;
+        assert!(!changed, "reported a change");
+        assert_eq!(properties, video(), "record modified");
+        assert_eq!(probe.calls(), 1);
     }
 
     #[tokio::test]
@@ -1255,7 +1283,7 @@ mod enrich_metadata_tests {
             }
         }
 
-        let probe = Probe::new(None);
+        let probe = Probe::with_fingerprint(None, Some("fp-1"));
         let mut record = Stamped { fingerprint: None };
         assert!(enrich_resolved_metadata(&probe, "provider", &item(), &mut record).await, "stamping persists");
         assert_eq!(record.fingerprint.as_deref(), Some("fp-1"));

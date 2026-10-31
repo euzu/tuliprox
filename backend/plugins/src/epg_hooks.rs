@@ -25,6 +25,31 @@ use tuliprox_plugin_api::bindings::{
     exports::tuliprox::plugin::epg_match_hooks::MatchRequest, tuliprox::plugin::epg_types::EpgProgramme as WitProgramme,
 };
 
+/// A guest call may return at most this many times the programmes it was sent,
+/// and never fewer than [`MIN_RETURNED_PROGRAMMES`] (enrichment can add to a
+/// sparse channel). Beyond that the call fails like a trap.
+const MAX_RETURN_FACTOR: usize = 4;
+const MIN_RETURNED_PROGRAMMES: usize = 10_000;
+
+/// Fails the call when the guest returned more programmes than the cap for the
+/// `sent` it was given.
+fn check_returned(what: &str, sent: usize, returned: usize) -> Result<(), CallError> {
+    let cap = sent.saturating_mul(MAX_RETURN_FACTOR).max(MIN_RETURNED_PROGRAMMES);
+    if returned > cap {
+        return Err(CallError::Trap(format!("{what} returned {returned} programmes for {sent} sent (cap {cap})")));
+    }
+    Ok(())
+}
+
+/// `on-epg-loaded` is sparse: it returns the channels it changes, so a call may
+/// not return more channels than it was sent. Beyond that it fails like a trap.
+fn check_returned_channels(sent: usize, returned: usize) -> Result<(), CallError> {
+    if returned > sent {
+        return Err(CallError::Trap(format!("on-epg-loaded returned {returned} channels for {sent} sent")));
+    }
+    Ok(())
+}
+
 #[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` function")]
 fn bind(err: wasmtime::Error) -> CallError { CallError::Trap(format!("{err:#}")) }
 
@@ -96,7 +121,9 @@ async fn load_one(
         let limits = live.limits();
         let result = call_with_deadline(limits, guest.call_on_epg_loaded(live.armed(), source, &wit)).await;
         host_fns::end_call(live.store_mut().data_mut()).await;
-        returned.extend(result?.map_err(hook_err)?);
+        let changed = result?.map_err(hook_err)?;
+        check_returned_channels(wit.len(), changed.len())?;
+        returned.extend(changed);
     }
     Ok(returned)
 }
@@ -154,7 +181,9 @@ async fn transform_one(
         let limits = live.limits();
         let result = call_with_deadline(limits, guest.call_transform_programmes(live.armed(), source, &wit)).await;
         host_fns::end_call(live.store_mut().data_mut()).await;
-        for programme in result?.map_err(hook_err)? {
+        let returned = result?.map_err(hook_err)?;
+        check_returned("transform-programmes", chunk.len(), returned.len())?;
+        for programme in returned {
             match programme_from_wit(programme, &ids) {
                 Some(programme) => kept.push(programme),
                 None => ignored += 1,
@@ -230,6 +259,7 @@ async fn enrich_one(
             call_with_deadline(limits, guest.call_enrich_programmes(live.armed(), &channel.channel_id, &wit)).await;
         host_fns::end_call(live.store_mut().data_mut()).await;
         let returned = result?.map_err(hook_err)?;
+        check_returned("enrich-programmes", wit.len(), returned.len())?;
         let returned_len = returned.len();
         let programmes: Vec<EpgProgramme> =
             returned.into_iter().filter_map(|programme| programme_from_wit(programme, &ids)).collect();
@@ -379,6 +409,25 @@ async fn metadata_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returned_programmes_are_capped_at_four_times_the_sent_and_at_least_ten_thousand() {
+        assert!(check_returned("t", 100, MIN_RETURNED_PROGRAMMES).is_ok());
+        let err = check_returned("t", 100, MIN_RETURNED_PROGRAMMES + 1).unwrap_err();
+        assert!(matches!(err, CallError::Trap(ref message) if message.contains("cap 10000")), "{err}");
+        assert!(check_returned("t", 5_000, 20_000).is_ok());
+        assert!(check_returned("t", 5_000, 20_001).is_err());
+        assert!(check_returned("t", 0, 0).is_ok());
+        assert!(check_returned("t", usize::MAX, usize::MAX).is_ok(), "no overflow");
+    }
+
+    #[test]
+    fn a_sparse_on_epg_loaded_result_never_has_more_channels_than_were_sent() {
+        assert!(check_returned_channels(500, 0).is_ok());
+        assert!(check_returned_channels(500, 500).is_ok());
+        let err = check_returned_channels(500, 501).unwrap_err();
+        assert!(matches!(err, CallError::Trap(ref message) if message.contains("501 channels for 500 sent")), "{err}");
+    }
 
     fn candidates() -> Vec<PluginEpgChannel> {
         vec![

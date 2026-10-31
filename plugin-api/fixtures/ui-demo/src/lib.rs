@@ -3,6 +3,9 @@
 //! `echo` and `counter` are reads, `bump` is a write. The counter lives in the
 //! plugin's KV store under `count`, so it survives across calls (each call gets
 //! a fresh instance).
+//!
+//! `spin` never returns. The `ui-demo` manifest does not export it (so the host
+//! answers 404); only the `rpc-spin` manifest does, for the isolation tests.
 
 wit_bindgen::generate!({
     path: "../../wit",
@@ -44,6 +47,14 @@ fn bump(payload: &Value) -> Result<u64, String> {
     Ok(next)
 }
 
+/// Never returns: the call deadline has to end it.
+fn spin() -> ! {
+    let mut ticks: u64 = 0;
+    loop {
+        ticks = core::hint::black_box(ticks.wrapping_add(1));
+    }
+}
+
 impl lifecycle::Guest for UiDemo {
     fn init(_settings: String) -> Result<(), String> {
         host::log(LogLevel::Debug, "ui-demo initialised");
@@ -58,6 +69,7 @@ impl rpc::Guest for UiDemo {
             "echo" => json!({ "echo": payload, "greeting": greeting() }),
             "counter" => json!(read_counter()?),
             "bump" => json!(bump(&payload)?),
+            "spin" => spin(),
             other => return Err(format!("unknown method `{other}`")),
         };
         Ok(result.to_string())

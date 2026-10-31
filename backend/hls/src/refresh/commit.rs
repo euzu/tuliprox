@@ -196,6 +196,9 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
     }
     let configured_target_duration = session.target_duration;
     if let Ok((progress_evidence, _, _)) = &result {
+        if let Some(io) = request.origin_io.as_ref() {
+            crate::origin::reserve_hls_origin_start(session, io, fetch_finished_at_ms);
+        }
         record_committed_manifest_media_progress(
             &mut session.origin_control,
             *progress_evidence,
@@ -597,6 +600,23 @@ fn mark_manifest_acceptance_success(
     observed_at_ms: u64,
 ) {
     session.origin_account_manifest_pending = None;
+    let start_timing = session.account_overlap_timing();
+    let live_start = session.origin_playback_kind() == tuliprox_core::model::PlaybackKind::LiveHls;
+    let startup_window_ms = session
+        .account_overlap_timing()
+        .target_duration_ms
+        .saturating_mul(2)
+        .max(tuliprox_session::STARTING_LEASE_TTL_SECS.saturating_mul(1_000));
+    if let Some(binding) = session.origin_account_binding.as_mut() {
+        if live_start {
+            binding.startup_protection.get_or_insert(crate::origin::HlsOriginStartProtection {
+                anchored_at_ms: observed_at_ms,
+                timing: start_timing,
+            });
+        } else {
+            binding.startup_media_deadline_ms.get_or_insert(observed_at_ms.saturating_add(startup_window_ms));
+        }
+    }
     let binding = Url::parse(&fetched.resolved_request_url)
         .ok()
         .and_then(|request_url| HlsManifestOriginBinding::new(request_url, fetched.provider_url_index).ok());

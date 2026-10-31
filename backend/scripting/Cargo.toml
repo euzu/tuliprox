@@ -1,0 +1,14 @@
+[package]
+name = "tuliprox-scripting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Embedded Rhai runtime shared by tuliprox scripting hosts"
+
+[lints]
+workspace = true
+
+[dependencies]
+shared = { workspace = true }
+log.workspace = true
+rhai = { version = "1.27.0", default-features = false, features = ["no_module", "std", "sync"] }

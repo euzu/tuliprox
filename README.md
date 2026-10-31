@@ -233,6 +233,8 @@ Tuliprox can be configured and monitored directly from the browser.
 - **Update Details** explain where data came from, which quality guards were applied, processing order, target results,  
   and technical versus quality failures
 - Reload-safe update/cluster status so a browser refresh does not erase the operational picture
+- **Playlist Stats** with per-target content counts, input-to-output ratios, largest groups, catch-up channels,
+  EPG source health, and unmapped live channel CSV export
 - **Playlist Explorer** with tree/gallery views, EPG timeline, text/regex search, and field-scoped search
 - **Download & Recording Manager** with retries, queue controls, fairness, and RBAC-protected actions
 - **User Management** including plans, connection limits, priorities, category access, output clusters, and network policies

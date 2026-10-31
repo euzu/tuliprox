@@ -237,7 +237,8 @@ impl PluginSystem {
     /// per registry snapshot.
     ///
     /// The first call after a registry change reads `approvals.json` and the
-    /// input schema files; later calls are a pointer comparison.
+    /// input schema files (call it from `tokio::task::spawn_blocking`); later
+    /// calls are a pointer comparison.
     pub fn mcp_tools(&self, builtin_names: &[&str]) -> Arc<[PluginMcpTool]> {
         let snapshot = self.registry().snapshot();
         self.mcp_tool_cache().get_or_build(&snapshot, || {
@@ -385,16 +386,16 @@ mod tests {
 
     #[test]
     fn two_plugin_tools_with_one_name_are_both_dropped() {
-        // `a-b` + `c` and `a` + `b-c` both read `plugin_a_b_c`.
+        // `foo-bar` + `baz` and `foo` + `bar-baz` both read `plugin_foo_bar_baz`.
         let one_export =
             |method: &str| format!("    - {{ name: {method}, kind: read, mcp: true, input_schema: rpc/ping.json }}\n");
-        let first = staged("a-b", &one_export("c"), Some(OBJECT_SCHEMA));
-        let second = staged("a", &one_export("b-c"), Some(OBJECT_SCHEMA));
+        let first = staged("foo-bar", &one_export("baz"), Some(OBJECT_SCHEMA));
+        let second = staged("foo", &one_export("bar-baz"), Some(OBJECT_SCHEMA));
         let third = staged("other", &one_export("ping"), Some(OBJECT_SCHEMA));
         let tools = derive_tools(
             [
-                candidate("a-b", &first, PluginState::Enabled, true),
-                candidate("a", &second, PluginState::Enabled, true),
+                candidate("foo-bar", &first, PluginState::Enabled, true),
+                candidate("foo", &second, PluginState::Enabled, true),
                 candidate("other", &third, PluginState::Enabled, true),
             ],
             &[],

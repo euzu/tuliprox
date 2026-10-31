@@ -4,7 +4,7 @@
 //! Security notes, since this is the edge between plugin JavaScript and the
 //! admin's session:
 //!
-//! - The frame is `sandbox="allow-scripts"` and nothing else. It never gets the
+//! - The frame's `sandbox` attribute is `allow-scripts` and nothing else. It never gets the
 //!   same-origin token, so it has an opaque origin and cannot read the app's
 //!   token from `localStorage`.
 //! - The parent performs every rpc. The token stays in [`PluginUiService`] and
@@ -51,6 +51,10 @@ pub const MAX_FRAME_HEIGHT: u32 = 2000;
 const INITIAL_FRAME_HEIGHT: u32 = 200;
 /// Longest error text handed to a frame.
 const MAX_ERROR_CHARS: usize = 500;
+
+/// The iframe `sandbox` attribute: scripts only. Without `allow-same-origin` the
+/// document gets an opaque origin, which keeps it away from the admin token.
+const FRAME_SANDBOX: &str = "allow-scripts";
 
 /// The CSS custom properties a frame receives as its theme. A fixed list: the
 /// frame sees the semantic tokens it needs to match the app, not the whole
@@ -631,7 +635,7 @@ pub fn PluginFrame(props: &PluginFrameProps) -> Html {
                     ref={iframe}
                     class="tp__plugin-frame"
                     src={src}
-                    sandbox="allow-scripts"
+                    sandbox={FRAME_SANDBOX}
                     referrerpolicy="no-referrer"
                     title={props.plugin.name.clone()}
                     style={style}
@@ -867,11 +871,7 @@ mod tests {
 
     #[test]
     fn the_iframe_is_sandboxed_without_same_origin() {
-        let source = include_str!("plugin_frame.rs");
-        // The attribute is written once. The token that would lift the opaque origin is
-        // spelled in two parts here so this file does not contain it.
-        assert_eq!(source.matches("sandbox=\"allow-scripts\"").count(), 1);
-        let forbidden = ["allow-same", "-origin"].concat();
-        assert!(!source.contains(&forbidden));
+        assert_eq!(FRAME_SANDBOX, "allow-scripts");
+        assert!(!FRAME_SANDBOX.contains("same-origin"));
     }
 }

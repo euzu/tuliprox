@@ -456,3 +456,34 @@ async fn settings_of_a_plugin_without_extensions_treat_ext_as_an_ordinary_key() 
     let (saved, _) = env.system.api_prepare_settings("demo", &incoming, Some(&env.config)).await.unwrap();
     assert_eq!(saved["ext"], json!({"anything": true}));
 }
+
+// --- blocking file reads -----------------------------------------------------
+
+/// Runs `future` on a current-thread runtime and counts the threads that runtime
+/// started. It has no worker threads, so each one is a blocking-pool thread.
+fn blocking_threads_started<F: std::future::Future>(future: F) -> (F::Output, usize) {
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&started);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .build()
+        .expect("runtime");
+    let output = runtime.block_on(future);
+    (output, started.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+#[test]
+fn preparing_settings_reads_the_schema_files_on_the_blocking_pool() {
+    let env = env();
+    let extra = "ui:\n  config_section:\n    schema: config-schema.json\n";
+    let bytes = package(&manifest("demo", "1.0.0", extra), &[("config-schema.json", r#"{"type":"object"}"#)]);
+    tokio::runtime::Runtime::new().unwrap().block_on(install(&env, "demo", bytes, &[]));
+
+    let (result, blocking_threads) =
+        blocking_threads_started(env.system.api_prepare_settings("demo", &json!({}), Some(&env.config)));
+    result.expect("the settings pass the schema");
+    assert!(blocking_threads >= 1, "the schema files were read on the async thread");
+}

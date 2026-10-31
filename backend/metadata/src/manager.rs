@@ -192,7 +192,7 @@ macro_rules! apply_cascade_updates {
             }
 
             if target.use_memory_cache {
-                Self::update_memory_cache(ctx, target_name, $cluster, updates).await;
+                Self::update_memory_cache(&ctx.playlists, target_name, $cluster, updates).await;
             }
         }
     };

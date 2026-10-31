@@ -25,8 +25,7 @@ struct Edge {
 fn load_edge(settings: Value) -> Option<Edge> {
     let directory = common::fixture_dir()?;
     if !directory.join("edge-probe/plugin.wasm").is_file() {
-        eprintln!("skipped: edge-probe not built; run bin/build_plugin_fixture.sh");
-        return None;
+        return common::skip_missing_fixture("skipped: edge-probe not built; run bin/build_plugin_fixture.sh");
     }
     let data = tempfile::tempdir().expect("temporary data dir");
     let config = PluginsConfig {

@@ -528,13 +528,13 @@ fn counters_saturate() {
     let f = fixture_with(CircuitBreakerPolicy { failure_threshold: u32::MAX, ..policy() });
     {
         let mut inner = f.breaker.shared.inner.lock();
-        inner.consecutive_failures = u32::MAX - 1;
+        // Already at the ceiling while still closed: one more failure must
+        // saturate instead of overflowing (and then opens the circuit).
+        inner.consecutive_failures = u32::MAX;
         inner.diagnostics.stale_reports = u64::MAX;
         inner.diagnostics.rejected_calls = u64::MAX;
         inner.generation = u64::MAX - 1;
     }
-    f.fail();
-    f.fail();
     f.fail();
     assert_eq!(f.breaker.snapshot().consecutive_failures, u32::MAX);
     f.breaker.reset();

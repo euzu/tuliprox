@@ -2,8 +2,8 @@
 use super::publication::TargetCacheReloadStage;
 use super::{publication::TargetPersistenceMode, PlaylistM3uStorage, PlaylistXtreamStorage, TargetPlaylistStorage};
 use crate::{
-    get_target_id_mapping_file, get_target_storage_path, m3u_get_file_path_for_db, xtream_get_file_path,
-    xtream_get_storage_path, BPlusTree, TargetIdMapping, VirtualIdRecord,
+    get_file_path_for_db_index, get_target_id_mapping_file, get_target_storage_path, m3u_get_file_path_for_db,
+    xtream_get_file_path, xtream_get_storage_path, BPlusTree, TargetIdMapping, VirtualIdRecord,
 };
 use log::{debug, warn};
 use shared::{
@@ -49,26 +49,43 @@ async fn load_target_id_mapping_as_tree(
         .map_err(|err| TuliproxError::Config(format!("Could not find path for target {target_name} err:{err}")))
 }
 
+type XtreamTreeAndOrder = (BPlusTree<u32, XtreamPlaylistItem>, Vec<(u32, u32)>);
+
+fn read_tree_and_order(
+    path: &Path,
+    index_path: &Path,
+    cluster: XtreamCluster,
+) -> Result<XtreamTreeAndOrder, TuliproxError> {
+    let mut tree = BPlusTree::new();
+    crate::visit_xtream_cluster_entries(path, index_path, cluster, |key, item| {
+        tree.insert(key, item);
+        true
+    })?;
+    let order = PlaylistXtreamStorage::build_cluster_order(cluster, &tree);
+    Ok((tree, order))
+}
+
 async fn load_xtream_playlist_as_tree(
     app_config: &AppConfig,
     storage_path: &Path,
     cluster: XtreamCluster,
-) -> Result<BPlusTree<u32, XtreamPlaylistItem>, TuliproxError> {
+) -> Result<(BPlusTree<u32, XtreamPlaylistItem>, Vec<(u32, u32)>), TuliproxError> {
     let xtream_path = xtream_get_file_path(storage_path, cluster);
+    let index_path = get_file_path_for_db_index(&xtream_path);
     let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
     // Move B+Tree query and iteration to spawn_blocking to avoid blocking tokio runtime
     let path_clone = xtream_path.clone();
     match tokio::task::spawn_blocking(move || {
         let _guard = file_lock;
-        BPlusTree::<u32, XtreamPlaylistItem>::load(&path_clone)
+        if !path_clone.exists() {
+            debug!("No xtream {cluster} storage at {}, serving empty playlist", path_clone.display());
+            return Ok((BPlusTree::new(), Vec::new()));
+        }
+        read_tree_and_order(&path_clone, &index_path, cluster)
     })
     .await
     {
-        Ok(Ok(tree)) => Ok(tree),
-        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => {
-            debug!("No xtream {cluster} storage at {}, serving empty playlist", xtream_path.display());
-            Ok(BPlusTree::new())
-        }
+        Ok(Ok((tree, order))) => Ok((tree, order)),
         Ok(Err(err)) => Err(TuliproxError::RepositoryXtream(format!(
             "Failed to load xtream {cluster} storage {}: {err}",
             xtream_path.display()
@@ -101,11 +118,11 @@ pub async fn load_xtream_target_storage(
         TuliproxError::Config(format!("Could not find path for target {} xtream output", target.name))
     })?;
 
-    let live_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await?;
-    let vod_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await?;
-    let series_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Series).await?;
+    let (live, live_order) = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await?;
+    let (vod, vod_order) = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await?;
+    let (series, series_order) = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Series).await?;
 
-    Ok(PlaylistXtreamStorage { live: live_storage, vod: vod_storage, series: series_storage })
+    Ok(PlaylistXtreamStorage { live, live_order, vod, vod_order, series, series_order })
 }
 
 pub async fn load_m3u_target_storage(

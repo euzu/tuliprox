@@ -38,5 +38,6 @@ pub use item::{PlaylistEntry, PlaylistItem};
 pub use kind::{PlaylistItemType, XtreamCluster};
 pub use m3u::M3uPlaylistItem;
 pub use xtream::{
-    ResourceOutputPolicy, XtreamMappingFlags, XtreamMappingFlagsSet, XtreamMappingOptions, XtreamPlaylistItem,
+    ResourceOutputPolicy, SeriesListProjection, XtreamMappingFlags, XtreamMappingFlagsSet, XtreamMappingOptions,
+    XtreamPlaylistItem,
 };

@@ -17,8 +17,9 @@ const PLUGIN: &str = "task-probe";
 
 fn probe(enabled: bool) -> Option<Probe> {
     if !fixture_dir()?.join(PLUGIN).join("plugin.wasm").is_file() {
-        eprintln!("skipped: task-probe fixture not installed; run bin/build_plugin_fixture.sh");
-        return None;
+        return common::skip_missing_fixture(
+            "skipped: task-probe fixture not installed; run bin/build_plugin_fixture.sh",
+        );
     }
     let mut entry = probe_entry(PLUGIN, json!({}));
     entry.enabled = enabled;

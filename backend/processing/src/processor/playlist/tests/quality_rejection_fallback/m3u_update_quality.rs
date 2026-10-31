@@ -468,7 +468,7 @@ async fn m3u_update_quality_raw_group_catalog_uses_effective_state() {
 async fn m3u_update_quality_duplicate_keys_match_the_existing_persisted_population() {
     let temp = tempfile::tempdir().unwrap();
     let (ctx, input) = fixture(temp.path(), Some([1, 1, 0]), [100, 100, 0]).await;
-    let candidate = document("superseded", [1, 1, 0]) + &document("last", [1, 1, 0]);
+    let candidate = document("superseded", [1, 1, 0]) + document("last", [1, 1, 0]).as_str();
     tokio::fs::write(&input.url, candidate).await.unwrap();
     let mut result = download_input(&ctx, &input, false).await;
     assert_eq!(result.update_state(), PlaylistUpdateState::Success);
@@ -481,7 +481,7 @@ async fn m3u_update_quality_duplicate_keys_match_the_existing_persisted_populati
 async fn m3u_update_quality_duplicate_keys_match_the_existing_persisted_population_when_disabled() {
     let temp = tempfile::tempdir().unwrap();
     let (ctx, input) = fixture(temp.path(), None, [0, 0, 0]).await;
-    let candidate = document("superseded", [1, 1, 0]) + &document("last", [1, 1, 0]);
+    let candidate = document("superseded", [1, 1, 0]) + document("last", [1, 1, 0]).as_str();
     tokio::fs::write(&input.url, candidate).await.unwrap();
     let mut result = download_input(&ctx, &input, false).await;
     assert_eq!(result.update_state(), PlaylistUpdateState::Success);

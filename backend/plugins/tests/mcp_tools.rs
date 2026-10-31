@@ -59,8 +59,9 @@ fn write_pin(data: &Path, wasm: &[u8], mcp: Option<bool>) {
 fn stage(setup: &Setup<'_>) -> Option<Staged> {
     let component = fixture_dir()?.join(ID).join("plugin.wasm");
     if !component.is_file() {
-        eprintln!("skipped: the {ID} fixture is not built; run bin/build_plugin_fixture.sh");
-        return None;
+        return common::skip_missing_fixture(&format!(
+            "skipped: the {ID} fixture is not built; run bin/build_plugin_fixture.sh"
+        ));
     }
     let wasm = fs::read(component).expect("component");
     let plugins = tempfile::tempdir().expect("temporary plugins dir");

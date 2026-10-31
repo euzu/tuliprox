@@ -7,11 +7,13 @@ mod wal;
 
 pub use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
 pub use publish::{publish_staged_database, BPlusTreeStagingArtifacts};
+pub(crate) use tree::{publish_database, temporary_path};
 #[allow(unused_imports)]
 pub use tree::{
     BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeQuery,
     BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy,
 };
+pub(crate) use wal::sync_parent_directory;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BPlusTreeMetadata {

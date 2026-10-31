@@ -1,13 +1,15 @@
+use crate::scripting::MappingScript;
 use shared::{
     error::TuliproxError,
     foundation::{Filter, MapperScript},
-    model::{MapperDto, MappingCounter, MappingDto, MappingStage, MappingsDto, PatternTemplate},
+    model::{MapperDto, MapperType, MappingCounter, MappingDto, MappingStage, MappingsDto, PatternTemplate},
 };
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub enum MappingProgram {
-    Script(MapperScript),
+    Dsl(MapperScript),
+    Rhai(MappingScript),
 }
 
 #[derive(Debug, Clone)]
@@ -23,9 +25,15 @@ impl TryFrom<&MapperDto> for CompiledMappingRule {
     fn try_from(dto: &MapperDto) -> Result<Self, Self::Error> {
         let filter =
             dto.t_filter.clone().ok_or_else(|| TuliproxError::Config("Mapping filter was not prepared".to_string()))?;
-        let script =
-            dto.t_script.clone().ok_or_else(|| TuliproxError::Config("Mapping script was not prepared".to_string()))?;
-        Ok(Self { name: dto.name.clone(), filter, program: MappingProgram::Script(script) })
+        let program = match dto.mapper_type {
+            MapperType::Dsl => MappingProgram::Dsl(
+                dto.t_script
+                    .clone()
+                    .ok_or_else(|| TuliproxError::Config("Mapping script was not prepared".to_string()))?,
+            ),
+            MapperType::Rhai => MappingProgram::Rhai(MappingScript::compile(&dto.script)?),
+        };
+        Ok(Self { name: dto.name.clone(), filter, program })
     }
 }
 
@@ -36,7 +44,9 @@ pub struct CompiledMapping {
     pub stage: MappingStage,
     pub rules: Vec<CompiledMappingRule>,
     pub counters: Vec<MappingCounter>,
-    pub templates: Option<Vec<PatternTemplate>>,
+    /// Shared once per mapping and only refcounted per item, so a script evaluation never clones
+    /// the template list.
+    pub templates: Option<Arc<[PatternTemplate]>>,
 }
 
 impl TryFrom<&MappingDto> for CompiledMapping {
@@ -61,7 +71,7 @@ impl TryFrom<&MappingDto> for CompiledMapping {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             counters: dto.t_counter.clone().unwrap_or_default(),
-            templates: dto.templates.clone(),
+            templates: dto.templates.clone().map(Arc::from),
         })
     }
 }

@@ -37,6 +37,7 @@ struct Probe;
 /// `HttpRequestDenied(None)` becomes `http-request-denied`.
 fn kebab(debug: &str) -> String {
     let name = debug.split('(').next().unwrap_or_default();
+    let name = name.rsplit("::").next().unwrap_or(name);
     let mut out = String::with_capacity(name.len() + 4);
     for (index, ch) in name.chars().enumerate() {
         if ch.is_uppercase() {
@@ -70,6 +71,45 @@ fn exhaust_memory() -> ! {
         let mut block = vec![0_u8; ONE_MIB];
         block[0] = 1;
         held.push(core::hint::black_box(block));
+    }
+}
+
+/// Never returns: recurses until the guest stack overflows and traps. The
+/// opaque condition and the use of the result keep it from becoming a loop.
+#[inline(never)]
+fn recurse(depth: u64) -> u64 {
+    if core::hint::black_box(depth) == u64::MAX {
+        return 0;
+    }
+    let frame = [core::hint::black_box(depth); 16];
+    core::hint::black_box(recurse(depth + 1)) + frame[3]
+}
+
+/// Never returns: writes 1 MiB values under new keys until the host refuses
+/// (`quota-exceeded`), logs that once, then keeps asking until the deadline.
+/// The keys are random per instance, so parallel floods do not overwrite (and
+/// re-read) each other's entries.
+fn kv_flood() -> ! {
+    use std::hash::{BuildHasher, RandomState};
+    let value = vec![0_u8; ONE_MIB];
+    let run = RandomState::new().hash_one(0_u8);
+    let (mut stored, mut refused) = (0_u64, false);
+    loop {
+        match host::kv_set(&format!("flood-{run:x}-{stored}"), &value) {
+            Ok(()) => stored += 1,
+            Err(err) if !refused => {
+                refused = true;
+                host::log(LogLevel::Warn, &format!("kv-flood refused after {stored} MiB: {}", kebab(&format!("{err:?}"))));
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Never returns: logs as fast as it can until the deadline.
+fn log_flood() -> ! {
+    loop {
+        host::log(LogLevel::Info, "flood");
     }
 }
 
@@ -143,6 +183,9 @@ fn run_mode(mode: &str, settings: &Value) -> String {
         "loop" => spin(),
         "oom" => exhaust_memory(),
         "trap" => panic!("trap mode requested"),
+        "recurse" => recurse(0).to_string(),
+        "kv-flood" => kv_flood(),
+        "log-flood" => log_flood(),
         "kv" => kv_counter(),
         "kv-big" => match host::kv_set("big", &vec![0_u8; ONE_MIB + 1]) {
             Ok(()) => "stored".to_string(),

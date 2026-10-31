@@ -1,5 +1,5 @@
 //! `GET /api/v1/plugins/ui`, the plugin UI frame files under
-//! `/plugins/{id}/ui/{path…}` with the frame CSP, and `/plugins/_sdk/bridge.js`
+//! `/plugins/{id}/ui/{path…}` with the frame CSP, and `/plugins/{id}/ui/_sdk/bridge.js`
 //! (plan §9 *UI trust boundary*, §11 *Sandboxed-frame bridge*, §18 *W6b seam
 //! freeze* "Frame serving"). W6b lane R.
 //!
@@ -47,12 +47,13 @@ pub fn plugins_ui_api_register_with_permissions(app_state: &Arc<AppState>) -> Ro
 
 pub fn plugins_ui_api_register_unprotected() -> Router<Arc<AppState>> { routes() }
 
-/// The unauthenticated frame routes, `/plugins/{id}/ui/{*path}` and
-/// `/plugins/_sdk/bridge.js`, under `web_ui_path`.
+/// The unauthenticated frame routes, `/plugins/{id}/ui/{*path}` and the bridge
+/// at `/plugins/{id}/ui/_sdk/bridge.js`, under `web_ui_path`. Frame pages
+/// include the bridge as `_sdk/bridge.js`, which resolves from any `web_ui_path`.
 #[cfg(feature = "plugins")]
 pub fn plugins_ui_frames_register(web_ui_path: &str) -> Router<Arc<AppState>> {
     Router::new()
-        .route(&concat_path_leading_slash(web_ui_path, "plugins/_sdk/bridge.js"), get(get_bridge))
+        .route(&concat_path_leading_slash(web_ui_path, "plugins/{id}/ui/_sdk/bridge.js"), get(get_bridge))
         .route(&concat_path_leading_slash(web_ui_path, "plugins/{id}/ui/{*path}"), get(get_frame_file))
 }
 
@@ -225,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_js_is_served_with_the_script_and_all_six_headers() {
         let dir = TempDir::new().unwrap();
-        let (status, headers, body) = get_with(&router(&dir, ""), "/plugins/_sdk/bridge.js", &[]).await;
+        let (status, headers, body) = get_with(&router(&dir, ""), "/plugins/demo/ui/_sdk/bridge.js", &[]).await;
         assert_eq!(status, StatusCode::OK);
         assert_frame_headers(&headers);
         assert_eq!(headers[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
@@ -236,16 +237,17 @@ mod tests {
     async fn bridge_js_revalidates_with_a_304_that_keeps_the_headers() {
         let dir = TempDir::new().unwrap();
         let router = router(&dir, "");
-        let (_, headers, _) = get_with(&router, "/plugins/_sdk/bridge.js", &[]).await;
+        let (_, headers, _) = get_with(&router, "/plugins/demo/ui/_sdk/bridge.js", &[]).await;
         let etag = headers[header::ETAG].to_str().unwrap().to_string();
         for validator in [etag.clone(), format!("W/{etag}"), format!("\"other\", {etag}"), "*".to_string()] {
             let (status, headers, body) =
-                get_with(&router, "/plugins/_sdk/bridge.js", &[("if-none-match", validator.as_str())]).await;
+                get_with(&router, "/plugins/demo/ui/_sdk/bridge.js", &[("if-none-match", validator.as_str())]).await;
             assert_eq!(status, StatusCode::NOT_MODIFIED, "{validator}");
             assert_frame_headers(&headers);
             assert_eq!(body, Vec::<u8>::new());
         }
-        let (status, _, _) = get_with(&router, "/plugins/_sdk/bridge.js", &[("if-none-match", "\"stale\"")]).await;
+        let (status, _, _) =
+            get_with(&router, "/plugins/demo/ui/_sdk/bridge.js", &[("if-none-match", "\"stale\"")]).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -253,11 +255,26 @@ mod tests {
     async fn the_bridge_is_mounted_under_the_web_ui_path() {
         let dir = TempDir::new().unwrap();
         let router = router(&dir, "ui-base");
-        let (status, headers, _) = get_with(&router, "/ui-base/plugins/_sdk/bridge.js", &[]).await;
+        let (status, headers, _) = get_with(&router, "/ui-base/plugins/demo/ui/_sdk/bridge.js", &[]).await;
         assert_eq!(status, StatusCode::OK);
         assert_frame_headers(&headers);
-        let (status, _, _) = get_with(&router, "/plugins/_sdk/bridge.js", &[]).await;
+        let (status, _, _) = get_with(&router, "/plugins/demo/ui/_sdk/bridge.js", &[]).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "not also at the root");
+        let (status, _, _) = get_with(&router, "/plugins/_sdk/bridge.js", &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "the old absolute path is gone");
+        let (status, _, _) = get_with(&router, "/ui-base/plugins/_sdk/bridge.js", &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "the old absolute path is gone");
+    }
+
+    #[tokio::test]
+    async fn the_relative_bridge_include_resolves_under_a_non_root_web_ui_path() {
+        let dir = TempDir::new().unwrap();
+        let router = router(&dir, "ui-base");
+        // `<script src="_sdk/bridge.js">` in `/ui-base/plugins/demo/ui/menu.html`.
+        let (status, headers, body) = get_with(&router, "/ui-base/plugins/demo/ui/_sdk/bridge.js", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_frame_headers(&headers);
+        assert_eq!(body, BRIDGE_JS.as_bytes());
     }
 
     #[tokio::test]

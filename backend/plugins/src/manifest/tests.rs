@@ -33,7 +33,6 @@ hooks:
   - epg.enrich-programmes
   - epg.match-channel
   - epg.transform-programmes
-  - epg.resolve-conflict
   - events.on-event
   - metrics.collect
   - tasks.run
@@ -136,7 +135,7 @@ fn the_full_example_parses_into_typed_fields() {
     );
     assert_eq!(manifest.capabilities.granted().len(), 5);
 
-    assert_eq!(manifest.hooks.len(), 17);
+    assert_eq!(manifest.hooks.len(), 16);
     assert_eq!(manifest.hooks[0], HookId::PlaylistAfterFilter);
     assert!(manifest.has_hook(HookId::RpcCall));
     assert!(!manifest.has_hook(HookId::EpgLoaded));
@@ -307,8 +306,12 @@ fn hook_ids_are_validated_and_duplicates_collapse() {
 }
 
 #[test]
-fn every_one_of_the_27_ids_is_accepted_when_its_requirements_are_met() {
-    let ids = HookId::ALL.iter().map(|hook| ["  - ", hook.as_str(), "\n"].concat()).collect::<String>();
+fn every_supported_id_is_accepted_when_its_requirements_are_met() {
+    let ids = HookId::ALL
+        .iter()
+        .filter(|hook| **hook != HookId::EpgResolveConflict)
+        .map(|hook| ["  - ", hook.as_str(), "\n"].concat())
+        .collect::<String>();
     let text = with(&format!(
         "capabilities: {{ epg_write: true, notifications: true, stream_headers: true }}\n\
          hooks:\n{ids}\
@@ -318,7 +321,7 @@ fn every_one_of_the_27_ids_is_accepted_when_its_requirements_are_met() {
          ui:\n  rpc_exports:\n    - {{ name: ping, kind: read }}\n"
     ));
     let manifest = parse(&text).unwrap();
-    assert_eq!(manifest.hooks.len(), 27);
+    assert_eq!(manifest.hooks.len(), 26);
 }
 
 #[test]
@@ -377,8 +380,8 @@ fn declarations_need_the_hook_that_serves_them() {
 
 #[test]
 fn event_names_come_from_the_wire_names_and_unknown_ones_are_listed() {
-    let text = with("hooks: [events.on-event]\nevents: [playlist.update, playlist.updat, config.changed]\n");
-    assert_problem(&text, "unknown event names: `playlist.updat`, `config.changed`");
+    let text = with("hooks: [events.on-event]\nevents: [playlist.update, playlist.updat, config.chang]\n");
+    assert_problem(&text, "unknown event names: `playlist.updat`, `config.chang`");
     let ok = parse(&with("hooks: [events.on-event]\nevents: [playlist.update, scheduled_task.failed]\n")).unwrap();
     assert!(ok.events.contains(EventKind::PlaylistUpdate));
     assert!(ok.events.contains(EventKind::ScheduledTaskFailed));
@@ -592,10 +595,24 @@ fn every_problem_is_reported_in_one_error() {
 }
 
 #[test]
+fn epg_resolve_conflict_is_rejected_as_planned_for_later_release() {
+    assert_problem(
+        &with("hooks: [epg.resolve-conflict]\n"),
+        "hook `epg.resolve-conflict` is not supported yet: planned for a later ABI 1.x release",
+    );
+}
+
+#[test]
 fn pipeline_hooks_is_the_subset_the_host_can_run() {
     let manifest =
         parse(&with("hooks: [playlist.after-sort, playlist.after-filter, playlist.loaded, playlist.after-filter]\n"))
             .unwrap();
     assert_eq!(manifest.pipeline_hooks(), [PluginHook::AfterSort, PluginHook::AfterFilter, PluginHook::PlaylistLoaded]);
-    assert_eq!(parse(&with("hooks: [epg.resolve-conflict]\n")).unwrap().pipeline_hooks().len(), 0);
+    assert_eq!(
+        parse(&with("hooks: [rpc.call]\nui:\n  rpc_exports: [{ name: ping, kind: read }]\n"))
+            .unwrap()
+            .pipeline_hooks()
+            .len(),
+        0
+    );
 }

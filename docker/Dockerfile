@@ -8,15 +8,16 @@
 # Stage 0: Fetch static FFmpeg binaries
 # -----------------------------------------------------------------
 # We use a static build to ensure it works in the scratch image without libraries
-FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg-static
 
 # Workspace skeleton shared by the backend and frontend dependency builds.
-FROM rust:1.95 AS workspace-skeleton
+FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS workspace-skeleton
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/reqwest ./vendor/reqwest/
 COPY shared ./shared/
+COPY plugin-api ./plugin-api/
 COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
 COPY backend/app/Cargo.toml backend/app/build.rs ./backend/app/
 COPY backend/auth/Cargo.toml ./backend/auth/
@@ -33,8 +34,10 @@ COPY backend/metadata/Cargo.toml ./backend/metadata/
 COPY backend/messaging/Cargo.toml ./backend/messaging/
 COPY backend/mpegts/Cargo.toml ./backend/mpegts/
 COPY backend/parser/Cargo.toml ./backend/parser/
+COPY backend/plugins/Cargo.toml ./backend/plugins/
 COPY backend/processing/Cargo.toml ./backend/processing/
 COPY backend/repository/Cargo.toml ./backend/repository/
+COPY backend/scripting/Cargo.toml ./backend/scripting/
 COPY backend/session/Cargo.toml ./backend/session/
 COPY tools/tuliprox-testkit/Cargo.toml ./tools/tuliprox-testkit/
 
@@ -44,7 +47,7 @@ RUN mkdir -p frontend/src backend/app/src/tools tools/tuliprox-testkit/src && \
     printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
     printf '\n' > tools/tuliprox-testkit/src/lib.rs && \
     printf 'fn main() {}\n' > tools/tuliprox-testkit/src/main.rs && \
-    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser processing repository session; do \
+    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser plugins processing repository scripting session; do \
       mkdir -p "backend/${crate}/src"; \
       printf '\n' > "backend/${crate}/src/lib.rs"; \
     done && \
@@ -107,7 +110,7 @@ RUN find src -type f -name '*.rs' -exec touch {} + && trunk build --release
 # -----------------------------------------------------------------
 # Stage 3: Build video resources with ffmpeg (from linuxserver used for build time only)
 # -----------------------------------------------------------------
-FROM linuxserver/ffmpeg:latest AS resource-build
+FROM linuxserver/ffmpeg:version-9.0-cli@sha256:a7182d4fe498feea393622b43513cfaecb3fd073dcd3c7f38e9d74a10a4e8702 AS resource-build
 
 WORKDIR /src
 COPY resources ./resources
@@ -152,7 +155,7 @@ RUN set -eu; \
 # -----------------------------------------------------------------
 # Stage 4: Prepare timezone data
 # -----------------------------------------------------------------
-FROM alpine:latest AS tz-prep
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS tz-prep
 
 ARG TZ=UTC
 ENV TZ=${TZ}
@@ -173,7 +176,7 @@ RUN apk add --no-cache tzdata \
 # -----------------------------------------------------------------
 # Final Image #1: Debugging Environment (Alpine-based)
 # -----------------------------------------------------------------
-FROM rust:alpine AS debug
+FROM rust:1.99.0-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627 AS debug
 
 # Make the build-time argument available as a run-time environment variable
 ARG RUST_TARGET=x86_64-unknown-linux-musl
@@ -189,8 +192,8 @@ ENV TZ=${TZ}
 # 'ffmpeg' is required for the probe feature
 RUN apk add --no-cache bash build-base perl lldb gdb ffmpeg
 
-# Update Rust toolchain and add the necessary target
-RUN rustup update && rustup target add $RUST_TARGET
+# Add the necessary target to the pinned Rust toolchain
+RUN rustup target add $RUST_TARGET
 
 # Create the app layout to simulate the production environment
 WORKDIR /app
@@ -242,7 +245,7 @@ CMD ["-s", "-p", "/app/config"]
 # -----------------------------------------------------------------
 # Final Image #3: Production image based on Alpine
 # -----------------------------------------------------------------
-FROM alpine:latest AS alpine-final
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS alpine-final
 
 ARG RUST_TARGET=x86_64-unknown-linux-musl
 ARG TZ=UTC

@@ -49,6 +49,7 @@ mod epg_channel_candidate_tests;
 #[cfg(test)]
 mod tests;
 
+mod analytics;
 mod content;
 mod epg;
 pub(in crate::api::endpoints) mod epg_inspect;
@@ -87,6 +88,7 @@ use self::update::read_playlist_update_input_status;
 #[cfg(test)]
 use self::update::resolve_manual_playlist_update_targets;
 use self::{
+    analytics::{playlist_analytics, playlist_analytics_unmapped_csv},
     content::{playlist_content, playlist_episode_item, playlist_series_info},
     epg::playlist_epg,
     epg_inspect::{get_target_epg_channel, query_target_epg_channels},
