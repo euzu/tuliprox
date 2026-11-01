@@ -283,4 +283,20 @@ body[data-theme="refined-dark"] {
     rgba(0, 0, 0, 0.35) 70%,
     rgba(0, 0, 0, 0) 85%
   );
+
+  // Explorer UI tokens (poster grids, ratings, badges) — tuned per theme for WCAG AA text contrast.
+  --theme-palette-explorer-poster-placeholder-1: #16212f;
+  --theme-palette-explorer-poster-placeholder-2: #1c2a3b;
+  --theme-palette-explorer-rating-surface: rgba(0, 0, 0, 0.55);
+  --theme-palette-explorer-rating-text: #ffc078;
+  --theme-palette-explorer-new-surface: #0b393f;
+  --theme-palette-explorer-new-text: #86efac;
+  --theme-palette-explorer-edited: #38bdf8;
+  --theme-palette-explorer-edited-surface: #0e3c4d;
+  --theme-palette-explorer-epg-missing: #ffc078;
+  --theme-palette-explorer-epg-missing-surface: #3c301b;
+  --theme-palette-explorer-progress-track: #334154;
+  --theme-palette-explorer-progress-fill: #fb7185;
+  --theme-palette-explorer-row-hover: rgba(96, 165, 250, 0.16);
+  --theme-palette-explorer-selected: rgba(96, 165, 250, 0.22);
 }

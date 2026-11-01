@@ -94,6 +94,7 @@ async fn parallel_target_pipeline_bounds_active_finalizers() {
                 result: Ok(()),
                 errors: Vec::new(),
                 processing: PipelineStats::default(),
+                overrides: None,
             }
         });
     }

@@ -4,7 +4,10 @@ use crate::{
             empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream,
             stream_json_or_bin_response_try_stream,
         },
-        endpoints::v1_api_playlist::items::visible_in_target_listing,
+        endpoints::v1_api_playlist::{
+            epg_status::{apply_overlay_input, apply_overlay_target, has_input_overrides, has_target_overrides},
+            items::visible_in_target_listing,
+        },
         model::AppState,
     },
     iptv::{m3u, xtream},
@@ -44,6 +47,17 @@ fn stalker_refresh_pending_response(accept: Option<&str>) -> axum::response::Res
     response
 }
 
+async fn collect_stream_items<S, E>(mut stream: S) -> Result<Vec<UiPlaylistItem>, E>
+where
+    S: tokio_stream::Stream<Item = Result<UiPlaylistItem, E>> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(res) = stream.next().await {
+        items.push(res?);
+    }
+    Ok(items)
+}
+
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
     cfg_target: Option<&ConfigTarget>,
     app_state: &Arc<AppState>,
@@ -55,6 +69,9 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
     let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Some(target) = cfg_target {
+        // Live lists always run the overlay: it also computes the explorer EPG state, which must be
+        // visible without any override file. VOD/series keep streaming unless overrides exist.
+        let has_overrides = cluster == XtreamCluster::Live || has_target_overrides(app_state, target).await;
         if target.has_output(TargetType::Xtream) {
             let Some(channel_iterator) = iter_raw_xtream_target_playlist(&app_state.app_config, target, cluster).await
             else {
@@ -67,6 +84,22 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             });
+            if has_overrides {
+                match collect_stream_items(converted_stream).await {
+                    Ok(mut items) => {
+                        apply_overlay_target(&mut items, target, app_state).await;
+                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read target playlist item: {err}");
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"error": err.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if target.has_output(TargetType::M3u) {
             let Some(channel_iterator) =
@@ -81,6 +114,22 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             });
+            if has_overrides {
+                match collect_stream_items(converted_stream).await {
+                    Ok(mut items) => {
+                        apply_overlay_target(&mut items, target, app_state).await;
+                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read target playlist item: {err}");
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"error": err.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         }
     }
@@ -132,6 +181,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
     accept: Option<&str>,
 ) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
+        let has_overrides = cluster == XtreamCluster::Live || has_input_overrides(app_state, input).await;
         // Icon URLs are wrapped into a proxy link, so the browser never receives a destination that
         // may be internal to this Tuliprox instance.
         let config = app_state.app_config.config.load();
@@ -146,6 +196,22 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             let converted_stream = channel_iterator.map(move |entry| {
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
+            if has_overrides {
+                match collect_stream_items(converted_stream).await {
+                    Ok(mut items) => {
+                        apply_overlay_input(&mut items, input, app_state).await;
+                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read input item: {err}");
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"error": err.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_m3u() {
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
@@ -154,6 +220,22 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             let converted_stream = channels.map(move |entry| {
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
+            if has_overrides {
+                match collect_stream_items(converted_stream).await {
+                    Ok(mut items) => {
+                        apply_overlay_input(&mut items, input, app_state).await;
+                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read input item: {err}");
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"error": err.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_stalker() {
             // TODO refactor
@@ -180,13 +262,16 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response();
             }
-            let channels: Vec<UiPlaylistItem> = fetch
+            let mut channels: Vec<UiPlaylistItem> = fetch
                 .groups
                 .iter()
                 .flat_map(|group| group.channels.iter())
                 .map(|item| preview_item(&encrypt_secret, &resource_url, input.id, UiPlaylistItem::from(item)))
                 .collect();
             interner_gc();
+            if has_overrides {
+                apply_overlay_input(&mut channels, input, app_state).await;
+            }
             return json_or_bin_response(accept, &channels).into_response();
         }
     }
@@ -305,6 +390,7 @@ mod tests {
             rating: 0.0,
             input_name: "test".intern(),
             epg_channel_id: None,
+            explorer_meta: None,
         }
     }
 

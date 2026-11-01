@@ -93,7 +93,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 /// The slot is taken before the lock, so a queued scan holds nothing. Both are moved into the blocking thread and
 /// released only when it ends. Dropping the returned future cancels the [`CancellationToken`]; `work` is expected to check
 /// it once per entry and stop, which frees the slot, the lock and the thread promptly.
-async fn with_epg_query<R, F>(
+pub(super) async fn with_epg_query<R, F>(
     scans: &EpgScanCoordinator,
     file_locks: &FileLockManager,
     epg_path: &Path,

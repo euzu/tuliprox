@@ -50,6 +50,13 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    #[must_use]
+    pub fn resolve_storage_dir(&self) -> std::path::PathBuf {
+        let paths = self.paths.load();
+        let config = self.config.load();
+        crate::utils::resolve_storage_dir(&paths.storage_path, &config.storage_dir)
+    }
+
     pub fn set_config(&self, config: Config) -> Result<(), TuliproxError> {
         self.config.store(Arc::new(config));
         self.prepare_paths();

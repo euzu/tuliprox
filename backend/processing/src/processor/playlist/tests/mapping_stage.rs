@@ -98,6 +98,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         maintenance: None,
+        override_status: None,
     }
 }
 
@@ -287,6 +288,7 @@ fn persist_filter_runs_after_after_epg_mapping() {
             ClusterFlags::empty(),
             false,
             &Arc::default(),
+            &Arc::default(),
         )
         .await
         .expect("target preparation");
@@ -331,7 +333,7 @@ fn map_playlist_applies_only_the_requested_stage() {
     let target = build_target(vec![processing, after_epg], false);
 
     let mut source = memory_source(vec![make_channel("Alpha")]);
-    let (groups, _) = execute_pipeline_on_groups(source.take_groups(), &target, &[TransformStage::Map]);
+    let (groups, _) = execute_pipeline_on_groups(source.take_groups(), &target, &[TransformStage::Map], None);
     assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P");
 
     let mut source = MemoryPlaylistSource::new(groups).into_source();
@@ -424,6 +426,7 @@ match {
                     &mut errors,
                     ClusterFlags::empty(),
                     false,
+                    &Arc::default(),
                     &Arc::default(),
                 )
                 .await
@@ -520,6 +523,7 @@ fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
                     ClusterFlags::empty(),
                     false,
                     &Arc::default(),
+                    &Arc::default(),
                 )
                 .await
                 .expect("target preparation");
@@ -559,7 +563,7 @@ fn after_epg_hook_runs_on_source_already_deduplicated_by_processing_pipe() {
         FetchedPlaylist { input: &input, source: memory_source(vec![channel.clone(), channel]), epg: None };
     let mut duplicates = HashSet::new();
     let (mut processed, _outcome) =
-        execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false, None)
+        execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false, None, None)
             .expect("processing pipe must run");
     assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");
 
@@ -595,6 +599,7 @@ fn prepare_target_deduplicates_virtual_items_created_by_after_epg_mappings() {
             &mut errors,
             ClusterFlags::empty(),
             false,
+            &Arc::default(),
             &Arc::default(),
         )
         .await

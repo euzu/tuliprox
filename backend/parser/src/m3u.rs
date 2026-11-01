@@ -1532,4 +1532,79 @@ https://example.test/series/user/pass/episode-2
             "custom .mp4 should classify as Video via the extension"
         );
     }
+
+    #[tokio::test]
+    async fn classify_matches_parser_chain() {
+        use shared::model::InputType;
+        use tuliprox_core::model::{classify_id, IdSource};
+
+        // 1. Provider source: Xtream or non-M3U inputs
+        let header_xtream = shared::model::PlaylistItemHeader { id: "123".intern(), ..Default::default() };
+        assert_eq!(classify_id(&header_xtream, InputType::Xtream), IdSource::Provider);
+        assert_eq!(classify_id(&header_xtream, InputType::XtreamBatch), IdSource::Provider);
+        assert_eq!(classify_id(&header_xtream, InputType::Stalker), IdSource::Provider);
+
+        let cfg = Config::default();
+        let input = ConfigInput { name: "test-m3u".intern(), input_type: InputType::M3u, ..Default::default() };
+
+        // 2. UrlNumeric: parsed from real fixture where URL ends in numeric ID > 0
+        let m3u_numeric = "\
+#EXTM3U
+#EXTINF:-1,Channel With Numeric URL
+http://example.com/live/user/pass/98765.ts
+";
+        let groups_num = parse_m3u(&cfg, &input, make_reader(m3u_numeric)).await;
+        assert_eq!(groups_num.len(), 1);
+        let h_num = &groups_num[0].channels[0].header;
+        assert_eq!(h_num.id.as_ref(), "98765");
+        assert_eq!(classify_id(h_num, InputType::M3u), IdSource::UrlNumeric);
+
+        // 3. Attribute: parsed from real fixture where URL is non-numeric but provider attribute is present
+        let m3u_attr = "\
+#EXTM3U
+#EXTINF:-1 xui-id=\"custom_provider_id\",Channel With Attribute
+http://example.com/live/user/pass/stream.m3u8
+";
+        let groups_attr = parse_m3u(&cfg, &input, make_reader(m3u_attr)).await;
+        assert_eq!(groups_attr.len(), 1);
+        let h_attr = &groups_attr[0].channels[0].header;
+        assert_eq!(h_attr.id.as_ref(), "custom_provider_id");
+        assert_eq!(classify_id(h_attr, InputType::M3u), IdSource::Attribute);
+
+        // Also fallback attribute: channel-id="4444" with non-numeric URL
+        let m3u_fallback = "\
+#EXTM3U
+#EXTINF:-1 channel-id=\"4444\",Channel With Fallback Attribute
+http://example.com/live/user/pass/stream.m3u8
+";
+        let groups_fallback = parse_m3u(&cfg, &input, make_reader(m3u_fallback)).await;
+        assert_eq!(groups_fallback.len(), 1);
+        let h_fallback = &groups_fallback[0].channels[0].header;
+        assert_eq!(h_fallback.id.as_ref(), "4444");
+        assert_eq!(classify_id(h_fallback, InputType::M3u), IdSource::Attribute);
+
+        // 4. UrlHash: parsed from real fixture where neither numeric URL nor attribute exists
+        let m3u_hash = "\
+#EXTM3U
+#EXTINF:-1,Channel With URL Hash
+http://example.com/live/user/pass/stream_live.m3u8
+";
+        let groups_hash = parse_m3u(&cfg, &input, make_reader(m3u_hash)).await;
+        assert_eq!(groups_hash.len(), 1);
+        let h_hash = &groups_hash[0].channels[0].header;
+        assert_eq!(h_hash.id.as_ref(), shared::utils::extract_id_from_url(&h_hash.url).as_str());
+        assert_eq!(classify_id(h_hash, InputType::M3u), IdSource::UrlHash);
+
+        // 5. UrlHash: ".../0.ts" falls through to extract_id_from_url returning "0", classified as UrlHash
+        let m3u_zero = "\
+#EXTM3U
+#EXTINF:-1,Channel With Zero In URL
+http://example.com/live/user/pass/0.ts
+";
+        let groups_zero = parse_m3u(&cfg, &input, make_reader(m3u_zero)).await;
+        assert_eq!(groups_zero.len(), 1);
+        let h_zero = &groups_zero[0].channels[0].header;
+        assert_eq!(h_zero.id.as_ref(), "0");
+        assert_eq!(classify_id(h_zero, InputType::M3u), IdSource::UrlHash);
+    }
 }

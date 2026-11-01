@@ -39,6 +39,7 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
     let playlist_explorer_ctx = use_context::<PlaylistExplorerContext>();
     let active_source = use_state(|| ExplorerSourceType::Hosted);
     let loading = use_state(|| false);
+    let picker_expanded = use_state(|| true);
     let custom_provider = use_state(|| InputType::Xtream);
     let username_ref = use_node_ref();
     let password_ref = use_node_ref();
@@ -51,6 +52,17 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
     });
 
     let handle_source_select = source_selection_callback(active_source.clone());
+
+    let has_playlist = playlist_explorer_ctx.as_ref().is_some_and(|c| (*c.playlist).is_some());
+    {
+        let picker_expanded = picker_expanded.clone();
+        use_effect_with(has_playlist, move |&has_pl| {
+            if has_pl {
+                picker_expanded.set(false);
+            }
+            || ()
+        });
+    }
 
     let handle_source_download = {
         let services = services_ctx.clone();
@@ -262,8 +274,15 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
             </div>
         })}
         <div class="tp__playlist-source-selector__body tp__list-list__body">
-            <CollapsePanel class="tp__playlist-source-selector__source-picker" expanded={true}
-               title={translate.t("LABEL.SOURCE_PICKER")}>
+            <CollapsePanel
+                class="tp__playlist-source-selector__source-picker"
+                expanded={*picker_expanded}
+                on_state_change={
+                    let picker_expanded = picker_expanded.clone();
+                    Callback::from(move |exp: bool| picker_expanded.set(exp))
+                }
+                title={translate.t("LABEL.SOURCE_PICKER")}
+            >
                <Card>
                 <div class="tp__playlist-source-selector__source-picker__header">
                     <RadioButtonGroup options={source_types.clone()}

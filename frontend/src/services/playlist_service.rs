@@ -1,21 +1,34 @@
 use crate::{
     error::Error,
-    services::{get_base_href, request_get, request_get_binary, request_post, Encoding},
+    services::{
+        get_base_href, request_get, request_get_binary, request_post, request_post_with_error_body, Encoding,
+        WriteFailure,
+    },
 };
 use futures::join;
 use indexmap::IndexMap;
 use log::error;
 use shared::{
     model::{
-        EpgChannel, EpgChannelFilter, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest, EpgTv,
-        InputRefreshOverride, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest, PlaylistUpdateRequestDto,
-        PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, SeriesStreamProperties, StreamEpgItemRequest,
-        StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories, UiPlaylistGroup,
-        UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
+        EpgChannel, EpgChannelFilter, EpgGridRequest, EpgGridRow, EpgGroupInfo, EpgGroupsRequest, EpgSearchResultDto,
+        EpgTv, FieldError, InputRefreshOverride, OperationRunAccepted, OverrideConflictDto, OverrideDiscardRequest,
+        OverrideFieldErrorsDto, OverrideFileDto, OverrideItemKind, OverrideOrphansDto, OverrideProvenanceDto,
+        OverrideRevisionDto, OverrideSaveRequest, OverrideScopeDto, PlaylistEpgRequest, PlaylistRequest,
+        PlaylistUpdateRequestDto, PlaylistUpdateStatusDto, PlaylistUrlResolveRequest, SeriesStreamProperties,
+        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetAnalyticsResponseDto, UiPlaylistCategories,
+        UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::concat_path_leading_slash,
 };
 use std::rc::Rc;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverrideSaveResult {
+    Ok(OverrideRevisionDto),
+    Conflict(OverrideConflictDto),
+    FieldErrors(Vec<FieldError>),
+    Err(String),
+}
 
 pub struct PlaylistService {
     target_update_api_path: String,
@@ -31,15 +44,21 @@ pub struct PlaylistService {
     epg_groups_path: String,
     epg_grid_path: String,
     playlist_analytics_path: String,
+    overrides_path: String,
+    overrides_item_path: String,
+    overrides_discard_path: String,
+    epg_search_path: String,
+    overrides_orphans_path: String,
 }
 impl Default for PlaylistService {
     fn default() -> Self { Self::new() }
 }
 
 impl PlaylistService {
-    pub fn new() -> Self {
-        let base_href = get_base_href();
-        let api = |endpoint: &str| concat_path_leading_slash(&base_href, &format!("api/v1/playlist/{endpoint}"));
+    pub fn new() -> Self { Self::from_base(&get_base_href()) }
+
+    pub fn from_base(base_href: &str) -> Self {
+        let api = |endpoint: &str| concat_path_leading_slash(base_href, &format!("api/v1/playlist/{endpoint}"));
 
         Self {
             target_update_api_path: api("update"),
@@ -55,6 +74,11 @@ impl PlaylistService {
             epg_groups_path: api("epg/groups"),
             epg_grid_path: api("epg/grid"),
             playlist_analytics_path: api("analytics"),
+            overrides_path: api("overrides"),
+            overrides_item_path: api("overrides/item"),
+            overrides_discard_path: api("overrides/discard"),
+            epg_search_path: api("epg/search"),
+            overrides_orphans_path: api("overrides/orphans"),
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
@@ -247,7 +271,7 @@ impl PlaylistService {
 
     pub async fn get_series_info(
         &self,
-        pli: &Rc<UiPlaylistItem>,
+        pli: &UiPlaylistItem,
         playlist_request: &PlaylistRequest,
     ) -> Option<SeriesStreamProperties> {
         let path = format!("{}/{}/{}", self.playlist_api_series_info_path, pli.virtual_id, pli.provider_id);
@@ -270,6 +294,103 @@ impl PlaylistService {
                 None
             },
         )
+    }
+
+    pub async fn get_overrides(&self, scope: OverrideScopeDto, name: &str) -> Result<Option<OverrideFileDto>, Error> {
+        let url = format!("{}?scope={}&name={}", self.overrides_path, scope, js_sys::encode_uri_component(name));
+        request_get(&url, None, None).await
+    }
+
+    pub async fn get_override_item(
+        &self,
+        input: &str,
+        kind: OverrideItemKind,
+        id: &str,
+        target_id: Option<u16>,
+    ) -> Result<Option<OverrideProvenanceDto>, Error> {
+        let kind_str = match kind {
+            OverrideItemKind::Live => "live",
+            OverrideItemKind::Vod => "vod",
+            OverrideItemKind::Series => "series",
+        };
+        let mut url = format!(
+            "{}?input={}&kind={}&id={}",
+            self.overrides_item_path,
+            js_sys::encode_uri_component(input),
+            kind_str,
+            js_sys::encode_uri_component(id),
+        );
+        if let Some(target_id) = target_id {
+            url.push_str(&format!("&target_id={target_id}"));
+        }
+        request_get(&url, None, None).await
+    }
+
+    pub async fn save_overrides(&self, request: &OverrideSaveRequest) -> OverrideSaveResult {
+        let outcome =
+            request_post_with_error_body::<_, OverrideRevisionDto, serde_json::Value>(&self.overrides_path, request)
+                .await;
+
+        match outcome {
+            Ok(Some(revision)) => OverrideSaveResult::Ok(revision),
+            Ok(None) => {
+                OverrideSaveResult::Err(Error::HttpResponse("Empty override save response".to_string()).to_string())
+            }
+            Err(failure) => {
+                let WriteFailure { status, error, body, message } = failure;
+                let message = error.map_or(message, |error| error.to_string());
+                match status {
+                    409 => body
+                        .and_then(|body| serde_json::from_value::<OverrideConflictDto>(body).ok())
+                        .map_or_else(|| OverrideSaveResult::Err(message.clone()), OverrideSaveResult::Conflict),
+                    422 => {
+                        body.and_then(|body| serde_json::from_value::<OverrideFieldErrorsDto>(body).ok()).map_or_else(
+                            || OverrideSaveResult::Err(message),
+                            |errors| OverrideSaveResult::FieldErrors(errors.field_errors),
+                        )
+                    }
+                    _ => OverrideSaveResult::Err(message),
+                }
+            }
+        }
+    }
+
+    pub async fn discard_overrides(
+        &self,
+        request: &OverrideDiscardRequest,
+    ) -> Result<Option<OverrideRevisionDto>, Error> {
+        request_post::<&OverrideDiscardRequest, OverrideRevisionDto>(&self.overrides_discard_path, request, None, None)
+            .await
+    }
+
+    pub async fn search_epg(
+        &self,
+        query: &str,
+        target_id: Option<u16>,
+        input: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<EpgSearchResultDto>, Error> {
+        let mut params = Vec::new();
+        params.push(format!("q={}", js_sys::encode_uri_component(query)));
+        if let Some(target_id) = target_id {
+            params.push(format!("target_id={target_id}"));
+        } else if let Some(input) = input {
+            params.push(format!("input={}", js_sys::encode_uri_component(input)));
+        }
+        if let Some(limit) = limit {
+            params.push(format!("limit={limit}"));
+        }
+        let url = format!("{}?{}", self.epg_search_path, params.join("&"));
+        let res: Result<Option<Vec<EpgSearchResultDto>>, Error> = request_get(&url, None, None).await;
+        res.map(Option::unwrap_or_default)
+    }
+
+    pub async fn get_orphans(&self, input: Option<&str>) -> Result<Option<OverrideOrphansDto>, Error> {
+        let mut url = self.overrides_orphans_path.clone();
+        if let Some(input) = input {
+            url.push_str(&format!("?input={}", js_sys::encode_uri_component(input)));
+        }
+        request_get(&url, None, None).await
     }
 }
 
@@ -482,5 +603,15 @@ mod tests {
         assert_eq!(url, "/api/v1/playlist/analytics/42/unmapped.csv");
         let url_subpath = super::PlaylistService::unmapped_csv_url_from_base("/prefix/", 99);
         assert_eq!(url_subpath, "/prefix/api/v1/playlist/analytics/99/unmapped.csv");
+    }
+
+    #[test]
+    fn override_urls_construct_expected_endpoint_paths() {
+        let service = super::PlaylistService::from_base("/");
+        assert_eq!(service.overrides_path, "/api/v1/playlist/overrides");
+        assert_eq!(service.overrides_item_path, "/api/v1/playlist/overrides/item");
+        assert_eq!(service.overrides_discard_path, "/api/v1/playlist/overrides/discard");
+        assert_eq!(service.epg_search_path, "/api/v1/playlist/epg/search");
+        assert_eq!(service.overrides_orphans_path, "/api/v1/playlist/overrides/orphans");
     }
 }

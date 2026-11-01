@@ -236,6 +236,8 @@ Tuliprox can be configured and monitored directly from the browser.
 - **Playlist Stats** with per-target content counts, input-to-output ratios, largest groups, catch-up channels,
   EPG source health, and unmapped live channel CSV export
 - **Playlist Explorer** with tree/gallery views, EPG timeline, text/regex search, and field-scoped search
+- **Manual item overrides**: correct single channels, movies or series in the Playlist Explorer — for the whole input or
+  for one target — without writing mapper rules, with validation, conflict checks and orphan cleanup
 - **Download & Recording Manager** with retries, queue controls, fairness, and RBAC-protected actions
 - **User Management** including plans, connection limits, priorities, category access, output clusters, and network policies
 - **RBAC Administration** for users, groups, and permission grants

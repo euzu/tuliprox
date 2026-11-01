@@ -137,7 +137,7 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     };
 
     // Apply pipe transformations to new groups
-    let (new_playlist, pipeline_outcome) = execute_pipeline_on_groups(groups_to_add, target, pipe);
+    let (new_playlist, pipeline_outcome) = execute_pipeline_on_groups(groups_to_add, target, pipe, None);
     debug!("Resolved series pipeline outcome: {pipeline_outcome:?}");
 
     // Apply resolved episodes to playlist
