@@ -366,6 +366,33 @@ pub async fn request_post_form(url: &str, form: FormData) -> Result<RawResponse,
     Ok(RawResponse { status, body })
 }
 
+/// Send `request` with the bearer token and an optional JSON body, and hand
+/// back the status and the body text, whatever the status. For callers that
+/// must read an error body the typed helpers fold away: a `422` with field
+/// problems, or the exact status a plugin frame is told.
+pub async fn request_raw(request: RequestBuilder, json_body: Option<String>) -> Result<RawResponse, Error> {
+    let mut request = request.header("Accept", CONTENT_TYPE_JSON);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+    let response = match json_body {
+        Some(payload) => {
+            request
+                .header("Content-Type", CONTENT_TYPE_JSON)
+                .body(payload)
+                .map_err(|_| Error::RequestError)?
+                .send()
+                .await
+        }
+        None => request.send().await,
+    }
+    .map_err(|err| {
+        error!("{err}");
+        Error::RequestError
+    })?;
+    Ok(RawResponse { status: response.status(), body: response.text().await.unwrap_or_default() })
+}
+
 pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
     let mut request = Request::get(url);
     if let Some(token) = get_token() {

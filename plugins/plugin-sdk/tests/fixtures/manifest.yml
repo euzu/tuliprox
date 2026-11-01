@@ -1,0 +1,17 @@
+id: macro-fixture
+name: Macro fixture
+version: 0.1.0
+api_version: 1
+hooks:
+  - playlist.after-filter
+  - playlist.after-map
+  - events.on-event
+  - tasks.run
+  - settings.migrate
+events:
+  - playlist.update
+tasks:
+  - id: refresh
+    title: Refresh
+    default_schedule: "0 0 * * * *"
+    max_exec_ms: 1000

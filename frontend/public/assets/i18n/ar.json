@@ -2104,7 +2104,14 @@
     "PLUGIN_EXPOSE_MCP": "إتاحتها عبر MCP (يمكن لمساعدي الذكاء الاصطناعي استدعاؤها دون إشراف)",
     "PLUGIN_UNINSTALL": "إلغاء التثبيت",
     "PLUGIN_PURGE_DATA": "حذف البيانات المخزنة أيضًا",
-    "PLUGIN_REENABLE": "إعادة التفعيل"
+    "PLUGIN_REENABLE": "إعادة التفعيل",
+    "PLUGIN_UPDATE_AVAILABLE": "تحديث متاح للمراجعة",
+    "PLUGIN_UPDATE_NEW_CAPABILITIES": "صلاحيات جديدة",
+    "PLUGIN_UPDATE_REVIEW": "مراجعة التحديث",
+    "PLUGIN_ROLLBACK": "التراجع",
+    "PLUGIN_SETTINGS_REVIEW": "الإعدادات بحاجة إلى مراجعة",
+    "PLUGIN_CAPABILITY_ADDED": "جديد",
+    "PLUGIN_CAPABILITIES_REMOVED": "لم تعد مطلوبة"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "الحافظة غير مدعومة.\nمتصفحك أو السياق الحالي لا يسمح بالوصول إلى الحافظة.\nيرجى استخدام HTTPS أو localhost.",
@@ -2396,7 +2403,11 @@
     "PLUGIN_UNINSTALLED": "تم إلغاء تثبيت الإضافة",
     "PLUGIN_UNINSTALL_CONFIRM": "سيؤدي هذا إلى إزالة الإضافة وإدخالها في config.yml. لا يمكن التراجع عن ذلك.",
     "PLUGIN_PURGE_HINT": "اتركه غير مفعّل للاحتفاظ ببيانات الإضافة، مثلًا إذا كنت تنوي إعادة تثبيتها.",
-    "PLUGIN_FRAME_INVALID": "لا يمكن عرض صفحة الإضافة هذه."
+    "PLUGIN_FRAME_INVALID": "لا يمكن عرض صفحة الإضافة هذه.",
+    "PLUGIN_ROLLED_BACK": "تم التراجع",
+    "PLUGIN_UPDATE_MCP_RESET": "تمت الموافقة على إتاحة MCP للإصدار المثبت. لا يتم نقلها؛ حدّدها مرة أخرى إذا كان يجب أن يبقى الإصدار الجديد متاحًا.",
+    "PLUGIN_UPDATE_KEEPS_PRIOR": "يتم الاحتفاظ بالإصدار المثبت حتى تتمكن من التراجع. إذا فشل التحديث في البدء، يتم التراجع تلقائيًا.",
+    "PLUGIN_SETTINGS_REVIEW": "الإعدادات المحفوظة لهذه الإضافة بحاجة إلى مراجعة. راجعها واحفظها لإزالة هذا التنبيه."
   },
   "SETUP": {
     "DESC": {

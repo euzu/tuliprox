@@ -2104,7 +2104,14 @@
     "PLUGIN_EXPOSE_MCP": "Expose to MCP (AI assistants can call these unattended)",
     "PLUGIN_UNINSTALL": "Uninstall",
     "PLUGIN_PURGE_DATA": "Also delete stored data",
-    "PLUGIN_REENABLE": "Re-enable"
+    "PLUGIN_REENABLE": "Re-enable",
+    "PLUGIN_UPDATE_AVAILABLE": "Update available for review",
+    "PLUGIN_UPDATE_NEW_CAPABILITIES": "New capabilities",
+    "PLUGIN_UPDATE_REVIEW": "Review update",
+    "PLUGIN_ROLLBACK": "Roll back",
+    "PLUGIN_SETTINGS_REVIEW": "Settings need review",
+    "PLUGIN_CAPABILITY_ADDED": "New",
+    "PLUGIN_CAPABILITIES_REMOVED": "No longer requested"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -2396,7 +2403,11 @@
     "PLUGIN_UNINSTALLED": "Plugin uninstalled",
     "PLUGIN_UNINSTALL_CONFIRM": "This removes the plugin and its entry in config.yml. It cannot be undone.",
     "PLUGIN_PURGE_HINT": "Leave this off to keep the plugin's stored data, for example if you plan to reinstall it.",
-    "PLUGIN_FRAME_INVALID": "This plugin page cannot be displayed."
+    "PLUGIN_FRAME_INVALID": "This plugin page cannot be displayed.",
+    "PLUGIN_ROLLED_BACK": "Rolled back",
+    "PLUGIN_UPDATE_MCP_RESET": "MCP exposure was approved for the installed version. It is not carried over; tick it again if the new version should stay exposed.",
+    "PLUGIN_UPDATE_KEEPS_PRIOR": "The installed version is kept so you can roll back. If the update fails to start, it is rolled back automatically.",
+    "PLUGIN_SETTINGS_REVIEW": "This plugin's saved settings need review. Check them and save to clear this notice."
   },
   "SETUP": {
     "DESC": {

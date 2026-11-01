@@ -19,7 +19,7 @@ use shared::{
     foundation::ValueProvider,
     model::{
         EventSink, MediaQuality, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, PluginHost,
-        SeriesStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
+        PluginRunReport, SeriesStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
     },
 };
 use std::{
@@ -87,11 +87,10 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     pipe: &ProcessingPipe,
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
-    report: &mut shared::model::PluginRunReport,
-) {
+) -> PluginRunReport {
     // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
     if processed_fpl.input.has_flag(ConfigInputFlags::SkipSeries) {
-        return;
+        return PluginRunReport::default();
     }
 
     let mut resolve_options = get_resolve_series_options(target, processed_fpl);
@@ -101,7 +100,7 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     }
     provider_fpl.source.release_resources(XtreamCluster::Series);
 
-    playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target, report).await;
+    let episode_report = playlist_resolve_series_info(ctx, errors, processed_fpl, resolve_options, pipe, target).await;
 
     if provider_fpl.is_memory() {
         sync_resolved_series_properties(provider_fpl, processed_fpl);
@@ -110,6 +109,7 @@ pub async fn playlist_resolve_series<E: EventSink + Clone + 'static, M: Metadata
     if let Err(err) = provider_fpl.source.obtain_resources().await {
         errors.push(err);
     }
+    episode_report
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -120,8 +120,7 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     resolve_options: ResolveOptions,
     pipe: &ProcessingPipe,
     target: &ConfigTarget,
-    report: &mut shared::model::PluginRunReport,
-) {
+) -> PluginRunReport {
     let filter = |pli: &PlaylistItem| {
         pli.header.xtream_cluster == XtreamCluster::Series && pli.header.item_type == PlaylistItemType::SeriesInfo
     };
@@ -144,10 +143,11 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     let (new_playlist, pipeline_outcome) =
         execute_pipeline_on_groups_with_filter_calls(groups_to_add, target, &fpl.input.name, pipe, &ctx.plugins).await;
     debug!("Resolved series pipeline outcome: {pipeline_outcome:?}");
-    report.merge(pipeline_outcome.plugins);
 
     // Apply resolved episodes to playlist
     fpl.extend_playlist(new_playlist);
+    // The episodes' filter-call stats belong to the target's report.
+    pipeline_outcome.plugins
 }
 
 fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
@@ -487,7 +487,9 @@ async fn process_immediate_series_info<E: EventSink + Clone + 'static, M: Metada
     }
 
     if !batch.is_empty() {
-        // Release lock before final persist
+        // Release the open query (its shared sidecar lock) and the file lock before the
+        // final persist: the writer's exclusive sidecar lock would otherwise wait forever.
+        drop(db_query_holder.take());
         _db_lock_holder = None;
 
         let updates: Vec<(u32, SeriesStreamProperties)> = batch

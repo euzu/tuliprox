@@ -1,0 +1,15 @@
+server:
+  - name: default
+    protocol: http
+    host: 127.0.0.1
+    port: "18980"
+    timezone: UTC
+    message: HF EPG Matcher demo
+user:
+  - target: hf-demo
+    credentials:
+      - username: demo
+        password: demo
+        proxy: redirect
+        server: default
+        status: Active

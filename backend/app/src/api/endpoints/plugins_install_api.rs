@@ -1,5 +1,6 @@
 //! `POST /api/v1/plugins`, `PUT …/approve`, `…/enable`, `…/disable` and
-//! `DELETE /api/v1/plugins/{id}` (plan §10, §18 *W6b seam freeze*). W6b lane M.
+//! `DELETE /api/v1/plugins/{id}`, and `POST …/rollback` (plan §10, §18 *W6b seam
+//! freeze* and *W8 seam freeze*). W6b lane M, W8 lane D.
 //!
 //! All of them need `SystemWrite` (the layer is `plugins_api`'s). Each one takes
 //! the plugin system's install mutex before it touches anything, then the config
@@ -8,7 +9,7 @@
 //! without the `plugins` feature) answers `404`.
 
 #[cfg(feature = "plugins")]
-use super::plugins_settings_api::{config_file_path, persist_entry, EntryChange};
+use super::plugins_settings_api::{config_file_path, persist_entry, written_plugins_config, EntryChange};
 #[cfg(feature = "plugins")]
 use crate::api::model::reload_plugins;
 use crate::api::model::AppState;
@@ -16,7 +17,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 #[cfg(feature = "plugins")]
@@ -37,6 +38,8 @@ pub(super) fn install_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/plugins", post(post_plugin_upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT_BYTES)))
         .route("/plugins/{id}/approve", put(put_plugin_approve))
+        .route("/plugins/{id}/staged", get(get_plugin_staged))
+        .route("/plugins/{id}/rollback", post(post_plugin_rollback))
         .route("/plugins/{id}/enable", put(put_plugin_enable))
         .route("/plugins/{id}/disable", put(put_plugin_disable))
         .route("/plugins/{id}", delete(delete_plugin))
@@ -96,17 +99,131 @@ async fn put_plugin_approve(
     Path(id): Path<String>,
     Json(body): Json<PluginApproveDto>,
 ) -> Response {
+    // Detached, locks included: a client that hangs up must not cancel an
+    // update between its directory swap and its activation check, nor release
+    // the install lock while the swap still runs.
+    detached(async move {
+        let Some(plugins) = app_state.plugins.as_ref() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let guard = plugins.install_lock().await;
+        let config = match install_config(&app_state, &id).await {
+            Ok(config) => config,
+            Err(response) => return *response,
+        };
+        match plugins.api_approve(&guard, &id, &body, &config).await {
+            Ok(summary) => Json(summary).into_response(),
+            Err(rejection) => (rejection.status, Json(rejection.body)).into_response(),
+        }
+    })
+    .await
+}
+
+/// The plugins config an update or rollback of `id` runs with: the runtime one,
+/// but `id`'s settings (and their version) as `config.yml` has them. The runtime
+/// config is env-resolved, and an update keeps this entry in the retained
+/// prior's `prev.json`, which a rollback writes back: with the runtime entry a
+/// resolved secret would reach `prev.json` and then `config.yml`.
+#[cfg(feature = "plugins")]
+async fn install_config(app_state: &AppState, id: &str) -> Result<tuliprox_core::model::PluginsConfig, Box<Response>> {
+    let Some(runtime) = app_state.app_config.plugins.load_full() else {
+        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
+    };
+    let written = written_plugins_config(&app_state.app_config).await.map_err(|err| {
+        log::error!("Cannot read config.yml for plugin `{id}`: {err}");
+        Box::new(error_response(StatusCode::INTERNAL_SERVER_ERROR, "cannot read config.yml"))
+    })?;
+    let mut config = (*runtime).clone();
+    if let (Some(entry), Some(as_written)) = (config.plugins.iter_mut().find(|entry| entry.id == id), written.entry(id))
+    {
+        entry.settings.clone_from(&as_written.settings);
+        entry.settings_version = as_written.settings_version;
+    }
+    Ok(config)
+}
+
+/// Run a mutating handler body on its own task, so dropping the request does
+/// not cancel it halfway; the locks it takes live and die with the task.
+#[cfg(feature = "plugins")]
+async fn detached(work: impl std::future::Future<Output = Response> + Send + 'static) -> Response {
+    tokio::spawn(work).await.unwrap_or_else(|err| {
+        log::error!("A plugin management task failed: {err}");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })
+}
+
+/// `GET /api/v1/plugins/{id}/staged`: the capability review of the package
+/// staged for `id` (an update waiting for approval). `404` when none is staged.
+#[cfg(feature = "plugins")]
+async fn get_plugin_staged(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Some(plugins) = app_state.plugins.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let guard = plugins.install_lock().await;
-    let Some(config) = app_state.app_config.plugins.load_full() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match plugins.api_approve(&guard, &id, &body, &config).await {
-        Ok(summary) => Json(summary).into_response(),
+    match plugins.api_staged_review(&guard, &id).await {
+        Ok(review) => Json(review).into_response(),
         Err(rejection) => (rejection.status, Json(rejection.body)).into_response(),
     }
+}
+
+/// `POST /api/v1/plugins/{id}/rollback`: swap the installed package and the one
+/// retained prior version (`SystemWrite`; never an MCP tool). The settings of the
+/// prior's config entry are written to `config.yml` once the swap passed its
+/// activation check. `404` without a prior, `409` when the check fails (the swap
+/// is undone first).
+#[cfg(feature = "plugins")]
+async fn post_plugin_rollback(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    // Detached like `put_plugin_approve`.
+    detached(async move {
+        let Some(plugins) = app_state.plugins.as_ref() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let guard = plugins.install_lock().await;
+        let file_path = config_file_path(&app_state);
+        let _lock = app_state.app_config.file_locks.write_lock(std::path::Path::new(&file_path)).await;
+        let config = match install_config(&app_state, &id).await {
+            Ok(config) => config,
+            Err(response) => return *response,
+        };
+        let outcome = match plugins.api_rollback(&guard, &id, &config).await {
+            Ok(outcome) => outcome,
+            Err(rejection) => return (rejection.status, Json(rejection.body)).into_response(),
+        };
+        if let Some(settings) = &outcome.settings {
+            if let Err(err) =
+                persist_entry(&app_state, &id, EntryChange::Versioned(settings, outcome.settings_version)).await
+            {
+                log::error!("Failed to restore the settings of plugin `{id}` after its rollback: {err}");
+                // `config.yml` still holds the settings of the version rolled
+                // back from, so roll back again (a rollback swaps the two
+                // packages): package and settings then agree once more.
+                let undone = plugins.api_rollback(&guard, &id, &config).await;
+                reload_plugins(&app_state.plugins, &app_state.app_config).await;
+                let message = match undone {
+                    Ok(back) => format!(
+                        "the settings of {} could not be saved ({err}); the rollback was undone, still on {}",
+                        outcome.version, back.version
+                    ),
+                    Err(rejection) => {
+                        log::error!("Failed to undo the rollback of plugin `{id}`: {}", rejection.body.error);
+                        format!(
+                            "rolled back to {}, but its settings could not be saved ({err}) and undoing the rollback \
+                             failed: {}",
+                            outcome.version, rejection.body.error
+                        )
+                    }
+                };
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, message);
+            }
+        }
+        reload_plugins(&app_state.plugins, &app_state.app_config).await;
+        log::info!("Plugin `{id}` rolled back to {}", outcome.version);
+        let config = app_state.app_config.plugins.load();
+        plugins
+            .api_summary(&id, config.as_deref())
+            .map_or_else(|| StatusCode::NOT_FOUND.into_response(), |summary| Json(summary).into_response())
+    })
+    .await
 }
 
 /// Set `enabled` on plugin `id`'s config entry and reload. Enabling a plugin
@@ -187,6 +304,12 @@ async fn post_plugin_upload() -> Response { StatusCode::NOT_FOUND.into_response(
 async fn put_plugin_approve(Path(_id): Path<String>) -> Response { StatusCode::NOT_FOUND.into_response() }
 
 #[cfg(not(feature = "plugins"))]
+async fn get_plugin_staged(Path(_id): Path<String>) -> Response { StatusCode::NOT_FOUND.into_response() }
+
+#[cfg(not(feature = "plugins"))]
+async fn post_plugin_rollback(Path(_id): Path<String>) -> Response { StatusCode::NOT_FOUND.into_response() }
+
+#[cfg(not(feature = "plugins"))]
 async fn put_plugin_enable(Path(_id): Path<String>) -> Response { StatusCode::NOT_FOUND.into_response() }
 
 #[cfg(not(feature = "plugins"))]
@@ -228,6 +351,8 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         for (method, uri) in [
+            ("GET", "/plugins/demo/staged"),
+            ("POST", "/plugins/demo/rollback"),
             ("PUT", "/plugins/demo/enable"),
             ("PUT", "/plugins/demo/disable"),
             ("DELETE", "/plugins/demo"),

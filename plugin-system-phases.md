@@ -1,7 +1,7 @@
 # Tuliprox Plugin System — Phases & Execution
 
 > Companion to [`plugin-system-plan.md`](plugin-system-plan.md) (design) and [`plugin-system-history.md`](plugin-system-history.md) (history). Section
-> numbers are global across the three files. Revision 4.1, 2026-10-30.
+> numbers are global across the three files. Revision 4.3, 2026-10-31.
 
 ---
 
@@ -16,7 +16,7 @@ Before building foundations, prove the whole path end to end with the least
 code that can work. Phases 0, 0A and 1 then **generalize** what S proved,
 instead of building three layers on assumptions.
 
-1. `plugin-api/` with only `world base` + `world playlist-plugin` (§5). The
+1. `plugins/plugin-api/` with only `world base` + `world playlist-plugin` (§5). The
    rest of the WIT stays in the doc until Phase 0 freezes it.
 2. Thread `P: PluginHost = NoPlugins` through the pipeline (the Phase 0 item 4
    change, done here **once**, for real), exposing **one** hook: `after-filter`,
@@ -86,11 +86,11 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 0 — Contract & Scaffolding *(de-risk gate)*
 
-1. Create `plugin-api/` crate with the WIT package; generate host bindings;
+1. Create `plugins/plugin-api/` crate with the WIT package; generate host bindings;
    pin ABI `1.0.0`.
    - ☑️ *W2: full WIT frozen, `ABI_VERSION`/`ABI_MAJOR`, per-interface host bindings.*
 2. Create `backend/plugins` (`tuliprox-plugins`) depending only on `shared` +
-   `core` (+ `plugin-api`), and the `PluginHost`/`NoPlugins` seam in
+   `core` (+ `plugins/plugin-api`), and the `PluginHost`/`NoPlugins` seam in
    `shared/src/model/plugin.rs` (§7.0). **Gate: `bin/check-workspace-deps.sh`
    passes with only the new edges added to its allowlist.** No edge from
    `messaging`, `session` or `dvr` changes.
@@ -374,17 +374,66 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 8 — Hardening & Polish
 
- 1. Concurrency audit under parallel target processing + the event consumer;
+ 1. *Deferred (excluded from W8 by owner, 2026-10-31).* Concurrency audit under parallel target processing + the event consumer;
     loom/stress tests on dispatch and queue backpressure.
- 2. Benchmarks: 100k channels × 3 plugins (incl. plugin sort/dedupe/output
+ 2. *Deferred (excluded from W8 by owner, 2026-10-31).* Benchmarks: 100k channels × 3 plugins (incl. plugin sort/dedupe/output
     paths); tune batch size; confirm disabled-path zero cost and session-setup
     latency budget with header injection active.
- 3. sha256 pinning + re-approval on change; settings migration story
-    (schema `version` field).
- 4. Docker/compose docs for mounting `config/plugins`; release notes;
+ 3. ✅ *W8 (2026-10-31): built + linted; exit checks 1 and 2 run on a live server; `tuliprox-plugins`
+    `cargo test -p tuliprox-plugins` passes in full after the W8 open-issue round, history §2.6 W8 rows.*
+    SHA-256 pinning of installed `plugin.wasm` + re-approval if it changes
+    outside an approved install/update; settings migration story (schema
+    `version` field). Marketplace catalogs do not provide checksums or
+    signatures.
+ 4. *Deferred (excluded from W8 by owner, 2026-10-31).* Docker/compose docs for mounting `config/plugins`; release notes;
     CHANGELOG.
+ 5. ✅ *W8 (2026-10-31): built + linted; exit check 3 run on a live server; tests run as for item 3.
+    No marketplace or network code.*
+    Safe package replacement foundation: validate and stage before activation,
+    retain the previous package, and roll back if activation fails.
 
-**Dependency graph:** S → {0A ∥ 0} → 1 → {2 → 3 → 4, 5 → 6} → 7 → 8.
+### Phase 9 — Repository Marketplace *(after Phase 8)*
+
+ 1. Define a versioned `marketplace.json` format at the root of each repository.
+    A source is configured by the direct HTTPS/raw URL to that file; Tuliprox
+    does not clone repositories or resolve Git-provider default branches.
+ 2. Catalog entries describe plugins and releases: ID, name, description,
+    author, license, category, version, HTTPS package URL, and minimum
+    Tuliprox/plugin API compatibility, requested capabilities, and changelog.
+    No publisher-provided package hash, signing key, or signature is included.
+ 3. Add multiple repository sources to the existing plugin config, with
+    add/edit/enable/disable/remove controls in both config and UI. Both surfaces
+    update the same persisted settings. Cache catalogs and show sync time/errors.
+ 4. Add repository/catalog management endpoints and a Marketplace UI for
+    browsing, searching, selecting a compatible release, and reviewing its
+    metadata/capabilities before install. Reuse existing validation, approval,
+    and enable flows; calculate the installed hash locally during approval.
+ 5. Record the selected source and installed version. If an ID exists in
+    multiple sources, require an explicit source choice. Removing a source
+    leaves its installed plugins in place.
+    - *Exit criteria:* add a source through either config or UI, browse it, and
+      install/approve/enable a compatible plugin; invalid or incompatible
+      packages leave the existing installation untouched.
+
+### Phase 10 — Updates and Boot Automation *(after Phase 9)*
+
+ 1. Add manual update checks and a global `auto_update_on_boot` option, exposed
+    in config and UI and defaulting to `false`. Keep version pinning available
+    for plugins that should not move automatically.
+ 2. On boot, check for updates to already-installed, enabled plugins from their
+   configured source. Use a strict time budget without gating Tuliprox startup;
+   if the check/download misses the budget or the source fails, start the
+   current plugin and retry on the next boot.
+ 3. Validate compatibility and package contents, stage and atomically activate
+    the update, then record the new locally computed hash. Do not silently grant
+    new capabilities; require the existing admin approval flow if they change.
+    Roll back to the prior package if activation fails. Never install or enable
+    a new plugin automatically.
+    - *Exit criteria:* tests cover a successful update, offline source,
+      malformed/incompatible package, capability change, interrupted
+      activation, and rollback; failures preserve the previous working plugin.
+
+**Dependency graph:** S → {0A ∥ 0} → 1 → {2 → 3 → 4, 5 → 6} → 7 → 8 → 9 → 10.
 
 - Phase S (walking skeleton) comes first. Only the Phase 0 wasmtime
   build spike and the WIT decisions for `base` / `playlist-plugin` run before it.
@@ -412,6 +461,8 @@ flowchart LR
     P4 --> P7["Phase 7<br/>SDK · Docs · Examples"]
     P6 --> P7
     P7 --> P8["Phase 8<br/>Hardening & Polish"]
+    P8 --> P9["Phase 9<br/>Repository Marketplace"]
+    P9 --> P10["Phase 10<br/>Updates & Boot Automation"]
 ```
 
 ---
@@ -485,7 +536,7 @@ integration cost faster than they remove wall-clock time.
 | W1 | ✅ 0A.1 *(built + linted, untested; unitless = seconds in both parsers)* | `ms` durations → `Millis` (`shared/src/utils/time_utils.rs`, `time_units.rs`) | Haiku | — |
 | W1 | ✅ 0A.2 *(built + linted, untested)* | circuit breaker (`core/utils/circuit_breaker.rs` + tests) | Sonnet | — |
 | W1 | ✅ 0A.3 *(built + linted, untested; jitter not yet wired into `calculate_retry_backoff`, see W2 0A.4)* | token bucket + bulkhead + jitter (`core/utils/network/request/` new files only) | Sonnet | — |
-| **W2** | ✅ 0.1 *(built + linted, untested; ABI 1.0.0, 23 export interfaces, union-world host bindings; plan §18 *W2 full freeze*)* | full WIT freeze (all capability worlds) in `plugin-api/` | Opus | S |
+| **W2** | ✅ 0.1 *(built + linted, untested; ABI 1.0.0, 23 export interfaces, union-world host bindings; plan §18 *W2 full freeze*)* | full WIT freeze (all capability worlds) in `plugins/plugin-api/` | Opus | S |
 | W2 | ✅ 0.4 *(built + linted, untested; parity holds: median 1052 ms vs 1056 ms on `develop`, history §2.6)* | widen the seam: remaining hook-hosting fns, `finalize_playlist_view` → async — single lane on `processing` | Opus | S |
 | W2 | ✅ 0.5/0.6 *(built + linted, untested; tests written, not run)* | `manifest.rs` + tests; full `PluginsConfig` (budgets, secrets) + example YAML | Sonnet | S |
 | W2 | ✅ 0A.4 *(built + linted, untested; also wired into `wasi:http` at integration)* | transport options + plugin client; `OutboundExecutor` compose | Sonnet | 0A.1–3 |
@@ -507,11 +558,20 @@ integration cost faster than they remove wall-clock time.
 | W6b | ✅ 5.1b *(built + linted, untested; full upload→review→approve→configure→enable→stats→logs→disable→uninstall+purge loop exercised in a served UI, history §2.6)* | upload / approve / enable / disable / uninstall + UI: `POST /api/v1/plugins` (`.tlpx` multipart, size cap, zip-slip-safe staging, full §4 validation, capability review), `PUT …/approve` (grants + sha256 pin + MCP approval), `PUT …/enable` / `disable`, `DELETE …?purge_kv=`, all `SystemWrite`; `plugin_upload.rs` + PluginsView controls *(W6b plan fix: §19.3 had no row for the Phase 5 mutating routes)* | Sonnet | W5 |
 | W6b | ✅ 6.3a *(built + linted, untested; all three switches and read-only hiding verified against a live MCP endpoint, history §2.6)* | plugin MCP tools (`plugins/mcp_tools.rs`, `mcp_tools.rs`/`mcp_api.rs`); Opus reviews the exposure switches | Sonnet + Opus review | 6.3 (rpc) |
 | W6b | ✅ 6.x *(built + linted, untested; 7 of 9 slots seen rendering (config tab schema-driven) with a live bridge, i18n en/es and toasts; ⚠️ channel-detail is series-only, wizard step unreachable, metrics wait on W6a — history §2.6)* | slots, bridge, loader, i18n, config integration | Sonnet; bridge/CSP reviewed by Opus | W4 |
-| **W7** | 7.x | SDK + macro (Sonnet); 3 example plugins (Sonnet, one lane each); mdBook (Haiku draft → Sonnet edit) | mixed | W5, W6 |
-| **W8** | 8.x | concurrency audit (Opus); benchmarks (Sonnet); docs/CHANGELOG (Haiku) | mixed | W7 |
+| **W7** | ✅ 7.1 *(built + linted, untested; SDK unit/macro tests written, not run; API frozen in history §2.6 *W7 SDK as frozen*; template rendered + packaged + installed by the doc acid test)* | `plugins/plugin-sdk/` (`tuliprox-plugin-sdk`), `plugins/plugin-sdk-macros/`, `plugins/examples/template/`, `bin/package-plugin.sh`, `bin/new-plugin.sh`, `make plugin-examples` | Sonnet (S), Haiku (T) | W5, W6 |
+| W7 | ✅ 7.2 *(built + linted, untested; mock-host unit tests written, not run; all three exercised on a live server with local mocks, history §2.6 *W7 Examples, real runs*; ⚠️ E1 epg-overlay frame not reached, ⚠️ `stream.probe.failed` not run (no ffprobe))* | `plugins/examples/{sports-enricher,hf-epg-matcher,matrix-notifier}/` | Sonnet, one lane each | 7.1 |
+| W7 | ✅ 7.3 *(docs build + markdownlint green; exit criterion met: a fresh Haiku agent went template → installed plugin → renamed group in the M3U from quickstart.md alone, 2 rounds, both unaided successes; round 1 friction (shell state, plugins dir, config rewrite, unbounded waits, nohup) and round 2 gaps (create `$QUICKSTART`, the unused secret) fixed in the page; the round-2 fixes were not re-run)* | `docs/src/plugins/*.md` (9 pages) + `SUMMARY.md` entry | Haiku draft → Sonnet edit | 7.2 |
+| **W8** | ✅ 8.3 *(built + linted; live exit checks 1–2 + `tuliprox-plugins` tests, history §2.6 W8)* | sha256 pin integrity + settings-schema `version` / `settings.migrate` (`registry.rs`, `settings.rs`, `migration.rs`, SDK) | Sonnet (C) | W7 |
+| W8 | ✅ 8.5 *(built + linted; live exit check 3 + tests)* | staged update, capability diff, one retained prior, auto + manual rollback (`install.rs`, `plugins_install_api.rs`, Plugin Manager) | Sonnet (D) | W7 |
+| W8 | ✅ verification debt *(W6a checks 3–4, E1 epg-overlay, frozen-clock metrics verified; `stream.probe.failed` unverified, no ffprobe)* | `state.rs`/`metrics.rs` tests, live runs | Sonnet (F) | W7 |
+| W8 | 8.1 / 8.2 / 8.4 *deferred (excluded from W8 by owner, 2026-10-31)* | concurrency audit; benchmarks; Docker docs, release notes, CHANGELOG | — | W7 |
+| **W9** | 9.x | root `marketplace.json` format; multi-repo config/UI; catalog APIs and browse/install UI | mixed | W8 |
+| **W10** | 10.x | manual update checks; default-off boot auto-update; capability review and rollback | mixed | W9 |
 
 The critical path is W0 (spike + 0.Q) → W1 S → W2 0.1/0.4 → W3 → W4 2.2 → W5. Everything
 else hangs off it, so Opus attention is spent where it shortens that path.
+The marketplace path is W8 → W9 → W10; boot automation follows manual
+repository installs.
 
 ### 19.4 Per-phase loop
 

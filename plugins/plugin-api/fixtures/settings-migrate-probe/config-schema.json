@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "version": 2,
+  "title": "Settings migrate probe",
+  "additionalProperties": false,
+  "required": ["group"],
+  "properties": {
+    "group": {
+      "type": "string",
+      "title": "Group",
+      "description": "Every channel is moved to this group."
+    },
+    "retries": {
+      "type": "integer",
+      "title": "Retries",
+      "minimum": 0,
+      "default": 3
+    },
+    "api_key": {
+      "type": "string",
+      "title": "API key",
+      "writeOnly": true
+    }
+  }
+}

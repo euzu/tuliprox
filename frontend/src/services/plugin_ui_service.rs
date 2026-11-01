@@ -1,13 +1,13 @@
 //! REST client for the plugin UI: contributions, locales, rpc, metrics. W6b lane U.
 use crate::{
     error::{Error, ErrorInfo},
-    services::{get_base_href, get_token, request_get},
+    services::{get_base_href, request_get, request_raw},
 };
 use gloo_net::http::Request;
 use serde_json::Value;
 use shared::{
     model::{PluginMetricDto, PluginRpcErrorDto, PluginSlotDto, PluginUiDto},
-    utils::{concat_path_leading_slash, CONTENT_TYPE_JSON},
+    utils::concat_path_leading_slash,
 };
 use std::collections::BTreeMap;
 
@@ -132,25 +132,15 @@ impl PluginUiService {
         frame_src(&self.base_href, plugin_id, version, element, slot)
     }
 
-    /// `POST /api/v1/plugins/{id}/rpc/{method}`, the way every other request of
-    /// the app is made: same base URL, same bearer token. It is not
-    /// `requests.rs::request_post` because the frame is told the HTTP status and
-    /// that helper folds most of them into one error.
+    /// `POST /api/v1/plugins/{id}/rpc/{method}` through `requests.rs::request_raw`
+    /// (same base URL, same bearer token), not `request_post`, because the frame
+    /// is told the HTTP status and that helper folds most of them into one error.
     pub async fn rpc(&self, plugin_id: &str, method: &str, payload: &Value) -> Result<Value, PluginRpcFailure> {
         let failure = |status: u16, error: &str| PluginRpcFailure { status, error: error.to_owned() };
         let url = format!("{}/{}/rpc/{}", self.plugins_path, percent_encode(plugin_id), percent_encode(method));
         let body = serde_json::to_string(payload).map_err(|_| failure(400, "payload is not JSON"))?;
-        let mut request = Request::post(&url).header("Accept", CONTENT_TYPE_JSON);
-        if let Some(token) = get_token() {
-            request = request.header("Authorization", format!("Bearer {token}").as_str());
-        }
-        let request = request
-            .header("Content-Type", CONTENT_TYPE_JSON)
-            .body(body)
-            .map_err(|_| failure(0, "request could not be built"))?;
-        let response = request.send().await.map_err(|_| failure(0, "request failed"))?;
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let response = request_raw(Request::post(&url), Some(body)).await.map_err(|_| failure(0, "request failed"))?;
+        let (status, text) = (response.status, response.body);
         if (200..300).contains(&status) {
             if text.trim().is_empty() {
                 return Ok(Value::Null);

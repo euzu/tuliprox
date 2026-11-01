@@ -1,0 +1,19 @@
+# W8 fixture: the settings schema is at version 2 (config-schema.json). Settings
+# stored for version 1 are `{label, token}`; `settings.migrate` turns them into
+# `{group, api_key, retries}`. `playlist.after-filter` regroups every channel to
+# `group`, so a test sees which settings the plugin ran on.
+id: settings-migrate-probe
+name: Settings migrate probe (W8 fixture)
+version: 0.2.0
+api_version: 1
+hooks:
+  - playlist.after-filter
+  - settings.migrate
+ui:
+  config_section:
+    schema: config-schema.json
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

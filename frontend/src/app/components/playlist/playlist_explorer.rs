@@ -22,8 +22,8 @@ use serde_json::{json, Value};
 use shared::{
     error::TuliproxError,
     model::{
-        recording::RecordingVisibility, Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest,
-        SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
+        recording::RecordingVisibility, Permission, PlaylistRequest, PlaylistUrlResolveRequest, PluginSlotDto,
+        SearchRequest, SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::Internable,
 };
@@ -219,7 +219,11 @@ pub fn PlaylistExplorer() -> Html {
         let set_is_open = popup_is_open.clone();
         Callback::from(move |request: PluginActionRequest| {
             if let Some(selection) = selected_channel.as_ref() {
-                let context = json!({ "channels": [selection.plugin_context.clone()] });
+                let context = if request.slot == PluginSlotDto::ChannelDetailPanel {
+                    json!({ "channel": selection.plugin_context.clone() })
+                } else {
+                    json!({ "channels": [selection.plugin_context.clone()] })
+                };
                 plugin_action.set(Some((request, context)));
             }
             set_is_open.set(false);
@@ -681,6 +685,12 @@ pub fn PlaylistExplorer() -> Html {
                 {
                 <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
             })}
+            // Live and VOD channels have no detail view: their `channel-detail-panel`
+            // contributions open from the menu (series show theirs in the series view).
+            { html_if!(
+                selected_channel.as_ref().is_some_and(|selection| selection.cluster != XtreamCluster::Series),
+                { <PluginActionMenuItems slot={PluginSlotDto::ChannelDetailPanel} onselect={handle_plugin_action.clone()} /> }
+            )}
             <PluginActionMenuItems onselect={handle_plugin_action} />
         </PopupMenu>
         { if let Some((request, context)) = (*plugin_action).as_ref() {

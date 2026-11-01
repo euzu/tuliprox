@@ -321,7 +321,8 @@ fn every_supported_id_is_accepted_when_its_requirements_are_met() {
          ui:\n  rpc_exports:\n    - {{ name: ping, kind: read }}\n"
     ));
     let manifest = parse(&text).unwrap();
-    assert_eq!(manifest.hooks.len(), 26);
+    // Every id but `epg.resolve-conflict`, which is refused until it runs.
+    assert_eq!(manifest.hooks.len(), HookId::ALL.len() - 1);
 }
 
 #[test]
@@ -380,8 +381,8 @@ fn declarations_need_the_hook_that_serves_them() {
 
 #[test]
 fn event_names_come_from_the_wire_names_and_unknown_ones_are_listed() {
-    let text = with("hooks: [events.on-event]\nevents: [playlist.update, playlist.updat, config.chang]\n");
-    assert_problem(&text, "unknown event names: `playlist.updat`, `config.chang`");
+    let text = with("hooks: [events.on-event]\nevents: [playlist.update, playlist.updat, config.changd]\n");
+    assert_problem(&text, "unknown event names: `playlist.updat`, `config.changd`");
     let ok = parse(&with("hooks: [events.on-event]\nevents: [playlist.update, scheduled_task.failed]\n")).unwrap();
     assert!(ok.events.contains(EventKind::PlaylistUpdate));
     assert!(ok.events.contains(EventKind::ScheduledTaskFailed));

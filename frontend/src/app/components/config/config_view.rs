@@ -164,7 +164,7 @@ pub fn ConfigView() -> Html {
                         id: tab.id.clone(),
                         title: tab.title.clone(),
                         icon: tab.icon.clone(),
-                        children: html! { <PluginConfigTab plugin={Rc::clone(&tab.plugin)} /> },
+                        children: html! { <PluginConfigTab plugin={Rc::clone(&tab.plugin)} element={tab.element.clone()} /> },
                         active_class: class.clone(),
                         inactive_class: class,
                     }

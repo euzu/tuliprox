@@ -1,0 +1,21 @@
+{
+  "name": "typescript-rename",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tuliprox plugin example: rename one playlist group, written in TypeScript",
+  "type": "module",
+  "scripts": {
+    "types": "jco types ../../plugin-api/wit --world-name playlist-plugin --out-dir generated",
+    "check": "tsc",
+    "test": "node --test test/rename.test.ts",
+    "bundle": "esbuild src/index.ts --bundle --format=esm --external:tuliprox:* --outfile=dist/index.js",
+    "build": "npm run types && npm run check && npm run bundle && jco componentize dist/index.js --wit ../../plugin-api/wit --world-name playlist-plugin --out plugin.wasm"
+  },
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "latest",
+    "@bytecodealliance/jco": "latest",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "typescript": "latest"
+  }
+}

@@ -6,7 +6,7 @@
 #
 #   target/plugin-fixtures/plugins/rename-group/{manifest.yml,plugin.wasm}
 #   target/plugin-fixtures/plugins/<id>/{manifest.yml,plugin.wasm}
-#       for every plugin-api/fixtures/host-probe/manifests/<id>.yml
+#       for every plugins/plugin-api/fixtures/host-probe/manifests/<id>.yml
 #   target/plugin-fixtures/plugins/ui-demo/{manifest.yml,plugin.wasm,config-schema.json,
 #       tab-schema.json,rpc/,ui/} and the same tree zipped as target/plugin-fixtures/ui-demo.tlpx
 #
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fixtures="$root/plugin-api/fixtures"
+fixtures="$root/plugins/plugin-api/fixtures"
 out="$root/target/plugin-fixtures"
 target="wasm32-wasip2"
 
@@ -55,6 +55,7 @@ build event-probe
 build notify-probe
 build edge-probe
 build provider-probe
+build settings-migrate-probe
 build task-probe
 build ui-demo
 
@@ -84,6 +85,10 @@ install_plugin filter-probe \
 install_plugin provider-probe \
     "$out/build/$target/release/plugin_fixture_provider_probe.wasm" \
     "$fixtures/provider-probe/manifest.yml"
+install_plugin settings-migrate-probe \
+    "$out/build/$target/release/plugin_fixture_settings_migrate_probe.wasm" \
+    "$fixtures/settings-migrate-probe/manifest.yml"
+cp "$fixtures/settings-migrate-probe/config-schema.json" "$out/plugins/settings-migrate-probe/"
 
 # ui-demo ships more than a manifest: schemas, rpc input schemas and the ui/
 # frames. It is also packed as `ui-demo.tlpx` (manifest.yml at the zip root)

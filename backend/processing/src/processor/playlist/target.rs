@@ -386,8 +386,8 @@ pub(crate) async fn prepare_playlist_for_target<
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         processed_fpl.sort_by_provider_ordinal();
-        playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl, &mut aggregate_outcome.plugins)
-            .await;
+        let series_report = playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        aggregate_outcome.plugins.merge(series_report);
         log_memory_snapshot(
             format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str(),
         );
@@ -1017,15 +1017,15 @@ pub(crate) async fn playlist_resolve<E: EventSink + Clone + 'static, M: Metadata
     pipe: &ProcessingPipe,
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
-    report: &mut PluginRunReport,
-) {
+) -> PluginRunReport {
     // Resolve and probe talk to the provider; an input in maintenance keeps what it has.
     if ctx.is_input_in_maintenance(&processed_fpl.input.name) {
-        return;
+        return PluginRunReport::default();
     }
-    playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl, report).await;
+    let series_report = playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
     playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
     playlist_probe(ctx, target, processed_fpl).await;
+    series_report
 }
 
 pub(crate) fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {

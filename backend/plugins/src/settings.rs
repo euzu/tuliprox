@@ -7,7 +7,7 @@
 
 use crate::api::{is_env_reference, parse_secret_path, Step};
 use serde_json::{Map, Value};
-use shared::model::{PluginFieldErrorDto, PluginSettingsErrorDto, REDACTED_SECRET};
+use shared::model::{PluginFieldErrorDto, PluginSettingsErrorDto, DEFAULT_PLUGIN_SETTINGS_VERSION, REDACTED_SECRET};
 
 /// Deepest schema nesting followed, a guard against pathological packages.
 const MAX_DEPTH: usize = 32;
@@ -180,6 +180,139 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         .iter()
         .filter(|secret| !secret.is_empty())
         .fold(text.to_string(), |text, secret| text.replace(secret.as_str(), REDACTED_SECRET))
+}
+
+// ---------------------------------------------------------------------------
+// Settings versions (plan §18 *W8 seam freeze*)
+// ---------------------------------------------------------------------------
+
+/// The settings-schema `version` of `schema`: its top-level integer
+/// `"version"` (at least 1), or 1 when it declares none.
+///
+/// # Errors
+/// `version` is present and not an integer of at least 1.
+pub(crate) fn schema_version(schema: &Value) -> Result<u32, String> {
+    match schema.get("version") {
+        None => Ok(DEFAULT_PLUGIN_SETTINGS_VERSION),
+        Some(version) => version
+            .as_u64()
+            .and_then(|version| u32::try_from(version).ok())
+            .filter(|version| *version >= 1)
+            .ok_or_else(|| "`version` must be an integer of at least 1".to_string()),
+    }
+}
+
+/// The settings `value` as the plugin's own schema sees them: without the
+/// `ext` object, which holds `ui.config_extensions` values.
+fn own_settings(settings: &Map<String, Value>) -> Value {
+    let mut own = settings.clone();
+    own.remove(crate::manifest::package::EXTENSION_KEY);
+    Value::Object(own)
+}
+
+/// Why settings written for `stored_version` cannot be used under a schema at
+/// `current_version`: only when the versions differ, and the settings fail the
+/// schema. Paths and messages only, never a value.
+pub(crate) fn version_conflict(
+    schema: Option<&Value>,
+    current_version: u32,
+    stored_version: u32,
+    settings: &Map<String, Value>,
+) -> Option<String> {
+    if stored_version == current_version {
+        return None;
+    }
+    let error = check_settings(schema, &own_settings(settings)).err()?;
+    let mut problems: Vec<String> =
+        error.fields.iter().take(3).map(|field| format!("{}: {}", field.path, field.message)).collect();
+    if problems.is_empty() {
+        problems.push(error.error);
+    }
+    Some(format!(
+        "the stored settings (version {stored_version}) do not match the settings schema (version {current_version}): {}; \
+         save the settings to continue",
+        problems.join(", ")
+    ))
+}
+
+/// The `settings_review` text of a plugin whose stored settings are at
+/// `stored` while its package's schema is at `current`, or `None` when nothing
+/// needs a look.
+///
+/// `can_migrate` is whether the package exports `settings.migrate` (`None`
+/// while the package is not loaded, which gives nothing to say yet);
+/// `failure` is why the last migration attempt failed, if it did.
+pub(crate) fn review_text(
+    stored: u32,
+    current: u32,
+    can_migrate: Option<bool>,
+    failure: Option<&str>,
+) -> Option<String> {
+    match stored.cmp(&current) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(format!(
+            "the stored settings are at version {stored}, newer than this package's settings schema (version \
+             {current}), as after a rollback; review them and save"
+        )),
+        std::cmp::Ordering::Less => match (can_migrate?, failure) {
+            (false, _) => Some(format!(
+                "the settings schema moved from version {stored} to {current} and this plugin has no migration; \
+                 review the settings and save"
+            )),
+            (true, Some(reason)) => Some(format!(
+                "migrating the settings from version {stored} to {current} failed ({reason}); the stored settings \
+                 were kept; review them and save"
+            )),
+            (true, None) => None,
+        },
+    }
+}
+
+/// Pairs of `(resolved, original)` for every string of `original` that
+/// `${env:VAR}` resolution changed, found by walking both values together.
+pub(crate) fn reference_pairs(original: &Value, resolved: &Value) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    collect_pairs(original, resolved, &mut pairs);
+    pairs
+}
+
+fn collect_pairs(original: &Value, resolved: &Value, pairs: &mut Vec<(String, String)>) {
+    match (original, resolved) {
+        (Value::String(before), Value::String(after)) => {
+            if before != after && !after.is_empty() && !pairs.iter().any(|(known, _)| known == after) {
+                pairs.push((after.clone(), before.clone()));
+            }
+        }
+        (Value::Object(before), Value::Object(after)) => {
+            for (key, value) in before {
+                if let Some(counterpart) = after.get(key) {
+                    collect_pairs(value, counterpart, pairs);
+                }
+            }
+        }
+        (Value::Array(before), Value::Array(after)) => {
+            for (value, counterpart) in before.iter().zip(after) {
+                collect_pairs(value, counterpart, pairs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Put the `${env:VAR}` references back: every string of `value` that equals a
+/// resolved value in `pairs` becomes the original text again, so a migration
+/// that saw resolved secrets does not write them into `config.yml`.
+pub(crate) fn restore_references(value: &mut Value, pairs: &[(String, String)]) {
+    match value {
+        Value::String(text) => {
+            if let Some((_, original)) = pairs.iter().find(|(resolved, _)| resolved == text) {
+                text.clone_from(original);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| restore_references(item, pairs)),
+        Value::Object(map) => map.values_mut().for_each(|item| restore_references(item, pairs)),
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +540,78 @@ mod tests {
         let mut paths: Vec<String> = fields(schema, settings).into_iter().map(|(path, _)| path).collect();
         paths.sort();
         paths
+    }
+
+    // --- settings versions ---------------------------------------------------
+
+    #[test]
+    fn the_schema_version_is_the_top_level_integer_and_defaults_to_one() {
+        assert_eq!(schema_version(&json!({"type": "object"})), Ok(1));
+        assert_eq!(schema_version(&json!({"type": "object", "version": 3})), Ok(3));
+        // a property called `version` is a setting, not the schema version
+        assert_eq!(schema_version(&json!({"properties": {"version": {"type": "string"}}})), Ok(1));
+        for bad in [json!(0), json!(-1), json!("2"), json!(1.5), json!(null), json!(5_000_000_000_u64)] {
+            assert!(schema_version(&json!({"version": bad})).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_schema_subset_accepts_a_top_level_version() {
+        let schema = json!({"type": "object", "version": 2, "properties": {"a": {"type": "string"}}});
+        assert_eq!(unsupported_constructs(&schema), Vec::<String>::new());
+        assert!(check_settings(Some(&schema), &json!({"a": "x"})).is_ok());
+    }
+
+    fn map(value: &Value) -> Map<String, Value> { value.as_object().cloned().unwrap() }
+
+    #[test]
+    fn a_version_conflict_needs_different_versions_and_a_schema_failure() {
+        let schema = json!({"type": "object", "version": 2, "required": ["endpoint"], "additionalProperties": false,
+            "properties": {"endpoint": {"type": "string"}}});
+        let old = map(&json!({"host": "secret-looking-value"}));
+        // same version: never a conflict, even for settings the schema rejects
+        assert_eq!(version_conflict(Some(&schema), 2, 2, &old), None);
+        let message = version_conflict(Some(&schema), 2, 1, &old).unwrap();
+        assert!(message.contains("version 1") && message.contains("version 2") && message.contains("endpoint"));
+        assert!(!message.contains("secret-looking-value"), "a value is never echoed");
+        // old settings that still validate keep running
+        assert_eq!(version_conflict(Some(&schema), 2, 1, &map(&json!({"endpoint": "a"}))), None);
+        assert!(version_conflict(Some(&schema), 1, 2, &old).is_some(), "a downgrade checks too");
+        assert_eq!(version_conflict(None, 2, 1, &old), None, "no schema accepts any object");
+    }
+
+    #[test]
+    fn the_ext_object_is_not_checked_against_the_own_schema() {
+        let schema = json!({"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}});
+        assert_eq!(version_conflict(Some(&schema), 2, 1, &map(&json!({"a": "x", "ext": {"s": {"k": 1}}}))), None);
+    }
+
+    #[test]
+    fn review_text_follows_the_freeze() {
+        assert_eq!(review_text(2, 2, Some(true), None), None);
+        assert_eq!(review_text(1, 2, Some(true), None), None, "a pending migration needs no review yet");
+        assert_eq!(review_text(1, 2, None, None), None, "not loaded: nothing to say");
+        let no_export = review_text(1, 2, Some(false), None).unwrap();
+        assert!(no_export.contains("no migration") && no_export.contains('1') && no_export.contains('2'));
+        let failed = review_text(1, 3, Some(true), Some("boom")).unwrap();
+        assert!(failed.contains("boom") && failed.contains("kept"));
+        let newer = review_text(4, 2, Some(false), None).unwrap();
+        assert!(newer.contains("version 4") && newer.contains("rollback"));
+        assert!(review_text(4, 2, None, None).is_some(), "a downgrade does not depend on the export");
+    }
+
+    #[test]
+    fn env_references_come_back_after_a_migration() {
+        let original = json!({"token": "${env:T}", "list": ["${env:L}", "plain"], "n": 1, "same": "x"});
+        let resolved = json!({"token": "tok-1", "list": ["list-1", "plain"], "n": 1, "same": "x"});
+        let pairs = reference_pairs(&original, &resolved);
+        assert_eq!(pairs.len(), 2);
+        // the plugin renamed and moved the values
+        let mut migrated = json!({"auth": {"key": "tok-1"}, "all": ["list-1", "plain", "tok-1"], "n": 1});
+        restore_references(&mut migrated, &pairs);
+        assert_eq!(migrated, json!({"auth": {"key": "${env:T}"}, "all": ["${env:L}", "plain", "${env:T}"], "n": 1}));
+        // an unset variable resolves to an empty string: nothing to map back
+        assert_eq!(reference_pairs(&json!({"a": "${env:UNSET}"}), &json!({"a": ""})), Vec::<(String, String)>::new());
     }
 
     // --- validator: each supported construct --------------------------------

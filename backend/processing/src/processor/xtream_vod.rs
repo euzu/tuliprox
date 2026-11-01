@@ -330,7 +330,9 @@ async fn process_immediate_vod_info<E: EventSink + Clone + 'static, M: MetadataU
 
     // Flush the remaining batch if bundled strategy
     if !batch.is_empty() {
-        // Release lock before final persist
+        // Release the open query (its shared sidecar lock) and the file lock before the
+        // final persist: the writer's exclusive sidecar lock would otherwise wait forever.
+        drop(db_query_holder.take());
         _db_lock_holder = None;
 
         let updates: Vec<(u32, VideoStreamProperties)> = batch
@@ -1100,6 +1102,10 @@ pub(crate) async fn enrich_resolved_metadata<P: PluginHost, T: EnrichableMetadat
     let ctx = HookCtx::new("").with_input(input);
     let mut report = PluginRunReport::default();
     let amended = plugins.enrich_metadata(&ctx, item, &json, &mut report).await;
+    // Not merged into a target report: this also runs in the background metadata
+    // worker, after the target run. Each plugin's own stats (`GET …/{id}/stats`)
+    // count the call either way.
+    debug!("enrich-metadata for '{}' of input '{input}': {report:?}", item.header.title);
     let mut changed = apply_amended_metadata(properties, amended.as_deref(), &item.header.title);
     changed |= properties.set_plugin_fingerprint(fingerprint);
     changed

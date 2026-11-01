@@ -52,6 +52,48 @@ pub struct PluginSummaryDto {
     pub abi: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_sha256: Option<String>,
+    /// Why the stored settings need a look (plan §16 Phase 8 item 3): the
+    /// settings-schema `version` moved past the stored one and no migration
+    /// ran or it failed. Saving the settings clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_review: Option<String>,
+    /// An uploaded update of this installed plugin waits in staging for review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<PluginUpdateDto>,
+    /// The one retained prior package `POST …/rollback` restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<PluginRollbackDto>,
+}
+
+/// A staged update of an installed plugin, before approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateDto {
+    pub version: String,
+    /// Capabilities the update asks for that the installed approval lacks.
+    pub added_capabilities: Vec<String>,
+    /// Approved capabilities the update no longer asks for.
+    pub removed_capabilities: Vec<String>,
+}
+
+/// The retained prior package of a plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRollbackDto {
+    pub version: String,
+}
+
+/// What an update changes against the installed approval. Every capability in
+/// the review still has to be echoed by the approve body; this only marks the
+/// new ones, and `mcp` is never carried over (the approve body decides it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapabilityDiffDto {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub unchanged: Vec<String>,
+    /// The installed approval had MCP switch 2 on.
+    pub mcp_was_approved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +460,9 @@ pub struct PluginUploadReviewDto {
     /// The version of an installed plugin with this id that approval replaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
+    /// Set with `replaces`: the capability change against the installed approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_diff: Option<PluginCapabilityDiffDto>,
     /// Non-fatal findings (unknown hook exports ignored, ...).
     pub warnings: Vec<String>,
 }
@@ -565,6 +610,9 @@ mod tests {
             capabilities: vec!["network".to_string()],
             abi: "1.0.0".to_string(),
             wasm_sha256: Some("ab".repeat(32)),
+            settings_review: None,
+            update: None,
+            rollback: None,
         };
         let value = serde_json::to_value(&summary).unwrap();
         assert_eq!(value["state"], "pending_approval");

@@ -4,14 +4,18 @@ use crate::{
             plugin_logs::PluginLogs, plugin_settings::PluginSettings, plugin_slot::use_plugin_ui,
             plugin_upload::PluginUpload,
         },
-        Card, Chip, ContentDialog, LoadingIndicator, NoContent, Table, TableDefinition, TextButton, ToggleSwitch,
+        Card, Chip, ConfirmDialog, ContentDialog, LoadingIndicator, NoContent, Table, TableDefinition, TextButton,
+        ToggleSwitch,
     },
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
     model::{DialogAction, DialogActions, DialogResult},
     services::PluginService,
 };
-use shared::model::{Permission, PluginHookStats, PluginStateDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto};
+use shared::model::{
+    Permission, PluginHookStats, PluginStateDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto, PluginUpdateDto,
+    PluginUploadReviewDto,
+};
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::{
@@ -173,6 +177,12 @@ fn render_stats(translate: &YewI18n, stats: Option<&PluginStatsDto>) -> Html {
     }
 }
 
+/// The capabilities an update asks for beyond the installed approval, for the
+/// row's notice; `None` when it asks for nothing new.
+fn added_capabilities_text(update: &PluginUpdateDto) -> Option<String> {
+    (!update.added_capabilities.is_empty()).then(|| update.added_capabilities.join(", "))
+}
+
 /// What a row can do. The write controls (`can_write`) are shown only to users
 /// with `SystemWrite`; `busy` locks them while an action runs. `generation`
 /// changes after every action, so a switch the server refused snaps back.
@@ -184,6 +194,10 @@ struct RowActions<'a> {
     on_logs: &'a Callback<String>,
     on_toggle: &'a Callback<(String, bool)>,
     on_uninstall: &'a Callback<(String, String)>,
+    /// Open the review of the update staged for this plugin id.
+    on_review_update: &'a Callback<String>,
+    /// Ask to roll back: plugin id, name and the version it would return to.
+    on_rollback: &'a Callback<(String, String, String)>,
 }
 
 fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'_>, logs_open: bool) -> Html {
@@ -216,6 +230,18 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
         let id = summary.id.clone();
         let name = summary.name.clone();
         Callback::from(move |_: String| on_uninstall.emit((id.clone(), name.clone())))
+    };
+    let review_update = {
+        let on_review_update = actions.on_review_update.clone();
+        let id = summary.id.clone();
+        Callback::from(move |_: String| on_review_update.emit(id.clone()))
+    };
+    let rollback = {
+        let on_rollback = actions.on_rollback.clone();
+        let id = summary.id.clone();
+        let name = summary.name.clone();
+        let version = summary.rollback.as_ref().map(|prior| prior.version.clone()).unwrap_or_default();
+        Callback::from(move |_: String| on_rollback.emit((id.clone(), name.clone(), version.clone())))
     };
     html! {
         <Card key={summary.id.clone()} class="tp__plugins__card">
@@ -256,6 +282,16 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
                             onclick={reenable}
                         />
                     }
+                    if summary.rollback.is_some() {
+                        <TextButton
+                            name={format!("rollback-{}", summary.id)}
+                            icon="Refresh"
+                            title={translate.t("LABEL.PLUGIN_ROLLBACK")}
+                            aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_ROLLBACK"), summary.name)}
+                            disabled={actions.busy}
+                            onclick={rollback}
+                        />
+                    }
                     <TextButton
                         name={format!("uninstall-{}", summary.id)}
                         icon="Delete"
@@ -271,6 +307,29 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
             }
             if let Some(failure) = summary.failure.as_ref() {
                 <div class="tp__plugins__failure tp__input-error" role="alert">{ failure.clone() }</div>
+            }
+            if let Some(reason) = summary.settings_review.as_ref() {
+                <div class="tp__plugins__settings-review tp__input-error" role="status">
+                    <strong>{ translate.t("LABEL.PLUGIN_SETTINGS_REVIEW") }</strong>{ ": " }{ reason.clone() }
+                </div>
+            }
+            if let Some(update) = summary.update.as_ref().filter(|_| actions.can_write) {
+                <div class="tp__plugins__update" role="status">
+                    <strong>{ translate.t("LABEL.PLUGIN_UPDATE_AVAILABLE") }</strong>
+                    { format!(" {} {}", translate.t("LABEL.VERSION"), update.version) }
+                    if let Some(added) = added_capabilities_text(update) {
+                        <span class="tp__plugins__update-added">
+                            { format!(" - {}: {added}", translate.t("LABEL.PLUGIN_UPDATE_NEW_CAPABILITIES")) }
+                        </span>
+                    }
+                    <TextButton
+                        name={format!("review-update-{}", summary.id)}
+                        icon="Visibility"
+                        title={translate.t("LABEL.PLUGIN_UPDATE_REVIEW")}
+                        disabled={actions.busy}
+                        onclick={review_update}
+                    />
+                </div>
             }
             if !summary.hooks.is_empty() {
                 <div class="tp__plugins__chips">
@@ -372,6 +431,9 @@ pub fn PluginsView() -> Html {
     let logs_for = use_state(|| None::<String>);
     let show_upload = use_state(|| false);
     let uninstall_for = use_state(|| None::<(String, String)>);
+    // The staged update being reviewed, and the rollback awaiting confirmation (id, name, prior version).
+    let update_review = use_state(|| None::<PluginUploadReviewDto>);
+    let rollback_for = use_state(|| None::<(String, String, String)>);
     // An action is in flight: the write controls wait for it.
     let acting = use_state(|| false);
     let can_write = services.auth.has_permission(Permission::SystemWrite);
@@ -488,6 +550,68 @@ pub fn PluginsView() -> Html {
             });
         })
     };
+    let on_review_update = {
+        let services = services.clone();
+        let update_review = update_review.clone();
+        let acting = acting.clone();
+        Callback::from(move |id: String| {
+            if *acting {
+                return;
+            }
+            acting.set(true);
+            let services = services.clone();
+            let update_review = update_review.clone();
+            let acting = acting.clone();
+            spawn_local(async move {
+                match services.plugins.staged_review(&id).await {
+                    Ok(review) => update_review.set(Some(review)),
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+            });
+        })
+    };
+    let on_close_update = {
+        let update_review = update_review.clone();
+        Callback::from(move |()| update_review.set(None))
+    };
+    let on_rollback = {
+        let rollback_for = rollback_for.clone();
+        Callback::from(move |target: (String, String, String)| rollback_for.set(Some(target)))
+    };
+    let on_confirm_rollback = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let rollback_for = rollback_for.clone();
+        let acting = acting.clone();
+        let reload = reload.clone();
+        Callback::from(move |result: DialogResult| {
+            let target = (*rollback_for).clone();
+            rollback_for.set(None);
+            let (DialogResult::Ok, Some((id, name, _))) = (result, target) else {
+                return;
+            };
+            acting.set(true);
+            let next = *reload + 1;
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let reload = reload.clone();
+            spawn_local(async move {
+                match services.plugins.rollback(&id).await {
+                    Ok(summary) => {
+                        let version = summary.version.unwrap_or_default();
+                        services
+                            .toastr
+                            .success(format!("{}: {name} {version}", translate.t("MESSAGES.PLUGIN_ROLLED_BACK")));
+                    }
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+                reload.set(next);
+            });
+        })
+    };
     let on_open_upload = {
         let show_upload = show_upload.clone();
         Callback::from(move |_: String| show_upload.set(true))
@@ -522,6 +646,8 @@ pub fn PluginsView() -> Html {
                         on_logs: &on_toggle_logs,
                         on_toggle: &on_toggle,
                         on_uninstall: &on_uninstall,
+                        on_review_update: &on_review_update,
+                        on_rollback: &on_rollback,
                     };
                     render_entry(&translate, entry, &actions, logs_open)
                 }) }</>
@@ -547,7 +673,20 @@ pub fn PluginsView() -> Html {
             <LoadingIndicator loading={*loading} />
             <div class="tp__config-view__body">{ body }</div>
             if can_write && *show_upload {
-                <PluginUpload on_close={on_close_upload} on_installed={on_installed} />
+                <PluginUpload on_close={on_close_upload} on_installed={on_installed.clone()} />
+            }
+            if let Some(review) = (*update_review).clone().filter(|_| can_write) {
+                <PluginUpload key={format!("update-{}", review.id)} on_close={on_close_update}
+                    on_installed={on_installed} initial_review={Some(review.clone())} />
+            }
+            if let Some((_, name, version)) = (*rollback_for).clone() {
+                <ConfirmDialog
+                    title={format!("{} {name}: {} {version}", translate.t("LABEL.PLUGIN_ROLLBACK"), translate.t("LABEL.VERSION"))}
+                    ok_caption="LABEL.PLUGIN_ROLLBACK"
+                    cancel_caption="LABEL.CANCEL"
+                    on_confirm={on_confirm_rollback}
+                    close_on_backdrop_click=false
+                />
             }
             if let Some((_, plugin_name)) = (*uninstall_for).clone() {
                 <PluginUninstall plugin_name={plugin_name} on_confirm={on_confirm_uninstall}
@@ -555,6 +694,9 @@ pub fn PluginsView() -> Html {
             }
             if let Some((plugin_id, plugin_name)) = (*settings_for).clone() {
                 <PluginSettings key={plugin_id.clone()} plugin_id={plugin_id.clone()} plugin_name={plugin_name}
+                    settings_review={entries.as_ref().and_then(|entries| entries.iter()
+                        .find(|entry| entry.summary.id == plugin_id)
+                        .and_then(|entry| entry.summary.settings_review.clone()))}
                     on_close={on_close_settings} />
             }
         </div>
@@ -592,6 +734,18 @@ mod tests {
             [PluginStateDto::Loaded, PluginStateDto::Enabled, PluginStateDto::Disabled, PluginStateDto::Failed]
         );
         assert!(!can_toggle(PluginStateDto::PendingApproval) && !can_toggle(PluginStateDto::Invalid));
+    }
+
+    #[test]
+    fn the_update_notice_lists_only_new_capabilities() {
+        let mut update = PluginUpdateDto {
+            version: "2.0.0".to_string(),
+            added_capabilities: Vec::new(),
+            removed_capabilities: vec!["storage".to_string()],
+        };
+        assert_eq!(added_capabilities_text(&update), None);
+        update.added_capabilities = vec!["network".to_string(), "epg_write".to_string()];
+        assert_eq!(added_capabilities_text(&update).as_deref(), Some("network, epg_write"));
     }
 
     #[test]

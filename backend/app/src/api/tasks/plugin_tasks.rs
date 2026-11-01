@@ -139,6 +139,7 @@ mod tests {
                 enabled: true,
                 priority: 0,
                 settings: serde_json::Map::new(),
+                settings_version: 1,
             }],
             ..PluginsConfig::default()
         };

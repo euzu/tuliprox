@@ -34,7 +34,13 @@ fn load_fixture() -> Option<PluginSystem> {
         return common::skip_missing_fixture("skipped: fixture not built; run bin/build_plugin_fixture.sh");
     }
     // Approval is by config entry: rename-group runs only when listed.
-    let entry = PluginEntry { id: "rename-group".to_string(), enabled: true, priority: 0, settings: Map::new() };
+    let entry = PluginEntry {
+        id: "rename-group".to_string(),
+        enabled: true,
+        priority: 0,
+        settings: Map::new(),
+        settings_version: 1,
+    };
     let config = PluginsConfig {
         enabled: true,
         directory: directory.to_string_lossy().to_string(),

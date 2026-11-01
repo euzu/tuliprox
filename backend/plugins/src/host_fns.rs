@@ -48,7 +48,7 @@ pub(crate) async fn end_call(state: &mut HostState) {
         Ok(skipped) => format!("{skipped} plugin KV writes were dropped: the quota is exhausted"),
         Err(err) => format!("committing the plugin KV writes failed: {err:?}"),
     };
-    env.host.log.record(&env.id, &env.secrets, env.clock.now_ms().get(), log::Level::Warn, &message);
+    env.host.log.record(&env.id, &env.secrets, env.clock.wall_ms().get(), log::Level::Warn, &message);
 }
 
 fn log_level(level: types::LogLevel) -> log::Level {
@@ -67,7 +67,7 @@ impl types::Host for HostState {}
 impl host::Host for HostState {
     async fn log(&mut self, level: types::LogLevel, msg: String) {
         let env = &self.env;
-        env.host.log.record(&env.id, &env.secrets, env.clock.now_ms().get(), log_level(level), &msg);
+        env.host.log.record(&env.id, &env.secrets, env.clock.wall_ms().get(), log_level(level), &msg);
     }
 
     async fn kv_get(&mut self, key: String) -> Result<Option<Vec<u8>>, host::KvError> {

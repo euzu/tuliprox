@@ -5,7 +5,7 @@
 //! Every test is built on `isolation_support::prove` (see there for the four
 //! assertions); this file only names the attack, its classification and the
 //! data that must come out unchanged. The attacks live in the fixtures as
-//! extra modes (`plugin-api/fixtures`), the manifests with the one-second
+//! extra modes (`plugins/plugin-api/fixtures`), the manifests with the one-second
 //! deadline are `probe-evil`, `provider-evil`, `task-probe-spin`, `rpc-spin`,
 //! `event-probe-hang`.
 //!
@@ -14,6 +14,10 @@
 //! `state.rs`), and a `fetch-playlist` answer past the one million channel cap
 //! (it needs a guest of about 260 MiB, the limit is 128 MiB; the guest's own
 //! memory limit stops the attack first, and `input_provider.rs` tests the cap).
+
+// The attack futures nest the whole hook dispatch; their `Send` proof needs a
+// deeper limit, like the crate itself (`src/lib.rs`).
+#![recursion_limit = "256"]
 
 mod common;
 mod isolation_support;
@@ -81,14 +85,22 @@ async fn prove_stage(attack: &str, settings: Value, error: &str) {
     let Some(probe) = load(vec![probe_entry("probe-evil", settings)]) else { return };
     let before = rss_kib();
     let expect = Expect { plugin: "probe-evil", error: Some(error), breaker_opens: true, max_call: CALL_BOUND };
-    prove(&probe.system, &expect, |_| stage_call(probe.system.clone()), |unchanged| {
-        assert!(*unchanged, "{attack}: a failed call must leave the items untouched");
-    })
+    prove(
+        &probe.system,
+        &expect,
+        |_| stage_call(probe.system.clone()),
+        |unchanged| {
+            assert!(*unchanged, "{attack}: a failed call must leave the items untouched");
+        },
+    )
     .await;
     assert_rss_growth_below(before, RSS_BOUND_MIB);
 }
 
-isolation_test!(an_infinite_loop_in_a_playlist_hook_ends_at_the_deadline, prove_stage("loop", mode("loop"), "deadline exceeded"));
+isolation_test!(
+    an_infinite_loop_in_a_playlist_hook_ends_at_the_deadline,
+    prove_stage("loop", mode("loop"), "deadline exceeded")
+);
 
 isolation_test!(a_linear_memory_bomb_ends_as_out_of_memory, prove_stage("oom", mode("oom"), "out of memory"));
 
@@ -96,12 +108,8 @@ isolation_test!(unbounded_recursion_ends_as_a_stack_overflow_trap, prove_stage("
 
 isolation_test!(a_log_flood_is_rate_limited_and_ends_at_the_deadline, async {
     let Some(probe) = load(vec![probe_entry("probe-evil", mode("log-flood"))]) else { return };
-    let expect = Expect {
-        plugin: "probe-evil",
-        error: Some("deadline exceeded"),
-        breaker_opens: true,
-        max_call: CALL_BOUND,
-    };
+    let expect =
+        Expect { plugin: "probe-evil", error: Some("deadline exceeded"), breaker_opens: true, max_call: CALL_BOUND };
     prove(&probe.system, &expect, |_| stage_call(probe.system.clone()), |unchanged| assert!(*unchanged)).await;
 
     // Five calls logged as fast as they could: the ring buffer holds its capacity and the rest is counted.
@@ -113,12 +121,8 @@ isolation_test!(a_log_flood_is_rate_limited_and_ends_at_the_deadline, async {
 
 isolation_test!(a_kv_flood_is_refused_at_the_quota_and_ends_at_the_deadline, async {
     let Some(probe) = load(vec![probe_entry("probe-evil", mode("kv-flood"))]) else { return };
-    let expect = Expect {
-        plugin: "probe-evil",
-        error: Some("deadline exceeded"),
-        breaker_opens: true,
-        max_call: KV_CALL_BOUND,
-    };
+    let expect =
+        Expect { plugin: "probe-evil", error: Some("deadline exceeded"), breaker_opens: true, max_call: KV_CALL_BOUND };
     prove(&probe.system, &expect, |_| stage_call(probe.system.clone()), |unchanged| assert!(*unchanged)).await;
 
     let kv = stats(&probe.system, "probe-evil").kv.expect("the plugin has storage");
@@ -126,7 +130,9 @@ isolation_test!(a_kv_flood_is_refused_at_the_quota_and_ends_at_the_deadline, asy
     assert!(kv.used_bytes <= kv.quota_bytes, "{} bytes stored, quota {}", kv.used_bytes, kv.quota_bytes);
     let lines = probe.system.api_logs("probe-evil", &PluginLogQueryDto::default()).expect("logs");
     assert!(
-        lines.iter().any(|line| line.message.contains("kv-flood refused after") && line.message.contains("quota-exceeded")),
+        lines
+            .iter()
+            .any(|line| line.message.contains("kv-flood refused after") && line.message.contains("quota-exceeded")),
         "the guest never saw quota-exceeded: {lines:?}"
     );
 });
@@ -165,12 +171,8 @@ isolation_test!(an_outbound_request_that_never_answers_ends_at_the_wall_clock_ca
     let blackhole = Blackhole::start().await;
     let settings = json!({ "mode": "http", "url": format!("http://127.0.0.1:{}/hang", blackhole.port) });
     let Some(probe) = load(vec![probe_entry("probe-evil", settings)]) else { return };
-    let expect = Expect {
-        plugin: "probe-evil",
-        error: Some("deadline exceeded"),
-        breaker_opens: true,
-        max_call: CALL_BOUND,
-    };
+    let expect =
+        Expect { plugin: "probe-evil", error: Some("deadline exceeded"), breaker_opens: true, max_call: CALL_BOUND };
     prove(&probe.system, &expect, |_| stage_call(probe.system.clone()), |unchanged| assert!(*unchanged)).await;
     assert!(blackhole.accepted.load(Ordering::SeqCst) >= 1, "the guest never reached the listener");
 });
@@ -209,9 +211,7 @@ async fn epg_loaded_call(system: PluginSystem) -> bool {
         .map(|index| PluginEpgChannel { id: format!("ch{index}"), names: vec![format!("Channel {index}")], icon: None })
         .collect();
     let before = channels.clone();
-    system
-        .on_epg_loaded(&HookCtx::new("").with_input("source"), &mut channels, &mut PluginRunReport::default())
-        .await;
+    system.on_epg_loaded(&HookCtx::new("").with_input("source"), &mut channels, &mut PluginRunReport::default()).await;
     channels == before
 }
 
@@ -247,18 +247,29 @@ async fn prove_fetch(settings: Value, error: &str) {
     let Some(probe) = load(vec![probe_entry("provider-evil", settings)]) else { return };
     let before = rss_kib();
     let expect = Expect { plugin: "provider-evil", error: Some(error), breaker_opens: true, max_call: CALL_BOUND };
-    prove(&probe.system, &expect, |_| fetch_call(probe.system.clone(), "provider-evil"), |outcome| {
-        let message = outcome.as_ref().expect_err("an attacked fetch-playlist is an Err, never a list");
-        assert!(message.contains(error), "{message}");
-    })
+    prove(
+        &probe.system,
+        &expect,
+        |_| fetch_call(probe.system.clone(), "provider-evil"),
+        |outcome| {
+            let message = outcome.as_ref().expect_err("an attacked fetch-playlist is an Err, never a list");
+            assert!(message.contains(error), "{message}");
+        },
+    )
     .await;
     assert_rss_growth_below(before, RSS_BOUND_MIB);
 }
 
-isolation_test!(an_infinite_loop_in_fetch_playlist_ends_at_the_provider_deadline, prove_fetch(json!({ "mode": "loop" }), "deadline exceeded"));
+isolation_test!(
+    an_infinite_loop_in_fetch_playlist_ends_at_the_provider_deadline,
+    prove_fetch(json!({ "mode": "loop" }), "deadline exceeded")
+);
 
 // The guest's own 32 MiB limit stops this one before the host cap of one million channels (see the module doc).
-isolation_test!(a_flood_of_channels_from_fetch_playlist_ends_as_out_of_memory, prove_fetch(json!({ "count": 5_000_000 }), "out of memory"));
+isolation_test!(
+    a_flood_of_channels_from_fetch_playlist_ends_as_out_of_memory,
+    prove_fetch(json!({ "count": 5_000_000 }), "out of memory")
+);
 
 isolation_test!(an_oversized_output_chunk_hits_the_host_cap_and_keeps_the_old_file, async {
     let Some(probe) = load(vec![probe_entry("provider-evil", json!({}))]) else { return };
@@ -268,12 +279,8 @@ isolation_test!(an_oversized_output_chunk_hits_the_host_cap_and_keeps_the_old_fi
         std::fs::write(path, "previous run").expect("previous output");
     }
     let before = rss_kib();
-    let expect = Expect {
-        plugin: "provider-evil",
-        error: Some("(cap 16777216)"),
-        breaker_opens: true,
-        max_call: CALL_BOUND,
-    };
+    let expect =
+        Expect { plugin: "provider-evil", error: Some("(cap 16777216)"), breaker_opens: true, max_call: CALL_BOUND };
     let attack = |index: usize| {
         let (system, path) = (probe.system.clone(), paths[index].clone());
         async move {
@@ -317,10 +324,15 @@ async fn headers_call(system: PluginSystem) -> Vec<(String, String)> {
 isolation_test!(thousands_of_injected_headers_are_cut_to_the_host_cap, async {
     let Some(probe) = load(vec![probe_entry("edge-probe", json!({ "header_count": 3_000 }))]) else { return };
     let expect = Expect { plugin: "edge-probe", error: None, breaker_opens: false, max_call: Duration::from_secs(1) };
-    prove(&probe.system, &expect, |_| headers_call(probe.system.clone()), |headers| {
-        assert!(headers.len() <= 32, "{} headers got through", headers.len());
-        MOST_HEADERS.fetch_max(headers.len(), Ordering::SeqCst);
-    })
+    prove(
+        &probe.system,
+        &expect,
+        |_| headers_call(probe.system.clone()),
+        |headers| {
+            assert!(headers.len() <= 32, "{} headers got through", headers.len());
+            MOST_HEADERS.fetch_max(headers.len(), Ordering::SeqCst);
+        },
+    )
     .await;
     assert_eq!(MOST_HEADERS.load(Ordering::SeqCst), 32, "no call showed the cap");
 });
@@ -334,9 +346,14 @@ isolation_test!(a_slow_header_plugin_never_holds_the_stream_past_the_clamp, asyn
         breaker_opens: true,
         max_call: Duration::from_millis(500),
     };
-    prove(&probe.system, &expect, |_| headers_call(probe.system.clone()), |headers| {
-        assert!(headers.is_empty(), "fail-open: no headers added, got {headers:?}");
-    })
+    prove(
+        &probe.system,
+        &expect,
+        |_| headers_call(probe.system.clone()),
+        |headers| {
+            assert!(headers.is_empty(), "fail-open: no headers added, got {headers:?}");
+        },
+    )
     .await;
     assert!(!probe.system.wants_upstream_headers(), "the tripped plugin is no longer asked");
 });
@@ -353,7 +370,11 @@ isolation_test!(a_spinning_task_ends_at_its_deadline_and_a_run_is_a_failed_run, 
     };
     let attack = |index: usize| {
         let system = probe.system.clone();
-        async move { system.run_task("task-probe-spin", ["spin-a", "spin-b", "spin-c", "spin-d"][index % 4], TaskTrigger::Manual).await }
+        async move {
+            system
+                .run_task("task-probe-spin", ["spin-a", "spin-b", "spin-c", "spin-d"][index % 4], TaskTrigger::Manual)
+                .await
+        }
     };
     prove(&probe.system, &expect, attack, |outcome| {
         let TaskOutcome::Ran(run) = outcome else { panic!("expected a run, got {outcome:?}") };
@@ -365,12 +386,8 @@ isolation_test!(a_spinning_task_ends_at_its_deadline_and_a_run_is_a_failed_run, 
 
 isolation_test!(a_spinning_rpc_method_answers_502_and_never_feeds_the_breaker, async {
     let Some(probe) = load(vec![probe_entry("rpc-spin", json!({}))]) else { return };
-    let expect = Expect {
-        plugin: "rpc-spin",
-        error: Some("deadline exceeded"),
-        breaker_opens: false,
-        max_call: CALL_BOUND,
-    };
+    let expect =
+        Expect { plugin: "rpc-spin", error: Some("deadline exceeded"), breaker_opens: false, max_call: CALL_BOUND };
     let attack = |_| {
         let system = probe.system.clone();
         async move { system.api_rpc_call("rpc-spin", "spin", b"{}", || false).await }

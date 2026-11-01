@@ -87,6 +87,7 @@ fn stage(setup: &Setup<'_>) -> Option<Staged> {
             enabled: setup.entry_enabled,
             priority: 0,
             settings: Map::new(),
+            settings_version: 1,
         }],
         ..PluginsConfig::default()
     };

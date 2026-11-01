@@ -160,7 +160,13 @@ where
 {
     for parallel in [PARALLEL, 1] {
         let round = attack_round(parallel, &attack, system).await;
-        eprintln!("DBG {} calls: {:?} sleep {:?} healthy {:?}", parallel, round.outcomes.iter().map(|(_, took)| *took).collect::<Vec<_>>(), round.worst_sleep, round.healthy);
+        eprintln!(
+            "DBG {} calls: {:?} sleep {:?} healthy {:?}",
+            parallel,
+            round.outcomes.iter().map(|(_, took)| *took).collect::<Vec<_>>(),
+            round.worst_sleep,
+            round.healthy
+        );
         for (outcome, took) in &round.outcomes {
             assert!(*took <= expect.max_call, "an attack call took {took:?}, bound {:?}", expect.max_call);
             check(outcome);
@@ -170,7 +176,10 @@ where
     }
 
     let attacked = stats(system, expect.plugin);
-    eprintln!("DBG last_error {:?} failures {} breaker {:?}", attacked.last_error, attacked.failures, attacked.breaker.state);
+    eprintln!(
+        "DBG last_error {:?} failures {} breaker {:?}",
+        attacked.last_error, attacked.failures, attacked.breaker.state
+    );
     match expect.error {
         Some(text) => {
             assert!(attacked.failures >= BREAKER_THRESHOLD, "failures: {}", attacked.failures);

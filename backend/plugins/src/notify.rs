@@ -11,7 +11,7 @@
 use crate::{
     dispatch::HookDispatcher,
     host_fns,
-    registry::LoadedPlugin,
+    registry::{LoadedPlugin, PluginState},
     runtime::{call_with_deadline, CallError},
     PluginSystem,
 };
@@ -93,6 +93,15 @@ async fn call_one(
 
 async fn deliver(dispatcher: &HookDispatcher<'_>, plugin: &str, message: PluginNotification<'_>) -> PluginDelivery {
     let Some((record, loaded)) = dispatcher.named(HOOK, plugin) else {
+        // Tripped by its circuit breaker: the outbox holds the message, so it
+        // goes out once the plugin is re-enabled or reloaded (within the
+        // outbox's own attempt budget).
+        if dispatcher.record(plugin).is_some_and(|record| record.state() == PluginState::Failed) {
+            return PluginDelivery::Retry {
+                reason: format!("plugin `{plugin}` is failed (circuit breaker open)"),
+                after: None,
+            };
+        }
         // Disabled, removed or reloaded invalid since the outbox enqueued it.
         return PluginDelivery::Permanent { reason: format!("plugin `{plugin}` is not loaded") };
     };

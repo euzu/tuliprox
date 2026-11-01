@@ -29,6 +29,9 @@ pub const DEFAULT_PLUGINS_BATCH_SIZE: u32 = 500;
 pub const MAX_PLUGINS_BATCH_SIZE: u32 = 10_000;
 /// Default for `plugins.plugins[].priority`; lower runs first.
 pub const DEFAULT_PLUGIN_PRIORITY: i32 = 100;
+/// Default for `plugins.plugins[].settings_version`, and the settings-schema
+/// `version` of a schema that declares none.
+pub const DEFAULT_PLUGIN_SETTINGS_VERSION: u32 = 1;
 
 /// Shortest and longest plugin id, the `^[a-z][a-z0-9-]{2,40}$` of the manifest.
 pub const PLUGIN_ID_LEN: std::ops::RangeInclusive<usize> = 3..=41;
@@ -42,6 +45,7 @@ fn default_stream_header_ttl() -> String { DEFAULT_PLUGINS_STREAM_HEADER_TTL.to_
 const fn default_max_instances() -> u16 { DEFAULT_PLUGINS_MAX_INSTANCES }
 const fn default_batch_size() -> u32 { DEFAULT_PLUGINS_BATCH_SIZE }
 const fn default_plugin_priority() -> i32 { DEFAULT_PLUGIN_PRIORITY }
+const fn default_settings_version() -> u32 { DEFAULT_PLUGIN_SETTINGS_VERSION }
 
 fn is_default_plugins_directory(value: &str) -> bool { value.trim().is_empty() || value == DEFAULT_PLUGINS_DIR }
 fn is_default_max_total_memory(value: &ByteSize) -> bool { value.as_str() == DEFAULT_PLUGINS_MAX_TOTAL_MEMORY }
@@ -52,6 +56,7 @@ fn is_default_stream_header_ttl(value: &str) -> bool { value == DEFAULT_PLUGINS_
 const fn is_default_max_instances(value: &u16) -> bool { *value == DEFAULT_PLUGINS_MAX_INSTANCES }
 const fn is_default_batch_size(value: &u32) -> bool { *value == DEFAULT_PLUGINS_BATCH_SIZE }
 const fn is_default_plugin_priority(value: &i32) -> bool { *value == DEFAULT_PLUGIN_PRIORITY }
+const fn is_default_settings_version(value: &u32) -> bool { *value == DEFAULT_PLUGIN_SETTINGS_VERSION }
 const fn is_true(value: &bool) -> bool { *value }
 
 /// `true` for `^[a-z][a-z0-9-]*$` whose length lies in `len`.
@@ -87,6 +92,10 @@ pub struct PluginEntryDto {
     /// `${env:VAR}` references; they are kept unresolved here.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub settings: serde_json::Map<String, serde_json::Value>,
+    /// The settings-schema `version` the stored `settings` are written for
+    /// (plan §18 *W8 seam freeze*). Absent means 1, and 1 is never written.
+    #[serde(default = "default_settings_version", skip_serializing_if = "is_default_settings_version")]
+    pub settings_version: u32,
 }
 
 impl PluginEntryDto {
@@ -97,6 +106,7 @@ impl PluginEntryDto {
             enabled: default_as_true(),
             priority: DEFAULT_PLUGIN_PRIORITY,
             settings: serde_json::Map::new(),
+            settings_version: DEFAULT_PLUGIN_SETTINGS_VERSION,
         }
     }
 }

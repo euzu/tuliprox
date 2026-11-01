@@ -386,16 +386,16 @@ mod tests {
 
     #[test]
     fn two_plugin_tools_with_one_name_are_both_dropped() {
-        // `foo-bar` + `baz` and `foo` + `bar-baz` both read `plugin_foo_bar_baz`.
+        // `sun-moon` + `c` and `sun` + `moon-c` both read `plugin_sun_moon_c`.
         let one_export =
             |method: &str| format!("    - {{ name: {method}, kind: read, mcp: true, input_schema: rpc/ping.json }}\n");
-        let first = staged("foo-bar", &one_export("baz"), Some(OBJECT_SCHEMA));
-        let second = staged("foo", &one_export("bar-baz"), Some(OBJECT_SCHEMA));
+        let first = staged("sun-moon", &one_export("c"), Some(OBJECT_SCHEMA));
+        let second = staged("sun", &one_export("moon-c"), Some(OBJECT_SCHEMA));
         let third = staged("other", &one_export("ping"), Some(OBJECT_SCHEMA));
         let tools = derive_tools(
             [
-                candidate("foo-bar", &first, PluginState::Enabled, true),
-                candidate("foo", &second, PluginState::Enabled, true),
+                candidate("sun-moon", &first, PluginState::Enabled, true),
+                candidate("sun", &second, PluginState::Enabled, true),
                 candidate("other", &third, PluginState::Enabled, true),
             ],
             &[],

@@ -458,6 +458,7 @@ impl InputWorker {
                 db_handles.remove(&XtreamCluster::Live);
 
                 match update_live_stream_metadata(
+                    &ctx.events,
                     &ctx.app_config,
                     client,
                     input,

@@ -17,7 +17,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/reqwest ./vendor/reqwest/
 COPY shared ./shared/
-COPY plugin-api ./plugin-api/
+COPY plugins/plugin-api ./plugins/plugin-api/
+COPY plugins/plugin-sdk ./plugins/plugin-sdk/
+COPY plugins/plugin-sdk-macros ./plugins/plugin-sdk-macros/
 COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
 COPY backend/app/Cargo.toml backend/app/build.rs ./backend/app/
 COPY backend/auth/Cargo.toml ./backend/auth/

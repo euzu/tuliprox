@@ -28,7 +28,7 @@ use std::{
     },
     time::Duration,
 };
-use tuliprox_core::{model::PluginsConfig, utils::Clock};
+use tuliprox_core::model::PluginsConfig;
 use tuliprox_plugin_api::bindings::exports::tuliprox::plugin::stream_hooks::UpstreamRequest;
 
 /// The hard clamp of the whole injection step (plan §9).
@@ -233,7 +233,7 @@ async fn inject_all<'a>(
             target_id: request.target_id,
             virtual_id: request.virtual_id,
         };
-        let cached = cache.get(&key, system.shared().clock.now_ms().get());
+        let cached = cache.get(&key, system.shared().clock.wall_ms().get());
         let injected = if let Some(hit) = cached {
             hit
         } else {
@@ -244,7 +244,7 @@ async fn inject_all<'a>(
                 Ok(raw) => {
                     plugin.report(Ok(()));
                     let screened: Arc<[(String, String)]> = screen(&plugin.id, raw).into();
-                    cache.insert(key, Arc::clone(&screened), system.shared().clock.now_ms().get());
+                    cache.insert(key, Arc::clone(&screened), system.shared().clock.wall_ms().get());
                     screened
                 }
                 Err(err) => {
@@ -285,7 +285,7 @@ impl PluginHeaderInjector for PluginSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuliprox_core::utils::ManualClock;
+    use tuliprox_core::utils::{Clock, ManualClock};
 
     fn key(plugin: &str, user: &str, target_id: u16, virtual_id: u32) -> CacheKey {
         CacheKey { plugin: Arc::from(plugin), user: user.to_string(), target_id, virtual_id }

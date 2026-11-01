@@ -189,8 +189,9 @@ inputs:
     options:
       # Attempts to resolve missing TMDB IDs and Release Date via TMDB API based on title
       resolve_tmdb: true
-      # Probes stream if video/audio info is missing in provider data
-      probe_stream: true
+      # Probes movies and series episodes if video/audio info is missing in provider data
+      probe_vod: true
+      probe_series: true
 ```
 
 **Target Config (`source.yml`):**

@@ -1,6 +1,6 @@
 [workspace]
-members = ["backend/*", "frontend", "plugin-api", "shared", "tools/tuliprox-testkit"]
-exclude = ["vendor/reqwest"]
+members = ["backend/*", "frontend", "plugins/plugin-api", "plugins/plugin-sdk", "plugins/plugin-sdk-macros", "shared", "tools/tuliprox-testkit"]
+exclude = ["vendor/reqwest", "plugins/examples"]
 resolver = "2"
 
 [patch.crates-io]
@@ -40,7 +40,7 @@ tuliprox-metadata = { version = "3", path = "backend/metadata" }
 tuliprox-messaging = { version = "3", path = "backend/messaging" }
 tuliprox-processing = { version = "3", path = "backend/processing" }
 tuliprox-plugins = { version = "3", path = "backend/plugins" }
-tuliprox-plugin-api = { version = "3", path = "plugin-api" }
+tuliprox-plugin-api = { version = "3", path = "plugins/plugin-api" }
 # Plugin runtime (W0 spike): default features off. `wasmtime-wasi-http` must not
 # enable `default-send-request`, which pulls ring + webpki-roots and calls
 # `rustls::ClientConfig::builder()` - a runtime panic with both ring and

@@ -66,8 +66,11 @@ pub fn plugin_route(plugin_id: &str, element: &str) -> String { format!("{PLUGIN
 /// Whether a location hash addresses a plugin page.
 pub fn is_plugin_route(hash: &str) -> bool { hash.starts_with(PLUGIN_ROUTE_PREFIX) }
 
-/// The id of the plugin a config tab id (`plugin:{id}`) belongs to.
-pub fn plugin_id_of_tab(tab_id: &str) -> Option<&str> { tab_id.strip_prefix(CONFIG_TAB_PREFIX) }
+/// The id of the plugin a config tab id (`plugin:{id}`, or `plugin:{id}:{n}` for
+/// its `n`-th `config-tab` contribution) belongs to.
+pub fn plugin_id_of_tab(tab_id: &str) -> Option<&str> {
+    tab_id.strip_prefix(CONFIG_TAB_PREFIX).map(|rest| rest.split(':').next().unwrap_or(rest))
+}
 
 /// One contribution of a plugin.
 #[derive(Clone, PartialEq)]
@@ -94,10 +97,13 @@ pub struct PluginMenuEntry {
 #[derive(Clone, PartialEq)]
 pub struct PluginConfigTab {
     pub plugin: Rc<PluginUiDto>,
-    /// `plugin:{plugin_id}`
+    /// `plugin:{plugin_id}`, or `plugin:{plugin_id}:{n}` for a contribution.
     pub id: String,
     pub title: String,
     pub icon: String,
+    /// `None`: the plugin's `ui.config_tab`. `Some`: the frame of a `config-tab`
+    /// contribution.
+    pub element: Option<String>,
 }
 
 /// The icon a contribution asks for if the app has it. A plugin-supplied name
@@ -177,28 +183,34 @@ impl PluginUiContext {
             .collect()
     }
 
-    /// The plugin tabs of the config page: `ui.config_tab`, or a `config-tab` contribution.
+    /// The plugin tabs of the config page: a plugin's `ui.config_tab` first,
+    /// then one tab per `config-tab` contribution, in manifest order.
     pub fn config_tabs(&self, icons: &Icons) -> Vec<PluginConfigTab> {
-        self.plugins
-            .iter()
-            .filter_map(|plugin| {
-                let strings = self.strings_for(&plugin.id);
-                let (title, icon) = if let Some(tab) = plugin.config_tab.as_ref() {
-                    let title =
-                        title_or_key(&strings, tab.title.as_deref().unwrap_or(&plugin.name), tab.title_key.as_deref());
-                    (title, tab.icon.clone())
-                } else {
-                    let entry = plugin.contributions.iter().find(|c| c.slot == PluginSlotDto::ConfigTab)?;
-                    (contribution_title(&strings, entry), entry.icon.clone())
-                };
-                Some(PluginConfigTab {
+        let mut tabs = Vec::new();
+        for plugin in self.plugins.iter() {
+            let strings = self.strings_for(&plugin.id);
+            if let Some(tab) = plugin.config_tab.as_ref() {
+                let title =
+                    title_or_key(&strings, tab.title.as_deref().unwrap_or(&plugin.name), tab.title_key.as_deref());
+                tabs.push(PluginConfigTab {
                     plugin: Rc::clone(plugin),
                     id: format!("{CONFIG_TAB_PREFIX}{}", plugin.id),
                     title,
-                    icon: resolve_icon(icons, icon.as_deref()),
-                })
-            })
-            .collect()
+                    icon: resolve_icon(icons, tab.icon.as_deref()),
+                    element: None,
+                });
+            }
+            for (n, entry) in plugin.contributions.iter().filter(|c| c.slot == PluginSlotDto::ConfigTab).enumerate() {
+                tabs.push(PluginConfigTab {
+                    plugin: Rc::clone(plugin),
+                    id: format!("{CONFIG_TAB_PREFIX}{}:{n}", plugin.id),
+                    title: contribution_title(&strings, entry),
+                    icon: resolve_icon(icons, entry.icon.as_deref()),
+                    element: Some(entry.element.clone()),
+                });
+            }
+        }
+        tabs
     }
 }
 
@@ -419,15 +431,21 @@ pub struct PluginActionRequest {
     pub plugin: Rc<PluginUiDto>,
     pub element: String,
     pub title: String,
+    /// The slot the contribution belongs to; the dialog frames it as that slot.
+    pub slot: PluginSlotDto,
 }
 
 #[derive(Properties, PartialEq)]
 pub struct PluginActionMenuProps {
     pub onselect: Callback<PluginActionRequest>,
+    /// `playlist-explorer-action`, or `channel-detail-panel` for live and VOD
+    /// channels, which have no detail view of their own.
+    #[prop_or(PluginSlotDto::PlaylistExplorerAction)]
+    pub slot: PluginSlotDto,
 }
 
-/// The `playlist-explorer-action` contributions as entries of the explorer's
-/// popup menu. A plugin that is not enabled shows greyed out and says why.
+/// The contributions of `props.slot` as entries of the explorer's popup menu.
+/// A plugin that is not enabled shows greyed out and says why.
 #[component]
 pub fn PluginActionMenuItems(props: &PluginActionMenuProps) -> Html {
     let ui = use_plugin_ui();
@@ -435,7 +453,8 @@ pub fn PluginActionMenuItems(props: &PluginActionMenuProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let Some(ui) = ui else { return html! {} };
-    let entries = ui.contributions(PluginSlotDto::PlaylistExplorerAction);
+    let slot = props.slot;
+    let entries = ui.contributions(slot);
     html! {
         <>
             { for entries.iter().map(|entry| {
@@ -446,6 +465,7 @@ pub fn PluginActionMenuItems(props: &PluginActionMenuProps) -> Html {
                         plugin: Rc::clone(&entry.plugin),
                         element: entry.contribution().element.clone(),
                         title: title.clone(),
+                        slot,
                     };
                     let onselect = props.onselect.clone();
                     let toastr = Rc::clone(&services.toastr);
@@ -480,7 +500,8 @@ pub struct PluginActionDialogProps {
     pub on_close: Callback<()>,
 }
 
-/// The dialog an explorer action opens: the plugin frame with the selected channels.
+/// The dialog an explorer menu entry opens: the plugin frame, as the slot of
+/// the entry, with the selected channel(s).
 #[component]
 pub fn PluginActionDialog(props: &PluginActionDialogProps) -> Html {
     let request = &props.request;
@@ -493,7 +514,7 @@ pub fn PluginActionDialog(props: &PluginActionDialogProps) -> Html {
             <PluginFrame
                 plugin={Rc::clone(&request.plugin)}
                 element={request.element.clone()}
-                slot={PluginSlotDto::PlaylistExplorerAction}
+                slot={request.slot}
                 context={props.context.clone()}
             />
         </div>
@@ -672,6 +693,7 @@ mod tests {
         assert!(!is_plugin_route("dashboard"));
         assert!(!is_plugin_route("plugins"));
         assert_eq!(plugin_id_of_tab("plugin:sports"), Some("sports"));
+        assert_eq!(plugin_id_of_tab("plugin:sports:1"), Some("sports"));
         assert_eq!(plugin_id_of_tab("main"), None);
     }
 
@@ -691,7 +713,7 @@ mod tests {
         let ctx = context(vec![Rc::new(with_tab), with_contribution, none], &[]);
         let tabs = ctx.config_tabs(&Icons::new());
         let ids: Vec<_> = tabs.iter().map(|tab| (tab.id.as_str(), tab.title.as_str())).collect();
-        assert_eq!(ids, [("plugin:a", "A tab"), ("plugin:b", "ui/b-tab.html title")]);
+        assert_eq!(ids, [("plugin:a", "A tab"), ("plugin:b:0", "ui/b-tab.html title")]);
         assert!(tabs.iter().all(|tab| tab.icon == FALLBACK_ICON));
     }
 

@@ -106,6 +106,9 @@ impl<'a> HookDispatcher<'a> {
         self.runnable(hook).find(|(plugin, _)| &*plugin.id == id)
     }
 
+    /// The plugin `id` in this snapshot, whatever its state.
+    pub(crate) fn record(&self, id: &str) -> Option<&Arc<PluginRecord>> { self.snapshot.get(id) }
+
     /// The combined fingerprint of the plugins that run `hook`: the single
     /// plugin's digest, or a digest over every (id, digest) in run order.
     pub(crate) fn fingerprint(&self, hook: PluginHook) -> Option<String> {

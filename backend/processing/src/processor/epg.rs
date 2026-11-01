@@ -102,8 +102,19 @@ pub struct EpgHookState {
     /// Keep the guide channels that matched a playlist name ambiguously, so a
     /// `match-channel` plugin can still pick one of them in the second pass.
     pub(crate) keep_match_candidates: bool,
+    /// One playlist item per normalized name, for the early `match-channel` pass
+    /// the parser runs over each guide's channel list (filled only when a
+    /// `match-channel` plugin runs).
+    pub(crate) match_items: HashMap<Arc<str>, PlaylistItem>,
     /// What `on-epg-loaded` / `transform-programmes` did, collected by the parser.
     pub(crate) report: PluginRunReport,
+}
+
+/// One guide channel as the early `match-channel` pass sees it: its id and its
+/// display names, as the guide spells them.
+pub(crate) struct EarlyGuideChannel<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) names: Vec<&'a str>,
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +139,11 @@ pub struct EpgIdCache {
     match_candidates: HashMap<Arc<str>, HashMap<Arc<str>, RankedEpgMatch>>,
     match_requirements: HashMap<Arc<str>, MatchRequirement>,
     guide_names: HashMap<Arc<str>, HashSet<Arc<str>>>,
+    /// Early `match-channel` answers (normalized name -> guide id), used by
+    /// [`Self::finalize_matches`] when the built-in matcher has no winner.
+    plugin_picks: HashMap<Arc<str>, Arc<str>>,
+    /// Names already asked in the early pass (once per input, over all sources).
+    early_asked: HashSet<Arc<str>>,
     pub processed: HashSet<Arc<str>>,
     pub smart_match_config: EpgSmartMatchConfig,
     pub metaphone: DoubleMetaphone,
@@ -163,6 +179,8 @@ impl EpgIdCache {
             match_candidates: HashMap::new(),
             match_requirements: HashMap::new(),
             guide_names: HashMap::new(),
+            plugin_picks: HashMap::new(),
+            early_asked: HashSet::new(),
             processed: HashSet::new(),
             metaphone: DoubleMetaphone::default(),
             smart_match_enabled: normalize_config.enabled,
@@ -249,6 +267,7 @@ impl EpgIdCache {
         let mut fuzzy = 0usize;
         let mut ambiguous = 0usize;
         let mut unavailable = 0usize;
+        let mut plugin = 0usize;
         for (key, entry) in &mut self.normalized {
             let candidates = self.match_candidates.get(key);
             let available_count = candidates.map_or(0, |candidates| {
@@ -267,6 +286,18 @@ impl EpgIdCache {
                     SmartMatchKind::Exact => exact += 1,
                     SmartMatchKind::Fuzzy => fuzzy += 1,
                 }
+            } else if let Some(pick) = self
+                .plugin_picks
+                .get(key)
+                .filter(|pick| with_folded_epg_id(pick, |folded| available_epg_ids.contains(folded)))
+            {
+                // No built-in winner, and an early `match-channel` answer that kept programmes.
+                entry.replace(Arc::clone(pick));
+                self.match_ranks.insert(
+                    Arc::clone(key),
+                    SmartMatchRank { kind: SmartMatchKind::Fuzzy, score: 0, source_priority: 0, source_order: 0 },
+                );
+                plugin += 1;
             } else {
                 entry.take();
                 if available_count > 0 {
@@ -276,7 +307,9 @@ impl EpgIdCache {
                 }
             }
         }
-        debug!("Smart EPG candidates: exact={exact}, fuzzy={fuzzy}, ambiguous={ambiguous}, unavailable={unavailable}");
+        debug!(
+            "Smart EPG candidates: exact={exact}, fuzzy={fuzzy}, plugin={plugin}, ambiguous={ambiguous}, unavailable={unavailable}"
+        );
     }
 
     /// Normalizes a channel name, computes its phonetic encoding, and stores both in the cache for later EPG matching.
@@ -629,6 +662,138 @@ impl EpgIdCache {
     fn match_key(&self, name: &str) -> Option<Arc<str>> {
         let key = self.normalize(name).intern();
         (!key.is_empty()).then_some(key)
+    }
+
+    /// Remember one playlist item per normalized name for the early
+    /// `match-channel` pass: the first live channel with that name that has no
+    /// guide id of its own. A channel whose own id turns out stale is still
+    /// offered by the second pass, after the guides are parsed.
+    pub(crate) fn collect_match_items(&mut self, fp: &mut FetchedPlaylist<'_>) {
+        for item in fp.items() {
+            if item.header.xtream_cluster != XtreamCluster::Live || !item.header.item_type.is_live() {
+                continue;
+            }
+            if item.header.epg_channel_id.as_deref().is_some_and(|id| !id.is_empty()) {
+                continue;
+            }
+            if let Some(key) = self.match_key(&item.header.name) {
+                if self.normalized.contains_key(&key) && !self.hooks.match_items.contains_key(&key) {
+                    self.hooks.match_items.insert(key, item.into_owned());
+                }
+            }
+        }
+    }
+
+    /// The names the early `match-channel` pass asks about now: names the
+    /// built-in matcher has no unambiguous candidate for yet, that have a sample
+    /// item and were not asked before, in name order.
+    pub(crate) fn early_match_keys(&self) -> Vec<Arc<str>> {
+        let mut keys: Vec<Arc<str>> = self
+            .hooks
+            .match_items
+            .keys()
+            .filter(|key| !self.early_asked.contains(*key) && !self.plugin_picks.contains_key(*key))
+            .filter(|key| {
+                self.match_candidates
+                    .get(*key)
+                    .is_none_or(|candidates| best_ranked_match(candidates.values()).is_none())
+            })
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Per key, the indexes into `guide` of the top-[`MATCH_SHORTLIST_LEN`] guide
+    /// channels by name similarity, best first. Only channels sharing a
+    /// phonetic, three-letter-prefix or country-less-core bucket with the key are
+    /// scored, and each must pass the country and digit gates of
+    /// [`Self::plugin_match_rank`], so the cost stays bounded by the buckets.
+    pub(crate) fn early_shortlists(&self, keys: &[Arc<str>], guide: &[EarlyGuideChannel<'_>]) -> Vec<Vec<usize>> {
+        let normalized: Vec<Vec<Arc<str>>> = guide
+            .iter()
+            .map(|channel| {
+                let mut names: Vec<Arc<str>> = std::iter::once(channel.id)
+                    .chain(channel.names.iter().copied())
+                    .map(|name| self.normalize(name).intern())
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                names.sort();
+                names.dedup();
+                names
+            })
+            .collect();
+        let mut phonetics: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
+        let mut prefixes: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut cores: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
+        for (at, names) in normalized.iter().enumerate() {
+            for name in names {
+                phonetics.entry(self.phonetic(name)).or_default().push(at);
+                if let Some(prefix) = candidate_prefix(name) {
+                    prefixes.entry(prefix).or_default().push(at);
+                }
+                let (core, _) = self.split_country(name);
+                cores.entry(core.intern()).or_default().push(at);
+            }
+        }
+        keys.iter()
+            .map(|key| {
+                let mut bucket: Vec<usize> = Vec::new();
+                bucket.extend(phonetics.get(&self.phonetic(key)).into_iter().flatten().take(MATCH_BUCKET_SCAN));
+                bucket.extend(
+                    candidate_prefix(key)
+                        .and_then(|prefix| prefixes.get(&prefix))
+                        .into_iter()
+                        .flatten()
+                        .take(MATCH_BUCKET_SCAN),
+                );
+                let (core, _) = self.split_country(key);
+                bucket.extend(cores.get(core).into_iter().flatten().take(MATCH_BUCKET_SCAN));
+                bucket.sort_unstable();
+                bucket.dedup();
+                let (playlist_core, playlist_country) = self.split_country(key);
+                let mut scored: Vec<(u16, usize)> = bucket
+                    .into_iter()
+                    .filter_map(|at| {
+                        normalized[at]
+                            .iter()
+                            .filter_map(|guide_name| {
+                                let (guide_core, guide_country) = self.split_country(guide_name);
+                                (countries_compatible(playlist_country, guide_country)
+                                    && numeric_signature_matches(playlist_core, guide_core))
+                                .then(|| similarity_score(playlist_core, guide_core))
+                            })
+                            .max()
+                            .filter(|score| *score > 0)
+                            .map(|score| (score, at))
+                    })
+                    .collect();
+                scored
+                    .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| guide[left.1].id.cmp(guide[right.1].id)));
+                scored.into_iter().take(MATCH_SHORTLIST_LEN).map(|(_, at)| at).collect()
+            })
+            .collect()
+    }
+
+    /// Record that `keys` were asked in the early pass.
+    pub(crate) fn mark_early_asked(&mut self, keys: &[Arc<str>]) { self.early_asked.extend(keys.iter().cloned()); }
+
+    /// Record an early `match-channel` answer, after it passed the same country
+    /// and digit gates as [`Self::plugin_match_rank`] against the guide's own
+    /// names. `false` when it did not.
+    pub(crate) fn record_early_pick(&mut self, key: &Arc<str>, channel: &EarlyGuideChannel<'_>) -> bool {
+        let (playlist_core, playlist_country) = self.split_country(key);
+        let passes = std::iter::once(channel.id).chain(channel.names.iter().copied()).any(|name| {
+            let normalized = self.normalize(name);
+            let (guide_core, guide_country) = self.split_country(&normalized);
+            countries_compatible(playlist_country, guide_country)
+                && numeric_signature_matches(playlist_core, guide_core)
+        });
+        if passes {
+            self.register_guide_names(channel.id, channel.names.iter().copied());
+            self.plugin_picks.insert(Arc::clone(key), channel.id.intern());
+        }
+        passes
     }
 
     /// Top-`limit` guide channels a `match-channel` plugin may pick for the
@@ -1023,7 +1188,8 @@ async fn resolve_unresolved_with_plugins<P: PluginHost>(
                 continue;
             };
             key_at.insert(at, Arc::clone(&key));
-            if !seen.insert(Arc::clone(&key)) {
+            // Asked in the early pass over the guide's channel list already.
+            if id_cache.early_asked.contains(&key) || !seen.insert(Arc::clone(&key)) {
                 continue;
             }
             let shortlist = id_cache.match_shortlist(&key, guide_channels, MATCH_SHORTLIST_LEN);
@@ -1177,6 +1343,9 @@ async fn assign_channel_epg<P: PluginHost>(
     let match_hook =
         options.plugin_hooks && id_cache.smart_match_enabled && plugins.wants(PluginHook::MatchChannel, "");
     id_cache.hooks.keep_match_candidates = match_hook;
+    if match_hook {
+        id_cache.collect_match_items(fp);
+    }
     let Some(tv_guide) = &fp.epg else {
         return;
     };
@@ -1649,6 +1818,33 @@ mod tests {
         assert!(selected.contains(&valid_id));
         assert!(selected.contains("france2.fr"));
         assert!(!selected.contains("tf1.unused"));
+    }
+
+    #[test]
+    fn early_match_offers_guide_channels_by_their_own_names_and_finalizes_a_kept_pick() {
+        let mut cache = smart_cache(80, 95);
+        cache.normalize_and_store("BBC Too", None);
+        let key = cache.match_key("BBC Too").expect("key");
+        cache.hooks.match_items.insert(Arc::clone(&key), PlaylistItem { header: PlaylistItemHeader::default() });
+        assert_eq!(cache.early_match_keys(), vec![Arc::clone(&key)], "no built-in candidate yet");
+
+        // No playlist channel keeps `bbc.two`: the shortlist comes from the guide's own names.
+        let guide = [
+            super::EarlyGuideChannel { id: "sky.news", names: vec!["Sky News"] },
+            super::EarlyGuideChannel { id: "bbc.two", names: vec!["BBC Two"] },
+        ];
+        let shortlists = cache.early_shortlists(std::slice::from_ref(&key), &guide);
+        assert_eq!(shortlists[0].first(), Some(&1), "bbc.two is the best candidate");
+        assert!(!shortlists[0].contains(&0), "sky.news shares no bucket with the name");
+
+        assert!(cache.record_early_pick(&key, &guide[1]));
+        cache.mark_early_asked(std::slice::from_ref(&key));
+        assert!(cache.early_match_keys().is_empty(), "asked once");
+
+        cache.finalize_matches(&HashSet::from(["bbc.two".intern()]));
+        assert_eq!(cache.normalized.get(&key).cloned().flatten().as_deref(), Some("bbc.two"));
+        cache.finalize_matches(&HashSet::new());
+        assert_eq!(cache.normalized.get(&key).cloned().flatten(), None, "a pick without programmes is dropped");
     }
 
     #[test]

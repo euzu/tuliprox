@@ -13,13 +13,17 @@ use crate::{
 };
 use shared::model::{PluginApproveDto, PluginRpcKindDto, PluginSlotDto, PluginUploadReviewDto};
 use web_sys::{File, HtmlInputElement};
-use yew::{component, html, platform::spawn_local, use_state, Callback, Event, Html, Properties, TargetCast};
+use yew::{classes, component, html, platform::spawn_local, use_state, Callback, Event, Html, Properties, TargetCast};
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct PluginUploadProps {
     pub on_close: Callback<()>,
     /// Called after a plugin was approved and installed, so the list can refresh.
     pub on_installed: Callback<()>,
+    /// The review of an update already waiting in staging: the dialog opens on it
+    /// instead of on the file picker.
+    #[prop_or_default]
+    pub initial_review: Option<PluginUploadReviewDto>,
 }
 
 /// The `network` capability needs a warning of its own.
@@ -40,6 +44,12 @@ fn slot_name(slot: PluginSlotDto) -> String {
     serde_json::to_value(slot).ok().and_then(|name| name.as_str().map(ToString::to_string)).unwrap_or_default()
 }
 
+/// Whether an update review marks capability `name` as new: the installed
+/// approval does not cover it.
+fn is_added_capability(review: &PluginUploadReviewDto, name: &str) -> bool {
+    review.capability_diff.as_ref().is_some_and(|diff| diff.added.iter().any(|added| added == name))
+}
+
 fn render_capabilities(translate: &YewI18n, review: &PluginUploadReviewDto) -> Html {
     html! {
         <section class="tp__plugin-upload__section">
@@ -48,14 +58,43 @@ fn render_capabilities(translate: &YewI18n, review: &PluginUploadReviewDto) -> H
                 <p class="tp__plugins__muted">{ translate.t("LABEL.PLUGIN_NO_CAPABILITIES") }</p>
             } else {
                 <ul class="tp__plugin-upload__capabilities">
-                    { for review.capabilities.iter().map(|capability| html! {
-                        <li key={capability.name.clone()}>
-                            <strong>{ capability.name.clone() }</strong>{ ": " }{ capability.description.clone() }
-                        </li>
+                    { for review.capabilities.iter().map(|capability| {
+                        let added = is_added_capability(review, &capability.name);
+                        html! {
+                            <li key={capability.name.clone()}
+                                class={classes!(added.then_some("tp__plugin-upload__capability--added"))}>
+                                if added {
+                                    <span class="tp__plugin-upload__badge">
+                                        { translate.t("LABEL.PLUGIN_CAPABILITY_ADDED") }
+                                    </span>{ " " }
+                                }
+                                <strong>{ capability.name.clone() }</strong>{ ": " }{ capability.description.clone() }
+                            </li>
+                        }
                     }) }
                 </ul>
             }
         </section>
+    }
+}
+
+/// What an update changes in the approval besides the added capabilities:
+/// the ones no longer asked for, and that MCP exposure starts off again.
+fn render_capability_diff(translate: &YewI18n, review: &PluginUploadReviewDto) -> Html {
+    let Some(diff) = review.capability_diff.as_ref() else {
+        return html! {};
+    };
+    html! {
+        <>
+            if !diff.removed.is_empty() {
+                <p class="tp__plugin-upload__removed">
+                    { format!("{}: {}", translate.t("LABEL.PLUGIN_CAPABILITIES_REMOVED"), diff.removed.join(", ")) }
+                </p>
+            }
+            if diff.mcp_was_approved {
+                <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_UPDATE_MCP_RESET") }</p>
+            }
+        </>
     }
 }
 
@@ -149,6 +188,7 @@ fn render_review(
                 <p class="tp__plugin-upload__replaces">
                     { format!("{} {replaces}", translate.t("LABEL.PLUGIN_REPLACES")) }
                 </p>
+                <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_UPDATE_KEEPS_PRIOR") }</p>
             }
             if let Some(description) = review.description.as_ref() {
                 <p class="tp__plugins__description">{ description.clone() }</p>
@@ -164,6 +204,7 @@ fn render_review(
             </p>
             { render_network_warning(translate, review) }
             { render_capabilities(translate, review) }
+            { render_capability_diff(translate, review) }
             { render_custom_ui(translate, review) }
             { render_rpc_exports(translate, review) }
             if !review.secrets.is_empty() {
@@ -208,7 +249,7 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
     let services = use_service_context();
 
     let file = use_state(|| None::<File>);
-    let review = use_state(|| None::<PluginUploadReviewDto>);
+    let review = use_state(|| props.initial_review.clone());
     let busy = use_state(|| false);
     let error = use_state(|| None::<PluginActionError>);
     let expose_mcp = use_state(|| false);
@@ -384,7 +425,7 @@ pub fn PluginUpload(props: &PluginUploadProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::PluginCapabilityReviewDto;
+    use shared::model::{PluginCapabilityDiffDto, PluginCapabilityReviewDto};
 
     fn review(capabilities: &[&str], mcp_requested: bool) -> PluginUploadReviewDto {
         PluginUploadReviewDto {
@@ -409,6 +450,7 @@ mod tests {
             rpc_exports: Vec::new(),
             mcp_requested,
             replaces: None,
+            capability_diff: None,
             warnings: Vec::new(),
         }
     }
@@ -432,6 +474,33 @@ mod tests {
         let mut ui_only = review(&[], false);
         ui_only.wasm_sha256 = None;
         assert_eq!(approve_body(&ui_only, false).wasm_sha256, None);
+    }
+
+    #[test]
+    fn only_capabilities_in_the_diff_are_marked_added() {
+        let mut update = review(&["network", "storage"], false);
+        assert!(!is_added_capability(&update, "network"), "a fresh install marks nothing");
+        update.capability_diff = Some(PluginCapabilityDiffDto {
+            added: vec!["network".to_string()],
+            removed: Vec::new(),
+            unchanged: vec!["storage".to_string()],
+            mcp_was_approved: false,
+        });
+        assert!(is_added_capability(&update, "network"));
+        assert!(!is_added_capability(&update, "storage"));
+    }
+
+    #[test]
+    fn an_update_still_echoes_every_capability_not_just_the_added_ones() {
+        let mut update = review(&["network", "storage"], false);
+        update.capability_diff = Some(PluginCapabilityDiffDto {
+            added: vec!["network".to_string()],
+            removed: Vec::new(),
+            unchanged: vec!["storage".to_string()],
+            mcp_was_approved: true,
+        });
+        assert_eq!(approve_body(&update, false).capabilities, ["network", "storage"]);
+        assert!(!approve_body(&update, false).mcp, "the earlier MCP approval is not carried over");
     }
 
     #[test]

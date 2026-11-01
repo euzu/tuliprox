@@ -573,6 +573,9 @@ pub fn PluginConfigSections() -> Html {
 #[derive(Properties, PartialEq)]
 pub struct PluginConfigTabProps {
     pub plugin: Rc<PluginUiDto>,
+    /// The frame of a `config-tab` contribution; `None` renders `ui.config_tab`.
+    #[prop_or_default]
+    pub element: Option<String>,
 }
 
 /// The content of a plugin tab: its schema form, or its frame.
@@ -585,6 +588,9 @@ pub fn PluginConfigTab(props: &PluginConfigTabProps) -> Html {
     let Some(ui) = ui else { return html! {} };
     if !plugin_available(plugin) {
         return html! { <PluginUnavailable plugin={Rc::clone(plugin)} title={String::new()} /> };
+    }
+    if let Some(element) = props.element.clone() {
+        return html! { <PluginFrame plugin={Rc::clone(plugin)} element={element} slot={PluginSlotDto::ConfigTab} /> };
     }
     let strings = ui.strings_for(&plugin.id);
     let tab = plugin.config_tab.as_ref();
@@ -616,13 +622,7 @@ pub fn PluginConfigTab(props: &PluginConfigTabProps) -> Html {
             </div>
         };
     }
-    let element = tab.and_then(|tab| tab.element.clone()).or_else(|| {
-        plugin
-            .contributions
-            .iter()
-            .find(|contribution| contribution.slot == PluginSlotDto::ConfigTab)
-            .map(|contribution| contribution.element.clone())
-    });
+    let element = tab.and_then(|tab| tab.element.clone());
     element.map_or_else(Html::default, |element| {
         html! {
             <PluginFrame plugin={Rc::clone(plugin)} element={element} slot={PluginSlotDto::ConfigTab} />

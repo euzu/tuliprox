@@ -1,7 +1,8 @@
 # Tuliprox Plugin System — Architecture
 
-> Status: **Proposal / Draft — revision 4.1** (verified against `develop` at
-> v3.3.170, `a8653d09`, 2026-10-30). Nothing plugin-specific is implemented.
+> Status: **Proposal / Draft — revision 4.3** (verified against `develop` at
+> v3.3.170, `a8653d09`, 2026-10-30). W1–W7 implementation is complete; W8–W10
+> remain planned (see the companion phases document).
 > Target: WebAssembly (WASI 0.2 Component Model) plugin system with backend processing
 > hooks (playlist, EPG, channel↔EPG matching, VOD metadata enrichment, lifecycle
 > events, custom input providers, notification providers) and frontend UI extension
@@ -11,7 +12,7 @@
 
 ## Document map
 
-The plan is split into three files (rev 4.1). **Section numbers are global**:
+The plan is split into three files (rev 4.3). **Section numbers are global**:
 `§16` always means the phases, wherever it is referenced from.
 
 | File | Holds | Read it when |
@@ -92,7 +93,9 @@ history, so an agent reading it gets only the current design.
 
 ### Non-Goals (v1)
 
-- No plugin marketplace / remote registry (install is file upload or directory drop).
+- No plugin marketplace / remote registry in the initial plugin-system release
+  (install is file upload or directory drop). A repository-based marketplace is
+  planned after Phase 8 in Phases 9–10.
 - No plugin-to-plugin communication.
 - No synchronous hooks inside the streaming/proxying data path. Stream
   start/stop are exposed only as **async fire-and-forget events** on a queue —
@@ -101,6 +104,23 @@ history, so an agent reading it gets only the current design.
   (never per-chunk) under a hard 50 ms clamp with a TTL cache and fail-open
   semantics.
 - No native (`.so`/`.dylib`) plugins — WASM only.
+
+### Post-v1 marketplace direction
+
+The marketplace is a separate management feature; it does not change the frozen
+plugin ABI. Each configured source points directly to the HTTPS/raw URL of a
+root-level `marketplace.json` in that repository. The catalog lists plugin
+metadata and releases, including package URLs and host/API compatibility; it
+does not contain package checksums or signatures. Configured repositories are
+trusted by the administrator. The UI and config file manage the same repository
+settings.
+
+Marketplace installs reuse package validation, capability review and approval.
+The host computes and records its own installed `plugin.wasm` hash at approval;
+this detects later on-disk changes, not publisher identity. Repository removal
+does not uninstall plugins. Boot-time auto-update is a separate, default-off
+option and must preserve the current plugin if an update cannot be validated or
+activated. See §16, Phases 9–10.
 
 ---
 
@@ -364,12 +384,12 @@ and at load (§18 *W6b seam freeze*).
 
 ## 5. The Hook Contract (WIT)
 
-A new workspace crate `plugin-api/` owns the WIT package. It is the single
+A new workspace crate `plugins/plugin-api/` owns the WIT package. It is the single
 source of truth; both host bindings (backend) and guest bindings (SDK) are
 generated from it.
 
 > **Frozen W2 (2026-10-30), ABI `1.0.0`.** The block below is a copy of
-> [`plugin-api/wit/tuliprox-plugin.wit`](plugin-api/wit/tuliprox-plugin.wit),
+> [`plugins/plugin-api/wit/tuliprox-plugin.wit`](plugins/plugin-api/wit/tuliprox-plugin.wit),
 > which wins on any difference. §18 *W2 full freeze* lists every change
 > against the rev 4 draft.
 
@@ -781,8 +801,8 @@ world enricher-plugin {
 ```
 
 **How the host loads any of these.** The host does not bind against one world.
-`plugin-api` generates ONE set of host bindings over a host-only union world
-(`tuliprox:host/union`, defined inline in `plugin-api/src/lib.rs` and never
+`plugins/plugin-api` generates ONE set of host bindings over a host-only union world
+(`tuliprox:host/union`, defined inline in `plugins/plugin-api/src/lib.rs` and never
 shipped to guests) that includes every capability world. That gives one set of
 types and one `host::Host` impl. The union's world-level `UnionPre` is never
 used, because it demands every export. At load time the registry instead calls
@@ -1133,11 +1153,11 @@ backend/plugins/src/
 └── api.rs           # handler bodies for the management endpoints (router mounted in `app`)
 ```
 
-`plugin-api/` (the WIT crate, §14) sits beside `shared` at the workspace root
+`plugins/plugin-api/` (the WIT crate, §14) sits beside `shared` at the workspace root
 and is depended on by `backend/plugins` for host bindings and by the SDK for
 guest bindings. Expect `#![recursion_limit = "256"]` on both new crates — seven
 existing crates need it for the nightly clippy gate, and generated component
-bindings nest deeply. `plugin-api/` is **not** covered by the `backend/*` glob
+bindings nest deeply. `plugins/plugin-api/` is **not** covered by the `backend/*` glob
 and needs its own `members` entry in the workspace `Cargo.toml`.
 
 ### Engine & instances
@@ -1942,9 +1962,12 @@ env/args, spawning. WASI imports beyond `host` and `wasi:http/outgoing-handler`
     `extra` bags, and never sent to the UI frame bridge.
   - **Approving.** The capability review lists which settings are secrets, so
     the admin sees "this plugin asks for an API token" before approving.
-- **Install integrity**: sha256 of `plugin.wasm` recorded at install; changed
-  hash on disk ⇒ warning + requires re-approval. (Full signature verification
-  is a later phase — see §16 Phase 8.)
+- **Install integrity**: SHA-256 of `plugin.wasm` is recorded at approval;
+  changed hash on disk ⇒ warning + requires re-approval. Marketplace updates
+  calculate a new local pin when an approved update is activated. This pin
+  detects post-approval changes; it does not authenticate a publisher.
+  Marketplace catalogs do not use signatures, trusted keys, or publisher-
+  provided package checksums.
 - **UI trust boundary (rev 4, defect fix).** Revision 3 ran plugin custom
   elements in the admin page and relied on CSP plus a "scoped" bridge. That
   cannot work. Same-origin script shares the page's JS realm, so it can read
@@ -2015,6 +2038,8 @@ them in `MCP_TOOLS`. Mutating plugin routes (upload, approve, rpc) must not be.
 | `GET  /api/v1/plugins` | list: manifest summary, state (enabled/disabled/failed), health, hook stats |
 | `POST /api/v1/plugins` | upload `.tlpx`; returns validation result + capability grant summary (install completes only after `PUT …/approve`) |
 | `PUT  /api/v1/plugins/{id}/approve` | admin approves capabilities; plugin becomes installable/loadable |
+| `GET  /api/v1/plugins/{id}/staged` | *(W8)* the review of the package staged for an installed id (an update), re-validated; `SystemWrite` |
+| `POST /api/v1/plugins/{id}/rollback` | *(W8)* swap the installed package and the one retained prior version (pins + settings entry), activation-checked, undone on failure; `SystemWrite`, never an MCP tool |
 | `PUT  /api/v1/plugins/{id}/enable` / `disable` | toggle without uninstall |
 | `DELETE /api/v1/plugins/{id}` | uninstall (+ optional KV purge flag) |
 | `GET  /api/v1/plugins/{id}/settings` | current settings JSON + the schema |
@@ -2351,9 +2376,9 @@ the integration is wrong.
 
 | File | Purpose |
 | --- | --- |
-| `plugin-api/Cargo.toml` | new crate; deps: `wit-bindgen`/`wasmtime::component::bindgen` feature-split for host vs guest |
-| `plugin-api/wit/world.wit` | the WIT package from §5 (may be split into `types.wit`, `host.wit`, `hooks.wit`) |
-| `plugin-api/src/lib.rs` | generated bindings re-export, ABI version constant, shared helper types |
+| `plugins/plugin-api/Cargo.toml` | new crate; deps: `wit-bindgen`/`wasmtime::component::bindgen` feature-split for host vs guest |
+| `plugins/plugin-api/wit/world.wit` | the WIT package from §5 (may be split into `types.wit`, `host.wit`, `hooks.wit`) |
+| `plugins/plugin-api/src/lib.rs` | generated bindings re-export, ABI version constant, shared helper types |
 
 ### New files — backend
 
@@ -2363,7 +2388,7 @@ Paths reflect the 18-crate workspace and the split in §7.0. Revision 1's
 | File | Purpose |
 | --- | --- |
 | `shared/src/model/plugin.rs` | **the seam**: `PluginHost` trait, `NoPlugins` ZST, hook id enums, `PluginHookStats`, status/stats DTOs. Lives here for the same reason `EventSink` does — every caller already sees `shared` |
-| `backend/plugins/Cargo.toml` | new crate `tuliprox-plugins`; deps `shared`, `tuliprox-core`, `plugin-api`, wasmtime, zip, `tuliprox-btree` (§18 Q10) |
+| `backend/plugins/Cargo.toml` | new crate `tuliprox-plugins`; deps `shared`, `tuliprox-core`, `plugins/plugin-api`, wasmtime, zip, `tuliprox-btree` (§18 Q10) |
 | `backend/plugins/src/lib.rs` | `PluginSystem` facade + `impl PluginHost for PluginSystem`; `#![recursion_limit = "256"]` |
 | `backend/plugins/src/manifest.rs` | manifest model, parsing, validation, capability types; `impl Prepare` so errors aggregate with the rest of config |
 | `backend/plugins/src/registry.rs` | discovery, lifecycle states, `arc-swap` hot reload, circuit breaker |
@@ -2396,8 +2421,8 @@ Paths reflect the 18-crate workspace and the split in §7.0. Revision 1's
 
 | File | Change |
 | --- | --- |
-| `Cargo.toml` (workspace) | add `plugin-api` to `members` explicitly (`backend/*` covers only `backend/plugins`); add `wasmtime`, `wit-bindgen`, `zip`, a JSON-Schema validator (no `redb`: §18 Q10 picked `tuliprox-btree`) to `[workspace.dependencies]`. `arc-swap` is already there; `notify` is an `app`-only dep today |
-| [`bin/check-workspace-deps.sh`](bin/check-workspace-deps.sh) | allowlist the new edges (`plugins → shared, core, plugin-api`; `app → plugins`; `processing`/`messaging` → `shared` only, already present). **This replaces revision 2's `cargo tree` gate** |
+| `Cargo.toml` (workspace) | add `plugins/plugin-api` to `members` explicitly (`backend/*` covers only `backend/plugins`); add `wasmtime`, `wit-bindgen`, `zip`, a JSON-Schema validator (no `redb`: §18 Q10 picked `tuliprox-btree`) to `[workspace.dependencies]`. `arc-swap` is already there; `notify` is an `app`-only dep today |
+| [`bin/check-workspace-deps.sh`](bin/check-workspace-deps.sh) | allowlist the new edges (`plugins → shared, core, plugins/plugin-api`; `app → plugins`; `processing`/`messaging` → `shared` only, already present). **This replaces revision 2's `cargo tree` gate** |
 | `backend/app/Cargo.toml`, `backend/processing/Cargo.toml`, `backend/messaging/Cargo.toml`, `backend/session/Cargo.toml` | `plugins` cargo feature (default on). Only `app` depends on `tuliprox-plugins` — the others see the `PluginHost` seam via `shared` |
 | `backend/core/src/model/config/mod.rs` | export the `plugins` config module |
 | [`backend/core/src/model/config/app.rs:39`](backend/core/src/model/config/app.rs#L39) | `AppConfig` gains `plugins: Arc<ArcSwapOption<PluginsConfig>>`. *(W2 re-anchor)* Phase S parses `plugins:` onto `Config.plugins: Option<PluginsConfig>` (`base.rs:119`), like `mcp`/`messaging`. That stays the parse target. `AppConfig.plugins` mirrors it in `set_config` the way `hdhomerun` is mirrored (`app.rs:152`), so plugin settings writes (§10) can swap the section without rebuilding `Config`. Validation is via `PrepareAll`, so plugin config errors aggregate with the rest |
@@ -3563,10 +3588,116 @@ are never tools.
 `plugin_slot.rs`, `plugin_i18n.rs`, `plugin_ui_service.rs`, and the host views
 named in §14 (explorer, popup menu, EPG view, config page/view, source editor,
 dashboard, setup, `toastr`). X: `plugins/src/mcp_tools.rs`. T (Haiku):
-`packages/plugin-ui-types/`. D: the demo fixture `plugin-api/fixtures/ui-demo/`
+`packages/plugin-ui-types/`. D: the demo fixture `plugins/plugin-api/fixtures/ui-demo/`
 (a wasm component exporting `rpc`; contributions in all nine slots, a config
 section, extension and tab, `en` + `es` locales) and its lines in
 `bin/build_plugin_fixture.sh`, which also writes `target/plugin-fixtures/ui-demo.tlpx`. The orchestrator owns the §19.6 hot-spots plus
 `view_type.rs`, `home.rs`, `sidebar.rs`, the locale JSONs, `v1_api.rs`,
 `main_api.rs`, `mcp_api.rs`, `mcp_tools.rs` (app) and every `mod.rs`
 registration.
+
+### W8 seam freeze *(2026-10-31, orchestrator `claude-opus-5-5`; uncommitted on `plugin-w8`, lanes apply it as a patch)*
+
+Reduced W8: Phase 8 items 3 and 5 only (1, 2 and 4 excluded by the owner).
+BASE `1d7337e5`. The seam patch (`.git/w8-status/w8-seam.patch`) carries the
+WIT addition, the shared DTO fields below and this section.
+
+**Re-anchor facts (W8).** `install.rs` (W6b) already owns staging
+(`<data_dir>/staging/<id>`), extraction, `validate_package`, `review` and
+`approve_blocking`. `install_staged` swaps directories but deletes the old
+one. Uploading an installed id already stages beside it (`replaces` in the
+review). `init` runs per instance (`dispatch.rs::open_prepared`) and in a
+settings save (`api.rs::run_candidate_init`), never on approve or enable. The
+plugins dir watcher (`Registry::watch`, 500 ms debounce) rescans fully, and a
+changed hash then yields `PendingApproval` (`decide_approval`). The frozen-clock
+fix already landed after W7 (`HostClock::Frozen`, `wall_ms()`; history §2.6). No
+settings-schema or stored-settings version exists yet.
+
+**WIT (1.x additive rule).** A new interface plus world in the `@1.0.0`
+package. No existing interface, record or world changes, and the ABI string
+stays `1.0.0`. `EXPORT_INTERFACES` grows to 24.
+
+```wit
+interface settings-migration {
+  migrate: func(from-version: u32, settings: string) -> result<string, string>;
+}
+world settings-migration-plugin { include base; export settings-migration; }
+```
+
+The manifest hook id is `settings.migrate` and needs no capability. A plugin
+that exports it targets a W8+ host, which its manifest `tuliprox:` range must
+say.
+
+**Settings versions.**
+- Schema version: an optional top-level integer `"version"` (≥ 1) in the
+  settings schema, defaulting to 1. It is accepted by the §11 subset.
+- Stored version: `settings_version` on the `plugins.plugins[]` entry. It is
+  omitted when equal to 1, and an absent value means 1. `PUT …/settings`
+  writes the schema version.
+- When the stored version is lower than the schema version, the plugin is
+  migrated if it exports `settings.migrate`. The migrated JSON is validated
+  against the schema and persisted (settings and `settings_version`) through
+  the same config.yml write as `PUT …/settings`. It runs in an async step after
+  the registry reload, never inside the blocking scan (rule 0: no `block_on`).
+- Without the export, or when `migrate` errs or its output fails validation,
+  the stored settings are kept untouched and `settings_review` is set with the
+  reason. If the old settings still validate, the plugin keeps running on them.
+  If they don't, it is not runnable until the settings are saved.
+- When the stored version is higher than the schema version (a downgrade or
+  rollback), there is no migration and `settings_review` is set.
+
+**Pin integrity (C).** Any `plugin.wasm` change that doesn't go through
+approve, update or rollback means `PendingApproval`, and that includes a swap
+while the server runs. The bytes that are compiled must be the bytes that were
+hashed (no TOCTOU between hashing and compiling). Trust on first use (an
+enabled entry with no pin) is unchanged and still undecided (W7 item (e)).
+
+**Registry API frozen for D (C implements in `registry.rs`, D calls).**
+- `Registry::swap_pin(&self, id, pin: ApprovalPin) -> io::Result<Option<ApprovalPin>>`
+  writes the new pin and returns the previous one.
+- `Registry::restore_pin(&self, id, previous: Option<ApprovalPin>) -> io::Result<()>`
+  puts the previous pin back, or removes it.
+- `PluginSystem::activation_check(&self, id, config: &PluginsConfig) -> Result<(), String>`
+  (async, `api.rs`, called after the reload) fails unless the record is
+  loaded and runnable and one fresh instance's `init` succeeds with the
+  effective (migrated if needed) settings, within the hook budget. It reuses
+  `run_candidate_init`.
+
+**Safe replacement (D).**
+- An update is an upload of an installed id. It stages and runs the full
+  validation, and the review carries `capability_diff` against the installed
+  pin. `mcp` is never carried over: the approve body decides it.
+- The approve body still echoes every capability, so nothing is granted
+  silently. The summary shows a staged update as `update`.
+- Approving an update does this, in order:
+  1. Move the current package to `<data_dir>/plugins-prev/<id>/`, outside the
+     scanned dir, together with `prev.json` (its pin and its `plugins[]`
+     settings entry). This is the one retained prior version; an older one is
+     replaced.
+  2. `swap_pin`, then the directory swap, then reload, then `activation_check`.
+  3. On failure, restore the directory and the pin, reload, and answer `409`
+     with "rolled back to <version>: <reason>". The failed package is
+     discarded.
+- `POST /api/v1/plugins/{id}/rollback` (`SystemWrite`, never an MCP tool)
+  swaps the current and prior packages, with their pins and settings entries,
+  and runs the same activation check. The summary shows `rollback`.
+
+**DTO additions (seam, `shared/src/model/plugins_dto.rs`).**
+- `PluginSummaryDto` gains `settings_review` (filled by C) and `update` and
+  `rollback` (filled by D).
+- New `PluginUpdateDto`, `PluginRollbackDto` and `PluginCapabilityDiffDto`.
+- `PluginUploadReviewDto` gains `capability_diff` (filled by D).
+
+**Ownership (W8).**
+- C: `registry.rs`, `settings.rs`, `api.rs`, `manifest/**`, `plugins_settings_api.rs`,
+  `app_state/plugin_state.rs`, `core/src/model/config/plugins.rs`,
+  `plugins/plugin-sdk/**`, `plugins/plugin-sdk-macros/**`, `plugin_settings.rs`,
+  `docs/src/plugins/settings.md`, and a new fixture under `plugins/plugin-api/fixtures/`.
+- D: `install.rs`, `plugins_install_api.rs` (including the rollback route),
+  `plugins_view.rs` (which also renders `settings_review`), `plugin_upload.rs`,
+  `plugin_service.rs`, and `docs/src/plugins/packaging.md`.
+- F: tests in `state.rs`/`metrics.rs` only, plus run harnesses outside the
+  repo.
+- Orchestrator: the WIT, `plugin-api/src/lib.rs`, `plugins_dto.rs`, the locale
+  JSONs, `bin/build_plugin_fixture.sh`, every §19.6 hot-spot, and every
+  `registry.rs` edit D needs (D describes them).

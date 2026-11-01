@@ -2,13 +2,14 @@ use super::{
     merge::{collect_tag_attributes, get_tag_type},
     normalize_channel_name, EpgMergeAccumulator, TVGuide,
 };
-use crate::processor::EpgIdCache;
+use crate::processor::{EarlyGuideChannel, EpgIdCache};
 use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use shared::{
     concat_string,
     model::{
-        EpgCategory, EpgChannel, EpgProgramme, HookCtx, PluginEpgChannel, PluginHook, PluginHost, PluginRunReport,
+        EpgCategory, EpgChannel, EpgProgramme, HookCtx, PlaylistItem, PluginEpgChannel, PluginHook, PluginHost,
+        PluginMatchRequest, PluginRunReport,
     },
     utils::Internable,
 };
@@ -180,7 +181,7 @@ impl TVGuide {
         source_order: usize,
         source_processed: &mut HashSet<Arc<str>>,
         attribs: &GuideAttribs,
-        mut tag: XmlTag,
+        tag: &mut XmlTag,
     ) -> bool {
         let smart_match = id_cache.smart_match_config.enabled;
         let tag_epg_id = tag.get_attribute_value(&attribs.id).map_or_else(|| "".intern(), Internable::intern);
@@ -188,7 +189,7 @@ impl TVGuide {
             return false;
         }
 
-        Self::prepare_tag(id_cache, &mut tag, smart_match);
+        Self::prepare_tag(id_cache, tag, smart_match);
         if smart_match && id_cache.needs_guide_names(&tag_epg_id) {
             id_cache.register_guide_names(
                 &tag_epg_id,
@@ -210,22 +211,36 @@ impl TVGuide {
         };
 
         if add_channel {
-            with_folded_epg_id(&tag_epg_id, |folded| source_processed.insert(folded.intern()));
-            id_cache.insert_processed_epg_id(&tag_epg_id);
-            accumulator.upsert_channel(
-                epg_source.priority,
-                source_order,
-                epg_source.source_idx,
-                epg_source.logo_override,
-                EpgChannel {
-                    id: Arc::clone(&tag_epg_id),
-                    title: Self::channel_display_name(&tag),
-                    icon: Self::channel_icon(&tag),
-                    programmes: vec![],
-                },
-            );
+            Self::add_channel(id_cache, accumulator, epg_source, source_order, source_processed, &tag_epg_id, tag);
         }
         add_channel
+    }
+
+    /// Keep `tag`'s channel for this source: its programmes are accepted as they
+    /// stream past, and it joins the merge.
+    fn add_channel(
+        id_cache: &mut EpgIdCache,
+        accumulator: &mut EpgMergeAccumulator,
+        epg_source: &PersistedEpgSource,
+        source_order: usize,
+        source_processed: &mut HashSet<Arc<str>>,
+        tag_epg_id: &Arc<str>,
+        tag: &XmlTag,
+    ) {
+        with_folded_epg_id(tag_epg_id, |folded| source_processed.insert(folded.intern()));
+        id_cache.insert_processed_epg_id(tag_epg_id);
+        accumulator.upsert_channel(
+            epg_source.priority,
+            source_order,
+            epg_source.source_idx,
+            epg_source.logo_override,
+            EpgChannel {
+                id: Arc::clone(tag_epg_id),
+                title: Self::channel_display_name(tag),
+                icon: Self::channel_icon(tag),
+                programmes: vec![],
+            },
+        );
     }
 
     /// The `<programme>` arm: the programme of `tag` when its channel was
@@ -282,7 +297,7 @@ impl TVGuide {
                 } else {
                     let mut source_processed: HashSet<Arc<str>> = HashSet::with_capacity(5000);
                     let mut accepted_channels = 0usize;
-                    let mut filter_tags = |tag: XmlTag| match tag.name.as_ref() {
+                    let mut filter_tags = |mut tag: XmlTag| match tag.name.as_ref() {
                         EPG_TAG_CHANNEL => {
                             if Self::accept_channel(
                                 id_cache,
@@ -291,7 +306,7 @@ impl TVGuide {
                                 source_order,
                                 &mut source_processed,
                                 &attribs,
-                                tag,
+                                &mut tag,
                             ) {
                                 accepted_channels += 1;
                             }
@@ -353,6 +368,9 @@ pub(super) struct GuideHooks {
     pub(super) loaded: bool,
     /// `transform-programmes`.
     pub(super) transform: bool,
+    /// `match-channel`, asked once per name over the buffered channel list, so
+    /// the guide channel it picks keeps its programmes.
+    pub(super) early_match: bool,
 }
 
 impl GuideHooks {
@@ -360,15 +378,16 @@ impl GuideHooks {
     /// no enabled plugin subscribes: the constant answer for `NoPlugins`.
     pub(super) fn probe<P: PluginHost>(plugins: &P, id_cache: &EpgIdCache) -> Self {
         if !id_cache.hooks.enabled {
-            return Self { loaded: false, transform: false };
+            return Self { loaded: false, transform: false, early_match: false };
         }
         Self {
             loaded: plugins.wants(PluginHook::EpgLoaded, ""),
             transform: plugins.wants(PluginHook::TransformProgrammes, ""),
+            early_match: !id_cache.hooks.match_items.is_empty() && plugins.wants(PluginHook::MatchChannel, ""),
         }
     }
 
-    pub(super) const fn any(self) -> bool { self.loaded || self.transform }
+    pub(super) const fn any(self) -> bool { self.loaded || self.transform || self.early_match }
 }
 
 /// `transform-programmes` over `programmes` in batches of [`EPG_HOOK_BATCH`], in order.
@@ -491,7 +510,9 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
         let mut tags: Vec<XmlTag> = Vec::new();
         let mut open = true;
 
-        if self.hooks.loaded {
+        // Only `on-epg-loaded` and the early match need the whole channel list;
+        // otherwise channels are accepted while streaming, without buffering.
+        if self.hooks.loaded || self.hooks.early_match {
             let mut channel_tags: Vec<XmlTag> = Vec::new();
             // Everything read from the first `<programme>` on, in file order.
             let mut held: Vec<XmlTag> = Vec::new();
@@ -510,15 +531,21 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
                 }
             }
 
-            self.on_epg_loaded(&mut channel_tags).await;
-            for tag in channel_tags {
-                self.accept_channel(tag);
+            if self.hooks.loaded {
+                self.on_epg_loaded(&mut channel_tags).await;
+            }
+            if self.hooks.early_match {
+                let accepted: Vec<bool> = channel_tags.iter_mut().map(|tag| self.accept_channel(tag)).collect();
+                self.early_match(&channel_tags, &accepted).await;
+            } else {
+                for mut tag in channel_tags {
+                    self.accept_channel(&mut tag);
+                }
             }
             for tag in held {
                 self.tag(tag).await;
             }
         }
-
         while open {
             open = stream.next_tags(&mut tags).await;
             for tag in tags.drain(..) {
@@ -540,8 +567,8 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
         self.accumulator.set_attributes_if_preferred(self.epg_source.priority, self.source_order, tag.attributes);
     }
 
-    fn accept_channel(&mut self, tag: XmlTag) {
-        if TVGuide::accept_channel(
+    fn accept_channel(&mut self, tag: &mut XmlTag) -> bool {
+        let accepted = TVGuide::accept_channel(
             self.id_cache,
             self.accumulator,
             self.epg_source,
@@ -549,8 +576,104 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
             &mut self.source_processed,
             &self.attribs,
             tag,
-        ) {
+        );
+        if accepted {
             self.accepted += 1;
+        }
+        accepted
+    }
+
+    /// The early `match-channel` pass: every name the built-in matcher left
+    /// without a winner is offered the guide channels of this source that share a
+    /// matcher bucket with it, in ONE batched plugin call. A pick that passes the
+    /// matcher's gates is recorded for `finalize_matches`, and its channel is
+    /// kept for this source, so its programmes are not dropped as they stream.
+    async fn early_match(&mut self, channel_tags: &[XmlTag], accepted: &[bool]) {
+        let keys = self.id_cache.early_match_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let mut tag_at: Vec<usize> = Vec::new();
+        let mut channels: Vec<EarlyGuideChannel<'_>> = Vec::new();
+        for (at, tag) in channel_tags.iter().enumerate() {
+            let Some(id) = tag.get_attribute_value(&self.attribs.id).filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let names = tag
+                .children
+                .iter()
+                .flatten()
+                .filter(|child| child.name.as_ref() == EPG_TAG_DISPLAY_NAME)
+                .filter_map(|child| child.value.as_deref())
+                .collect();
+            channels.push(EarlyGuideChannel { id, names });
+            tag_at.push(at);
+        }
+        if channels.is_empty() {
+            return;
+        }
+        let shortlists = self.id_cache.early_shortlists(&keys, &channels);
+        let mut asked: Vec<Arc<str>> = Vec::new();
+        let mut items: Vec<PlaylistItem> = Vec::new();
+        let mut picks: Vec<Vec<usize>> = Vec::new();
+        for (key, shortlist) in keys.iter().zip(shortlists) {
+            let Some(item) = self.id_cache.hooks.match_items.get(key).filter(|_| !shortlist.is_empty()) else {
+                continue;
+            };
+            asked.push(Arc::clone(key));
+            items.push(item.clone());
+            picks.push(shortlist);
+        }
+        if asked.is_empty() {
+            return;
+        }
+        let requests: Vec<PluginMatchRequest<'_>> = items
+            .iter()
+            .zip(&picks)
+            .map(|(item, shortlist)| PluginMatchRequest {
+                item,
+                candidates: shortlist
+                    .iter()
+                    .map(|&ci| plugin_channel(&channel_tags[tag_at[ci]], channels[ci].id))
+                    .collect(),
+            })
+            .collect();
+        let answers = self.plugins.match_channels(&self.ctx, &requests, &mut self.report).await;
+        self.id_cache.mark_early_asked(&asked);
+        if answers.len() != requests.len() {
+            log::warn!(
+                "match-channel plugins answered {} of {} early requests for input '{}'; the answers are ignored",
+                answers.len(),
+                requests.len(),
+                self.ctx.input.unwrap_or_default()
+            );
+            return;
+        }
+        for ((key, shortlist), answer) in asked.iter().zip(&picks).zip(answers) {
+            let Some(answer) = answer else {
+                continue;
+            };
+            let Some(&ci) = shortlist.iter().find(|&&ci| channels[ci].id.eq_ignore_ascii_case(&answer)) else {
+                continue;
+            };
+            if !self.id_cache.record_early_pick(key, &channels[ci]) {
+                continue;
+            }
+            let at = tag_at[ci];
+            if !accepted[at] {
+                let tag = &channel_tags[at];
+                let epg_id = channels[ci].id.intern();
+                TVGuide::add_channel(
+                    self.id_cache,
+                    self.accumulator,
+                    self.epg_source,
+                    self.source_order,
+                    &mut self.source_processed,
+                    &epg_id,
+                    tag,
+                );
+                self.accepted += 1;
+            }
         }
     }
 
@@ -558,7 +681,10 @@ impl<'a, P: PluginHost> HookedPass<'a, P> {
     /// ever, but `on-epg-loaded` has already run and does not see it.
     async fn tag(&mut self, tag: XmlTag) {
         match tag.name.as_ref() {
-            EPG_TAG_CHANNEL => self.accept_channel(tag),
+            EPG_TAG_CHANNEL => {
+                let mut tag = tag;
+                self.accept_channel(&mut tag);
+            }
             EPG_TAG_PROGRAMME => {
                 if let Some(programme) = TVGuide::accepted_programme(&tag, &self.source_processed, &self.attribs) {
                     self.batch.push(programme);
@@ -834,7 +960,7 @@ mod tests {
             source_idx: 0,
         };
 
-        let hooks = GuideHooks { loaded: false, transform: true };
+        let hooks = GuideHooks { loaded: false, transform: true, early_match: false };
         let pass = HookedPass::new(&NoPlugins, hooks, &mut id_cache, &mut accumulator, &epg_source, 0, "input");
 
         let accepted_at_step_2 = Arc::new(AtomicUsize::new(usize::MAX));

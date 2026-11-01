@@ -409,9 +409,9 @@ pub fn exec_interner_prune(app_state: &Arc<AppState>) {
 mod tests {
     use super::parse_schedule;
     use crate::api::tasks::{datetime_to_instant, drain_pending_playlist_triggers, next_schedule_run};
-    use shared::model::ScheduleTaskType;
     use chrono::{DateTime, FixedOffset, Local};
     use cron::Schedule;
+    use shared::model::ScheduleTaskType;
     use std::{
         str::FromStr,
         sync::atomic::{AtomicU8, Ordering},

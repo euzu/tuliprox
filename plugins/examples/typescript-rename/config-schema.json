@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "title": "TypeScript rename example",
+  "properties": {
+    "rename_from": { "type": "string", "title": "Group to rename", "default": "" },
+    "rename_to": { "type": "string", "title": "New group name", "default": "" }
+  }
+}

@@ -69,9 +69,17 @@ async fn get_plugin_stats(State(app_state): State<Arc<AppState>>, Path(id): Path
 #[cfg(feature = "plugins")]
 async fn get_plugin_settings(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Some(plugins) = app_state.plugins.clone() else {
-        return found::<()>(None);
+        return StatusCode::NOT_FOUND.into_response();
     };
-    found(read_plugin_settings(plugins, id, app_state.app_config.plugins.load_full()).await)
+    // As written, so a `${env:VAR}` value shows as the reference (plan §9 *Returning*).
+    match super::plugins_settings_api::written_plugins_config(&app_state.app_config).await {
+        // The schema files are read on the blocking pool.
+        Ok(config) => found(read_plugin_settings(plugins, id, Some(Arc::new(config))).await),
+        Err(err) => {
+            log::error!("Cannot read config.yml to show the settings of plugin `{id}`: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[cfg(feature = "plugins")]
@@ -143,8 +151,14 @@ mod tests {
         runtime.block_on(async {
             let system = create_test_plugin_system(dir.path());
             let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
-            let router =
-                plugins_api_register_unprotected().with_state(create_test_app_state_with_plugins(config, Some(system)));
+            let app_state = create_test_app_state_with_plugins(config, Some(system));
+            // The settings GET reads `config.yml` as written (W8), so the test needs one.
+            let config_file = dir.path().join("config.yml");
+            std::fs::write(&config_file, "api:\n  host: 127.0.0.1\n  port: 8901\n").unwrap();
+            let mut paths = (**app_state.app_config.paths.load()).clone();
+            paths.config_file_path = config_file.to_string_lossy().to_string();
+            app_state.app_config.paths.store(std::sync::Arc::new(paths));
+            let router = plugins_api_register_unprotected().with_state(app_state);
             let before = threads.load(std::sync::atomic::Ordering::SeqCst);
             let (status, body) = call(&router, "/plugins/demo/settings").await;
             assert_eq!(status, StatusCode::OK);

@@ -62,6 +62,11 @@ normal tuliprox -> tuliprox-plugins
 normal tuliprox-plugins -> shared
 normal tuliprox-plugins -> tuliprox-core
 normal tuliprox-plugins -> tuliprox-plugin-api
+# The plugin author SDK (W7 7.1a): the guest-side counterpart of `plugins`.
+# Nothing here may reach `shared` or `backend/*`.
+normal tuliprox-plugin-sdk -> tuliprox-plugin-sdk-macros
+normal tuliprox-plugin-sdk -> tuliprox-plugin-api
+dev tuliprox-plugin-sdk-macros -> tuliprox-plugin-api
 # The plugin KV store (plan §18 Q10). `btree` has no workspace deps, so no cycle.
 normal tuliprox-plugins -> tuliprox-btree
 normal tuliprox -> tuliprox-metadata

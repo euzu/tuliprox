@@ -32,7 +32,12 @@ use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 #[derive(Clone)]
 pub enum HostClock {
     System(SystemClock),
+    /// Tests: plugins and host-side timing both follow this clock.
     Manual(ManualClock),
+    /// Determinism checks on a running server: plugins see this frozen time,
+    /// while host-side timing (throttles, TTL caches, log stamps) keeps the
+    /// wall clock, so nothing host-side stalls.
+    Frozen(ManualClock),
 }
 
 impl Default for HostClock {
@@ -43,7 +48,18 @@ impl Clock for HostClock {
     fn now_ms(&self) -> Millis {
         match self {
             Self::System(clock) => clock.now_ms(),
+            Self::Manual(clock) | Self::Frozen(clock) => clock.now_ms(),
+        }
+    }
+}
+
+impl HostClock {
+    /// The time host-side timing runs on: the wall clock, except under
+    /// [`HostClock::Manual`], where tests drive it.
+    pub fn wall_ms(&self) -> Millis {
+        match self {
             Self::Manual(clock) => clock.now_ms(),
+            Self::System(_) | Self::Frozen(_) => SystemClock.now_ms(),
         }
     }
 }
@@ -280,5 +296,33 @@ mod tests {
         assert_eq!(grow.call(&mut store, 9_000).expect("within the limit"), 1);
         assert!(grow.call(&mut store, 1_000).is_err(), "10_001 elements are over the limit");
         assert!(grow.call(&mut store, i32::MAX).is_err(), "a flood is refused, not allocated");
+    }
+
+    #[test]
+    fn a_frozen_clock_keeps_plugin_time_fixed_while_wall_time_advances() {
+        let manual = ManualClock::new(1_793_448_000_000);
+        let clock = HostClock::Frozen(manual.clone());
+        let (plugin_before, wall_before) = (clock.now_ms().get(), clock.wall_ms().get());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        assert_eq!(clock.now_ms().get(), plugin_before, "plugins keep seeing the frozen instant");
+        assert_eq!(plugin_before, 1_793_448_000_000);
+        assert!(clock.wall_ms().get() >= wall_before + 20, "host-side timing follows the wall clock");
+        assert_ne!(clock.wall_ms().get(), plugin_before, "wall time is not the frozen instant");
+
+        // Only an explicit move changes the frozen plugin time.
+        manual.advance(5);
+        assert_eq!(clock.now_ms().get(), plugin_before + 5);
+    }
+
+    #[test]
+    fn manual_drives_both_clocks_and_system_follows_the_wall_clock() {
+        let manual = HostClock::Manual(ManualClock::new(42));
+        assert_eq!((manual.now_ms().get(), manual.wall_ms().get()), (42, 42));
+
+        let system = HostClock::default();
+        let (now, wall) = (system.now_ms().get(), system.wall_ms().get());
+        assert!(wall.abs_diff(now) < 5_000, "system plugin time and wall time are the same clock");
     }
 }

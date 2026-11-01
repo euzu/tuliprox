@@ -602,9 +602,7 @@ async fn apply_playlist_loaded_hook_within<P: PluginHost>(
     let Some(scopes) = plugins.scope(PluginHook::PlaylistLoaded, &ctx) else {
         return Ok(playlist);
     };
-    if !scopes.is_all() && !playlist.items().any(|item| scopes.matches(&item)) {
-        return Ok(playlist);
-    }
+    // Checked before the scope scan, which would read a huge disk playlist in full.
     if !playlist.is_memory() {
         let count = playlist.get_channel_count();
         if count > disk_ceiling {
@@ -614,6 +612,9 @@ async fn apply_playlist_loaded_hook_within<P: PluginHost>(
             );
             return Ok(playlist);
         }
+    }
+    if !scopes.is_all() && !playlist.items().any(|item| scopes.matches(&item)) {
+        return Ok(playlist);
     }
 
     let groups = playlist.take_groups();

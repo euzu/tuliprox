@@ -155,7 +155,7 @@ pub async fn probe_generic_stream_metadata<E: EventSink>(
 /// The URL is sanitized here rather than by the caller: it is a resolved
 /// provider URL carrying account credentials, and this record is rendered
 /// into notification channels.
-fn emit_probe_failure<E: EventSink>(
+pub(crate) fn emit_probe_failure<E: EventSink>(
     events: &E,
     input: &ConfigInput,
     unique_id: &str,

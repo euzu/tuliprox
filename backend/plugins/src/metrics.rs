@@ -23,7 +23,7 @@ use std::{
     },
     time::Duration,
 };
-use tuliprox_core::{model::PluginsConfig, utils::Clock};
+use tuliprox_core::model::PluginsConfig;
 use tuliprox_plugin_api::bindings::{
     exports::tuliprox::plugin::metrics_hooks::Metric, tuliprox::plugin::status::Severity,
 };
@@ -41,6 +41,8 @@ struct Snapshot {
     /// Host clock, milliseconds, when the refresh finished. `None` before the first.
     taken_ms: Option<u64>,
     metrics: Metrics,
+    /// The registry reload generation the snapshot belongs to.
+    generation: u64,
 }
 
 /// The last snapshot and when it was taken. Built once with the
@@ -71,7 +73,7 @@ impl Drop for RefreshGuard<'_> {
 impl MetricsCache {
     pub(crate) fn new(_config: &PluginsConfig) -> Self {
         Self {
-            snapshot: Mutex::new(Snapshot { taken_ms: None, metrics: Arc::from([]) }),
+            snapshot: Mutex::new(Snapshot { taken_ms: None, metrics: Arc::from([]), generation: 0 }),
             refreshing: AtomicBool::new(false),
         }
     }
@@ -81,6 +83,17 @@ impl MetricsCache {
     }
 
     fn current(&self) -> Metrics { Arc::clone(&self.lock().metrics) }
+
+    /// Forget the snapshot when the registry reloaded since it was taken, so a
+    /// plugin installed, updated or removed shows (or stops showing) on the
+    /// next read instead of after up to [`REFRESH_INTERVAL`].
+    fn follow_generation(&self, generation: u64) {
+        let mut snapshot = self.lock();
+        if snapshot.generation != generation {
+            snapshot.generation = generation;
+            snapshot.taken_ms = None;
+        }
+    }
 
     fn fresh(&self, now_ms: u64) -> Option<Metrics> {
         let snapshot = self.lock();
@@ -104,9 +117,19 @@ impl MetricsCache {
         Plan::Refresh(guard)
     }
 
+    #[cfg(test)]
     fn store(&self, metrics: Metrics, now_ms: u64) {
         let mut snapshot = self.lock();
         snapshot.taken_ms = Some(now_ms);
+        snapshot.metrics = metrics;
+    }
+
+    /// [`MetricsCache::store`] for a refresh begun at registry `generation`:
+    /// if the registry reloaded meanwhile the result is kept but not fresh, so
+    /// the next read collects again.
+    fn store_for(&self, metrics: Metrics, now_ms: u64, generation: u64) {
+        let mut snapshot = self.lock();
+        snapshot.taken_ms = (snapshot.generation == generation).then_some(now_ms);
         snapshot.metrics = metrics;
     }
 }
@@ -154,12 +177,14 @@ impl PluginSystem {
     /// round per 10 s; plugins that failed this round are absent.
     pub async fn metrics_snapshot(&self) -> Vec<PluginMetricDto> {
         let cache = self.metrics();
+        let generation = *self.changes().borrow();
+        cache.follow_generation(generation);
         let clock = &self.shared().clock;
-        match cache.plan(clock.now_ms().get()) {
+        match cache.plan(clock.wall_ms().get()) {
             Plan::Fresh(metrics) | Plan::Busy(metrics) => metrics.to_vec(),
             Plan::Refresh(_guard) => {
                 let metrics: Metrics = self.collect_metrics().await.into();
-                cache.store(Arc::clone(&metrics), clock.now_ms().get());
+                cache.store_for(Arc::clone(&metrics), clock.wall_ms().get(), generation);
                 metrics.to_vec()
             }
         }
@@ -196,7 +221,7 @@ impl PluginSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuliprox_core::utils::ManualClock;
+    use tuliprox_core::utils::{Clock, ManualClock};
 
     fn cache() -> MetricsCache { MetricsCache::new(&PluginsConfig::default()) }
 
@@ -283,6 +308,59 @@ mod tests {
         assert!(
             matches!(cache.plan(6), Plan::Fresh(metrics) if metrics.is_empty()),
             "no plugin answered; do not poll again"
+        );
+    }
+
+    #[test]
+    fn the_throttle_refreshes_under_wall_time_while_plugins_see_a_frozen_clock() {
+        use crate::state::HostClock;
+        let frozen = ManualClock::new(1_793_448_000_000);
+        let clock = HostClock::Frozen(frozen);
+        let cache = cache();
+
+        // First call stores the snapshot, stamped with the host wall clock like `metrics_snapshot`.
+        let taken = clock.wall_ms().get();
+        let Plan::Refresh(guard) = cache.plan(taken) else { panic!("the first call must refresh") };
+        cache.store(one("edge.calls"), taken);
+        drop(guard);
+
+        // Wall time moved past the interval: the snapshot is stale and refreshes again.
+        let later = taken + 10_000;
+        assert!(matches!(cache.plan(later - 1), Plan::Fresh(_)));
+        assert!(matches!(cache.plan(later), Plan::Refresh(_)), "wall time advancing refreshes the snapshot");
+    }
+
+    #[test]
+    fn a_registry_reload_drops_the_snapshot() {
+        let cache = cache();
+        let Plan::Refresh(guard) = cache.plan(1_000) else { panic!("the first call must refresh") };
+        cache.store(one("edge.calls"), 1_000);
+        drop(guard);
+        cache.follow_generation(0);
+        assert!(matches!(cache.plan(1_001), Plan::Fresh(_)), "same generation: the snapshot stays");
+        cache.follow_generation(1);
+        let Plan::Refresh(guard) = cache.plan(1_002) else { panic!("a reload since: refresh at once") };
+        // a refresh begun before a further reload is not fresh for the new generation
+        cache.follow_generation(2);
+        cache.store_for(one("edge.old"), 1_003, 1);
+        drop(guard);
+        assert!(matches!(cache.plan(1_004), Plan::Refresh(_)));
+    }
+
+    #[test]
+    fn a_throttle_fed_the_frozen_plugin_time_would_never_refresh() {
+        use crate::state::HostClock;
+        let clock = HostClock::Frozen(ManualClock::new(1_793_448_000_000));
+        let cache = cache();
+        let Plan::Refresh(guard) = cache.plan(clock.now_ms().get()) else { panic!("the first call must refresh") };
+        cache.store(one("edge.calls"), clock.now_ms().get());
+        drop(guard);
+        // Plugin time never moves, so the snapshot would stay fresh forever. This is why the throttle reads
+        // `wall_ms`, and why `wall_ms` of a frozen clock must differ from `now_ms`.
+        assert!(matches!(cache.plan(clock.now_ms().get()), Plan::Fresh(_)));
+        assert!(
+            matches!(cache.plan(clock.wall_ms().get()), Plan::Refresh(_)),
+            "the wall clock is far past the frozen instant, so the snapshot is stale"
         );
     }
 }

@@ -27,7 +27,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 use tokio::sync::RwLock;
-use tuliprox_core::utils::LRUResourceCache;
+use tuliprox_core::utils::{LRUResourceCache, CACHE_PARTIAL_SUFFIX};
 
 /// Largest image one `cache-image` call downloads.
 pub(crate) const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -202,15 +202,19 @@ fn image_mime(content_type: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// Write on the blocking pool; a crashed write leaves nothing registered, and a
-/// failed one is removed.
+/// Write on the blocking pool, to a `.partial` sibling renamed into place once
+/// complete: a crashed write leaves only the partial, which the cache's `scan`
+/// drops, and a failed one is removed.
 async fn write_file(path: PathBuf, bytes: Bytes) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|err| format!("cache directory: {err}"))?;
         }
-        std::fs::write(&path, &bytes).map_err(|err| {
-            let _ = std::fs::remove_file(&path);
+        let mut partial = path.clone().into_os_string();
+        partial.push(CACHE_PARTIAL_SUFFIX);
+        let partial = PathBuf::from(partial);
+        std::fs::write(&partial, &bytes).and_then(|()| std::fs::rename(&partial, &path)).map_err(|err| {
+            let _ = std::fs::remove_file(&partial);
             format!("cache file: {err}")
         })
     })

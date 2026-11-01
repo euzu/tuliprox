@@ -735,10 +735,8 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
 
     let mut errors = Vec::new();
     let pipe: ProcessingPipe = vec![TransformStage::Filter];
-    let mut report = PluginRunReport::default();
-
-    playlist_resolve_series(&ctx, &target, &mut errors, &pipe, &mut provider_fpl, &mut processed_fpl, &mut report)
-        .await;
+    let report =
+        playlist_resolve_series(&ctx, &target, &mut errors, &pipe, &mut provider_fpl, &mut processed_fpl).await;
 
     assert!(!report.hooks.is_empty(), "series episode plugin report must be merged into target's report");
     assert_eq!(report.hooks[0].plugin, "test-filter-plugin");

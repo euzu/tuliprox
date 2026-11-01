@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tv generator-info-name="hf-epg-matcher demo">
+  <channel id="bbc.one"><display-name>BBC One</display-name></channel>
+  <channel id="bbc.two"><display-name>BBC Two</display-name></channel>
+  <channel id="channel.four"><display-name>Channel Four</display-name></channel>
+  <channel id="sky.news"><display-name>Sky News</display-name></channel>
+  <programme start="20261101180000 +0000" stop="20261101190000 +0000" channel="bbc.one">
+    <title lang="en">Evening news</title>
+  </programme>
+  <programme start="20261101190000 +0000" stop="20261101200000 +0000" channel="bbc.one">
+    <title lang="en">One drama</title>
+  </programme>
+  <programme start="20261101180000 +0000" stop="20261101190000 +0000" channel="bbc.two">
+    <title lang="en">Two documentary</title>
+  </programme>
+  <programme start="20261101190000 +0000" stop="20261101200000 +0000" channel="bbc.two">
+    <title lang="en">Two quiz</title>
+  </programme>
+  <programme start="20261101180000 +0000" stop="20261101190000 +0000" channel="channel.four">
+    <title lang="en">Four feature</title>
+  </programme>
+  <programme start="20261101190000 +0000" stop="20261101200000 +0000" channel="channel.four">
+    <title lang="en">Four comedy</title>
+  </programme>
+  <programme start="20261101180000 +0000" stop="20261101190000 +0000" channel="sky.news">
+    <title lang="en">Sky bulletin</title>
+  </programme>
+</tv>

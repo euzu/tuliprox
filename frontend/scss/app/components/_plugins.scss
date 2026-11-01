@@ -47,6 +47,10 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  // The parent panel centres its child; a menu page fills the content area instead
+  // (plan §11), so its frame is not left at the 300 px default width of an iframe.
+  width: 100%;
+  align-self: stretch;
 
   &__header {
     display: flex;
@@ -57,6 +61,7 @@
   &__body {
     flex: 1;
     min-height: 0;
+    width: 100%;
   }
 }
 
@@ -125,6 +130,25 @@
     color: var(--theme-brand-danger);
   }
 
+  // W8: an update review marks what the installed approval lacks.
+  &__capability--added {
+    font-weight: 600;
+  }
+
+  &__badge {
+    margin-left: var(--margin-mini);
+    padding: 0 var(--margin-mini);
+    border-radius: var(--border-radius-small);
+    background: var(--theme-brand-warning);
+    color: var(--theme-brand-surface);
+    font-size: 0.8em;
+  }
+
+  &__removed {
+    color: var(--theme-brand-text-muted);
+    text-decoration: line-through;
+  }
+
   &__mcp {
     display: flex;
     align-items: flex-start;
@@ -136,4 +160,27 @@
   display: flex;
   flex-direction: column;
   gap: var(--margin-small);
+}
+
+// W8: notices on a plugin row (a staged update, settings that need a look).
+.tp__plugins__update,
+.tp__plugins__settings-review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--margin-mini);
+  padding: var(--margin-mini) var(--margin-small);
+  border-left: 3px solid var(--theme-brand-warning);
+  background: var(--theme-brand-surface-soft);
+}
+
+.tp__plugins__update-added {
+  color: var(--theme-brand-danger);
+}
+
+// The list sits in `.tp__config-view__body`, a flex column with `overflow: hidden`:
+// without this a card shrinks to share the height and the next one hides its
+// lower rows (the W8 update and settings notices, the rollback control).
+.tp__plugins__card {
+  flex-shrink: 0;
 }

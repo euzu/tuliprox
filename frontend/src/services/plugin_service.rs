@@ -1,8 +1,8 @@
 use crate::{
     error::{Error, ErrorInfo},
-    services::{get_base_href, get_token, request_get, request_post_form, RawResponse},
+    services::{get_base_href, request_get, request_post_form, request_raw, RawResponse},
 };
-use gloo_net::http::{Request, RequestBuilder};
+use gloo_net::http::Request;
 use js_sys::encode_uri_component;
 use serde::de::DeserializeOwned;
 use shared::{
@@ -11,7 +11,7 @@ use shared::{
         PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto,
         PluginUploadErrorDto, PluginUploadReviewDto,
     },
-    utils::{concat_path, concat_path_leading_slash, CONTENT_TYPE_JSON},
+    utils::{concat_path, concat_path_leading_slash},
 };
 use web_sys::{File, FormData};
 
@@ -75,32 +75,6 @@ fn status_message(status: u16, text: &str) -> String {
     }
 }
 
-/// `PUT` with a JSON body, reading the `422` body so it can be decoded as [`PluginSettingsErrorDto`].
-/// Uses the same base URL and bearer token as `requests.rs`, which only exposes the 422 body as a generic error set.
-async fn put_settings(url: &str, body: &PluginSettingsSaveDto) -> Result<PluginSettingsDto, PluginSaveError> {
-    let payload = serde_json::to_string(body).map_err(|_| PluginSaveError::Other(Error::RequestError.to_string()))?;
-    let mut request = Request::put(url).header("Accept", CONTENT_TYPE_JSON);
-    if let Some(token) = get_token() {
-        request = request.header("Authorization", format!("Bearer {token}").as_str());
-    }
-    let request = request
-        .header("Content-Type", CONTENT_TYPE_JSON)
-        .body(payload)
-        .map_err(|_| PluginSaveError::Other(Error::RequestError.to_string()))?;
-    let response = request.send().await.map_err(|_| PluginSaveError::Other(Error::RequestError.to_string()))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    match status {
-        200..=299 => serde_json::from_str::<PluginSettingsDto>(&text)
-            .map_err(|_| PluginSaveError::Other(Error::DeserializeError.to_string())),
-        422 => serde_json::from_str::<PluginSettingsErrorDto>(&text).map_or_else(
-            |_| Err(PluginSaveError::Other(status_message(status, &text))),
-            |dto| Err(PluginSaveError::Invalid(dto)),
-        ),
-        _ => Err(PluginSaveError::Other(status_message(status, &text))),
-    }
-}
-
 /// The body of a failed management action: the server's `PluginUploadErrorDto`,
 /// or whatever text it sent.
 fn action_error(status: u16, text: &str) -> PluginActionError {
@@ -117,28 +91,6 @@ fn decode_action<T: DeserializeOwned>(response: &RawResponse) -> Result<T, Plugi
         }
         status => Err(action_error(status, &response.body)),
     }
-}
-
-/// Send `request` with the bearer token and an optional JSON body, and hand
-/// back the status and body text.
-async fn call(request: RequestBuilder, body: Option<String>) -> Result<RawResponse, Error> {
-    let mut request = request.header("Accept", CONTENT_TYPE_JSON);
-    if let Some(token) = get_token() {
-        request = request.header("Authorization", format!("Bearer {token}").as_str());
-    }
-    let response = match body {
-        Some(payload) => {
-            request
-                .header("Content-Type", CONTENT_TYPE_JSON)
-                .body(payload)
-                .map_err(|_| Error::RequestError)?
-                .send()
-                .await
-        }
-        None => request.send().await,
-    }
-    .map_err(|_| Error::RequestError)?;
-    Ok(RawResponse { status: response.status(), body: response.text().await.unwrap_or_default() })
 }
 
 impl PluginService {
@@ -167,7 +119,21 @@ impl PluginService {
         req: &PluginSettingsSaveDto,
     ) -> Result<PluginSettingsDto, PluginSaveError> {
         let id = encode_path_segment(id);
-        put_settings(&concat_path(&self.plugins_path, &format!("{id}/settings")), req).await
+        let url = concat_path(&self.plugins_path, &format!("{id}/settings"));
+        let payload =
+            serde_json::to_string(req).map_err(|_| PluginSaveError::Other(Error::RequestError.to_string()))?;
+        let response = request_raw(Request::put(&url), Some(payload))
+            .await
+            .map_err(|err| PluginSaveError::Other(err.to_string()))?;
+        match response.status {
+            200..=299 => serde_json::from_str::<PluginSettingsDto>(&response.body)
+                .map_err(|_| PluginSaveError::Other(Error::DeserializeError.to_string())),
+            422 => serde_json::from_str::<PluginSettingsErrorDto>(&response.body).map_or_else(
+                |_| Err(PluginSaveError::Other(status_message(response.status, &response.body))),
+                |dto| Err(PluginSaveError::Invalid(dto)),
+            ),
+            status => Err(PluginSaveError::Other(status_message(status, &response.body))),
+        }
     }
 
     /// `POST /api/v1/plugins`: upload a `.tlpx` and get the capability review.
@@ -186,7 +152,24 @@ impl PluginService {
         let payload = serde_json::to_string(body).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
         let url = concat_path(&self.plugins_path, &format!("{}/approve", encode_path_segment(id)));
         let response =
-            call(Request::put(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
+            request_raw(Request::put(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `GET …/staged`: the review of an update waiting in staging, so it can be
+    /// reviewed and approved without uploading it again.
+    pub async fn staged_review(&self, id: &str) -> Result<PluginUploadReviewDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, &format!("{}/staged", encode_path_segment(id)));
+        let response = request_raw(Request::get(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `POST …/rollback`: go back to the retained prior version. A `409` means the
+    /// prior failed its activation check and the current version is still live.
+    pub async fn rollback(&self, id: &str) -> Result<PluginSummaryDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, &format!("{}/rollback", encode_path_segment(id)));
+        let response =
+            request_raw(Request::post(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
         decode_action(&response)
     }
 
@@ -194,7 +177,7 @@ impl PluginService {
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<PluginSummaryDto, PluginActionError> {
         let action = if enabled { "enable" } else { "disable" };
         let url = concat_path(&self.plugins_path, &format!("{}/{action}", encode_path_segment(id)));
-        let response = call(Request::put(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        let response = request_raw(Request::put(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
         decode_action(&response)
     }
 
@@ -202,7 +185,8 @@ impl PluginService {
     pub async fn uninstall(&self, id: &str, purge_kv: bool) -> Result<(), PluginActionError> {
         let url = concat_path(&self.plugins_path, &encode_path_segment(id));
         let url = if purge_kv { format!("{url}?purge_kv=true") } else { url };
-        let response = call(Request::delete(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        let response =
+            request_raw(Request::delete(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
         match response.status {
             200..=299 => Ok(()),
             status => Err(action_error(status, &response.body)),
