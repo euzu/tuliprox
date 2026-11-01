@@ -22,6 +22,10 @@ pub struct PluginEntry {
     /// see a resolved secret. Use [`PluginsConfig::resolved_settings`] at
     /// instantiation.
     pub settings: Map<String, Value>,
+    /// The settings-schema `version` `settings` were written for (1 when the
+    /// config says nothing). The registry compares it with the installed
+    /// package's schema version (plan §18 *W8 seam freeze*).
+    pub settings_version: u32,
 }
 
 /// Runtime form of the `plugins:` block.
@@ -137,7 +141,13 @@ fn format_millis(millis: Millis) -> String {
 
 impl From<&PluginEntryDto> for PluginEntry {
     fn from(dto: &PluginEntryDto) -> Self {
-        Self { id: dto.id.clone(), enabled: dto.enabled, priority: dto.priority, settings: dto.settings.clone() }
+        Self {
+            id: dto.id.clone(),
+            enabled: dto.enabled,
+            priority: dto.priority,
+            settings: dto.settings.clone(),
+            settings_version: dto.settings_version.max(1),
+        }
     }
 }
 
@@ -148,6 +158,7 @@ impl From<&PluginEntry> for PluginEntryDto {
             enabled: entry.enabled,
             priority: entry.priority,
             settings: entry.settings.clone(),
+            settings_version: entry.settings_version,
         }
     }
 }
@@ -212,6 +223,20 @@ mod tests {
             plugins: vec![entry],
         };
         assert_eq!(PluginsConfigDto::from(&PluginsConfig::from(&dto)), dto);
+    }
+
+    #[test]
+    fn settings_version_defaults_to_one_and_is_only_written_when_it_differs() {
+        let dto = dto_from(json!({"plugins": [{"id": "demo-plugin"}, {"id": "other-plugin", "settings_version": 3}]}));
+        let config = PluginsConfig::from(&dto);
+        assert_eq!(config.entry("demo-plugin").unwrap().settings_version, 1);
+        assert_eq!(config.entry("other-plugin").unwrap().settings_version, 3);
+        let written = serde_json::to_value(PluginsConfigDto::from(&config)).unwrap();
+        assert!(written["plugins"][0].get("settings_version").is_none(), "1 is omitted");
+        assert_eq!(written["plugins"][1]["settings_version"], 3);
+        // a 0 in the file is read as the default 1
+        let zero = PluginsConfig::from(&dto_from(json!({"plugins": [{"id": "demo-plugin", "settings_version": 0}]})));
+        assert_eq!(zero.entry("demo-plugin").unwrap().settings_version, 1);
     }
 
     #[test]

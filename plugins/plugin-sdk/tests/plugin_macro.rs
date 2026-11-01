@@ -37,6 +37,21 @@ mod plugin {
         }
     }
 
+    impl SettingsMigration for Fixture {
+        fn migrate(from_version: u32, settings: &str) -> Result<String, String> {
+            Migrations::new()
+                .step(1, |mut value| {
+                    if let Some(object) = value.as_object_mut() {
+                        if let Some(label) = object.remove("name") {
+                            object.insert("label".to_string(), label);
+                        }
+                    }
+                    Ok(value)
+                })
+                .run(from_version, settings)
+        }
+    }
+
     impl Tasks for Fixture {
         fn run(ctx: TaskContext) -> Result<String, String> {
             tasks::Router::new().task("refresh", |ctx| Ok(format!("ran at {}", ctx.scheduled_at))).dispatch(&ctx)
@@ -64,13 +79,17 @@ fn channel(handle: u32) -> Channel {
 
 #[test]
 fn the_module_exposes_the_manifest_hooks_and_exactly_the_implemented_exports() {
-    assert_eq!(plugin::HOOK_IDS, ["playlist.after-filter", "playlist.after-map", "events.on-event", "tasks.run"]);
+    assert_eq!(
+        plugin::HOOK_IDS,
+        ["playlist.after-filter", "playlist.after-map", "events.on-event", "tasks.run", "settings.migrate"]
+    );
     assert_eq!(
         plugin::EXPORTS,
         [
             "tuliprox:plugin/lifecycle@1.0.0",
             "tuliprox:plugin/event-hooks@1.0.0",
             "tuliprox:plugin/playlist-hooks@1.0.0",
+            "tuliprox:plugin/settings-migration@1.0.0",
             "tuliprox:plugin/tasks@1.0.0",
         ]
     );
@@ -125,4 +144,14 @@ fn events_and_tasks_dispatch_through_their_adapters() {
         last_success_at: None,
     });
     assert_eq!(ran, Ok("ran at 77".to_string()));
+}
+
+#[test]
+fn settings_migration_dispatches_through_its_adapter() {
+    use exports::settings_migration::Guest as _;
+
+    let migrated = <tuliprox_plugin_sdk::__private::Adapter<plugin::Fixture>>::migrate(1, r#"{"name":"x"}"#.into());
+    assert_eq!(migrated, Ok(r#"{"label":"x"}"#.to_string()));
+    let newer = <tuliprox_plugin_sdk::__private::Adapter<plugin::Fixture>>::migrate(5, "{}".into());
+    assert!(newer.unwrap_err().contains("newer"));
 }

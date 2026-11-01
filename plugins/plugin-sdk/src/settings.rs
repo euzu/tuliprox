@@ -104,6 +104,81 @@ pub trait PluginSettings: DeserializeOwned + Send + Sync + Sized + 'static {
     }
 }
 
+/// A chain of settings migrations, one step per old schema version.
+///
+/// The settings schema carries a top-level `"version"` (default 1). When a
+/// plugin update raises it, the host calls the plugin's
+/// [`SettingsMigration`](crate::SettingsMigration) export with the stored
+/// version and JSON. `Migrations` is the usual body of that export: each
+/// [`step`](Self::step) turns the settings of version `n` into those of `n + 1`,
+/// and [`run`](Self::run) applies the steps from the stored version up to the
+/// newest one.
+///
+/// ```ignore
+/// impl SettingsMigration for Plugin {
+///     fn migrate(from_version: u32, settings: &str) -> Result<String, String> {
+///         Migrations::new()
+///             .step(1, |mut v| { rename(&mut v, "host", "endpoint"); Ok(v) })
+///             .run(from_version, settings)
+///     }
+/// }
+/// ```
+#[derive(Default)]
+pub struct Migrations {
+    steps: Vec<(u32, Step)>,
+}
+
+type Step = Box<dyn Fn(serde_json::Value) -> Result<serde_json::Value, String>>;
+
+impl Migrations {
+    #[must_use]
+    pub fn new() -> Self { Self::default() }
+
+    /// The step that migrates settings of version `from` to version `from + 1`.
+    #[must_use]
+    pub fn step(
+        mut self,
+        from: u32,
+        migrate: impl Fn(serde_json::Value) -> Result<serde_json::Value, String> + 'static,
+    ) -> Self {
+        self.steps.push((from, Box::new(migrate)));
+        self
+    }
+
+    /// The version the steps lead to: one past the highest step.
+    #[must_use]
+    pub fn latest(&self) -> u32 { self.steps.iter().map(|(from, _)| *from + 1).max().unwrap_or(1) }
+
+    /// Migrate `settings` (JSON, an empty string is `{}`) from `from_version`
+    /// to [`latest`](Self::latest) and return the JSON.
+    ///
+    /// # Errors
+    /// The settings are not a JSON object, a step in the chain is missing, or a
+    /// step failed. A `from_version` that is already the latest returns the
+    /// settings unchanged; a newer one is an error (nothing can migrate down).
+    pub fn run(&self, from_version: u32, settings: &str) -> Result<String, String> {
+        let raw = if settings.trim().is_empty() { "{}" } else { settings };
+        let mut value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|err| format!("the stored settings are not JSON: {err}"))?;
+        if !value.is_object() {
+            return Err("the stored settings are not a JSON object".to_string());
+        }
+        let latest = self.latest();
+        if from_version > latest {
+            return Err(format!("the settings are at version {from_version}, newer than the latest known, {latest}"));
+        }
+        for version in from_version..latest {
+            let (_, step) = self
+                .steps
+                .iter()
+                .find(|(from, _)| *from == version)
+                .ok_or_else(|| format!("no migration from settings version {version} to {}", version + 1))?;
+            value = step(value).map_err(|err| format!("migration from version {version}: {err}"))?;
+        }
+        Ok(value.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +223,58 @@ mod tests {
         Fields::init(r#"{"api_key":"from-init","hours":9}"#).unwrap();
         assert_eq!(Fields::current().unwrap().api_key.expose(), "from-init");
         assert!(Fields::init("{}").unwrap_err().contains("api_key"), "a missing field names itself");
+    }
+
+    fn rename(value: &mut serde_json::Value, from: &str, to: &str) {
+        if let Some(object) = value.as_object_mut() {
+            if let Some(moved) = object.remove(from) {
+                object.insert(to.to_string(), moved);
+            }
+        }
+    }
+
+    fn chain() -> Migrations {
+        Migrations::new()
+            .step(1, |mut value| {
+                rename(&mut value, "host", "endpoint");
+                Ok(value)
+            })
+            .step(2, |mut value| {
+                let object = value.as_object_mut().ok_or("not an object")?;
+                object.entry("retries").or_insert(serde_json::json!(3));
+                Ok(value)
+            })
+    }
+
+    fn parsed(text: &str) -> serde_json::Value { serde_json::from_str(text).unwrap() }
+
+    #[test]
+    fn migrations_chain_the_steps_from_the_stored_version() {
+        let migrations = chain();
+        assert_eq!(migrations.latest(), 3);
+        let from_one = migrations.run(1, r#"{"host":"a","keep":true}"#).unwrap();
+        assert_eq!(parsed(&from_one), serde_json::json!({"endpoint": "a", "keep": true, "retries": 3}));
+        let from_two = migrations.run(2, r#"{"endpoint":"b"}"#).unwrap();
+        assert_eq!(parsed(&from_two), serde_json::json!({"endpoint": "b", "retries": 3}));
+        assert_eq!(parsed(&migrations.run(1, "").unwrap()), serde_json::json!({"retries": 3}));
+    }
+
+    #[test]
+    fn the_latest_version_is_returned_unchanged_and_a_newer_one_is_refused() {
+        let migrations = chain();
+        assert_eq!(parsed(&migrations.run(3, r#"{"endpoint":"c"}"#).unwrap()), serde_json::json!({"endpoint": "c"}));
+        assert!(migrations.run(4, "{}").unwrap_err().contains("newer"));
+        assert_eq!(Migrations::new().latest(), 1);
+        assert!(Migrations::new().run(1, "{}").is_ok());
+    }
+
+    #[test]
+    fn a_gap_a_failing_step_and_bad_input_are_errors() {
+        let gap = Migrations::new().step(2, Ok);
+        assert!(gap.run(1, "{}").unwrap_err().contains("no migration from settings version 1"));
+        let failing = Migrations::new().step(1, |_| Err("boom".to_string()));
+        assert_eq!(failing.run(1, "{}").unwrap_err(), "migration from version 1: boom");
+        assert!(chain().run(1, "[1]").unwrap_err().contains("not a JSON object"));
+        assert!(chain().run(1, "{oops").unwrap_err().contains("not JSON"));
     }
 }

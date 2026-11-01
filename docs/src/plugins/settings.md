@@ -70,7 +70,9 @@ Use `properties` for every field. Keep one flat object or a small nested one, as
 3. If the plugin is loaded, its `init` is run with the new settings in a throwaway instance. An error from `init` is
    refused with `422` and an `error` message. If the plugin is not loaded, `init` is skipped and the answer carries a
    warning that says so.
-4. Only then is `config.yml` written, with a backup of the previous file, and the plugins are reloaded.
+4. Only then is `config.yml` written, with a backup of the previous file, and the plugins are reloaded. The entry's
+   `settings_version` is written as the schema's `version` (see [Versioning and migration](#versioning-and-migration)),
+   which also clears a "needs review" notice.
 
 The answer is `200` with the masked settings, the schema, the secret list and the `warnings`. A `503` means no
 instance was free within the call deadline.
@@ -80,6 +82,94 @@ rewritten from the parsed config, so comments in it are not kept.
 
 A settings save for a plugin that has no entry creates the entry **disabled**. It does not enable the plugin, and it
 does not approve it. See [Security Model](./security.md#trust-on-first-use).
+
+## Versioning and migration
+
+A settings schema may carry a top-level integer `version` (at least 1, default 1). Raise it whenever an update changes
+the shape of the settings, such as a renamed field.
+
+```json
+{ "type": "object", "version": 2, "required": ["group"], "properties": { "group": { "type": "string" } } }
+```
+
+`version` sits next to `type` and `properties`. A property that happens to be named `version` is an ordinary setting.
+A `version` that is not an integer of at least 1 makes the package invalid.
+
+The stored settings remember the version they were written for, as `settings_version` in the `plugins.plugins[]`
+entry. It is left out of `config.yml` when it is 1, and a missing value means 1. A settings save writes the schema's
+current version.
+
+When the stored version is lower than the installed schema's, one of these happens:
+
+- **The plugin exports `settings.migrate`.** After the plugins reload, tuliprox calls it once, with the stored version
+  and the stored settings. The settings it gets have their `${env:VAR}` references resolved, as `init` would see them.
+  The version it returns is validated against the new schema. If it passes, it is saved to `config.yml` with the new
+  `settings_version`, in the same write as a settings save, and the plugins reload. Resolved values are not written
+  out: a string that is exactly a resolved `${env:VAR}` value goes back to the reference.
+- **There is no `settings.migrate`, it returns `err`, or its result fails the schema.** The stored settings are left
+  untouched, and the plugin list shows a "settings need review" notice with the reason, which the plugin's settings
+  dialog repeats above the form. Saving the settings clears the notice.
+
+If the old settings still pass the new schema, the plugin keeps running on them meanwhile. If they do not, the plugin
+does not run: it is loaded, its state reads `failed` with the reason, and it runs again once a migration or a
+save has written settings that fit.
+
+When the stored version is higher than the schema's, as after a rollback to an older package, nothing is migrated down.
+The notice is set, and the plugin runs only if the stored settings fit the older schema.
+
+Only an enabled plugin is migrated. A disabled one is migrated after it is enabled. A migration that failed is not
+retried until the package or the stored version changes.
+
+A one-shot run without `-s` migrates the same way, but only in memory for that run: it never writes `config.yml`,
+which a running server may share, and logs that the migration was not saved. The next server start saves it.
+
+`migrate` is a function of the `settings-migration` interface, which the manifest lists as the hook `settings.migrate`.
+It needs no capability. A plugin that exports it needs a tuliprox that has the interface, so its manifest should say
+so with `min_tuliprox_version`. The interface is new in the 1.x line, so plugins built before it keep working.
+
+```wit
+interface settings-migration {
+  migrate: func(from-version: u32, settings: string) -> result<string, string>;
+}
+```
+
+`init` does not run before `migrate`: the old settings may not fit what the new `init` expects. Do not read the typed
+`#[tuliprox_plugin_settings]` struct in `migrate`. Work on the JSON text instead.
+
+With the SDK, implement `SettingsMigration` and let `Migrations` chain one step per old version. Each step turns the
+settings of version `n` into those of `n + 1`; a gap in the chain, or a newer version than the last step leads to, is
+an error.
+
+```rust
+use tuliprox_plugin_sdk::prelude::*;
+
+#[tuliprox_plugin]
+mod plugin {
+    use super::*;
+
+    impl SettingsMigration for MyPlugin {
+        fn migrate(from_version: u32, settings: &str) -> Result<String, String> {
+            Migrations::new()
+                .step(1, |mut value| {
+                    // 1 -> 2: `label` became `group`
+                    if let Some(object) = value.as_object_mut() {
+                        if let Some(label) = object.remove("label") {
+                            object.insert("group".to_string(), label);
+                        }
+                    }
+                    Ok(value)
+                })
+                .run(from_version, settings)
+        }
+    }
+}
+```
+
+List `settings.migrate` under `hooks:` in the manifest. The fixture `plugins/plugin-api/fixtures/settings-migrate-probe`
+is a complete example, from version 1 to 2.
+
+<!-- UNVERIFIED: the web UI notice. The server side and the SDK are covered by unit and fixture tests; the dialog
+rendering was not exercised in a browser. -->
 
 ## Secrets
 

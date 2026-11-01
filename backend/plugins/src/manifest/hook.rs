@@ -81,6 +81,7 @@ hook_ids! {
     OutputRender => "output.render", "output-generator", Requirement::OutputFormat;
     RpcCall => "rpc.call", "rpc", Requirement::RpcExports;
     TasksRun => "tasks.run", "tasks", Requirement::Tasks;
+    SettingsMigrate => "settings.migrate", "settings-migration", Requirement::None;
 }
 
 /// Phase S spelled the six stage ids without the `playlist.` prefix.
@@ -105,10 +106,10 @@ impl HookId {
 
     /// The pipeline hook the host can run, if this id has one.
     ///
-    /// W5 dispatches the playlist, strategy, filter, EPG and metadata hooks.
-    /// `epg.resolve-conflict` (v1.x, needs the blocking bridge) and the W6
-    /// hooks (stream, events, metrics, notifications, input, output, rpc,
-    /// tasks) are validated and kept in the manifest but run nothing yet.
+    /// Every id maps to a host hook except three: `epg.resolve-conflict` (v1.x,
+    /// needs the blocking bridge; validated and kept, never run), `rpc.call`
+    /// (run by the rpc route and MCP tools) and `settings.migrate` (W8, run by
+    /// the settings migration step).
     pub(crate) const fn pipeline_hook(self) -> Option<PluginHook> {
         match self {
             Self::PlaylistLoaded => Some(PluginHook::PlaylistLoaded),
@@ -136,7 +137,8 @@ impl HookId {
             Self::OutputRender => Some(PluginHook::RenderOutput),
             Self::StreamInjectHeaders => Some(PluginHook::InjectHeaders),
             Self::TasksRun => Some(PluginHook::RunTask),
-            Self::EpgResolveConflict | Self::RpcCall => None,
+            // Called by the settings migration step, never by the pipeline.
+            Self::EpgResolveConflict | Self::RpcCall | Self::SettingsMigrate => None,
         }
     }
 }
@@ -147,10 +149,10 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_frozen_table_has_27_unique_ids_and_round_trips() {
-        assert_eq!(HookId::ALL.len(), 27);
+    fn the_frozen_table_has_28_unique_ids_and_round_trips() {
+        assert_eq!(HookId::ALL.len(), 28);
         let spellings: HashSet<_> = HookId::ALL.iter().map(|hook| hook.as_str()).collect();
-        assert_eq!(spellings.len(), 27);
+        assert_eq!(spellings.len(), 28);
         for hook in HookId::ALL {
             assert_eq!(HookId::parse(hook.as_str()), Ok(*hook));
             let (group, name) = hook.as_str().split_once('.').expect("ids are dotted");
@@ -164,7 +166,7 @@ mod tests {
         assert_eq!(stages, 6);
         let others: HashSet<_> =
             HookId::ALL.iter().map(|hook| hook.wit_interface()).filter(|wit| *wit != "playlist-hooks").collect();
-        assert_eq!(others.len(), 21, "21 other ids, 21 distinct interfaces");
+        assert_eq!(others.len(), 22, "22 other ids, 22 distinct interfaces");
         assert_eq!(HookId::PlaylistLoaded.wit_interface(), "source-hooks");
         assert_eq!(HookId::InputFetch.wit_interface(), "input-provider");
         assert_eq!(HookId::RpcCall.wit_interface(), "rpc");
@@ -217,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn every_hook_but_resolve_conflict_and_rpc_maps_to_a_host_hook() {
+    fn every_hook_but_resolve_conflict_rpc_and_migrate_maps_to_a_host_hook() {
         let pipeline: Vec<_> = HookId::ALL.iter().filter_map(|hook| hook.pipeline_hook()).collect();
         assert_eq!(pipeline.len(), 25);
         assert_eq!(pipeline.iter().copied().collect::<HashSet<_>>().len(), 25);
@@ -225,6 +227,7 @@ mod tests {
         assert_eq!(HookId::PlaylistAfterFilter.pipeline_hook(), Some(PluginHook::AfterFilter));
         assert_eq!(HookId::EpgResolveConflict.pipeline_hook(), None);
         assert_eq!(HookId::RpcCall.pipeline_hook(), None);
+        assert_eq!(HookId::SettingsMigrate.pipeline_hook(), None);
         assert_eq!(HookId::StreamInjectHeaders.pipeline_hook(), Some(PluginHook::InjectHeaders));
         assert_eq!(HookId::TasksRun.pipeline_hook(), Some(PluginHook::RunTask));
     }

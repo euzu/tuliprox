@@ -128,6 +128,11 @@ inputs:
 The input type is `plugin`, from `InputType` in `shared/src/model/config/input/kind.rs` (`snake_case` serde). The
 `plugin:` field names the plugin id (`shared/src/model/config/input.rs`).
 
+The plugin references in `source.yml` are checked when tuliprox starts: an input or output that names a plugin that is
+not installed, approved and providing that input type or output format stops the start
+(``input <name>: no loaded plugin <id> provides fetch-input``). So install the plugin first: start with `source.yml` not yet naming
+it, upload and approve it in the Plugin Manager, then add the input or output and restart.
+
 - The plugin's `fetch_playlist` returns the channels. `fetch_epg` returns EPG channels and programmes, or an empty list.
 - For a plugin input, `url`, `username` and `password` are optional and passed to the plugin unchanged.
 - Each call runs in a fresh instance with a deadline of `plugins.max_exec` times 10, never more than `plugins.max_task_exec`

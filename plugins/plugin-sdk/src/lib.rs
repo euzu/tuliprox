@@ -68,6 +68,7 @@ pub mod bindings {
                 include tuliprox:plugin/output-plugin@1.0.0;
                 include tuliprox:plugin/rpc-plugin@1.0.0;
                 include tuliprox:plugin/task-plugin@1.0.0;
+                include tuliprox:plugin/settings-migration-plugin@1.0.0;
             }
         ",
         world: "tuliprox:sdk/union",
@@ -97,9 +98,9 @@ pub mod tasks;
 pub use hooks::{
     ChnoHooks, DedupeHooks, EpgConflictHooks, EpgEnrichHooks, EpgLoadHooks, EpgMatchHooks, EpgTransformHooks,
     EventHooks, FilterHooks, GroupMergeHooks, InputProvider, Lifecycle, MetadataHooks, MetricsHooks, NotificationHooks,
-    OutputGenerator, PlaylistHooks, Rpc, SortHooks, SortKeyHooks, SourceHooks, StreamHooks, Tasks,
+    OutputGenerator, PlaylistHooks, Rpc, SettingsMigration, SortHooks, SortKeyHooks, SourceHooks, StreamHooks, Tasks,
 };
-pub use settings::{PluginSettings, Secret};
+pub use settings::{Migrations, PluginSettings, Secret};
 /// The contract version the SDK is generated against.
 pub use tuliprox_plugin_api::{ABI_MAJOR, ABI_VERSION};
 pub use tuliprox_plugin_sdk_macros::{tuliprox_plugin, tuliprox_plugin_settings};
@@ -110,8 +111,8 @@ pub mod wit {
         exports::tuliprox::plugin::{
             chno_hooks, dedupe_hooks, epg_conflict_hooks, epg_enrich_hooks, epg_load_hooks, epg_match_hooks,
             epg_transform_hooks, event_hooks, filter_hooks, group_merge_hooks, input_provider, lifecycle,
-            metadata_hooks, metrics_hooks, notification_hooks, output_generator, playlist_hooks, rpc, sort_hooks,
-            sort_key_hooks, source_hooks, stream_hooks, tasks,
+            metadata_hooks, metrics_hooks, notification_hooks, output_generator, playlist_hooks, rpc,
+            settings_migration, sort_hooks, sort_key_hooks, source_hooks, stream_hooks, tasks,
         },
         tuliprox::plugin::{epg_types, host, status, types},
     };
@@ -125,7 +126,7 @@ pub mod prelude {
         hooks::*,
         http::{self, Client as HttpClient},
         images, info, kv, log, metrics, rpc,
-        settings::{PluginSettings, Secret},
+        settings::{Migrations, PluginSettings, Secret},
         tasks, trace, warn,
         wit::{
             dedupe_hooks::DuplicateGroup,

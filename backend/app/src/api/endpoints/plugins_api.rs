@@ -66,8 +66,17 @@ async fn get_plugin_stats(State(app_state): State<Arc<AppState>>, Path(id): Path
 
 #[cfg(feature = "plugins")]
 async fn get_plugin_settings(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let config = app_state.app_config.plugins.load();
-    found(app_state.plugins.as_ref().and_then(|plugins| plugins.api_settings(&id, config.as_deref())))
+    let Some(plugins) = app_state.plugins.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // As written, so a `${env:VAR}` value shows as the reference (plan §9 *Returning*).
+    match super::plugins_settings_api::written_plugins_config(&app_state.app_config).await {
+        Ok(config) => found(plugins.api_settings(&id, Some(&config))),
+        Err(err) => {
+            log::error!("Cannot read config.yml to show the settings of plugin `{id}`: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[cfg(feature = "plugins")]

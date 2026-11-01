@@ -37,6 +37,7 @@ struct Probe;
 /// `HttpRequestDenied(None)` becomes `http-request-denied`.
 fn kebab(debug: &str) -> String {
     let name = debug.split('(').next().unwrap_or_default();
+    let name = name.rsplit("::").next().unwrap_or(name);
     let mut out = String::with_capacity(name.len() + 4);
     for (index, ch) in name.chars().enumerate() {
         if ch.is_uppercase() {

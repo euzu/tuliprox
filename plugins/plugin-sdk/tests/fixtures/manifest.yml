@@ -7,6 +7,7 @@ hooks:
   - playlist.after-map
   - events.on-event
   - tasks.run
+  - settings.migrate
 events:
   - playlist.update
 tasks:

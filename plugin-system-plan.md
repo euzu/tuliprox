@@ -2038,6 +2038,8 @@ them in `MCP_TOOLS`. Mutating plugin routes (upload, approve, rpc) must not be.
 | `GET  /api/v1/plugins` | list: manifest summary, state (enabled/disabled/failed), health, hook stats |
 | `POST /api/v1/plugins` | upload `.tlpx`; returns validation result + capability grant summary (install completes only after `PUT …/approve`) |
 | `PUT  /api/v1/plugins/{id}/approve` | admin approves capabilities; plugin becomes installable/loadable |
+| `GET  /api/v1/plugins/{id}/staged` | *(W8)* the review of the package staged for an installed id (an update), re-validated; `SystemWrite` |
+| `POST /api/v1/plugins/{id}/rollback` | *(W8)* swap the installed package and the one retained prior version (pins + settings entry), activation-checked, undone on failure; `SystemWrite`, never an MCP tool |
 | `PUT  /api/v1/plugins/{id}/enable` / `disable` | toggle without uninstall |
 | `DELETE /api/v1/plugins/{id}` | uninstall (+ optional KV purge flag) |
 | `GET  /api/v1/plugins/{id}/settings` | current settings JSON + the schema |
@@ -3593,3 +3595,109 @@ section, extension and tab, `en` + `es` locales) and its lines in
 `view_type.rs`, `home.rs`, `sidebar.rs`, the locale JSONs, `v1_api.rs`,
 `main_api.rs`, `mcp_api.rs`, `mcp_tools.rs` (app) and every `mod.rs`
 registration.
+
+### W8 seam freeze *(2026-10-31, orchestrator `claude-opus-5-5`; uncommitted on `plugin-w8`, lanes apply it as a patch)*
+
+Reduced W8: Phase 8 items 3 and 5 only (1, 2 and 4 excluded by the owner).
+BASE `1d7337e5`. The seam patch (`.git/w8-status/w8-seam.patch`) carries the
+WIT addition, the shared DTO fields below and this section.
+
+**Re-anchor facts (W8).** `install.rs` (W6b) already owns staging
+(`<data_dir>/staging/<id>`), extraction, `validate_package`, `review` and
+`approve_blocking`. `install_staged` swaps directories but deletes the old
+one. Uploading an installed id already stages beside it (`replaces` in the
+review). `init` runs per instance (`dispatch.rs::open_prepared`) and in a
+settings save (`api.rs::run_candidate_init`), never on approve or enable. The
+plugins dir watcher (`Registry::watch`, 500 ms debounce) rescans fully, and a
+changed hash then yields `PendingApproval` (`decide_approval`). The frozen-clock
+fix already landed after W7 (`HostClock::Frozen`, `wall_ms()`; history §2.6). No
+settings-schema or stored-settings version exists yet.
+
+**WIT (1.x additive rule).** A new interface plus world in the `@1.0.0`
+package. No existing interface, record or world changes, and the ABI string
+stays `1.0.0`. `EXPORT_INTERFACES` grows to 24.
+
+```wit
+interface settings-migration {
+  migrate: func(from-version: u32, settings: string) -> result<string, string>;
+}
+world settings-migration-plugin { include base; export settings-migration; }
+```
+
+The manifest hook id is `settings.migrate` and needs no capability. A plugin
+that exports it targets a W8+ host, which its manifest `tuliprox:` range must
+say.
+
+**Settings versions.**
+- Schema version: an optional top-level integer `"version"` (≥ 1) in the
+  settings schema, defaulting to 1. It is accepted by the §11 subset.
+- Stored version: `settings_version` on the `plugins.plugins[]` entry. It is
+  omitted when equal to 1, and an absent value means 1. `PUT …/settings`
+  writes the schema version.
+- When the stored version is lower than the schema version, the plugin is
+  migrated if it exports `settings.migrate`. The migrated JSON is validated
+  against the schema and persisted (settings and `settings_version`) through
+  the same config.yml write as `PUT …/settings`. It runs in an async step after
+  the registry reload, never inside the blocking scan (rule 0: no `block_on`).
+- Without the export, or when `migrate` errs or its output fails validation,
+  the stored settings are kept untouched and `settings_review` is set with the
+  reason. If the old settings still validate, the plugin keeps running on them.
+  If they don't, it is not runnable until the settings are saved.
+- When the stored version is higher than the schema version (a downgrade or
+  rollback), there is no migration and `settings_review` is set.
+
+**Pin integrity (C).** Any `plugin.wasm` change that doesn't go through
+approve, update or rollback means `PendingApproval`, and that includes a swap
+while the server runs. The bytes that are compiled must be the bytes that were
+hashed (no TOCTOU between hashing and compiling). Trust on first use (an
+enabled entry with no pin) is unchanged and still undecided (W7 item (e)).
+
+**Registry API frozen for D (C implements in `registry.rs`, D calls).**
+- `Registry::swap_pin(&self, id, pin: ApprovalPin) -> io::Result<Option<ApprovalPin>>`
+  writes the new pin and returns the previous one.
+- `Registry::restore_pin(&self, id, previous: Option<ApprovalPin>) -> io::Result<()>`
+  puts the previous pin back, or removes it.
+- `PluginSystem::activation_check(&self, id, config: &PluginsConfig) -> Result<(), String>`
+  (async, `api.rs`, called after the reload) fails unless the record is
+  loaded and runnable and one fresh instance's `init` succeeds with the
+  effective (migrated if needed) settings, within the hook budget. It reuses
+  `run_candidate_init`.
+
+**Safe replacement (D).**
+- An update is an upload of an installed id. It stages and runs the full
+  validation, and the review carries `capability_diff` against the installed
+  pin. `mcp` is never carried over: the approve body decides it.
+- The approve body still echoes every capability, so nothing is granted
+  silently. The summary shows a staged update as `update`.
+- Approving an update does this, in order:
+  1. Move the current package to `<data_dir>/plugins-prev/<id>/`, outside the
+     scanned dir, together with `prev.json` (its pin and its `plugins[]`
+     settings entry). This is the one retained prior version; an older one is
+     replaced.
+  2. `swap_pin`, then the directory swap, then reload, then `activation_check`.
+  3. On failure, restore the directory and the pin, reload, and answer `409`
+     with "rolled back to <version>: <reason>". The failed package is
+     discarded.
+- `POST /api/v1/plugins/{id}/rollback` (`SystemWrite`, never an MCP tool)
+  swaps the current and prior packages, with their pins and settings entries,
+  and runs the same activation check. The summary shows `rollback`.
+
+**DTO additions (seam, `shared/src/model/plugins_dto.rs`).**
+- `PluginSummaryDto` gains `settings_review` (filled by C) and `update` and
+  `rollback` (filled by D).
+- New `PluginUpdateDto`, `PluginRollbackDto` and `PluginCapabilityDiffDto`.
+- `PluginUploadReviewDto` gains `capability_diff` (filled by D).
+
+**Ownership (W8).**
+- C: `registry.rs`, `settings.rs`, `api.rs`, `manifest/**`, `plugins_settings_api.rs`,
+  `app_state/plugin_state.rs`, `core/src/model/config/plugins.rs`,
+  `plugins/plugin-sdk/**`, `plugins/plugin-sdk-macros/**`, `plugin_settings.rs`,
+  `docs/src/plugins/settings.md`, and a new fixture under `plugins/plugin-api/fixtures/`.
+- D: `install.rs`, `plugins_install_api.rs` (including the rollback route),
+  `plugins_view.rs` (which also renders `settings_review`), `plugin_upload.rs`,
+  `plugin_service.rs`, and `docs/src/plugins/packaging.md`.
+- F: tests in `state.rs`/`metrics.rs` only, plus run harnesses outside the
+  repo.
+- Orchestrator: the WIT, `plugin-api/src/lib.rs`, `plugins_dto.rs`, the locale
+  JSONs, `bin/build_plugin_fixture.sh`, every §19.6 hot-spot, and every
+  `registry.rs` edit D needs (D describes them).

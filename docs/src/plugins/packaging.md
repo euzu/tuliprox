@@ -79,6 +79,36 @@ You can also unpack the package into `<config dir>/plugins/<id>/` and write a `p
 That path skips the review: an enabled entry with no recorded approval approves the plugin on first sight. See
 [Security Model](./security.md#trust-on-first-use).
 
+## Updating and rolling back
+
+Uploading a package whose `id` is already installed is an update. The package goes through the same validation as a new
+one and waits in staging. The plugin list shows "update available for review". The review marks the capabilities the
+update adds, lists the ones it no longer asks for, and says if MCP exposure was approved for the installed version.
+`GET /api/v1/plugins/{id}/staged` returns that review again, so an update can be reviewed after the upload dialog has
+closed. Nothing changes until you approve:
+
+- The approval still has to name every capability the package asks for, not only the new ones. A body that leaves one
+  out is refused with `409` and the staged package stays.
+- MCP exposure is never carried over. Tick it again if you want it for the new version.
+- The installed package, its approval, and its `plugins:` settings entry are kept as the single prior version in
+  `<data dir>/plugins-prev/<id>/` (`package/` and `prev.json`). The directory is outside the plugins directory, so it is
+  never loaded. An older prior version is replaced, so at most one is kept. `prev.json` can hold settings values, so it
+  is readable by the server user only.
+- The new package is then swapped in and activated: the plugin must load and one fresh instance's `init` must accept its
+  settings. If that fails, the old directory, approval and prior version come back, the failed package is discarded, and
+  the answer is `409 rolled back to <version>: <reason>`. A plugin you never configured, and a package without a wasm,
+  are not checked beyond validation.
+
+`POST /api/v1/plugins/{id}/rollback` (`SystemWrite`, not available as an MCP tool) swaps the installed package and the
+prior one, with their approvals and settings entries, and runs the same activation check. The plugin list shows a
+rollback button, with a confirmation, while a prior version exists. After a rollback the version you left becomes the
+prior one, so a second rollback goes forward again. If the check fails, the rollback is undone and the answer is
+`409`. A prior version that was never approved, was changed on disk, or no longer validates is refused.
+
+If the server stops in the middle of an update, the installed package and its approval stay consistent, or the plugin
+shows `pending_approval`. In that case approve the staged package again or roll back. Hidden `.swap~` leftovers are
+removed by the next update of that plugin.
+
 ## Pre-publish checklist
 
 - The manifest's `id`, `name`, `version`, `author` and `description` are your own. The template's values are
@@ -98,7 +128,7 @@ That path skips the review: an enabled entry with no recorded approval approves 
   that checkout, switch it to a published or git dependency.
 - Compile every `ui/*.ts` to `ui/*.js`, and check that the frame documents load their scripts from the package.
 - Do not commit `.wasm` or `.tlpx` files. Build them when you need them.
-- Do not use the ids `metrics` and `staging`.
+- Do not use the ids `metrics`, `staging` and `plugins-prev`.
 - Run the unit tests with `cargo test` in the plugin directory. They run on the SDK's mock host.
 
 ## Template contents

@@ -18,6 +18,11 @@
 //!    module only says whether enabling is allowed.
 //! 4. **Uninstall** removes the pin and the directories, reloads, and optionally
 //!    deletes the KV store once the registry has dropped its handle.
+//! 5. **Update and rollback** (plan §18 *W8 seam freeze*, *Safe replacement*):
+//!    approving a staged package over an installed one keeps the installed one as
+//!    the single prior version under `<data_dir>/plugins-prev/<id>/`, and
+//!    `rollback` swaps the two. Both run the activation check on the result and
+//!    undo themselves when it fails. See [`FsSwap`] for the crash analysis.
 //!
 //! One [`InstallGuard`] (a mutex in [`PluginSystem`]) must be held across each
 //! of these and across a settings save; the methods take it by reference so a
@@ -26,17 +31,19 @@
 use crate::{
     manifest::{package::check_package, Capability, Contribution, Manifest, RpcExport, RpcKind, Slot},
     registry::{
-        capability_names, check_hooks, export_names, host_version_problem, sha256_hex, ApprovalPin, PluginState,
-        MANIFEST_FILE, WASM_FILE,
+        approvals_path, capability_names, check_hooks, export_names, host_version_problem, read_approvals, sha256_hex,
+        ApprovalPin, PluginState, MANIFEST_FILE, WASM_FILE,
     },
     runtime::PluginLimits,
     system::PluginSystem,
 };
 use http::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use shared::model::{
-    is_valid_plugin_id, PluginApproveDto, PluginCapabilityReviewDto, PluginContributionDto, PluginRpcExportDto,
-    PluginRpcKindDto, PluginSlotDto, PluginSummaryDto, PluginUploadErrorDto, PluginUploadReviewDto,
+    is_valid_plugin_id, PluginApproveDto, PluginCapabilityDiffDto, PluginCapabilityReviewDto, PluginContributionDto,
+    PluginRollbackDto, PluginRpcExportDto, PluginRpcKindDto, PluginSlotDto, PluginSummaryDto, PluginUpdateDto,
+    PluginUploadErrorDto, PluginUploadReviewDto,
 };
 use std::{
     fs,
@@ -45,7 +52,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tuliprox_core::model::PluginsConfig;
+use tuliprox_core::model::{PluginEntry, PluginsConfig};
 use tuliprox_plugin_api::ABI_VERSION;
 use zip::ZipArchive;
 
@@ -60,7 +67,12 @@ const STAGING_DIR: &str = "staging";
 /// Ids that would collide with a directory the host keeps in the data dir.
 /// `metrics` would make `DELETE /api/v1/plugins/metrics` hit the static
 /// `GET /api/v1/plugins/metrics` route (W6a) and never reach the uninstall.
-const RESERVED_IDS: [&str; 2] = [STAGING_DIR, "metrics"];
+const RESERVED_IDS: [&str; 3] = [STAGING_DIR, PRIOR_DIR, "metrics"];
+/// The one retained prior version of each plugin lives in `<data_dir>/plugins-prev/<id>/`:
+/// the package in [`PRIOR_PACKAGE`] and its [`PriorMeta`] in [`PRIOR_META`].
+const PRIOR_DIR: &str = "plugins-prev";
+const PRIOR_PACKAGE: &str = "package";
+const PRIOR_META: &str = "prev.json";
 /// The `unix_mode` file-type bits of a zip entry.
 const S_IFMT: u32 = 0o170_000;
 const S_IFREG: u32 = 0o100_000;
@@ -368,6 +380,303 @@ fn install_staged(staged: &Path, plugins_dir: &Path, id: &str) -> io::Result<()>
 }
 
 // ---------------------------------------------------------------------------
+// Replacing an installed package, keeping one prior version
+// ---------------------------------------------------------------------------
+
+/// The settings entry a retained package ran with, so a rollback can put the
+/// settings that package understood back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PriorEntry {
+    pub(crate) enabled: bool,
+    pub(crate) priority: i32,
+    pub(crate) settings: Map<String, Value>,
+    /// The `settings_version` the settings were written for (W8 lane C).
+    #[serde(default = "default_settings_version")]
+    pub(crate) settings_version: u32,
+}
+
+const fn default_settings_version() -> u32 { shared::model::DEFAULT_PLUGIN_SETTINGS_VERSION }
+
+impl From<&PluginEntry> for PriorEntry {
+    fn from(entry: &PluginEntry) -> Self {
+        Self {
+            enabled: entry.enabled,
+            priority: entry.priority,
+            settings: entry.settings.clone(),
+            settings_version: entry.settings_version,
+        }
+    }
+}
+
+/// `plugins-prev/<id>/prev.json`: what goes with the retained package.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PriorMeta {
+    pub(crate) version: String,
+    /// The approval the package ran under; `None` when it was never approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pin: Option<ApprovalPin>,
+    /// Its `plugins.plugins[]` entry; `None` when the operator had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) entry: Option<PriorEntry>,
+}
+
+/// Write a file only its owner can read: the settings may hold secrets.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// A hidden sibling for a swap in `dir`. Hidden, so a scan skips it; the `~`
+/// separators cannot occur in an id, so [`sweep_leftovers`] never matches
+/// another plugin's names.
+fn swap_path(dir: &Path, role: &str, id: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    dir.join(format!(".swap~{role}~{id}~{}~{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)))
+}
+
+/// Remove what a swap of `id` that was killed halfway left in `dirs`. Called
+/// under the install mutex, so no swap of this plugin is in flight.
+fn sweep_leftovers(dirs: &[&Path], id: &str) {
+    let marker = format!("~{id}~");
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(".swap~") && name.contains(&marker) {
+                if let Err(err) = remove_path(&entry.path()) {
+                    log::warn!("cannot remove the swap leftover {}: {err}", entry.path().display());
+                }
+            }
+        }
+    }
+}
+
+/// Where the incoming package of an [`FsSwap`] comes from.
+enum Incoming {
+    /// An uploaded package in staging; moved in.
+    Staged(PathBuf),
+    /// The retained prior package; copied in, so it stays until the swap commits.
+    Prior,
+}
+
+/// The filesystem half of replacing `<plugins dir>/<id>` while keeping the
+/// package it replaces as the one prior version.
+///
+/// Order: [`FsSwap::prepare`] copies the current package into a hidden new
+/// prior directory and renames it over `plugins-prev/<id>` (the old prior waits
+/// in a hidden `bak` sibling); the caller swaps the pin; [`FsSwap::enter`]
+/// renames the current directory aside and the incoming one in;
+/// [`FsSwap::commit`] deletes the aside and the old prior, or [`FsSwap::undo`]
+/// puts everything back. Nothing the old package or the old prior needs is
+/// deleted before `commit`.
+///
+/// A kill is recoverable at every point (the hidden `.swap~…` leftovers of this
+/// plugin are removed by the next swap): before `prepare` ends, the current
+/// package and its pin are untouched and the prior is the old one or the new
+/// copy (a copy of the current package, so a rollback to it is harmless); after
+/// the pin and before `enter`, the pin is the new one and the directory the old
+/// one, which reads as `pending_approval`, and approving the still staged
+/// package, or a rollback (its prior is a copy of exactly that old package and
+/// pin), fixes it; after `enter` the new package is live with its pin and the
+/// prior is the old one, only `commit`'s cleanup is missing.
+struct FsSwap {
+    plugins_dir: PathBuf,
+    id: String,
+    target: PathBuf,
+    prior: PathBuf,
+    source: Incoming,
+    incoming: Option<PathBuf>,
+    aside: Option<PathBuf>,
+    backup: Option<PathBuf>,
+    retained: bool,
+}
+
+impl FsSwap {
+    /// Retain the current package as the prior version (with `meta`) and, for a
+    /// rollback, copy the prior package next to the target. The current package
+    /// must exist.
+    fn prepare(
+        source: Incoming,
+        plugins_dir: &Path,
+        prior_root: &Path,
+        id: &str,
+        meta: &PriorMeta,
+    ) -> io::Result<Self> {
+        fs::create_dir_all(plugins_dir)?;
+        fs::create_dir_all(prior_root)?;
+        sweep_leftovers(&[plugins_dir, prior_root], id);
+        let mut swap = Self {
+            plugins_dir: plugins_dir.to_path_buf(),
+            id: id.to_string(),
+            target: plugins_dir.join(id),
+            prior: prior_root.join(id),
+            source,
+            incoming: None,
+            aside: None,
+            backup: None,
+            retained: false,
+        };
+        if let Err(err) = swap.retain(prior_root, meta) {
+            swap.undo();
+            return Err(err);
+        }
+        Ok(swap)
+    }
+
+    fn retain(&mut self, prior_root: &Path, meta: &PriorMeta) -> io::Result<()> {
+        if !is_real_dir(&self.target) {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "the installed package is missing"));
+        }
+        if matches!(self.source, Incoming::Prior) {
+            let incoming = swap_path(&self.plugins_dir, "in", &self.id);
+            self.incoming = Some(incoming.clone());
+            copy_tree(&self.prior.join(PRIOR_PACKAGE), &incoming)?;
+        }
+        let fresh = swap_path(prior_root, "new", &self.id);
+        let built = (|| {
+            fs::create_dir(&fresh)?;
+            copy_tree(&self.target, &fresh.join(PRIOR_PACKAGE))?;
+            let text = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
+            write_private(&fresh.join(PRIOR_META), &text)
+        })();
+        if let Err(err) = built {
+            let _ = remove_path(&fresh);
+            return Err(err);
+        }
+        if fs::symlink_metadata(&self.prior).is_ok() {
+            let backup = swap_path(prior_root, "bak", &self.id);
+            if let Err(err) = fs::rename(&self.prior, &backup) {
+                let _ = remove_path(&fresh);
+                return Err(err);
+            }
+            self.backup = Some(backup);
+        }
+        if let Err(err) = fs::rename(&fresh, &self.prior) {
+            if let Some(backup) = self.backup.take() {
+                let _ = fs::rename(backup, &self.prior);
+            }
+            let _ = remove_path(&fresh);
+            return Err(err);
+        }
+        self.retained = true;
+        Ok(())
+    }
+
+    /// Put the incoming package in place of the current one, which is kept
+    /// aside. On an error the current package is back in place.
+    fn enter(&mut self) -> io::Result<()> {
+        let incoming = match (&self.source, &self.incoming) {
+            (_, Some(incoming)) => incoming.clone(),
+            (Incoming::Staged(staged), None) => {
+                let incoming = swap_path(&self.plugins_dir, "in", &self.id);
+                move_dir(staged, &incoming)?;
+                self.incoming = Some(incoming.clone());
+                incoming
+            }
+            (Incoming::Prior, None) => return Err(io::Error::other("the prior package was not prepared")),
+        };
+        let aside = swap_path(&self.plugins_dir, "old", &self.id);
+        fs::rename(&self.target, &aside)?;
+        if let Err(err) = fs::rename(&incoming, &self.target) {
+            let _ = fs::rename(&aside, &self.target);
+            return Err(err);
+        }
+        self.incoming = None;
+        self.aside = Some(aside);
+        Ok(())
+    }
+
+    /// The new package is active: delete what only an undo would have needed.
+    fn commit(self) {
+        for path in [self.aside, self.backup].into_iter().flatten() {
+            if let Err(err) = remove_path(&path) {
+                log::warn!("cannot remove {}: {err}", path.display());
+            }
+        }
+    }
+
+    /// Restore the directory and the prior exactly as they were. The incoming
+    /// package, a failed update included, is discarded.
+    fn undo(self) {
+        if let Some(aside) = &self.aside {
+            if let Err(err) = remove_path(&self.target).and_then(|()| fs::rename(aside, &self.target)) {
+                log::error!("cannot restore the plugin directory {}: {err}", self.target.display());
+            }
+        }
+        if let Some(incoming) = &self.incoming {
+            let _ = remove_path(incoming);
+        }
+        if self.retained {
+            let restored = remove_path(&self.prior).and_then(|()| match &self.backup {
+                Some(backup) => fs::rename(backup, &self.prior),
+                None => Ok(()),
+            });
+            if let Err(err) = restored {
+                log::error!("cannot restore the retained package {}: {err}", self.prior.display());
+            }
+        }
+    }
+}
+
+/// An update or rollback whose directory and pin are swapped but not yet
+/// confirmed by the activation check.
+struct Replacement {
+    id: String,
+    swap: FsSwap,
+    previous_pin: Option<ApprovalPin>,
+    /// The version that is restored if the activation check fails.
+    kept_version: String,
+    /// The version the swap activates.
+    target_version: String,
+    rollback: bool,
+    /// Whether the new package has a wasm, so there is an `init` to check.
+    has_wasm: bool,
+}
+
+/// The answer of a rollback: the version now live and the settings of the
+/// restored package's entry, which the caller must persist (`config.yml`) and
+/// reload with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollbackOutcome {
+    pub version: String,
+    /// `None` when the operator has no entry or the prior had none.
+    pub settings: Option<Map<String, Value>>,
+    /// The `settings_version` of [`RollbackOutcome::settings`].
+    pub settings_version: u32,
+}
+
+/// `config` with the settings (and their version) of `id`'s entry replaced;
+/// unchanged when there is no entry.
+fn with_settings(config: &PluginsConfig, id: &str, settings: &Map<String, Value>, version: u32) -> PluginsConfig {
+    let mut next = config.clone();
+    if let Some(entry) = next.plugins.iter_mut().find(|entry| entry.id == id) {
+        entry.settings.clone_from(settings);
+        entry.settings_version = version;
+    }
+    next
+}
+
+/// The capability change of a package asking for `wanted` (sorted names)
+/// against the installed approval.
+fn capability_diff(wanted: &[String], pin: Option<&ApprovalPin>) -> PluginCapabilityDiffDto {
+    let approved: &[String] = pin.map_or(&[], |pin| pin.capabilities.as_slice());
+    PluginCapabilityDiffDto {
+        added: wanted.iter().filter(|name| !approved.contains(name)).cloned().collect(),
+        removed: approved.iter().filter(|name| !wanted.contains(name)).cloned().collect(),
+        unchanged: wanted.iter().filter(|name| approved.contains(name)).cloned().collect(),
+        mcp_was_approved: pin.is_some_and(|pin| pin.mcp),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Validation and the review
 // ---------------------------------------------------------------------------
 
@@ -542,6 +851,7 @@ fn review(validated: &Validated, replaces: Option<String>) -> PluginUploadReview
         rpc_exports: manifest.ui.rpc_exports.iter().map(rpc_export_dto).collect(),
         mcp_requested: manifest.ui.rpc_exports.iter().any(|export| export.mcp),
         replaces,
+        capability_diff: None,
         warnings,
     }
 }
@@ -556,6 +866,10 @@ impl PluginSystem {
     pub async fn install_lock(&self) -> InstallGuard<'_> { InstallGuard { _guard: self.install_mutex().lock().await } }
 
     fn staging_root(&self) -> PathBuf { self.shared().data_dir.join(STAGING_DIR) }
+
+    fn prior_root(&self) -> PathBuf { self.shared().data_dir.join(PRIOR_DIR) }
+
+    fn prior_dir(&self, id: &str) -> PathBuf { self.prior_root().join(id) }
 
     /// `POST /api/v1/plugins`: unpack, validate and stage `package` (the bytes
     /// of a `.tlpx`) and return the capability review. Nothing is installed.
@@ -572,6 +886,48 @@ impl PluginSystem {
         tokio::task::spawn_blocking(move || system.upload_blocking(&package))
             .await
             .map_err(|err| InstallRejection::internal("the upload task failed", &err))?
+    }
+
+    /// The review of a validated package: `replaces` and the capability diff
+    /// are set when `id` is installed.
+    fn review_of(&self, validated: &Validated, id: &str) -> PluginUploadReviewDto {
+        let replaces = self
+            .registry()
+            .snapshot()
+            .get(id)
+            .and_then(|record| record.manifest.as_ref().map(|manifest| manifest.version.to_string()));
+        let mut answer = review(validated, replaces);
+        if answer.replaces.is_some() {
+            let pins = read_approvals(&approvals_path(&self.shared().data_dir));
+            answer.capability_diff =
+                Some(capability_diff(&capability_names(validated.manifest.capabilities), pins.get(id)));
+        }
+        answer
+    }
+
+    /// `GET /api/v1/plugins/{id}/staged`: the review of the package staged for
+    /// `id`, validated again, so an update waiting in staging can be reviewed
+    /// after the upload dialog is gone. Nothing changes.
+    ///
+    /// # Errors
+    /// `404` when nothing is staged for `id`, `422` when it no longer validates.
+    pub async fn api_staged_review(
+        &self,
+        _guard: &InstallGuard<'_>,
+        id: &str,
+    ) -> Result<PluginUploadReviewDto, InstallRejection> {
+        let system = self.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let staged = system.staging_root().join(&id);
+            if !is_installable_id(&id) || !is_real_dir(&staged) {
+                return Err(InstallRejection::new(StatusCode::NOT_FOUND, "nothing is staged for this plugin"));
+            }
+            let validated = system.validate_package(&staged, &id).map_err(InstallRejection::invalid)?;
+            Ok(system.review_of(&validated, &id))
+        })
+        .await
+        .map_err(|err| InstallRejection::internal("the review task failed", &err))?
     }
 
     fn upload_blocking(&self, package: &[u8]) -> Result<PluginUploadReviewDto, InstallRejection> {
@@ -598,12 +954,7 @@ impl PluginSystem {
         staging.path = staged;
 
         let validated = self.validate_package(&staging.path, &id).map_err(InstallRejection::invalid)?;
-        let replaces = self
-            .registry()
-            .snapshot()
-            .get(&id)
-            .and_then(|record| record.manifest.as_ref().map(|manifest| manifest.version.to_string()));
-        let answer = review(&validated, replaces);
+        let answer = self.review_of(&validated, &id);
         staging.keep();
         log::info!("plugin `{id}` {} staged for review", answer.version);
         Ok(answer)
@@ -628,14 +979,24 @@ impl PluginSystem {
     ) -> Result<PluginSummaryDto, InstallRejection> {
         let system = self.clone();
         let (id, body, config) = (id.to_string(), body.clone(), config.clone());
-        tokio::task::spawn_blocking(move || {
-            system.approve_blocking(&id, &body, &config)?;
+        // Must not be cancelled between the directory swap and its activation
+        // check: the route runs this on a detached task that also holds `_guard`.
+        async move {
+            let blocking = system.clone();
+            let (blocking_id, blocking_config) = (id.clone(), config.clone());
+            let replacement =
+                tokio::task::spawn_blocking(move || blocking.approve_blocking(&blocking_id, &body, &blocking_config))
+                    .await
+                    .map_err(|err| InstallRejection::internal("the approve task failed", &err))??;
+            if let Some(replacement) = replacement {
+                let check = system.check_replacement(&replacement, &config).await;
+                system.finish_replacement(replacement, &config, check).await?;
+            }
             system
                 .api_summary(&id, Some(&config))
                 .ok_or_else(|| InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin"))
-        })
+        }
         .await
-        .map_err(|err| InstallRejection::internal("the approve task failed", &err))?
     }
 
     fn approve_blocking(
@@ -643,7 +1004,7 @@ impl PluginSystem {
         id: &str,
         body: &PluginApproveDto,
         config: &PluginsConfig,
-    ) -> Result<(), InstallRejection> {
+    ) -> Result<Option<Replacement>, InstallRejection> {
         if !is_installable_id(id) {
             return Err(InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin"));
         }
@@ -690,6 +1051,25 @@ impl PluginSystem {
             mcp: body.mcp && validated.manifest.ui.rpc_exports.iter().any(|export| export.mcp),
         };
 
+        if is_staged && is_real_dir(&plugins_dir.join(id)) {
+            // An update: keep the installed package as the prior version.
+            let target_version = validated.manifest.version.to_string();
+            let replacement = self.begin_replacement(
+                id,
+                Incoming::Staged(staged),
+                pin.clone(),
+                (validated.wasm_sha256.is_some(), target_version, false),
+                config,
+            )?;
+            log::info!(
+                "plugin `{id}` updated to {} with capabilities: {}",
+                replacement.target_version,
+                pin.capabilities.join(", ")
+            );
+            self.reload(config);
+            return Ok(Some(replacement));
+        }
+
         // The pin goes first: the watcher can rescan as soon as the directory
         // moves, and it must find the pin there.
         let mut previous = None;
@@ -714,7 +1094,7 @@ impl PluginSystem {
         }
         log::info!("plugin `{id}` approved with capabilities: {}", pin.capabilities.join(", "));
         self.reload(config);
-        Ok(())
+        Ok(None)
     }
 
     /// Whether plugin `id` is installed or staged.
@@ -780,7 +1160,7 @@ impl PluginSystem {
                 approvals.remove(id);
             })
             .map_err(|err| InstallRejection::internal("cannot update the approvals", &err))?;
-        for dir in [plugins_dir.join(id), self.staging_root().join(id)] {
+        for dir in [plugins_dir.join(id), self.staging_root().join(id), self.prior_dir(id)] {
             remove_path(&dir).map_err(|err| InstallRejection::internal("cannot remove the plugin", &err))?;
         }
         self.reload(config);
@@ -796,5 +1176,239 @@ impl PluginSystem {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Update and rollback
+// ---------------------------------------------------------------------------
+
+impl PluginSystem {
+    /// Swap in `source` over the installed package of `id`, with `new_pin`, and
+    /// keep the installed package, its pin and `current`'s entry of it as the
+    /// prior version. Blocking. The caller reloads, runs the activation check
+    /// and calls [`PluginSystem::finish_replacement`]. `facts` is
+    /// `(has_wasm, target_version, is_rollback)`.
+    fn begin_replacement(
+        &self,
+        id: &str,
+        source: Incoming,
+        new_pin: ApprovalPin,
+        facts: (bool, String, bool),
+        current: &PluginsConfig,
+    ) -> Result<Replacement, InstallRejection> {
+        let (has_wasm, target_version, rollback) = facts;
+        let registry = self.registry();
+        let plugins_dir = registry.directory();
+        let kept_version = registry
+            .snapshot()
+            .get(id)
+            .and_then(|record| record.manifest.as_ref().map(|manifest| manifest.version.to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let current_pin = read_approvals(&approvals_path(&self.shared().data_dir)).remove(id);
+        let meta = PriorMeta {
+            version: kept_version.clone(),
+            pin: current_pin,
+            entry: current.entry(id).map(PriorEntry::from),
+        };
+        let mut swap = FsSwap::prepare(source, &plugins_dir, &self.prior_root(), id, &meta)
+            .map_err(|err| InstallRejection::internal("cannot keep the installed package", &err))?;
+        let previous_pin = match registry.swap_pin(id, new_pin) {
+            Ok(previous) => previous,
+            Err(err) => {
+                swap.undo();
+                return Err(InstallRejection::internal("cannot write the approvals", &err));
+            }
+        };
+        if let Err(err) = swap.enter() {
+            if let Err(restore_err) = registry.restore_pin(id, previous_pin) {
+                log::error!("cannot restore the approval of plugin `{id}`: {restore_err}");
+            }
+            swap.undo();
+            return Err(InstallRejection::internal("cannot install the package", &err));
+        }
+        Ok(Replacement { id: id.to_string(), swap, previous_pin, kept_version, target_version, rollback, has_wasm })
+    }
+
+    /// The activation check of a swapped package. A package without a wasm has
+    /// no component, so validating it was the check. A plugin that runs (an
+    /// enabled entry) must pass [`PluginSystem::activation_check`]: it loads and
+    /// `init` accepts its settings. One that does not run must still load, but
+    /// its `init` is not checked: it may need settings the operator has not
+    /// written yet, and it gets them checked when it is enabled.
+    async fn check_replacement(&self, replacement: &Replacement, config: &PluginsConfig) -> Result<(), String> {
+        if !replacement.has_wasm {
+            return Ok(());
+        }
+        if config.entry(&replacement.id).is_some_and(|entry| entry.enabled) {
+            return self.activation_check(&replacement.id, config).await;
+        }
+        let snapshot = self.registry().snapshot();
+        match snapshot.get(&replacement.id) {
+            Some(record) if record.loaded.is_some() => Ok(()),
+            Some(record) => Err(format!(
+                "plugin `{}` did not load ({}): {}",
+                replacement.id,
+                record.state().as_str(),
+                record.failure().unwrap_or_default()
+            )),
+            None => Err(format!("plugin `{}` is not installed", replacement.id)),
+        }
+    }
+
+    /// Settle a swapped package. `Ok` keeps it and deletes what the undo would
+    /// have needed. `Err(reason)` restores the directory, the pin and the prior
+    /// version, reloads with `undo_config`, discards the new package and
+    /// answers `409`.
+    async fn finish_replacement(
+        &self,
+        replacement: Replacement,
+        undo_config: &PluginsConfig,
+        check: Result<(), String>,
+    ) -> Result<(), InstallRejection> {
+        let Err(reason) = check else {
+            return tokio::task::spawn_blocking(move || replacement.swap.commit())
+                .await
+                .map_err(|err| InstallRejection::internal("the commit task failed", &err));
+        };
+        let reason = sanitize_text(&reason, 300);
+        let message = if replacement.rollback {
+            format!(
+                "rollback to {} failed and was undone, still on {}: {reason}",
+                replacement.target_version, replacement.kept_version
+            )
+        } else {
+            format!("rolled back to {}: {reason}", replacement.kept_version)
+        };
+        log::warn!("plugin `{}`: {message}", replacement.id);
+        let (system, config) = (self.clone(), undo_config.clone());
+        tokio::task::spawn_blocking(move || {
+            replacement.swap.undo();
+            if let Err(err) = system.registry().restore_pin(&replacement.id, replacement.previous_pin) {
+                log::error!("cannot restore the approval of plugin `{}`: {err}", replacement.id);
+            }
+            system.reload(&config);
+        })
+        .await
+        .map_err(|err| InstallRejection::internal("the undo task failed", &err))?;
+        Err(InstallRejection::new(StatusCode::CONFLICT, message))
+    }
+
+    /// `POST /api/v1/plugins/{id}/rollback`: swap the installed package and the
+    /// retained prior one, with their pins, then reload and run the activation
+    /// check; a failed check swaps everything back and is a `409`. The prior
+    /// entry's settings are put in the candidate config the check runs with;
+    /// the caller persists [`RollbackOutcome::settings`] to `config.yml` and
+    /// reloads once this returns.
+    ///
+    /// # Errors
+    /// `404` when the plugin or its prior version does not exist, `409` for a
+    /// prior that was never approved, changed on disk or fails activation,
+    /// `422` when the prior no longer validates.
+    pub async fn api_rollback(
+        &self,
+        _guard: &InstallGuard<'_>,
+        id: &str,
+        config: &PluginsConfig,
+    ) -> Result<RollbackOutcome, InstallRejection> {
+        let system = self.clone();
+        let (id, config) = (id.to_string(), config.clone());
+        // Not cancellable halfway, for the same reason as `api_approve`.
+        async move {
+            let blocking = system.clone();
+            let (blocking_id, blocking_config) = (id.clone(), config.clone());
+            let (replacement, candidate, outcome) =
+                tokio::task::spawn_blocking(move || blocking.rollback_blocking(&blocking_id, &blocking_config))
+                    .await
+                    .map_err(|err| InstallRejection::internal("the rollback task failed", &err))??;
+            let check = system.check_replacement(&replacement, &candidate).await;
+            system.finish_replacement(replacement, &config, check).await?;
+            log::info!("plugin `{id}` rolled back to {}", outcome.version);
+            Ok(outcome)
+        }
+        .await
+    }
+
+    fn rollback_blocking(
+        &self,
+        id: &str,
+        config: &PluginsConfig,
+    ) -> Result<(Replacement, PluginsConfig, RollbackOutcome), InstallRejection> {
+        let unknown = || InstallRejection::new(StatusCode::NOT_FOUND, "unknown plugin");
+        if !is_installable_id(id) || !is_real_dir(&self.registry().directory().join(id)) {
+            return Err(unknown());
+        }
+        let prior_dir = self.prior_dir(id);
+        let meta = read_prior_meta(&prior_dir).ok_or_else(|| {
+            InstallRejection::new(StatusCode::NOT_FOUND, "there is no earlier version to roll back to")
+        })?;
+        let package = prior_dir.join(PRIOR_PACKAGE);
+        if !is_real_dir(&package) {
+            return Err(InstallRejection::new(StatusCode::NOT_FOUND, "the earlier version is missing on disk"));
+        }
+        let Some(pin) = meta.pin.clone() else {
+            return Err(InstallRejection::new(StatusCode::CONFLICT, "the earlier version was never approved"));
+        };
+        let validated = self.validate_package(&package, id).map_err(InstallRejection::invalid)?;
+        if validated.wasm_sha256.clone().unwrap_or_default() != pin.wasm_sha256 {
+            return Err(InstallRejection::new(
+                StatusCode::CONFLICT,
+                "the earlier version changed on disk since it was approved",
+            ));
+        }
+        let (settings, settings_version) = match (&meta.entry, config.entry(id)) {
+            (Some(entry), Some(_)) => (Some(entry.settings.clone()), entry.settings_version),
+            _ => (None, shared::model::DEFAULT_PLUGIN_SETTINGS_VERSION),
+        };
+        let candidate = settings
+            .as_ref()
+            .map_or_else(|| config.clone(), |settings| with_settings(config, id, settings, settings_version));
+        let replacement = self.begin_replacement(
+            id,
+            Incoming::Prior,
+            pin,
+            (validated.wasm_sha256.is_some(), meta.version.clone(), true),
+            config,
+        )?;
+        self.reload(&candidate);
+        Ok((replacement, candidate, RollbackOutcome { version: meta.version, settings, settings_version }))
+    }
+
+    /// The summary field `update`: a staged package of an installed plugin and
+    /// what it changes in the approval. Reads only the staged manifest (no
+    /// compile), so a list call stays cheap.
+    pub(crate) fn update_summary(&self, id: &str) -> Option<PluginUpdateDto> {
+        if !is_installable_id(id) || self.registry().snapshot().get(id).is_none() {
+            return None;
+        }
+        let staged = self.staging_root().join(id);
+        if !is_real_dir(&staged) {
+            return None;
+        }
+        let text = fs::read_to_string(staged.join(MANIFEST_FILE)).ok()?;
+        let manifest = Manifest::parse(&text, id).ok()?;
+        let pins = read_approvals(&approvals_path(&self.shared().data_dir));
+        let diff = capability_diff(&capability_names(manifest.capabilities), pins.get(id));
+        Some(PluginUpdateDto {
+            version: manifest.version.to_string(),
+            added_capabilities: diff.added,
+            removed_capabilities: diff.removed,
+        })
+    }
+
+    /// The summary field `rollback`: the retained prior version of `id`.
+    pub(crate) fn rollback_summary(&self, id: &str) -> Option<PluginRollbackDto> {
+        if !is_installable_id(id) {
+            return None;
+        }
+        read_prior_meta(&self.prior_dir(id)).map(|meta| PluginRollbackDto { version: sanitize_text(&meta.version, 64) })
+    }
+}
+
+/// `prev.json` of a retained prior directory, if it is there and readable.
+fn read_prior_meta(prior_dir: &Path) -> Option<PriorMeta> {
+    let text = fs::read(prior_dir.join(PRIOR_META)).ok()?;
+    serde_json::from_slice(&text).ok()
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod update_tests;

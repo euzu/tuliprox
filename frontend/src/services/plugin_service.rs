@@ -156,6 +156,23 @@ impl PluginService {
         decode_action(&response)
     }
 
+    /// `GET …/staged`: the review of an update waiting in staging, so it can be
+    /// reviewed and approved without uploading it again.
+    pub async fn staged_review(&self, id: &str) -> Result<PluginUploadReviewDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, &format!("{}/staged", encode_path_segment(id)));
+        let response = request_raw(Request::get(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `POST …/rollback`: go back to the retained prior version. A `409` means the
+    /// prior failed its activation check and the current version is still live.
+    pub async fn rollback(&self, id: &str) -> Result<PluginSummaryDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, &format!("{}/rollback", encode_path_segment(id)));
+        let response =
+            request_raw(Request::post(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
     /// `PUT …/enable` or `…/disable`.
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<PluginSummaryDto, PluginActionError> {
         let action = if enabled { "enable" } else { "disable" };

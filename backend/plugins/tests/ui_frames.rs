@@ -127,7 +127,9 @@ fn the_ui_list_shows_enabled_and_disabled_plugins_but_not_unlisted_ones() {
     assert_eq!(list[0].contributions[0].element, "ui/index.html");
     assert_eq!(list[0].rpc_exports, Vec::new());
 
-    let Some(disabled) = stage(Some(false)) else { return };
+    // An unpinned, disabled entry waits for approval and is not listed, so pin it enabled first.
+    let Some(disabled) = stage(Some(true)) else { return };
+    disabled.disable();
     assert_eq!(disabled.system.api_ui()[0].state, PluginStateDto::Disabled, "greyed out, not hidden");
 
     let Some(unlisted) = stage(None) else { return };

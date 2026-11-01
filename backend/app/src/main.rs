@@ -593,6 +593,7 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
     let maintenance_path = std::path::PathBuf::from(storage_dir).join(tuliprox_core::model::MAINTENANCE_FILE);
     let maintenance = Arc::new(tuliprox_core::model::MaintenanceRegistry::load_read_only(maintenance_path).await);
     let plugins = crate::api::model::load_validated_plugins(&cfg, None).await.unwrap_or_else(|err| exit!("{err}"));
+    crate::api::model::migrate_settings_for_run(&plugins, &cfg).await;
     exec_processing(
         ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)
             .with_maintenance(maintenance)

@@ -24,7 +24,7 @@ pub const WIT_SOURCE: &str = include_str!("../wit/tuliprox-plugin.wit");
 /// Every interface a plugin may export, as the fully qualified component export
 /// name the registry looks up. `lifecycle` is mandatory; each other entry is
 /// one manifest hook family (plan §4 "Hook ids").
-pub const EXPORT_INTERFACES: [&str; 23] = [
+pub const EXPORT_INTERFACES: [&str; 24] = [
     "tuliprox:plugin/lifecycle@1.0.0",
     "tuliprox:plugin/playlist-hooks@1.0.0",
     "tuliprox:plugin/source-hooks@1.0.0",
@@ -48,6 +48,7 @@ pub const EXPORT_INTERFACES: [&str; 23] = [
     "tuliprox:plugin/output-generator@1.0.0",
     "tuliprox:plugin/rpc@1.0.0",
     "tuliprox:plugin/tasks@1.0.0",
+    "tuliprox:plugin/settings-migration@1.0.0",
 ];
 
 /// Host bindings for the whole contract.
@@ -98,6 +99,7 @@ pub mod bindings {
                 include tuliprox:plugin/output-plugin@1.0.0;
                 include tuliprox:plugin/rpc-plugin@1.0.0;
                 include tuliprox:plugin/task-plugin@1.0.0;
+                include tuliprox:plugin/settings-migration-plugin@1.0.0;
             }
         ",
         world: "tuliprox:host/union",
@@ -171,6 +173,7 @@ mod tests {
             e::output_generator::GuestIndices::new::<()>,
             e::rpc::GuestIndices::new::<()>,
             e::tasks::GuestIndices::new::<()>,
+            e::settings_migration::GuestIndices::new::<()>,
         );
     }
 }

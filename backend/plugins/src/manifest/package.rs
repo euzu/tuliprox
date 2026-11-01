@@ -10,7 +10,10 @@
 //! * Step 6: every `ui.config_extensions[].section` is a built-in config section.
 
 use super::{ConfigExtension, ConfigTab, ConfigTabSource, Manifest};
-use crate::{manifest::secrets::secret_property_paths, settings::unsupported_constructs};
+use crate::{
+    manifest::secrets::secret_property_paths,
+    settings::{schema_version, unsupported_constructs},
+};
 use serde_json::{Map, Value};
 use std::{fs, io::Read, path::Path};
 
@@ -149,6 +152,9 @@ fn check_schema(schema: &Value, label: &str, problems: &mut Vec<String>) {
     if !unsupported.is_empty() {
         problems.push(format!("{label} uses constructs outside the supported subset: {}", unsupported.join(", ")));
     }
+    if let Err(problem) = schema_version(schema) {
+        problems.push(format!("{label}: {problem}"));
+    }
 }
 
 /// A locale file: a flat map of string to string.
@@ -275,6 +281,18 @@ mod tests {
         let problems = check_package(dir.path(), &manifest).unwrap_err();
         assert!(problems.iter().any(|problem| problem.contains("oneOf")), "{problems:?}");
         assert!(problems.iter().any(|problem| problem.contains("token")), "{problems:?}");
+    }
+
+    #[test]
+    fn a_settings_schema_version_must_be_a_positive_integer() {
+        let manifest = manifest("ui:\n  config_section:\n    schema: config-schema.json\n");
+        let ok = package(&[("config-schema.json", r#"{"type":"object","version":2}"#)]);
+        assert!(check_package(ok.path(), &manifest).is_ok());
+        for bad in [r#""2""#, "0", "1.5"] {
+            let dir = package(&[("config-schema.json", &format!(r#"{{"type":"object","version":{bad}}}"#))]);
+            let problems = check_package(dir.path(), &manifest).unwrap_err();
+            assert!(problems.iter().any(|problem| problem.contains("`version` must be")), "{bad}: {problems:?}");
+        }
     }
 
     #[test]

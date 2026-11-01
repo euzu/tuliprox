@@ -49,10 +49,10 @@ relative to `backend/plugins/src/`, `backend/processing/src/` or `backend/app/sr
 | `output.render` | `output-generator` | `begin_output`, `render_batch`, `finish_output` -> bytes | `provides.output_format` | When a target output with `type: plugin` is written (`output_provider.rs`) |
 | `rpc.call` | `rpc` | `call(method, payload)` -> JSON string | a non-empty `ui.rpc_exports` | `POST /api/v1/plugins/{id}/rpc/{method}` and MCP tools (`plugins_rpc_api.rs`). Not a pipeline hook |
 | `tasks.run` | `tasks` | `run(ctx)` -> summary string | a non-empty `tasks:` list | The scheduler and the manual run route (`tasks.rs`) |
+| `settings.migrate` | `settings-migration` | `SettingsMigration::migrate(from_version, settings)` -> settings JSON for the current schema version | a settings schema with a `version` (see [Settings](settings.md)) | Once after the plugins reload, when the stored `settings_version` is behind the schema's (`migration.rs`). Not a pipeline hook |
 
-`backend/plugins/src/manifest/hook.rs` has a comment that says the W6 hooks run nothing yet. That comment is out of
-date: `pipeline_hook()` maps them to host hooks, and the modules named above dispatch them. Only `epg.resolve-conflict`
-and `rpc.call` have no pipeline hook.
+`HookId::pipeline_hook()` in `backend/plugins/src/manifest/hook.rs` maps every other id to a host hook, which the modules
+named above dispatch. Only `epg.resolve-conflict`, `rpc.call` and `settings.migrate` have no pipeline hook.
 
 Notes on single hooks:
 

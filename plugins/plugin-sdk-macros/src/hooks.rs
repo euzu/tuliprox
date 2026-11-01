@@ -83,6 +83,7 @@ hook_table! {
     "OutputGenerator", "output-generator", ["output.render"];
     "Rpc", "rpc", ["rpc.call"];
     "Tasks", "tasks", ["tasks.run"];
+    "SettingsMigration", "settings-migration", ["settings.migrate"];
 }
 
 /// The family that serves a manifest hook id.

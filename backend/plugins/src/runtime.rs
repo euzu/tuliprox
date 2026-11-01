@@ -47,6 +47,7 @@
 
 use crate::{
     manifest::Resources,
+    registry::sha256_hex,
     rpc::RpcGate,
     state::{HostState, PluginEnv},
 };
@@ -569,6 +570,17 @@ impl Runtime {
         limits: PluginLimits,
     ) -> Result<(Component, PreparedPlugin), TuliproxError> {
         self.check_memory(limits)?;
+        // The cache key is the approval hash, so it must be the hash of exactly
+        // these bytes: a caller that hashed one read and passed another would
+        // otherwise run unapproved code under an approved hash.
+        let actual = sha256_hex(wasm);
+        if actual != wasm_sha256 {
+            return Err(TuliproxError::Plugin(format!(
+                "plugin.wasm does not match the hash it was approved under ({}... is not {}...)",
+                actual.get(..12).unwrap_or(&actual),
+                wasm_sha256.get(..12).unwrap_or(wasm_sha256)
+            )));
+        }
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(cached) = cache.get(wasm_sha256) {
             return Ok((cached.component.clone(), PreparedPlugin::new(cached.pre.clone(), limits)));
@@ -975,6 +987,44 @@ mod tests {
         assert_eq!(runtime.pooled, !cfg!(target_pointer_width = "32"), "the pooling allocator did not build");
         let stats = runtime.budget_stats();
         assert_eq!((stats.total_mib, stats.in_use_mib), (512, 0));
+    }
+
+    /// The empty component: a valid binary that compiles and links.
+    const EMPTY_COMPONENT: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+
+    fn small_limits() -> PluginLimits {
+        PluginLimits { memory_bytes: MIB_BYTES, exec: Duration::from_millis(100), max_instances: 1 }
+    }
+
+    #[test]
+    fn prepare_cached_refuses_bytes_that_do_not_hash_to_the_given_hash() {
+        let runtime = Runtime::new(config()).expect("runtime");
+        let approved = sha256_hex(EMPTY_COMPONENT);
+        runtime.prepare_cached(&approved, EMPTY_COMPONENT, small_limits()).expect("matching hash compiles");
+        // the same hash with other bytes must not reach the cached component
+        let swapped: &[u8] = b"not the approved bytes";
+        let err = runtime.prepare_cached(&approved, swapped, small_limits()).map(|_| ()).expect_err("hash mismatch");
+        assert!(err.to_string().contains("does not match the hash"), "{err}");
+        // and bytes are never cached under a hash they do not have
+        let err = runtime.prepare_cached(&sha256_hex(b"other"), swapped, small_limits()).map(|_| ()).unwrap_err();
+        assert!(err.to_string().contains("does not match the hash"), "{err}");
+        assert_eq!(runtime.cache.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_cache_is_keyed_by_hash_so_different_bytes_never_share_a_component() {
+        let runtime = Runtime::new(config()).expect("runtime");
+        // a custom section changes the bytes, and with them the hash
+        let mut other = EMPTY_COMPONENT.to_vec();
+        other.extend_from_slice(&[0x00, 0x03, 0x01, b'x', 0x00]);
+        let (first, second) = (sha256_hex(EMPTY_COMPONENT), sha256_hex(&other));
+        assert_ne!(first, second);
+        runtime.prepare_cached(&first, EMPTY_COMPONENT, small_limits()).expect("first");
+        runtime.prepare_cached(&second, &other, small_limits()).expect("second");
+        assert_eq!(runtime.cache.lock().unwrap().len(), 2);
+        // a reload that only keeps the new hash drops the old component
+        runtime.retain_cached(&std::iter::once(second.clone()).collect());
+        assert_eq!(runtime.cache.lock().unwrap().keys().collect::<Vec<_>>(), [&second]);
     }
 
     #[test]

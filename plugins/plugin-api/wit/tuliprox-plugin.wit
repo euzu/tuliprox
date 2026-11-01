@@ -360,6 +360,17 @@ interface tasks {
   run: func(ctx: task-context) -> result<string, string>;
 }
 
+// ——— settings migration (1.x addition, W8; optional) ———
+// manifest: settings.migrate
+// Called by the host when the stored settings carry an older settings-schema
+// `version` than the installed package's schema. `from-version` is the stored
+// version and `settings` the stored JSON (secrets resolved). `ok` is the JSON
+// for the current schema version; the host validates it before persisting.
+// `err` keeps the stored settings and marks the plugin "needs settings review".
+interface settings-migration {
+  migrate: func(from-version: u32, settings: string) -> result<string, string>;
+}
+
 // ——— worlds: ONE PER CAPABILITY ———
 // `base` carries the imports + lifecycle; each capability world adds exactly
 // one export. A plugin needing several capabilities declares a small composite
@@ -392,6 +403,7 @@ world input-plugin         { include base; export input-provider; }
 world output-plugin        { include base; export output-generator; }
 world rpc-plugin           { include base; export rpc; }
 world task-plugin          { include base; export tasks; }
+world settings-migration-plugin { include base; export settings-migration; }
 
 // convenience composite shipped with the SDK (authors may define their own)
 world enricher-plugin {

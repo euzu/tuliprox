@@ -234,3 +234,36 @@ impl WasiHttpView for HostState {
         WasiHttpCtxView { ctx: &mut self.http_ctx, table: &mut self.table, hooks: &mut self.http_hooks }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frozen_clock_keeps_plugin_time_fixed_while_wall_time_advances() {
+        let manual = ManualClock::new(1_793_448_000_000);
+        let clock = HostClock::Frozen(manual.clone());
+        let (plugin_before, wall_before) = (clock.now_ms().get(), clock.wall_ms().get());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        assert_eq!(clock.now_ms().get(), plugin_before, "plugins keep seeing the frozen instant");
+        assert_eq!(plugin_before, 1_793_448_000_000);
+        assert!(clock.wall_ms().get() >= wall_before + 20, "host-side timing follows the wall clock");
+        assert_ne!(clock.wall_ms().get(), plugin_before, "wall time is not the frozen instant");
+
+        // Only an explicit move changes the frozen plugin time.
+        manual.advance(5);
+        assert_eq!(clock.now_ms().get(), plugin_before + 5);
+    }
+
+    #[test]
+    fn manual_drives_both_clocks_and_system_follows_the_wall_clock() {
+        let manual = HostClock::Manual(ManualClock::new(42));
+        assert_eq!((manual.now_ms().get(), manual.wall_ms().get()), (42, 42));
+
+        let system = HostClock::default();
+        let (now, wall) = (system.now_ms().get(), system.wall_ms().get());
+        assert!(wall.abs_diff(now) < 5_000, "system plugin time and wall time are the same clock");
+    }
+}

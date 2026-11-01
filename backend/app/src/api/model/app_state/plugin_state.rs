@@ -40,6 +40,91 @@ pub fn register_plugin_notifier(plugins: &AppPlugins, cancel_token: &Cancellatio
 #[cfg(not(feature = "plugins"))]
 pub fn register_plugin_notifier(_plugins: &AppPlugins, _cancel_token: &CancellationToken) {}
 
+/// Migrate the stored settings of plugins whose package moved to a newer
+/// settings schema (plan §18 *W8 seam freeze*): once now (the boot load has
+/// already happened), then after every registry reload, whatever caused it (a
+/// config reload, an approval, an update, a directory change). Each pass is a
+/// no-op unless some enabled plugin is due, and a failed migration is not
+/// retried until the package or the stored version changes.
+#[cfg(feature = "plugins")]
+pub fn spawn_settings_migration(plugins: &AppPlugins, app_config: &Arc<AppConfig>, cancel_token: &CancellationToken) {
+    let Some(system) = plugins.as_ref() else {
+        return;
+    };
+    let mut changes = system.changes();
+    let plugins = plugins.clone();
+    let app_config = Arc::clone(app_config);
+    let cancel_token = cancel_token.clone();
+    tokio::spawn(async move {
+        loop {
+            crate::api::endpoints::plugins_settings_api::migrate_stored_settings(&plugins, &app_config).await;
+            tokio::select! {
+                () = cancel_token.cancelled() => break,
+                reloaded = changes.changed() => {
+                    if reloaded.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// A one-shot (CLI) run: migrate stored settings that are behind their
+/// plugin's settings schema for this run only, in memory, and say so. A CLI
+/// run must not write `config.yml` (it may share it with a running server),
+/// so the migration is persisted by the next server start or settings save.
+#[cfg(feature = "plugins")]
+pub async fn migrate_settings_for_run(plugins: &AppPlugins, app_config: &AppConfig) {
+    let (Some(system), Some(current)) = (plugins.as_ref(), app_config.plugins.load_full()) else {
+        return;
+    };
+    if !system.settings_migration_pending(&current) {
+        return;
+    }
+    let written: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>> =
+        match crate::api::endpoints::plugins_settings_api::written_plugins_config(app_config).await {
+            Ok(written) => written.plugins.into_iter().map(|entry| (entry.id, entry.settings)).collect(),
+            Err(err) => {
+                log::error!("Cannot read config.yml for the plugin settings migration, not migrating: {err}");
+                return;
+            }
+        };
+    let migrated = system.migrate_settings_as_written(&current, &written).await;
+    if migrated.is_empty() {
+        return;
+    }
+    let mut next = (*current).clone();
+    for item in &migrated {
+        if let Some(entry) = next.plugins.iter_mut().find(|entry| entry.id == item.id) {
+            entry.settings.clone_from(&item.settings);
+            entry.settings_version = item.version;
+        }
+        log::warn!(
+            "plugin `{}`: settings migrated to version {} for this run only; config.yml is not changed by a CLI run \
+             (the next server start persists the migration)",
+            item.id,
+            item.version
+        );
+    }
+    app_config.plugins.store(Some(Arc::new(next)));
+    reload_plugins(plugins, app_config).await;
+}
+
+/// Built without the `plugins` feature: there are no settings to migrate.
+#[cfg(not(feature = "plugins"))]
+#[allow(clippy::unused_async, reason = "Same signature as the `plugins` build.")]
+pub async fn migrate_settings_for_run(_plugins: &AppPlugins, _app_config: &AppConfig) {}
+
+/// Built without the `plugins` feature: there are no settings to migrate.
+#[cfg(not(feature = "plugins"))]
+pub fn spawn_settings_migration(
+    _plugins: &AppPlugins,
+    _app_config: &Arc<AppConfig>,
+    _cancel_token: &CancellationToken,
+) {
+}
+
 /// `AppState.cache`: the resource cache `cache-image` stores into. `None`
 /// inside means it is disabled.
 pub type ResourceCacheHandle = Arc<ArcSwapOption<RwLock<LRUResourceCache>>>;

@@ -826,6 +826,13 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // channels. Both follow registry reloads and are inert with plugins off.
     crate::api::tasks::spawn_plugin_event_bridge(&app_state, &app_state.cancel_tokens.load().recordings);
     crate::api::model::register_plugin_notifier(&app_state.plugins, &app_state.cancel_tokens.load().recordings);
+    // Settings written for an older settings schema of a plugin are migrated
+    // after every registry reload (plan §18 W8).
+    crate::api::model::spawn_settings_migration(
+        &app_state.plugins,
+        &app_state.app_config,
+        &app_state.cancel_tokens.load().recordings,
+    );
 
     // Emitted here rather than at the top of `main`: the bridge above is what
     // turns a bus event into a notification, and a `system.started` published

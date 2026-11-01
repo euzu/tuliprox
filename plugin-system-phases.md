@@ -374,18 +374,22 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 8 — Hardening & Polish
 
- 1. Concurrency audit under parallel target processing + the event consumer;
+ 1. *Deferred (excluded from W8 by owner, 2026-10-31).* Concurrency audit under parallel target processing + the event consumer;
     loom/stress tests on dispatch and queue backpressure.
- 2. Benchmarks: 100k channels × 3 plugins (incl. plugin sort/dedupe/output
+ 2. *Deferred (excluded from W8 by owner, 2026-10-31).* Benchmarks: 100k channels × 3 plugins (incl. plugin sort/dedupe/output
     paths); tune batch size; confirm disabled-path zero cost and session-setup
     latency budget with header injection active.
- 3. SHA-256 pinning of installed `plugin.wasm` + re-approval if it changes
+ 3. ✅ *W8 (2026-10-31): built + linted; exit checks 1 and 2 run on a live server; `tuliprox-plugins`
+    `cargo test -p tuliprox-plugins` passes in full after the W8 open-issue round, history §2.6 W8 rows.*
+    SHA-256 pinning of installed `plugin.wasm` + re-approval if it changes
     outside an approved install/update; settings migration story (schema
     `version` field). Marketplace catalogs do not provide checksums or
     signatures.
- 4. Docker/compose docs for mounting `config/plugins`; release notes;
+ 4. *Deferred (excluded from W8 by owner, 2026-10-31).* Docker/compose docs for mounting `config/plugins`; release notes;
     CHANGELOG.
- 5. Safe package replacement foundation: validate and stage before activation,
+ 5. ✅ *W8 (2026-10-31): built + linted; exit check 3 run on a live server; tests run as for item 3.
+    No marketplace or network code.*
+    Safe package replacement foundation: validate and stage before activation,
     retain the previous package, and roll back if activation fails.
 
 ### Phase 9 — Repository Marketplace *(after Phase 8)*
@@ -557,7 +561,10 @@ integration cost faster than they remove wall-clock time.
 | **W7** | ✅ 7.1 *(built + linted, untested; SDK unit/macro tests written, not run; API frozen in history §2.6 *W7 SDK as frozen*; template rendered + packaged + installed by the doc acid test)* | `plugins/plugin-sdk/` (`tuliprox-plugin-sdk`), `plugins/plugin-sdk-macros/`, `plugins/examples/template/`, `bin/package-plugin.sh`, `bin/new-plugin.sh`, `make plugin-examples` | Sonnet (S), Haiku (T) | W5, W6 |
 | W7 | ✅ 7.2 *(built + linted, untested; mock-host unit tests written, not run; all three exercised on a live server with local mocks, history §2.6 *W7 Examples, real runs*; ⚠️ E1 epg-overlay frame not reached, ⚠️ `stream.probe.failed` not run (no ffprobe))* | `plugins/examples/{sports-enricher,hf-epg-matcher,matrix-notifier}/` | Sonnet, one lane each | 7.1 |
 | W7 | ✅ 7.3 *(docs build + markdownlint green; exit criterion met: a fresh Haiku agent went template → installed plugin → renamed group in the M3U from quickstart.md alone, 2 rounds, both unaided successes; round 1 friction (shell state, plugins dir, config rewrite, unbounded waits, nohup) and round 2 gaps (create `$QUICKSTART`, the unused secret) fixed in the page; the round-2 fixes were not re-run)* | `docs/src/plugins/*.md` (9 pages) + `SUMMARY.md` entry | Haiku draft → Sonnet edit | 7.2 |
-| **W8** | 8.x | concurrency audit; benchmarks; installed hash pinning; config migration; staged package replacement/rollback; docs/CHANGELOG | mixed | W7 |
+| **W8** | ✅ 8.3 *(built + linted; live exit checks 1–2 + `tuliprox-plugins` tests, history §2.6 W8)* | sha256 pin integrity + settings-schema `version` / `settings.migrate` (`registry.rs`, `settings.rs`, `migration.rs`, SDK) | Sonnet (C) | W7 |
+| W8 | ✅ 8.5 *(built + linted; live exit check 3 + tests)* | staged update, capability diff, one retained prior, auto + manual rollback (`install.rs`, `plugins_install_api.rs`, Plugin Manager) | Sonnet (D) | W7 |
+| W8 | ✅ verification debt *(W6a checks 3–4, E1 epg-overlay, frozen-clock metrics verified; `stream.probe.failed` unverified, no ffprobe)* | `state.rs`/`metrics.rs` tests, live runs | Sonnet (F) | W7 |
+| W8 | 8.1 / 8.2 / 8.4 *deferred (excluded from W8 by owner, 2026-10-31)* | concurrency audit; benchmarks; Docker docs, release notes, CHANGELOG | — | W7 |
 | **W9** | 9.x | root `marketplace.json` format; multi-repo config/UI; catalog APIs and browse/install UI | mixed | W8 |
 | **W10** | 10.x | manual update checks; default-off boot auto-update; capability review and rollback | mixed | W9 |
 

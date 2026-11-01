@@ -15,8 +15,10 @@
 //! components on the calling thread, which must be a blocking one.
 
 use crate::{
+    api::read_settings_schema,
     manifest::{hook::HookId, package::check_package, Capabilities, FailMode, Manifest},
     runtime::{CallError, PluginLimits, PreparedPlugin, Runtime},
+    settings::{review_text, schema_version, version_conflict},
     state::{PluginEnv, Shared},
 };
 use arc_swap::ArcSwap;
@@ -31,11 +33,11 @@ use shared::{
     error::TuliproxError,
     model::{
         PluginFingerprintStats, PluginHook, PluginHookStats, PluginScope, DEFAULT_PLUGINS_BATCH_SIZE,
-        DEFAULT_PLUGIN_PRIORITY,
+        DEFAULT_PLUGIN_PRIORITY, DEFAULT_PLUGIN_SETTINGS_VERSION,
     },
 };
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Write as _,
     fs,
     io::{self, Write as _},
@@ -57,7 +59,8 @@ use tuliprox_plugin_api::{
     bindings::exports::tuliprox::plugin::{
         chno_hooks, dedupe_hooks, epg_enrich_hooks, epg_load_hooks, epg_match_hooks, epg_transform_hooks, event_hooks,
         filter_hooks, group_merge_hooks, input_provider, lifecycle, metadata_hooks, metrics_hooks, notification_hooks,
-        output_generator, playlist_hooks, rpc, sort_hooks, sort_key_hooks, source_hooks, stream_hooks, tasks,
+        output_generator, playlist_hooks, rpc, settings_migration, sort_hooks, sort_key_hooks, source_hooks,
+        stream_hooks, tasks,
     },
     ABI_VERSION, EXPORT_INTERFACES,
 };
@@ -88,7 +91,9 @@ pub(crate) enum PluginState {
     Loaded,
     Enabled,
     Disabled,
-    /// The circuit breaker tripped; skipped until re-enabled or reloaded.
+    /// The circuit breaker tripped, or the stored settings do not fit the
+    /// installed settings schema; skipped until re-enabled, reloaded or (for
+    /// the settings) saved.
     Failed,
 }
 
@@ -182,6 +187,9 @@ pub(crate) struct LoadedPlugin {
     pub(crate) tasks: Option<tasks::GuestIndices>,
     /// `Some` when the component exports `rpc` (W6b, `ui.rpc_exports`).
     pub(crate) rpc: Option<rpc::GuestIndices>,
+    /// `Some` when the component exports `settings-migration` (W8,
+    /// `settings.migrate`); called by the migration step, never by a hook site.
+    pub(crate) settings_migration: Option<settings_migration::GuestIndices>,
     /// The manifest hooks the host can run today.
     pub(crate) hooks: Vec<PluginHook>,
     /// The manifest `scope:`, compiled once here.
@@ -236,6 +244,12 @@ pub(crate) struct PluginRecord {
     /// Fully qualified export interfaces the component implements.
     pub(crate) exports: Vec<String>,
     pub(crate) loaded: Option<LoadedPlugin>,
+    /// The `version` of the package's settings schema (1 without one).
+    pub(crate) settings_version: u32,
+    /// Set when the stored settings were written for another schema version
+    /// and fail this one: the plugin is loaded but does not run until the
+    /// settings are saved (plan §18 *W8 seam freeze*).
+    settings_block: Option<String>,
     state: PluginState,
     failure: Option<String>,
     breaker: CircuitBreaker,
@@ -255,6 +269,8 @@ impl PluginRecord {
             wasm_sha256: None,
             exports: Vec::new(),
             loaded: None,
+            settings_version: DEFAULT_PLUGIN_SETTINGS_VERSION,
+            settings_block: None,
             state: PluginState::Discovered,
             failure: None,
             breaker: CircuitBreaker::new(policy, SystemClock).expect("the plugin breaker policy is valid"),
@@ -264,9 +280,10 @@ impl PluginRecord {
 
     fn tripped(&self) -> bool { matches!(self.breaker.snapshot().state, CircuitState::Open | CircuitState::HalfOpen) }
 
-    /// The effective state: [`PluginState::Failed`] once the breaker trips.
+    /// The effective state: [`PluginState::Failed`] once the breaker trips, or
+    /// while the stored settings do not fit the installed schema.
     pub(crate) fn state(&self) -> PluginState {
-        if self.state == PluginState::Enabled && self.tripped() {
+        if self.state == PluginState::Enabled && (self.tripped() || self.settings_block.is_some()) {
             PluginState::Failed
         } else {
             self.state
@@ -276,6 +293,9 @@ impl PluginRecord {
     /// Why the plugin is `Invalid`, `PendingApproval` or `Failed`.
     pub(crate) fn failure(&self) -> Option<String> {
         if self.state() == PluginState::Failed {
+            if let Some(block) = &self.settings_block {
+                return Some(block.clone());
+            }
             let last = lock(&self.counters.last_error).clone().unwrap_or_else(|| "unknown".to_string());
             return Some(format!(
                 "circuit breaker open after {BREAKER_THRESHOLD} consecutive failures; last error: {last}"
@@ -412,20 +432,36 @@ pub(crate) fn approvals_path(data_dir: &Path) -> PathBuf { data_dir.join(APPROVA
 
 /// The pins on disk. A missing file means none; a corrupt one is logged and
 /// treated as none, so nothing stays approved on the strength of a file that
-/// cannot be read.
-pub(crate) fn read_approvals(path: &Path) -> Approvals {
+/// cannot be read. The scan and every write use [`load_approvals`], which tells
+/// the two apart.
+pub(crate) fn read_approvals(path: &Path) -> Approvals { load_approvals(path).unwrap_or_default() }
+
+/// The pins on disk; `Err` (logged) when the file exists but cannot be read or
+/// parsed. A missing file is `Ok` with no pins.
+pub(crate) fn load_approvals(path: &Path) -> Result<Approvals, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Approvals::new(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Approvals::new()),
         Err(err) => {
             log::error!("cannot read the plugin approvals {}: {err}", path.display());
-            return Approvals::new();
+            return Err(err.to_string());
         }
     };
-    serde_json::from_str(&text).unwrap_or_else(|err| {
+    serde_json::from_str(&text).map_err(|err| {
         log::error!("ignoring the corrupt plugin approvals {}: {err}", path.display());
-        Approvals::new()
+        err.to_string()
     })
+}
+
+/// Move an unreadable `approvals.json` aside (`approvals.json.unreadable-<unix s>`)
+/// before a fresh one replaces it, so the operator can still inspect it.
+fn set_aside_unreadable(path: &Path) {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+    let aside = path.with_extension(format!("json.unreadable-{stamp}"));
+    match fs::rename(path, &aside) {
+        Ok(()) => log::warn!("moved the unreadable plugin approvals aside to {}", aside.display()),
+        Err(err) => log::error!("cannot move the unreadable plugin approvals {} aside: {err}", path.display()),
+    }
 }
 
 /// Write the pins atomically: a temp file next to the target, synced, then
@@ -696,6 +732,9 @@ struct ScanContext<'a> {
     runtime: &'a Runtime,
     shared: &'a Shared,
     approvals: &'a Approvals,
+    /// `false` while `approvals.json` is unreadable: trust on first use would
+    /// otherwise re-approve every enabled plugin whose pin the file still holds.
+    trust_entries: bool,
 }
 
 pub(crate) fn export_names(engine: &Engine, component: &Component) -> (Vec<String>, Vec<String>) {
@@ -763,6 +802,7 @@ fn load(
     let stream_hooks = bind!(stream_hooks, "stream-hooks");
     let tasks = bind!(tasks, "tasks");
     let rpc = bind!(rpc, "rpc");
+    let settings_migration = bind!(settings_migration, "settings-migration");
     let scope = PluginScope::new(&manifest.scope.groups, &manifest.scope.item_types)
         .map_err(|err| Rejection::invalid(format!("scope.groups: {err}")))?;
 
@@ -801,6 +841,7 @@ fn load(
         stream_hooks,
         tasks,
         rpc,
+        settings_migration,
         hooks: manifest.pipeline_hooks(),
         scope: Arc::new(scope),
         fail_mode: manifest.resources.fail_mode,
@@ -827,6 +868,11 @@ fn evaluate(
     // Plan §4 steps 4-6: the schemas, the locale files and the extension sections.
     let secret_paths =
         check_package(&record.dir, &manifest).map_err(|problems| Rejection::invalid(problems.join("; ")))?;
+    let settings_schema = read_settings_schema(&record.dir, &manifest);
+    record.settings_version = settings_schema
+        .as_ref()
+        .and_then(|schema| schema_version(schema).ok())
+        .unwrap_or(DEFAULT_PLUGIN_SETTINGS_VERSION);
 
     // A package without `plugin.wasm` is a UI-only plugin: nothing to compile,
     // so it may list no hook. Its pin carries an empty hash.
@@ -847,7 +893,7 @@ fn evaluate(
         ctx.approvals.get(&*record.id),
         pinned_hash,
         &capabilities,
-        entry.is_some_and(|entry| entry.enabled),
+        ctx.trust_entries && entry.is_some_and(|entry| entry.enabled),
     ) {
         Verdict::Approved => None,
         Verdict::PinNow => Some(ApprovalPin { wasm_sha256: pinned_hash.to_string(), capabilities, mcp: false }),
@@ -857,6 +903,11 @@ fn evaluate(
         (Some(wasm), Some(wasm_sha256)) => load(ctx, record, &manifest, &wasm, &wasm_sha256, &secret_paths, entry)?,
         _ => record.state = state_for_entry(entry),
     }
+    // Settings written for another schema version keep running only while they
+    // still fit this one (plan §18 *W8 seam freeze*).
+    record.settings_block = entry.and_then(|entry| {
+        version_conflict(settings_schema.as_ref(), record.settings_version, entry.settings_version, &entry.settings)
+    });
     Ok(pin)
 }
 
@@ -912,11 +963,20 @@ fn scan(config: &PluginsConfig, runtime: &Runtime, shared: &Shared) -> Option<Sc
     };
 
     let approvals_file = approvals_path(&shared.data_dir);
-    let mut approvals = read_approvals(&approvals_file);
+    let loaded = load_approvals(&approvals_file);
+    let trust_entries = loaded.is_ok();
+    if !trust_entries {
+        log::error!(
+            "{} is unreadable: no plugin is approved by its config entry until the plugins are approved again \
+             through the Plugin Manager",
+            approvals_file.display()
+        );
+    }
+    let mut approvals = loaded.unwrap_or_default();
     let mut records = Vec::with_capacity(candidates.len());
     let mut new_pins = Vec::new();
     {
-        let ctx = ScanContext { config, runtime, shared, approvals: &approvals };
+        let ctx = ScanContext { config, runtime, shared, approvals: &approvals, trust_entries };
         for candidate in &candidates {
             let (record, pin) = build_record(&ctx, candidate);
             if let Some(pin) = pin {
@@ -977,6 +1037,20 @@ pub(crate) struct Registry {
     /// notification channels and the providers can rebuild what they derived
     /// from the plugin set ([`Registry::changes`]).
     generation: tokio::sync::watch::Sender<u64>,
+    /// The last failed settings migration per plugin id. Outlives a rescan, so
+    /// the review stays and the same migration is not retried on every reload.
+    migration_failures: Mutex<HashMap<String, MigrationFailure>>,
+}
+
+/// Why the settings migration of a plugin failed, and what it was for. It only
+/// counts while the plugin, its package and its stored settings version still
+/// are what the attempt saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MigrationFailure {
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+    pub(crate) wasm_sha256: Option<String>,
+    pub(crate) reason: String,
 }
 
 /// Whether a filesystem event can change what a scan sees. Reads (`Access`
@@ -1019,6 +1093,7 @@ impl Registry {
             config: Mutex::new(config.clone()),
             watch: Mutex::new(None),
             generation: tokio::sync::watch::Sender::new(0),
+            migration_failures: Mutex::new(HashMap::new()),
         };
         registry.rescan(config);
         registry
@@ -1040,9 +1115,61 @@ impl Registry {
     pub(crate) fn update_approvals(&self, change: impl FnOnce(&mut Approvals)) -> io::Result<()> {
         let _scan_lock = lock(&self.config);
         let path = approvals_path(&self.shared.data_dir);
-        let mut approvals = read_approvals(&path);
+        let mut approvals = load_approvals(&path).unwrap_or_else(|_| {
+            // An explicit approval starts a fresh file; keep the unreadable one.
+            set_aside_unreadable(&path);
+            Approvals::new()
+        });
         change(&mut approvals);
         write_approvals(&path, &approvals)
+    }
+
+    /// Plan §18 *W8 seam freeze*: write `pin` for `id` and return the pin it
+    /// replaced, so a failed activation can put it back.
+    pub(crate) fn swap_pin(&self, id: &str, pin: ApprovalPin) -> io::Result<Option<ApprovalPin>> {
+        let mut previous = None;
+        self.update_approvals(|approvals| previous = approvals.insert(id.to_string(), pin))?;
+        Ok(previous)
+    }
+
+    /// Plan §18 *W8 seam freeze*: undo [`Registry::swap_pin`]; `None` removes the pin.
+    pub(crate) fn restore_pin(&self, id: &str, previous: Option<ApprovalPin>) -> io::Result<()> {
+        self.update_approvals(|approvals| match previous {
+            Some(pin) => {
+                approvals.insert(id.to_string(), pin);
+            }
+            None => {
+                approvals.remove(id);
+            }
+        })
+    }
+
+    /// Remember that migrating `id`'s settings failed.
+    pub(crate) fn note_migration_failure(&self, id: &str, failure: MigrationFailure) {
+        lock(&self.migration_failures).insert(id.to_string(), failure);
+    }
+
+    /// Why the last migration of `record`'s settings from `stored` failed, if
+    /// it did for this package and this version pair.
+    pub(crate) fn migration_failure(&self, record: &PluginRecord, stored: u32) -> Option<String> {
+        let failures = lock(&self.migration_failures);
+        failures
+            .get(&*record.id)
+            .filter(|failure| {
+                failure.from == stored
+                    && failure.to == record.settings_version
+                    && failure.wasm_sha256 == record.wasm_sha256
+            })
+            .map(|failure| failure.reason.clone())
+    }
+
+    /// The `settings_review` of `record` under `config`: `None` when its stored
+    /// settings are at the package's schema version or a migration is still to
+    /// run (plan §18 *W8 seam freeze*).
+    pub(crate) fn settings_review(&self, record: &PluginRecord, config: Option<&PluginsConfig>) -> Option<String> {
+        let stored = config?.entry(&record.id)?.settings_version;
+        let can_migrate = record.loaded.as_ref().map(|loaded| loaded.settings_migration.is_some());
+        review_text(stored, record.settings_version, can_migrate, self.migration_failure(record, stored).as_deref())
     }
 
     /// Re-scan with `config` and swap the snapshot. Unchanged plugins keep
@@ -1374,6 +1501,143 @@ mod tests {
         assert_eq!(read_approvals(&fixture.approvals_file()), pins);
     }
 
+    // --- pin integrity (plan §18 *W8 seam freeze*) --------------------------
+
+    /// Poll until `done` holds; the watcher debounces for 500 ms and the OS may
+    /// be slower still, so the bound is generous. Panics with `what` on timeout.
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn a_manual_swap_while_the_server_runs_goes_pending_through_the_watcher() {
+        let fixture = Fixture::new();
+        plugin_dir(fixture.plugins.path(), "demo", &manifest("demo", ""), Some(b"approved bytes"));
+        let mut pins = Approvals::new();
+        pins.insert("demo".into(), pin(b"approved bytes", &[]));
+        write_approvals(&fixture.approvals_file(), &pins).unwrap();
+        let mut config = config(fixture.plugins.path());
+        config.plugins = vec![entry("demo", true, 100)];
+        let registry = Arc::new(fixture.registry(&config));
+        registry.watch().unwrap();
+        // approved, so it got as far as compiling (the fake bytes fail there)
+        assert_eq!(record_of(&registry, "demo").state(), PluginState::Invalid);
+
+        // someone replaces plugin.wasm in place while the server runs
+        fs::write(fixture.plugins.path().join("demo").join(WASM_FILE), b"swapped bytes").unwrap();
+        wait_for("the watcher to rescan the swap", || {
+            record_of(&registry, "demo").state() == PluginState::PendingApproval
+        });
+        let record = record_of(&registry, "demo");
+        assert!(record.loaded.is_none(), "swapped bytes are never compiled");
+        assert!(record.failure().unwrap().contains("plugin.wasm changed"));
+        assert_eq!(record.wasm_sha256, Some(sha256_hex(b"swapped bytes")));
+        assert_eq!(read_approvals(&fixture.approvals_file()), pins, "the watcher never re-pins");
+    }
+
+    #[test]
+    fn a_swap_stays_pending_across_rescans_until_the_bytes_return() {
+        let fixture = Fixture::new();
+        plugin_dir(fixture.plugins.path(), "demo", &manifest("demo", ""), Some(b"approved bytes"));
+        let mut pins = Approvals::new();
+        pins.insert("demo".into(), pin(b"approved bytes", &[]));
+        write_approvals(&fixture.approvals_file(), &pins).unwrap();
+        let mut config = config(fixture.plugins.path());
+        config.plugins = vec![entry("demo", true, 100)];
+        let registry = fixture.registry(&config);
+        let wasm = fixture.plugins.path().join("demo").join(WASM_FILE);
+
+        fs::write(&wasm, b"swapped bytes").unwrap();
+        for _ in 0..3 {
+            registry.reload(&config);
+            let record = record_of(&registry, "demo");
+            assert_eq!(record.state(), PluginState::PendingApproval);
+            assert!(record.loaded.is_none());
+        }
+        assert_eq!(read_approvals(&fixture.approvals_file()), pins);
+
+        // the approved bytes back: approved again, so it compiles (and the fake bytes fail there)
+        fs::write(&wasm, b"approved bytes").unwrap();
+        registry.reload(&config);
+        let record = record_of(&registry, "demo");
+        assert_eq!(record.state(), PluginState::Invalid);
+        assert!(record.failure().unwrap().contains("cannot compile"));
+    }
+
+    #[test]
+    fn an_unreadable_approvals_file_approves_nothing_by_config_entry() {
+        let fixture = Fixture::new();
+        plugin_dir(fixture.plugins.path(), "demo", "id: demo\nname: Demo\nversion: 0.1.0\napi_version: 1\n", None);
+        fs::create_dir_all(fixture.approvals_file().parent().unwrap()).unwrap();
+        fs::write(fixture.approvals_file(), "{not json").unwrap();
+        let mut config = config(fixture.plugins.path());
+        config.plugins = vec![entry("demo", true, 100)];
+        let registry = fixture.registry(&config);
+        // trust on first use would re-approve every enabled plugin of a lost file
+        assert_eq!(record_of(&registry, "demo").state(), PluginState::PendingApproval);
+        assert_eq!(fs::read_to_string(fixture.approvals_file()).unwrap(), "{not json", "the scan never rewrites it");
+
+        // an explicit approval starts a fresh file and keeps the unreadable one aside
+        registry
+            .swap_pin("demo", ApprovalPin { wasm_sha256: String::new(), capabilities: Vec::new(), mcp: false })
+            .unwrap();
+        assert!(read_approvals(&fixture.approvals_file()).contains_key("demo"));
+        let dir = fixture.approvals_file().parent().unwrap().to_path_buf();
+        let aside = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+            .count();
+        assert_eq!(aside, 1);
+        registry.reload(&config);
+        assert_eq!(record_of(&registry, "demo").state(), PluginState::Enabled);
+    }
+
+    #[test]
+    fn adding_a_wasm_to_a_pinned_ui_only_plugin_goes_pending() {
+        let fixture = Fixture::new();
+        // no wasm and no hooks: the pin carries an empty hash
+        plugin_dir(fixture.plugins.path(), "demo", "id: demo\nname: Demo\nversion: 0.1.0\napi_version: 1\n", None);
+        let mut config = config(fixture.plugins.path());
+        config.plugins = vec![entry("demo", true, 100)];
+        let registry = fixture.registry(&config);
+        assert_eq!(record_of(&registry, "demo").state(), PluginState::Enabled);
+        assert_eq!(read_approvals(&fixture.approvals_file())["demo"].wasm_sha256, "");
+
+        fs::write(fixture.plugins.path().join("demo").join(WASM_FILE), b"added later").unwrap();
+        registry.reload(&config);
+        let record = record_of(&registry, "demo");
+        assert_eq!(record.state(), PluginState::PendingApproval);
+        assert!(record.loaded.is_none());
+    }
+
+    #[test]
+    fn load_refuses_bytes_that_do_not_hash_to_the_pinned_hash() {
+        let fixture = Fixture::new();
+        let config = config(fixture.plugins.path());
+        let approvals = Approvals::new();
+        let ctx = ScanContext {
+            config: &config,
+            runtime: &fixture.runtime,
+            shared: &fixture.shared,
+            approvals: &approvals,
+            trust_entries: true,
+        };
+        let manifest = Manifest::parse(&manifest("demo", ""), "demo").unwrap();
+        let mut record = PluginRecord::new("demo", fixture.plugins.path().join("demo"), 100);
+        // the empty component compiles, but not under the hash of other bytes
+        let empty_component: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+        let wrong_hash = sha256_hex(b"other bytes");
+        let rejection = load(&ctx, &mut record, &manifest, empty_component, &wrong_hash, &[], None).unwrap_err();
+        assert_eq!(rejection.state, PluginState::Invalid);
+        assert!(rejection.reason.contains("does not match the hash"), "{}", rejection.reason);
+        assert!(record.loaded.is_none());
+    }
+
     #[test]
     fn an_enabled_entry_pins_only_what_loaded() {
         let fixture = Fixture::new();
@@ -1495,6 +1759,70 @@ mod tests {
         assert_eq!(secret_values(&settings, &paths), ["t0k", "pw", "k1", "k2", "ex", "ey", "s1", "s2"]);
         assert_eq!(secret_values(&json!("root"), &["(root)".to_string()]), ["root"]);
         assert_eq!(secret_values(&settings, &[]), Vec::<String>::new());
+    }
+
+    // --- settings versions (plan §18 *W8 seam freeze*) -----------------------
+
+    #[test]
+    fn settings_that_do_not_fit_the_schema_block_the_plugin_until_saved() {
+        let mut record = enabled_record();
+        assert_eq!(record.state(), PluginState::Enabled);
+        record.settings_block = Some("the stored settings (version 1) do not match".to_string());
+        assert_eq!(record.state(), PluginState::Failed);
+        assert!(!record.runs(PluginHook::AfterFilter), "a blocked plugin runs no hook");
+        assert!(record.failure().unwrap().starts_with("the stored settings"));
+        // a plugin that was not enabled never reads as failed for it
+        let mut disabled = enabled_record();
+        disabled.state = PluginState::Disabled;
+        disabled.settings_block = Some("x".to_string());
+        assert_eq!(disabled.state(), PluginState::Disabled);
+    }
+
+    #[test]
+    fn the_settings_review_follows_the_stored_and_the_schema_version() {
+        let fixture = Fixture::new();
+        let registry = fixture.registry(&config(fixture.plugins.path()));
+        let mut record = enabled_record();
+        record.settings_version = 2;
+        let mut stored = entry("demo", true, 100);
+        let config_with =
+            |entry: &PluginEntry| PluginsConfig { plugins: vec![entry.clone()], ..PluginsConfig::default() };
+
+        // equal versions, or no entry at all: nothing to review
+        stored.settings_version = 2;
+        assert_eq!(registry.settings_review(&record, Some(&config_with(&stored))), None);
+        assert_eq!(registry.settings_review(&record, Some(&PluginsConfig::default())), None);
+        assert_eq!(registry.settings_review(&record, None), None);
+
+        // a downgrade is reviewed whether or not the package is loaded
+        stored.settings_version = 3;
+        let review = registry.settings_review(&record, Some(&config_with(&stored))).unwrap();
+        assert!(review.contains("version 3") && review.contains("version 2"), "{review}");
+
+        // behind, but not loaded: nothing to say yet
+        stored.settings_version = 1;
+        assert_eq!(registry.settings_review(&record, Some(&config_with(&stored))), None);
+    }
+
+    #[test]
+    fn a_migration_failure_counts_only_for_the_package_and_versions_it_saw() {
+        let fixture = Fixture::new();
+        let registry = fixture.registry(&config(fixture.plugins.path()));
+        let mut record = enabled_record();
+        record.settings_version = 2;
+        record.wasm_sha256 = Some("aa".repeat(32));
+        let failure =
+            MigrationFailure { from: 1, to: 2, wasm_sha256: record.wasm_sha256.clone(), reason: "boom".into() };
+        assert_eq!(registry.migration_failure(&record, 1), None);
+        registry.note_migration_failure("demo", failure);
+        assert_eq!(registry.migration_failure(&record, 1).as_deref(), Some("boom"));
+        // another stored version, another schema version, or an updated package: a new attempt is due
+        assert_eq!(registry.migration_failure(&record, 0), None);
+        record.settings_version = 3;
+        assert_eq!(registry.migration_failure(&record, 1), None);
+        record.settings_version = 2;
+        record.wasm_sha256 = Some("bb".repeat(32));
+        assert_eq!(registry.migration_failure(&record, 1), None);
     }
 
     // --- circuit breaker ---------------------------------------------------

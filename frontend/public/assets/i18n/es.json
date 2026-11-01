@@ -2046,7 +2046,14 @@
     "PLUGIN_EXPOSE_MCP": "Exponer a MCP (los asistentes de IA pueden llamarlas sin supervisión)",
     "PLUGIN_UNINSTALL": "Desinstalar",
     "PLUGIN_PURGE_DATA": "Eliminar también los datos guardados",
-    "PLUGIN_REENABLE": "Volver a activar"
+    "PLUGIN_REENABLE": "Volver a activar",
+    "PLUGIN_UPDATE_AVAILABLE": "Actualización pendiente de revisión",
+    "PLUGIN_UPDATE_NEW_CAPABILITIES": "Nuevas capacidades",
+    "PLUGIN_UPDATE_REVIEW": "Revisar actualización",
+    "PLUGIN_ROLLBACK": "Revertir",
+    "PLUGIN_SETTINGS_REVIEW": "La configuración requiere revisión",
+    "PLUGIN_CAPABILITY_ADDED": "Nueva",
+    "PLUGIN_CAPABILITIES_REMOVED": "Ya no se solicita"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Portapapeles no compatible.\nSu navegador o el contexto actual no permite el acceso al portapapeles.\nUtilice HTTPS o localhost.",
@@ -2338,7 +2345,11 @@
     "PLUGIN_UNINSTALLED": "Plugin desinstalado",
     "PLUGIN_UNINSTALL_CONFIRM": "Esto elimina el plugin y su entrada en config.yml. No se puede deshacer.",
     "PLUGIN_PURGE_HINT": "Déjalo desactivado para conservar los datos del plugin, por ejemplo si piensas reinstalarlo.",
-    "PLUGIN_FRAME_INVALID": "No se puede mostrar esta página del plugin."
+    "PLUGIN_FRAME_INVALID": "No se puede mostrar esta página del plugin.",
+    "PLUGIN_ROLLED_BACK": "Revertido",
+    "PLUGIN_UPDATE_MCP_RESET": "La exposición MCP estaba aprobada para la versión instalada. No se conserva; márquela de nuevo si la nueva versión debe seguir expuesta.",
+    "PLUGIN_UPDATE_KEEPS_PRIOR": "La versión instalada se conserva para poder revertir. Si la actualización no arranca, se revierte automáticamente.",
+    "PLUGIN_SETTINGS_REVIEW": "La configuración guardada de este plugin requiere revisión. Revísela y guárdela para quitar este aviso."
   },
   "SETUP": {
     "DESC": {

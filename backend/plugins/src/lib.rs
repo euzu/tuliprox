@@ -28,6 +28,7 @@ mod logs;
 mod manifest;
 mod mcp_tools;
 mod metrics;
+mod migration;
 mod notify;
 mod output_provider;
 mod registry;
@@ -41,6 +42,7 @@ mod tasks;
 mod ui_assets;
 
 pub use mcp_tools::{PluginMcpTool, PluginMcpToolKind};
+pub use migration::MigratedSettings;
 pub use state::{HostClock, PluginServices, SealResourceUrl};
 pub use system::PluginSystem;
 pub use tasks::{TaskOutcome, TaskTrigger};

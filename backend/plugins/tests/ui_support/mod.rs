@@ -24,6 +24,19 @@ pub struct Staged {
     pub plugin_dir: PathBuf,
     _plugins: TempDir,
     _data: TempDir,
+    config: PluginsConfig,
+}
+
+impl Staged {
+    /// Switch the config entry off and re-scan. The enabled load pinned the
+    /// plugin first, so it is a disabled plugin and not one waiting for approval.
+    pub fn disable(&self) {
+        let mut config = self.config.clone();
+        for entry in &mut config.plugins {
+            entry.enabled = false;
+        }
+        self.system.reload(&config);
+    }
 }
 
 /// Stage the plugin with `ui/index.html`, `ui/assets/app.js`, `ui/.secret.js` and
@@ -45,7 +58,13 @@ pub fn stage(entry: Option<bool>) -> Option<Staged> {
     fs::write(plugin_dir.join("ui/data.xml"), "<x/>").expect("xml");
 
     let entries = entry
-        .map(|enabled| PluginEntry { id: ID.to_string(), enabled, priority: 0, settings: Map::new() })
+        .map(|enabled| PluginEntry {
+            id: ID.to_string(),
+            enabled,
+            priority: 0,
+            settings: Map::new(),
+            settings_version: 1,
+        })
         .into_iter()
         .collect();
     let config = PluginsConfig {
@@ -56,5 +75,5 @@ pub fn stage(entry: Option<bool>) -> Option<Staged> {
     };
     let services = PluginServices::new(reqwest::Client::new(), data.path().to_path_buf());
     let system = PluginSystem::load(&config, services).expect("plugin system loads").expect("plugins are enabled");
-    Some(Staged { system, plugin_dir, _plugins: plugins, _data: data })
+    Some(Staged { system, plugin_dir, _plugins: plugins, _data: data, config })
 }

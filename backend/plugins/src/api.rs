@@ -51,13 +51,30 @@ impl PluginSystem {
     /// operator's `enabled` flag; without it nothing reads as enabled.
     #[must_use]
     pub fn api_list(&self, config: Option<&PluginsConfig>) -> Vec<PluginSummaryDto> {
-        self.registry().snapshot().plugins.iter().map(|record| summary(record, config)).collect()
+        let registry = self.registry();
+        registry
+            .snapshot()
+            .plugins
+            .iter()
+            .map(|record| self.with_replacement(summary(record, config, registry.settings_review(record, config))))
+            .collect()
     }
 
     /// The list row of plugin `id`.
     #[must_use]
     pub fn api_summary(&self, id: &str, config: Option<&PluginsConfig>) -> Option<PluginSummaryDto> {
-        self.registry().snapshot().get(id).map(|record| summary(record, config))
+        let registry = self.registry();
+        registry
+            .snapshot()
+            .get(id)
+            .map(|record| self.with_replacement(summary(record, config, registry.settings_review(record, config))))
+    }
+
+    /// Fill the W8 lane D summary fields: a staged update and the retained prior.
+    fn with_replacement(&self, mut summary: PluginSummaryDto) -> PluginSummaryDto {
+        summary.update = self.update_summary(&summary.id);
+        summary.rollback = self.rollback_summary(&summary.id);
+        summary
     }
 
     /// Counters, breaker, instances, quotas and the memory budget of plugin `id`.
@@ -198,6 +215,26 @@ impl PluginSystem {
         Ok((settings, warnings))
     }
 
+    /// Plan §18 *W8 seam freeze*: after an update or rollback reload, whether
+    /// plugin `id` is loaded and one fresh instance's `init` accepts its
+    /// settings within the hook budget. The settings are the effective ones:
+    /// migrated in memory when the stored ones are behind the package's schema
+    /// (see [`PluginSystem::effective_settings`]), nothing persisted.
+    ///
+    /// # Errors
+    /// Why the package cannot be activated.
+    pub(crate) async fn activation_check(&self, id: &str, config: &PluginsConfig) -> Result<(), String> {
+        let snapshot = self.registry().snapshot();
+        let record = snapshot.get(id).ok_or_else(|| format!("plugin `{id}` is not installed"))?;
+        if record.loaded.is_none() {
+            let reason = record.failure().unwrap_or_default();
+            return Err(format!("plugin `{id}` did not load ({}): {reason}", record.state().as_str()));
+        }
+        let settings = self.effective_settings(record, config.entry(id)).await?;
+        let paths = secret_paths_of(record);
+        self.run_candidate_init(record, &settings, &paths).await.map_err(|(_, error)| error.error)
+    }
+
     /// Run `init` of `record` with `settings` in a throwaway instance. The
     /// registry keeps its own environment and instances.
     async fn run_candidate_init(
@@ -216,6 +253,7 @@ impl PluginSystem {
                 enabled: true,
                 priority: record.priority,
                 settings: settings.clone(),
+                settings_version: record.settings_version,
             }],
             ..PluginsConfig::default()
         };
@@ -292,7 +330,7 @@ impl PluginSystem {
     }
 }
 
-fn summary(record: &PluginRecord, config: Option<&PluginsConfig>) -> PluginSummaryDto {
+fn summary(record: &PluginRecord, config: Option<&PluginsConfig>, settings_review: Option<String>) -> PluginSummaryDto {
     let manifest = record.manifest.as_deref();
     PluginSummaryDto {
         id: record.id.to_string(),
@@ -316,6 +354,9 @@ fn summary(record: &PluginRecord, config: Option<&PluginsConfig>) -> PluginSumma
             .as_ref()
             .map_or_else(|| ABI_VERSION.to_string(), |loaded| loaded.fingerprint.abi.to_string()),
         wasm_sha256: record.wasm_sha256.clone(),
+        settings_review,
+        update: None,
+        rollback: None,
     }
 }
 
@@ -395,7 +436,7 @@ pub(crate) fn read_settings_schema(dir: &Path, manifest: &Manifest) -> Option<Va
 /// The secret property paths of the whole settings object of `record`: its
 /// schemas' own and, under `ext.<section>.`, those of its extensions. Empty for
 /// a record without a readable manifest.
-fn secret_paths_of(record: &PluginRecord) -> Vec<String> {
+pub(crate) fn secret_paths_of(record: &PluginRecord) -> Vec<String> {
     let Some(manifest) = record.manifest.as_deref() else {
         return Vec::new();
     };
@@ -409,7 +450,10 @@ fn secret_paths_of(record: &PluginRecord) -> Vec<String> {
 /// Check the `ext` object of a save: one object per declared section, each
 /// valid against that section's fragments (plan §11 *Config page integration*).
 /// Violation paths come back as `ext.<section>.<field>`.
-fn check_extension_settings(record: &PluginRecord, settings: &Map<String, Value>) -> Result<(), SettingsRejection> {
+pub(crate) fn check_extension_settings(
+    record: &PluginRecord,
+    settings: &Map<String, Value>,
+) -> Result<(), SettingsRejection> {
     let Some(manifest) = record.manifest.as_deref() else {
         return Ok(());
     };

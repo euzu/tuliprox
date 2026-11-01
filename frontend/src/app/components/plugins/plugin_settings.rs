@@ -18,6 +18,11 @@ pub struct PluginSettingsProps {
     /// Shown in the dialog title.
     pub plugin_name: String,
     pub on_close: Callback<()>,
+    /// `PluginSummaryDto::settings_review`: why the stored settings need a
+    /// look (the settings schema moved on and no migration ran or it failed).
+    /// Shown as a notice above the form; saving the settings clears it.
+    #[prop_or_default]
+    pub settings_review: Option<String>,
 }
 
 /// What the dialog shows once the settings are loaded.
@@ -27,6 +32,19 @@ struct LoadedSettings {
     secrets: Vec<PluginSecretDto>,
     /// The saved settings, as the server returned them (secrets masked).
     saved: Value,
+}
+
+/// The "settings need review" notice: what to do, then the server's reason.
+/// Nothing when the plugin has no review.
+fn review_notice(hint: &str, review: Option<&str>) -> Html {
+    match review {
+        Some(reason) => html! {
+            <div class="tp__plugin-settings__review" role="status">
+                <AppIcon name="Warning"/>{ " " }{ hint }{ " " }{ reason }
+            </div>
+        },
+        None => html! {},
+    }
 }
 
 fn pretty_json(value: &Value) -> String { serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()) }
@@ -201,6 +219,7 @@ pub fn PluginSettings(props: &PluginSettingsProps) -> Html {
         };
         html! {
             <>
+                { review_notice(&translate.t("MESSAGES.PLUGIN_SETTINGS_REVIEW"), props.settings_review.as_deref()) }
                 {
                     if let Some(error) = top_error.as_ref() {
                         html! { <div class="tp__plugin-settings__error tp__input-error" role="alert">{ error.clone() }</div> }

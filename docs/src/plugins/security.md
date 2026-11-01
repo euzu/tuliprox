@@ -105,6 +105,13 @@ capabilities it granted, and writes the pin
 
 From then on the pin applies: a changed `plugin.wasm` or capability list puts the plugin back to `pending_approval`.
 
+The pins live in `<data dir>/approvals.json`. Losing that file is the same as never having approved: trust on first use
+applies again on the next load. Anyone who can delete it can also edit it, so this grants nothing beyond write access to
+the data directory, which you should protect like `config.yml`. An `approvals.json` that exists but cannot be read or
+parsed is different: tuliprox then approves **nothing** by config entry, logs an error, and leaves the file as it is.
+Every plugin without a matching pin waits for approval. The next approval in the Plugin Manager moves the unreadable
+file aside as `approvals.json.unreadable-<unix seconds>` and starts a new one.
+
 Do not write an enabled entry, and do not copy a plugin directory into `<config dir>/plugins/`, for a plugin you have not
 reviewed. Upload, review and approve the package instead. A settings save for an id with no entry creates the entry
 disabled, for this reason (`backend/app/src/api/endpoints/plugins_settings_api.rs`).

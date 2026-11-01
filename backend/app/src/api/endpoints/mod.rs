@@ -17,7 +17,7 @@ mod plugins_api;
 mod plugins_install_api;
 mod plugins_metrics_api;
 mod plugins_rpc_api;
-mod plugins_settings_api;
+pub(in crate::api) mod plugins_settings_api;
 mod plugins_tasks_api;
 pub(in crate::api) mod plugins_ui_api;
 pub(in crate::api) mod provider_resolve_api;

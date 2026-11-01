@@ -174,6 +174,19 @@ pub trait Tasks {
     fn run(ctx: TaskContext) -> Res<String>;
 }
 
+/// `settings-migration`: manifest `settings.migrate` (no capability). The host
+/// calls it once when the stored settings carry an older settings-schema
+/// `version` than the installed package: `from_version` is the stored version
+/// and `settings` the stored JSON (secret `${env:VAR}` references resolved).
+/// Return the JSON for the current schema version; the host validates it before
+/// it saves it. An `Err` keeps the stored settings and marks the plugin "needs
+/// settings review". No `init` ran on the old settings, so do not use
+/// [`PluginSettings::current`](crate::settings::PluginSettings::current) here;
+/// [`Migrations`](crate::settings::Migrations) chains one step per old version.
+pub trait SettingsMigration {
+    fn migrate(from_version: u32, settings: &str) -> Res<String>;
+}
+
 /// Implements each generated `Guest` trait for any type implementing the SDK
 /// trait of the same interface. The `#[tuliprox_plugin]` glue exports
 /// `Adapter<UserType>`, so no signature is written twice by the macro.
@@ -293,4 +306,8 @@ impl<T: Rpc> exports::rpc::Guest for Adapter<T> {
 
 impl<T: Tasks> exports::tasks::Guest for Adapter<T> {
     fn run(ctx: TaskContext) -> Res<String> { T::run(ctx) }
+}
+
+impl<T: SettingsMigration> exports::settings_migration::Guest for Adapter<T> {
+    fn migrate(from_version: u32, settings: String) -> Res<String> { T::migrate(from_version, &settings) }
 }
