@@ -1,4 +1,4 @@
-//! Update and rollback (plan §18 *W8 seam freeze*, *Safe replacement*) over
+//! Update and rollback over
 //! UI-only packages, which need no built fixture. The activation check is
 //! driven by hand: a UI-only package has no `init` to fail.
 
@@ -29,6 +29,7 @@ fn env_with(entry_settings: Option<Value>) -> Env {
             priority: 0,
             settings,
             settings_version: 1,
+            update_policy: shared::model::PluginUpdatePolicy::Auto,
         });
     }
     let system = PluginSystem::load(&config, PluginServices::new(reqwest::Client::new(), data.clone()))
@@ -94,6 +95,7 @@ fn the_capability_diff_marks_added_removed_and_unchanged_and_never_carries_mcp()
         wasm_sha256: String::new(),
         capabilities: vec!["network".to_string(), "storage".to_string()],
         mcp: true,
+        origin: None,
     };
     let wanted = vec!["epg_write".to_string(), "storage".to_string()];
     let diff = capability_diff(&wanted, Some(&pin));
@@ -217,7 +219,7 @@ async fn a_rollback_without_a_prior_is_a_404_and_an_edited_prior_is_refused() {
     // a prior approved with a wasm hash it no longer has
     let prior = env.data.join(PRIOR_DIR).join("demo");
     let mut meta = read_prior_meta(&prior).unwrap();
-    meta.pin = Some(ApprovalPin { wasm_sha256: "ab".repeat(32), capabilities: Vec::new(), mcp: false });
+    meta.pin = Some(ApprovalPin { wasm_sha256: "ab".repeat(32), capabilities: Vec::new(), mcp: false, origin: None });
     fs::write(prior.join(PRIOR_META), serde_json::to_vec(&meta).unwrap()).unwrap();
     let rejection = env.system.api_rollback(&guard, "demo", &env.config).await.unwrap_err();
     assert_eq!(rejection.status, StatusCode::CONFLICT);
@@ -305,9 +307,92 @@ fn a_swap_killed_halfway_leaves_hidden_leftovers_the_next_swap_sweeps() {
     fs::create_dir_all(plugins.join(".swap~old~demo-two~1~1")).unwrap();
     fs::create_dir_all(prior_root.join(".swap~bak~demo~1~2")).unwrap();
     let meta = PriorMeta { version: "1.0.0".to_string(), pin: None, entry: None };
-    let swap = FsSwap::prepare(Incoming::Prior, &plugins, &prior_root, "demo", &meta);
+    let paths = SwapPaths::for_swap(&plugins, &prior_root, "demo");
+    let swap = FsSwap::prepare(Incoming::Prior, paths, false, &meta);
     // a first swap has no prior package to copy in, so it fails, but only after sweeping
     assert!(swap.is_err());
     assert_eq!(names(&plugins), [".swap~old~demo-two~1~1", "demo"], "another plugin's names are left alone");
     assert_eq!(names(&prior_root), no_strings());
+}
+
+// --- marketplace provenance ---------
+
+fn expect(version: &str) -> MarketplaceExpect {
+    MarketplaceExpect {
+        id: "demo".to_string(),
+        version: version.to_string(),
+        origin: PluginOriginDto { source: "main".to_string(), version: version.to_string() },
+    }
+}
+
+fn pin_origin(env: &Env) -> Option<PluginOriginDto> {
+    read_approvals(&approvals_path(&env.data)).get("demo").and_then(|pin| pin.origin.clone())
+}
+
+fn origin_file(env: &Env) -> PathBuf { env.data.join("staging/.origin/demo.json") }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_marketplace_install_records_the_origin_on_approve() {
+    let env = env();
+    let guard = env.system.install_lock().await;
+    env.system.api_upload_from_marketplace(&guard, package("1.0.0", &[]), expect("1.0.0")).await.unwrap();
+    assert!(origin_file(&env).is_file(), "the origin is pending while staged");
+    assert!(pin_origin(&env).is_none());
+
+    let summary = env.system.api_approve(&guard, "demo", &body(&[]), &env.config).await.unwrap();
+    let origin = pin_origin(&env).expect("the pin carries the origin");
+    assert_eq!((origin.source.as_str(), origin.version.as_str()), ("main", "1.0.0"));
+    assert_eq!(summary.origin.as_ref(), Some(&origin));
+    assert!(!origin_file(&env).exists(), "the pending origin moved into the pin");
+    assert_eq!(env.system.marketplace_installed()["demo"].origin.as_ref(), Some(&origin));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_upload_clears_the_pending_origin_and_installs_without_one() {
+    let env = env();
+    let guard = env.system.install_lock().await;
+    env.system.api_upload_from_marketplace(&guard, package("1.0.0", &[]), expect("1.0.0")).await.unwrap();
+    env.system.api_upload(&guard, package("1.0.0", &[])).await.unwrap();
+    assert!(!origin_file(&env).exists());
+    env.system.api_approve(&guard, "demo", &body(&[]), &env.config).await.unwrap();
+    assert!(pin_origin(&env).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_origin_travels_with_the_pin_through_an_update_and_a_rollback() {
+    let env = env();
+    let guard = env.system.install_lock().await;
+    env.system.api_upload_from_marketplace(&guard, package("1.0.0", &[]), expect("1.0.0")).await.unwrap();
+    env.system.api_approve(&guard, "demo", &body(&[]), &env.config).await.unwrap();
+    // A plain-upload update has no origin.
+    env.system.api_upload(&guard, package("1.1.0", &[])).await.unwrap();
+    env.system.api_approve(&guard, "demo", &body(&[]), &env.config).await.unwrap();
+    assert!(pin_origin(&env).is_none());
+    // Rolling back restores the prior pin together with its origin.
+    env.system.api_rollback(&guard, "demo", &env.config).await.unwrap();
+    assert_eq!(pin_origin(&env).map(|origin| origin.version), Some("1.0.0".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_package_that_is_not_the_requested_release_is_refused_before_staging_changes() {
+    let env = env();
+    upload_and_approve(&env, "1.0.0", &[]).await;
+    let guard = env.system.install_lock().await;
+    env.system.api_upload(&guard, package("1.1.0", &[])).await.unwrap();
+    let staged_before = names(&env.data.join("staging"));
+
+    // Wrong version.
+    let rejection =
+        env.system.api_upload_from_marketplace(&guard, package("1.2.0", &[]), expect("1.1.5")).await.unwrap_err();
+    assert_eq!(rejection.status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Wrong id.
+    let mut other = expect("1.2.0");
+    other.id = "other".to_string();
+    let rejection = env.system.api_upload_from_marketplace(&guard, package("1.2.0", &[]), other).await.unwrap_err();
+    assert_eq!(rejection.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    assert_eq!(names(&env.data.join("staging")), staged_before, "no extraction leftovers");
+    assert!(env.data.join("staging/demo/v1.1.0.txt").is_file(), "the staged update is untouched");
+    assert_eq!(installed_version(&env).as_deref(), Some("1.0.0"));
+    assert!(!origin_file(&env).exists());
 }

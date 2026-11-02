@@ -1,7 +1,7 @@
-//! `PluginSystem::api_rpc_call`: the refusals that need a loaded plugin
-//! (plan §18 *W6b seam freeze* "rpc"). The limits and the status of the payload
-//! checks (`403`, `413`, `429`, `400`, `422`) are exercised without a component
-//! by the unit tests in `src/rpc.rs`; a call that reaches a guest needs a
+//! `PluginSystem::api_rpc_call`: the refusals that need a loaded plugin. The
+//! limits and the response codes of the payload checks (`403`, `413`, `429`,
+//! `400`, `422`) are exercised without a component by the unit tests in
+//! `src/rpc.rs`; a call that reaches a guest needs a
 //! component exporting `rpc`, which the `ui-demo` fixture provides.
 
 mod common;

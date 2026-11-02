@@ -1,4 +1,4 @@
-//! `Channel::Plugin` delivery (plan §7 *Notification providers*): the
+//! `Channel::Plugin` delivery : the
 //! [`shared::model::PluginNotifier`] that messaging reaches plugins through.
 //!
 //! `notification_channels` lists the plugins runnable for `SendNotification`

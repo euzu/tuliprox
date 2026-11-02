@@ -1,5 +1,4 @@
-//! Discovery, approval pins, lifecycle, the circuit breaker and hot reload
-//! (plan §7 *Registry lifecycle*, §9 *Install integrity*, §18 *W3 runtime freeze*).
+//! Discovery, approval pins, lifecycle, the circuit breaker and hot reload.
 //!
 //! Every directory `<plugins dir>/<id>/` with a `manifest.yml` becomes one
 //! [`PluginRecord`], whatever its state: a broken manifest is `Invalid` and an
@@ -75,7 +74,7 @@ const BREAKER_THRESHOLD: u32 = 5;
 /// How long the plugins directory must stay quiet before it is re-scanned.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Where a plugin is in its lifecycle (plan §7 state diagram).
+/// Where a plugin is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PluginState {
     Discovered,
@@ -83,9 +82,9 @@ pub(crate) enum PluginState {
     Invalid,
     /// Valid, but not approved, or its wasm hash or capabilities changed since.
     PendingApproval,
-    /// Approved but not yet compiled. Never stored by the W3 registry, which
-    /// loads in the same scan; `PUT …/approve` (Phase 5.3) reports it.
-    #[allow(dead_code, reason = "part of the frozen lifecycle; first stored by Phase 5.3 approval")]
+    /// Approved but not yet compiled. Never stored by the registry, which
+    /// loads in the same scan; `PUT …/approve` reports it.
+    #[allow(dead_code, reason = "part of the lifecycle state; written when a pending approval is stored")]
     Approved,
     /// Compiled and linked, not enabled.
     Loaded,
@@ -112,7 +111,7 @@ impl PluginState {
     }
 }
 
-/// What a plugin contributed to a run (plan §7 *Determinism*).
+/// What a plugin contributed to a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PluginFingerprint {
     pub(crate) id: Arc<str>,
@@ -164,7 +163,7 @@ pub(crate) struct LoadedPlugin {
     pub(crate) playlist_hooks: Option<playlist_hooks::GuestIndices>,
     /// `Some` when the component exports `source-hooks`.
     pub(crate) source_hooks: Option<source_hooks::GuestIndices>,
-    /// The W5 interfaces, each `Some` when the component exports it.
+    /// The interfaces, each `Some` when the component exports it.
     pub(crate) sort_hooks: Option<sort_hooks::GuestIndices>,
     pub(crate) sort_key_hooks: Option<sort_key_hooks::GuestIndices>,
     pub(crate) chno_hooks: Option<chno_hooks::GuestIndices>,
@@ -176,7 +175,7 @@ pub(crate) struct LoadedPlugin {
     pub(crate) epg_enrich_hooks: Option<epg_enrich_hooks::GuestIndices>,
     pub(crate) epg_match_hooks: Option<epg_match_hooks::GuestIndices>,
     pub(crate) metadata_hooks: Option<metadata_hooks::GuestIndices>,
-    /// The W6a interfaces (plan §6 *Hooks outside the per-target pipeline*),
+    /// The interfaces of hooks outside the per-target pipeline,
     /// each `Some` when the component exports it.
     pub(crate) event_hooks: Option<event_hooks::GuestIndices>,
     pub(crate) metrics_hooks: Option<metrics_hooks::GuestIndices>,
@@ -185,10 +184,10 @@ pub(crate) struct LoadedPlugin {
     pub(crate) output_generator: Option<output_generator::GuestIndices>,
     pub(crate) stream_hooks: Option<stream_hooks::GuestIndices>,
     pub(crate) tasks: Option<tasks::GuestIndices>,
-    /// `Some` when the component exports `rpc` (W6b, `ui.rpc_exports`).
+    /// `Some` when the component exports `rpc` (`ui.rpc_exports`).
     pub(crate) rpc: Option<rpc::GuestIndices>,
-    /// `Some` when the component exports `settings-migration` (W8,
-    /// `settings.migrate`); called by the migration step, never by a hook site.
+    /// `Some` when the component exports `settings-migration`
+    /// (`settings.migrate`); called by the migration step, never by a hook site.
     pub(crate) settings_migration: Option<settings_migration::GuestIndices>,
     /// The manifest hooks the host can run today.
     pub(crate) hooks: Vec<PluginHook>,
@@ -248,7 +247,7 @@ pub(crate) struct PluginRecord {
     pub(crate) settings_version: u32,
     /// Set when the stored settings were written for another schema version
     /// and fail this one: the plugin is loaded but does not run until the
-    /// settings are saved (plan §18 *W8 seam freeze*).
+    /// settings are saved.
     settings_block: Option<String>,
     state: PluginState,
     failure: Option<String>,
@@ -344,7 +343,7 @@ impl PluginRecord {
     }
 
     /// Close the circuit breaker again (a manual re-enable). The counters stay.
-    #[allow(dead_code, reason = "called by `PUT …/enable` (Phase 5.3)")]
+    #[allow(dead_code, reason = "called by `PUT …/enable`")]
     pub(crate) fn reset_breaker(&self) { self.breaker.reset(); }
 
     /// Call counters, the last error and the breaker, for the management API.
@@ -418,11 +417,15 @@ pub(crate) struct ApprovalPin {
     pub(crate) wasm_sha256: String,
     /// Capability names (`network`, `storage`, ...), sorted.
     pub(crate) capabilities: Vec<String>,
-    /// MCP switch 2 (plan §7): the admin approved offering the `mcp: true`
+    /// MCP switch 2: the admin approved offering the `mcp: true`
     /// exports as MCP tools. Only `PUT …/approve` sets it; a trust-on-first-use
     /// pin never does.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) mcp: bool,
+    /// The marketplace source and release the package was installed from;
+    /// `None` for an upload or a directory drop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin: Option<shared::model::PluginOriginDto>,
 }
 
 /// `<data_dir>/approvals.json`: `{"<plugin id>": {"wasm_sha256": "...", "capabilities": ["network"]}}`.
@@ -511,7 +514,7 @@ fn list(names: &[String]) -> String {
     }
 }
 
-/// Plan §18 *Approval without a PUT route*: no pin and an enabled config entry
+/// Approval of a plugin: no pin and an enabled config entry
 /// approves (trust on first use); no pin otherwise waits; a pin that no longer
 /// matches the hash or the capabilities always waits.
 fn decide_approval(
@@ -578,8 +581,7 @@ fn split_exports<'a>(names: impl IntoIterator<Item = &'a str>) -> (Vec<String>, 
 }
 
 /// `lifecycle` is mandatory, every listed hook needs its interface, and every
-/// exported hook interface needs a hook that uses it (plan §5 *How the host
-/// loads*). Reports every problem at once.
+/// exported hook interface needs a hook that uses it. Reports every problem at once.
 pub(crate) fn check_hooks(hooks: &[HookId], exports: &[String]) -> Result<(), String> {
     let lifecycle = interface_name("lifecycle");
     let mut problems = Vec::new();
@@ -865,7 +867,7 @@ fn evaluate(
     if let Some(problem) = host_version_problem(&manifest) {
         return Err(Rejection::invalid(problem));
     }
-    // Plan §4 steps 4-6: the schemas, the locale files and the extension sections.
+    // Validate the schemas, the locale files and the extension sections.
     let secret_paths =
         check_package(&record.dir, &manifest).map_err(|problems| Rejection::invalid(problems.join("; ")))?;
     let settings_schema = read_settings_schema(&record.dir, &manifest);
@@ -896,7 +898,9 @@ fn evaluate(
         ctx.trust_entries && entry.is_some_and(|entry| entry.enabled),
     ) {
         Verdict::Approved => None,
-        Verdict::PinNow => Some(ApprovalPin { wasm_sha256: pinned_hash.to_string(), capabilities, mcp: false }),
+        Verdict::PinNow => {
+            Some(ApprovalPin { wasm_sha256: pinned_hash.to_string(), capabilities, mcp: false, origin: None })
+        }
         Verdict::Pending(reason) => return Err(Rejection { state: PluginState::PendingApproval, reason }),
     };
     match (wasm, wasm_sha256) {
@@ -904,7 +908,7 @@ fn evaluate(
         _ => record.state = state_for_entry(entry),
     }
     // Settings written for another schema version keep running only while they
-    // still fit this one (plan §18 *W8 seam freeze*).
+    // still fit this one.
     record.settings_block = entry.and_then(|entry| {
         version_conflict(settings_schema.as_ref(), record.settings_version, entry.settings_version, &entry.settings)
     });
@@ -987,7 +991,7 @@ fn scan(config: &PluginsConfig, runtime: &Runtime, shared: &Shared) -> Option<Sc
     }
     if !new_pins.is_empty() {
         for (id, pin) in new_pins {
-            // A config entry is an approval (plan §18): say what it granted, so
+            // A config entry is an approval: say what it granted, so
             // the log shows it the way the install dialog would have.
             log::warn!(
                 "plugin `{id}` approved by its config entry (trust on first use), capabilities: {}; \
@@ -1124,7 +1128,7 @@ impl Registry {
         write_approvals(&path, &approvals)
     }
 
-    /// Plan §18 *W8 seam freeze*: write `pin` for `id` and return the pin it
+    /// Write `pin` for `id` and return the pin it
     /// replaced, so a failed activation can put it back.
     pub(crate) fn swap_pin(&self, id: &str, pin: ApprovalPin) -> io::Result<Option<ApprovalPin>> {
         let mut previous = None;
@@ -1132,7 +1136,7 @@ impl Registry {
         Ok(previous)
     }
 
-    /// Plan §18 *W8 seam freeze*: undo [`Registry::swap_pin`]; `None` removes the pin.
+    /// Undo [`Registry::swap_pin`]; `None` removes the pin.
     pub(crate) fn restore_pin(&self, id: &str, previous: Option<ApprovalPin>) -> io::Result<()> {
         self.update_approvals(|approvals| match previous {
             Some(pin) => {
@@ -1165,7 +1169,7 @@ impl Registry {
 
     /// The `settings_review` of `record` under `config`: `None` when its stored
     /// settings are at the package's schema version or a migration is still to
-    /// run (plan §18 *W8 seam freeze*).
+    /// run.
     pub(crate) fn settings_review(&self, record: &PluginRecord, config: Option<&PluginsConfig>) -> Option<String> {
         let stored = config?.entry(&record.id)?.settings_version;
         let can_migrate = record.loaded.as_ref().map(|loaded| loaded.settings_migration.is_some());
@@ -1416,6 +1420,7 @@ mod tests {
             wasm_sha256: sha256_hex(wasm),
             capabilities: capabilities.iter().map(ToString::to_string).collect(),
             mcp: false,
+            origin: None,
         }
     }
 
@@ -1432,6 +1437,7 @@ mod tests {
             wasm_sha256: "abc".into(),
             capabilities: vec!["storage".into(), "network".into()],
             mcp: false,
+            origin: None,
         };
         assert_eq!(decide_approval(Some(&matching), "abc", &caps, false), Verdict::Approved);
         assert_eq!(decide_approval(Some(&matching), "abc", &caps, true), Verdict::Approved);
@@ -1501,7 +1507,7 @@ mod tests {
         assert_eq!(read_approvals(&fixture.approvals_file()), pins);
     }
 
-    // --- pin integrity (plan §18 *W8 seam freeze*) --------------------------
+    // --- pin integrity --------------------------
 
     /// Poll until `done` holds; the watcher debounces for 500 ms and the OS may
     /// be slower still, so the bound is generous. Panics with `what` on timeout.
@@ -1583,7 +1589,10 @@ mod tests {
 
         // an explicit approval starts a fresh file and keeps the unreadable one aside
         registry
-            .swap_pin("demo", ApprovalPin { wasm_sha256: String::new(), capabilities: Vec::new(), mcp: false })
+            .swap_pin(
+                "demo",
+                ApprovalPin { wasm_sha256: String::new(), capabilities: Vec::new(), mcp: false, origin: None },
+            )
             .unwrap();
         assert!(read_approvals(&fixture.approvals_file()).contains_key("demo"));
         let dir = fixture.approvals_file().parent().unwrap().to_path_buf();
@@ -1761,7 +1770,7 @@ mod tests {
         assert_eq!(secret_values(&settings, &[]), Vec::<String>::new());
     }
 
-    // --- settings versions (plan §18 *W8 seam freeze*) -----------------------
+    // --- settings versions -----------------------
 
     #[test]
     fn settings_that_do_not_fit_the_schema_block_the_plugin_until_saved() {

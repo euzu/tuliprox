@@ -1,4 +1,4 @@
-//! W6a fixture: the `on-event` hook. It logs one host line per event it is
+//! Fixture: the `on-event` hook. It logs one host line per event it is
 //! handed (`event <kind>`, info), so a test can see what the bridge delivered.
 //!
 //! With the setting `mode: loop` it never returns instead (the isolation tests).

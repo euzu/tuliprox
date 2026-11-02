@@ -833,6 +833,9 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         &app_state.app_config,
         &app_state.cancel_tokens.load().recordings,
     );
+    // Marketplace updates of installed plugins, in the background under
+    // `plugins.boot_update_budget` (plan §18 W10); startup never waits for it.
+    crate::api::tasks::spawn_plugin_boot_update(&app_state);
 
     // Emitted here rather than at the top of `main`: the bridge above is what
     // turns a bus event into a notification, and a `system.started` published

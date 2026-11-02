@@ -1,4 +1,4 @@
-//! Settings versioning and migration (plan §18 *W8 seam freeze*) over the
+//! Settings versioning and migration over the
 //! `settings-migrate-probe` fixture: its settings schema is at version 2 and its
 //! `settings.migrate` turns the version 1 shape `{label, token}` into
 //! `{group, retries, api_key}`.
@@ -27,7 +27,14 @@ struct Env {
 
 fn entry(settings: &Value, version: u32) -> PluginEntry {
     let settings: Map<String, Value> = settings.as_object().cloned().unwrap_or_default();
-    PluginEntry { id: ID.to_string(), enabled: true, priority: 0, settings, settings_version: version }
+    PluginEntry {
+        id: ID.to_string(),
+        enabled: true,
+        priority: 0,
+        settings,
+        settings_version: version,
+        update_policy: shared::model::PluginUpdatePolicy::Auto,
+    }
 }
 
 fn config_for(env: &Env, entry: PluginEntry) -> PluginsConfig {
@@ -129,7 +136,7 @@ async fn old_settings_that_fail_the_new_schema_block_the_plugin_until_migrated()
 
 /// The server reads `config.yml` with env resolution, so the runtime entry
 /// holds the resolved secret; the references must come from the file as written
-/// (W8 integration fix: the migrated `api_key` was persisted in plain text).
+/// The migrated `api_key` must not be persisted in plain text.
 #[tokio::test]
 async fn a_migration_of_env_resolved_settings_keeps_the_references_as_written() {
     let path = std::env::var("PATH").expect("PATH is set");

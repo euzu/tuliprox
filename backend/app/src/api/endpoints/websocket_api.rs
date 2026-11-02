@@ -537,6 +537,9 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // not a Web UI one, and there is no panel that renders it.
         | EventMessage::NotificationDeadLettered(_)
         | EventMessage::ScheduledTaskFailed(_)
+        // The Plugin Manager re-reads its list when it acts; the outcome of a
+        // boot update is in the boot report.
+        | EventMessage::PluginUpdate(_)
         // Auth decisions reach notification channels and plugins, not the
         // Web UI socket: there is no panel that renders them, and pushing
         // every sign-in to every connected admin is noise.
@@ -748,8 +751,11 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 28] = [
+        const NOT_ON_THE_WIRE: [EventKind; 31] = [
             EventKind::ConnectionDenied,
+            EventKind::PluginUpdateAvailable,
+            EventKind::PluginUpdateApplied,
+            EventKind::PluginUpdateFailed,
             EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
             EventKind::ProviderPoolExhausted,

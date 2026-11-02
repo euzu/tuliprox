@@ -48,7 +48,14 @@ pub fn probe_entry(id: &str, settings: Value) -> PluginEntry {
         Value::Object(map) => map,
         _ => Map::new(),
     };
-    PluginEntry { id: id.to_string(), enabled: true, priority: 0, settings, settings_version: 1 }
+    PluginEntry {
+        id: id.to_string(),
+        enabled: true,
+        priority: 0,
+        settings,
+        settings_version: 1,
+        update_policy: shared::model::PluginUpdatePolicy::Auto,
+    }
 }
 
 /// Settings that only name the probe mode.

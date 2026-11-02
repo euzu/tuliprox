@@ -1,6 +1,6 @@
-//! `rpc.call` for manifest-declared `ui.rpc_exports` (plan §10): input-schema
+//! `rpc.call` for manifest-declared `ui.rpc_exports`: input-schema
 //! validation, size caps, a per-plugin rate limit and a dedicated instance per
-//! call (§18 Q3). W6b lane R.
+//! call.
 //!
 //! Everything the host decides before a guest is touched is a pure function
 //! ([`require_enabled`], [`export_named`], [`admit`]), so the status codes are
@@ -240,7 +240,7 @@ fn redact_value(value: &mut Value, secrets: &[String]) {
 }
 
 /// Check the answer of a guest: at most 256 KiB, valid JSON, and no resolved
-/// secret in any string (plan §9 *Delivering*: never sent to the UI).
+/// secret in any string (never sent to the UI).
 fn vet_result(text: String, secrets: &[String]) -> Result<String, RpcFailure> {
     if text.len() > MAX_RPC_RESULT_BYTES {
         return Err(failure(
@@ -276,15 +276,15 @@ impl PluginSystem {
     /// The largest rpc request body, in bytes; the route's body limit.
     pub const MAX_RPC_PAYLOAD_BYTES: usize = MAX_RPC_PAYLOAD_BYTES;
 
-    /// Call `method` of plugin `id` with the request `body` (plan §10, `POST
-    /// /api/v1/plugins/{id}/rpc/{method}`). `may_write` is asked only for a
+    /// Call `method` of plugin `id` with the request `body` at `POST
+    /// /api/v1/plugins/{id}/rpc/{method}`. `may_write` is asked only for a
     /// `kind: write` method, and answers whether the caller has `SystemWrite`.
     ///
     /// On success the JSON text the plugin returned (at most 256 KiB, secrets
     /// redacted). Every caller (the route, MCP tools) gets the same limits.
     ///
     /// # Errors
-    /// [`RpcFailure`] with the frozen status: `404` (unknown plugin or method),
+    /// [`RpcFailure`] with the fixed status: `404` (unknown plugin or method),
     /// `409` (not enabled), `403`, `413`, `429`, `400`, `422` (also a guest
     /// `err(msg)`), `502` and `503`.
     pub async fn api_rpc_call(

@@ -1,4 +1,4 @@
-//! `PUT /api/v1/plugins/{id}/settings` (plan §9 *Plugin secrets*, §10), under
+//! `PUT /api/v1/plugins/{id}/settings`, under
 //! `SystemWrite`.
 //!
 //! The save is validated and `init`-checked before anything is written
@@ -8,7 +8,7 @@
 //! The writer (`persist_entry`) also serves enable, disable and uninstall
 //! (`plugins_install_api`).
 //! `migrate_stored_settings` is the same write for a settings migration after a
-//! plugin update (plan §18 *W8 seam freeze*): it takes the same two locks, and
+//! plugin update: it takes the same two locks, and
 //! writes the migrated settings together with their `settings_version`.
 //! Secret values are never logged and never echoed: the answer is the masked
 //! `GET` view plus the warnings of the save.
@@ -139,7 +139,7 @@ pub(super) fn config_file_path(app_state: &AppState) -> String {
 /// unresolved. The runtime config is read with env resolution, so its settings
 /// hold resolved values: what the UI is shown, what an echoed secret sentinel
 /// restores and what a migration writes back must start from this instead, or
-/// a resolved secret reaches the UI or the file (W8 fix of the W4 settings save).
+/// a resolved secret reaches the UI or the file.
 #[cfg(feature = "plugins")]
 pub(in crate::api) async fn written_plugins_config(app_config: &AppConfig) -> Result<PluginsConfig, TuliproxError> {
     let read_path = app_config.paths.load().config_file_path.clone();
@@ -203,7 +203,7 @@ pub(super) async fn put_plugin_settings(
     let Some(plugins) = app_state.plugins.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    // One install-affecting change at a time (plan §18 *W6b seam freeze*), and
+    // One install-affecting change at a time, and
     // within it one config write at a time: the stored values the sentinel
     // restores come from the state this save then replaces. The install routes
     // take the locks in the same order.
@@ -245,8 +245,7 @@ pub(super) async fn put_plugin_settings(
     Json(answer).into_response()
 }
 
-/// The settings migration step after a registry reload (plan §18 *W8 seam
-/// freeze*): migrates the stored settings of every plugin whose package moved
+/// The settings migration step after a registry reload: migrates the stored settings of every plugin whose package moved
 /// to a newer settings schema, writes them with their `settings_version`
 /// through [`persist_entry_in`] and reloads once. Cheap when nothing is due, and
 /// never blocks the reload that triggered it: it runs on its own task, under

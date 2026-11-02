@@ -1,4 +1,4 @@
-# Sports Enricher: the plugin plan's section 13 A example. Every hook here is
+# Sports Enricher example plugin. Every hook here is
 # implemented in src/ and the macro checks this list against the impls at compile time.
 id: sports-enricher
 name: Sports Enricher

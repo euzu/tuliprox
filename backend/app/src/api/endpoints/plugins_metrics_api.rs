@@ -1,4 +1,4 @@
-//! `GET /api/v1/plugins/metrics` (plan §10, §7 *Dashboard metrics*), under
+//! `GET /api/v1/plugins/metrics`, under
 //! `SystemRead`: the throttled `collect-metrics` snapshot of every plugin.
 //! The same snapshot rides the status payload ([`plugin_metrics`]).
 //!

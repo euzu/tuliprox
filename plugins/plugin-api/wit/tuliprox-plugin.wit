@@ -1,10 +1,8 @@
-// Tuliprox plugin contract, ABI 1.0.0 — FROZEN (W2, 2026-10-30).
-//
-// Source of truth: plugin-system-plan.md §5 and §18 "WIT freeze" (W0 memo,
-// W1 amendment `channel.virtual-id` -> `handle`, W2 full freeze).
-// "Frozen" means no breaking edits from here on. A 1.x addition is a NEW
+// Tuliprox plugin contract, ABI 1.0.0. This file is the single source of truth
+// for the plugin ABI.
+// The contract is frozen: breaking edits are not allowed. A 1.x addition is a NEW
 // interface (e.g. `sort-hooks-v1-1`) plus a new world; existing interfaces,
-// records and worlds never change. Every WIT edit goes through the W2 owner.
+// records and worlds never change.
 //
 // The `wasi:*@0.2.12` packages under `deps/` are copied verbatim from
 // wasmtime-wasi-http 50.0.1, which is the host runtime the contract is pinned to.
@@ -19,7 +17,7 @@
 //   single-purpose and a plugin exports only what it implements.
 package tuliprox:plugin@1.0.0;
 
-// FROZEN W0. Only the types base + playlist-plugin need; it never grows.
+// Only the types the base and playlist-plugin worlds need. This interface does not grow.
 interface types {
   enum item-type {                 // == shared::model::PlaylistItemType (11)
     live, video, series, series-info, catchup,
@@ -30,7 +28,7 @@ interface types {
   enum log-level { trace, debug, info, warn, error }
 
   record channel {
-    handle: u32,                   // host-issued, unique within one call; read-only (W1 fix)
+    handle: u32,                   // host-issued, unique within one call; read-only
     name: string,
     title: string,
     group: string,
@@ -85,7 +83,7 @@ interface epg-types {
   }
 }
 
-// ——— functions the HOST provides to every plugin (FROZEN W0) ———
+// ——— functions the HOST provides to every plugin ———
 interface host {
   use types.{log-level};
 
@@ -100,13 +98,13 @@ interface host {
   cache-image: func(url: string) -> result<string, string>;  // -> locally served URL
 }
 
-// ——— lifecycle: every plugin exports this (FROZEN W0) ———
+// ——— lifecycle: every plugin exports this ———
 interface lifecycle {
   // once per instantiation with the settings JSON; err disables the instance
   init: func(settings: string) -> result<_, string>;
 }
 
-// ——— playlist pipeline (FROZEN W0) ———
+// ——— playlist pipeline ———
 // manifest: playlist.{before,after}-{filter,rename,map}
 interface playlist-hooks {
   use types.{channel, channel-change};
@@ -218,7 +216,7 @@ interface epg-enrich-hooks {
 
 // manifest: epg.match-channel — second pass over the channels the built-in
 // matcher left unresolved; results go through the same ambiguity and
-// case-adoption rules (§7 prepare -> apply)
+// case-adoption rules (prepare -> apply)
 interface epg-match-hooks {
   use types.{channel};
   use epg-types.{epg-channel};
@@ -231,7 +229,7 @@ interface epg-match-hooks {
       -> result<list<option<string>>, string>;
 }
 
-// manifest: epg.resolve-conflict — v1.x (needs the blocking-thread bridge, §7)
+// manifest: epg.resolve-conflict — v1.x (needs the blocking-thread bridge)
 interface epg-conflict-hooks {
   use epg-types.{epg-programme};
   // The host only collapses EXACT start/stop collisions today (priority
@@ -360,7 +358,7 @@ interface tasks {
   run: func(ctx: task-context) -> result<string, string>;
 }
 
-// ——— settings migration (1.x addition, W8; optional) ———
+// ——— settings migration (1.x addition; optional) ———
 // manifest: settings.migrate
 // Called by the host when the stored settings carry an older settings-schema
 // `version` than the installed package's schema. `from-version` is the stored

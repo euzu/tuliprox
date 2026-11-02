@@ -1,13 +1,13 @@
-//! The package-level half of the install-time validation (plan §4 steps 4-6):
+//! The package-level half of the install-time validation:
 //! the files a manifest points at. Runs when a `.tlpx` is uploaded and again
 //! on every load, so a package dropped in by hand is held to the same rules.
 //!
-//! * Step 4: every settings schema (`ui.config_section`, a schema
+//! * Settings: every settings schema (`ui.config_section`, a schema
 //!   `ui.config_tab`) and every `ui.config_extensions` fragment is a schema the
 //!   host's validator can honour, and no secret property carries a `default`.
-//! * Step 5: every declared locale file exists and is a flat string map, and
+//! * Locales: every declared locale file exists and is a flat string map, and
 //!   every `title_key` resolves in `en`, the fallback locale.
-//! * Step 6: every `ui.config_extensions[].section` is a built-in config section.
+//! * Extensions: every `ui.config_extensions[].section` is a built-in config section.
 
 use super::{ConfigExtension, ConfigTab, ConfigTabSource, Manifest};
 use crate::{
@@ -170,7 +170,7 @@ fn read_locale(dir: &Path, locale: &str) -> Result<Map<String, Value>, String> {
     }
 }
 
-/// Plan §4 steps 4-6 over the files of the package at `dir`.
+/// The package-level validation over the files of the package at `dir`.
 ///
 /// Returns the secret property paths of the settings (schemas and
 /// extensions), or **every** problem found.
@@ -182,7 +182,7 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
         problems.push(format!("`ui/{UI_RESERVED_DIR}` is reserved for the host and must not be in the package"));
     }
 
-    // Step 4: settings schemas and extension fragments.
+    // Settings schemas and extension fragments.
     let mut schemas = Vec::new();
     for relative in settings_schema_paths(manifest) {
         match read_json(dir, relative, "config schema") {
@@ -209,7 +209,7 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
         }
     };
 
-    // Step 5: locale files, and the title keys resolving in the fallback locale.
+    // Locale files, and the title keys resolving in the fallback locale.
     let mut fallback: Option<Map<String, Value>> = None;
     for locale in &manifest.ui.locales {
         match read_locale(dir, locale) {
@@ -228,7 +228,7 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
         }
     }
 
-    // Step 6: extensions target built-in sections.
+    // Extensions target built-in sections.
     for section in manifest.unknown_config_sections(&KNOWN_CONFIG_SECTIONS) {
         problems.push(format!(
             "ui.config_extensions section `{section}` is not a built-in config section; known sections are {}",

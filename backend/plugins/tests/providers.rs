@@ -1,6 +1,5 @@
 //! `type: plugin` inputs and outputs against the built `provider-probe`
-//! fixture (plan §7 *Input providers* / *Output providers*). Skips, with a
-//! note, when the fixtures are not built (`bin/build_plugin_fixture.sh`).
+//! fixture. Skips, with a note, when the fixtures are not built (`bin/build_plugin_fixture.sh`).
 
 mod common;
 

@@ -1,5 +1,5 @@
 //! The `host` interface a guest imports: log, kv, get-config, now-unix and
-//! cache-image (plan §8).
+//! cache-image.
 
 use crate::{
     kv::{KvHandle, KvWrites},

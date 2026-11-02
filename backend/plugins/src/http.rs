@@ -6,7 +6,7 @@
 //! must supply this hook; the default would open raw sockets and build its own
 //! TLS stack. The guest never touches a socket: it hands over a request, and
 //! the host client (with the proxy and TLS settings of every other outbound
-//! call, but deliberately without the resource destination resolver, plan §9)
+//! call, but deliberately without the resource destination resolver)
 //! performs it.
 //!
 //! Every plugin gets its own executor key (its id): a circuit breaker, a token
@@ -21,8 +21,7 @@
 //! rejection of that layer guards redirects this client never follows, so it has
 //! nothing to do here. Guest `request-options` timeouts can only tighten ours.
 //!
-//! W2 limits are fixed consts; Phase 1 derives them from the manifest and the
-//! `plugins:` config clamps.
+//! The limits are fixed consts.
 
 use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};

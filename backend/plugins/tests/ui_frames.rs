@@ -1,7 +1,6 @@
-//! The plugin UI frame files and the contribution list, through `PluginSystem`
-//! (plan §18 *W6b seam freeze* "Frame serving"). The route's headers are
-//! asserted here from the same function the route uses; the route itself is
-//! tested in `app`.
+//! The plugin UI frame files and the contribution list, through `PluginSystem`.
+//! The route's headers are asserted here from the same function the route uses;
+//! the route itself is tested in `app`.
 
 mod common;
 mod ui_support;

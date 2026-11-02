@@ -1,9 +1,8 @@
 //! The state every guest instance runs with, and the services it is built from.
 //!
-//! Frozen for W3 (plan §19.7 briefs reference it): each lane owns the types it
-//! contributes here (`host_fns`, `logs`, `kv`, `http`, `image_cache`) but not
-//! this file, so the shape of [`PluginEnv`] and [`HostState`] changes only
-//! through the integration owner.
+//! This file defines the shape of [`PluginEnv`] and [`HostState`], which the
+//! modules that contribute to them (`host_fns`, `logs`, `kv`, `http`,
+//! `image_cache`) depend on, so a change here affects all of them.
 
 use crate::{
     host_fns::{PluginHostEnv, StoreHostState},
@@ -190,8 +189,8 @@ pub(crate) struct PluginEnv {
     pub(crate) host: PluginHostEnv,
     pub(crate) http: PluginHttp,
     pub(crate) images: PluginImages,
-    /// Bumped by every task run that may have written KV (plan §7 *Scheduled
-    /// plugin tasks*, *Determinism*): later hook results can differ, so the
+    /// Bumped by every task run that may have written KV. Later hook results can
+    /// differ, so the
     /// plugin fingerprint includes it. In memory; a restart starts at 0.
     pub(crate) kv_generation: Arc<AtomicU64>,
 }

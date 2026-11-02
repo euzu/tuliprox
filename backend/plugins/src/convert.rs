@@ -1,9 +1,9 @@
-//! `PlaylistItem` ⇄ WIT `channel` (plan §5 `types`, §14 `convert.rs`).
+//! `PlaylistItem` ⇄ WIT `channel` .
 //!
-//! FROZEN W4 API (dispatch builds on these signatures; B1 owns the bodies):
+//! Public signatures that dispatch builds on:
 //! [`item_to_channel`], [`apply_channel`], the enum maps both ways, and
 //! [`EXTRA_KEYS`]. The handle is a per-call index issued by the caller;
-//! `VirtualId` never crosses this boundary (W1 amendment).
+//! `VirtualId` never crosses this boundary .
 //!
 //! Direction of travel: the host sends a full [`Channel`] per item
 //! ([`item_to_channel`]); a plugin may return a `modified` channel, of which
@@ -18,7 +18,7 @@ use shared::{
 use std::sync::Arc;
 use tuliprox_plugin_api::bindings::tuliprox::plugin::types::{Channel, Cluster as WitCluster, ItemType as WitItemType};
 
-/// The `extra` keys the host sends (plan §18 W0 memo, item 8), in this order,
+/// The `extra` keys the host sends in this order,
 /// each read from the matching header field: `provider-id` ← `id`,
 /// `logo-small` ← `logo_small`, `parent-code`, `time-shift`, `rec`,
 /// `audio-track`. An entry whose value is empty is omitted, so an item with

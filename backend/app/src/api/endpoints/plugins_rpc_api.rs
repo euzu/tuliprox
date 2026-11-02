@@ -1,5 +1,4 @@
-//! `POST /api/v1/plugins/{id}/rpc/{method}` (plan §10, §18 *W6b seam freeze*
-//! "rpc"). The route sits behind `SystemRead`; a `kind: write` method also needs
+//! `POST /api/v1/plugins/{id}/rpc/{method}`. The route sits behind `SystemRead`; a `kind: write` method also needs
 //! `SystemWrite`, which the handler checks itself (`403`). Without web auth
 //! every caller may write, as on every other route.
 //!

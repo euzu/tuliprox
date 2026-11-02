@@ -394,21 +394,21 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 9 — Repository Marketplace *(after Phase 8)*
 
- 1. Define a versioned `marketplace.json` format at the root of each repository.
+ 1. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Define a versioned `marketplace.json` format at the root of each repository.
     A source is configured by the direct HTTPS/raw URL to that file; Tuliprox
     does not clone repositories or resolve Git-provider default branches.
- 2. Catalog entries describe plugins and releases: ID, name, description,
+ 2. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Catalog entries describe plugins and releases: ID, name, description,
     author, license, category, version, HTTPS package URL, and minimum
     Tuliprox/plugin API compatibility, requested capabilities, and changelog.
     No publisher-provided package hash, signing key, or signature is included.
- 3. Add multiple repository sources to the existing plugin config, with
+ 3. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Add multiple repository sources to the existing plugin config, with
     add/edit/enable/disable/remove controls in both config and UI. Both surfaces
     update the same persisted settings. Cache catalogs and show sync time/errors.
- 4. Add repository/catalog management endpoints and a Marketplace UI for
+ 4. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Add repository/catalog management endpoints and a Marketplace UI for
     browsing, searching, selecting a compatible release, and reviewing its
     metadata/capabilities before install. Reuse existing validation, approval,
     and enable flows; calculate the installed hash locally during approval.
- 5. Record the selected source and installed version. If an ID exists in
+ 5. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Record the selected source and installed version. If an ID exists in
     multiple sources, require an explicit source choice. Removing a source
     leaves its installed plugins in place.
     - *Exit criteria:* add a source through either config or UI, browse it, and
@@ -417,14 +417,14 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 10 — Updates and Boot Automation *(after Phase 9)*
 
- 1. Add manual update checks and a global `auto_update_on_boot` option, exposed
+ 1. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests written, not run (awaiting the owner's test approval).* Add manual update checks and a global `auto_update_on_boot` option, exposed
     in config and UI and defaulting to `false`. Keep version pinning available
     for plugins that should not move automatically.
- 2. On boot, check for updates to already-installed, enabled plugins from their
+ 2. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests written, not run (awaiting the owner's test approval).* On boot, check for updates to already-installed, enabled plugins from their
    configured source. Use a strict time budget without gating Tuliprox startup;
    if the check/download misses the budget or the source fails, start the
    current plugin and retry on the next boot.
- 3. Validate compatibility and package contents, stage and atomically activate
+ 3. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests written, not run (awaiting the owner's test approval).* Validate compatibility and package contents, stage and atomically activate
     the update, then record the new locally computed hash. Do not silently grant
     new capabilities; require the existing admin approval flow if they change.
     Roll back to the prior package if activation fails. Never install or enable
@@ -565,8 +565,16 @@ integration cost faster than they remove wall-clock time.
 | W8 | ✅ 8.5 *(built + linted; live exit check 3 + tests)* | staged update, capability diff, one retained prior, auto + manual rollback (`install.rs`, `plugins_install_api.rs`, Plugin Manager) | Sonnet (D) | W7 |
 | W8 | ✅ verification debt *(W6a checks 3–4, E1 epg-overlay, frozen-clock metrics verified; `stream.probe.failed` unverified, no ffprobe)* | `state.rs`/`metrics.rs` tests, live runs | Sonnet (F) | W7 |
 | W8 | 8.1 / 8.2 / 8.4 *deferred (excluded from W8 by owner, 2026-10-31)* | concurrency audit; benchmarks; Docker docs, release notes, CHANGELOG | — | W7 |
-| **W9** | 9.x | root `marketplace.json` format; multi-repo config/UI; catalog APIs and browse/install UI | mixed | W8 |
-| **W10** | 10.x | manual update checks; default-off boot auto-update; capability review and rollback | mixed | W9 |
+| **W9** | ✅ 9.1–9.2, 9.5 provenance | `marketplace.json` v1 + JSON Schema, compatibility, HTTPS/size/classifier fetch, catalog cache, `ApprovalPin.origin`, marketplace staging (`backend/plugins/src/marketplace/*`, `install.rs`), publisher docs (plan §18 *W9 seam freeze*) | Sonnet (F) | W8 |
+| W9 | ✅ 9.3 | `plugins.repositories` config DTO/runtime/Prepare, as-written persistence | Sonnet (S) | W8 |
+| W9 | ✅ 9.4 API | repositories CRUD + sync, marketplace browse + install (`plugins_marketplace_api.rs`) | Sonnet (A) | F, S |
+| W9 | ✅ 9.4 UI | Marketplace tab, sources management, release picker, install → existing review | Sonnet (U) | seam DTOs |
+| W9 | ✅ docs | operator page *Plugin marketplace* | Haiku (D) | F |
+| **W10** | ✅ 10.1–10.3 discovery *(built + linted; live checks 1–8; tests written, not run)* | update candidates, eligibility, staging, settings dry run (`marketplace/updates.rs`, `migration.rs`; plan §18 *W10 seam freeze*) | Sonnet (K) | W9 |
+| W10 | ✅ 10.2–10.3 activation | activation journal + startup recovery + crash knob, unattended activation, drain, boot runner + report (`activation.rs`, `boot_update.rs`, `install.rs`, `tasks.rs`, `plugin_state.rs`, `plugin_boot_update.rs`) | Opus (B) | K |
+| W10 | ✅ 10.1 API | update routes + as-written update fields (`plugins_updates_api.rs`) | Sonnet (P) | K, B |
+| W10 | ✅ 10.1 UI | Plugin Manager updates, badges, policy selector, boot toggle + budget (also on the config page), boot report (`plugin_updates.rs`, `plugins_view.rs`) | Sonnet (U) | seam DTOs |
+| W10 | ✅ docs | operator *Plugin marketplace* → Updates; crash knob on the developer page | Haiku (D) | K, B |
 
 The critical path is W0 (spike + 0.Q) → W1 S → W2 0.1/0.4 → W3 → W4 2.2 → W5. Everything
 else hangs off it, so Opus attention is spent where it shortens that path.

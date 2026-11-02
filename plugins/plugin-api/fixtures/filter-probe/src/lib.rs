@@ -1,4 +1,4 @@
-//! W5 fixture: `eval-filter-batch` with one function, `name-contains(needle)`.
+//! Fixture: `eval-filter-batch` with one function, `name-contains(needle)`.
 //!
 //! The decision for a channel is true when its name contains the argument. An unknown
 //! function name, or a missing argument, is an `err`, which the host counts as a failed run.

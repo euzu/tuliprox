@@ -1,5 +1,5 @@
-//! `PUT /api/v1/plugins/{id}/settings` (plan §9 *Plugin secrets*, §10): schema
-//! validation of the §11 subset, the secret sentinel round-trip, and the
+//! `PUT /api/v1/plugins/{id}/settings` : schema
+//! validation of the supported schema subset, the secret sentinel round-trip, and the
 //! warnings of a save. The `init` re-run lives in `api.rs`.
 //!
 //! Pure over JSON values; nothing here reads a file or touches the registry.
@@ -183,7 +183,7 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Settings versions (plan §18 *W8 seam freeze*)
+// Settings versions
 // ---------------------------------------------------------------------------
 
 /// The settings-schema `version` of `schema`: its top-level integer
@@ -320,7 +320,7 @@ pub(crate) fn restore_references(value: &mut Value, pairs: &[(String, String)]) 
 // ---------------------------------------------------------------------------
 
 /// The constructs of `schema` this validator cannot honour, each as
-/// `` `keyword` at `path` ``. Empty when the whole schema is in the §11 subset.
+/// `` `keyword` at `path` ``. Empty when the whole schema is in the supported schema subset.
 pub(crate) fn unsupported_constructs(schema: &Value) -> Vec<String> {
     let mut found = Vec::new();
     scan(schema, "", 0, &mut found);
@@ -502,7 +502,7 @@ pub(crate) fn validate(schema: &Value, settings: &Value) -> Vec<PluginFieldError
 
 /// Accept or reject `settings` against the plugin's `schema`.
 ///
-/// No schema accepts any object. A schema outside the §11 subset is refused
+/// No schema accepts any object. A schema outside the supported schema subset is refused
 /// whole, naming each construct, because skipping a constraint would let bad
 /// settings through. Otherwise every violation is collected at once.
 pub(crate) fn check_settings(schema: Option<&Value>, settings: &Value) -> Result<(), PluginSettingsErrorDto> {

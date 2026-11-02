@@ -1,5 +1,5 @@
 //! The host clock. Hooks must be a pure function of their inputs and the
-//! plugin's KV (plan §7 *Determinism*): the wall clock is not an input, so
+//! plugin's KV: the wall clock is not an input, so
 //! there is deliberately no `std::time::SystemTime` shim. Read time here, so a
 //! frozen host clock freezes the plugin too.
 

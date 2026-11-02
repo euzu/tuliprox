@@ -157,6 +157,8 @@ fn installable_ids_follow_the_id_grammar_and_skip_reserved_names() {
         "abc.",
         "ábc",
         "staging",
+        "repositories",
+        "marketplace",
         too_long.as_str(),
     ] {
         assert!(!is_installable_id(bad), "{bad:?}");
@@ -165,6 +167,9 @@ fn installable_ids_follow_the_id_grammar_and_skip_reserved_names() {
 
 #[test]
 fn the_manifest_id_is_checked_before_it_can_name_a_path() {
+    for reserved in ["staging", "metrics", "repositories", "marketplace"] {
+        assert!(manifest_id(&format!("id: {reserved}\nname: x")).unwrap_err().contains("reserved"), "{reserved}");
+    }
     assert_eq!(manifest_id("id: demo\nname: x").unwrap(), "demo");
     for text in [
         "id: ../evil\nname: x",

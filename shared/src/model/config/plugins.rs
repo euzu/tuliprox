@@ -27,11 +27,20 @@ pub const DEFAULT_PLUGINS_MAX_INSTANCES: u16 = 4;
 pub const DEFAULT_PLUGINS_BATCH_SIZE: u32 = 500;
 /// Largest `plugins.batch_size`: bounds the guest memory one call needs.
 pub const MAX_PLUGINS_BATCH_SIZE: u32 = 10_000;
+/// Default for `plugins.boot_update_budget`: how long the background boot
+/// update run may take before it gives up until the next boot.
+pub const DEFAULT_PLUGINS_BOOT_UPDATE_BUDGET: &str = "30s";
 /// Default for `plugins.plugins[].priority`; lower runs first.
 pub const DEFAULT_PLUGIN_PRIORITY: i32 = 100;
 /// Default for `plugins.plugins[].settings_version`, and the settings-schema
 /// `version` of a schema that declares none.
 pub const DEFAULT_PLUGIN_SETTINGS_VERSION: u32 = 1;
+
+/// Env-only developer switch: `1` lets marketplace
+/// catalog and package URLs use `http://` and loopback destinations, for a
+/// local test marketplace. There is no config field; a WARN is logged at
+/// startup and on every fetch while it is set.
+pub const ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP: &str = "TULIPROX_PLUGIN_MARKETPLACE_ALLOW_HTTP";
 
 /// Shortest and longest plugin id, the `^[a-z][a-z0-9-]{2,40}$` of the manifest.
 pub const PLUGIN_ID_LEN: std::ops::RangeInclusive<usize> = 3..=41;
@@ -42,6 +51,7 @@ fn default_max_memory() -> ByteSize { ByteSize::new(DEFAULT_PLUGINS_MAX_MEMORY) 
 fn default_max_exec() -> String { DEFAULT_PLUGINS_MAX_EXEC.to_string() }
 fn default_max_task_exec() -> String { DEFAULT_PLUGINS_MAX_TASK_EXEC.to_string() }
 fn default_stream_header_ttl() -> String { DEFAULT_PLUGINS_STREAM_HEADER_TTL.to_string() }
+fn default_boot_update_budget() -> String { DEFAULT_PLUGINS_BOOT_UPDATE_BUDGET.to_string() }
 const fn default_max_instances() -> u16 { DEFAULT_PLUGINS_MAX_INSTANCES }
 const fn default_batch_size() -> u32 { DEFAULT_PLUGINS_BATCH_SIZE }
 const fn default_plugin_priority() -> i32 { DEFAULT_PLUGIN_PRIORITY }
@@ -53,6 +63,7 @@ fn is_default_max_memory(value: &ByteSize) -> bool { value.as_str() == DEFAULT_P
 fn is_default_max_exec(value: &str) -> bool { value == DEFAULT_PLUGINS_MAX_EXEC }
 fn is_default_max_task_exec(value: &str) -> bool { value == DEFAULT_PLUGINS_MAX_TASK_EXEC }
 fn is_default_stream_header_ttl(value: &str) -> bool { value == DEFAULT_PLUGINS_STREAM_HEADER_TTL }
+fn is_default_boot_update_budget(value: &str) -> bool { value == DEFAULT_PLUGINS_BOOT_UPDATE_BUDGET }
 const fn is_default_max_instances(value: &u16) -> bool { *value == DEFAULT_PLUGINS_MAX_INSTANCES }
 const fn is_default_batch_size(value: &u32) -> bool { *value == DEFAULT_PLUGINS_BATCH_SIZE }
 const fn is_default_plugin_priority(value: &i32) -> bool { *value == DEFAULT_PLUGIN_PRIORITY }
@@ -76,6 +87,26 @@ pub fn is_kebab_id(value: &str, len: std::ops::RangeInclusive<usize>) -> bool {
 #[must_use]
 pub fn is_valid_plugin_id(value: &str) -> bool { is_kebab_id(value, PLUGIN_ID_LEN) }
 
+/// How a marketplace-installed plugin may move to a newer release.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginUpdatePolicy {
+    /// Updated at boot when `plugins.auto_update_on_boot` is on and the update
+    /// needs no approval; offered by "update all".
+    #[default]
+    Auto,
+    /// Never updated at boot; offered by manual checks and "update all".
+    Manual,
+    /// Never updated at boot and left out of "update all"; a single update is
+    /// still possible by hand.
+    Pinned,
+}
+
+impl PluginUpdatePolicy {
+    #[must_use]
+    pub const fn is_auto(&self) -> bool { matches!(self, Self::Auto) }
+}
+
 /// One `plugins.plugins[]` entry: the operator's switch, order and settings for
 /// an installed plugin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -92,10 +123,13 @@ pub struct PluginEntryDto {
     /// `${env:VAR}` references; they are kept unresolved here.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub settings: serde_json::Map<String, serde_json::Value>,
-    /// The settings-schema `version` the stored `settings` are written for
-    /// (plan §18 *W8 seam freeze*). Absent means 1, and 1 is never written.
+    /// The settings-schema `version` the stored `settings` are written for. Absent means 1, and 1 is never written.
     #[serde(default = "default_settings_version", skip_serializing_if = "is_default_settings_version")]
     pub settings_version: u32,
+    /// How this plugin may be updated from its marketplace source. Absent
+    /// means `auto`, and `auto` is never written.
+    #[serde(default, skip_serializing_if = "PluginUpdatePolicy::is_auto")]
+    pub update_policy: PluginUpdatePolicy,
 }
 
 impl PluginEntryDto {
@@ -107,8 +141,22 @@ impl PluginEntryDto {
             priority: DEFAULT_PLUGIN_PRIORITY,
             settings: serde_json::Map::new(),
             settings_version: DEFAULT_PLUGIN_SETTINGS_VERSION,
+            update_policy: PluginUpdatePolicy::Auto,
         }
     }
+}
+
+/// One `plugins.repositories[]` entry: a marketplace source. `url` is the direct HTTPS/raw URL of the repository's
+/// root `marketplace.json` and may be a `${env:VAR}` reference; it is kept
+/// unresolved here. `id` uses the plugin id shape.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRepositoryDto {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 }
 
 /// The `plugins:` block of `config.yml`.
@@ -157,6 +205,21 @@ pub struct PluginsConfigDto {
     #[serde(default = "default_batch_size", skip_serializing_if = "is_default_batch_size")]
     pub batch_size: u32,
 
+    /// At boot, update marketplace-installed, enabled plugins whose policy is
+    /// `auto` in the background, when the update needs no approval.
+    /// Startup never waits for it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_update_on_boot: bool,
+
+    /// How long the background boot update run may take (`30s`). A unit is
+    /// required. On overrun the current packages stay and the next boot retries.
+    #[serde(default = "default_boot_update_budget", skip_serializing_if = "is_default_boot_update_budget")]
+    pub boot_update_budget: String,
+
+    /// Marketplace sources. Removing one leaves its installed plugins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<PluginRepositoryDto>,
+
     /// Per-plugin switches, order and settings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginEntryDto>,
@@ -174,6 +237,9 @@ impl Default for PluginsConfigDto {
             stream_header_ttl: default_stream_header_ttl(),
             max_instances: default_max_instances(),
             batch_size: default_batch_size(),
+            auto_update_on_boot: false,
+            boot_update_budget: default_boot_update_budget(),
+            repositories: Vec::new(),
             plugins: Vec::new(),
         }
     }
@@ -237,6 +303,12 @@ impl Prepare for PluginsConfigDto {
             DEFAULT_PLUGINS_STREAM_HEADER_TTL,
             &mut errors,
         );
+        check_duration(
+            "boot_update_budget",
+            &mut self.boot_update_budget,
+            DEFAULT_PLUGINS_BOOT_UPDATE_BUDGET,
+            &mut errors,
+        );
         if self.max_instances == 0 {
             errors.push("plugins.max_instances must be at least 1".to_string());
         }
@@ -255,6 +327,28 @@ impl Prepare for PluginsConfigDto {
                 ));
             } else if !seen.insert(entry.id.clone()) && reported.insert(entry.id.clone()) {
                 errors.push(format!("plugins.plugins lists `{}` more than once", entry.id));
+            }
+        }
+
+        let mut seen = HashSet::new();
+        let mut reported = HashSet::new();
+        for repository in &mut self.repositories {
+            repository.id = repository.id.trim().to_string();
+            repository.name = repository.name.trim().to_string();
+            repository.url = repository.url.trim().to_string();
+            if !is_valid_plugin_id(&repository.id) {
+                errors.push(format!(
+                    "plugins.repositories id `{}` is invalid: use lowercase letters, digits and `-`, starting with a letter, 3 to 41 characters",
+                    repository.id
+                ));
+            } else if !seen.insert(repository.id.clone()) && reported.insert(repository.id.clone()) {
+                errors.push(format!("plugins.repositories lists `{}` more than once", repository.id));
+            }
+            if repository.name.is_empty() {
+                errors.push(format!("plugins.repositories `{}` needs a name", repository.id));
+            }
+            if repository.url.is_empty() {
+                errors.push(format!("plugins.repositories `{}` needs a url", repository.id));
             }
         }
 
@@ -306,6 +400,7 @@ mod tests {
         entry.priority = -5;
         entry.settings.insert("token".to_string(), json!("${env:SPORTS_TOKEN}"));
         entry.settings.insert("leagues".to_string(), json!(["nfl", "nba"]));
+        entry.update_policy = PluginUpdatePolicy::Pinned;
         let dto = PluginsConfigDto {
             enabled: true,
             directory: "/opt/tuliprox/plugins".to_string(),
@@ -316,6 +411,14 @@ mod tests {
             stream_header_ttl: "90s".to_string(),
             max_instances: 8,
             batch_size: 250,
+            auto_update_on_boot: true,
+            boot_update_budget: "45s".to_string(),
+            repositories: vec![PluginRepositoryDto {
+                id: "community".to_string(),
+                name: "Community".to_string(),
+                url: "${env:TP_MARKET_URL}".to_string(),
+                enabled: false,
+            }],
             plugins: vec![entry],
         };
         let json = serde_json::to_string(&dto).unwrap();
@@ -403,6 +506,49 @@ mod tests {
         let message = prepare_message(from_json(json!({
             "max_exec": "never", "max_instances": 0, "max_memory": "x", "plugins": [{"id": "a"}]
         })));
+        assert_eq!(message.lines().count(), 4, "{message}");
+    }
+
+    #[test]
+    fn repositories_default_to_none_and_enabled() {
+        let dto = from_json(
+            json!({"repositories": [{"id": "community", "name": "Community", "url": "https://x.test/marketplace.json"}]}),
+        );
+        assert!(dto.repositories[0].enabled);
+        assert_eq!(
+            serde_json::to_value(&dto.repositories[0]).unwrap(),
+            json!({"id": "community", "name": "Community", "url": "https://x.test/marketplace.json"})
+        );
+        assert_eq!(PluginsConfigDto::default().repositories.len(), 0);
+    }
+
+    #[test]
+    fn repositories_are_trimmed_and_keep_env_references() {
+        let mut dto = from_json(
+            json!({"repositories": [{"id": " community ", "name": " Community ", "url": " ${env:TP_MARKET_URL} "}]}),
+        );
+        dto.prepare(()).unwrap();
+        let repository = &dto.repositories[0];
+        assert_eq!(repository.id, "community");
+        assert_eq!(repository.name, "Community");
+        assert_eq!(repository.url, "${env:TP_MARKET_URL}");
+        let json = serde_json::to_string(&dto).unwrap();
+        assert_eq!(serde_json::from_str::<PluginsConfigDto>(&json).unwrap(), dto);
+    }
+
+    #[test]
+    fn repositories_reject_bad_id_duplicates_blank_name_and_url() {
+        let message = prepare_message(from_json(json!({"repositories": [
+            {"id": "Bad_Id", "name": "A", "url": "https://x.test/m.json"},
+            {"id": "dup-repo", "name": "B", "url": "https://x.test/m.json"},
+            {"id": "dup-repo", "name": "C", "url": "https://x.test/m.json"},
+            {"id": "dup-repo", "name": "D", "url": "https://x.test/m.json"},
+            {"id": "blank-one", "name": "  ", "url": " "},
+        ]})));
+        assert!(message.contains("`Bad_Id` is invalid"), "{message}");
+        assert_eq!(message.matches("more than once").count(), 1, "{message}");
+        assert!(message.contains("`blank-one` needs a name"), "{message}");
+        assert!(message.contains("`blank-one` needs a url"), "{message}");
         assert_eq!(message.lines().count(), 4, "{message}");
     }
 

@@ -1,4 +1,4 @@
-//! Scheduled plugin tasks (plan §7 *Scheduled plugin tasks*): `run_task` with
+//! Scheduled plugin tasks : `run_task` with
 //! the task deadline and concurrency policy, results, `kv_generation`.
 //!
 //! A task is a fire of the scheduler's cron entry or an operator's "run now".
@@ -13,7 +13,8 @@
 //! * A manual run never queues: its caller wants the answer of *this* run.
 //!
 //! A registry reload cancels a running task: the call is raced against
-//! [`PluginSystem::changes`], and dropping the guest future ends it.
+//! [`PluginSystem::changes`], and dropping the guest future ends it. So a boot
+//! update waits for [`PluginSystem::wait_for_idle_tasks`] before it reloads.
 
 use crate::{
     dispatch::HookDispatcher,
@@ -99,10 +100,28 @@ type Key = (String, String);
 /// [`crate::PluginSystem`].
 pub(crate) struct TaskRunner {
     states: Mutex<HashMap<Key, TaskState>>,
+    /// Guest runs in progress, of every plugin and task.
+    running: watch::Sender<usize>,
+}
+
+/// Counts one guest run in [`TaskRunner::running`] while it lives.
+struct RunningGuard<'a>(&'a watch::Sender<usize>);
+
+impl<'a> RunningGuard<'a> {
+    fn new(running: &'a watch::Sender<usize>) -> Self {
+        running.send_modify(|count| *count += 1);
+        Self(running)
+    }
+}
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) { self.0.send_modify(|count| *count = count.saturating_sub(1)); }
 }
 
 impl TaskRunner {
-    pub(crate) fn new(_config: &PluginsConfig) -> Self { Self { states: Mutex::new(HashMap::new()) } }
+    pub(crate) fn new(_config: &PluginsConfig) -> Self {
+        Self { states: Mutex::new(HashMap::new()), running: watch::Sender::new(0) }
+    }
 
     fn states(&self) -> MutexGuard<'_, HashMap<Key, TaskState>> {
         self.states.lock().unwrap_or_else(PoisonError::into_inner)
@@ -208,7 +227,7 @@ impl Resolved {
 }
 
 impl PluginSystem {
-    /// Run task `task` of plugin `plugin` (plan §7 *Scheduled plugin tasks*).
+    /// Run task `task` of plugin `plugin`.
     ///
     /// The call returns when the run has ended, so an `await` here can take as
     /// long as `plugins.max_task_exec`. Spawn it from the scheduler. Fail-open:
@@ -239,6 +258,21 @@ impl PluginSystem {
         let snapshot = self.registry().snapshot();
         let manifest = snapshot.get(plugin)?.manifest.as_deref()?;
         manifest.tasks.iter().find(|candidate| candidate.id == task).map(|candidate| candidate.respect_maintenance)
+    }
+
+    /// How many task runs are executing a guest right now, registry-wide.
+    #[must_use]
+    pub fn running_task_count(&self) -> usize { *self.tasks().running.borrow() }
+
+    /// Wait until no task run executes a guest, at most `timeout`. `true` when
+    /// it got there. A reload cancels every running task, so an unattended
+    /// activation drains them first; a run that starts after this returned is
+    /// not waited for.
+    pub async fn wait_for_idle_tasks(&self, timeout: Duration) -> bool {
+        let mut running = self.tasks().running.subscribe();
+        let idle =
+            tokio::time::timeout(timeout, running.wait_for(|count| *count == 0)).await.is_ok_and(|seen| seen.is_ok());
+        idle
     }
 
     /// Run the fire that owns the task and return its result. A fire queued
@@ -315,6 +349,7 @@ impl PluginSystem {
             last_success_at: self.tasks().last_success_at(key),
         };
         let exec = task_deadline(resolved.task.max_exec_ms, self.runtime().config().task_exec);
+        let _running = RunningGuard::new(&self.tasks().running);
         let dispatcher = HookDispatcher::new(self.runtime(), Arc::clone(&resolved.snapshot));
         let mut changes = resolved.changes.clone();
 
@@ -489,6 +524,19 @@ mod tests {
         assert!(matches!(runner.claim(&key(), Concurrency::Skip, SCHEDULED), Claim::Run));
         let other = ("p".to_string(), "other".to_string());
         assert!(matches!(runner.claim(&other, Concurrency::Skip, SCHEDULED), Claim::Run));
+    }
+
+    #[test]
+    fn the_running_count_follows_the_guards() {
+        let runner = runner();
+        assert_eq!(*runner.running.borrow(), 0);
+        let first = RunningGuard::new(&runner.running);
+        let second = RunningGuard::new(&runner.running);
+        assert_eq!(*runner.running.borrow(), 2);
+        drop(first);
+        assert_eq!(*runner.running.borrow(), 1);
+        drop(second);
+        assert_eq!(*runner.running.borrow(), 0);
     }
 
     #[test]

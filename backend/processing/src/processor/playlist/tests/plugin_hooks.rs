@@ -26,8 +26,7 @@ use tuliprox_core::{
 };
 use tuliprox_repository::MemoryPlaylistSource;
 
-/// Renames one group in `after-filter`, the way the Phase S fixture does, and
-/// counts how often it ran.
+/// Renames one group in `after-filter` and counts how often it ran.
 #[derive(Clone, Default)]
 struct RenameGroupHost {
     calls: Arc<AtomicUsize>,
@@ -139,7 +138,7 @@ async fn abort_target_failure_propagates_as_an_error() {
     assert_eq!(abort.hook, PluginHook::AfterFilter);
 }
 
-// ——— W5: stage hooks, after-sort, strategies, on-playlist-loaded ———
+// ——— Stage hooks, after-sort, strategies, on-playlist-loaded ———
 
 /// What the [`Spy`] answers. Every field is a canned decision.
 #[derive(Default)]

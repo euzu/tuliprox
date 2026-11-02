@@ -1,4 +1,4 @@
-//! Read models for the management API (plan §10), served by `app`'s
+//! Read models for the management API, served by `app`'s
 //! `plugins_api.rs`: the list, stats, settings, tasks and logs of a plugin, and
 //! the preparation of a settings save (`PUT …/settings`).
 //!
@@ -16,7 +16,7 @@ use crate::{
         },
         Concurrency, Manifest,
     },
-    registry::{PluginRecord, PluginState},
+    registry::{approvals_path, read_approvals, Approvals, PluginRecord, PluginState},
     runtime::{call_with_deadline, CallError},
     settings::{check_settings, literal_secret_warning, merge_secrets, redact, secret_values},
     system::PluginSystem,
@@ -52,11 +52,14 @@ impl PluginSystem {
     #[must_use]
     pub fn api_list(&self, config: Option<&PluginsConfig>) -> Vec<PluginSummaryDto> {
         let registry = self.registry();
+        let pins = read_approvals(&approvals_path(&self.shared().data_dir));
         registry
             .snapshot()
             .plugins
             .iter()
-            .map(|record| self.with_replacement(summary(record, config, registry.settings_review(record, config))))
+            .map(|record| {
+                self.with_replacement(summary(record, config, registry.settings_review(record, config)), &pins)
+            })
             .collect()
     }
 
@@ -64,14 +67,16 @@ impl PluginSystem {
     #[must_use]
     pub fn api_summary(&self, id: &str, config: Option<&PluginsConfig>) -> Option<PluginSummaryDto> {
         let registry = self.registry();
-        registry
-            .snapshot()
-            .get(id)
-            .map(|record| self.with_replacement(summary(record, config, registry.settings_review(record, config))))
+        let pins = read_approvals(&approvals_path(&self.shared().data_dir));
+        registry.snapshot().get(id).map(|record| {
+            self.with_replacement(summary(record, config, registry.settings_review(record, config)), &pins)
+        })
     }
 
-    /// Fill the W8 lane D summary fields: a staged update and the retained prior.
-    fn with_replacement(&self, mut summary: PluginSummaryDto) -> PluginSummaryDto {
+    /// Fill the update summary (a staged update, the retained prior) and the
+    /// origin from the pin.
+    fn with_replacement(&self, mut summary: PluginSummaryDto, pins: &Approvals) -> PluginSummaryDto {
+        summary.origin = pins.get(&summary.id).and_then(|pin| pin.origin.clone());
         summary.update = self.update_summary(&summary.id);
         summary.rollback = self.rollback_summary(&summary.id);
         summary
@@ -153,7 +158,7 @@ impl PluginSystem {
         Some(PluginSettingsDto { settings, schema, secrets, warnings: Vec::new() })
     }
 
-    /// Check and prepare a settings save for plugin `id` (plan §10, `PUT
+    /// Check and prepare a settings save for plugin `id` (`PUT
     /// …/settings`), without persisting anything and without touching the live
     /// registry.
     ///
@@ -220,7 +225,7 @@ impl PluginSystem {
         Ok((settings, warnings))
     }
 
-    /// Plan §18 *W8 seam freeze*: after an update or rollback reload, whether
+    /// After an update or rollback reload, whether
     /// plugin `id` is loaded and one fresh instance's `init` accepts its
     /// settings within the hook budget. The settings are the effective ones:
     /// migrated in memory when the stored ones are behind the package's schema
@@ -259,6 +264,7 @@ impl PluginSystem {
                 priority: record.priority,
                 settings: settings.clone(),
                 settings_version: record.settings_version,
+                update_policy: shared::model::PluginUpdatePolicy::Auto,
             }],
             ..PluginsConfig::default()
         };
@@ -362,6 +368,11 @@ fn summary(record: &PluginRecord, config: Option<&PluginsConfig>, settings_revie
         settings_review,
         update: None,
         rollback: None,
+        origin: None,
+        update_policy: config
+            .and_then(|config| config.entry(&record.id))
+            .map(|entry| entry.update_policy)
+            .unwrap_or_default(),
     }
 }
 
@@ -460,7 +471,7 @@ pub(crate) fn secret_paths_of(record: &PluginRecord) -> Vec<String> {
 }
 
 /// Check the `ext` object of a save: one object per declared section, each
-/// valid against that section's fragments (plan §11 *Config page integration*).
+/// valid against that section's fragments.
 /// Violation paths come back as `ext.<section>.<field>`.
 pub(crate) fn check_extension_settings(
     record: &PluginRecord,

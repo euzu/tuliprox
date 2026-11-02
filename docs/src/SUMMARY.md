@@ -41,5 +41,7 @@
   - [Custom UI](./plugins/custom-ui.md)
   - [Events, Notifications, Inputs, Outputs & MCP](./plugins/events-notifications-inputs.md)
   - [Packaging & Publishing](./plugins/packaging.md)
+  - [Plugin Marketplace](./plugins/marketplace.md)
+  - [Publishing a Marketplace](./plugins/marketplace-publishing.md)
   - [Security Model](./plugins/security.md)
 - [Troubleshooting & Resilience](./troubleshooting.md)

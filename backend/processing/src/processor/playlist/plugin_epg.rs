@@ -1,4 +1,4 @@
-//! The EPG of a `type: plugin` input (plan §7 *Input providers*).
+//! The EPG of a `type: plugin` input.
 //!
 //! `fetch-epg` returns channels and programmes in memory; the EPG path that
 //! follows (`TVGuide`, the streaming XMLTV parser, `merge_epg_trees`) works on

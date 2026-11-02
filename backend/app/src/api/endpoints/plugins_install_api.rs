@@ -1,6 +1,5 @@
 //! `POST /api/v1/plugins`, `PUT …/approve`, `…/enable`, `…/disable` and
-//! `DELETE /api/v1/plugins/{id}`, and `POST …/rollback` (plan §10, §18 *W6b seam
-//! freeze* and *W8 seam freeze*). W6b lane M, W8 lane D.
+//! `DELETE /api/v1/plugins/{id}`, and `POST …/rollback`.
 //!
 //! All of them need `SystemWrite` (the layer is `plugins_api`'s). Each one takes
 //! the plugin system's install mutex before it touches anything, then the config
@@ -29,7 +28,7 @@ use axum::{
 use shared::model::{PluginApproveDto, PluginUninstallQueryDto, PluginUploadErrorDto};
 use std::sync::Arc;
 
-/// The request body cap of an upload (plan §18: 32 MiB, this route only).
+/// The request body cap of an upload (32 MiB, this route only).
 const UPLOAD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// The management routes that change things; `plugins_api` merges them under
@@ -125,7 +124,10 @@ async fn put_plugin_approve(
 /// prior's `prev.json`, which a rollback writes back: with the runtime entry a
 /// resolved secret would reach `prev.json` and then `config.yml`.
 #[cfg(feature = "plugins")]
-async fn install_config(app_state: &AppState, id: &str) -> Result<tuliprox_core::model::PluginsConfig, Box<Response>> {
+pub(super) async fn install_config(
+    app_state: &AppState,
+    id: &str,
+) -> Result<tuliprox_core::model::PluginsConfig, Box<Response>> {
     let Some(runtime) = app_state.app_config.plugins.load_full() else {
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     };
@@ -145,7 +147,7 @@ async fn install_config(app_state: &AppState, id: &str) -> Result<tuliprox_core:
 /// Run a mutating handler body on its own task, so dropping the request does
 /// not cancel it halfway; the locks it takes live and die with the task.
 #[cfg(feature = "plugins")]
-async fn detached(work: impl std::future::Future<Output = Response> + Send + 'static) -> Response {
+pub(super) async fn detached(work: impl std::future::Future<Output = Response> + Send + 'static) -> Response {
     tokio::spawn(work).await.unwrap_or_else(|err| {
         log::error!("A plugin management task failed: {err}");
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -185,7 +187,8 @@ async fn post_plugin_rollback(State(app_state): State<Arc<AppState>>, Path(id): 
             Ok(config) => config,
             Err(response) => return *response,
         };
-        let outcome = match plugins.api_rollback(&guard, &id, &config).await {
+        // Journaled until the settings write below is settled.
+        let outcome = match plugins.api_rollback_journaled(&guard, &id, &config).await {
             Ok(outcome) => outcome,
             Err(rejection) => return (rejection.status, Json(rejection.body)).into_response(),
         };
@@ -195,14 +198,14 @@ async fn post_plugin_rollback(State(app_state): State<Arc<AppState>>, Path(id): 
             {
                 log::error!("Failed to restore the settings of plugin `{id}` after its rollback: {err}");
                 // `config.yml` still holds the settings of the version rolled
-                // back from, so roll back again (a rollback swaps the two
-                // packages): package and settings then agree once more.
-                let undone = plugins.api_rollback(&guard, &id, &config).await;
+                // back from, so undo the rollback: package and settings then
+                // agree once more.
+                let undone = plugins.api_rollback_settled(&guard, &id, false, &config).await;
                 reload_plugins(&app_state.plugins, &app_state.app_config).await;
                 let message = match undone {
                     Ok(back) => format!(
-                        "the settings of {} could not be saved ({err}); the rollback was undone, still on {}",
-                        outcome.version, back.version
+                        "the settings of {} could not be saved ({err}); the rollback was undone, still on {back}",
+                        outcome.version
                     ),
                     Err(rejection) => {
                         log::error!("Failed to undo the rollback of plugin `{id}`: {}", rejection.body.error);
@@ -214,6 +217,9 @@ async fn post_plugin_rollback(State(app_state): State<Arc<AppState>>, Path(id): 
                     }
                 };
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, message);
+            }
+            if let Err(rejection) = plugins.api_rollback_settled(&guard, &id, true, &config).await {
+                log::error!("Failed to settle the rollback of plugin `{id}`: {}", rejection.body.error);
             }
         }
         reload_plugins(&app_state.plugins, &app_state.app_config).await;

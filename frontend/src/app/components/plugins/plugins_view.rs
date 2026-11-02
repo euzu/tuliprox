@@ -1,11 +1,18 @@
 use crate::{
     app::components::{
         plugins::{
-            plugin_logs::PluginLogs, plugin_settings::PluginSettings, plugin_slot::use_plugin_ui,
+            marketplace_view::MarketplaceView,
+            plugin_logs::PluginLogs,
+            plugin_settings::PluginSettings,
+            plugin_slot::use_plugin_ui,
+            plugin_updates::{
+                is_update_all_candidate, render_policy_selector, render_update_candidate, staged_review,
+                update_all_eligible, CandidateActions, PluginUpdatePanel,
+            },
             plugin_upload::PluginUpload,
         },
-        Card, Chip, ConfirmDialog, ContentDialog, LoadingIndicator, NoContent, Table, TableDefinition, TextButton,
-        ToggleSwitch,
+        Card, Chip, ConfirmDialog, ContentDialog, LoadingIndicator, NoContent, TabItem, TabSet, Table, TableDefinition,
+        TextButton, ToggleSwitch,
     },
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
@@ -13,8 +20,9 @@ use crate::{
     services::PluginService,
 };
 use shared::model::{
-    Permission, PluginHookStats, PluginStateDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto, PluginUpdateDto,
-    PluginUploadReviewDto,
+    Permission, PluginHookStats, PluginStateDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto,
+    PluginUpdateCandidateDto, PluginUpdateDto, PluginUpdatePolicy, PluginUpdateRequestDto, PluginUpdateResultKindDto,
+    PluginUpdatesDto, PluginUploadReviewDto,
 };
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
@@ -22,6 +30,10 @@ use yew::{
     classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_state, Callback, Event, Html,
     Properties, TargetCast,
 };
+
+/// Tab ids of the Plugin Manager.
+const TAB_INSTALLED: &str = "installed";
+const TAB_MARKETPLACE: &str = "marketplace";
 
 /// The i18n key of a lifecycle state.
 fn state_label_key(state: PluginStateDto) -> &'static str {
@@ -198,6 +210,13 @@ struct RowActions<'a> {
     on_review_update: &'a Callback<String>,
     /// Ask to roll back: plugin id, name and the version it would return to.
     on_rollback: &'a Callback<(String, String, String)>,
+    /// The newer marketplace releases of this plugin the last check found: the
+    /// newest, and before it the newest one the approval covers when the newest
+    /// asks for more.
+    candidates: Vec<&'a PluginUpdateCandidateDto>,
+    /// Plugin id, release version and whether to activate at once.
+    on_update: &'a Callback<(String, String, bool)>,
+    on_policy: &'a Callback<(String, PluginUpdatePolicy)>,
 }
 
 fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'_>, logs_open: bool) -> Html {
@@ -253,6 +272,11 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
                 <span class={classes!("tp__task-status", state_modifier(summary.state))}>
                     { translate.t(state_label_key(summary.state)) }
                 </span>
+                if let Some(origin) = summary.origin.as_ref() {
+                    <span class="tp__plugins__origin">
+                        { format!("{} {} @ {}", translate.t("LABEL.PLUGIN_MARKETPLACE_INSTALLED_FROM"), origin.source, origin.version) }
+                    </span>
+                }
                 <TextButton
                     name={format!("settings-{}", summary.id)}
                     icon="Settings"
@@ -329,6 +353,17 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
                         disabled={actions.busy}
                         onclick={review_update}
                     />
+                </div>
+            }
+            { for actions.candidates.iter().map(|candidate| render_update_candidate(translate, candidate, &CandidateActions {
+                can_write: actions.can_write,
+                busy: actions.busy,
+                on_update: actions.on_update,
+            })) }
+            if summary.origin.is_some() {
+                <div class="tp__plugins__update-policy-row">
+                    { render_policy_selector(translate, &summary.id, summary.update_policy, actions.can_write,
+                        actions.busy, actions.on_policy) }
                 </div>
             }
             if !summary.hooks.is_empty() {
@@ -434,6 +469,8 @@ pub fn PluginsView() -> Html {
     // The staged update being reviewed, and the rollback awaiting confirmation (id, name, prior version).
     let update_review = use_state(|| None::<PluginUploadReviewDto>);
     let rollback_for = use_state(|| None::<(String, String, String)>);
+    // The newer marketplace releases of installed plugins, from the last load or check.
+    let updates = use_state(PluginUpdatesDto::default);
     // An action is in flight: the write controls wait for it.
     let acting = use_state(|| false);
     let can_write = services.auth.has_permission(Permission::SystemWrite);
@@ -443,12 +480,17 @@ pub fn PluginsView() -> Html {
         let entries = entries.clone();
         let loading = loading.clone();
         let error = error.clone();
+        let updates = updates.clone();
         let service = services.plugins.clone();
         use_effect_with(*reload, move |generation| {
             loading.set(true);
             // After an install, enable, disable or uninstall the slots change too.
             let refresh_slots = (*generation > 0).then(|| plugin_ui.map(|ui| ui.refresh)).flatten();
             spawn_local(async move {
+                // The candidates are an extra: the list works without them.
+                if let Ok(found) = service.updates().await {
+                    updates.set(found);
+                }
                 match load_entries(service).await {
                     Ok(loaded) => {
                         entries.set(Some(Rc::new(loaded)));
@@ -612,6 +654,149 @@ pub fn PluginsView() -> Html {
             });
         })
     };
+    let on_update = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let acting = acting.clone();
+        let reload = reload.clone();
+        let update_review = update_review.clone();
+        Callback::from(move |(id, version, apply): (String, String, bool)| {
+            if *acting {
+                return;
+            }
+            acting.set(true);
+            let next = *reload + 1;
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let reload = reload.clone();
+            let update_review = update_review.clone();
+            spawn_local(async move {
+                match services.plugins.update(&id, &PluginUpdateRequestDto { version, apply }).await {
+                    Ok(result) => match result.result {
+                        PluginUpdateResultKindDto::Applied => {
+                            services.toastr.success(format!("{}: {id}", translate.t("MESSAGES.PLUGIN_UPDATE_APPLIED")));
+                        }
+                        PluginUpdateResultKindDto::Staged => match staged_review(result) {
+                            Some(review) => update_review.set(Some(review)),
+                            None => services.toastr.info(translate.t("MESSAGES.PLUGIN_UPDATE_STAGED")),
+                        },
+                        PluginUpdateResultKindDto::Failed => {
+                            let reason = result.reason.unwrap_or_default();
+                            services
+                                .toastr
+                                .error(format!("{}: {id} {reason}", translate.t("MESSAGES.PLUGIN_UPDATE_FAILED")));
+                        }
+                    },
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+                reload.set(next);
+            });
+        })
+    };
+    let on_policy = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let acting = acting.clone();
+        let reload = reload.clone();
+        Callback::from(move |(id, policy): (String, PluginUpdatePolicy)| {
+            if *acting {
+                return;
+            }
+            acting.set(true);
+            let next = *reload + 1;
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let reload = reload.clone();
+            spawn_local(async move {
+                match services.plugins.set_update_policy(&id, policy).await {
+                    Ok(()) => {
+                        services
+                            .toastr
+                            .success(format!("{}: {id}", translate.t("MESSAGES.PLUGIN_UPDATE_POLICY_SAVED")));
+                    }
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+                reload.set(next);
+            });
+        })
+    };
+    let on_check_updates = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let acting = acting.clone();
+        let updates = updates.clone();
+        Callback::from(move |_: String| {
+            if *acting {
+                return;
+            }
+            acting.set(true);
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let updates = updates.clone();
+            spawn_local(async move {
+                match services.plugins.check_updates().await {
+                    Ok(found) => {
+                        for failed in &found.errors {
+                            services.toastr.warning(format!("{}: {}", failed.source, failed.error));
+                        }
+                        let message = if found.candidates.is_empty() {
+                            translate.t("MESSAGES.PLUGIN_UPDATES_NONE")
+                        } else {
+                            format!("{}: {}", translate.t("MESSAGES.PLUGIN_UPDATES_FOUND"), found.candidates.len())
+                        };
+                        services.toastr.info(message);
+                        updates.set(found);
+                    }
+                    Err(err) => services.toastr.error(err.message()),
+                }
+                acting.set(false);
+            });
+        })
+    };
+    let on_update_all = {
+        let services = services.clone();
+        let translate = translate.clone();
+        let acting = acting.clone();
+        let reload = reload.clone();
+        let updates = updates.clone();
+        Callback::from(move |_: String| {
+            if *acting {
+                return;
+            }
+            acting.set(true);
+            let next = *reload + 1;
+            let services = services.clone();
+            let translate = translate.clone();
+            let acting = acting.clone();
+            let reload = reload.clone();
+            let candidates = updates.candidates.clone();
+            spawn_local(async move {
+                let summary = update_all_eligible(services.plugins.clone(), candidates).await;
+                let message = format!(
+                    "{}: {} {}, {} {}, {} {}",
+                    translate.t("MESSAGES.PLUGIN_UPDATE_ALL_DONE"),
+                    summary.applied,
+                    translate.t("LABEL.PLUGIN_UPDATE_APPLIED"),
+                    summary.staged,
+                    translate.t("LABEL.PLUGIN_UPDATE_AWAITING_APPROVAL"),
+                    summary.failed,
+                    translate.t("LABEL.PLUGIN_STATE_FAILED"),
+                );
+                if summary.failed > 0 {
+                    services.toastr.warning(message);
+                } else {
+                    services.toastr.success(message);
+                }
+                acting.set(false);
+                reload.set(next);
+            });
+        })
+    };
     let on_open_upload = {
         let show_upload = show_upload.clone();
         Callback::from(move |_: String| show_upload.set(true))
@@ -625,7 +810,7 @@ pub fn PluginsView() -> Html {
         Callback::from(move |()| reload.set(*reload + 1))
     };
 
-    let body = if let Some(message) = error.as_ref() {
+    let list = if let Some(message) = error.as_ref() {
         html! {
             <div class="tp__plugins__error tp__input-error" role="alert">
                 { format!("{} {message}", translate.t("MESSAGES.PLUGIN_LOAD_FAILED")) }
@@ -648,6 +833,13 @@ pub fn PluginsView() -> Html {
                         on_uninstall: &on_uninstall,
                         on_review_update: &on_review_update,
                         on_rollback: &on_rollback,
+                        candidates: updates
+                            .candidates
+                            .iter()
+                            .filter(|candidate| candidate.id == entry.summary.id)
+                            .collect(),
+                        on_update: &on_update,
+                        on_policy: &on_policy,
                     };
                     render_entry(&translate, entry, &actions, logs_open)
                 }) }</>
@@ -656,6 +848,52 @@ pub fn PluginsView() -> Html {
     } else {
         html! {}
     };
+
+    let body = html! {
+        <>
+            <PluginUpdatePanel can_write={can_write} />
+            { for updates.errors.iter().map(|failed| html! {
+                <div key={failed.source.clone()} class="tp__plugins__error tp__input-error" role="alert">
+                    { format!("{}: {}", failed.source, failed.error) }
+                </div>
+            }) }
+            { list }
+        </>
+    };
+    let eligible_count = updates.candidates.iter().filter(|candidate| is_update_all_candidate(candidate)).count();
+
+    // The Marketplace tab loads when it is first opened, not with the page.
+    let marketplace_opened = use_state(|| false);
+    let on_tab_change = {
+        let marketplace_opened = marketplace_opened.clone();
+        Callback::from(move |tab: String| {
+            if tab == TAB_MARKETPLACE {
+                marketplace_opened.set(true);
+            }
+        })
+    };
+    let tabs = Rc::new(vec![
+        TabItem {
+            id: TAB_INSTALLED.to_owned(),
+            title: translate.t("LABEL.PLUGIN_MARKETPLACE_TAB_INSTALLED"),
+            icon: "Nodes".to_owned(),
+            children: body,
+            active_class: None,
+            inactive_class: None,
+        },
+        TabItem {
+            id: TAB_MARKETPLACE.to_owned(),
+            title: translate.t("LABEL.PLUGIN_MARKETPLACE"),
+            icon: "Download".to_owned(),
+            children: if *marketplace_opened {
+                html! { <MarketplaceView can_write={can_write} on_changed={on_installed.clone()} /> }
+            } else {
+                html! {}
+            },
+            active_class: None,
+            inactive_class: None,
+        },
+    ]);
 
     html! {
         <div class="tp__config-view tp__plugins">
@@ -666,12 +904,20 @@ pub fn PluginsView() -> Html {
                         <TextButton name="install" icon="Add" title={translate.t("LABEL.PLUGIN_INSTALL")}
                             disabled={*acting} onclick={on_open_upload} />
                     }
+                    if can_write {
+                        <TextButton name="check-updates" icon="Refresh" title={translate.t("LABEL.PLUGIN_UPDATE_CHECK")}
+                            disabled={*acting} onclick={on_check_updates} />
+                        <TextButton name="update-all" icon="Download" title={format!("{} ({eligible_count})", translate.t("LABEL.PLUGIN_UPDATE_ALL"))}
+                            disabled={*acting || eligible_count == 0} onclick={on_update_all} />
+                    }
                     <TextButton name="refresh" icon="Refresh" title={translate.t("LABEL.REFRESH")}
                         disabled={*loading} onclick={on_refresh} />
                 </div>
             </div>
             <LoadingIndicator loading={*loading} />
-            <div class="tp__config-view__body">{ body }</div>
+            <div class="tp__config-view__body">
+                <TabSet tabs={tabs} class="tp__config-view__tabset" on_tab_change={on_tab_change} />
+            </div>
             if can_write && *show_upload {
                 <PluginUpload on_close={on_close_upload} on_installed={on_installed.clone()} />
             }

@@ -1,4 +1,4 @@
-//! W5 fixture: the EPG and metadata hooks, driven by the plugin's settings.
+//! Fixture: the EPG and metadata hooks, driven by the plugin's settings.
 //!
 //! One component serves every id under `manifests/`; each manifest subscribes to
 //! one hook. The scenario is the settings JSON the test puts in the plugin's

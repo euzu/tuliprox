@@ -1,4 +1,4 @@
-//! Plugin settings on the config page (plan §11 *Config page integration*). W6b lane U.
+//! Plugin settings on the config page.
 //!
 //! A plugin can put three things on the config page: fields inside a built-in
 //! section (`ui.config_extensions`, stored under `ext.<section>.<field>`), a
@@ -11,7 +11,7 @@ use super::config_view_context::ConfigViewContext;
 use crate::{
     app::components::{
         plugin_available, prefill_defaults, translate_schema, use_plugin_ui, PluginBadge, PluginFrame, PluginSlot,
-        PluginUnavailable, SchemaForm,
+        PluginUnavailable, PluginUpdateSettings, SchemaForm,
     },
     hooks::{use_service_context, Services},
     i18n::{use_translation, YewI18n},
@@ -19,7 +19,8 @@ use crate::{
 };
 use serde_json::{Map, Value};
 use shared::model::{
-    PluginFieldErrorDto, PluginSecretDto, PluginSettingsDto, PluginSettingsSaveDto, PluginSlotDto, PluginUiDto,
+    Permission, PluginFieldErrorDto, PluginSecretDto, PluginSettingsDto, PluginSettingsSaveDto, PluginSlotDto,
+    PluginUiDto,
 };
 use std::{collections::BTreeMap, rc::Rc};
 use yew::{
@@ -513,11 +514,21 @@ pub fn PluginConfigSections() -> Html {
     let ui = use_plugin_ui();
     let context = use_context::<PluginSettingsContext>();
     let translate = use_translation();
+    let services = use_service_context();
     let editing = use_edit_mode();
-    let (Some(ui), Some(context)) = (ui, context) else { return html! {} };
+    // The update fields are the host's own `plugins:` settings, not a plugin's: they show even
+    // when no plugin contributes a section. They save on their own, like the Plugin Manager's.
+    let updates = html! {
+        <div class="tp__plugin-ext tp__plugin-section">
+            <h3>{ translate.t("LABEL.PLUGIN_UPDATES") }</h3>
+            <PluginUpdateSettings can_write={services.auth.has_permission(Permission::SystemWrite)} />
+        </div>
+    };
+    let (Some(ui), Some(context)) = (ui, context) else { return updates };
     let plugins: Vec<_> = ui.plugins.iter().filter(|plugin| plugin.config_section).collect();
     html! {
         <>
+            { updates }
             if !plugins.is_empty() {
                 <div class="tp__plugin-sections">
                     { for plugins.iter().map(|plugin| {

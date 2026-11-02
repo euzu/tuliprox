@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tuliprox_core::utils::LRUResourceCache;
 
 /// Make the plugins that export `send-notification` messaging channels
-/// (`Channel::Plugin`, plan §7 *Notification providers*), and drop
+/// (`Channel::Plugin`), and drop
 /// messaging's cached channel set on every registry reload so an enabled,
 /// disabled or reconfigured plugin channel shows up on the next send.
 #[cfg(feature = "plugins")]
@@ -41,7 +41,7 @@ pub fn register_plugin_notifier(plugins: &AppPlugins, cancel_token: &Cancellatio
 pub fn register_plugin_notifier(_plugins: &AppPlugins, _cancel_token: &CancellationToken) {}
 
 /// Migrate the stored settings of plugins whose package moved to a newer
-/// settings schema (plan §18 *W8 seam freeze*): once now (the boot load has
+/// settings schema: once now (the boot load has
 /// already happened), then after every registry reload, whatever caused it (a
 /// config reload, an approval, an update, a directory change). Each pass is a
 /// no-op unless some enabled plugin is due, and a failed migration is not
@@ -144,7 +144,7 @@ pub type AppPlugins = shared::model::NoPlugins;
 pub fn share_plugins(plugins: &AppPlugins) -> AppPlugins { plugins.clone() }
 
 /// Freezes the plugins' `now-unix` at this Unix time (seconds), so two runs on
-/// the same input can be compared byte for byte (plan §7 *Determinism*). A
+/// the same input can be compared byte for byte. A
 /// test knob, not configuration: unset in normal operation. Host-side timing
 /// (the metrics throttle, header TTLs, log stamps) keeps the wall clock.
 #[cfg(feature = "plugins")]
@@ -155,13 +155,34 @@ fn frozen_plugin_clock() -> Option<u64> {
     std::env::var(ENV_PLUGIN_FROZEN_CLOCK).ok().and_then(|value| value.trim().parse().ok())
 }
 
+/// Say loudly that the activation crash knob is set: the process aborts in
+/// the middle of the next plugin update.
+#[cfg(feature = "plugins")]
+fn warn_crash_knob() {
+    let Ok(value) = std::env::var(tuliprox_plugins::ENV_PLUGIN_TEST_CRASH_AT) else {
+        return;
+    };
+    match tuliprox_plugins::crash_knob() {
+        Some(stage) => log::warn!(
+            "{}={stage}: the server aborts at this stage of the next plugin activation; for crash tests only",
+            tuliprox_plugins::ENV_PLUGIN_TEST_CRASH_AT
+        ),
+        None => log::warn!(
+            "{}={value:?} names no activation stage and is ignored; stages: {}",
+            tuliprox_plugins::ENV_PLUGIN_TEST_CRASH_AT,
+            tuliprox_plugins::ActivationStage::ALL.map(tuliprox_plugins::ActivationStage::as_str).join(", ")
+        ),
+    }
+}
+
 /// Load the configured plugins.
 ///
 /// Compiling components is CPU-bound, so it runs on the blocking pool. A
 /// failure is logged and the server runs without plugins: plugins fail open.
 /// Plugins get their own HTTP client (no redirects, no resource destination
-/// resolver, plan §9); when it cannot be built they stay off rather than fall
-/// back to another client.
+/// resolver); when it cannot be built they stay off rather than fall
+/// back to another client. Before the scan, activation journals left by a
+/// kill are recovered ([`tuliprox_plugins::recover_activations`]).
 ///
 /// `resource_cache` is the server's resource cache; the CLI passes `None`, and
 /// `cache-image` then returns `Err`.
@@ -181,8 +202,8 @@ pub async fn load_plugins(app_config: &AppConfig, resource_cache: Option<&Resour
         let web_ui_path = cfg.web_ui.as_ref().and_then(|web_ui| web_ui.path.clone()).unwrap_or_default();
         (cfg.storage_dir.clone(), web_ui_path)
     };
-    let mut services =
-        tuliprox_plugins::PluginServices::new(client, std::path::PathBuf::from(storage_dir).join("plugins"));
+    let data_dir = std::path::PathBuf::from(storage_dir).join("plugins");
+    let mut services = tuliprox_plugins::PluginServices::new(client, data_dir.clone());
     if let Some(cache) = resource_cache {
         let secret = app_config.get_encrypt_secret();
         let resource_url = shared::utils::concat_path_leading_slash(&web_ui_path, "api/v1/playlist/resource");
@@ -191,13 +212,29 @@ pub async fn load_plugins(app_config: &AppConfig, resource_cache: Option<&Resour
         });
         services = services.with_resource_cache(Arc::clone(cache), seal);
     }
+    if tuliprox_core::model::marketplace_allow_http() {
+        log::warn!(
+            "{}=1: plugin marketplace catalogs and packages may use http:// and local destinations; for local testing only",
+            shared::model::ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP
+        );
+    }
     if let Some(now_secs) = frozen_plugin_clock() {
         log::warn!("Plugin clock frozen at {now_secs} ({ENV_PLUGIN_FROZEN_CLOCK}); for determinism checks only");
         services = services.with_clock(tuliprox_plugins::HostClock::Frozen(tuliprox_core::utils::ManualClock::new(
             now_secs.saturating_mul(1000),
         )));
     }
-    match tokio::task::spawn_blocking(move || tuliprox_plugins::PluginSystem::load(&config, services)).await {
+    warn_crash_knob();
+    let loaded = tokio::task::spawn_blocking(move || {
+        if config.enabled {
+            // Before the first scan: an activation a kill interrupted is settled
+            // first, so the scan sees a consistent package and pin.
+            let recovered = tuliprox_plugins::recover_activations(&data_dir, std::path::Path::new(&config.directory));
+            tuliprox_plugins::record_recovered(&data_dir, &recovered);
+        }
+        tuliprox_plugins::PluginSystem::load(&config, services)
+    });
+    match loaded.await {
         Ok(Ok(plugins)) => plugins,
         Ok(Err(err)) => {
             log::error!("Plugins disabled: {err}");
@@ -252,8 +289,7 @@ pub async fn load_validated_plugins(
     Ok(plugins)
 }
 
-/// Checks the `type: plugin_task` schedules (plan §7 *Scheduled plugin
-/// tasks*): such an entry names both `plugin` and `task`, the fields appear on
+/// Checks the `type: plugin_task` schedules: such an entry names both `plugin` and `task`, the fields appear on
 /// no other type, and, with plugins on, the plugin is installed and declares
 /// the task. With plugins off only the shape is checked; the scheduler skips
 /// plugin tasks then.
@@ -302,8 +338,7 @@ pub fn validate_plugin_schedules(
     }
 }
 
-/// Checks every target's plugin references against the loaded plugins (plan
-/// §18 *Validation timing*): the strategy refs (`plugin:<id>`) and the
+/// Checks every target's plugin references against the loaded plugins: the strategy refs (`plugin:<id>`) and the
 /// `plugin.<id>.<fn>(…)` terms of the processing filter must name a loaded
 /// plugin that provides the hook. The function name is not checked; the
 /// manifest does not declare it.
@@ -315,7 +350,7 @@ pub fn validate_plugin_refs<P: shared::model::PluginHost>(
 ) -> Result<(), shared::error::TuliproxError> {
     use shared::model::PluginHook;
     let mut problems = Vec::new();
-    // `type: plugin` inputs (plan §18 Q6): with plugins off nothing provides
+    // `type: plugin` inputs: with plugins off nothing provides
     // `fetch-input`, so they are rejected here.
     for input in &sources.inputs {
         if let Some((hook, plugin)) = input.plugin_ref() {

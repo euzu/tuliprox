@@ -1,12 +1,12 @@
 //! DTOs of the plugin management API (`/api/v1/plugins…`), shared with the
-//! web UI. W3 serves the read-only half (plan §10): the list, stats, settings,
-//! tasks and logs of a plugin. W4 adds the settings `PUT`.
+//! web UI: the list, stats, settings, tasks and logs of a plugin, and the
+//! settings update.
 
 use crate::model::PluginHookStats;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Where a plugin is in its lifecycle (plan §7 state diagram).
+/// Where a plugin is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginStateDto {
@@ -52,7 +52,7 @@ pub struct PluginSummaryDto {
     pub abi: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_sha256: Option<String>,
-    /// Why the stored settings need a look (plan §16 Phase 8 item 3): the
+    /// Why the stored settings need a look: the
     /// settings-schema `version` moved past the stored one and no migration
     /// ran or it failed. Saving the settings clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +63,12 @@ pub struct PluginSummaryDto {
     /// The one retained prior package `POST …/rollback` restores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback: Option<PluginRollbackDto>,
+    /// The marketplace source and release this plugin was installed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::model::PluginOriginDto>,
+    /// The entry's update policy; `auto` without an entry.
+    #[serde(default)]
+    pub update_policy: crate::model::PluginUpdatePolicy,
 }
 
 /// A staged update of an installed plugin, before approval.
@@ -92,7 +98,7 @@ pub struct PluginCapabilityDiffDto {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub unchanged: Vec<String>,
-    /// The installed approval had MCP switch 2 on.
+    /// The installed approval had MCP exposure approved.
     pub mcp_was_approved: bool,
 }
 
@@ -147,7 +153,7 @@ pub struct PluginUsageDto {
     pub quota_bytes: u64,
 }
 
-/// What a plugin contributed to a run (plan §7 *Determinism*). The settings
+/// What a plugin contributed to a run. The settings
 /// hash is left out: it is derived from the resolved secrets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -271,7 +277,7 @@ pub struct PluginTaskDto {
     pub max_exec_ms: Option<u64>,
     pub concurrency: PluginTaskConcurrencyDto,
     pub respect_maintenance: bool,
-    /// Always `null` in W3: tasks do not run yet.
+    /// Always `null`: tasks do not run yet.
     #[serde(default)]
     pub last_run: Option<Value>,
 }
@@ -285,7 +291,7 @@ pub enum PluginMetricSeverityDto {
     Error,
 }
 
-/// One `collect-metrics` value (plan §7 *Dashboard metrics*), in the status
+/// One `collect-metrics` value, in the status
 /// payload and `GET /api/v1/plugins/metrics`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginMetricDto {
@@ -302,7 +308,7 @@ pub struct PluginMetricDto {
     pub severity: Option<PluginMetricSeverityDto>,
 }
 
-/// The outcome of one task run (plan §7 *Scheduled plugin tasks*): the answer
+/// The outcome of one task run: the answer
 /// of `POST /api/v1/plugins/{id}/tasks/{task}/run`, and a task's `last_run`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginTaskRunDto {
@@ -356,8 +362,7 @@ pub struct PluginLogQueryDto {
 }
 
 // ---------------------------------------------------------------------------
-// W6b: install and approval (plan §10), UI contributions and the frame bridge
-// (§11) and rpc (§10); the metrics DTOs above are W6a's. Frozen in plan §18 *W6b seam freeze*.
+// Install and approval, UI contributions, the frame bridge and rpc.
 // ---------------------------------------------------------------------------
 
 /// One capability in the install review, with the sentence the admin approves.
@@ -385,14 +390,14 @@ pub enum PluginRpcKindDto {
 pub struct PluginRpcExportDto {
     pub name: String,
     pub kind: PluginRpcKindDto,
-    /// The manifest asks to offer it as an MCP tool (switch 1 of 3).
+    /// The manifest asks to offer it as an MCP tool.
     pub mcp: bool,
     /// Sanitized: control characters stripped, at most 512 chars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-/// The extension slots of plan §11.
+/// The extension slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginSlotDto {
@@ -448,14 +453,14 @@ pub struct PluginUploadReviewDto {
     pub events: Vec<String>,
     /// Declared task ids.
     pub tasks: Vec<String>,
-    /// Settings-schema paths that hold secrets (plan §9 *Approving*).
+    /// Settings-schema paths that hold secrets.
     pub secrets: Vec<String>,
     /// Any `ui.contributions`, or a frame-backed `ui.config_tab`: plugin
     /// JavaScript will run in sandboxed frames.
     pub custom_ui: bool,
     pub contributions: Vec<PluginContributionDto>,
     pub rpc_exports: Vec<PluginRpcExportDto>,
-    /// Some export has `mcp: true`: the admin decides switch 2 separately.
+    /// Some export has `mcp: true`: the admin decides MCP exposure separately.
     pub mcp_requested: bool,
     /// The version of an installed plugin with this id that approval replaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -484,7 +489,7 @@ pub struct PluginApproveDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_sha256: Option<String>,
     pub capabilities: Vec<String>,
-    /// Switch 2 of the MCP exposure: offer the `mcp: true` exports as tools.
+    /// Admin approval for MCP exposure: offer the `mcp: true` exports as tools.
     #[serde(default)]
     pub mcp: bool,
 }
@@ -613,8 +618,11 @@ mod tests {
             settings_review: None,
             update: None,
             rollback: None,
+            origin: None,
+            update_policy: crate::model::PluginUpdatePolicy::Pinned,
         };
         let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["updatePolicy"], "pinned");
         assert_eq!(value["state"], "pending_approval");
         assert_eq!(value["wasmSha256"], "ab".repeat(32));
         assert!(value.get("description").is_none());

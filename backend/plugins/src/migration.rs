@@ -1,4 +1,4 @@
-//! Settings migration (plan §18 *W8 seam freeze*).
+//! Settings migration.
 //!
 //! A plugin's settings schema carries a `version`; the stored settings carry
 //! the version they were written for (`plugins.plugins[].settings_version`).
@@ -17,14 +17,19 @@
 use crate::{
     api::{check_extension_settings, read_settings_schema, secret_paths_of},
     host_fns,
-    registry::{MigrationFailure, PluginRecord},
-    runtime::call_with_deadline,
-    settings::{check_settings, redact, reference_pairs, restore_references, secret_values, version_conflict},
+    manifest::{Capabilities, Manifest},
+    registry::{export_names, interface_name, sha256_hex, MigrationFailure, PluginRecord},
+    runtime::{call_with_deadline, PluginLimits, PreparedPlugin},
+    settings::{
+        check_settings, redact, reference_pairs, restore_references, schema_version, secret_values, version_conflict,
+    },
     system::PluginSystem,
 };
 use serde_json::{Map, Value};
-use std::{collections::HashMap, sync::Arc};
+use shared::model::{PluginUpdatePolicy, DEFAULT_PLUGIN_SETTINGS_VERSION};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tuliprox_core::model::{PluginEntry, PluginsConfig};
+use tuliprox_plugin_api::bindings::exports::tuliprox::plugin::settings_migration;
 
 /// The settings of one plugin after a successful migration, ready to persist:
 /// `settings` are validated against the package's schema and written with
@@ -70,7 +75,7 @@ impl PluginSystem {
     /// env-resolved (the server reads `config.yml` with env resolution):
     /// `written` holds each plugin's settings as `config.yml` has them, so
     /// the `${env:VAR}` references they hold are put back into the migrated
-    /// settings and no resolved secret is persisted (W8 integration fix).
+    /// settings and no resolved secret is persisted.
     pub async fn migrate_settings_as_written(
         &self,
         config: &PluginsConfig,
@@ -181,24 +186,50 @@ impl PluginSystem {
     ) -> Result<Map<String, Value>, String> {
         let loaded = record.loaded.as_ref().ok_or("the plugin is not loaded")?;
         let guest_indices = loaded.settings_migration.as_ref().ok_or("the plugin exports no settings migration")?;
+        let paths = secret_paths_of(record);
+        let settings = self
+            .call_migration(
+                &record.id,
+                loaded.env.capabilities,
+                &loaded.prepared,
+                guest_indices,
+                entry,
+                written,
+                &paths,
+            )
+            .await?;
+        validate_migrated(record, &settings)?;
+        Ok(settings)
+    }
 
+    /// The guest call of [`PluginSystem::run_migration`], on whatever
+    /// `prepared` component and `guest_indices` the caller bound: a fresh
+    /// instance, the stored settings of `entry` in, the settings JSON object
+    /// out (references restored, **not** yet validated).
+    #[allow(clippy::too_many_arguments)]
+    async fn call_migration(
+        &self,
+        id: &Arc<str>,
+        capabilities: Capabilities,
+        prepared: &PreparedPlugin,
+        guest_indices: &settings_migration::GuestIndices,
+        entry: &PluginEntry,
+        written: Option<&Map<String, Value>>,
+        secret_paths: &[String],
+    ) -> Result<Map<String, Value>, String> {
         let stored = Value::Object(written.unwrap_or(&entry.settings).clone());
         let candidate = PluginsConfig { plugins: vec![entry.clone()], ..PluginsConfig::default() };
-        let resolved = candidate.resolved_settings(&record.id).unwrap_or_else(|| Value::Object(Map::new()));
-        let paths = secret_paths_of(record);
-        let secrets = secret_values(&resolved, &paths);
+        let resolved = candidate.resolved_settings(id).unwrap_or_else(|| Value::Object(Map::new()));
+        let secrets = secret_values(&resolved, secret_paths);
         let pairs = reference_pairs(&stored, &resolved);
         let settings_json = resolved.to_string();
         let env = self
             .shared()
-            .env_for(&record.id, loaded.env.capabilities, Arc::from(settings_json.as_str()), Arc::from(secrets.clone()))
+            .env_for(id, capabilities, Arc::from(settings_json.as_str()), Arc::from(secrets.clone()))
             .map_err(|err| redact(err.message(), &secrets))?;
 
-        let mut live = self
-            .runtime()
-            .instantiate(&loaded.prepared, &env)
-            .await
-            .map_err(|err| redact(&err.to_string(), &secrets))?;
+        let mut live =
+            self.runtime().instantiate(prepared, &env).await.map_err(|err| redact(&err.to_string(), &secrets))?;
         let instance = live.instance();
         let guest = guest_indices
             .load(live.store_mut(), &instance)
@@ -217,9 +248,138 @@ impl PluginSystem {
         let Value::Object(settings) = value else {
             return Err("migrate must return a JSON object".to_string());
         };
-        validate_migrated(record, &settings)?;
         Ok(settings)
     }
+
+    /// What installing a **staged** package would do to the stored settings of
+    /// `entry` (`None`: no config entry, version 1 and no settings), without
+    /// changing anything: the package's `settings.migrate` runs on a fresh
+    /// instance of the staged component, and its output is validated against
+    /// the staged schema. Nothing is persisted, the registry is not touched and
+    /// no failure is remembered ([`Registry::note_migration_failure`] is never
+    /// called), so it can be repeated freely. `entry` must hold the settings as
+    /// written (its `${env:VAR}` references are resolved for the guest only).
+    ///
+    /// `dir` is the staged package directory and `wasm` the bytes of its
+    /// `plugin.wasm` (`None` for a UI-only package). The staged component is
+    /// compiled into the runtime's cache; the next reload drops it again.
+    pub(crate) async fn dry_run_settings_migration(
+        &self,
+        dir: PathBuf,
+        manifest: Arc<Manifest>,
+        wasm: Option<Vec<u8>>,
+        entry: Option<&PluginEntry>,
+    ) -> SettingsDryRun {
+        let from = entry.map_or(DEFAULT_PLUGIN_SETTINGS_VERSION, |entry| entry.settings_version);
+        let system = self.clone();
+        // Reads the schema files and compiles the component: blocking work.
+        let prepared = tokio::task::spawn_blocking(move || system.prepare_staged_migration(dir, &manifest, wasm, from))
+            .await
+            .unwrap_or_else(|err| Err(SettingsDryRun::Failed { from, to: from, reason: err.to_string() }));
+        let staged = match prepared {
+            Ok(staged) => staged,
+            Err(outcome) => return outcome,
+        };
+        let to = staged.record.settings_version;
+        let default_entry;
+        let entry = if let Some(entry) = entry {
+            entry
+        } else {
+            default_entry = PluginEntry {
+                id: staged.record.id.to_string(),
+                enabled: false,
+                priority: 0,
+                settings: Map::new(),
+                settings_version: from,
+                update_policy: PluginUpdatePolicy::default(),
+            };
+            &default_entry
+        };
+        let result = self
+            .call_migration(
+                &staged.record.id,
+                staged.capabilities,
+                &staged.prepared,
+                &staged.guest,
+                entry,
+                None,
+                &staged.secret_paths,
+            )
+            .await
+            .and_then(|settings| validate_migrated(&staged.record, &settings));
+        match result {
+            Ok(()) => SettingsDryRun::Migrates { from, to },
+            Err(reason) => SettingsDryRun::Failed { from, to, reason },
+        }
+    }
+
+    /// The blocking half of [`PluginSystem::dry_run_settings_migration`]: the
+    /// schema version, and, when the stored version is behind, the compiled
+    /// component with its `settings-migration` binding. `Err` is the final
+    /// verdict when no guest call is needed (or possible).
+    fn prepare_staged_migration(
+        &self,
+        dir: PathBuf,
+        manifest: &Arc<Manifest>,
+        wasm: Option<Vec<u8>>,
+        from: u32,
+    ) -> Result<StagedMigration, SettingsDryRun> {
+        let mut record = PluginRecord::new(&manifest.id, dir, 0);
+        record.manifest = Some(Arc::clone(manifest));
+        record.settings_version = read_settings_schema_of(&record)
+            .and_then(|schema| schema_version(&schema).ok())
+            .unwrap_or(DEFAULT_PLUGIN_SETTINGS_VERSION);
+        let to = record.settings_version;
+        if to == from {
+            return Err(SettingsDryRun::Unchanged);
+        }
+        if to < from {
+            return Err(SettingsDryRun::Downgrade { from, to });
+        }
+        let Some(wasm) = wasm else {
+            return Err(SettingsDryRun::Missing { from, to });
+        };
+        let failed = |reason: String| SettingsDryRun::Failed { from, to, reason };
+        let runtime = self.runtime();
+        let limits = PluginLimits::clamp(&manifest.resources, runtime.config());
+        let (component, prepared) = runtime
+            .prepare_cached(&sha256_hex(&wasm), &wasm, limits)
+            .map_err(|err| failed(err.message().to_string()))?;
+        let (exports, _unknown) = export_names(runtime.engine(), &component);
+        if !exports.contains(&interface_name("settings-migration")) {
+            return Err(SettingsDryRun::Missing { from, to });
+        }
+        let guest = settings_migration::GuestIndices::new(prepared.pre())
+            .map_err(|err| failed(format!("cannot bind the settings-migration export: {err:#}")))?;
+        let secret_paths = secret_paths_of(&record);
+        Ok(StagedMigration { record, capabilities: manifest.capabilities, prepared, guest, secret_paths })
+    }
+}
+
+/// A staged package opened far enough to call its `settings.migrate`.
+struct StagedMigration {
+    /// Carries the staged manifest, directory and schema version for the
+    /// validation; never registered anywhere.
+    record: PluginRecord,
+    capabilities: Capabilities,
+    prepared: PreparedPlugin,
+    guest: settings_migration::GuestIndices,
+    secret_paths: Vec<String>,
+}
+
+/// What [`PluginSystem::dry_run_settings_migration`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SettingsDryRun {
+    /// The staged schema version equals the stored one; nothing to migrate.
+    Unchanged,
+    /// The package migrates the stored settings to a valid result.
+    Migrates { from: u32, to: u32 },
+    /// The staged schema version is below the stored one.
+    Downgrade { from: u32, to: u32 },
+    /// The version moves up and the package has no `settings.migrate`.
+    Missing { from: u32, to: u32 },
+    /// The migration failed, or its output does not fit the staged schema.
+    Failed { from: u32, to: u32, reason: String },
 }
 
 fn read_settings_schema_of(record: &PluginRecord) -> Option<Value> {
@@ -272,6 +432,7 @@ mod tests {
             priority: 0,
             settings: settings.as_object().cloned().unwrap_or_default(),
             settings_version: version,
+            update_policy: shared::model::PluginUpdatePolicy::Auto,
         };
         let config = PluginsConfig {
             enabled: true,

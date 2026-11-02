@@ -1,4 +1,4 @@
-//! Upload dialog and capability-grant review (plan §11 *Plugin Manager*). W6b lane M.
+//! Upload dialog and capability-grant review.
 //!
 //! Two steps in one dialog. Choosing a `.tlpx` and pressing Upload stages it on
 //! the server and shows what it asks for. Approving echoes the reviewed hash and

@@ -1,4 +1,4 @@
-//! Pin integrity (plan §18 *W8 seam freeze*) over the real `rename-group`
+//! Pin integrity over the real `rename-group`
 //! component: a `plugin.wasm` change outside approve, update and rollback means
 //! `PendingApproval`, and the swapped bytes never run, whether the registry
 //! learns of it from the directory watcher, from a reload, or at the next start.
@@ -61,6 +61,7 @@ fn env() -> Option<Env> {
         priority: 0,
         settings: serde_json::Map::new(),
         settings_version: 1,
+        update_policy: shared::model::PluginUpdatePolicy::Auto,
     };
     let config = PluginsConfig {
         enabled: true,

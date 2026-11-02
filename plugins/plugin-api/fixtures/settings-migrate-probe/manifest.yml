@@ -1,4 +1,4 @@
-# W8 fixture: the settings schema is at version 2 (config-schema.json). Settings
+# Fixture: the settings schema is at version 2 (config-schema.json). Settings
 # stored for version 1 are `{label, token}`; `settings.migrate` turns them into
 # `{group, api_key, retries}`. `playlist.after-filter` regroups every channel to
 # `group`, so a test sees which settings the plugin ran on.

@@ -195,7 +195,8 @@ library:
 
 # WebAssembly plugins (experimental). Each plugin is a folder <directory>/<id>/
 # holding manifest.yml and plugin.wasm. A relative directory resolves against
-# this file's directory. Off by default.
+# this file's directory. When this section is missing, the server adds a minimal one
+# (`enabled: true`) at start; set `enabled: false` to turn the plugin system off.
 #plugins:
 #  enabled: false
 #  directory: plugins

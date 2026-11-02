@@ -1,5 +1,4 @@
-//! Sandboxed plugin frame and the parent-side `postMessage` bridge (plan §11
-//! *Sandboxed-frame bridge*, frozen in §18 *W6b seam freeze*). W6b lane U.
+//! Sandboxed plugin frame and the parent-side `postMessage` bridge.
 //!
 //! Security notes, since this is the edge between plugin JavaScript and the
 //! admin's session:
@@ -231,7 +230,7 @@ impl FrameRuntime {
         }
     }
 
-    /// The rpc rules of the frozen bridge: 5 requests per second with a burst of
+    /// The rpc rules of the bridge: 5 requests per second with a burst of
     /// 10 (every request counts, so a frame cannot flood the parent with bad ones),
     /// the method must be exported, the payload at most 64 KiB, and at most 8 calls
     /// in flight.
@@ -481,7 +480,7 @@ pub fn PluginFrame(props: &PluginFrameProps) -> Html {
         }
     }
 
-    // Inactive slots unmount their frame (plan §11). Views stay mounted and are
+    // Inactive slots unmount their frame. Views stay mounted and are
     // hidden with CSS, so the frame exists only while its host box is shown: a
     // hidden ancestor gives the host a zero width. Hiding also starts a new
     // generation, so answers of calls the old document made are dropped.

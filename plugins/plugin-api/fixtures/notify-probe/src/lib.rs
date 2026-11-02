@@ -1,4 +1,4 @@
-//! W6a fixture: a notification channel, driven by the plugin's settings.
+//! Fixture: a notification channel, driven by the plugin's settings.
 //!
 //! The scenario is the `mode` setting the test puts in the plugin's config
 //! entry (a `routing` object next to it is read by the host, not by this

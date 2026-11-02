@@ -1,6 +1,5 @@
 //! The wasmtime side: the shared engine, the epoch ticker, compiled and linked
-//! components, the memory budget and guarded guest calls (plan §7 *Engine &
-//! instances*).
+//! components, the memory budget and guarded guest calls.
 //!
 //! # Memory budget
 //!
@@ -38,12 +37,11 @@
 //!
 //! No explicit `Config::target`. wasmtime's build script already points
 //! `Config::new()` at the Pulley interpreter on architectures Cranelift cannot
-//! host (armv7); the W0 spike on wasmtime 50.0.1 verified that the epoch trap
+//! host (armv7); on wasmtime 50.0.1 the epoch trap
 //! fires there (a 200 ms deadline traps at about 239 ms with a 10 ms tick).
 //!
 //! `Config::async_support` is a deprecated no-op in wasmtime 50: async comes
-//! from the `async` cargo feature. Nothing here blocks on a future (plan §7,
-//! Rule 0).
+//! from the `async` cargo feature. Nothing here blocks on a future.
 
 use crate::{
     manifest::Resources,
@@ -133,7 +131,7 @@ impl PluginLimits {
 
     /// The deadline of an input/output provider call: a full download or
     /// render, so the hook deadline times [`PROVIDER_EXEC_MULTIPLIER`], never
-    /// more than `plugins.max_task_exec` (plan §7 *Input providers*).
+    /// more than `plugins.max_task_exec`.
     pub(crate) fn provider_exec(&self, config: &RuntimeConfig) -> Duration {
         (self.exec * PROVIDER_EXEC_MULTIPLIER).min(config.task_exec.max(self.exec))
     }
@@ -490,7 +488,7 @@ pub(crate) struct Runtime {
     budget: Arc<MemoryBudget>,
     /// Compiled and linked components by `wasm_sha256` ([`Runtime::prepare_cached`]).
     cache: Mutex<HashMap<String, CachedPlugin>>,
-    /// The rpc route's token buckets and counters (W6b); never the breaker.
+    /// The rpc route's token buckets and counters; never the breaker.
     rpc: RpcGate,
     #[cfg(test)]
     pooled: bool,
@@ -514,7 +512,7 @@ fn base_config() -> Config {
 }
 
 /// The engine with the pooling allocator when the host can take it, else with
-/// the on-demand one. The plan is `Some` when the pool is in use.
+/// the on-demand one. The pool plan is `Some` when the pool is in use.
 fn build_engine(total_mib: u32, instance_memory: u64) -> Result<(Engine, Option<PoolPlan>), TuliproxError> {
     if !cfg!(target_pointer_width = "32") {
         let plan = PoolPlan::new(total_mib, instance_memory);

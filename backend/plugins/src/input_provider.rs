@@ -1,4 +1,4 @@
-//! `type: plugin` inputs (plan §7 *Input providers*): `fetch-playlist` /
+//! `type: plugin` inputs: `fetch-playlist` /
 //! `fetch-epg` of the plugin an input names, under the provider deadline.
 //!
 //! Both calls are fail-open for the server: an `Err` only fails the one input

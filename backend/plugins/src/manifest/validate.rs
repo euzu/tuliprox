@@ -221,7 +221,7 @@ fn check_provides(input_type: bool, output_format: Option<String>, errors: &mut 
     Provides { input_type, output_format }
 }
 
-/// `movie` is what the plan's `scope.item_types` comment calls a `Video`.
+/// `movie` is the name of the `Video` item type in `scope.item_types`.
 fn parse_item_type(text: &str) -> Option<PlaylistItemType> {
     let name = text.trim().replace('-', "_");
     if name == "movie" {

@@ -1,4 +1,4 @@
-# Plugin manifest (plugin-system-plan.md section 4). Replace the placeholders,
+# Plugin manifest. Replace the placeholders,
 # then see README.md for the packaging and install steps.
 id: "{{project-name}}"        # ^[a-z][a-z0-9-]{2,40}$, unique on the host
 name: My plugin

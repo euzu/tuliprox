@@ -1,8 +1,8 @@
 use super::*;
 use shared::{error::ErrorKind, model::EventKind};
 
-/// The §4 example, made self-consistent: `stream.inject-headers` needs
-/// `capabilities.stream_headers`, which the plan's own sample leaves off.
+/// A complete, self-consistent manifest: `stream.inject-headers` needs
+/// `capabilities.stream_headers`, which is declared here.
 const FULL: &str = r#"
 id: sports-enricher
 name: Sports Channel Enricher
@@ -216,7 +216,7 @@ fn a_minimal_manifest_has_defaults_everywhere() {
 
 #[test]
 fn keys_present_but_empty_read_as_defaults() {
-    // what is left of the plan's example once the `# provides:` block stays commented out
+    // Keys present but empty, as left by the example with its `# provides:` block commented out
     let manifest =
         parse(&with("hooks:\nevents:\ntasks:\nprovides:\nscope:\nui:\nresources:\ncapabilities:\n")).unwrap();
     assert_eq!(manifest.hooks.len(), 0);
@@ -330,7 +330,7 @@ fn bare_stage_names_are_rejected_naming_the_dotted_form() {
     for stage in ["before-filter", "after-filter", "before-rename", "after-rename", "before-map", "after-map"] {
         assert_problem(&with(&format!("hooks: [{stage}]\n")), &format!("`playlist.{stage}`"));
     }
-    // the Phase S manifest shape no longer loads
+    // Bare stage names are rejected
     assert_problem("id: demo-plugin\nhooks: [after-filter]\n", "bare stage name");
 }
 

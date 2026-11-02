@@ -1,4 +1,4 @@
-//! `PluginSlot`: the contributions of one extension slot (plan §11). W6b lane U.
+//! `PluginSlot`: the contributions of one extension slot.
 //!
 //! Besides the slot component this holds what every slot shares: the app-wide
 //! [`PluginUiContext`] that loads `GET /api/v1/plugins/ui` once, the helpers
@@ -363,7 +363,7 @@ pub fn PluginUnavailable(props: &PluginUnavailableProps) -> Html {
 #[derive(Properties, PartialEq)]
 pub struct PluginSlotProps {
     pub slot: PluginSlotDto,
-    /// The slot subject, as the frozen context shape of the slot: `{ channels }`,
+    /// The slot subject, in the context shape the slot passes to plugins: `{ channels }`,
     /// `{ channel }`, `{ channel, programme }`. `None` is `null`.
     #[prop_or_default]
     pub context: Option<Value>,

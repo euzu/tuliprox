@@ -1,6 +1,6 @@
 //! Finalize-side playlist hooks: `after-sort` and the per-target strategies
 //! `sort-key`, `assign-channel-numbers`, `resolve-duplicates` and
-//! `merge-groups` (plan §7 *Sync/async boundary* pattern 2, prepare -> apply).
+//! `merge-groups` (prepare -> apply).
 //!
 //! Every function is the *prepare* half: it asks the plugin for a decision
 //! (a permutation, keys, numbers, keepers, a merge map) and returns it as plain

@@ -23,10 +23,10 @@ use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
     AuthAuditEvent, AuthAuditOutcome, ConnectionDenied, EventKind, EventKindMask, EventMessage,
-    LibraryScanSummaryStatus, MetadataUpdateFailure, ProviderFetchFailure, ProviderPoolExhausted,
-    ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
-    StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled, WatchDisabledReason,
-    WatchUnmatched,
+    LibraryScanSummaryStatus, MetadataUpdateFailure, PluginUpdateEvent, PluginUpdateOutcome, ProviderFetchFailure,
+    ProviderPoolExhausted, ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState,
+    StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled,
+    WatchDisabledReason, WatchUnmatched,
 };
 use std::{fmt::Write, sync::Arc};
 use tokio::sync::broadcast::error::RecvError;
@@ -106,6 +106,9 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ConnectionDenied)
     .with(EventKind::StreamProbeFailed)
     .with(EventKind::ScheduledTaskFailed)
+    .with(EventKind::PluginUpdateAvailable)
+    .with(EventKind::PluginUpdateApplied)
+    .with(EventKind::PluginUpdateFailed)
     .with(EventKind::AuthSignInSucceeded)
     .with(EventKind::AuthSignInFailed)
     .with(EventKind::AuthSignInThrottled)
@@ -260,6 +263,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         }
 
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
+        EventMessage::PluginUpdate(event) => Some(plugin_update_notification(id, event, message.severity())),
         EventMessage::ConnectionDenied(denied) => Some(connection_denied_notification(id, denied, message.severity())),
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
@@ -428,6 +432,24 @@ fn user_lifecycle_notification(id: EventId, event: &UserLifecycleEvent, severity
         .with_severity(severity)
         .with_dedup_key(event.dedup_key())
         .with_fields(event)
+}
+
+/// Word a plugin update outcome.
+fn plugin_update_notification(id: EventId, event: &PluginUpdateEvent, severity: Severity) -> NotificationEvent {
+    let title = match event.outcome {
+        PluginUpdateOutcome::Available => {
+            format!("Plugin {} {} is waiting for approval (installed: {})", event.plugin, event.to, event.from)
+        }
+        PluginUpdateOutcome::Applied => format!("Plugin {} updated from {} to {}", event.plugin, event.from, event.to),
+        PluginUpdateOutcome::Failed => {
+            format!("Plugin {} update to {} failed; {} still runs", event.plugin, event.to, event.from)
+        }
+    };
+    let mut body = format!("{title}\n\nSource: {}", event.source);
+    if let Some(reason) = &event.reason {
+        let _ = write!(body, "\n\n{reason}");
+    }
+    NotificationEvent::new(id, title, body).with_severity(severity).with_dedup_key(event.dedup_key()).with_fields(event)
 }
 
 /// Word an authentication decision.

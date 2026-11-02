@@ -206,7 +206,7 @@ impl Config {
         }
 
         if let Some(plugins) = self.plugins.as_mut() {
-            plugins.prepare(config_path);
+            plugins.prepare(config_path)?;
         }
 
         if let Some(recording) = self.video.as_mut().and_then(|video| video.recording.as_mut()) {

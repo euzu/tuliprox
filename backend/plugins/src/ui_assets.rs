@@ -1,6 +1,5 @@
 //! Plugin UI: the `GET /api/v1/plugins/ui` contribution list and the
-//! path-safe lookup of `/plugins/{id}/ui/{path…}` files (plan §9 *UI trust
-//! boundary*, §11, §18 *W6b seam freeze* "Frame serving"). W6b lane R.
+//! path-safe lookup of `/plugins/{id}/ui/{path…}` files.
 //!
 //! Frame files are served without auth, so everything here fails closed: a
 //! path, plugin or file that is not clearly safe is `None`, which the route
@@ -27,7 +26,7 @@ use std::{
 /// The CSP of every frame document and asset. It is a header and not a `<meta>`
 /// tag so that it also covers a document opened as a top-level page: the
 /// `sandbox` directive gives that page an opaque origin, which keeps plugin
-/// script away from the admin token in `LocalStorage` (plan §9).
+/// script away from the admin token in `LocalStorage`.
 pub(crate) const FRAME_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
                                     img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; \
                                     base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts";
@@ -185,7 +184,7 @@ impl PluginSystem {
     pub const MAX_UI_ASSET_BYTES: u64 = MAX_ASSET_BYTES;
 
     /// The six headers of every `200` and `304` of the frame route and of
-    /// `bridge.js` (plan §18 *W6b seam freeze*). `etag` is already quoted.
+    /// `bridge.js`. `etag` is already quoted.
     #[must_use]
     pub fn frame_headers(etag: &str) -> Vec<(HeaderName, HeaderValue)> {
         let mut headers = vec![

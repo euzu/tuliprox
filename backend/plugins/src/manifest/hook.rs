@@ -1,4 +1,4 @@
-//! The `hooks:` ids of a manifest (plan §4, *Hook ids (frozen W2)*).
+//! The `hooks:` ids of a manifest.
 
 use super::Capability;
 use shared::model::PluginHook;
@@ -84,7 +84,7 @@ hook_ids! {
     SettingsMigrate => "settings.migrate", "settings-migration", Requirement::None;
 }
 
-/// Phase S spelled the six stage ids without the `playlist.` prefix.
+/// Former spellings of the six stage ids without the `playlist.` prefix.
 const RETIRED_BARE_STAGES: [&str; 6] =
     ["before-filter", "after-filter", "before-rename", "after-rename", "before-map", "after-map"];
 
@@ -106,10 +106,10 @@ impl HookId {
 
     /// The pipeline hook the host can run, if this id has one.
     ///
-    /// Every id maps to a host hook except three: `epg.resolve-conflict` (v1.x,
-    /// needs the blocking bridge; validated and kept, never run), `rpc.call`
-    /// (run by the rpc route and MCP tools) and `settings.migrate` (W8, run by
-    /// the settings migration step).
+    /// Every supported pipeline id maps to a host hook. `epg.resolve-conflict`
+    /// is reserved but rejected by manifest validation until its blocking
+    /// bridge exists. `rpc.call` and `settings.migrate` are dispatched outside
+    /// the pipeline.
     pub(crate) const fn pipeline_hook(self) -> Option<PluginHook> {
         match self {
             Self::PlaylistLoaded => Some(PluginHook::PlaylistLoaded),

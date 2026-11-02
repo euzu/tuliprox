@@ -62,6 +62,12 @@ pub enum EventKind {
     RecordingProgress,
     /// Appended last for the same reason.
     MaintenanceChanged,
+    /// A marketplace update of an installed plugin waits for an admin (W10).
+    PluginUpdateAvailable,
+    /// A marketplace update of an installed plugin is active (W10).
+    PluginUpdateApplied,
+    /// A marketplace update was rejected or rolled back (W10).
+    PluginUpdateFailed,
 }
 
 impl EventKind {
@@ -69,7 +75,7 @@ impl EventKind {
     ///
     /// The mask type below indexes into this, so the order is load-bearing:
     /// it is the bit order, not just a listing.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 46] = [
         Self::ServerError,
         Self::ServerStarted,
         Self::ServerShutdown,
@@ -113,6 +119,9 @@ impl EventKind {
         Self::AuthPermissionDenied,
         Self::RecordingProgress,
         Self::MaintenanceChanged,
+        Self::PluginUpdateAvailable,
+        Self::PluginUpdateApplied,
+        Self::PluginUpdateFailed,
     ];
 
     /// This kind's bit position.
@@ -177,7 +186,10 @@ impl EventKind {
             // Sits with the metadata-update events it is produced by.
             | Self::StreamProbeFailed
             | Self::NotificationDeadLettered
-            | Self::ScheduledTaskFailed => Permission::SystemRead,
+            | Self::ScheduledTaskFailed
+            | Self::PluginUpdateAvailable
+            | Self::PluginUpdateApplied
+            | Self::PluginUpdateFailed => Permission::SystemRead,
             Self::MaintenanceChanged => Permission::MaintenanceRead,
         }
     }
@@ -278,6 +290,9 @@ impl EventKind {
             Self::AuthSignInThrottled => "auth.sign_in.throttled",
             Self::AuthPermissionDenied => "auth.permission.denied",
             Self::MaintenanceChanged => "maintenance.changed",
+            Self::PluginUpdateAvailable => "plugin.update.available",
+            Self::PluginUpdateApplied => "plugin.update.applied",
+            Self::PluginUpdateFailed => "plugin.update.failed",
         }
     }
 

@@ -3,7 +3,7 @@
 //!
 //! The host bounds it: a key is at most 1 KiB, a value at most 1 MiB, the store
 //! 50 MiB per plugin. KV writes change what later hooks return, so they feed
-//! the plugin fingerprint (plan §7 *Determinism*).
+//! the plugin fingerprint.
 //!
 //! # TTL
 //!

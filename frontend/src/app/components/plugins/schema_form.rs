@@ -1,5 +1,5 @@
-//! `SchemaForm`: renders the settings JSON Schema a plugin ships (plan §11, a
-//! draft 2020-12 **subset**) with the existing form primitives.
+//! `SchemaForm`: renders the settings JSON Schema a plugin ships (a draft 2020-12 **subset**)
+//! with the existing form primitives.
 //!
 //! The component is controlled: it renders `value` and emits the whole edited
 //! object through `on_change`. The schema analysis (what is supported, which

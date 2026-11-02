@@ -1,4 +1,4 @@
-//! W6b demo fixture: the rpc methods behind the `ui-demo` frames and MCP tools.
+//! Demo fixture: the rpc methods behind the `ui-demo` frames and MCP tools.
 //!
 //! `echo` and `counter` are reads, `bump` is a write. The counter lives in the
 //! plugin's KV store under `count`, so it survives across calls (each call gets

@@ -1,5 +1,4 @@
-//! Plugin `rpc_exports` as MCP tools (plan §7 *Plugin functions as MCP
-//! tools*): the registry-derived tool snapshot. W6b lane X.
+//! Plugin `rpc_exports` as MCP tools : the registry-derived tool snapshot.
 //!
 //! A tool exists only when every gate on the plugin's side holds: the plugin is
 //! `enabled`, the export says `mcp: true`, the admin's approval pin says
@@ -7,7 +6,7 @@
 //! `input_schema` is a usable object schema. The third switch, `mcp.plugin_tools`,
 //! belongs to the server's config and is applied by the MCP endpoint.
 //!
-//! This crate does not own the MCP tool list, so the plan's "a name clash is a
+//! This crate does not own the MCP tool list, so "a name clash is a
 //! load error" is: the tool is never exposed, and the clash is logged as an
 //! error naming the plugin. Tasks are never tools; only `ui.rpc_exports` is read.
 //!
@@ -228,7 +227,7 @@ fn candidates<'a>(snapshot: &'a RegistrySnapshot, approvals: &Approvals) -> Vec<
 }
 
 impl PluginSystem {
-    /// The plugin functions offered as MCP tools (plan §7), for the registry as it
+    /// The plugin functions offered as MCP tools, for the registry as it
     /// is now. This covers the plugin side of the switches only: the endpoint
     /// still applies `mcp.plugin_tools`, and hides `Write` tools while read-only.
     ///

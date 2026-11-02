@@ -1,4 +1,4 @@
-//! W6a fixture: an input provider and an output generator, both deterministic.
+//! Fixture: an input provider and an output generator, both deterministic.
 //!
 //! * `fetch-playlist`: `count` channels (setting `count`, default 5), named
 //!   `ch-000`, `ch-001`, ..., in `Group 0..2`, with stable URLs and EPG ids.

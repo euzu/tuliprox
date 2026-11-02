@@ -1,14 +1,17 @@
 use crate::{model::macros, utils::resolve_env_var};
 use serde_json::{Map, Value};
 use shared::{
+    error::TuliproxError,
     model::{
-        ByteSize, Bytes, Millis, PluginEntryDto, PluginsConfigDto, DEFAULT_PLUGINS_DIR, DEFAULT_PLUGINS_MAX_EXEC,
-        DEFAULT_PLUGINS_MAX_MEMORY, DEFAULT_PLUGINS_MAX_TASK_EXEC, DEFAULT_PLUGINS_MAX_TOTAL_MEMORY,
-        DEFAULT_PLUGINS_STREAM_HEADER_TTL, MAX_PLUGINS_BATCH_SIZE,
+        ByteSize, Bytes, Millis, PluginEntryDto, PluginRepositoryDto, PluginUpdatePolicy, PluginsConfigDto,
+        DEFAULT_PLUGINS_BOOT_UPDATE_BUDGET, DEFAULT_PLUGINS_DIR, DEFAULT_PLUGINS_MAX_EXEC, DEFAULT_PLUGINS_MAX_MEMORY,
+        DEFAULT_PLUGINS_MAX_TASK_EXEC, DEFAULT_PLUGINS_MAX_TOTAL_MEMORY, DEFAULT_PLUGINS_STREAM_HEADER_TTL,
+        ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP, MAX_PLUGINS_BATCH_SIZE,
     },
     utils::parse_duration_millis,
 };
 use std::path::{Path, PathBuf};
+use url::Url;
 
 /// Runtime form of one `plugins.plugins[]` entry.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,8 +27,75 @@ pub struct PluginEntry {
     pub settings: Map<String, Value>,
     /// The settings-schema `version` `settings` were written for (1 when the
     /// config says nothing). The registry compares it with the installed
-    /// package's schema version (plan §18 *W8 seam freeze*).
+    /// package's schema version.
     pub settings_version: u32,
+    /// How the plugin may move to a newer marketplace release.
+    pub update_policy: PluginUpdatePolicy,
+}
+
+/// Runtime form of one `plugins.repositories[]` entry. `url` is kept as configured, like [`PluginEntry::settings`]; fetch
+/// with [`PluginRepository::resolved_url`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRepository {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub enabled: bool,
+}
+
+impl PluginRepository {
+    /// `url` with a `${env:VAR}` reference expanded through [`resolve_env_var`].
+    #[must_use]
+    pub fn resolved_url(&self) -> String { resolve_env_var(&self.url) }
+}
+
+/// `true` when the developer switch `TULIPROX_PLUGIN_MARKETPLACE_ALLOW_HTTP=1`
+/// is set. The only reader of that variable in the workspace's config code;
+/// call it per use, never cache it.
+#[must_use]
+pub fn marketplace_allow_http() -> bool {
+    std::env::var(ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP).is_ok_and(|value| value.trim() == "1")
+}
+
+/// Check that the resolved url of `repository` parses and is `https://`
+/// (`http://` only with `allow_http`; every other scheme is refused). The error
+/// names the source and never contains the resolved url.
+///
+/// # Errors
+/// A message naming the repository id when the url is not acceptable.
+pub fn validate_repository(repository: &PluginRepository, allow_http: bool) -> Result<(), String> {
+    let id = &repository.id;
+    let resolved = repository.resolved_url();
+    let url = Url::parse(resolved.trim()).map_err(|_| {
+        format!("plugins.repositories `{id}` url is not a valid absolute url (is a ${{env:VAR}} reference unset?)")
+    })?;
+    match url.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
+        "http" => return Err(format!("plugins.repositories `{id}` url must use https")),
+        scheme => return Err(format!("plugins.repositories `{id}` url scheme `{scheme}` is not allowed; use https")),
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("plugins.repositories `{id}` url has no host"));
+    }
+    Ok(())
+}
+
+impl From<&PluginRepositoryDto> for PluginRepository {
+    fn from(dto: &PluginRepositoryDto) -> Self {
+        Self { id: dto.id.clone(), name: dto.name.clone(), url: dto.url.clone(), enabled: dto.enabled }
+    }
+}
+
+impl From<&PluginRepository> for PluginRepositoryDto {
+    fn from(repository: &PluginRepository) -> Self {
+        Self {
+            id: repository.id.clone(),
+            name: repository.name.clone(),
+            url: repository.url.clone(),
+            enabled: repository.enabled,
+        }
+    }
 }
 
 /// Runtime form of the `plugins:` block.
@@ -49,13 +119,19 @@ pub struct PluginsConfig {
     pub max_instances: u16,
     /// Items sent to a plugin per hook call.
     pub batch_size: u32,
+    /// Run the background boot update.
+    pub auto_update_on_boot: bool,
+    /// Deadline of the whole background boot update run.
+    pub boot_update_budget: Millis,
+    /// Marketplace sources.
+    pub repositories: Vec<PluginRepository>,
     pub plugins: Vec<PluginEntry>,
 }
 
 macros::from_impl!(PluginsConfig);
 
 impl Default for PluginsConfig {
-    /// Disabled, with the frozen default clamps.
+    /// Disabled, with the default clamps.
     fn default() -> Self { Self::from(&PluginsConfigDto::default()) }
 }
 
@@ -63,17 +139,39 @@ impl PluginsConfig {
     /// Resolve `directory` the way config-relative paths are resolved
     /// elsewhere (see `WebAuthConfig`): blank means the default folder, an
     /// absolute path is kept, a relative one is joined onto the config dir.
-    pub fn prepare(&mut self, config_path: &str) {
+    ///
+    /// # Errors
+    /// Every marketplace source whose resolved url fails [`validate_repository`],
+    /// one line each.
+    pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
         let configured = self.directory.trim();
         let directory = if configured.is_empty() { DEFAULT_PLUGINS_DIR } else { configured };
         let path = Path::new(directory);
         let resolved: PathBuf = if path.is_absolute() { path.to_path_buf() } else { Path::new(config_path).join(path) };
         self.directory = resolved.to_string_lossy().to_string();
+
+        let allow_http = marketplace_allow_http();
+        let errors: Vec<String> = self
+            .repositories
+            .iter()
+            .filter_map(|repository| validate_repository(repository, allow_http).err())
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(TuliproxError::Plugin(errors.join("\n")))
+        }
     }
 
     /// The configured entry for plugin `id`, if the operator listed one.
     #[must_use]
     pub fn entry(&self, id: &str) -> Option<&PluginEntry> { self.plugins.iter().find(|entry| entry.id == id) }
+
+    /// The configured marketplace source `id`, enabled or not.
+    #[must_use]
+    pub fn repository(&self, id: &str) -> Option<&PluginRepository> {
+        self.repositories.iter().find(|repository| repository.id == id)
+    }
 
     /// The settings of plugin `id` with every `${env:VAR}` in a string value
     /// expanded through [`resolve_env_var`], at any depth. `None` when the
@@ -147,6 +245,7 @@ impl From<&PluginEntryDto> for PluginEntry {
             priority: dto.priority,
             settings: dto.settings.clone(),
             settings_version: dto.settings_version.max(1),
+            update_policy: dto.update_policy,
         }
     }
 }
@@ -159,6 +258,7 @@ impl From<&PluginEntry> for PluginEntryDto {
             priority: entry.priority,
             settings: entry.settings.clone(),
             settings_version: entry.settings_version,
+            update_policy: entry.update_policy,
         }
     }
 }
@@ -175,6 +275,9 @@ impl From<&PluginsConfigDto> for PluginsConfig {
             stream_header_ttl: millis_or(&dto.stream_header_ttl, DEFAULT_PLUGINS_STREAM_HEADER_TTL),
             max_instances: dto.max_instances.max(1),
             batch_size: dto.batch_size.clamp(1, MAX_PLUGINS_BATCH_SIZE),
+            auto_update_on_boot: dto.auto_update_on_boot,
+            boot_update_budget: millis_or(&dto.boot_update_budget, DEFAULT_PLUGINS_BOOT_UPDATE_BUDGET),
+            repositories: dto.repositories.iter().map(PluginRepository::from).collect(),
             plugins: dto.plugins.iter().map(PluginEntry::from).collect(),
         }
     }
@@ -192,6 +295,9 @@ impl From<&PluginsConfig> for PluginsConfigDto {
             stream_header_ttl: format_millis(config.stream_header_ttl),
             max_instances: config.max_instances,
             batch_size: config.batch_size,
+            auto_update_on_boot: config.auto_update_on_boot,
+            boot_update_budget: format_millis(config.boot_update_budget),
+            repositories: config.repositories.iter().map(PluginRepositoryDto::from).collect(),
             plugins: config.plugins.iter().map(PluginEntryDto::from).collect(),
         }
     }
@@ -220,6 +326,14 @@ mod tests {
             stream_header_ttl: "90s".to_string(),
             max_instances: 8,
             batch_size: 250,
+            auto_update_on_boot: true,
+            boot_update_budget: "2m".to_string(),
+            repositories: vec![PluginRepositoryDto {
+                id: "community".to_string(),
+                name: "Community".to_string(),
+                url: "${env:TP_MARKET_URL}".to_string(),
+                enabled: false,
+            }],
             plugins: vec![entry],
         };
         assert_eq!(PluginsConfigDto::from(&PluginsConfig::from(&dto)), dto);
@@ -287,7 +401,7 @@ mod tests {
     #[test]
     fn relative_directory_is_joined_onto_the_config_dir() {
         let mut config = PluginsConfig::from(&dto_from(json!({"enabled": true})));
-        config.prepare("/etc/tuliprox/config");
+        config.prepare("/etc/tuliprox/config").unwrap();
         assert_eq!(Path::new(&config.directory), Path::new("/etc/tuliprox/config/plugins"));
     }
 
@@ -295,14 +409,14 @@ mod tests {
     fn blank_directory_falls_back_to_the_default() {
         let mut config = PluginsConfig::from(&dto_from(json!({"enabled": true})));
         config.directory = "  ".to_string();
-        config.prepare("/etc/tuliprox/config");
+        config.prepare("/etc/tuliprox/config").unwrap();
         assert_eq!(Path::new(&config.directory), Path::new("/etc/tuliprox/config/plugins"));
     }
 
     #[test]
     fn absolute_directory_is_kept() {
         let mut config = PluginsConfig::from(&dto_from(json!({"directory": "/opt/plugins"})));
-        config.prepare("/etc/tuliprox/config");
+        config.prepare("/etc/tuliprox/config").unwrap();
         assert_eq!(config.directory, "/opt/plugins");
     }
 
@@ -352,5 +466,55 @@ mod tests {
     fn resolved_settings_of_an_unknown_plugin_is_none() {
         assert!(config_with_settings(&json!({})).resolved_settings("other-plugin").is_none());
         assert_eq!(config_with_settings(&json!({})).resolved_settings("demo-plugin"), Some(json!({})));
+    }
+
+    fn repository(url: &str) -> PluginRepository {
+        PluginRepository {
+            id: "community".to_string(),
+            name: "Community".to_string(),
+            url: url.to_string(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn repository_urls_must_be_https() {
+        assert!(validate_repository(&repository("https://example.test/marketplace.json"), false).is_ok());
+        let err = validate_repository(&repository("http://example.test/marketplace.json"), false).unwrap_err();
+        assert!(err.contains("`community`") && err.contains("https"), "{err}");
+        assert!(validate_repository(&repository("http://127.0.0.1:8080/marketplace.json"), true).is_ok());
+    }
+
+    #[test]
+    fn repository_other_schemes_are_refused_even_with_allow_http() {
+        for url in ["ftp://example.test/m.json", "file:///etc/passwd", "javascript:alert(1)", "example.test/m.json", ""]
+        {
+            assert!(validate_repository(&repository(url), false).is_err(), "{url}");
+            assert!(validate_repository(&repository(url), true).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn repository_unresolvable_env_reference_is_an_error_without_leaking() {
+        let err = validate_repository(&repository("${env:TULIPROX_PLUGIN_TEST_UNSET_REPO}"), false).unwrap_err();
+        assert!(err.contains("`community`"), "{err}");
+    }
+
+    #[test]
+    fn repository_env_reference_is_validated_resolved_but_kept_as_configured() {
+        let url = repository("${env:PATH}");
+        // PATH is not a url, so it is refused; the configured form stays a reference.
+        assert!(validate_repository(&url, false).is_err());
+        assert_eq!(url.url, "${env:PATH}");
+    }
+
+    #[test]
+    fn prepare_reports_bad_repositories_by_id() {
+        let mut config = PluginsConfig::from(&dto_from(json!({"repositories": [
+            {"id": "good-one", "name": "Good", "url": "https://example.test/m.json"},
+            {"id": "bad-one", "name": "Bad", "url": "ftp://example.test/m.json"},
+        ]})));
+        let err = config.prepare("config").unwrap_err().to_string();
+        assert!(err.contains("`bad-one`") && !err.contains("good-one"), "{err}");
     }
 }

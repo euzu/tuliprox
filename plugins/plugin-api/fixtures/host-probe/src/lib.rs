@@ -1,4 +1,4 @@
-//! Phase 1 fixture: probes the host functions, `wasi:http` and the traps.
+//! Fixture: probes the host functions, `wasi:http` and the traps.
 //!
 //! One component serves every id under `manifests/`; each manifest grants a
 //! different capability set and resource budget. `on-stage` reads `mode` from

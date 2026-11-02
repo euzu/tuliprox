@@ -1,4 +1,4 @@
-//! Secret properties of a plugin's `config-schema.json` (plan §9, *Plugin secrets*).
+//! Secret properties of a plugin's `config-schema.json` .
 //!
 //! A property is secret iff its schema has `"writeOnly": true` or
 //! `"format": "password"`. A secret must not carry a `default`: a default is

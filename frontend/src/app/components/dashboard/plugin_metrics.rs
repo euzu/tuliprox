@@ -1,6 +1,5 @@
-//! Plugin metrics as native entries of the stats cards (plan §7 *Dashboard metrics*):
-//! label, value, unit and a severity accent, with a sparkline for numeric values.
-//! No plugin JavaScript is involved. W6b lane U.
+//! Plugin metrics as native entries of the stats cards: label, value, unit and a severity
+//! accent, with a sparkline for numeric values. No plugin JavaScript is involved.
 
 use crate::app::components::{
     resolve_text, use_plugin_metrics, use_plugin_ui, Card, Sparkline, SparklineFormat, SparklineSeries, StatusCard,

@@ -1,5 +1,4 @@
-//! Per-plugin log ring buffers, fed by the `log` host fn (plan §7 *Per-plugin
-//! logs*), plus the per-plugin rate limiter, secret redaction and message cap
+//! Per-plugin log ring buffers, fed by the `log` host fn, plus the per-plugin rate limiter, secret redaction and message cap
 //! that sit in front of both the ring and the backend logger.
 
 use shared::model::REDACTED_SECRET;

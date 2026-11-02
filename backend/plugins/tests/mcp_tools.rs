@@ -1,5 +1,4 @@
-//! `PluginSystem::mcp_tools` over a loaded registry (plan §7 *Plugin functions
-//! as MCP tools*): a tool exists only for an `enabled` plugin whose export says
+//! `PluginSystem::mcp_tools` over a loaded registry: a tool exists only for an `enabled` plugin whose export says
 //! `mcp: true`, whose approval pin says `mcp: true`, and whose `input_schema` is
 //! an object schema; the list follows the registry. The derivation rules
 //! (naming, clashes, description) are unit-tested in `src/mcp_tools.rs`; the
@@ -88,6 +87,7 @@ fn stage(setup: &Setup<'_>) -> Option<Staged> {
             priority: 0,
             settings: Map::new(),
             settings_version: 1,
+            update_policy: shared::model::PluginUpdatePolicy::Auto,
         }],
         ..PluginsConfig::default()
     };

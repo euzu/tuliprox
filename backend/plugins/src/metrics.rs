@@ -1,4 +1,4 @@
-//! Dashboard metrics (plan §7 *Dashboard metrics*): throttled
+//! Dashboard metrics: throttled
 //! `collect-metrics` polling, a snapshot cache, `<plugin-id>.<key>` keys.
 //!
 //! [`PluginSystem::metrics_snapshot`] is what the status payload and

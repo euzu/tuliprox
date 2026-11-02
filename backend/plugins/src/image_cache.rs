@@ -1,6 +1,5 @@
 //! `cache-image`: downloads through the plugin client into the existing
-//! `LRUResourceCache` and returns a URL on the existing resource route (plan §7
-//! *Image cache*).
+//! `LRUResourceCache` and returns a URL on the existing resource route.
 //!
 //! The cache is keyed by URL (`encode_base64_hash(url)`), not by content hash,
 //! so a URL that is already cached is answered without a download. The bytes

@@ -1,4 +1,4 @@
-//! The seam between the playlist pipeline and a plugin host.
+//! The interface between the playlist pipeline and a plugin host.
 //!
 //! The pipeline is generic over [`PluginHost`] the same way it is generic over
 //! `EventSink` and `MetadataUpdateSink`: a bound, not a trait object. Runs
@@ -16,8 +16,8 @@ use std::{future::Future, path::Path, pin::Pin, sync::Arc, time::Duration};
 ///
 /// The wire id ([`PluginHook::as_str`]) is the WIT case name
 /// (`playlist-hooks.stage`, or the interface for the non-stage hooks). The
-/// manifest `hooks:` entry is the dotted form (`playlist.after-filter`, plan §4
-/// *Hook ids*), mapped in `tuliprox-plugins`' manifest module.
+/// manifest `hooks:` entry is the dotted form (`playlist.after-filter`), mapped
+/// in `tuliprox-plugins`' manifest module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PluginHook {
     /// After an input downloaded, before target processing (`source-hooks`).
@@ -34,7 +34,7 @@ pub enum PluginHook {
     /// Once per finalized view, between sort and channel numbering (`sort-hooks`).
     AfterSort,
     /// Per-target strategies, opt-in by target config naming one plugin
-    /// (prepare -> apply, plan §7 *Sync/async boundary* pattern 2).
+    /// (prepare -> apply).
     SortKey,
     AssignChno,
     ResolveDuplicates,
@@ -48,8 +48,8 @@ pub enum PluginHook {
     MatchChannel,
     /// Inside `update_vod_metadata` / `update_series_metadata` (`metadata-hooks`).
     EnrichMetadata,
-    /// Phase 4 hooks outside the per-target pipeline (plan §6 *Hooks outside
-    /// the per-target pipeline*). The pipeline never asks `wants` for them;
+    /// Hooks outside the per-target pipeline. The pipeline never asks `wants`
+    /// for them;
     /// they mark which loaded plugins export the interface.
     /// Lifecycle events from the bus (`event-hooks`).
     OnEvent,
@@ -161,7 +161,7 @@ pub struct PluginOutputRequest<'a> {
     pub path: &'a Path,
 }
 
-/// `sort-key` result: one key per item, index-aligned (plan §7 pattern 2).
+/// `sort-key` result: one key per item, index-aligned.
 pub type PluginSortKeys = Vec<String>;
 /// `assign-channel-numbers` result: `(index into items, chno)` pairs.
 pub type PluginChnoMap = Vec<(usize, u32)>;
@@ -244,7 +244,7 @@ impl PluginScopes {
     pub fn matches(&self, item: &PlaylistItem) -> bool { self.0.iter().any(|scope| scope.matches(item)) }
 }
 
-/// What one plugin did in one hook on one target (plan §7 *Dispatcher*).
+/// What one plugin did in one hook on one target.
 /// Summed over the target's inputs, so a target reports each (plugin, hook)
 /// once.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,8 +285,7 @@ impl PluginHookStats {
     }
 }
 
-/// The identity of a plugin that ran a hook on a target (plan §7
-/// *Determinism*). `fingerprint` digests id, version, wasm hash, the resolved
+/// The identity of a plugin that ran a hook on a target. `fingerprint` digests id, version, wasm hash, the resolved
 /// settings and the ABI, so a changed setting or secret changes it; the
 /// settings themselves are never part of the report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,7 +352,7 @@ pub struct PluginAbort {
 
 /// What the playlist pipeline needs from a plugin host.
 ///
-/// Every method has a no-op default, so a hook added in a later phase changes
+/// Every method has a no-op default, so a hook added later changes
 /// neither [`NoPlugins`] nor any signature the parameter is threaded through -
 /// only the call site that awaits it.
 pub trait PluginHost: Clone + Send + Sync + 'static {
@@ -402,7 +401,7 @@ pub trait PluginHost: Clone + Send + Sync + 'static {
     fn provides(&self, _hook: PluginHook, _plugin: &str) -> bool { false }
 
     /// Combined fingerprint of the plugins that run `hook`, for host-side
-    /// caches of plugin-processed data (plan §7 *Determinism*); `None` when
+    /// caches of plugin-processed data; `None` when
     /// none does.
     fn fingerprint(&self, _hook: PluginHook) -> Option<String> { None }
 
@@ -831,7 +830,7 @@ pub struct PluginUpstreamRequest<'a> {
     pub user: &'a str,
 }
 
-/// The session-edge seam (plan §7 *Session-edge header injection*, §18 Q8):
+/// The session-edge header injection interface:
 /// the stream proxy asks it once per stream-session setup, before the
 /// upstream request is built.
 ///
@@ -905,7 +904,7 @@ pub struct PluginNotificationChannel {
 /// future is boxed (one allocation per notification, off the hot path).
 pub type PluginDeliveryFuture<'a> = Pin<Box<dyn Future<Output = PluginDelivery> + Send + 'a>>;
 
-/// The messaging seam (plan §7 *Notification providers*, §18 Q8). Object safe:
+/// The messaging interface. Object safe:
 /// messaging holds an `Arc<dyn PluginNotifier>` registered by `app`, so the
 /// closed `Channel` enum takes no generic parameter.
 pub trait PluginNotifier: Send + Sync + 'static {

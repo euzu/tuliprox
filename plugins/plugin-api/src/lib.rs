@@ -23,7 +23,7 @@ pub const WIT_SOURCE: &str = include_str!("../wit/tuliprox-plugin.wit");
 
 /// Every interface a plugin may export, as the fully qualified component export
 /// name the registry looks up. `lifecycle` is mandatory; each other entry is
-/// one manifest hook family (plan §4 "Hook ids").
+/// one manifest hook family.
 pub const EXPORT_INTERFACES: [&str; 24] = [
     "tuliprox:plugin/lifecycle@1.0.0",
     "tuliprox:plugin/playlist-hooks@1.0.0",

@@ -30,13 +30,13 @@ struct Inner {
     install: tokio::sync::Mutex<()>,
     registry: Arc<Registry>,
     shared: Arc<Shared>,
-    // W6a state, one per lane module (plan §18 *W6a seam freeze*). Built once
+    // Per-module state, built once
     // at load; a reload swaps the registry snapshot, never these.
     events: EventQueue,
     metrics: MetricsCache,
     headers: HeaderCache,
     tasks: TaskRunner,
-    /// The MCP tools derived from the registry snapshot (W6b lane X).
+    /// The MCP tools derived from the registry snapshot.
     mcp_tools: McpToolCache,
     // Declared last: the engine and its epoch ticker go after the registry,
     // which holds compiled components of this engine.
@@ -48,9 +48,9 @@ struct Inner {
 ///
 /// Every hook invocation runs each plugin in a fresh instance, created lazily
 /// (only for plugins that run that hook and whose scope matches an item) and
-/// dropped at the end, so no state leaks across runs. The seam has no
+/// dropped at the end, so no state leaks across runs. There is no
 /// target-run scope yet, so an instance lives for one hook call over one input,
-/// not for the whole target run (plan §7 *Engine & instances*).
+/// not for the whole target run.
 #[derive(Clone)]
 pub struct PluginSystem {
     inner: Arc<Inner>,

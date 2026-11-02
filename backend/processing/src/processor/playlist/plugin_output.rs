@@ -1,7 +1,7 @@
-//! The `type: plugin` outputs of a target (plan §7 *Output providers*).
+//! The `type: plugin` outputs of a target.
 //!
 //! `persist_playlist_views` lives in `tuliprox-repository`, which has no plugin
-//! seam, so it treats `TargetOutput::Plugin` as a no-op and the render driver
+//! hook, so it treats `TargetOutput::Plugin` as a no-op and the render driver
 //! runs here, right after it, over the same finalized base view.
 
 use log::{debug, error};

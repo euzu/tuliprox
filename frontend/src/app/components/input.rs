@@ -95,6 +95,7 @@ pub fn Input(props: &InputProps) -> Html {
                 onkeydown={props.onkeydown.clone()}
                 oninput={handle_oninput}
                 placeholder={props.placeholder.clone()}
+                required={props.required}
                 aria-label={aria_label}
                 aria-required={props.required.then(|| "true".to_string())}
                 aria-invalid={props.error.as_ref().map(|_| "true".to_string())}

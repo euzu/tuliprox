@@ -78,7 +78,14 @@ fn staging_entries(env: &Env) -> Vec<String> {
 
 fn entry_with(id: &str, settings: Value) -> PluginEntry {
     let Value::Object(settings) = settings else { panic!("settings must be an object") };
-    PluginEntry { id: id.to_string(), enabled: false, priority: 0, settings, settings_version: 1 }
+    PluginEntry {
+        id: id.to_string(),
+        enabled: false,
+        priority: 0,
+        settings,
+        settings_version: 1,
+        update_policy: shared::model::PluginUpdatePolicy::Auto,
+    }
 }
 
 const EXTENSION: &str = "ui:\n  config_extensions:\n    - section: proxy\n      schema:\n        type: object\n        properties:\n          port: {type: integer}\n          key: {type: string, writeOnly: true}\n";

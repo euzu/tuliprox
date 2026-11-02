@@ -1,8 +1,7 @@
-//! A notification channel backed by a wasm plugin (plan §7 *Notification
-//! providers*).
+//! A notification channel backed by a wasm plugin.
 //!
 //! The plugin host lives behind [`shared::model::PluginNotifier`], an object
-//! safe seam `app` registers with [`super::set_plugin_notifier`], so this
+//! safe trait `app` registers with [`super::set_plugin_notifier`], so this
 //! crate names only `shared` types. Routing, quiet hours, suppression and the
 //! outbox apply to a plugin channel exactly as to a built-in one.
 

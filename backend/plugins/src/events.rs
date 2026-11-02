@@ -1,4 +1,4 @@
-//! Lifecycle events to `on-event` (plan §7 *Event queue*, §14): the bounded
+//! Lifecycle events to `on-event` : the bounded
 //! queue between the app's bus subscriber (`plugin_event_bridge.rs`) and the
 //! consumer task that fans each event out to the plugins subscribed to it.
 //!

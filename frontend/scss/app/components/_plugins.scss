@@ -1,4 +1,4 @@
-// Plugin UI (W6b): install review, slots, frames, config extensions and the
+// Plugin UI: install review, slots, frames, config extensions and the
 // plugin metric cards. Plugin frames bring their own styles inside the
 // sandbox; this only lays out the host side.
 
@@ -47,8 +47,8 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  // The parent panel centres its child; a menu page fills the content area instead
-  // (plan §11), so its frame is not left at the 300 px default width of an iframe.
+  // The parent panel centres its child; a menu page fills the content area instead,
+  // so its frame is not left at the 300 px default width of an iframe.
   width: 100%;
   align-self: stretch;
 
@@ -130,7 +130,7 @@
     color: var(--theme-brand-danger);
   }
 
-  // W8: an update review marks what the installed approval lacks.
+  // An update review marks what the installed approval lacks.
   &__capability--added {
     font-weight: 600;
   }
@@ -162,7 +162,7 @@
   gap: var(--margin-small);
 }
 
-// W8: notices on a plugin row (a staged update, settings that need a look).
+// Notices on a plugin row (a staged update, settings that need a look).
 .tp__plugins__update,
 .tp__plugins__settings-review {
   display: flex;
@@ -180,7 +180,192 @@
 
 // The list sits in `.tp__config-view__body`, a flex column with `overflow: hidden`:
 // without this a card shrinks to share the height and the next one hides its
-// lower rows (the W8 update and settings notices, the rollback control).
+// lower rows (the update and settings notices, the rollback control).
 .tp__plugins__card {
   flex-shrink: 0;
+}
+
+// The Marketplace tab (sources, filters, catalog cards) and the origin chip on a plugin card.
+.tp__plugins__origin {
+  display: inline-block;
+  padding: 0 var(--margin-mini);
+  border: 1px solid var(--theme-brand-border-soft);
+  border-radius: var(--border-radius-small);
+  font-size: var(--font-size-xs);
+  color: var(--theme-brand-text-muted);
+}
+
+.tp__plugins__marketplace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+}
+
+.tp__plugins__sources {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+  flex-shrink: 0;
+}
+
+.tp__plugins__sources-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--margin-small);
+}
+
+.tp__plugins__sources-table {
+  width: 100%;
+  border-collapse: collapse;
+
+  th,
+  td {
+    padding: var(--margin-mini) var(--margin-small);
+    text-align: left;
+    vertical-align: middle;
+    border-bottom: 1px solid var(--theme-brand-border-soft);
+  }
+}
+
+.tp__plugins__source-url {
+  word-break: break-all;
+}
+
+.tp__plugins__source-actions {
+  white-space: nowrap;
+}
+
+.tp__plugins__source-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+}
+
+.tp__plugins__source-enabled {
+  display: flex;
+  align-items: center;
+  gap: var(--margin-mini);
+}
+
+.tp__plugins__market-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--margin-small);
+  flex-shrink: 0;
+}
+
+.tp__plugins__market-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+}
+
+.tp__plugins__market-card {
+  flex-shrink: 0;
+}
+
+.tp__plugins__also-in {
+  padding: var(--margin-mini) var(--margin-small);
+  border-left: 3px solid var(--theme-brand-warning);
+  background: var(--theme-brand-surface-soft);
+}
+
+.tp__plugins__releases {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-micro);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tp__plugins__release {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--margin-small);
+
+  &--incompatible {
+    opacity: 0.7;
+  }
+
+  // The radio and its version on one line: the global form styles stack them.
+  > label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--margin-micro);
+    margin: 0;
+
+    input[type="radio"] {
+      width: auto;
+      margin: 0;
+    }
+  }
+}
+
+.tp__plugins__changelog {
+  white-space: pre-wrap;
+}
+
+.tp__plugins__market-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+// A row of chips, optionally led by a label.
+.tp__plugins__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--margin-micro);
+}
+
+// Update badge, policy selector, global update settings and the boot report.
+.tp__plugins__update-candidate {
+  .tp__plugins__update-blockers {
+    flex-basis: 100%;
+    margin: 0;
+    padding-left: var(--margin-normal);
+  }
+
+  .tp__plugins__update-changelog {
+    flex-basis: 100%;
+
+    pre {
+      white-space: pre-wrap;
+    }
+  }
+}
+
+.tp__plugins__update-policy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--margin-mini);
+}
+
+.tp__plugins__update-panel {
+  flex-shrink: 0;
+}
+
+.tp__plugins__update-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-small);
+
+  fieldset {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--margin-small);
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+}
+
+.tp__plugins__boot-entries {
+  margin: 0;
+  padding-left: var(--margin-normal);
 }

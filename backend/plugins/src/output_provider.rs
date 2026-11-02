@@ -1,4 +1,4 @@
-//! `type: plugin` target outputs (plan §7 *Output providers*):
+//! `type: plugin` target outputs:
 //! `begin-output -> render-batch… -> finish-output`, written to a temp file
 //! and renamed; a failure fails only that output.
 //!

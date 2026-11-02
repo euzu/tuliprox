@@ -40,6 +40,7 @@ fn load_fixture() -> Option<PluginSystem> {
         priority: 0,
         settings: Map::new(),
         settings_version: 1,
+        update_policy: shared::model::PluginUpdatePolicy::Auto,
     };
     let config = PluginsConfig {
         enabled: true,

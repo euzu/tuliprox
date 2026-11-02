@@ -1,4 +1,4 @@
-//! The per-plugin KV store over `tuliprox-btree` (plan §18 Q10).
+//! The per-plugin KV store over `tuliprox-btree`.
 //!
 //! One file per plugin, `<data_dir>/<id>/kv.db`, a `BPlusTree<String, Vec<u8>>`
 //! behind one mutex-guarded handle that all of the plugin's instances share. It

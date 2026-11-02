@@ -1,7 +1,5 @@
 //! `GET /api/v1/plugins/ui`, the plugin UI frame files under
-//! `/plugins/{id}/ui/{path…}` with the frame CSP, and `/plugins/{id}/ui/_sdk/bridge.js`
-//! (plan §9 *UI trust boundary*, §11 *Sandboxed-frame bridge*, §18 *W6b seam
-//! freeze* "Frame serving"). W6b lane R.
+//! `/plugins/{id}/ui/{path…}` with the frame CSP, and `/plugins/{id}/ui/_sdk/bridge.js`.
 //!
 //! The frame routes cannot require auth: an iframe `src` carries no token. They
 //! are safe because a plugin document runs in an opaque origin (the CSP carries

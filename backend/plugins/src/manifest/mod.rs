@@ -1,12 +1,12 @@
-//! `manifest.yml`: the typed plugin manifest (plan §4) and its validation.
+//! `manifest.yml`: the typed plugin manifest and its validation.
 //!
 //! [`Manifest::parse`] reads the YAML, then checks every constraint of the
-//! plan's install-time validation that needs no other file, and reports **all**
+//! install-time validation that needs no other file, and reports **all**
 //! problems in one `TuliproxError::Plugin`. Checks that need the package
 //! (`plugin.wasm` exports, `config-schema.json`, locale files) belong to the
-//! loader; [`Manifest::parse`] never reads files (`package` does, for steps 4-6 of
-//! the validation, at upload and at load). Unknown keys are ignored so a manifest
-//! written for a later phase still loads.
+//! loader; [`Manifest::parse`] never reads files (`package` does, for the package-level
+//! validation, at upload and at load). Unknown keys are ignored, so a manifest
+//! with keys this host does not know still loads.
 //!
 //! The model lands ahead of the loader that consumes every field, hence the
 //! module-wide `dead_code` allowance.
@@ -315,7 +315,7 @@ impl Manifest {
         })
     }
 
-    /// The hooks the playlist pipeline can run today, as the shared host seam
+    /// The hooks the playlist pipeline can run, as the shared host interface
     /// names them. Ids without a pipeline stage are validated but not listed.
     pub(crate) fn pipeline_hooks(&self) -> Vec<PluginHook> {
         let mut hooks = Vec::new();

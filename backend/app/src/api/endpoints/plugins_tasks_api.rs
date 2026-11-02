@@ -1,5 +1,4 @@
-//! `POST /api/v1/plugins/{id}/tasks/{task}/run` (plan §10, §7 *Scheduled
-//! plugin tasks*), under `SystemWrite`: run a task now and answer its
+//! `POST /api/v1/plugins/{id}/tasks/{task}/run`, under `SystemWrite`: run a task now and answer its
 //! `PluginTaskRunDto`. Never exposed through MCP.
 //!
 //! `200` carries the run, including a run that failed (`error` set). `404` is

@@ -1,5 +1,4 @@
-//! Scheduler fires and manual runs of plugin tasks (plan §7 *Scheduled plugin
-//! tasks*): the app side of `tuliprox_plugins` task runs, maintenance gate and
+//! Scheduler fires and manual runs of plugin tasks: the app side of `tuliprox_plugins` task runs, maintenance gate and
 //! the `scheduled_task.failed` publish.
 //!
 //! Works with and without the `plugins` feature: without it every run is
@@ -140,6 +139,7 @@ mod tests {
                 priority: 0,
                 settings: serde_json::Map::new(),
                 settings_version: 1,
+                update_policy: shared::model::PluginUpdatePolicy::Auto,
             }],
             ..PluginsConfig::default()
         };

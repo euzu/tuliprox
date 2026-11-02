@@ -1,5 +1,4 @@
-//! Session-edge header injection (plan §7 *Session-edge header injection*,
-//! §9 *Session-edge containment*): `inject-upstream-headers` under a 50 ms
+//! Session-edge header injection: `inject-upstream-headers` under a 50 ms
 //! clamp, a TTL cache per (plugin, user, channel), a header denylist,
 //! fail-open.
 //!
@@ -31,7 +30,7 @@ use std::{
 use tuliprox_core::model::PluginsConfig;
 use tuliprox_plugin_api::bindings::exports::tuliprox::plugin::stream_hooks::UpstreamRequest;
 
-/// The hard clamp of the whole injection step (plan §9).
+/// The hard clamp of the whole injection step.
 const HEADER_CLAMP: Duration = Duration::from_millis(50);
 
 /// Cached (plugin, user, channel) entries at most. A full cache evicts the

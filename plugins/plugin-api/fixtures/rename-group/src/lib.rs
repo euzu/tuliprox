@@ -1,6 +1,6 @@
-//! Phase S fixture: renames the group `News` to `Plugin News` in `after-filter`.
+//! Fixture: renames the group `News` to `Plugin News` in `after-filter`.
 //!
-//! Exercises the whole contract surface S needs: `lifecycle.init`, the sparse
+//! Exercises the contract surface the rename needs: `lifecycle.init`, the sparse
 //! `modified` result, handle echo, and a host `log` call.
 
 wit_bindgen::generate!({

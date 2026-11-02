@@ -1,6 +1,6 @@
 //! `eval-filter-batch`: index-aligned decision vectors for
 //! `plugin.<id>.<fn>(…)` filter terms, prepared before the synchronous filter
-//! evaluator runs (plan §7 *Filter-DSL extension*).
+//! evaluator runs.
 //!
 //! One call serves one term of one filter: the named plugin, the function name
 //! and the literal arguments. The plugin sees every item of the view, in

@@ -123,6 +123,23 @@ manifest's `resources:` can only ask for less.
 
 Each plugin entry in `plugins.plugins[]` also has `priority` (default 100, lower runs first).
 
+`plugins.repositories[]` lists the marketplace sources:
+
+```yaml
+plugins:
+  repositories:
+    - id: community
+      name: Community plugins
+      url: ${env:TP_MARKETPLACE_URL}   # the repository's marketplace.json
+      enabled: true
+```
+
+`id` follows the plugin id shape (lowercase letters, digits and `-`, 3 to 41 characters) and is unique. `name` and
+`url` must not be blank. `url` is the direct `https://` address of the repository's `marketplace.json`, and may be a
+`${env:VAR}` reference: the reference is what is stored and shown, the value is looked up when the source is used. Other
+schemes, an unset reference and a url that is not valid are config errors that name the source, at startup and on
+a config reload. `enabled` defaults to `true`. Removing a source leaves the plugins installed from it in place.
+
 ## Rpc and tasks
 
 - An rpc request body is at most 64 KiB. The result is at most 256 KiB. Rate is 10 per second with a burst of 20
@@ -165,3 +182,17 @@ normal operation. The
 check is: start the server twice on the same input and config with the same frozen clock, and compare the outputs
 byte for byte. `plugins/examples/hf-epg-matcher/demo/CHECKS.md` (Check 3) and
 `plugins/examples/sports-enricher/demo/CHECKS.md` (section 6) spell it out for two examples.
+
+For crash-recovery testing only, the environment variable `TULIPROX_PLUGIN_TEST_CRASH_AT=<stage>` aborts the process at a
+named stage of a package replacement (an approved update, a rollback, or a boot update): `journaled`, `prior_retained`,
+`pin_swapped`, `entered`, `reloaded`, `checked` or `committed`. The next start then recovers the plugin from its activation
+journal before plugins load. The server logs a WARN at start and right before it aborts when the variable is set. It is
+read from the environment only, and it is never for production.
+
+### Local test marketplace
+
+To try a marketplace on your machine, serve `marketplace.json` and the packages over plain HTTP on localhost and start
+the server with `TULIPROX_PLUGIN_MARKETPLACE_ALLOW_HTTP=1`. The variable is read on every fetch. It permits `http://`
+catalog and package URLs and local or loopback destinations, which are refused otherwise, and it logs a warning each
+time. It is for development only: do not set it in normal operation. See
+[Publishing to a Marketplace](marketplace-publishing.md) for the format.

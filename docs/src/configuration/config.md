@@ -804,6 +804,9 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 | `recording.rules.changed` | info | The recording rule set changed. |
 | `maintenance.changed` | warn | An input was put into or taken out of maintenance mode. |
 | `scheduled_task.failed` | error | A scheduled task could not complete. |
+| `plugin.update.available` | info | A plugin update is staged and waits for an admin. |
+| `plugin.update.applied` | info | A plugin was updated to a newer release. |
+| `plugin.update.failed` | warn | A plugin update was rejected or rolled back; the previous version still runs. |
 | `notification.dead_lettered` | error | A notification was permanently undeliverable and has been dropped. |
 | `user.created` | info | An API-proxy user account was created. |
 | `user.updated` | info | An API-proxy user account was changed. |

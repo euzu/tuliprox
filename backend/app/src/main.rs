@@ -31,6 +31,7 @@ extern crate pest;
 pub mod api;
 mod env_loader;
 mod mcp_stdio;
+mod seed;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
@@ -400,6 +401,12 @@ async fn main() {
             flush_syslog();
             return;
         }
+    }
+
+    // The Plugin Manager needs the `plugins:` section; the server adds a minimal one when it is missing.
+    #[cfg(feature = "plugins")]
+    if args.server {
+        seed::plugins::ensure_section(&config_paths.config_file_path).await;
     }
 
     let app_config = crate::config_loader::read_initial_app_config(&mut config_paths, true, true, args.server)

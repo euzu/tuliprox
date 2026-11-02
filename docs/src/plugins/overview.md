@@ -4,8 +4,11 @@ A plugin is a WebAssembly component that runs inside tuliprox. It can change pla
 inputs and outputs, send notifications, run scheduled work, expose settings and a sandboxed admin page, and
 answer calls from the web UI and MCP clients.
 
-Plugins are off by default. With `plugins.enabled: false` no plugin engine is created and the pipeline behaves as
-it does without the plugin system. The management API (`/api/v1/plugins`) is part of the web API, so it needs
+When the server starts and `config.yml` has no `plugins:` section, it appends a minimal one (`plugins: {enabled: true}`)
+so the Plugin Manager works. The section is added once as plain text; your comments and values stay as they are, and a
+section you wrote is never changed. Set `plugins.enabled: false` to turn the plugin system off: no plugin engine is
+created and the pipeline behaves as it does without the plugin system. If the file cannot be written (a read-only
+mount), the server logs a warning and starts with plugins off. The management API (`/api/v1/plugins`) is part of the web API, so it needs
 `web_ui.enabled: true`. To build and run a first plugin, start with the [Quickstart](./quickstart.md).
 
 ## What a plugin is
@@ -51,8 +54,9 @@ interfaces it implements. The file defines one world per hook interface (`playli
 `notifier-plugin` and so on, all including `base`), and one composite, `enricher-plugin`. The host does not assume a
 world: it binds each interface by name and finds the exports when it loads the component.
 
-Each hook id in `hooks:` maps to exactly one interface. There are 27 hook ids. [Hook Reference](./hooks.md) lists
-them with their timing and their requirements.
+Each supported hook id in `hooks:` maps to exactly one interface. The contract defines 28 hook ids; 27 are currently
+supported. A manifest that declares the reserved `epg.resolve-conflict` hook is rejected until its host integration is
+implemented. [Hook Reference](./hooks.md) lists the hooks with their timing and requirements.
 
 Capabilities are the permissions an admin grants. The manifest names them under `capabilities:`:
 `network`, `storage`, `epg_write`, `image_cache`, `notifications` and `stream_headers`. Nothing is granted by

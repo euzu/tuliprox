@@ -4,13 +4,15 @@
 //! keeps every plugin's lifecycle state in a hot-reloaded registry, runs guests
 //! under an epoch deadline, a memory limit and a global memory budget, gives
 //! them the `host` functions and outbound HTTP through the dedicated plugin
-//! client, and implements [`shared::model::PluginHost`], the seam the playlist
+//! client, and implements [`shared::model::PluginHost`], the interface the playlist
 //! pipeline is generic over.
 //!
 //! The contract a plugin is written against lives in `tuliprox-plugin-api`.
 #![recursion_limit = "256"]
 
+mod activation;
 mod api;
+mod boot_update;
 mod convert;
 mod convert_epg;
 mod dispatch;
@@ -26,6 +28,7 @@ mod install;
 mod kv;
 mod logs;
 mod manifest;
+mod marketplace;
 mod mcp_tools;
 mod metrics;
 mod migration;
@@ -41,6 +44,17 @@ mod system;
 mod tasks;
 mod ui_assets;
 
+pub use activation::{
+    crash_knob, inject_test_crash, recover_activations, ActivationKind, ActivationStage, RecoveredActivation,
+    RecoveryOutcome, ENV_PLUGIN_TEST_CRASH_AT,
+};
+pub use boot_update::{boot_report_path, read_boot_report, record_recovered, run_boot_update};
+pub use install::{ActivatedUpdate, InstallGuard, InstallRejection, MarketplaceExpect};
+pub use marketplace::{
+    browse, fetch_package, has_catalog, remove_cache, resolve_release, source_info, source_warnings, sync_source,
+    Blocker, Eligibility, FetchPolicy, MarketplaceError, ReleaseLookup, ResolvedRelease, UpdateCandidate,
+    CATALOG_MAX_BYTES, PACKAGE_MAX_BYTES,
+};
 pub use mcp_tools::{PluginMcpTool, PluginMcpToolKind};
 pub use migration::MigratedSettings;
 pub use state::{HostClock, PluginServices, SealResourceUrl};

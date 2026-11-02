@@ -1,4 +1,4 @@
-//! REST client for the plugin UI: contributions, locales, rpc, metrics. W6b lane U.
+//! REST client for the plugin UI: contributions, locales, rpc, metrics.
 use crate::{
     error::{Error, ErrorInfo},
     services::{get_base_href, request_get, request_raw},
@@ -111,8 +111,8 @@ impl PluginUiService {
         request_get(&format!("{}/ui", self.plugins_path), None, None).await.map(Option::unwrap_or_default)
     }
 
-    /// `GET /api/v1/plugins/metrics`. The route belongs to the metrics wave and
-    /// may not exist: every failure is an empty list.
+    /// `GET /api/v1/plugins/metrics`. The route may not exist on every server:
+    /// every failure is an empty list.
     pub async fn metrics(&self) -> Vec<PluginMetricDto> {
         request_get(&format!("{}/metrics", self.plugins_path), None, None).await.ok().flatten().unwrap_or_default()
     }

@@ -10,8 +10,7 @@ use std::{
 ///
 /// Only the syntax is checked here. Plugins load after the config, so whether
 /// `<id>` names an enabled plugin that runs the hook is validated against the
-/// registry right after plugin load (plan §18 *W5 seam freeze*,
-/// `ConfigTarget::plugin_refs`).
+/// registry right after plugin load (see `ConfigTarget::plugin_refs`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginRef(String);
 

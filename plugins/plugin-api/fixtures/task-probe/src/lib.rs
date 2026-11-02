@@ -1,4 +1,4 @@
-//! W6a fixture: scheduled tasks.
+//! Fixture: scheduled tasks.
 //!
 //! * `ok`: increments the KV key `count` and returns `ok <n>`, so a test sees
 //!   that KV survives between runs (each run is a new instance) and that the

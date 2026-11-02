@@ -1,4 +1,4 @@
-//! W6a fixture: the session-edge and dashboard-metrics hooks, driven by the
+//! Fixture: the session-edge and dashboard-metrics hooks, driven by the
 //! plugin's settings.
 //!
 //! * `inject-upstream-headers` answers `X-Edge-Probe: 1` and

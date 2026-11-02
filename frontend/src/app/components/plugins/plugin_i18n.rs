@@ -1,5 +1,4 @@
-//! Plugin locale maps: loading, the exact → language → `en` fallback, `t()`
-//! (plan §11 *Plugin UI i18n*). W6b lane U.
+//! Plugin locale maps: loading, the exact → language → `en` fallback, `t()`.
 //!
 //! A plugin ships flat string maps at `ui/locales/<lang>.json`. The host loads
 //! the maps for the active locale, and uses them for contribution `title_key`s,

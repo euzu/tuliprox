@@ -1,5 +1,5 @@
 //! EPG record conversions: `shared::model::EpgProgramme` /
-//! `PluginEpgChannel` <-> the WIT `epg-types` records (plan §5 `epg-types`).
+//! `PluginEpgChannel` <-> the WIT `epg-types` records .
 //!
 //! The channel id of an `EpgProgramme` is transient host-side (`#[serde(skip)]`,
 //! private). It goes to the guest as `epg-programme.channel` and is

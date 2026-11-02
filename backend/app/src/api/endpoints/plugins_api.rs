@@ -1,7 +1,9 @@
-//! Plugin management API (plan §10): the list, stats, settings, tasks and logs
+//! Plugin management API: the list, stats, settings, tasks and logs
 //! of the installed plugins under `SystemRead`, and under `SystemWrite` the
 //! settings `PUT` (`plugins_settings_api`) and upload, approve, enable, disable
-//! and uninstall (`plugins_install_api`).
+//! and uninstall (`plugins_install_api`). The marketplace sources and catalog
+//! (`plugins_marketplace_api`) read under `SystemRead` and change under
+//! `SystemWrite`.
 //!
 //! Plugins off (`plugins.enabled: false`, or a build without the `plugins`
 //! feature) answers the list with `[]` and every id route with `404`.
@@ -9,8 +11,12 @@
 #[cfg(feature = "plugins")]
 use super::plugins_settings_api::read_plugin_settings;
 use super::{
-    plugins_install_api::install_routes, plugins_metrics_api::get_plugins_metrics,
-    plugins_settings_api::put_plugin_settings, plugins_tasks_api::post_plugin_task_run,
+    plugins_install_api::install_routes,
+    plugins_marketplace_api::{marketplace_read_routes, marketplace_write_routes},
+    plugins_metrics_api::get_plugins_metrics,
+    plugins_settings_api::put_plugin_settings,
+    plugins_tasks_api::post_plugin_task_run,
+    plugins_updates_api::{updates_read_routes, updates_write_routes},
 };
 use crate::api::{auth_middleware::permission_layer, model::AppState};
 #[cfg(feature = "plugins")]
@@ -33,6 +39,8 @@ fn routes() -> Router<Arc<AppState>> {
         .route("/plugins/{id}/settings", get(get_plugin_settings))
         .route("/plugins/{id}/tasks", get(get_plugin_tasks))
         .route("/plugins/{id}/logs", get(get_plugin_logs))
+        .merge(marketplace_read_routes())
+        .merge(updates_read_routes())
 }
 
 fn write_routes() -> Router<Arc<AppState>> {
@@ -40,6 +48,8 @@ fn write_routes() -> Router<Arc<AppState>> {
         .route("/plugins/{id}/settings", put(put_plugin_settings))
         .route("/plugins/{id}/tasks/{task}/run", post(post_plugin_task_run))
         .merge(install_routes())
+        .merge(marketplace_write_routes())
+        .merge(updates_write_routes())
 }
 
 pub fn plugins_api_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
@@ -71,7 +81,7 @@ async fn get_plugin_settings(State(app_state): State<Arc<AppState>>, Path(id): P
     let Some(plugins) = app_state.plugins.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    // As written, so a `${env:VAR}` value shows as the reference (plan §9 *Returning*).
+    // As written, so a `${env:VAR}` value shows as the reference.
     match super::plugins_settings_api::written_plugins_config(&app_state.app_config).await {
         // The schema files are read on the blocking pool.
         Ok(config) => found(read_plugin_settings(plugins, id, Some(Arc::new(config))).await),
@@ -152,7 +162,7 @@ mod tests {
             let system = create_test_plugin_system(dir.path());
             let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
             let app_state = create_test_app_state_with_plugins(config, Some(system));
-            // The settings GET reads `config.yml` as written (W8), so the test needs one.
+            // The settings GET reads `config.yml` as written, so the test needs one.
             let config_file = dir.path().join("config.yml");
             std::fs::write(&config_file, "api:\n  host: 127.0.0.1\n  port: 8901\n").unwrap();
             let mut paths = (**app_state.app_config.paths.load()).clone();

@@ -76,6 +76,7 @@ pub fn stage(entry: Option<bool>) -> Option<Staged> {
             priority: 0,
             settings: Map::new(),
             settings_version: 1,
+            update_policy: shared::model::PluginUpdatePolicy::Auto,
         })
         .into_iter()
         .collect();

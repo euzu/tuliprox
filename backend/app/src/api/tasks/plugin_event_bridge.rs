@@ -1,5 +1,4 @@
-//! Bridges the in-process event bus onto plugins exporting `on-event` (plan §7
-//! *Event queue*, §14), modelled on `notification_bridge.rs`: one
+//! Bridges the in-process event bus onto plugins exporting `on-event`, modelled on `notification_bridge.rs`: one
 //! `subscribe_filtered` over the union of the loaded plugins' `events:`
 //! masks, `Lagged` survived and reported through `record_lag`, the mask
 //! rebuilt on every registry change.

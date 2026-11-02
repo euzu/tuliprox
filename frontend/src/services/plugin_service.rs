@@ -7,9 +7,11 @@ use js_sys::encode_uri_component;
 use serde::de::DeserializeOwned;
 use shared::{
     model::{
-        PluginApproveDto, PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginSettingsDto,
-        PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto,
-        PluginUploadErrorDto, PluginUploadReviewDto,
+        MarketplaceDto, MarketplaceInstallDto, MarketplaceQueryDto, PluginApproveDto, PluginBootReportDto,
+        PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginRepositoryDto, PluginRepositoryInfoDto,
+        PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto, PluginSummaryDto,
+        PluginTaskDto, PluginUpdatePolicy, PluginUpdatePolicyDto, PluginUpdateRequestDto, PluginUpdateResultDto,
+        PluginUpdateSettingsDto, PluginUpdatesDto, PluginUploadErrorDto, PluginUploadReviewDto,
     },
     utils::{concat_path, concat_path_leading_slash},
 };
@@ -94,6 +96,13 @@ fn decode_action<T: DeserializeOwned>(response: &RawResponse) -> Result<T, Plugi
 }
 
 impl PluginService {
+    fn repositories_path(&self) -> String { concat_path(&self.plugins_path, "repositories") }
+
+    /// `…/repositories/{id}` plus `suffix`.
+    fn repository_path(&self, id: &str, suffix: &str) -> String {
+        concat_path(&self.repositories_path(), &format!("{}{suffix}", encode_path_segment(id)))
+    }
+
     pub fn new() -> Self {
         let base_href = get_base_href();
         Self { plugins_path: concat_path_leading_slash(&base_href, "api/v1/plugins") }
@@ -191,6 +200,155 @@ impl PluginService {
             200..=299 => Ok(()),
             status => Err(action_error(status, &response.body)),
         }
+    }
+
+    /// `GET …/repositories`: every configured marketplace source with its sync state.
+    pub async fn list_repositories(&self) -> Result<Vec<PluginRepositoryInfoDto>, Error> {
+        request_get(&self.repositories_path(), None, None).await.map(Option::unwrap_or_default)
+    }
+
+    /// `POST …/repositories`: add a source (`422` on validation, `409` on a duplicate id).
+    pub async fn add_repository(
+        &self,
+        repository: &PluginRepositoryDto,
+    ) -> Result<PluginRepositoryInfoDto, PluginActionError> {
+        let payload =
+            serde_json::to_string(repository).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
+        let response = request_raw(Request::post(&self.repositories_path()), Some(payload))
+            .await
+            .map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `PUT …/repositories/{id}`: replace a source; the body id must equal `id`.
+    pub async fn update_repository(
+        &self,
+        id: &str,
+        repository: &PluginRepositoryDto,
+    ) -> Result<PluginRepositoryInfoDto, PluginActionError> {
+        let payload =
+            serde_json::to_string(repository).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
+        let response = request_raw(Request::put(&self.repository_path(id, "")), Some(payload))
+            .await
+            .map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `DELETE …/repositories/{id}`: drop the source and its cache; installed plugins stay.
+    pub async fn remove_repository(&self, id: &str) -> Result<(), PluginActionError> {
+        let response = request_raw(Request::delete(&self.repository_path(id, "")), None)
+            .await
+            .map_err(|err| PluginActionError::transport(&err))?;
+        match response.status {
+            200..=299 => Ok(()),
+            status => Err(action_error(status, &response.body)),
+        }
+    }
+
+    /// `POST …/repositories/{id}/sync`: fetch the catalog now (`502` when the fetch fails).
+    pub async fn sync_repository(&self, id: &str) -> Result<PluginRepositoryInfoDto, PluginActionError> {
+        let response = request_raw(Request::post(&self.repository_path(id, "/sync")), None)
+            .await
+            .map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `GET …/marketplace`: the plugins of every enabled source. Only the set filters are sent.
+    pub async fn marketplace(&self, query: &MarketplaceQueryDto) -> Result<MarketplaceDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, "marketplace");
+        let params = [("q", &query.q), ("category", &query.category), ("source", &query.source)]
+            .into_iter()
+            .filter_map(|(name, value)| {
+                value
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!("{name}={}", encode_path_segment(value)))
+            })
+            .collect::<Vec<_>>();
+        let url = if params.is_empty() { url } else { format!("{url}?{}", params.join("&")) };
+        let response = request_raw(Request::get(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `POST …/marketplace/install`: download a release into staging and get its review. Nothing
+    /// is installed until [`PluginService::approve`]. `404`, `409`, `413`, `422` and `502` carry a reason.
+    pub async fn marketplace_install(
+        &self,
+        request: &MarketplaceInstallDto,
+    ) -> Result<PluginUploadReviewDto, PluginActionError> {
+        let payload = serde_json::to_string(request).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
+        let url = concat_path(&self.plugins_path, "marketplace/install");
+        let response =
+            request_raw(Request::post(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `GET …/updates`: the newer releases of installed marketplace plugins, from the cached catalogs.
+    pub async fn updates(&self) -> Result<PluginUpdatesDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, "updates");
+        let response = request_raw(Request::get(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `POST …/updates/check`: sync the sources of installed marketplace plugins, then list the updates.
+    pub async fn check_updates(&self) -> Result<PluginUpdatesDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, "updates/check");
+        let response =
+            request_raw(Request::post(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `POST …/{id}/update`: stage a release and, with `apply` and an eligible package, activate it.
+    pub async fn update(
+        &self,
+        id: &str,
+        request: &PluginUpdateRequestDto,
+    ) -> Result<PluginUpdateResultDto, PluginActionError> {
+        let payload = serde_json::to_string(request).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
+        let url = concat_path(&self.plugins_path, &format!("{}/update", encode_path_segment(id)));
+        let response =
+            request_raw(Request::post(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `PUT …/{id}/update-policy`.
+    pub async fn set_update_policy(&self, id: &str, policy: PluginUpdatePolicy) -> Result<(), PluginActionError> {
+        let payload = serde_json::to_string(&PluginUpdatePolicyDto { policy })
+            .map_err(|_| PluginActionError::transport(&Error::RequestError))?;
+        let url = concat_path(&self.plugins_path, &format!("{}/update-policy", encode_path_segment(id)));
+        let response =
+            request_raw(Request::put(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
+        match response.status {
+            200..=299 => Ok(()),
+            status => Err(action_error(status, &response.body)),
+        }
+    }
+
+    /// `GET …/updates/settings`: the global update fields as written.
+    pub async fn update_settings(&self) -> Result<PluginUpdateSettingsDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, "updates/settings");
+        let response = request_raw(Request::get(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
+    }
+
+    /// `PUT …/updates/settings` (`422` when the budget is not a duration with a unit).
+    pub async fn save_update_settings(&self, settings: &PluginUpdateSettingsDto) -> Result<(), PluginActionError> {
+        let payload =
+            serde_json::to_string(settings).map_err(|_| PluginActionError::transport(&Error::RequestError))?;
+        let url = concat_path(&self.plugins_path, "updates/settings");
+        let response =
+            request_raw(Request::put(&url), Some(payload)).await.map_err(|err| PluginActionError::transport(&err))?;
+        match response.status {
+            200..=299 => Ok(()),
+            status => Err(action_error(status, &response.body)),
+        }
+    }
+
+    /// `GET …/updates/boot-report`: what the last boot update run did.
+    pub async fn boot_report(&self) -> Result<PluginBootReportDto, PluginActionError> {
+        let url = concat_path(&self.plugins_path, "updates/boot-report");
+        let response = request_raw(Request::get(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
+        decode_action(&response)
     }
 
     pub async fn get_tasks(&self, id: &str) -> Result<Vec<PluginTaskDto>, Error> {

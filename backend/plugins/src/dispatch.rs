@@ -1,5 +1,4 @@
-//! The hook dispatcher (plan §3 *Key structural decisions*, §7 *Dispatcher*,
-//! §18 *W4 seam freeze*).
+//! The hook dispatcher.
 //!
 //! One hook call runs every enabled plugin that exports the hook, in
 //! (priority, id) order, each over the items the one before it left: plugin B
@@ -72,7 +71,7 @@ enum Guest {
 /// Dispatches over one registry snapshot, so a reload mid-run never mixes two
 /// plugin sets in one hook call.
 ///
-/// The W5 hook families (`strategy.rs`, `filter_batch.rs`, `epg_hooks.rs`)
+/// The hook families (`strategy.rs`, `filter_batch.rs`, `epg_hooks.rs`)
 /// build on the same pieces as [`HookDispatcher::run`]: [`Self::runnable`] /
 /// [`Self::named`] to pick plugins, [`Self::open`] for a fresh initialized
 /// instance, then per guest call

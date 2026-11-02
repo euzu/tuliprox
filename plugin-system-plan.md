@@ -246,7 +246,7 @@ hooks:                         # must match the wasm component's exports (table 
   - epg.enrich-programmes
   - epg.match-channel
   - epg.transform-programmes   # global per-source programme transform
-  - epg.resolve-conflict       # EPG merge conflict resolution
+  - epg.resolve-conflict       # EPG merge conflict resolution — *rejected at validation since upstream 9d9f9470 ("not supported yet", v1.x)*
   - events.on-event            # lifecycle events; which ones is `events:` below
   - metrics.collect            # contribute metrics to the dashboard stats cards
   - tasks.run                  # scheduled background work (see tasks: below)
@@ -2231,8 +2231,9 @@ For contributions backed by `ui/`:
   manifest `element:` field names the entry document instead of a custom-element
   tag (`ui/sports-guide.html`). Authors may still use custom elements *inside*
   their own frame.
-- The frame loads a tiny host-provided client (`/plugins/_sdk/bridge.js`,
-  served by tuliprox) that exposes a `tuliprox` object built on
+- The frame loads a tiny host-provided client (`/plugins/{id}/ui/_sdk/bridge.js`,
+  served by tuliprox; *upstream 9d9f9470 moved it from `/plugins/_sdk/bridge.js`,
+  and packages may not ship `ui/_sdk/`*) that exposes a `tuliprox` object built on
   `parent.postMessage`: `{ pluginId, locale, theme, context, rpc(method,
   payload), toast(severity, message), t(key, params?), resize(height) }`.
   - `rpc` is a request/response pair with correlation ids. The **parent**
@@ -2474,7 +2475,7 @@ active-stream tracker, and a bespoke websocket channel for log tailing.
 | `frontend/src/app/components/plugins/plugin_slot.rs` | extension-slot component; mounts `plugin_frame` per contribution |
 | `frontend/src/app/components/plugins/plugin_logs.rs` | per-plugin log viewer (filter, search, live websocket tail) |
 | `frontend/src/app/components/plugins/plugin_frame.rs` | sandboxed-iframe host + parent-side `postMessage` bridge (source check, closed message set, rpc proxy, rate limits) — rev 4 |
-| `backend/app/…/plugins_ui_assets` + `/plugins/_sdk/bridge.js` | frame CSP headers and the host-provided frame-side bridge client |
+| `backend/app/…/plugins_ui_assets` + `/plugins/{id}/ui/_sdk/bridge.js` *(upstream 9d9f9470; was `/plugins/_sdk/bridge.js`)* | frame CSP headers and the host-provided frame-side bridge client |
 | `frontend/src/app/components/plugins/plugin_i18n.rs` | plugin locale file loading, fallback chain, `t()` resolution for titles/schema/metrics |
 | `frontend/src/services/plugin_service.rs` | REST client for §10 endpoints |
 | `frontend/src/model/plugins.rs` | DTOs: manifest summary, state, stats, contributions |
@@ -2820,7 +2821,7 @@ critical code stays in the core.
 4. **Frontend-side WASM plugins** — v1 uses JS in sandboxed frames for custom UI;
    a later version could allow Yew-compatible WASM UI plugins, but there is no
    stable ABI for that today. Revisit post-v1.
-5. **Marketplace/registry** — out of scope; directory drop + upload only.
+5. **Marketplace/registry** — ~~out of scope; directory drop + upload only.~~ *Superseded by rev 4.3:* a repository marketplace is Phase 9 (W9), boot updates Phase 10; see §1 *Post-v1 marketplace direction* and §18 *W9 seam freeze*.
 6. **`InputType` / `TargetType` variants.** Both are closed `EnumString` + serde
    enums, and `TargetType::capabilities()` is an exhaustive table by design.
    Rev 4 adds a cost: `InputType` derives `Copy`, `Default`, `EnumIter`,
@@ -2973,6 +2974,12 @@ critical code stays in the core.
     > `on-event`. A later `probe-hooks` interface with its own world is purely
     > additive. `probe-result`, `probe-outcome` and the `events.stream-probe` id
     > are gone.
+15. **Scheduled update checks** *(W10)*. Phase 10 checks for plugin updates on
+    demand and once per boot only. Should a scheduler-driven check (a built-in
+    `ScheduleTaskType`, cron in `plugins:`) exist, and should it only report
+    (`plugin.update.available`) or also apply eligible updates outside boot?
+    Applying at runtime would cancel running plugin tasks on each reload, so a
+    report-only check is the likely answer.
 
 ### WIT freeze: `base` + `playlist-plugin` *(W0 memo, **approved 2026-10-30**)*
 
@@ -3701,3 +3708,319 @@ enabled entry with no pin) is unchanged and still undecided (W7 item (e)).
 - Orchestrator: the WIT, `plugin-api/src/lib.rs`, `plugins_dto.rs`, the locale
   JSONs, `bin/build_plugin_fixture.sh`, every §19.6 hot-spot, and every
   `registry.rs` edit D needs (D describes them).
+
+### W9 seam freeze *(2026-11-01, orchestrator `claude-opus-5-5`; on `plugin-w9`, lanes start from it)*
+
+Phase 9 only (Phase 10 is out of scope; 8.1, 8.2 and 8.4 stay deferred). BASE
+`f9ec1ffd` = upstream merge `9d9f9470` + an example-lockfile refresh. The seam
+commit on `plugin-w9` carries the shared DTOs, the runtime repository type and
+this section. `plugin` is merged upstream, so it is never rewritten: W9 lands as
+ordinary commits.
+
+**Re-anchor facts (W9).** `install.rs`: `api_upload` → `upload_blocking`
+extracts into a fresh dir under `<data_dir>/staging`, reads the manifest id,
+**then** replaces `staging/<id>` and validates; `review_of` adds `replaces` and
+`capabilityDiff` for an installed id. `approve_blocking` re-validates and
+re-hashes, compares `wasmSha256` and the capability names, writes the
+`ApprovalPin` (`registry.rs`, `approvals.json`) and either installs or runs the
+W8 replacement (`begin_replacement` / `check_replacement` /
+`finish_replacement`, prior kept in `plugins-prev/<id>` with its pin in
+`prev.json`; `swap_pin` / `restore_pin` move whole pins). The upload cap is
+`UPLOAD_LIMIT_BYTES` = 32 MiB (`plugins_install_api.rs`); extraction is capped
+at 512 entries / 64 MiB total / 32 MiB per entry. Mutating routes take the
+install lock, then the `config.yml` write lock, and run `detached`.
+`written_plugins_config` reads `config.yml` with `resolve_env: false`;
+`persist_entry_in` is the as-written read → change → `save_main_config` →
+runtime `rcu` pattern. Operator clients live in `AppState.http_clients`
+(`main_api.rs` builds them, `reload.rs` rebuilds them):
+`no_redirect` (proxy-aware, no destination policy) and
+`resource_public_no_redirect` (proxy-aware, `ResourceDestinationResolver`
+refuses `Blocked` at connect). `classify_resource_destination(host)`
+(`core/…/request/download.rs`) is the pre-connect classifier. Core's
+manual-redirect downloaders are text-only and accept `file://`, so the
+marketplace does not use them. `RequestFetchOptions::with_reject_https_downgrade`
+exists. Versions: `tuliprox::VERSION` (`CARGO_PKG_VERSION`, 3.3.175),
+`tuliprox_plugin_api::ABI_MAJOR` = 1. Upstream `9d9f9470` changed no W9 seam
+(history §2.6 *(upstream, 9d9f9470)*).
+
+**Catalog format (`marketplace.json`, `format_version: 1`).** At the
+repository root; a source is the direct HTTPS/raw URL of that file. The JSON
+Schema is `plugins/plugin-api/marketplace.schema.json` (published; lane F).
+
+```json
+{
+  "format_version": 1,
+  "name": "Example plugins",
+  "plugins": [{
+    "id": "sports-enricher", "name": "Sports Enricher",
+    "description": "…", "author": "…", "license": "MIT",
+    "category": "epg", "homepage": "https://…",
+    "releases": [{
+      "version": "1.2.0",
+      "package_url": "https://github.com/o/r/releases/download/v1.2.0/sports-enricher-1.2.0.tlpx",
+      "min_tuliprox_version": "3.3.0",
+      "plugin_api": 1,
+      "capabilities": ["network", "storage"],
+      "changelog": "…", "published": "2026-11-01"
+    }]
+  }]
+}
+```
+
+- Required: `format_version`, `plugins[].id` (plugin id shape), `name`,
+  `releases[].version` (semver), `package_url`, `plugin_api`. The rest is
+  optional. `capabilities` is informational; the review of the downloaded
+  package is what the admin approves.
+- No hash, checksum, signature or key field exists, and none is read. Unknown
+  fields are ignored at every level. `format_version` > 1 is a sync error
+  ("format_version N is newer than this Tuliprox understands (1)"); 0 or
+  missing is invalid.
+- A catalog-level problem (bad JSON, duplicate plugin id) fails the sync and
+  keeps the previous cache. An invalid plugin or release is skipped with a
+  warning collected into the sync result, so one bad entry does not hide the
+  rest.
+- **Compatibility:** installable iff `min_tuliprox_version` (absent = any) ≤
+  the running version and `plugin_api` == `ABI_MAJOR`. Otherwise listed with
+  `compatible: false` and a reason. Releases sort newest first, compatible
+  before incompatible.
+
+**Fetch policy (`marketplace/fetch.rs`).**
+- `https://` only for the catalog URL, the package URL and every redirect hop
+  (this subsumes the downgrade check), manual redirects (limit 5) on a
+  no-redirect client, no credentials sent. `file://` and every other scheme are
+  refused.
+- Caps: catalog body ≤ 2 MiB, package ≤ `UPLOAD_LIMIT_BYTES` (32 MiB), counted
+  while streaming, never preallocated from `Content-Length`. Timeouts: the
+  client's connect timeout plus a whole-fetch deadline (catalog 30 s, package
+  120 s).
+- Catalog: the admin-entered URL may point anywhere; fetched with
+  `http_clients.no_redirect`. Conditional `If-None-Match` /
+  `If-Modified-Since`; `304` keeps the cache and updates the sync time.
+- Package (catalog-supplied URL): every hop is classified with
+  `classify_resource_destination` and refused when `Blocked`; fetched with
+  `resource_public_no_redirect`, whose resolver closes the DNS-rebinding window.
+- `TULIPROX_PLUGIN_MARKETPLACE_ALLOW_HTTP=1` (env only,
+  `shared::model::ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP`): permits `http://` and
+  `Blocked` destinations for catalog and package URLs (package fetches then use
+  `no_redirect`), and logs a WARN at startup and on every fetch. Read once per
+  fetch, never cached in config, never surfaced in the UI or the operator docs
+  (developer page only).
+- No network at boot. A source syncs on `POST …/sync` only, or on the first
+  `GET …/marketplace` while its cache is empty (once per source per boot).
+
+**Cache.** `<data_dir>/marketplace/<source-id>.json` holds the raw catalog
+bytes' parsed form plus `{ etag, last_modified, last_sync, last_error,
+warnings }`, written atomically. Removing a source deletes its cache file,
+never an installed plugin. A cache whose source URL changed is discarded on the
+next sync.
+
+**Provenance.** `ApprovalPin` gains `origin: Option<{ source, version }>`
+(serde-default, omitted when `None`), so `approvals.json`, `swap_pin` /
+`restore_pin`, `prev.json` and rollback carry it with no new file. A
+marketplace install stages with a pending origin
+(`<data_dir>/staging/.origin/<id>.json`; `.origin` is not a valid id). An
+approve of a staged package moves the pending origin into the pin (none for a
+plain upload); a plain upload of the same id clears the pending origin; an
+approve of an installed `pending_approval` package (changed on disk) drops the
+origin. `PluginSummaryDto.origin` exposes it.
+
+**Install path.** `POST …/marketplace/install { source, id, version }`:
+source enabled and known (404), id and version in its cache (404), release
+compatible (409 with the reason), download (502 on a fetch error, 413 over the
+cap), then `PluginSystem::api_upload_from_marketplace(guard, bytes, expect)`:
+the existing extraction + validation, but the manifest id and version must
+equal the requested ones **before** `staging/<id>` is replaced (422
+otherwise, the existing staging and installation untouched). It answers the
+existing `PluginUploadReviewDto`; approve, enable and rollback are the existing
+routes. Nothing is auto-approved or auto-enabled. The request always names the
+source, so an id offered by several sources is unambiguous; the UI must not
+pick one silently.
+
+**Routes** (all `/api/v1`, under `plugins_api`'s permission pattern: reads
+`SystemRead`, mutations `SystemWrite`, none are MCP tools; `404` with plugins
+off):
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /plugins/repositories` | `Vec<PluginRepositoryInfoDto>` |
+| `POST /plugins/repositories` | add; body `PluginRepositoryDto`; 422 on validation, 409 on a duplicate id |
+| `PUT /plugins/repositories/{id}` | replace (id from the path; body id must match) |
+| `DELETE /plugins/repositories/{id}` | remove the config entry and its cache only |
+| `POST /plugins/repositories/{id}/sync` | fetch now; `PluginRepositoryInfoDto`, or 502 `PluginUploadErrorDto` with `last_error` stored |
+| `GET /plugins/marketplace?q=&category=&source=` | `MarketplaceDto` (enabled sources only) |
+| `POST /plugins/marketplace/install` | `MarketplaceInstallDto` → `PluginUploadReviewDto` |
+
+**Config.** `plugins.repositories: [{ id, name, url, enabled }]`
+(`PluginRepositoryDto`, `PluginRepository`; `url` may be `${env:VAR}`).
+Prepare: id shape and unique, name non-blank, the resolved url parses and is
+`https` (or `http` with the env knob). Route writes go through an as-written
+`config.yml` read (`written_plugins_config` pattern), change only
+`plugins.repositories`, `save_main_config`, then update the runtime config, so
+a config-file edit and a UI edit change the same list and no resolved value is
+written back. A config reload picks the list up. Responses show the url as
+written.
+
+**Lanes.** F format + fetch + cache + provenance (`backend/plugins/src/marketplace/*`,
+`install.rs` origin/expect, `registry.rs` `ApprovalPin.origin`, the JSON Schema,
+the publisher doc page); S sources config (shared + core Prepare/validation,
+app persistence helper `plugins_repositories_store.rs`); A APIs
+(`plugins_marketplace_api.rs`); U UI (`frontend/src/app/components/plugins/marketplace*.rs`,
+`plugin_service.rs` additions); D operator docs. Hot-spots stay with the
+orchestrator: `v1_api.rs`, `main_api.rs`, `plugins_api.rs` route merge, the
+i18n files, `SUMMARY.md`, the deps allowlist, the plan files.
+
+**W9 integration facts (2026-11-01).** Runtime `PluginRepository.url` holds
+the env-RESOLVED url (the config is loaded resolved), so every response that
+shows a url is built from `written_repositories` (500 if `config.yml` cannot be
+read, never the runtime list). `PluginsConfig::prepare` returns a `Result`: a
+source that fails `validate_repository` (resolved url not https, no knob) is a
+config error, so boot fails and a hot reload keeps the old config. Two
+pre-existing leaks of the env-resolved config were closed for the `plugins:`
+block: `save_config_main` and `GET /api/v1/config` (`get_config_common`) both
+restore `plugins.repositories` and `plugins.plugins` from `config.yml` as
+written (`restore_written_plugin_lists`); the per-plugin settings save is a
+separate route, so no config-page edit is lost. The rest of the config page
+still shows env-resolved values (upstream design, out of scope).
+`RESERVED_IDS` gained `repositories` and `marketplace`. The knob logs a WARN at
+startup (`plugin_state.rs`) and on every `FetchPolicy::from_env`.
+
+### W10 seam freeze *(2026-11-01, orchestrator `claude-opus-5-5`; uncommitted on `plugin-w10`, lanes apply it as a patch)*
+
+Phase 10 only (8.1, 8.2 and 8.4 stay deferred). BASE `c2018cea` (W9). The seam
+patch (`.git/w10-status/w10-seam.patch`) carries the config fields, the update
+DTOs, the three event kinds and this section.
+
+**Re-anchor facts (W10).**
+- `install.rs`: an update's approve runs `begin_replacement` → `FsSwap::prepare`
+  (sweeps this id's `.swap~…` leftovers, copies the current package to
+  `.swap~new~`, moves the old prior to `.swap~bak~`, the copy to
+  `plugins-prev/<id>`) → `swap_pin` → `FsSwap::enter` (staged → `.swap~in~`,
+  target → `.swap~old~`, incoming → target) → reload → `check_replacement`
+  (`activation_check` for an enabled entry, load-only otherwise) →
+  `finish_replacement` (`commit` deletes the aside and backup, `undo` restores).
+- **Not crash-safe at boot.** There is no journal or marker, and nothing at
+  startup looks for a half-done swap (`discover` skips dot dirs; only the next
+  `prepare` of the same id sweeps). A kill between `target → .swap~old~` and
+  `incoming → target` leaves no plugin dir, and the next `prepare` deletes the
+  only copy. `install_staged`'s `.incoming-`/`.old-` leftovers are never swept.
+  The rollback route writes the settings entry in a second `config.yml` write
+  after the swap.
+- **Reload vs in-flight work.** A hook run (`dispatch.rs`), an rpc call
+  (`rpc.rs::call_guest`) and an event delivery (`events.rs`, one snapshot per
+  event) each hold an `Arc<RegistrySnapshot>` and finish on the old in-memory
+  component; instances never read disk. A running **task** is raced against the
+  registry-wide `changes()` watch, so **any** reload cancels every running task
+  of every plugin (`Ended::Reloaded`, "cancelled by a plugin reload"). There is
+  no per-plugin in-flight counter or drain.
+- `ApprovalPin { wasm_sha256, capabilities, mcp: bool, origin }`;
+  `capability_diff(wanted, pin)` compares capability names only (plus
+  `mcp_was_approved`). `migrate_settings` records a failure in the registry
+  (`note_migration_failure`); there is no side-effect-free dry run.
+- Startup: `create_shared_data` → `load_validated_plugins` → … →
+  `exec_update_on_boot` (spawns processing) → event bridge, notifier,
+  `spawn_settings_migration` (`main_api.rs`). The event taxonomy had 43 kinds.
+
+**Config (seam).** `plugins.auto_update_on_boot: bool` (default `false`),
+`plugins.boot_update_budget` (duration with a unit, default `30s`, checked by
+the existing `check_duration`), and `plugins.plugins[].update_policy: auto |
+manual | pinned` (default `auto`, never written when `auto`;
+`PluginUpdatePolicy`). Runtime: `PluginsConfig.{auto_update_on_boot,
+boot_update_budget: Millis}`, `PluginEntry.update_policy`. Persisted as
+written (`written_plugins_config` / `persist_entry_in` pattern).
+
+**Candidates (K).** For every installed plugin whose pin has an `origin`:
+only the recorded source (configured and enabled; a removed or disabled source
+gives no candidate), the newest release that is semver-newer than the installed
+version and compatible (`format::compatibility`), and, when that release's
+catalog capabilities exceed the pin, also the newest such release whose catalog
+capabilities the pin covers *(integration amendment: otherwise an admin who
+declines the new capability could never reach the update that needs no
+review)*. The boot run prefers the covered one; the newest then waits for the
+next start. The same id in another source is ignored. Before the package is downloaded, eligibility is judged from the
+catalog (`verified: false`); after staging, from the real package (`verified:
+true`). The staging slot is one per id: an update never replaces a staged
+package that is not a marketplace update of the same plugin.
+
+**Eligibility (K).** An update is *eligible* when it has no blocker
+(`PluginUpdateBlockerDto`):
+- capabilities ⊆ the pin's capabilities (else `capabilities_added`);
+- if the pin has `mcp: true`, the release's MCP-exposed rpc exports ⊆ the
+  installed version's (else `mcp_exposure_widened`); the unattended path
+  carries the pin's `mcp` over;
+- settings-schema version equal, or higher and the release's
+  `settings.migrate` turns the stored (as-written) settings into JSON that
+  validates against the new schema, in a dry run that persists and records
+  nothing (else `settings_migration_missing` / `_failed`); lower is
+  `settings_version_downgrade`.
+The policy is not a blocker. **Boot** applies an update iff
+`auto_update_on_boot`, the entry is enabled, the policy is `auto` and the
+staged update is eligible. **"Update all eligible"** applies eligible updates
+whose policy is not `pinned`. A single manual "Update" works for every policy.
+Anything not applied stays staged ("awaiting approval"); the current version
+keeps running. Nothing installs or enables a plugin that is not already
+installed (and, at boot, enabled).
+
+**Activation (B).** The unattended path is `approve_blocking`'s replacement
+with the current pin's capabilities and `mcp`, the staged origin and the
+locally computed hash; the pin changes only when activation succeeds. Every
+replacement (approve, rollback, unattended) is **journaled**: before `prepare`,
+`<data_dir>/activation/<id>.json` records the id, from/to versions, the previous
+pin, the swap paths and the stage, written atomically and updated per stage;
+it is removed after `finish_replacement` commits. **Recovery** runs
+synchronously in `load_plugins` before the registry's first scan: for each
+journal it restores the prior package and pin (and the prior's backup), removes
+the incoming leftovers, sweeps `.swap~`/`.incoming-`/`.old-` leftovers, logs a
+WARN per plugin and reports the ids. **Crash knob**
+`TULIPROX_PLUGIN_TEST_CRASH_AT=<stage>` (env only, WARN at startup and before
+it aborts, `std::process::abort()`; stages named by B). **Drain:** because a
+reload cancels running tasks, the boot activation waits for zero running tasks
+(registry-wide), bounded by the remaining budget; a timeout skips the plugin
+until the next boot. Once a swap has started it runs to completion: the budget
+bounds check, download, stage and the drain wait, never a swap in progress.
+
+**Boot runner (B).** Spawned by the app after the plugins load (startup never
+waits): if `auto_update_on_boot`, sync only the sources of eligible-policy
+installed plugins, then check → download → stage → evaluate → activate, all
+under `boot_update_budget`. Failures, an unreachable source and a budget
+overrun keep the current package, are logged and written to
+`<data_dir>/marketplace/.boot-report.json` (`PluginBootReportDto`; the dot keeps it apart from `<source-id>.json` caches); the next
+boot retries, nothing retries within a run. The recovery result is in the same
+report.
+
+**Events (seam).** `EventMessage::PluginUpdate(PluginUpdateEvent { outcome,
+plugin, from, to, source, reason })` → `plugin.update.available` (staged for an
+admin by the boot run), `plugin.update.applied`, `plugin.update.failed`
+(`SystemRead`, notifiable, not on the websocket). 46 kinds, 18 bits of mask
+headroom. Emitted by the boot runner's app glue and by `POST …/{id}/update`.
+
+**Routes (P)**, `/api/v1`, reads `SystemRead`, mutations `SystemWrite`, none MCP:
+
+| Method & path | Purpose |
+| --- | --- |
+| `POST /plugins/updates/check` | sync only the sources of installed marketplace plugins → `PluginUpdatesDto` |
+| `GET /plugins/updates` | candidates from the cached catalogs → `PluginUpdatesDto` |
+| `GET` / `PUT /plugins/updates/settings` | `PluginUpdateSettingsDto` (global fields, as written) |
+| `GET /plugins/updates/boot-report` | `PluginBootReportDto` |
+| `POST /plugins/{id}/update` | `PluginUpdateRequestDto { version, apply }` → `PluginUpdateResultDto` (stage; with `apply` and eligible, activate) |
+| `PUT /plugins/{id}/update-policy` | `PluginUpdatePolicyDto` |
+
+`RESERVED_IDS` (`install.rs`) gains `updates` in the seam, so `/plugins/updates` never collides with `/plugins/{id}`.
+
+**Ownership (W10).**
+- K: `backend/plugins/src/marketplace/updates.rs` (new), `marketplace/mod.rs`,
+  `migration.rs` (the dry run), tests `backend/plugins/tests/updates.rs`.
+- B: `install.rs` (+ `install/*`), `tasks.rs` (running-task count), new
+  `backend/plugins/src/activation.rs` and `backend/plugins/src/boot_update.rs`,
+  `app_state/plugin_state.rs` (recovery before the scan, the knob WARN), new
+  `backend/app/src/api/tasks/plugin_boot_update.rs`, tests
+  `backend/plugins/tests/{activation,boot_update}.rs`.
+- P: new `backend/app/src/api/endpoints/plugins_updates_api.rs`, the
+  persistence helpers in it.
+- U: `plugins_view.rs`, new `frontend/src/app/components/plugins/plugin_updates.rs`,
+  `plugin_upload.rs` (review of a staged update), `plugin_service.rs`,
+  `config/plugin_config.rs`.
+- D: `docs/src/plugins/marketplace.md`, `docs/src/plugins/` developer page
+  (crash knob only).
+- Orchestrator: this seam, `registry.rs` (B/K describe edits), `plugins_api.rs` route merge, `v1_api.rs`, `main_api.rs`,
+  `lib.rs`/`system.rs` re-exports, the i18n files, `SUMMARY.md`, the plan
+  files, the deps allowlist.

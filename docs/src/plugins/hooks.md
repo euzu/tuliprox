@@ -1,6 +1,7 @@
 # Hook Reference
 
-Every hook id listed in a manifest's `hooks:` must have a matching export in the component, and the other way round.
+Every supported hook id listed in a manifest's `hooks:` must have a matching export in the component, and the other way
+round. `epg.resolve-conflict` is reserved but unsupported; a manifest that declares it is rejected.
 The ids are the table `HookId` in `backend/plugins/src/manifest/hook.rs`. Ids are case sensitive. The six stage ids need
 the `playlist.` prefix: the bare form `after-filter` is refused with a message that names the right spelling.
 
@@ -41,7 +42,7 @@ relative to `backend/plugins/src/`, `backend/processing/src/` or `backend/app/sr
 | `epg.transform-programmes` | `epg-transform-hooks` | `transform_programmes(source, programmes)` -> programmes to keep | capability `epg_write` | Per bounded batch while an EPG source is built |
 | `epg.enrich-programmes` | `epg-enrich-hooks` | `enrich_programmes(channel_id, programmes)` -> programmes | capability `epg_write` | For one channel's programmes |
 | `epg.match-channel` | `epg-match-hooks` | `match_channels(requests)` -> one `Option<String>` per request | none | For channels the built-in matcher left without a guide id |
-| `epg.resolve-conflict` | `epg-conflict-hooks` | `resolve_conflict(conflict)` -> candidate index or `None` | none | **Not dispatched.** The id is valid, but `HookId::pipeline_hook` returns `None` |
+| `epg.resolve-conflict` | `epg-conflict-hooks` | `resolve_conflict(conflict)` -> candidate index or `None` | none | **Unsupported.** Manifest validation rejects this hook until its host integration is implemented |
 | `events.on-event` | `event-hooks` | `on_event(ev)` -> `()` | a non-empty `events:` list | Each bus event that `events:` names, queued (`events.rs`) |
 | `metrics.collect` | `metrics-hooks` | `collect_metrics()` -> list of metrics | none | Polled for the dashboard, at most every 10 seconds (`metrics.rs`) |
 | `notifications.send` | `notification-hooks` | `send_notification(msg)` -> `Ok` or a `DeliveryError` | capability `notifications` | When messaging delivers to the plugin's channel (`notify.rs`) |
@@ -51,8 +52,9 @@ relative to `backend/plugins/src/`, `backend/processing/src/` or `backend/app/sr
 | `tasks.run` | `tasks` | `run(ctx)` -> summary string | a non-empty `tasks:` list | The scheduler and the manual run route (`tasks.rs`) |
 | `settings.migrate` | `settings-migration` | `SettingsMigration::migrate(from_version, settings)` -> settings JSON for the current schema version | a settings schema with a `version` (see [Settings](settings.md)) | Once after the plugins reload, when the stored `settings_version` is behind the schema's (`migration.rs`). Not a pipeline hook |
 
-`HookId::pipeline_hook()` in `backend/plugins/src/manifest/hook.rs` maps every other id to a host hook, which the modules
-named above dispatch. Only `epg.resolve-conflict`, `rpc.call` and `settings.migrate` have no pipeline hook.
+`HookId::pipeline_hook()` in `backend/plugins/src/manifest/hook.rs` maps supported pipeline ids to host hooks, which the
+modules named above dispatch. The manifest validator rejects `epg.resolve-conflict`; `rpc.call` and `settings.migrate`
+are dispatched outside the pipeline.
 
 Notes on single hooks:
 

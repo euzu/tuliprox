@@ -1,4 +1,4 @@
-//! W5 fixture: exercises every pipeline hook from one component.
+//! Fixture: exercises every pipeline hook from one component.
 //!
 //! The component exports `playlist-hooks`, `source-hooks`, `sort-hooks`,
 //! `sort-key-hooks`, `chno-hooks`, `dedupe-hooks` and `group-merge-hooks`. Each

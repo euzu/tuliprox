@@ -1,4 +1,4 @@
-//! W8 fixture: a settings schema at version 2 with a `settings.migrate` export.
+//! Fixture: a settings schema at version 2 with a `settings.migrate` export.
 //!
 //! Version 1 stored `{label, token}`. Version 2 (`config-schema.json`) wants
 //! `{group, retries, api_key}`, so the v1 -> v2 step renames `label` to `group`,
