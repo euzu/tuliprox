@@ -544,6 +544,17 @@ mod tests {
         }
     }
 
+    fn plugin_update(outcome: shared::model::PluginUpdateOutcome) -> EventMessage {
+        EventMessage::PluginUpdate(shared::model::PluginUpdateEvent {
+            outcome,
+            plugin: "p".into(),
+            from: "1.0.0".into(),
+            to: "1.1.0".into(),
+            source: "s".into(),
+            reason: None,
+        })
+    }
+
     fn auth_audit(outcome: AuthAuditOutcome) -> EventMessage {
         EventMessage::AuthAudit(AuthAuditEvent {
             username: "u".into(),
@@ -657,6 +668,9 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInFailed),
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
+            plugin_update(shared::model::PluginUpdateOutcome::Available),
+            plugin_update(shared::model::PluginUpdateOutcome::Applied),
+            plugin_update(shared::model::PluginUpdateOutcome::Failed),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

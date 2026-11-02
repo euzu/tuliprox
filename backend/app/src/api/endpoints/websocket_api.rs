@@ -839,6 +839,17 @@ mod tests {
     /// Long by construction, and it has to stay one list for that assert to
     /// mean anything.
     #[allow(clippy::too_many_lines)]
+    fn plugin_update(outcome: shared::model::PluginUpdateOutcome) -> EventMessage {
+        EventMessage::PluginUpdate(shared::model::PluginUpdateEvent {
+            outcome,
+            plugin: "p".into(),
+            from: "1.0.0".into(),
+            to: "1.1.0".into(),
+            source: "s".into(),
+            reason: None,
+        })
+    }
+
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
             ActiveUserConnectionChange, ConfigType, ConnectionDenied, EventKind, NotificationDeadLetter,
@@ -947,6 +958,9 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
             EventMessage::MaintenanceChanged(Arc::default()),
+            plugin_update(shared::model::PluginUpdateOutcome::Available),
+            plugin_update(shared::model::PluginUpdateOutcome::Applied),
+            plugin_update(shared::model::PluginUpdateOutcome::Failed),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
