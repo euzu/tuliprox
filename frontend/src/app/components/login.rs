@@ -91,7 +91,10 @@ pub fn Login() -> Html {
 
     {
         let input_ref = username_ref.clone();
-        use_effect(move || {
+        // Focus the username field once on mount only. Running this on every render
+        // stole focus back to username whenever the component re-rendered (e.g. on the
+        // first keystroke in the password field).
+        use_effect_with((), move |()| {
             if let Some(input) = input_ref.cast::<HtmlInputElement>() {
                 let _ = input.focus();
             }
