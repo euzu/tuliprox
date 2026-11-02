@@ -694,6 +694,29 @@ async fn orphan_failed_input_is_unknown() {
 }
 
 #[tokio::test]
+async fn orphan_scan_of_unscanned_input_type_is_unknown() {
+    const STALKER_INPUT: &str = "stalker-input";
+    let fixture = fixture();
+    fixture.install_sources(
+        vec![input(3, STALKER_INPUT, InputType::Stalker)],
+        vec![ConfigSource { inputs: vec![STALKER_INPUT.intern()], targets: vec![target(1, M3U_TARGET, m3u_output())] }],
+    );
+    fixture.write_input_status(STALKER_INPUT, crate::processing::input_cache::ClusterState::Ok);
+
+    let base = fixture.revision("input", STALKER_INPUT).await;
+    let body =
+        save_body("input", STALKER_INPUT, &base, json!([patch(None, "live", "s1", json!({ "name": set("Kept") }))]));
+    let (status, body) = fixture.post("/playlist/overrides", body).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = fixture.get(&format!("/playlist/overrides/orphans?input={STALKER_INPUT}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries = body["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{body}");
+    assert_eq!(entries[0]["state"], "unknown", "no inventory was read, so nothing is orphaned: {body}");
+}
+
+#[tokio::test]
 async fn orphan_scan_skips_absent_xtream_clusters() {
     let fixture = fixture();
     // OTHER_INPUT is an Xtream input. Only live cluster is written to disk and recorded in status.

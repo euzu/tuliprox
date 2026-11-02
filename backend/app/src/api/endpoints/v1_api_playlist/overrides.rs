@@ -541,7 +541,8 @@ async fn scan_single_input_orphan_keys(
         }
         Ok((records.skipped_records() == 0).then(|| ALL_KINDS.into_iter().collect()))
     } else {
-        Ok(Some(ALL_KINDS.into_iter().collect()))
+        // No stored inventory is read for other input types: nothing can be proven orphaned.
+        Ok(Some(HashSet::new()))
     }
 }
 
