@@ -59,6 +59,8 @@ const EPG_SEARCH_DEFAULT_LIMIT: u32 = 20;
 const EPG_SEARCH_MAX_LIMIT: u32 = 50;
 /// Upper bound of matches one search collects before it stops collecting.
 const EPG_SEARCH_MAX_MATCHES: usize = 500;
+/// Every override item kind, in file section order.
+const ALL_KINDS: [OverrideItemKind; 3] = [OverrideItemKind::Live, OverrideItemKind::Vod, OverrideItemKind::Series];
 
 // ---------------------------------------------------------------------------------------------
 // Errors
@@ -260,7 +262,7 @@ fn fields_of(item: &ItemOverride) -> BTreeMap<String, Value> {
 }
 
 fn push_entries(entries: &mut Vec<OverrideEntryDto>, input: Option<&str>, sections: &InputOverrideSections) {
-    for kind in [OverrideItemKind::Live, OverrideItemKind::Vod, OverrideItemKind::Series] {
+    for kind in ALL_KINDS {
         for (id, item) in section(sections, kind) {
             entries.push(OverrideEntryDto {
                 input: input.map(ToString::to_string),
@@ -461,31 +463,45 @@ async fn scan_input_item_matches(
     Ok(matches)
 }
 
+/// Override keys found in the stored playlists of an input and its aliases, and the item kinds
+/// whose inventory is complete. Only a complete kind can prove an entry orphaned.
+struct OrphanInventory {
+    keys: HashSet<(OverrideItemKind, Arc<str>)>,
+    scanned: HashSet<OverrideItemKind>,
+}
+
+/// Collects the override keys of one input into `keys`.
+///
+/// Returns the item kinds that were scanned completely, or `None` if the input's inventory is
+/// unreliable (failed or missing run, unreadable records). An Xtream cluster the last run did not
+/// record is skipped and its kind is not reported as scanned.
 async fn scan_single_input_orphan_keys(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     aliases: &InputAliasMap,
     keys: &mut HashSet<(OverrideItemKind, Arc<str>)>,
-) -> Result<bool, OverrideApiError> {
+) -> Result<Option<HashSet<OverrideItemKind>>, OverrideApiError> {
     let app_config = &app_state.app_config;
     let status = load_input_status(app_state, &input.name).await;
     if !status_is_loaded_successfully(&status) {
-        return Ok(false);
+        return Ok(None);
     }
     if input.input_type.is_xtream() {
-        for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+        let mut scanned = HashSet::new();
+        for kind in ALL_KINDS {
+            let cluster = cluster_for(kind);
             if !status.clusters.contains_key(cluster.as_ref()) {
                 continue;
             }
             let Some(mut records) = iter_raw_xtream_input_playlist(app_config, input, cluster).await else {
-                return Ok(false);
+                return Ok(None);
             };
             while let Some(res) = records.next().await {
                 let item = match res {
                     Ok(item) => item,
                     Err(err) => {
                         log::warn!("Unreadable record for input '{}': {err}", input.name);
-                        return Ok(false);
+                        return Ok(None);
                     }
                 };
                 let id = Arc::from(item.provider_id.to_string());
@@ -501,20 +517,21 @@ async fn scan_single_input_orphan_keys(
                 }
             }
             if records.skipped_records() > 0 {
-                return Ok(false);
+                return Ok(None);
             }
+            scanned.insert(kind);
         }
-        Ok(true)
+        Ok(Some(scanned))
     } else if input.input_type.is_m3u() {
         let Some(mut records) = iter_raw_m3u_input_playlist(app_config, input, None).await else {
-            return Ok(false);
+            return Ok(None);
         };
         while let Some(res) = records.next().await {
             let item = match res {
                 Ok(item) => item,
                 Err(err) => {
                     log::warn!("Unreadable record for input '{}': {err}", input.name);
-                    return Ok(false);
+                    return Ok(None);
                 }
             };
             let header = header_of(Arc::clone(&item.provider_id), &item.url, &item.input_name, item.item_type);
@@ -522,32 +539,33 @@ async fn scan_single_input_orphan_keys(
                 keys.insert((key.kind, key.id));
             }
         }
-        Ok(records.skipped_records() == 0)
+        Ok((records.skipped_records() == 0).then(|| ALL_KINDS.into_iter().collect()))
     } else {
-        Ok(true)
+        Ok(Some(ALL_KINDS.into_iter().collect()))
     }
 }
 
-/// Scans the stored input playlists of the parent and all enabled aliases;
-/// returns `None` if any member inventory is missing or unreliable.
+/// Scans the stored input playlists of the parent and all enabled aliases; returns `None` if any
+/// member inventory is missing or unreliable. A kind counts as scanned only if every member
+/// scanned it, since an entry of that kind may come from any member.
 async fn scan_input_orphan_inventory(
     app_state: &Arc<AppState>,
     parent: &ConfigInput,
     aliases: &InputAliasMap,
-) -> Result<Option<HashSet<(OverrideItemKind, Arc<str>)>>, OverrideApiError> {
+) -> Result<Option<OrphanInventory>, OverrideApiError> {
     let mut keys = HashSet::new();
-    let parent_ok = scan_single_input_orphan_keys(app_state, parent, aliases, &mut keys).await?;
-    if !parent_ok {
+    let Some(mut scanned) = scan_single_input_orphan_keys(app_state, parent, aliases, &mut keys).await? else {
         return Ok(None);
-    }
+    };
     for alias in parent.aliases.as_deref().unwrap_or_default().iter().filter(|a| a.enabled) {
         let alias_input = parent.as_input(alias);
-        let alias_ok = scan_single_input_orphan_keys(app_state, &alias_input, aliases, &mut keys).await?;
-        if !alias_ok {
+        let Some(alias_scanned) = scan_single_input_orphan_keys(app_state, &alias_input, aliases, &mut keys).await?
+        else {
             return Ok(None);
-        }
+        };
+        scanned.retain(|kind| alias_scanned.contains(kind));
     }
-    Ok(Some(keys))
+    Ok(Some(OrphanInventory { keys, scanned }))
 }
 
 /// The record of a target that carries `kind`/`id`, if the target stores a playlist at all.
@@ -610,7 +628,7 @@ async fn hint_index(
 ) -> HintIndex {
     let mut index = HintIndex::new();
     let mut remaining = wanted.len();
-    for kind in [OverrideItemKind::Live, OverrideItemKind::Vod, OverrideItemKind::Series] {
+    for kind in ALL_KINDS {
         if remaining == 0 {
             break;
         }
@@ -1004,15 +1022,11 @@ fn status_is_loaded_successfully(status: &crate::processing::input_cache::InputS
         && status.clusters.values().all(|cluster| cluster.status == crate::processing::input_cache::ClusterState::Ok)
 }
 
-fn orphan_state(
-    keys: Option<&HashSet<(OverrideItemKind, Arc<str>)>>,
-    kind: OverrideItemKind,
-    id: &str,
-) -> OverrideEntryState {
-    match keys {
-        None => OverrideEntryState::Unknown,
-        Some(keys) if keys.contains(&(kind, Arc::from(id))) => OverrideEntryState::Active,
-        Some(_) => OverrideEntryState::Orphaned,
+fn orphan_state(inventory: Option<&OrphanInventory>, kind: OverrideItemKind, id: &str) -> OverrideEntryState {
+    match inventory {
+        Some(inventory) if inventory.keys.contains(&(kind, Arc::from(id))) => OverrideEntryState::Active,
+        Some(inventory) if inventory.scanned.contains(&kind) => OverrideEntryState::Orphaned,
+        _ => OverrideEntryState::Unknown,
     }
 }
 
@@ -1022,9 +1036,9 @@ fn push_orphan_entries(
     file: &str,
     input: Option<&str>,
     sections: &InputOverrideSections,
-    keys: Option<&HashSet<(OverrideItemKind, Arc<str>)>>,
+    inventory: Option<&OrphanInventory>,
 ) {
-    for kind in [OverrideItemKind::Live, OverrideItemKind::Vod, OverrideItemKind::Series] {
+    for kind in ALL_KINDS {
         for (id, item) in section(sections, kind) {
             entries.push(OverrideOrphanEntryDto {
                 scope,
@@ -1033,7 +1047,7 @@ fn push_orphan_entries(
                 kind,
                 id: id.clone(),
                 hint: item.hint.clone(),
-                state: orphan_state(keys, kind, id),
+                state: orphan_state(inventory, kind, id),
             });
         }
     }
@@ -1104,13 +1118,13 @@ async fn orphan_entries(
     let aliases = InputAliasMap::from_inputs(&sources.inputs);
     drop(sources);
 
-    let keys = scan_input_orphan_inventory(app_state, &input, &aliases).await?;
+    let inventory = scan_input_orphan_inventory(app_state, &input, &aliases).await?;
 
     let mut entries = Vec::new();
     let input_scope = OverrideScope::Input(parent.clone());
     let input_file = load_scope(app_state, &input_scope).await?;
     if let OverrideParseResult::Valid { file: ParsedOverrideFile::Input(file), .. } = &input_file.parsed {
-        push_orphan_entries(&mut entries, OverrideScopeDto::Input, &parent, None, &file.sections, keys.as_ref());
+        push_orphan_entries(&mut entries, OverrideScopeDto::Input, &parent, None, &file.sections, inventory.as_ref());
     }
 
     let repository = app_state.override_repository();
@@ -1130,7 +1144,7 @@ async fn orphan_entries(
                     &target_name,
                     Some(&parent),
                     sections,
-                    keys.as_ref(),
+                    inventory.as_ref(),
                 );
             }
         }

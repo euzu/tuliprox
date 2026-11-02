@@ -123,13 +123,28 @@ fn is_credential_header(name: &str) -> bool {
         || ["auth", "token", "secret", "api-key", "apikey"].iter().any(|part| name.contains(part))
 }
 
-/// The origin URL of `input` that serves `resource`: its own URL, or for a `provider://` input
+/// The origin URL of `input` that serves `resource`: its own URL, or for a `provider://` URL
 /// the matching URL of its provider.
-fn input_origin_for(input: &ConfigInput, resource: &Url) -> Option<String> {
-    match input.get_resolve_provider(&input.url) {
-        Some(provider) => provider.urls.iter().find(|url| is_same_origin(url, resource)).map(ToString::to_string),
-        None => is_same_origin(&input.url, resource).then(|| input.url.clone()),
+fn url_origin_for(input: &ConfigInput, url: &str, resource: &Url) -> Option<String> {
+    match input.get_resolve_provider(url) {
+        Some(provider) => {
+            provider.urls.iter().find(|provider_url| is_same_origin(provider_url, resource)).map(ToString::to_string)
+        }
+        None => is_same_origin(url, resource).then(|| url.to_string()),
     }
+}
+
+/// The origin URL of `input` or one of its enabled aliases that serves `resource`.
+fn input_origin_for(input: &ConfigInput, resource: &Url) -> Option<String> {
+    url_origin_for(input, &input.url, resource).or_else(|| {
+        input
+            .aliases
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|alias| alias.enabled)
+            .find_map(|alias| url_origin_for(input, &alias.url, resource))
+    })
 }
 
 /// The input whose server hosts `resource_url`, so its configured headers (User-Agent, ...) are sent.
@@ -141,6 +156,7 @@ fn web_ui_resource_input(app_state: &Arc<AppState>, resource_url: &str) -> Optio
     let sources = app_state.app_config.sources.load();
     sources.inputs.iter().find_map(|input| {
         let origin = input_origin_for(input, &resource)?;
+        // Aliases share the parent's headers and method (`ConfigInput::as_input`).
         let mut prepared = input.as_ref().clone();
         prepared.url = origin;
         prepared.method = shared::model::InputFetchMethod::GET;
@@ -330,5 +346,57 @@ mod web_ui_resource_tests {
         assert!(!matched.headers.contains_key("authorization"));
         assert!(!matched.headers.contains_key("cookie"));
         assert_eq!(matched.method, InputFetchMethod::GET);
+    }
+
+    fn alias(id: u16, url: &str, enabled: bool) -> crate::model::ConfigInputAlias {
+        crate::model::ConfigInputAlias {
+            id,
+            name: format!("alias-{id}").intern(),
+            url: url.to_string(),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 0,
+            exp_date: None,
+            enabled,
+            stalker: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn enabled_alias_origin_keeps_the_input_user_agent() {
+        let provider = Arc::new(ConfigProvider {
+            name: "mirror".into(),
+            urls: vec!["http://10.0.0.9:8080".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+            current_url_index: std::sync::atomic::AtomicUsize::new(0),
+            dns: None,
+            dns_cache: Arc::new(ProviderDnsCache::default()),
+        });
+        let input = Arc::new(ConfigInput {
+            id: 3,
+            name: "aliased-input".intern(),
+            input_type: InputType::Xtream,
+            url: "http://primary.example:8080".to_string(),
+            provider_configs: Some(vec![provider]),
+            headers: HashMap::from([("user-agent".to_string(), "AliasUA/1.0".to_string())]),
+            aliases: Some(vec![
+                alias(4, "http://backup.example:8080", true),
+                alias(5, "provider://mirror", true),
+                alias(6, "http://disabled.example:8080", false),
+            ]),
+            enabled: true,
+            ..Default::default()
+        });
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let sources = SourcesConfig { inputs: vec![Arc::clone(&input)], ..Default::default() };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        for logo_url in ["http://backup.example:8080/logo.png", "http://10.0.0.9:8080/logo.png"] {
+            let matched = web_ui_resource_input(&app_state, logo_url).expect(logo_url);
+            assert!(resource_input_for_url(Some(&matched), logo_url).is_some(), "{logo_url}");
+            assert_eq!(matched.headers.get("user-agent").map(String::as_str), Some("AliasUA/1.0"), "{logo_url}");
+        }
+        assert!(web_ui_resource_input(&app_state, "http://disabled.example:8080/logo.png").is_none());
     }
 }

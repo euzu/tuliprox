@@ -701,28 +701,48 @@ async fn orphan_scan_skips_absent_xtream_clusters() {
     fixture.write_input_status(OTHER_INPUT, crate::processing::input_cache::ClusterState::Ok);
 
     let base = fixture.revision("input", OTHER_INPUT).await;
-    let body =
-        save_body("input", OTHER_INPUT, &base, json!([patch(None, "live", "42", json!({ "name": set("Edited") }))]));
+    let body = save_body(
+        "input",
+        OTHER_INPUT,
+        &base,
+        json!([
+            patch(None, "live", "42", json!({ "name": set("Edited") })),
+            patch(None, "live", "77", json!({ "name": set("Gone") })),
+            patch(None, "series", "99", json!({ "name": set("Unscanned") })),
+        ]),
+    );
     let (status, body) = fixture.post("/playlist/overrides", body).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
+    let state_of = |body: &Value, id: &str| {
+        body["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .map_or_else(|| panic!("entry {id} missing: {body}"), |entry| entry["state"].clone())
+    };
+
     let (status, body) = fixture.get(&format!("/playlist/overrides/orphans?input={OTHER_INPUT}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let entries = body["entries"].as_array().expect("entries");
-    assert_eq!(entries.len(), 1, "{body}");
-    assert_eq!(
-        entries[0]["state"], "active",
-        "an input with absent series cluster should still report active live entries: {body}"
-    );
+    // The absent series cluster does not fail the scan of the recorded live cluster ...
+    assert_eq!(state_of(&body, "42"), "active", "{body}");
+    assert_eq!(state_of(&body, "77"), "orphaned", "{body}");
+    // ... but its entries cannot be proven orphaned.
+    assert_eq!(state_of(&body, "99"), "unknown", "{body}");
 
     // When a cluster IS recorded in status (e.g. series: Ok) but its file is missing,
     // the existing failure behavior is preserved (entry state becomes unknown).
     fixture.write_input_status_with_clusters(OTHER_INPUT, &["live", "series"]);
     let (status, body) = fixture.get(&format!("/playlist/overrides/orphans?input={OTHER_INPUT}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let entries = body["entries"].as_array().expect("entries");
-    assert_eq!(entries.len(), 1, "{body}");
-    assert_eq!(entries[0]["state"], "unknown", "a recorded cluster whose file is missing must make scan fail: {body}");
+    for id in ["42", "77", "99"] {
+        assert_eq!(
+            state_of(&body, id),
+            "unknown",
+            "a recorded cluster whose file is missing must fail the scan: {body}"
+        );
+    }
 }
 
 #[tokio::test]

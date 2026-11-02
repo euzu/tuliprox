@@ -149,6 +149,7 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,
+            override_status: None,
         }
     }
 }

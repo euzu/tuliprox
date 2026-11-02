@@ -592,8 +592,15 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
     let storage_dir = cfg.resolve_storage_dir();
     let maintenance_path = storage_dir.join(tuliprox_core::model::MAINTENANCE_FILE);
     let maintenance = Arc::new(tuliprox_core::model::MaintenanceRegistry::load_read_only(maintenance_path).await);
-    exec_processing(ProcessingRun::new(client, cfg, targets, shared::model::NoopSink).with_maintenance(maintenance))
-        .await;
+    // The status store holds no cache and writes under a cross-process lock, so recording the
+    // applied override revisions here never overwrites what a running server recorded.
+    let override_status = Arc::new(tuliprox_repository::OverrideStatusStore::new(storage_dir));
+    exec_processing(
+        ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)
+            .with_maintenance(maintenance)
+            .with_override_status(override_status),
+    )
+    .await;
 }
 
 async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {

@@ -106,15 +106,17 @@ impl OverrideStatusFile {
 
 /// Records which override revisions the last successful run of each target applied.
 ///
-/// The document is loaded lazily on first access and cached in memory. Writes are
-/// serialized by a mutex and land atomically (temp file in the same directory, then rename).
+/// The server and a one-shot CLI run may share the storage directory, so nothing is cached:
+/// every read loads the document from disk, and every write is a read-modify-write under an
+/// exclusive lock on a sidecar file (`std::fs::File::lock`), which serializes writers across
+/// threads and processes. The document itself lands atomically (temp file, then rename), so a
+/// reader never sees a partial write.
 pub struct OverrideStatusStore {
     dir: PathBuf,
-    state: tokio::sync::Mutex<Option<OverrideStatusFile>>,
 }
 
 impl OverrideStatusStore {
-    pub fn new(dir: impl Into<PathBuf>) -> Self { Self { dir: dir.into(), state: tokio::sync::Mutex::new(None) } }
+    pub fn new(dir: impl Into<PathBuf>) -> Self { Self { dir: dir.into() } }
 
     /// Directory holding the status document.
     #[must_use]
@@ -122,21 +124,15 @@ impl OverrideStatusStore {
 
     /// Path of the status document.
     #[must_use]
-    pub fn status_path(&self) -> PathBuf { self.dir.join(OVERRIDE_STATUS_FILE_NAME) }
+    pub fn status_path(&self) -> PathBuf { status_path(&self.dir) }
 
     /// Revision recorded for `scope` by the last successful run of `target`, if any.
     pub async fn applied_revision(&self, target: &str, scope: &OverrideScope) -> Option<OverrideRevision> {
-        let mut guard = self.state.lock().await;
-        let state = self.load_locked(&mut guard).await;
-        state.applied_revision(target, scope)
+        self.read_document().await.applied_revision(target, scope)
     }
 
     /// Whether `target` previously had a status record in the store.
-    pub async fn has_target(&self, target: &str) -> bool {
-        let mut guard = self.state.lock().await;
-        let state = self.load_locked(&mut guard).await;
-        state.targets.contains_key(target)
-    }
+    pub async fn has_target(&self, target: &str) -> bool { self.read_document().await.targets.contains_key(target) }
 
     /// `true` if `current` differs from the revision recorded for `scope` by the last successful
     /// run of `target`, or if nothing was recorded yet.
@@ -151,113 +147,103 @@ impl OverrideStatusStore {
     }
 
     /// Records the revisions `target` applied in a successful run, replacing what the previous
-    /// successful run recorded for that target.
+    /// successful run recorded for that target. Records of other targets, including ones another
+    /// process wrote, are kept.
     ///
     /// # Errors
-    /// Returns `std::io::Error` if the status document cannot be serialized or persisted. The
-    /// in-memory state is left unchanged in that case, so the affected revisions stay pending.
+    /// Returns `std::io::Error` if the status document cannot be locked, serialized or persisted.
+    /// The document on disk is left unchanged in that case, so the affected revisions stay pending.
     pub async fn record_success(
         &self,
         target: &str,
         revisions: Vec<(OverrideScope, OverrideRevision)>,
         diagnostics: OverrideRunDiagnostics,
     ) -> std::io::Result<()> {
-        let mut guard = self.state.lock().await;
-        let mut next = self.load_locked(&mut guard).await.clone();
-
-        next.targets.insert(
-            target.to_string(),
-            TargetStatus {
-                applied: revisions
-                    .into_iter()
-                    .map(|(scope, revision)| AppliedScopeRevision { scope, revision })
-                    .collect(),
-                diagnostics: Some(diagnostics),
-            },
-        );
-
-        self.write_document(&next).await?;
-
-        let recorded = next.targets.get(target).cloned();
-        *guard = Some(next);
-
-        if let Some(TargetStatus { applied, diagnostics }) = recorded {
-            let revision_count = applied.len();
-            if let Some(diagnostics) = diagnostics {
-                for skipped in &diagnostics.skipped_files {
-                    log::warn!("Target '{target}' skipped override file {}: {:?}", skipped.name, skipped.reason);
-                }
-                log::info!(
-                    "Override status for target '{target}': {revision_count} revision(s) applied, {} file(s) applied, {} skipped, {} ambiguous key(s), finished_at {}",
-                    diagnostics.applied_files.len(),
-                    diagnostics.skipped_files.len(),
-                    diagnostics.ambiguous_keys,
-                    diagnostics.finished_at
-                );
-            } else {
-                log::info!("Override status for target '{target}': {revision_count} revision(s) applied");
-            }
+        let applied: Vec<AppliedScopeRevision> =
+            revisions.into_iter().map(|(scope, revision)| AppliedScopeRevision { scope, revision }).collect();
+        let revision_count = applied.len();
+        for skipped in &diagnostics.skipped_files {
+            log::warn!("Target '{target}' skipped override file {}: {:?}", skipped.name, skipped.reason);
         }
+        let summary = format!(
+            "Override status for target '{target}': {revision_count} revision(s) applied, {} file(s) applied, {} skipped, {} ambiguous key(s), finished_at {}",
+            diagnostics.applied_files.len(),
+            diagnostics.skipped_files.len(),
+            diagnostics.ambiguous_keys,
+            diagnostics.finished_at
+        );
+        let status = TargetStatus { applied, diagnostics: Some(diagnostics) };
 
+        let dir = self.dir.clone();
+        let target = target.to_string();
+        tokio::task::spawn_blocking(move || record_locked(&dir, target, status))
+            .await
+            .map_err(std::io::Error::other)??;
+        log::info!("{summary}");
         Ok(())
     }
 
-    /// Returns the cached document, loading it from disk on first access.
-    async fn load_locked<'a>(&self, guard: &'a mut Option<OverrideStatusFile>) -> &'a OverrideStatusFile {
-        if guard.is_none() {
-            *guard = Some(self.read_document().await);
-        }
-        match guard {
-            Some(document) => document,
-            None => unreachable!("status document was just loaded"),
-        }
-    }
-
-    /// Reads the status document, treating a missing, unreadable, or corrupt file as empty.
     async fn read_document(&self) -> OverrideStatusFile {
         let path = self.status_path();
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return OverrideStatusFile::default(),
-            Err(err) => {
-                log::warn!("Cannot read override status file {}: {err}", path.display());
-                return OverrideStatusFile::default();
-            }
-        };
-
-        serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-            log::warn!("Override status file {} is corrupt, treating it as empty: {err}", path.display());
-            OverrideStatusFile::default()
-        })
+        decode_document(&path, tokio::fs::read(&path).await)
     }
+}
 
-    /// Persists the document atomically: temp file in the same directory, then rename.
-    async fn write_document(&self, document: &OverrideStatusFile) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
+fn status_path(dir: &Path) -> PathBuf { dir.join(OVERRIDE_STATUS_FILE_NAME) }
 
-        tokio::fs::create_dir_all(&self.dir).await?;
-        let payload = serde_json::to_vec_pretty(document)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+/// Read-modify-write of the status document under the cross-process lock.
+fn record_locked(dir: &Path, target: String, status: TargetStatus) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let lock = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!(".{OVERRIDE_STATUS_FILE_NAME}.lock")))?;
+    // Released when `lock` is dropped (closing the file releases the OS lock).
+    lock.lock()?;
+    let path = status_path(dir);
+    let mut document = decode_document(&path, std::fs::read(&path));
+    document.targets.insert(target, status);
+    write_document(dir, &document)
+}
 
-        let target_path = self.status_path();
-        let temp_path = self.dir.join(format!(".{OVERRIDE_STATUS_FILE_NAME}.{}.tmp", uuid::Uuid::new_v4()));
-
-        let write_result: std::io::Result<()> = async {
-            let mut temp_file = tokio::fs::File::create(&temp_path).await?;
-            temp_file.write_all(&payload).await?;
-            temp_file.write_all(b"\n").await?;
-            temp_file.sync_all().await?;
-            drop(temp_file);
-            tokio::fs::rename(&temp_path, &target_path).await
+/// Decodes the status document, treating a missing, unreadable, or corrupt file as empty.
+fn decode_document(path: &Path, bytes: std::io::Result<Vec<u8>>) -> OverrideStatusFile {
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return OverrideStatusFile::default(),
+        Err(err) => {
+            log::warn!("Cannot read override status file {}: {err}", path.display());
+            return OverrideStatusFile::default();
         }
-        .await;
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|err| {
+        log::warn!("Override status file {} is corrupt, treating it as empty: {err}", path.display());
+        OverrideStatusFile::default()
+    })
+}
 
-        if write_result.is_err() {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-        }
+/// Persists the document atomically: temp file in the same directory, then rename.
+fn write_document(dir: &Path, document: &OverrideStatusFile) -> std::io::Result<()> {
+    use std::io::Write;
 
-        write_result
+    let payload =
+        serde_json::to_vec_pretty(document).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let temp_path = dir.join(format!(".{OVERRIDE_STATUS_FILE_NAME}.{}.tmp", uuid::Uuid::new_v4()));
+
+    let write_result = (|| {
+        let mut temp_file = std::fs::File::create(&temp_path)?;
+        temp_file.write_all(&payload)?;
+        temp_file.write_all(b"\n")?;
+        temp_file.sync_all()?;
+        drop(temp_file);
+        std::fs::rename(&temp_path, status_path(dir))
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
     }
+    write_result
 }
 
 #[cfg(test)]

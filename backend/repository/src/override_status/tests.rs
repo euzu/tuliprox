@@ -181,3 +181,48 @@ async fn target_scope_roundtrips() -> TestResult {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn instances_sharing_a_directory_never_overwrite_each_other() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    // Server and one-shot CLI run: two stores on the same storage directory.
+    let server = OverrideStatusStore::new(dir.path());
+    let cli = OverrideStatusStore::new(dir.path());
+    let scope = OverrideScope::Input("provider-a".into());
+    let server_rev = revision(b"server\n");
+    let cli_rev = revision(b"cli\n");
+
+    // The server reads first; a cached copy would miss the CLI record below.
+    assert_eq!(server.applied_revision("t-cli", &scope).await, None);
+    cli.record_success("t-cli", vec![(scope.clone(), cli_rev.clone())], diagnostics()).await?;
+    assert_eq!(server.applied_revision("t-cli", &scope).await, Some(cli_rev.clone()));
+
+    server.record_success("t-server", vec![(scope.clone(), server_rev.clone())], diagnostics()).await?;
+    assert_eq!(cli.applied_revision("t-cli", &scope).await, Some(cli_rev));
+    assert_eq!(cli.applied_revision("t-server", &scope).await, Some(server_rev));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writers_keep_every_target() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let scope = OverrideScope::Input("provider-a".into());
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let store = OverrideStatusStore::new(dir.path());
+        let scope = scope.clone();
+        tasks.push(tokio::spawn(async move {
+            let target = format!("t{index}");
+            store.record_success(&target, vec![(scope, revision(target.as_bytes()))], diagnostics()).await
+        }));
+    }
+    for task in tasks {
+        task.await??;
+    }
+    let store = OverrideStatusStore::new(dir.path());
+    for index in 0..16 {
+        let target = format!("t{index}");
+        assert_eq!(store.applied_revision(&target, &scope).await, Some(revision(target.as_bytes())), "{target}");
+    }
+    Ok(())
+}
