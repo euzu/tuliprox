@@ -4,7 +4,7 @@ use crate::{
             custom_dialog::CustomDialog,
             define_table_columns,
             table::{PagedTable, TableDefinition},
-            AppIcon, DropDownOption, DropDownSelection, Select, TextButton,
+            Checkbox, DropDownOption, DropDownSelection, IconButton, Select, TextButton,
         },
         context::ConfigContext,
     },
@@ -348,13 +348,7 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
 
                     let select_label = translate.t("LABEL.EXPLORER_SELECT_PAGE");
                     html! {
-                        <input
-                            type="checkbox"
-                            class="tp__checkbox"
-                            aria-label={select_label}
-                            checked={all_orphaned_selected}
-                            onchange={on_toggle_all}
-                        />
+                        <Checkbox aria_label={Some(select_label)} checked={all_orphaned_selected} onchange={on_toggle_all} />
                     }
                 }
                 Some(col_enum) => html! { <span>{ translate.t(col_enum.header_label()) }</span> },
@@ -393,13 +387,7 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                             selected_keys.set(set);
                         });
                         html! {
-                            <input
-                                type="checkbox"
-                                class="tp__checkbox"
-                                aria-label={select_label}
-                                checked={is_checked}
-                                onchange={on_toggle}
-                            />
+                            <Checkbox aria_label={Some(select_label)} checked={is_checked} onchange={on_toggle} />
                         }
                     }
                     Some(OrphanTableColumn::Scope) => {
@@ -440,19 +428,17 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                     Some(OrphanTableColumn::Actions) => {
                         let single_discard = single_discard.clone();
                         let it = (*entry).clone();
-                        let on_discard = Callback::from(move |_: MouseEvent| {
+                        let on_discard = Callback::from(move |_: (String, MouseEvent)| {
                             single_discard.emit(it.clone());
                         });
                         html! {
-                            <button
-                                type="button"
-                                class="tp__icon-button btn-discard"
+                            <IconButton
+                                name="discard"
+                                icon="Trash"
+                                hint={translate.t("LABEL.EXPLORER_DISCARD")}
+                                aria_label={Some(translate.t("LABEL.EXPLORER_DISCARD"))}
                                 onclick={on_discard}
-                                title={translate.t("LABEL.EXPLORER_DISCARD")}
-                                aria-label={translate.t("LABEL.EXPLORER_DISCARD")}
-                            >
-                                <AppIcon name="Trash" />
-                            </button>
+                            />
                         }
                     }
                     None => html! {},
@@ -590,19 +576,23 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                                         for orphaned_files.into_iter().map(|file| {
                                             let delete_file = delete_file.clone();
                                             let f = file.clone();
-                                            let on_del = Callback::from(move |_: MouseEvent| {
+                                            let on_del = Callback::from(move |_: String| {
                                                 delete_file.emit(f.clone());
                                             });
                                             html! {
-                                                <div key={file.name.clone()} class="tp__orphaned-file-row">
+                                                <div key={format!("{}:{}", file.scope, file.name)} class="tp__orphaned-file-row">
                                                     <span class="tp__orphaned-file-name">
                                                         { translate.t("LABEL.EXPLORER_FILE_SCOPE")
                                                             .replace("{file}", &file.name)
                                                             .replace("{scope}", file.scope.as_str()) }
                                                     </span>
-                                                    <button type="button" class="tp__button danger small" onclick={on_del}>
-                                                        { translate.t("LABEL.EXPLORER_DELETE_FILE") }
-                                                    </button>
+                                                    <TextButton
+                                                        name="delete_file"
+                                                        class="secondary"
+                                                        icon="Delete"
+                                                        title={translate.t("LABEL.EXPLORER_DELETE_FILE")}
+                                                        onclick={on_del}
+                                                    />
                                                 </div>
                                             }
                                         })

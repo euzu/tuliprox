@@ -904,6 +904,7 @@
       "WINDOW_SECS": "Length in seconds of the rolling window used for the aggregates."
     },
     "PLAYLIST_OVERRIDE": {
+      "ALSO_SET_TITLE": "Lists and Xtream clients show the title. When on, changing the name also sets the title to the same value.",
       "INPUT": "Input playlist source whose overrides to inspect or clean up.",
       "NAME": "The channel or stream name from the playlist used for output and EPG matching.",
       "TITLE": "Display title of the item (the EXTINF title after the comma).",
@@ -1182,9 +1183,10 @@
     "EXPLORER_CATCHUP_BADGE": "Catch-up",
     "EXPLORER_EDITED_BADGE": "edited",
     "EPISODE": "Episode",
-    "EXPLORER_ITEM_META": "{cluster} · ID {id} · Input „{input}“",
+    "EXPLORER_ITEM_META": "{cluster} · Provider ID {id} · Virtual ID {virtual_id} · Input „{input}“",
     "EXPLORER_EPG_ID_TMDB": "EPG-ID / TMDB",
     "EXPLORER_LOGO_URL": "Logo / Poster URL",
+    "EXPLORER_FILTER_RATING_MIN": "Minimum rating",
     "EXPLORER_FILTER_RATING_GTE": "★ ≥ {rating}",
     "EXPLORER_PAGE_RANGE": "{start}-{end} of {total}",
     "EXPLORER_CLEARED": "(cleared)",
@@ -1217,6 +1219,9 @@
     "EXPLORER_SCOPE_INPUT": "For input (all targets)",
     "EXPLORER_SCOPE_TARGET": "This target only",
     "EXPLORER_SORT_ADDED": "Added",
+    "EXPLORER": "Explorer",
+    "EXPLORER_SHOW_EPISODES": "Show episodes",
+    "EXPLORER_CHNO_SHORT": "#",
     "EXPLORER_SORT_CHANNEL_NO": "Channel number",
     "EXPLORER_SORT_LAST_MODIFIED": "Last modified",
     "EXPLORER_SORT_PREFIX": "Sort: ",
@@ -2154,7 +2159,7 @@
     "EXPLORER_BULK_DISABLED_HINT": "Field cannot be edited in bulk mode",
     "EXPLORER_BULK_EDIT": "Bulk Edit",
     "EXPLORER_BULK_RESULTS_TITLE": "Bulk Save Results",
-    "EXPLORER_CONFIRM_BULK_MSG": "Are you sure you want to save changes across the following inputs?",
+    "EXPLORER_CONFIRM_BULK_MSG": "Are you sure you want to apply changes to {count} items across {inputs_count} inputs?",
     "EXPLORER_CONFIRM_BULK_SAVE": "Confirm Bulk Save",
     "EXPLORER_ITEMS_SELECTED": "items selected",
     "EXPLORER_SET_VALUE": "Set",
@@ -2249,7 +2254,10 @@
       "UNMAPPED_FIELD_ERRORS": "The server rejected fields this editor does not show: {errors}",
       "STALE_REVISION": "Stale revision (409)",
       "ORPHANS_LOAD_FAILED": "Could not load overrides: {error}",
-      "EPG_SEARCH_FAILED": "EPG search failed: {error}"
+      "EPG_SEARCH_FAILED": "EPG search failed: {error}",
+      "PARSE_ERROR": "The override file is malformed: {error}",
+      "SCHEMA_ERROR": "Unsupported override schema version: {version}",
+      "SAVE_FAILED_ERROR": "Save failed: {error}"
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",

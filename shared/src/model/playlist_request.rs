@@ -17,6 +17,12 @@ pub struct PlaylistRequestM3u {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct PlaylistContentQuery {
+    #[serde(default)]
+    pub explorer: bool,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum PlaylistRequest {
     Target(u16),
@@ -151,7 +157,12 @@ fn filter_channels(
                         (mask.title && matches(&c.title))
                             || (mask.name && matches(&c.name))
                             || (mask.url && matches(&c.url))
-                            || (mask.provider_id && matches_provider_id(&c.provider_id))
+                            || (mask.provider_id
+                                && (matches_provider_id(&c.provider_id)
+                                    || c.explorer_meta
+                                        .as_ref()
+                                        .and_then(|m| m.override_id.as_deref())
+                                        .is_some_and(matches_provider_id)))
                     })
                     .cloned()
                     .collect();

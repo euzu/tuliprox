@@ -14,11 +14,12 @@ use crate::{
     app::{
         components::{
             menu_item::MenuItem,
-            popup_menu::PopupMenu,
+            popup_menu::{PopupMenu, PopupMenuPlacement},
             recording::{
                 ensure_recording_available, target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill,
             },
-            AppIcon, DropDownOption, IconButton, NoContent, Search, TextButton,
+            DropDownOption, DropDownSelection, HorizontalShrinkPanel, IconButton, NoContent, Search, Select,
+            SplitButton, TextButton,
         },
         context::{ConfigContext, PlaylistExplorerContext},
     },
@@ -27,7 +28,15 @@ use crate::{
     i18n::use_translation,
     model::{BusyStatus, DialogAction, DialogActions, DialogResult, EventMessage},
     services::{CreateRecordingTaskRequest, DialogService, RecordingService, RecordingSourceInput},
+    utils::is_mobile_viewport,
 };
+/// Minimum star rating the VOD/series rating filter starts with.
+const DEFAULT_MIN_RATING: u8 = 6;
+/// Gap between a poster card's action button and its menu (same as `Select`).
+const CARD_POPUP_GAP_PX: f64 = 2.0;
+/// Thresholds offered by the rating filter dropdown.
+const RATING_FILTER_STEPS: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
 pub use bulk_edit::BulkEditPanel;
 pub use detail_panel::*;
 use identity::{use_identity_revision, Id};
@@ -52,6 +61,7 @@ use std::{
     rc::Rc,
     str::FromStr,
 };
+use wasm_bindgen::{prelude::Closure, JsCast};
 use yew::{platform::spawn_local, prelude::*};
 
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
@@ -117,9 +127,45 @@ pub fn can_show_record_action(can_write_recordings: bool, selected_channel: Opti
         && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live || item.downloadable)
 }
 
-enum ExplorerLevel {
+#[derive(Clone, PartialEq, Debug)]
+pub enum ExplorerLevel {
     Browser,
     SeriesEpisodes(Rc<UiPlaylistItem>, Option<Box<SeriesStreamProperties>>),
+}
+
+#[must_use]
+pub fn selected_group_from_id(id: &str) -> SelectedGroup {
+    match id {
+        "__all__" => SelectedGroup::All,
+        "__without_epg__" => SelectedGroup::WithoutEpg,
+        "__edited__" => SelectedGroup::Edited,
+        s if s.starts_with("grp:") => SelectedGroup::Group(s[4..].into()),
+        _ => SelectedGroup::All,
+    }
+}
+
+/// Determines the next `ExplorerLevel` when a group is selected in the sidebar.
+///
+/// If the user was viewing series episodes, selecting any group returns them to
+/// the catalog browser so the selected group is displayed.
+#[must_use]
+pub fn level_after_group_select(current: &ExplorerLevel) -> ExplorerLevel {
+    match current {
+        ExplorerLevel::SeriesEpisodes(_, _) => ExplorerLevel::Browser,
+        ExplorerLevel::Browser => ExplorerLevel::Browser,
+    }
+}
+
+/// Determines the next `ExplorerLevel` when a search is executed or cleared.
+///
+/// Running a search while viewing episodes returns to the catalog browser to show
+/// matching items.
+#[must_use]
+pub fn level_after_search(current: &ExplorerLevel) -> ExplorerLevel {
+    match current {
+        ExplorerLevel::SeriesEpisodes(_, _) => ExplorerLevel::Browser,
+        ExplorerLevel::Browser => ExplorerLevel::Browser,
+    }
 }
 
 #[component]
@@ -135,6 +181,7 @@ pub fn PlaylistExplorer() -> Html {
     };
 
     let service_ctx = use_service_context();
+    let can_write = service_ctx.auth.has_permission(Permission::PlaylistWrite);
     let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingCreate);
     let is_admin_role = service_ctx.auth.is_admin();
 
@@ -183,13 +230,55 @@ pub fn PlaylistExplorer() -> Html {
     // Filter chip states
     let filter_without_epg = use_state(|| false);
     let filter_edited = use_state(|| false);
-    let filter_rating_gte6 = use_state(|| false);
+    let filter_rating = use_state(|| false);
+    let filter_rating_min = use_state(|| DEFAULT_MIN_RATING);
 
     // Context popup & selection
     let selected_channel = use_state(|| None::<ChannelSelection>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let copy_to_clipboard = use_clipboard_copy();
+    let is_mobile = use_state(is_mobile_viewport);
+
+    // Keep mobile state in sync on resize, and close context/dropdown menus on viewport change.
+    // The listener is registered once, so it reads the current values through refs that every render
+    // refreshes; reading the state handles captured at registration would see the first render only.
+    let mobile_now = use_mut_ref(|| *is_mobile);
+    let popup_open_now = use_mut_ref(|| false);
+    *mobile_now.borrow_mut() = *is_mobile;
+    *popup_open_now.borrow_mut() = *popup_is_open;
+    {
+        let is_mobile = is_mobile.clone();
+        let popup_is_open = popup_is_open.clone();
+        let selected_channel = selected_channel.clone();
+        let popup_anchor_ref = popup_anchor_ref.clone();
+        let mobile_now = mobile_now.clone();
+        let popup_open_now = popup_open_now.clone();
+        use_effect_with((), move |()| {
+            let onresize = Closure::<dyn FnMut(web_sys::Event)>::wrap(Box::new(move |_| {
+                let mobile = is_mobile_viewport();
+                if *mobile_now.borrow() != mobile {
+                    *mobile_now.borrow_mut() = mobile;
+                    is_mobile.set(mobile);
+                }
+                if *popup_open_now.borrow() {
+                    *popup_open_now.borrow_mut() = false;
+                    popup_is_open.set(false);
+                    selected_channel.set(None);
+                    popup_anchor_ref.set(None);
+                }
+            }));
+            if let Some(win) = web_sys::window() {
+                let _ = win.add_event_listener_with_callback("resize", onresize.as_ref().unchecked_ref());
+            }
+            move || {
+                if let Some(win) = web_sys::window() {
+                    let _ = win.remove_event_listener_with_callback("resize", onresize.as_ref().unchecked_ref());
+                }
+                drop(onresize);
+            }
+        });
+    }
 
     // When a different playlist arrives, reset selection. Edits pushed by this component must
     // not reset it: the detail panel stays open after a successful save.
@@ -241,7 +330,7 @@ pub fn PlaylistExplorer() -> Html {
         let current_level = current_level.clone();
         let filter_without_epg = filter_without_epg.clone();
         let filter_edited = filter_edited.clone();
-        let filter_rating_gte6 = filter_rating_gte6.clone();
+        let filter_rating = filter_rating.clone();
         let set_selected_ids = selected_ids.clone();
         let set_bulk_edit_open = is_bulk_edit_open.clone();
 
@@ -255,7 +344,7 @@ pub fn PlaylistExplorer() -> Html {
             current_level.set(ExplorerLevel::Browser);
             filter_without_epg.set(false);
             filter_edited.set(false);
-            filter_rating_gte6.set(false);
+            filter_rating.set(false);
             set_selected_ids.set(HashSet::new());
             set_bulk_edit_open.set(false);
         })
@@ -319,9 +408,10 @@ pub fn PlaylistExplorer() -> Html {
             (*selected_group).clone(),
             *filter_without_epg,
             *filter_edited,
-            *filter_rating_gte6,
+            *filter_rating,
+            *filter_rating_min,
         ),
-        |(sorted, group_filter, without_epg, edited, rating_gte6)| {
+        |(sorted, group_filter, without_epg, edited, rating_on, rating_min)| {
             let mut list = Vec::new();
             for item in sorted.iter() {
                 // Group match
@@ -342,7 +432,7 @@ pub fn PlaylistExplorer() -> Html {
                 if *edited && !is_edited(item) {
                     continue;
                 }
-                if *rating_gte6 && item.rating < 6.0 {
+                if !passes_rating_filter(item, *rating_on, *rating_min) {
                     continue;
                 }
 
@@ -397,21 +487,28 @@ pub fn PlaylistExplorer() -> Html {
     let handle_search = {
         let services = service_ctx.clone();
         let set_playlist = playlist.clone();
+        let current_level = current_level.clone();
         let context = context.clone();
-        Callback::from(move |search_req| match search_req {
-            SearchRequest::Clear => set_playlist.set((*context.playlist).clone()),
-            SearchRequest::Text(ref _text, ref _search_fields)
-            | SearchRequest::Regexp(ref _text, ref _search_fields) => {
-                services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
-                let set_playlist = set_playlist.clone();
-                let context = context.clone();
-                let services = services.clone();
-                spawn_local(async move {
-                    let filtered =
-                        context.playlist.as_ref().and_then(|categories| categories.filter(&search_req)).map(Rc::new);
-                    set_playlist.set(filtered);
-                    services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
-                });
+        Callback::from(move |search_req| {
+            current_level.set(level_after_search(&current_level));
+            match search_req {
+                SearchRequest::Clear => set_playlist.set((*context.playlist).clone()),
+                SearchRequest::Text(ref _text, ref _search_fields)
+                | SearchRequest::Regexp(ref _text, ref _search_fields) => {
+                    services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
+                    let set_playlist = set_playlist.clone();
+                    let context = context.clone();
+                    let services = services.clone();
+                    spawn_local(async move {
+                        let filtered = context
+                            .playlist
+                            .as_ref()
+                            .and_then(|categories| categories.filter(&search_req))
+                            .map(Rc::new);
+                        set_playlist.set(filtered);
+                        services.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
+                    });
+                }
             }
         })
     };
@@ -776,23 +873,32 @@ pub fn PlaylistExplorer() -> Html {
     let selected_ids_rc = Rc::new((*selected_ids).clone());
 
     let handle_bulk_updated = {
-        let is_bulk_edit_open = is_bulk_edit_open.clone();
-        let selected_ids = selected_ids.clone();
         let explorer_ctx = context.clone();
         let set_playlist = playlist.clone();
         let self_written = self_written_playlist.clone();
+        let selected_item = selected_item.clone();
         Callback::from(move |patched_items: Vec<UiPlaylistItem>| {
-            is_bulk_edit_open.set(false);
-            selected_ids.set(HashSet::new());
-            if let Some(ref cat) = *explorer_ctx.playlist {
-                let mut current_cat = (**cat).clone();
-                for it in patched_items {
-                    current_cat = edit_panel::replace_item_in_categories(&current_cat, it);
+            if patched_items.is_empty() {
+                return;
+            }
+            let patch_map: HashMap<u32, UiPlaylistItem> =
+                patched_items.into_iter().map(|it| (it.virtual_id, it)).collect();
+
+            if let Some(ref sel) = *selected_item {
+                if let Some(patched) = patch_map.get(&sel.virtual_id) {
+                    selected_item.set(Some(Rc::new(patched.clone())));
                 }
-                let new_cat = Rc::new(current_cat);
-                set_playlist.set(Some(new_cat.clone()));
-                *self_written.borrow_mut() = Some(new_cat.clone());
-                explorer_ctx.playlist.set(Some(new_cat));
+            }
+
+            if let Some(ref cat) = *explorer_ctx.playlist {
+                let new_source = Rc::new(edit_panel::apply_bulk_patches_to_categories(cat, &patch_map));
+                let new_visible = (*set_playlist).as_ref().map_or_else(
+                    || new_source.clone(),
+                    |visible| Rc::new(edit_panel::apply_bulk_patches_to_categories(visible, &patch_map)),
+                );
+                set_playlist.set(Some(new_visible));
+                *self_written.borrow_mut() = Some(new_source.clone());
+                explorer_ctx.playlist.set(Some(new_source));
             }
         })
     };
@@ -808,8 +914,66 @@ pub fn PlaylistExplorer() -> Html {
 
     let handle_select_group = {
         let selected_group = selected_group.clone();
+        let current_level = current_level.clone();
         Callback::from(move |group: SelectedGroup| {
+            current_level.set(level_after_group_select(&current_level));
             selected_group.set(group);
+        })
+    };
+
+    let mobile_group_options = {
+        let mut opts = Vec::new();
+        let selected_group = (*selected_group).clone();
+
+        // 1. All groups
+        opts.push(DropDownOption::new(
+            "__all__",
+            html! { <>{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_ALL") }{ format!(" ({total_items})") }</> },
+            selected_group == SelectedGroup::All,
+        ));
+
+        // 2. Without EPG (live only)
+        if *active_cluster == XtreamCluster::Live {
+            let without_epg_count = *without_epg_count;
+            opts.push(DropDownOption::new(
+                "__without_epg__",
+                html! { <>{ "⚠ " }{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_WITHOUT_EPG") }{ format!(" ({without_epg_count})") }</> },
+                selected_group == SelectedGroup::WithoutEpg,
+            ));
+        }
+
+        // 3. Edited
+        let edited_count = *edited_count;
+        opts.push(DropDownOption::new(
+            "__edited__",
+            html! { <>{ "✎ " }{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED") }{ format!(" ({edited_count})") }</> },
+            selected_group == SelectedGroup::Edited,
+        ));
+
+        // 4. Every group with its count
+        if let Some(ref groups) = *groups_for_cluster {
+            for g in groups.iter() {
+                let is_sel = match &selected_group {
+                    SelectedGroup::Group(title) => title == &g.title,
+                    _ => false,
+                };
+                opts.push(DropDownOption::new(
+                    &format!("grp:{}", g.title),
+                    html! { <>{ g.title.clone() }{ format!(" ({})", g.channels.len()) }</> },
+                    is_sel,
+                ));
+            }
+        }
+
+        Rc::new(opts)
+    };
+
+    let handle_mobile_group_select = {
+        let handle_select_group = handle_select_group.clone();
+        Callback::from(move |(_name, sel): (String, DropDownSelection)| {
+            if let DropDownSelection::Single(id) = sel {
+                handle_select_group.emit(selected_group_from_id(&id));
+            }
         })
     };
 
@@ -827,43 +991,12 @@ pub fn PlaylistExplorer() -> Html {
     let handle_sort_change = {
         let active_sort = active_sort.clone();
         let active_desc = active_desc.clone();
-        Callback::from(move |e: Event| {
-            let target = e.target_unchecked_into::<web_sys::HtmlSelectElement>();
-            let val = target.value();
-            match val.as_str() {
-                "ChannelNo" => {
-                    active_sort.set(ExplorerSort::ChannelNo);
-                    active_desc.set(false);
+        Callback::from(move |(_name, selection): (String, DropDownSelection)| {
+            if let DropDownSelection::Single(id) = selection {
+                if let Some(sort) = ExplorerSort::from_id(&id) {
+                    active_sort.set(sort);
+                    active_desc.set(sort.default_desc());
                 }
-                "Name" => {
-                    active_sort.set(ExplorerSort::Name);
-                    active_desc.set(false);
-                }
-                "Group" => {
-                    active_sort.set(ExplorerSort::Group);
-                    active_desc.set(false);
-                }
-                "Added" => {
-                    active_sort.set(ExplorerSort::Added);
-                    active_desc.set(true);
-                }
-                "Title" => {
-                    active_sort.set(ExplorerSort::Title);
-                    active_desc.set(false);
-                }
-                "Year" => {
-                    active_sort.set(ExplorerSort::Year);
-                    active_desc.set(true);
-                }
-                "Rating" => {
-                    active_sort.set(ExplorerSort::Rating);
-                    active_desc.set(true);
-                }
-                "LastModified" => {
-                    active_sort.set(ExplorerSort::LastModified);
-                    active_desc.set(true);
-                }
-                _ => {}
             }
         })
     };
@@ -935,9 +1068,12 @@ pub fn PlaylistExplorer() -> Html {
                             <b>{ chan.title.clone() }</b>
                             <br />
                             <small>{ if ep_rating > 0.001 { format!("★ {} · ", format_float_localized(ep_rating, 1, false)) } else { String::new() } }{ translate.t("LABEL.EPISODE") }</small>
-                            <button type="button" class="tp__icon-button" onclick={Callback::from(move |e: MouseEvent| popup_onclick.emit((channel_select.clone(), e)))}>
-                                <AppIcon name="Popup" />
-                            </button>
+                            <IconButton
+                                name="episode_actions"
+                                icon="Popup"
+                                aria_label={Some(translate.t("LABEL.ACTIONS"))}
+                                onclick={Callback::from(move |(_, e): (String, MouseEvent)| popup_onclick.emit((channel_select.clone(), e)))}
+                            />
                         </span>
                     </div>
                 }
@@ -990,41 +1126,50 @@ pub fn PlaylistExplorer() -> Html {
             }
         };
 
+    // A poster card has its action button on the right: open its menu right-aligned below the button,
+    // attached like a select list. Row menus (button in the first column) keep the adaptive placement.
+    let popup_in_card =
+        (*popup_anchor_ref).as_ref().and_then(|anchor| anchor.closest(".post").ok().flatten()).is_some();
+    let popup_placement = if popup_in_card { PopupMenuPlacement::BottomEndFlip } else { PopupMenuPlacement::default() };
+
     html! {
         <div class="tp__playlist-explorer tpx">
             // TOP BAR
             <div class="top">
                 <div class="tabs">
-                    <button
-                        type="button"
-                        class={if *active_cluster == XtreamCluster::Live { "on" } else { "" }}
+                    <TextButton
+                        name={"live"}
+                        class={if *active_cluster == XtreamCluster::Live { "active" } else { "" }}
+                        aria_pressed={Some((*active_cluster == XtreamCluster::Live).to_string())}
+                        title={translate.t("LABEL.LIVE")}
+                        badge={Some(live_count.to_string())}
                         onclick={
                             let ch = handle_cluster_change.clone();
-                            Callback::from(move |_: MouseEvent| ch.emit(XtreamCluster::Live))
+                            Callback::from(move |_: String| ch.emit(XtreamCluster::Live))
                         }
-                    >
-                        { translate.t("LABEL.LIVE") } { " " } { live_count }
-                    </button>
-                    <button
-                        type="button"
-                        class={if *active_cluster == XtreamCluster::Video { "on" } else { "" }}
+                    />
+                    <TextButton
+                        name={"video"}
+                        class={if *active_cluster == XtreamCluster::Video { "active" } else { "" }}
+                        aria_pressed={Some((*active_cluster == XtreamCluster::Video).to_string())}
+                        title={translate.t("LABEL.VOD")}
+                        badge={Some(vod_count.to_string())}
                         onclick={
                             let ch = handle_cluster_change.clone();
-                            Callback::from(move |_: MouseEvent| ch.emit(XtreamCluster::Video))
+                            Callback::from(move |_: String| ch.emit(XtreamCluster::Video))
                         }
-                    >
-                        { translate.t("LABEL.VOD") } { " " } { vod_count }
-                    </button>
-                    <button
-                        type="button"
-                        class={if *active_cluster == XtreamCluster::Series { "on" } else { "" }}
+                    />
+                    <TextButton
+                        name={"series"}
+                        class={if *active_cluster == XtreamCluster::Series { "active" } else { "" }}
+                        aria_pressed={Some((*active_cluster == XtreamCluster::Series).to_string())}
+                        title={translate.t("LABEL.SERIES")}
+                        badge={Some(series_count.to_string())}
                         onclick={
                             let ch = handle_cluster_change.clone();
-                            Callback::from(move |_: MouseEvent| ch.emit(XtreamCluster::Series))
+                            Callback::from(move |_: String| ch.emit(XtreamCluster::Series))
                         }
-                    >
-                        { translate.t("LABEL.SERIES") } { " " } { series_count }
-                    </button>
+                    />
                 </div>
 
                 <div class="search">
@@ -1036,27 +1181,40 @@ pub fn PlaylistExplorer() -> Html {
                 </div>
 
                 <div class="top-actions">
-                    <TextButton
-                        name="orphan_cleanup"
-                        icon="DeleteSweep"
-                        title={translate.t("LABEL.EXPLORER_OVERRIDE_CLEANUP")}
-                        onclick={let is_orphans_open = is_orphans_open.clone(); Callback::from(move |_: String| is_orphans_open.set(true))}
-                    />
+                    { html_if!(can_write, {
+                        <TextButton
+                            name="orphan_cleanup"
+                            icon="DeleteSweep"
+                            title={translate.t("LABEL.EXPLORER_OVERRIDE_CLEANUP")}
+                            aria_label={Some(translate.t("LABEL.EXPLORER_OVERRIDE_CLEANUP"))}
+                            onclick={let is_orphans_open = is_orphans_open.clone(); Callback::from(move |_: String| is_orphans_open.set(true))}
+                        />
+                    })}
                 </div>
             </div>
 
             // BODY: SIDEBAR + MAIN + DETAIL PANEL
             <div class="body">
                 // SIDEBAR
-                <ExplorerSidebar
-                    cluster={*active_cluster}
-                    groups={Id::from_option((*groups_for_cluster).clone())}
-                    total_items={total_items}
-                    edited_count={*edited_count}
-                    without_epg_count={*without_epg_count}
-                    selected_group={(*selected_group).clone()}
-                    on_select_group={handle_select_group}
-                />
+                { html_if!(!*is_mobile, {
+                    <HorizontalShrinkPanel
+                        class="tp__explorer-group-panel"
+                        shrink_width="8rem"
+                        default_width="14rem"
+                        max_width="28rem"
+                        storage_key="tp-explorer-group-panel-width"
+                    >
+                        <ExplorerSidebar
+                            cluster={*active_cluster}
+                            groups={Id::from_option((*groups_for_cluster).clone())}
+                            total_items={total_items}
+                            edited_count={*edited_count}
+                            without_epg_count={*without_epg_count}
+                            selected_group={(*selected_group).clone()}
+                            on_select_group={handle_select_group}
+                        />
+                    </HorizontalShrinkPanel>
+                })}
 
                 // MAIN CONTENT
                 <div class="main">
@@ -1078,6 +1236,16 @@ pub fn PlaylistExplorer() -> Html {
                         if matches!(*current_level, ExplorerLevel::Browser) {
                             html! {
                                 <div class="bar">
+                                    // Mobile Group Select
+                                    { html_if!(*is_mobile, {
+                                        <Select
+                                            name="explorer_mobile_group"
+                                            class="tp__explorer-group-select sel"
+                                            options={mobile_group_options}
+                                            on_select={handle_mobile_group_select}
+                                            close_on_resize=true
+                                        />
+                                    })}
                                     // Live Chips
                                     {
                                         if *active_cluster == XtreamCluster::Live {
@@ -1086,31 +1254,31 @@ pub fn PlaylistExplorer() -> Html {
                                             let all_chip_click = {
                                                 let we = filter_without_epg.clone();
                                                 let ed = filter_edited.clone();
-                                                Callback::from(move |_: MouseEvent| { we.set(false); ed.set(false); })
+                                                Callback::from(move |_: String| { we.set(false); ed.set(false); })
                                             };
                                             html! {
                                                 <>
-                                                    <button
-                                                        type="button"
-                                                        class={format!("chip {}", if !*we_chip && !*ed_chip { "on" } else { "" })}
+                                                    <TextButton
+                                                        name="filter_all"
+                                                        class={if !*we_chip && !*ed_chip { "active" } else { "" }}
+                                                        aria_pressed={Some((!*we_chip && !*ed_chip).to_string())}
+                                                        title={translate.t("LABEL.EXPLORER_FILTER_ALL")}
                                                         onclick={all_chip_click}
-                                                    >
-                                                        { translate.t("LABEL.EXPLORER_FILTER_ALL") }
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        class={format!("chip {}", if *we_chip { "on" } else { "" })}
-                                                        onclick={Callback::from(move |_: MouseEvent| we_chip.set(!*we_chip))}
-                                                    >
-                                                        { translate.t("LABEL.EXPLORER_FILTER_WITHOUT_EPG") }
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        class={format!("chip {}", if *ed_chip { "on" } else { "" })}
-                                                        onclick={Callback::from(move |_: MouseEvent| ed_chip.set(!*ed_chip))}
-                                                    >
-                                                        { translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED") }
-                                                    </button>
+                                                    />
+                                                    <TextButton
+                                                        name="filter_without_epg"
+                                                        class={if *we_chip { "active" } else { "" }}
+                                                        aria_pressed={Some((*we_chip).to_string())}
+                                                        title={translate.t("LABEL.EXPLORER_FILTER_WITHOUT_EPG")}
+                                                        onclick={Callback::from(move |_: String| we_chip.set(!*we_chip))}
+                                                    />
+                                                    <TextButton
+                                                        name="filter_edited"
+                                                        class={if *ed_chip { "active" } else { "" }}
+                                                        aria_pressed={Some((*ed_chip).to_string())}
+                                                        title={translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED")}
+                                                        onclick={Callback::from(move |_: String| ed_chip.set(!*ed_chip))}
+                                                    />
                                                 </>
                                             }
                                         } else {
@@ -1122,23 +1290,42 @@ pub fn PlaylistExplorer() -> Html {
                                     {
                                         if *active_cluster == XtreamCluster::Video || *active_cluster == XtreamCluster::Series {
                                             let ed_chip = filter_edited.clone();
-                                            let r_chip = filter_rating_gte6.clone();
+                                            let r_chip = filter_rating.clone();
+                                            let r_min = filter_rating_min.clone();
+                                            let on_rating_min = {
+                                                let r_chip = filter_rating.clone();
+                                                let r_min = filter_rating_min.clone();
+                                                Callback::from(move |(_, sel): (String, DropDownSelection)| {
+                                                    if let DropDownSelection::Single(v) = sel {
+                                                        if let Ok(min) = v.parse::<u8>() {
+                                                            r_min.set(min);
+                                                            r_chip.set(true);
+                                                        }
+                                                    }
+                                                })
+                                            };
                                             html! {
                                                 <>
-                                                    <button
-                                                        type="button"
-                                                        class={format!("chip {}", if *r_chip { "on" } else { "" })}
-                                                        onclick={Callback::from(move |_: MouseEvent| r_chip.set(!*r_chip))}
-                                                    >
-                                                        { translate.t("LABEL.EXPLORER_FILTER_RATING_GTE").replace("{rating}", "6.0") }
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        class={format!("chip {}", if *ed_chip { "on" } else { "" })}
-                                                        onclick={Callback::from(move |_: MouseEvent| ed_chip.set(!*ed_chip))}
-                                                    >
-                                                        { translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED") }
-                                                    </button>
+                                                    <SplitButton
+                                                        name="filter_rating"
+                                                        active={*r_chip}
+                                                        title={translate.t("LABEL.EXPLORER_FILTER_RATING_GTE").replace("{rating}", &r_min.to_string())}
+                                                        menu_label={Some(translate.t("LABEL.EXPLORER_FILTER_RATING_MIN"))}
+                                                        options={Rc::new(RATING_FILTER_STEPS.iter().map(|n| DropDownOption::new(
+                                                            &n.to_string(),
+                                                            html! { { translate.t("LABEL.EXPLORER_FILTER_RATING_GTE").replace("{rating}", &n.to_string()) } },
+                                                            *n == *r_min,
+                                                        )).collect::<Vec<_>>())}
+                                                        onclick={Callback::from(move |_: String| r_chip.set(!*r_chip))}
+                                                        on_select={on_rating_min}
+                                                    />
+                                                    <TextButton
+                                                        name="filter_edited"
+                                                        class={if *ed_chip { "active" } else { "" }}
+                                                        aria_pressed={Some((*ed_chip).to_string())}
+                                                        title={translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED")}
+                                                        onclick={Callback::from(move |_: String| ed_chip.set(!*ed_chip))}
+                                                    />
                                                 </>
                                             }
                                         } else {
@@ -1147,33 +1334,17 @@ pub fn PlaylistExplorer() -> Html {
                                     }
 
                                     // Sort dropdown
-                                    <select
+                                    <Select
+                                        name="explorer_sort"
                                         class="sel"
-                                        aria-label={translate.t("LABEL.SORT")}
-                                        onchange={handle_sort_change}
-                                    >
-                                        {
-                                            available_sorts.iter().map(|s| {
-                                                let is_sel = *s == *active_sort;
-                                                let val_str = match s {
-                                                    ExplorerSort::ChannelNo => "ChannelNo",
-                                                    ExplorerSort::Name => "Name",
-                                                    ExplorerSort::Group => "Group",
-                                                    ExplorerSort::Added => "Added",
-                                                    ExplorerSort::Title => "Title",
-                                                    ExplorerSort::Year => "Year",
-                                                    ExplorerSort::Rating => "Rating",
-                                                    ExplorerSort::LastModified => "LastModified",
-                                                };
-                                                html! {
-                                                    <option value={val_str} selected={is_sel}>
-                                                        { translate.t("LABEL.EXPLORER_SORT_PREFIX") }
-                                                        { translate.t(s.label_key()) }
-                                                    </option>
-                                                }
-                                            }).collect::<Html>()
-                                        }
-                                    </select>
+                                        options={Rc::new(available_sorts.iter().map(|s| DropDownOption::new(
+                                            s.id(),
+                                            html! { <>{ translate.t("LABEL.EXPLORER_SORT_PREFIX") }{ translate.t(s.label_key()) }</> },
+                                            *s == *active_sort,
+                                        )).collect::<Vec<_>>())}
+                                        close_on_resize=true
+                                        on_select={handle_sort_change}
+                                    />
 
                                     // Bulk selection bar
                                     {
@@ -1187,13 +1358,15 @@ pub fn PlaylistExplorer() -> Html {
                                                     <span class="tp__selection-count">
                                                         { format!("{} {}", selected_ids.len(), translate.t("LABEL.EXPLORER_SELECTED_ITEMS")) }
                                                     </span>
-                                                    <TextButton
-                                                        class="primary"
-                                                        name="bulk_edit"
-                                                        icon="Edit"
-                                                        title={translate.t("LABEL.EXPLORER_BULK_EDIT")}
-                                                        onclick={Callback::from(move |_: String| is_bulk.set(true))}
-                                                    />
+                                                    { html_if!(can_write, {
+                                                        <TextButton
+                                                            class="primary"
+                                                            name="bulk_edit"
+                                                            icon="Edit"
+                                                            title={translate.t("LABEL.EXPLORER_BULK_EDIT")}
+                                                            onclick={Callback::from(move |_: String| is_bulk.set(true))}
+                                                        />
+                                                    })}
                                                     <TextButton
                                                         name="clear_selection"
                                                         icon="Clear"
@@ -1211,34 +1384,30 @@ pub fn PlaylistExplorer() -> Html {
                                             let is_list = is_vod_list_view.clone();
                                             let toggle_grid = {
                                                 let is_list = is_list.clone();
-                                                Callback::from(move |_: MouseEvent| is_list.set(false))
+                                                Callback::from(move |_: (String, MouseEvent)| is_list.set(false))
                                             };
                                             let toggle_list = {
                                                 let is_list = is_list.clone();
-                                                Callback::from(move |_: MouseEvent| is_list.set(true))
+                                                Callback::from(move |_: (String, MouseEvent)| is_list.set(true))
                                             };
                                             html! {
                                                 <div class="view-toggle">
-                                                    <button
-                                                        type="button"
-                                                        class={if *is_list { "" } else { "on" }}
+                                                    <IconButton
+                                                        name="grid_view"
+                                                        icon="VideoLibrary"
+                                                        class={if *is_list { "" } else { "active" }}
+                                                        hint={translate.t("LABEL.EXPLORER_GRID_VIEW")}
+                                                        aria_label={Some(translate.t("LABEL.EXPLORER_GRID_VIEW"))}
                                                         onclick={toggle_grid}
-                                                        title={translate.t("LABEL.EXPLORER_GRID_VIEW")}
-                                                        aria-label={translate.t("LABEL.EXPLORER_GRID_VIEW")}
-                                                        aria-pressed={(!*is_list).to_string()}
-                                                    >
-                                                        { "▦" }
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        class={if *is_list { "on" } else { "" }}
+                                                    />
+                                                    <IconButton
+                                                        name="list_view"
+                                                        icon="Log"
+                                                        class={if *is_list { "active" } else { "" }}
+                                                        hint={translate.t("LABEL.EXPLORER_LIST_VIEW")}
+                                                        aria_label={Some(translate.t("LABEL.EXPLORER_LIST_VIEW"))}
                                                         onclick={toggle_list}
-                                                        title={translate.t("LABEL.EXPLORER_LIST_VIEW")}
-                                                        aria-label={translate.t("LABEL.EXPLORER_LIST_VIEW")}
-                                                        aria-pressed={(*is_list).to_string()}
-                                                    >
-                                                        { "☰" }
-                                                    </button>
+                                                    />
                                                 </div>
                                             }
                                         } else {
@@ -1279,6 +1448,7 @@ pub fn PlaylistExplorer() -> Html {
                                                 selected_ids={selected_ids_rc.clone()}
                                                 on_toggle_select={handle_toggle_select.clone()}
                                                 on_select_page={handle_select_page.clone()}
+                                                is_mobile={*is_mobile}
                                             />
                                         }
                                     }
@@ -1321,7 +1491,7 @@ pub fn PlaylistExplorer() -> Html {
 
                 // DETAIL PANEL OR BULK EDIT PANEL
                 {
-                    if *is_bulk_edit_open && !selected_ids.is_empty() {
+                    if can_write && *is_bulk_edit_open && !selected_ids.is_empty() {
                         let selected_items: Rc<Vec<Rc<UiPlaylistItem>>> = Rc::new(
                             all_items_for_cluster
                                 .iter()
@@ -1332,7 +1502,11 @@ pub fn PlaylistExplorer() -> Html {
 
                         let handle_bulk_close = {
                             let is_bulk_edit_open = is_bulk_edit_open.clone();
-                            Callback::from(move |()| is_bulk_edit_open.set(false))
+                            let selected_ids = selected_ids.clone();
+                            Callback::from(move |()| {
+                                is_bulk_edit_open.set(false);
+                                selected_ids.set(HashSet::new());
+                            })
                         };
 
                         html! {
@@ -1352,6 +1526,7 @@ pub fn PlaylistExplorer() -> Html {
                                 playlist_revision={playlist_revision}
                                 on_close={handle_close_detail}
                                 on_item_updated={handle_item_updated}
+                                on_open_series={Some(load_series_info.clone())}
                             />
                         }
                     } else {
@@ -1364,6 +1539,9 @@ pub fn PlaylistExplorer() -> Html {
             <PopupMenu
                 is_open={*popup_is_open}
                 anchor_ref={(*popup_anchor_ref).clone()}
+                placement={popup_placement}
+                gap={popup_in_card.then_some(CARD_POPUP_GAP_PX)}
+                class={classes!(popup_in_card.then_some("tp__popup-menu--select"))}
                 on_close={handle_popup_close}
             >
                 {
@@ -1404,7 +1582,7 @@ pub fn PlaylistExplorer() -> Html {
 
             // ORPHANS CLEANUP DIALOG
             {
-                if *is_orphans_open {
+                if can_write && *is_orphans_open {
                     let close_orphans = {
                         let is_orphans_open = is_orphans_open.clone();
                         Callback::from(move |()| is_orphans_open.set(false))
@@ -1448,7 +1626,91 @@ pub fn background_style(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::background_style;
+    use super::*;
+    use std::rc::Rc;
+
+    #[test]
+    fn selected_group_from_id_maps_ids_correctly() {
+        assert_eq!(selected_group_from_id("__all__"), SelectedGroup::All);
+        assert_eq!(selected_group_from_id("__without_epg__"), SelectedGroup::WithoutEpg);
+        assert_eq!(selected_group_from_id("__edited__"), SelectedGroup::Edited);
+        assert_eq!(selected_group_from_id("grp:Sports"), SelectedGroup::Group("Sports".into()));
+        assert_eq!(selected_group_from_id("unknown"), SelectedGroup::All);
+    }
+
+    #[test]
+    fn search_by_provider_id_matches_override_id_and_provider_id() {
+        use shared::model::{PlaylistItemType, UiItemExplorerMeta, UiPlaylistItem};
+        use std::sync::Arc;
+
+        let item_with_override = Rc::new(UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: Arc::from("m3u-stream-id"),
+            name: Arc::from("Channel 1"),
+            title: Arc::from("Channel 1"),
+            group: Arc::from("Group"),
+            logo: Arc::from(""),
+            url: Arc::from(""),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: shared::model::XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: Arc::from("m3u-input"),
+            epg_channel_id: None,
+            explorer_meta: Some(UiItemExplorerMeta {
+                override_id: Some(Arc::from("urlhash-v1:blake3hash123")),
+                ..Default::default()
+            }),
+        });
+
+        let item_plain = Rc::new(UiPlaylistItem {
+            virtual_id: 2,
+            provider_id: Arc::from("xtream-12345"),
+            name: Arc::from("Channel 2"),
+            title: Arc::from("Channel 2"),
+            group: Arc::from("Group"),
+            logo: Arc::from(""),
+            url: Arc::from(""),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: shared::model::XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: Arc::from("xtream-input"),
+            epg_channel_id: None,
+            explorer_meta: None,
+        });
+
+        let group = Rc::new(shared::model::UiPlaylistGroup {
+            id: 1,
+            title: Arc::from("Group"),
+            channels: vec![item_with_override.clone(), item_plain.clone()],
+            xtream_cluster: shared::model::XtreamCluster::Live,
+        });
+
+        let categories = shared::model::UiPlaylistCategories { live: Some(vec![group]), vod: None, series: None };
+
+        // 1. Search by override_id exact
+        let req_override_id = shared::model::SearchRequest::Text(
+            "urlhash-v1:blake3hash123".to_string(),
+            Some(Rc::new(vec![shared::model::SEARCH_FIELD_PROVIDER_ID.to_string()])),
+        );
+        let res1 = categories.filter(&req_override_id);
+        assert!(res1.is_some());
+        let live1 = res1.unwrap().live.unwrap();
+        assert_eq!(live1[0].channels.len(), 1);
+        assert_eq!(live1[0].channels[0].virtual_id, 1);
+
+        // 2. Search by provider_id exact
+        let req_provider_id = shared::model::SearchRequest::Text(
+            "xtream-12345".to_string(),
+            Some(Rc::new(vec![shared::model::SEARCH_FIELD_PROVIDER_ID.to_string()])),
+        );
+        let res2 = categories.filter(&req_provider_id);
+        assert!(res2.is_some());
+        let live2 = res2.unwrap().live.unwrap();
+        assert_eq!(live2[0].channels.len(), 1);
+        assert_eq!(live2[0].channels[0].virtual_id, 2);
+    }
 
     #[test]
     fn plain_urls_are_accepted() {
@@ -1468,6 +1730,41 @@ mod tests {
         assert_eq!(background_style("javascript:alert(1)"), "");
         assert_eq!(background_style("https://x/a b.jpg"), "");
         assert_eq!(background_style("   "), "");
+    }
+
+    fn make_test_item(virtual_id: u32, cluster: shared::model::XtreamCluster) -> shared::model::UiPlaylistItem {
+        shared::model::UiPlaylistItem {
+            virtual_id,
+            provider_id: std::sync::Arc::from("prov-1"),
+            name: std::sync::Arc::from("Series 1"),
+            title: std::sync::Arc::from("Series 1"),
+            group: std::sync::Arc::from("Group"),
+            logo: std::sync::Arc::from(""),
+            url: std::sync::Arc::from(""),
+            item_type: shared::model::PlaylistItemType::Series,
+            xtream_cluster: cluster,
+            category_id: 1,
+            rating: 8.0,
+            input_name: std::sync::Arc::from("input-1"),
+            epg_channel_id: None,
+            explorer_meta: None,
+        }
+    }
+
+    #[test]
+    fn group_selection_leaves_series_episodes_level() {
+        let dummy = Rc::new(make_test_item(10, XtreamCluster::Series));
+        let level = ExplorerLevel::SeriesEpisodes(dummy, None);
+        assert_eq!(level_after_group_select(&level), ExplorerLevel::Browser);
+        assert_eq!(level_after_group_select(&ExplorerLevel::Browser), ExplorerLevel::Browser);
+    }
+
+    #[test]
+    fn search_leaves_series_episodes_level() {
+        let dummy = Rc::new(make_test_item(10, XtreamCluster::Series));
+        let level = ExplorerLevel::SeriesEpisodes(dummy, None);
+        assert_eq!(level_after_search(&level), ExplorerLevel::Browser);
+        assert_eq!(level_after_search(&ExplorerLevel::Browser), ExplorerLevel::Browser);
     }
 
     #[test]

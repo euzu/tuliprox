@@ -2,10 +2,10 @@ use crate::{
     app::components::{
         playlist::explorer::{
             identity::Id,
-            sort::{epg_badge_label_key, extract_channel_no, is_edited},
+            sort::{epg_badge_label_key, is_edited, item_chno},
         },
         table::{PagedTable, TableDefinition},
-        AppIcon,
+        Checkbox, IconButton,
     },
     i18n::use_translation,
 };
@@ -16,13 +16,28 @@ use yew::prelude::*;
 
 crate::app::components::define_table_columns! {
     enum LiveTableColumn {
-        Actions => ("actions", "") { can_hide: false },
-        Select => ("select", "") { can_hide: false },
-        ChNo => ("chno", "LABEL.EXPLORER_SORT_CHANNEL_NO"),
+        Actions => ("actions", "") { can_hide: false, content: false },
+        Select => ("select", "") { can_hide: false, content: false },
+        ChNo => ("chno", "LABEL.EXPLORER_SORT_CHANNEL_NO") { header_label: Some("LABEL.EXPLORER_CHNO_SHORT") },
         Logo => ("logo", "LABEL.LOGO"),
         Name => ("name", "LABEL.NAME") { can_hide: false },
         Epg => ("epg", "LABEL.EPG"),
         Badges => ("badges", "LABEL.STATUS"),
+    }
+}
+
+impl LiveTableColumn {
+    pub fn columns_for_viewport(is_mobile: bool) -> Vec<crate::app::components::TableColumn> {
+        Self::ALL
+            .iter()
+            .map(|col| {
+                let mut meta = col.definition().metadata();
+                if is_mobile && matches!(col, Self::Logo | Self::Badges) {
+                    meta.default_visible = false;
+                }
+                meta
+            })
+            .collect()
     }
 }
 
@@ -39,6 +54,8 @@ pub struct ExplorerLiveViewProps {
     pub on_toggle_select: Callback<u32>,
     #[prop_or_default]
     pub on_select_page: Callback<(Vec<u32>, bool)>,
+    #[prop_or_default]
+    pub is_mobile: bool,
 }
 
 #[component]
@@ -47,7 +64,7 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
     let page = use_state(|| 1u32);
     let page_size = use_state(|| 50u16);
 
-    let columns = use_memo((), |()| LiveTableColumn::columns());
+    let columns = use_memo(props.is_mobile, |mobile| LiveTableColumn::columns_for_viewport(*mobile));
 
     let total_items = props.items.len();
     let current_page_size = usize::from(*page_size).max(1);
@@ -81,13 +98,7 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
                 let select_label = translate.t("LABEL.EXPLORER_SELECT_PAGE");
                 html! {
                     <span class="row-cell-select" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
-                        <input
-                            type="checkbox"
-                            class="tp__checkbox"
-                            aria-label={select_label}
-                            checked={all_selected}
-                            {onchange}
-                        />
+                        <Checkbox aria_label={Some(select_label)} checked={all_selected} onchange={onchange} />
                     </span>
                 }
             }
@@ -110,20 +121,16 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
                     Some(LiveTableColumn::Actions) => {
                         let pli_for_popup = pli.clone();
                         let popup_cb = on_popup_menu.clone();
-                        let on_popup_click = Callback::from(move |e: MouseEvent| {
-                            e.prevent_default();
-                            e.stop_propagation();
+                        let on_popup_click = Callback::from(move |(_, e): (String, MouseEvent)| {
                             popup_cb.emit((pli_for_popup.clone(), e));
                         });
                         html! {
-                            <button
-                                type="button"
-                                class="tp__icon-button"
-                                aria-label={translate.t("LABEL.ACTIONS")}
+                            <IconButton
+                                name="row_actions"
+                                icon="Popup"
+                                aria_label={Some(translate.t("LABEL.ACTIONS"))}
                                 onclick={on_popup_click}
-                            >
-                                <AppIcon name="Popup" />
-                            </button>
+                            />
                         }
                     }
                     Some(LiveTableColumn::Select) => {
@@ -137,20 +144,12 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
                         let select_label = translate.t("LABEL.EXPLORER_SELECTED_ITEMS");
                         html! {
                             <span class="row-cell-select" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
-                                <input
-                                    type="checkbox"
-                                    class="tp__checkbox"
-                                    aria-label={select_label}
-                                    checked={is_checked}
-                                    {onchange}
-                                />
+                                <Checkbox aria_label={Some(select_label)} checked={is_checked} onchange={onchange} />
                             </span>
                         }
                     }
                     Some(LiveTableColumn::ChNo) => {
-                        let chno = extract_channel_no(&pli.name, &pli.title)
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "-".to_string());
+                        let chno = item_chno(&pli).map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
                         html! { <span class="row-cell-chno chno">{ chno }</span> }
                     }
                     Some(LiveTableColumn::Logo) => {
@@ -199,7 +198,13 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
                     Some(LiveTableColumn::Epg) => {
                         let epg_badge = match epg_badge_label_key(pli.epg_state()) {
                             Some(label_key) => {
-                                html! { <span class="noepg">{ "⚠ " }{ translate.t(label_key) }</span> }
+                                let label = translate.t(label_key);
+                                html! {
+                                    <span class="noepg" title={label.clone()} aria-label={label.clone()}>
+                                        <span class="noepg-icon">{ "⚠" }</span>
+                                        <span class="noepg-text">{ format!(" {label}") }</span>
+                                    </span>
+                                }
                             }
                             None => html! {},
                         };
@@ -236,7 +241,9 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
         let paged_items: Vec<Rc<UiPlaylistItem>> = props.items[start_idx..end_idx].to_vec();
 
         Rc::new(TableDefinition::<UiPlaylistItem> {
-            table_id: "playlist.explorer.live".into(),
+            // Mobile keeps its own column layout, so hiding Logo/Status on a phone never rewrites the
+            // desktop layout (and vice versa).
+            table_id: if props.is_mobile { "playlist.explorer.live.mobile" } else { "playlist.explorer.live" }.into(),
             columns,
             row_key: Callback::from(|(_, item): (usize, Rc<UiPlaylistItem>)| item.virtual_id.to_string().into()),
             items: Some(Rc::new(paged_items)),
@@ -272,7 +279,33 @@ pub fn ExplorerLiveView(props: &ExplorerLiveViewProps) -> Html {
                 has_next={current_page < total_pages}
                 on_page_change={handle_page_change}
                 on_page_size_change={handle_page_size_change}
+                on_row_click={Some(props.on_select_item.clone())}
+                selected_row_key={props.selected_item.as_ref().map(|item| AttrValue::from(item.virtual_id.to_string()))}
             />
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columns_for_viewport_hides_logo_and_badges_on_mobile_by_default() {
+        let desktop = LiveTableColumn::columns_for_viewport(false);
+        let mobile = LiveTableColumn::columns_for_viewport(true);
+
+        for col in &desktop {
+            assert!(col.default_visible, "all columns should be visible by default on desktop: {}", col.id);
+        }
+
+        for col in &mobile {
+            if col.id == "logo" || col.id == "badges" {
+                assert!(!col.default_visible, "column {} should be hidden by default on mobile", col.id);
+                assert!(col.can_hide, "column {} must be hideable/toggleable in columns panel", col.id);
+            } else {
+                assert!(col.default_visible, "column {} should be visible by default on mobile", col.id);
+            }
+        }
     }
 }

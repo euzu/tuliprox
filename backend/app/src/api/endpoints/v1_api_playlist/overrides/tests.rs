@@ -1171,3 +1171,144 @@ async fn hints_are_read_from_the_matching_cluster() {
         "the hint comes from the movie cluster, not from the live one: {body}"
     );
 }
+
+#[tokio::test]
+async fn test_b1_aliased_input_resolves_to_parent() {
+    let fixture = fixture();
+    let parent = alias_input(10, "parent-input", "alias-input");
+    let sources = vec![ConfigSource {
+        inputs: vec!["parent-input".intern()],
+        targets: vec![target(1, M3U_TARGET, m3u_output())],
+    }];
+    fixture.install_sources(vec![parent], sources);
+
+    // Save an override on parent-input
+    let base = fixture.revision("input", "parent-input").await;
+    let body =
+        save_body("input", "parent-input", &base, json!([patch(None, "live", "p1", json!({ "name": set("Item 1") }))]));
+    let (status, _) = fixture.post("/playlist/overrides", body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 1. GET /playlist/overrides?scope=input&name=alias-input resolves to parent-input
+    let (status, body) = fixture.get("/playlist/overrides?scope=input&name=alias-input").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status_parent, body_parent) = fixture.get("/playlist/overrides?scope=input&name=parent-input").await;
+    assert_eq!(status_parent, StatusCode::OK);
+    assert_eq!(body["revision"], body_parent["revision"]);
+    assert_eq!(body["entries"][0]["id"], "p1");
+
+    // 2. Provenance with input=alias-input resolves to parent-input
+    let (status, body) = fixture.get("/playlist/overrides/item?input=alias-input&kind=live&id=p1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["input_override"]["name"], "Item 1");
+
+    // 3. Orphans with input=alias-input
+    let (status, body) = fixture.get("/playlist/overrides/orphans?input=alias-input").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["entries"][0]["id"], "p1");
+
+    // 4. EPG search with input=alias-input
+    let (status, body) = fixture.get("/playlist/epg/search?input=alias-input&q=news").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn test_b2_orphan_detection_scans_aliases_and_missing_sets_unknown() {
+    let fixture = fixture();
+    let parent = alias_input(10, "parent-input", "alias-input");
+    let sources = vec![ConfigSource {
+        inputs: vec!["parent-input".intern()],
+        targets: vec![target(1, M3U_TARGET, m3u_output())],
+    }];
+    fixture.install_sources(vec![parent], sources);
+
+    // Save overrides on parent-input for p1 (present in parent) and p2 (present in alias)
+    let base = fixture.revision("input", "parent-input").await;
+    let body = save_body(
+        "input",
+        "parent-input",
+        &base,
+        json!([
+            patch(None, "live", "p1", json!({ "name": set("Item 1") })),
+            patch(None, "live", "p2", json!({ "name": set("Item 2") })),
+            patch(None, "live", "p3", json!({ "name": set("Item 3") })),
+        ]),
+    );
+    let (status, _) = fixture.post("/playlist/overrides", body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Case A: alias storage missing or failed -> state must be unknown, NEVER orphaned
+    fixture.write_input_playlist(
+        "parent-input",
+        vec![m3u_record_of("parent-input", "p1", "One", "G", PlaylistItemType::Live)],
+    );
+    fixture.write_input_status("parent-input", crate::processing::input_cache::ClusterState::Ok);
+    // Note: alias-input status/storage NOT created!
+    let (status, body) = fixture.get("/playlist/overrides/orphans?input=parent-input").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries = body["entries"].as_array().expect("entries");
+    for entry in entries {
+        assert_eq!(entry["state"], "unknown", "missing alias inventory must make all entries unknown: {entry}");
+    }
+
+    // Case B: parent has p1, alias has p2, both loaded OK -> p1 and p2 active, p3 orphaned
+    fixture.write_input_playlist(
+        "alias-input",
+        vec![m3u_record_of("alias-input", "p2", "Two", "G", PlaylistItemType::Live)],
+    );
+    fixture.write_input_status("alias-input", crate::processing::input_cache::ClusterState::Ok);
+
+    let (status, body) = fixture.get("/playlist/overrides/orphans?input=parent-input").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries = body["entries"].as_array().expect("entries");
+    let state_of = |id: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .and_then(|entry| entry["state"].as_str())
+            .unwrap_or("missing")
+            .to_string()
+    };
+    assert_eq!(state_of("p1"), "active", "item in parent inventory is active");
+    assert_eq!(state_of("p2"), "active", "item in alias inventory is active");
+    assert_eq!(state_of("p3"), "orphaned", "item in neither is orphaned");
+}
+
+#[tokio::test]
+async fn test_b4_explorer_flag_controls_meta_and_streaming() {
+    use shared::model::UiPlaylistItem;
+
+    let fixture = fixture();
+    fixture.write_input_playlist(CONFIG_INPUT, vec![m3u_record("p1", "Item One", "Group One", PlaylistItemType::Live)]);
+
+    // 1. Without explorer query param (default explorer=false)
+    let (status, body) =
+        fixture.call("POST", "/playlist/live", Some(&fixture.reader), Some(json!({ "Input": CONFIG_INPUT }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body.as_array().expect("array of items");
+    assert_eq!(items.len(), 1);
+    let item: UiPlaylistItem = serde_json::from_value(items[0].clone()).expect("deserialize UiPlaylistItem");
+    assert!(item.explorer_meta.is_none(), "explorer=false must not emit explorer_meta");
+
+    // 2. With explorer=false explicitly
+    let (status, body) = fixture
+        .call("POST", "/playlist/live?explorer=false", Some(&fixture.reader), Some(json!({ "Input": CONFIG_INPUT })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body.as_array().expect("array of items");
+    assert_eq!(items.len(), 1);
+    let item: UiPlaylistItem = serde_json::from_value(items[0].clone()).expect("deserialize UiPlaylistItem");
+    assert!(item.explorer_meta.is_none(), "explorer=false must not emit explorer_meta");
+
+    // 3. With explorer=true
+    let (status, body) = fixture
+        .call("POST", "/playlist/live?explorer=true", Some(&fixture.reader), Some(json!({ "Input": CONFIG_INPUT })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body.as_array().expect("array of items");
+    assert_eq!(items.len(), 1);
+    let item: UiPlaylistItem = serde_json::from_value(items[0].clone()).expect("deserialize UiPlaylistItem");
+    let meta = item.explorer_meta.expect("explorer=true must attach explorer_meta");
+    assert_eq!(meta.override_id.as_deref(), Some("p1"));
+    assert!(!meta.override_state.edited);
+}

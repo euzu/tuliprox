@@ -28,6 +28,7 @@ pub(super) async fn playlist_content(
     app_state: &Arc<AppState>,
     playlist_req: &PlaylistRequest,
     cluster: XtreamCluster,
+    explorer: bool,
 ) -> impl IntoResponse + Send {
     let client = app_state.http_clients.default.load();
     match playlist_req {
@@ -36,6 +37,7 @@ pub(super) async fn playlist_content(
             app_state,
             cluster,
             accept.as_deref(),
+            explorer,
         )
         .await
         .into_response(),
@@ -44,6 +46,7 @@ pub(super) async fn playlist_content(
             app_state,
             cluster,
             accept.as_deref(),
+            explorer,
         )
         .await
         .into_response(),

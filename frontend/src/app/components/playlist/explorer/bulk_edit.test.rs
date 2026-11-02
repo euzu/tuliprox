@@ -33,6 +33,7 @@ fn make_test_item(
         explorer_meta: Some(UiItemExplorerMeta {
             override_state: UiOverrideState { edited: false, pending: false, ambiguous: false },
             epg_state: None,
+            ..Default::default()
         }),
     })
 }
@@ -155,4 +156,44 @@ fn bulk_keeps_other_item_deltas() {
     let meta = patched.explorer_meta.expect("explorer_meta must exist");
     assert!(meta.override_state.edited);
     assert!(meta.override_state.pending);
+}
+
+#[test]
+fn bulk_patch_supports_all_ui_fields() {
+    let original = make_test_item(1, "p1", "Old Name", "input-a", PlaylistItemType::Live);
+    let patch = ItemOverridePatch {
+        name: Some(OverrideFieldOp::Set("Bulk Name".to_string())),
+        title: Some(OverrideFieldOp::Set("Bulk Title".to_string())),
+        group: Some(OverrideFieldOp::Set("Bulk Group".to_string())),
+        logo: Some(OverrideFieldOp::Set("http://bulk/logo.png".to_string())),
+        epg_channel_id: Some(OverrideFieldOp::Set("epg-bulk".to_string())),
+        rating: Some(OverrideFieldOp::Set(8.5)),
+        ..Default::default()
+    };
+
+    let patched = patch_playlist_item_bulk(&original, &patch);
+    assert_eq!(&*patched.name, "Bulk Name");
+    assert_eq!(&*patched.title, "Bulk Title");
+    assert_eq!(&*patched.group, "Bulk Group");
+    assert_eq!(&*patched.logo, "http://bulk/logo.png");
+    assert_eq!(patched.epg_channel_id.as_deref(), Some("epg-bulk"));
+    assert_eq!(patched.rating, 8.5);
+
+    let clear_patch = ItemOverridePatch {
+        name: Some(OverrideFieldOp::Clear),
+        title: Some(OverrideFieldOp::Clear),
+        group: Some(OverrideFieldOp::Clear),
+        logo: Some(OverrideFieldOp::Clear),
+        epg_channel_id: Some(OverrideFieldOp::Clear),
+        rating: Some(OverrideFieldOp::Clear),
+        ..Default::default()
+    };
+
+    let cleared = patch_playlist_item_bulk(&patched, &clear_patch);
+    assert_eq!(&*cleared.name, "");
+    assert_eq!(&*cleared.title, "");
+    assert_eq!(&*cleared.group, "");
+    assert_eq!(&*cleared.logo, "");
+    assert_eq!(cleared.epg_channel_id, None);
+    assert_eq!(cleared.rating, 0.0);
 }

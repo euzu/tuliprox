@@ -179,14 +179,44 @@ pub async fn get_target_epg_status_index(app_state: &Arc<AppState>, target: &Con
     }
 }
 
+struct CachedInputEpgStatusIndex {
+    stamps: Vec<(PathBuf, EpgStampKey)>,
+    last_used: std::time::Instant,
+    index: Arc<EpgStatusIndex>,
+}
+
+type InputEpgIndexCacheMap = HashMap<Arc<str>, CachedInputEpgStatusIndex>;
+static INPUT_EPG_INDEX_CACHE: OnceLock<RwLock<InputEpgIndexCacheMap>> = OnceLock::new();
+
+fn get_cached_input_index(input_name: &str, stamps: &[(PathBuf, EpgStampKey)]) -> Option<Arc<EpgStatusIndex>> {
+    let cache = INPUT_EPG_INDEX_CACHE.get_or_init(Default::default);
+    let mut guard = cache.write().ok()?;
+    guard.retain(|_, entry| entry.last_used.elapsed() < std::time::Duration::from_mins(30));
+    let entry = guard.get_mut(input_name)?;
+    if entry.stamps == stamps {
+        entry.last_used = std::time::Instant::now();
+        Some(Arc::clone(&entry.index))
+    } else {
+        None
+    }
+}
+
+fn put_cached_input_index(input_name: Arc<str>, stamps: Vec<(PathBuf, EpgStampKey)>, index: Arc<EpgStatusIndex>) {
+    let cache = INPUT_EPG_INDEX_CACHE.get_or_init(Default::default);
+    if let Ok(mut guard) = cache.write() {
+        guard.retain(|_, entry| entry.last_used.elapsed() < std::time::Duration::from_mins(30));
+        guard.insert(input_name, CachedInputEpgStatusIndex { stamps, last_used: std::time::Instant::now(), index });
+    }
+}
+
 /// Builds or retrieves the cached [`EpgStatusIndex`] for an input from stored/cached EPG files on disk (NEVER network).
 pub async fn get_input_epg_status_index(app_state: &Arc<AppState>, input: &ConfigInput) -> Arc<EpgStatusIndex> {
     let Some(epg_config) = input.epg.as_ref() else {
         return Arc::new(EpgStatusIndex::new(HashMap::new(), EpgIdOutputCase::LowercaseAscii));
     };
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
-    let mut combined_max_stop: HashMap<Arc<str>, i64> = HashMap::new();
 
+    let mut source_paths_and_stamps: Vec<(PathBuf, EpgStampKey, &EpgSource)> = Vec::new();
     for epg_source in &epg_config.sources {
         let Ok(raw_epg_path) = get_input_raw_epg_file_path(epg_source, input, &storage_dir).await else {
             continue;
@@ -195,10 +225,20 @@ pub async fn get_input_epg_status_index(app_state: &Arc<AppState>, input: &Confi
             continue;
         }
         let stamp = tokio::fs::metadata(&raw_epg_path).await.ok().and_then(|m| EpgStampKey::from_metadata(&m));
-        let Some(stamp) = stamp else {
-            continue;
-        };
+        if let Some(stamp) = stamp {
+            source_paths_and_stamps.push((raw_epg_path, stamp, epg_source));
+        }
+    }
 
+    let stamp_keys: Vec<(PathBuf, EpgStampKey)> =
+        source_paths_and_stamps.iter().map(|(p, s, _)| (p.clone(), *s)).collect();
+
+    if let Some(cached) = get_cached_input_index(&input.name, &stamp_keys) {
+        return cached;
+    }
+
+    let mut combined_max_stop: HashMap<Arc<str>, i64> = HashMap::new();
+    for (raw_epg_path, stamp, epg_source) in source_paths_and_stamps {
         if let Some(cached) = get_cached_index(&raw_epg_path, &stamp) {
             for (id, stop) in &cached.max_stop {
                 combined_max_stop.entry(Arc::clone(id)).and_modify(|s| *s = (*s).max(*stop)).or_insert(*stop);
@@ -221,7 +261,9 @@ pub async fn get_input_epg_status_index(app_state: &Arc<AppState>, input: &Confi
         }
     }
 
-    Arc::new(EpgStatusIndex::new(combined_max_stop, EpgIdOutputCase::LowercaseAscii))
+    let index = Arc::new(EpgStatusIndex::new(combined_max_stop, EpgIdOutputCase::LowercaseAscii));
+    put_cached_input_index(Arc::from(input.name.as_ref()), stamp_keys, Arc::clone(&index));
+    index
 }
 
 async fn parse_input_epg_source_file(
@@ -232,7 +274,10 @@ async fn parse_input_epg_source_file(
     let _cache_lock = app_state.app_config.file_locks.read_lock(raw_epg_path).await;
     match epg_source.source_type {
         EpgSourceType::Xmltv => {
-            let max_stop = parse_xmltv_channel_max_stops(raw_epg_path).await?;
+            let path = raw_epg_path.to_path_buf();
+            let max_stop = tokio::task::spawn_blocking(move || parse_xmltv_channel_max_stops_sync(&path))
+                .await
+                .map_err(|err| TuliproxError::RepositoryEpg(format!("EPG parser task failed: {err}")))??;
             Ok(EpgStatusIndex::new(max_stop, EpgIdOutputCase::LowercaseAscii))
         }
         EpgSourceType::Ics => {
@@ -252,25 +297,21 @@ async fn parse_input_epg_source_file(
     }
 }
 
-async fn parse_xmltv_channel_max_stops(path: &Path) -> Result<HashMap<Arc<str>, i64>, TuliproxError> {
+fn parse_xmltv_channel_max_stops_sync(path: &Path) -> Result<HashMap<Arc<str>, i64>, TuliproxError> {
     use quick_xml::events::Event;
     use tuliprox_core::{
         model::{EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_STOP, EPG_TAG_CHANNEL, EPG_TAG_PROGRAMME},
-        utils::{
-            async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
-            with_folded_epg_id,
-        },
+        utils::{compressed_file_reader::CompressedFileReader, parse_xmltv_time, with_folded_epg_id},
     };
 
-    let compressed_reader = CompressedFileReaderAsync::new(path)
-        .await
+    let compressed_reader = CompressedFileReader::new(path)
         .map_err(|err| TuliproxError::RepositoryEpg(format!("Cannot open EPG file {}: {err}", path.display())))?;
-    let mut reader = quick_xml::reader::Reader::from_reader(async_file_reader(compressed_reader));
+    let mut reader = quick_xml::reader::Reader::from_reader(compressed_reader);
     let mut buf = Vec::new();
     let mut max_stop: HashMap<Arc<str>, i64> = HashMap::new();
 
     loop {
-        match reader.read_event_into_async(&mut buf).await {
+        match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e) | Event::Start(e)) => {
                 let name = e.name();
                 let tag = name.as_ref();
@@ -381,14 +422,39 @@ fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride) {
         FieldDelta::Clear => item.group = Arc::from(""),
         FieldDelta::Set(v) => item.group = Arc::from(v.as_str()),
     }
-    match &ov.logo {
-        FieldDelta::Keep => match &ov.logo_small {
-            FieldDelta::Keep => {}
-            FieldDelta::Clear => item.logo = Arc::from(""),
-            FieldDelta::Set(v) => item.logo = Arc::from(v.as_str()),
-        },
-        FieldDelta::Clear => item.logo = Arc::from(""),
-        FieldDelta::Set(v) => item.logo = Arc::from(v.as_str()),
+    let effective_logo = match &ov.logo {
+        FieldDelta::Set(v) => Some(v.as_str()),
+        FieldDelta::Clear => Some(""),
+        FieldDelta::Keep => None,
+    };
+    let effective_logo_small = match &ov.logo_small {
+        FieldDelta::Set(v) => Some(v.as_str()),
+        FieldDelta::Clear => Some(""),
+        FieldDelta::Keep => None,
+    };
+    match (effective_logo, effective_logo_small) {
+        (Some(l), Some(s)) => {
+            if !l.is_empty() {
+                item.logo = Arc::from(l);
+            } else if !s.is_empty() {
+                item.logo = Arc::from(s);
+            } else {
+                item.logo = Arc::from("");
+            }
+        }
+        (Some(l), None) => {
+            if l.is_empty() {
+                item.logo = Arc::from("");
+            } else {
+                item.logo = Arc::from(l);
+            }
+        }
+        (None, Some(s)) => {
+            if item.logo.is_empty() && !s.is_empty() {
+                item.logo = Arc::from(s);
+            }
+        }
+        (None, None) => {}
     }
     match ov.rating {
         FieldDelta::Keep => {}
@@ -399,6 +465,13 @@ fn apply_override_to_ui_item(item: &mut UiPlaylistItem, ov: &ItemOverride) {
         FieldDelta::Keep => {}
         FieldDelta::Clear => item.epg_channel_id = None,
         FieldDelta::Set(v) => item.epg_channel_id = Some(Arc::from(v.as_str())),
+    }
+    if !ov.chno.is_keep() {
+        let meta = item.explorer_meta.get_or_insert_with(UiItemExplorerMeta::default);
+        meta.chno = match ov.chno {
+            FieldDelta::Set(v) if v > 0 => Some(v),
+            _ => None,
+        };
     }
 }
 
@@ -457,39 +530,6 @@ fn merge_item_override(base: &mut ItemOverride, overlay: &ItemOverride) {
     if !overlay.tmdb.is_keep() {
         base.tmdb = overlay.tmdb;
     }
-}
-
-/// Checks whether any override files exist for `target` or any of its inputs.
-pub async fn has_target_overrides(app_state: &Arc<AppState>, target: &ConfigTarget) -> bool {
-    let repo = app_state.override_repository();
-    if let Ok(target_path) = repo.file_path(&OverrideScope::Target(target.name.clone())) {
-        if tokio::fs::try_exists(&target_path).await.unwrap_or(false) {
-            return true;
-        }
-    }
-    let sources = app_state.app_config.sources.load();
-    let aliases = InputAliasMap::from_inputs(&sources.inputs);
-    let parents = inputs_for_target(&app_state.app_config, &aliases, &target.name);
-    for parent in parents {
-        if let Ok(input_path) = repo.file_path(&OverrideScope::Input(parent)) {
-            if tokio::fs::try_exists(&input_path).await.unwrap_or(false) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Checks whether an override file exists for `input`.
-pub async fn has_input_overrides(app_state: &Arc<AppState>, input: &ConfigInput) -> bool {
-    let repo = app_state.override_repository();
-    let sources = app_state.app_config.sources.load();
-    let aliases = InputAliasMap::from_inputs(&sources.inputs);
-    let parent = parent_input_name(&aliases, &input.name);
-    let Ok(input_path) = repo.file_path(&OverrideScope::Input(parent)) else {
-        return false;
-    };
-    tokio::fs::try_exists(&input_path).await.unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -643,34 +683,29 @@ fn apply_lookup_overlay(
         parent_arc
     };
 
-    let parents_with_entries: HashSet<Arc<str>> = merged_lookup.keys().map(|(p, _)| Arc::clone(p)).collect();
-
     let mut key_counts: HashMap<(Arc<str>, OverrideKey), usize> = HashMap::new();
     let mut item_keys: Vec<Option<OverrideKey>> = Vec::with_capacity(items.len());
 
     for item in items.iter() {
         let parent = get_parent(&item.input_name);
-        if parents_with_entries.contains(&parent) {
-            let header = header_of_ui_item(item);
-            if let Some(k) = override_key(&header, aliases) {
-                if merged_lookup.contains_key(&(Arc::clone(&parent), k.clone())) {
-                    *key_counts.entry((Arc::clone(&parent), k.clone())).or_insert(0) += 1;
-                }
-                item_keys.push(Some(k));
-                continue;
+        let header = header_of_ui_item(item);
+        if let Some(k) = override_key(&header, aliases) {
+            if merged_lookup.contains_key(&(Arc::clone(&parent), k.clone())) {
+                *key_counts.entry((Arc::clone(&parent), k.clone())).or_insert(0) += 1;
             }
+            item_keys.push(Some(k));
+        } else {
+            item_keys.push(None);
         }
-        item_keys.push(None);
     }
 
     for (item, key_opt) in items.iter_mut().zip(item_keys) {
         let parent = get_parent(&item.input_name);
         let mut override_state = UiOverrideState { edited: false, pending: false, ambiguous: false };
 
-        if let Some(key) = key_opt {
-            item.provider_id = Arc::clone(&key.id);
+        if let Some(key) = &key_opt {
             if let Some(merged) = merged_lookup.get(&(Arc::clone(&parent), key.clone())) {
-                let is_ambiguous = key_counts.get(&(Arc::clone(&parent), key)).copied().unwrap_or(0) > 1;
+                let is_ambiguous = key_counts.get(&(Arc::clone(&parent), key.clone())).copied().unwrap_or(0) > 1;
                 if is_ambiguous {
                     override_state = UiOverrideState { edited: true, pending: merged.pending, ambiguous: true };
                 } else {
@@ -683,7 +718,12 @@ fn apply_lookup_overlay(
         let epg_state =
             if item.item_type.is_live() { Some(epg_index.status(item.epg_channel_id.as_deref(), now)) } else { None };
 
-        item.explorer_meta = Some(UiItemExplorerMeta { override_state, epg_state });
+        // Keep what the record conversion filled in (timestamps, channel number).
+        let mut meta = item.explorer_meta.take().unwrap_or_default();
+        meta.override_state = override_state;
+        meta.epg_state = epg_state;
+        meta.override_id = key_opt.map(|k| k.id);
+        item.explorer_meta = Some(meta);
     }
 }
 
@@ -788,6 +828,8 @@ mod tests {
             Some(UiItemExplorerMeta {
                 override_state: UiOverrideState { edited: true, pending: true, ambiguous: false },
                 epg_state: Some(ExplorerEpgState::MissingId),
+                override_id: Some("12345".into()),
+                ..Default::default()
             })
         );
     }
@@ -836,6 +878,8 @@ mod tests {
             Some(UiItemExplorerMeta {
                 override_state: UiOverrideState { edited: true, pending: false, ambiguous: false },
                 epg_state: Some(ExplorerEpgState::Ok),
+                override_id: Some("12345".into()),
+                ..Default::default()
             })
         );
     }
@@ -957,5 +1001,171 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("deserialize as JSON value");
         let arr = value.as_array().expect("array serialization");
         assert_eq!(arr.len(), 12);
+    }
+
+    #[test]
+    fn test_b3_provider_id_preserved_and_override_id_emitted() {
+        let now = 1000i64;
+        let item = UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: "orig_provider_123".intern(),
+            name: "Channel".intern(),
+            title: "Channel".intern(),
+            group: "Group".intern(),
+            logo: "".intern(),
+            url: "http://example.com/live/1.m3u8".intern(),
+            item_type: shared::model::PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: "test_input".intern(),
+            epg_channel_id: None,
+            explorer_meta: Some(UiItemExplorerMeta {
+                added: Some(1_700_000_000),
+                last_modified: Some(1_700_000_100),
+                chno: Some(202_362),
+                ..Default::default()
+            }),
+        };
+
+        let mut items = vec![item];
+        let input = ConfigInput { name: "test_input".intern(), ..Default::default() };
+        let aliases = InputAliasMap::from_inputs(&[Arc::new(input)]);
+        let merged_lookup = HashMap::new(); // Parent has NO overrides!
+        let epg_index = EpgStatusIndex::default();
+
+        apply_lookup_overlay(&mut items, &aliases, &merged_lookup, &epg_index, now);
+
+        // provider_id must NOT be overwritten
+        assert_eq!(items[0].provider_id.as_ref(), "orig_provider_123");
+        let meta = items[0].explorer_meta.as_ref().expect("meta");
+        // override_id must be populated for every item even without overrides
+        assert_eq!(meta.override_id.as_deref(), Some("orig_provider_123"));
+        // added and last_modified are preserved
+        assert_eq!(meta.added, Some(1_700_000_000));
+        assert_eq!(meta.last_modified, Some(1_700_000_100));
+        // the stored channel number survives the overlay
+        assert_eq!(meta.chno, Some(202_362));
+    }
+
+    #[test]
+    fn chno_override_is_previewed_in_explorer_meta() {
+        let base = UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: "1".intern(),
+            name: "7 RADIO".intern(),
+            title: "7 RADIO".intern(),
+            group: "Group".intern(),
+            logo: "".intern(),
+            url: "".intern(),
+            item_type: shared::model::PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: "in".intern(),
+            epg_channel_id: None,
+            explorer_meta: Some(UiItemExplorerMeta { chno: Some(202_362), ..Default::default() }),
+        };
+
+        let mut set = base.clone();
+        apply_override_to_ui_item(&mut set, &ItemOverride { chno: FieldDelta::Set(5), ..Default::default() });
+        assert_eq!(set.explorer_meta.as_ref().and_then(|m| m.chno), Some(5));
+
+        let mut cleared = base.clone();
+        apply_override_to_ui_item(&mut cleared, &ItemOverride { chno: FieldDelta::Clear, ..Default::default() });
+        assert_eq!(cleared.explorer_meta.as_ref().and_then(|m| m.chno), None);
+
+        let mut kept = base;
+        apply_override_to_ui_item(&mut kept, &ItemOverride::default());
+        assert_eq!(kept.explorer_meta.as_ref().and_then(|m| m.chno), Some(202_362));
+    }
+
+    #[test]
+    fn test_b3_best_logo_override_rules() {
+        let mut item = UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: "1".intern(),
+            name: "Name".intern(),
+            title: "Title".intern(),
+            group: "Group".intern(),
+            logo: "http://large.png".intern(),
+            url: "http://url".intern(),
+            item_type: shared::model::PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: "in".intern(),
+            epg_channel_id: None,
+            explorer_meta: None,
+        };
+
+        // 1. logo: Keep, logo_small: Set("small.png") -> existing large logo is NOT overwritten
+        let ov1 = ItemOverride {
+            logo: FieldDelta::Keep,
+            logo_small: FieldDelta::Set("http://small.png".to_string()),
+            ..Default::default()
+        };
+        apply_override_to_ui_item(&mut item, &ov1);
+        assert_eq!(item.logo.as_ref(), "http://large.png");
+
+        // 2. empty logo, logo: Keep, logo_small: Set("small.png") -> small logo is adopted
+        item.logo = "".intern();
+        apply_override_to_ui_item(&mut item, &ov1);
+        assert_eq!(item.logo.as_ref(), "http://small.png");
+
+        // 3. logo: Set("large2.png"), logo_small: Clear -> large2 wins
+        let ov2 = ItemOverride {
+            logo: FieldDelta::Set("http://large2.png".to_string()),
+            logo_small: FieldDelta::Clear,
+            ..Default::default()
+        };
+        apply_override_to_ui_item(&mut item, &ov2);
+        assert_eq!(item.logo.as_ref(), "http://large2.png");
+
+        // 4. logo: Clear, logo_small: Set("small2.png") -> small2 wins
+        let ov3 = ItemOverride {
+            logo: FieldDelta::Clear,
+            logo_small: FieldDelta::Set("http://small2.png".to_string()),
+            ..Default::default()
+        };
+        apply_override_to_ui_item(&mut item, &ov3);
+        assert_eq!(item.logo.as_ref(), "http://small2.png");
+
+        // 5. logo: Clear, logo_small: Clear -> cleared
+        let ov4 = ItemOverride { logo: FieldDelta::Clear, logo_small: FieldDelta::Clear, ..Default::default() };
+        apply_override_to_ui_item(&mut item, &ov4);
+        assert_eq!(item.logo.as_ref(), "");
+    }
+
+    #[test]
+    fn test_b5_input_epg_cache_keyed_by_stamps() {
+        let input_name = Arc::from("cached_input");
+        let path1 = PathBuf::from("/tmp/epg1.xml");
+        let first_stamp = EpgStampKey {
+            len: 100,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            #[cfg(unix)]
+            inode: 1,
+        };
+        let second_stamp = EpgStampKey {
+            len: 200,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            #[cfg(unix)]
+            inode: 2,
+        };
+
+        let stamps = vec![(path1.clone(), first_stamp)];
+        let index = Arc::new(EpgStatusIndex::new(HashMap::new(), EpgIdOutputCase::Preserve));
+
+        put_cached_input_index(Arc::clone(&input_name), stamps.clone(), Arc::clone(&index));
+
+        // Matching stamps return cached index
+        let cached = get_cached_input_index(&input_name, &stamps);
+        assert!(cached.is_some());
+        assert!(Arc::ptr_eq(&cached.unwrap(), &index));
+
+        // Different stamp misses cache
+        let changed_stamps = vec![(path1, second_stamp)];
+        assert!(get_cached_input_index(&input_name, &changed_stamps).is_none());
     }
 }

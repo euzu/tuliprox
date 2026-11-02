@@ -1,5 +1,5 @@
 use super::*;
-use shared::model::{OverrideFieldOp, OverrideItemKind, OverrideProvenanceDto, OverrideScopeDto};
+use shared::model::{OverrideFieldOp, OverrideItemKind, OverrideProvenanceDto, OverrideScopeDto, PlaylistItemType};
 use std::collections::BTreeMap;
 
 #[test]
@@ -152,6 +152,7 @@ fn patch_playlist_item_resets_fields_and_clears_edited_when_no_deltas_remain() {
         explorer_meta: Some(shared::model::UiItemExplorerMeta {
             override_state: shared::model::UiOverrideState { edited: true, pending: false, ambiguous: false },
             epg_state: None,
+            ..Default::default()
         }),
     };
 
@@ -296,21 +297,212 @@ fn replace_item_in_categories_replaces_single_rc_and_preserves_others() {
 }
 
 #[test]
-fn name_edit_also_sets_title_when_equal() {
-    let mut form = PlaylistOverrideDto {
-        name: "Channel News".to_string(),
-        title: "Channel News".to_string(),
-        ..Default::default()
-    };
-    let mut deltas = FieldDeltas::default();
+fn replace_item_in_categories_matches_only_virtual_id_even_if_provider_id_collides() {
+    let item_input_a = Rc::new(UiPlaylistItem {
+        virtual_id: 101,
+        provider_id: Arc::from("shared-provider-id"),
+        name: Arc::from("Channel A"),
+        title: Arc::from("Channel A"),
+        group: Arc::from("News"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("Provider A"),
+        epg_channel_id: None,
+        explorer_meta: None,
+    });
 
-    // When also_set_title is true (default when name == title before edit)
-    handle_name_change("Channel News HD", true, &mut form, &mut deltas);
-    assert_eq!(form.name, "Channel News HD");
-    assert_eq!(form.title, "Channel News HD", "Title should follow name when also_set_title is true");
+    let item_input_b = Rc::new(UiPlaylistItem {
+        virtual_id: 202,
+        provider_id: Arc::from("shared-provider-id"),
+        name: Arc::from("Channel B"),
+        title: Arc::from("Channel B"),
+        group: Arc::from("News"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("Provider B"),
+        epg_channel_id: None,
+        explorer_meta: None,
+    });
 
-    // When also_set_title is false
-    handle_name_change("Channel News 4K", false, &mut form, &mut deltas);
-    assert_eq!(form.name, "Channel News 4K");
-    assert_eq!(form.title, "Channel News HD", "Title should remain unchanged when also_set_title is false");
+    let group = Rc::new(UiPlaylistGroup {
+        id: 1,
+        title: Arc::from("News"),
+        channels: vec![item_input_a.clone(), item_input_b.clone()],
+        xtream_cluster: XtreamCluster::Live,
+    });
+
+    let categories = UiPlaylistCategories { live: Some(vec![group]), vod: None, series: None };
+
+    let mut patch_item_a = (*item_input_a).clone();
+    patch_item_a.name = Arc::from("Channel A (Modified)");
+
+    let updated = replace_item_in_categories(&categories, patch_item_a);
+    let channels = &updated.live.as_ref().unwrap()[0].channels;
+
+    assert_eq!(&*channels[0].name, "Channel A (Modified)");
+    assert_eq!(channels[0].virtual_id, 101);
+    assert_eq!(&*channels[1].name, "Channel B");
+    assert_eq!(channels[1].virtual_id, 202);
+    // item_b is identical Rc
+    assert!(Rc::ptr_eq(&channels[1], &item_input_b));
+}
+
+#[test]
+fn replace_item_in_categories_moves_item_to_group_creates_missing_and_drops_empty() {
+    let item1 = Rc::new(UiPlaylistItem {
+        virtual_id: 1,
+        provider_id: Arc::from("p1"),
+        name: Arc::from("Lonely Item"),
+        title: Arc::from("Lonely Item"),
+        group: Arc::from("OldGroup"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 10,
+        rating: 0.0,
+        input_name: Arc::from("in"),
+        epg_channel_id: None,
+        explorer_meta: None,
+    });
+
+    let group1 = Rc::new(UiPlaylistGroup {
+        id: 10,
+        title: Arc::from("OldGroup"),
+        channels: vec![item1.clone()],
+        xtream_cluster: XtreamCluster::Live,
+    });
+
+    let categories = UiPlaylistCategories { live: Some(vec![group1]), vod: None, series: None };
+
+    let mut moved_item = (*item1).clone();
+    moved_item.group = Arc::from("BrandNewGroup");
+
+    let updated = replace_item_in_categories(&categories, moved_item);
+    let live_groups = updated.live.as_ref().unwrap();
+
+    // OldGroup had only 1 item and became empty -> dropped
+    assert_eq!(live_groups.len(), 1);
+    assert_eq!(&*live_groups[0].title, "BrandNewGroup");
+    assert_eq!(live_groups[0].channels.len(), 1);
+    assert_eq!(&*live_groups[0].channels[0].name, "Lonely Item");
+    assert_eq!(&*live_groups[0].channels[0].group, "BrandNewGroup");
+}
+
+#[test]
+fn apply_bulk_patches_to_categories_updates_multiple_items_and_rebuilds_groups() {
+    let item1 = Rc::new(UiPlaylistItem {
+        virtual_id: 1,
+        provider_id: Arc::from("p1"),
+        name: Arc::from("Item 1"),
+        title: Arc::from("Item 1"),
+        group: Arc::from("Group 1"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("in"),
+        epg_channel_id: None,
+        explorer_meta: None,
+    });
+    let item2 = Rc::new(UiPlaylistItem {
+        virtual_id: 2,
+        provider_id: Arc::from("p2"),
+        name: Arc::from("Item 2"),
+        title: Arc::from("Item 2"),
+        group: Arc::from("Group 1"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("in"),
+        epg_channel_id: None,
+        explorer_meta: None,
+    });
+
+    let group = Rc::new(UiPlaylistGroup {
+        id: 1,
+        title: Arc::from("Group 1"),
+        channels: vec![item1.clone(), item2.clone()],
+        xtream_cluster: XtreamCluster::Live,
+    });
+
+    let categories = UiPlaylistCategories { live: Some(vec![group]), vod: None, series: None };
+
+    let mut patched1 = (*item1).clone();
+    patched1.name = Arc::from("Patched 1");
+    let mut patched2 = (*item2).clone();
+    patched2.group = Arc::from("Moved Group 2");
+
+    let mut patch_map = HashMap::new();
+    patch_map.insert(1, patched1);
+    patch_map.insert(2, patched2);
+
+    let updated = apply_bulk_patches_to_categories(&categories, &patch_map);
+    let groups = updated.live.as_ref().unwrap();
+    assert_eq!(groups.len(), 2);
+
+    let g1 = groups.iter().find(|g| g.title.as_ref() == "Group 1").unwrap();
+    assert_eq!(g1.channels.len(), 1);
+    assert_eq!(&*g1.channels[0].name, "Patched 1");
+
+    let g2 = groups.iter().find(|g| g.title.as_ref() == "Moved Group 2").unwrap();
+    assert_eq!(g2.channels.len(), 1);
+    assert_eq!(&*g2.channels[0].name, "Item 2");
+}
+
+#[test]
+fn find_duplicate_chno_uses_precomputed_map() {
+    let item1 = Rc::new(UiPlaylistItem {
+        virtual_id: 1,
+        provider_id: Arc::from("ch1-pid"),
+        name: Arc::from("10 BBC One"),
+        title: Arc::from("BBC One"),
+        group: Arc::from("UK"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("in"),
+        epg_channel_id: None,
+        explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
+    });
+
+    let group = Rc::new(UiPlaylistGroup {
+        id: 1,
+        title: Arc::from("UK"),
+        channels: vec![item1.clone()],
+        xtream_cluster: XtreamCluster::Live,
+    });
+
+    let categories = UiPlaylistCategories { live: Some(vec![group]), vod: None, series: None };
+
+    let map = build_channel_no_map(Some(&categories));
+    assert!(map.contains_key(&10));
+
+    // Looking up 10 for another channel finds duplicate
+    let dup = find_duplicate_chno("10", 2, &map);
+    assert_eq!(dup, Some("10 BBC One (BBC One)".to_string()));
+
+    // Looking up 10 for the same channel ignores itself, even when another input shares its provider id
+    let dup_self = find_duplicate_chno("10", 1, &map);
+    assert_eq!(dup_self, None);
+
+    // Looking up unknown channel number returns None
+    let dup_none = find_duplicate_chno("99", 2, &map);
+    assert_eq!(dup_none, None);
 }

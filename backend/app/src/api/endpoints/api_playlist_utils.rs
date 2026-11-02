@@ -5,7 +5,7 @@ use crate::{
             stream_json_or_bin_response_try_stream,
         },
         endpoints::v1_api_playlist::{
-            epg_status::{apply_overlay_input, apply_overlay_target, has_input_overrides, has_target_overrides},
+            epg_status::{apply_overlay_input, apply_overlay_target},
             items::visible_in_target_listing,
         },
         model::AppState,
@@ -47,15 +47,31 @@ fn stalker_refresh_pending_response(accept: Option<&str>) -> axum::response::Res
     response
 }
 
-async fn collect_stream_items<S, E>(mut stream: S) -> Result<Vec<UiPlaylistItem>, E>
+async fn collect_explorer_items<S, T, E, F>(mut stream: S, map_fn: F, source_name: &str) -> Vec<UiPlaylistItem>
 where
-    S: tokio_stream::Stream<Item = Result<UiPlaylistItem, E>> + Unpin,
+    S: tokio_stream::Stream<Item = Result<T, E>> + Unpin,
+    E: std::fmt::Display,
+    F: Fn(T) -> Option<UiPlaylistItem>,
 {
     let mut items = Vec::new();
+    let mut skipped = 0usize;
     while let Some(res) = stream.next().await {
-        items.push(res?);
+        match res {
+            Ok(item) => {
+                if let Some(ui_item) = map_fn(item) {
+                    items.push(ui_item);
+                }
+            }
+            Err(err) => {
+                skipped += 1;
+                log::warn!("Skipping unreadable playlist record for '{source_name}': {err}");
+            }
+        }
     }
-    Ok(items)
+    if skipped > 0 {
+        log::warn!("Skipped {skipped} unreadable records for '{source_name}' in explorer mode");
+    }
+    items
 }
 
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
@@ -63,20 +79,38 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
     app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
+    explorer: bool,
 ) -> impl IntoResponse + Send {
     let config = app_state.app_config.config.load();
     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
     let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Some(target) = cfg_target {
-        // Live lists always run the overlay: it also computes the explorer EPG state, which must be
-        // visible without any override file. VOD/series keep streaming unless overrides exist.
-        let has_overrides = cluster == XtreamCluster::Live || has_target_overrides(app_state, target).await;
         if target.has_output(TargetType::Xtream) {
             let Some(channel_iterator) = iter_raw_xtream_target_playlist(&app_state.app_config, target, cluster).await
             else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channel_iterator,
+                    |item| {
+                        if visible_in_target_listing(cluster, &item) {
+                            Some(rewrite_resource_url(
+                                &encrypt_secret,
+                                &resource_url,
+                                UiPlaylistItem::from_xtream(item, true),
+                            ))
+                        } else {
+                            None
+                        }
+                    },
+                    &target.name,
+                )
+                .await;
+                apply_overlay_target(&mut items, target, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channel_iterator.filter_map(move |entry| match entry {
                 Ok(item) if visible_in_target_listing(cluster, &item) => {
                     Some(Ok(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item))))
@@ -84,22 +118,6 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             });
-            if has_overrides {
-                match collect_stream_items(converted_stream).await {
-                    Ok(mut items) => {
-                        apply_overlay_target(&mut items, target, app_state).await;
-                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
-                    }
-                    Err(err) => {
-                        log::error!("Failed to read target playlist item: {err}");
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(json!({"error": err.to_string()})),
-                        )
-                            .into_response();
-                    }
-                }
-            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if target.has_output(TargetType::M3u) {
             let Some(channel_iterator) =
@@ -107,6 +125,26 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channel_iterator,
+                    |pli| {
+                        if visible_in_target_listing(cluster, &pli) {
+                            Some(rewrite_resource_url(
+                                &encrypt_secret,
+                                &resource_url,
+                                UiPlaylistItem::from_m3u(pli, true),
+                            ))
+                        } else {
+                            None
+                        }
+                    },
+                    &target.name,
+                )
+                .await;
+                apply_overlay_target(&mut items, target, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channel_iterator.filter_map(move |res| match res {
                 Ok(pli) if visible_in_target_listing(cluster, &pli) => {
                     Some(Ok(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(pli))))
@@ -114,22 +152,6 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             });
-            if has_overrides {
-                match collect_stream_items(converted_stream).await {
-                    Ok(mut items) => {
-                        apply_overlay_target(&mut items, target, app_state).await;
-                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
-                    }
-                    Err(err) => {
-                        log::error!("Failed to read target playlist item: {err}");
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(json!({"error": err.to_string()})),
-                        )
-                            .into_response();
-                    }
-                }
-            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         }
     }
@@ -179,9 +201,9 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
     app_state: &Arc<AppState>,
     cluster: XtreamCluster,
     accept: Option<&str>,
+    explorer: bool,
 ) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
-        let has_overrides = cluster == XtreamCluster::Live || has_input_overrides(app_state, input).await;
         // Icon URLs are wrapped into a proxy link, so the browser never receives a destination that
         // may be internal to this Tuliprox instance.
         let config = app_state.app_config.config.load();
@@ -193,49 +215,45 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channel_iterator,
+                    |item| {
+                        Some(rewrite_resource_url(
+                            &encrypt_secret,
+                            &resource_url,
+                            UiPlaylistItem::from_xtream(item, true),
+                        ))
+                    },
+                    &input.name,
+                )
+                .await;
+                apply_overlay_input(&mut items, input, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channel_iterator.map(move |entry| {
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
-            if has_overrides {
-                match collect_stream_items(converted_stream).await {
-                    Ok(mut items) => {
-                        apply_overlay_input(&mut items, input, app_state).await;
-                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
-                    }
-                    Err(err) => {
-                        log::error!("Failed to read input item: {err}");
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(json!({"error": err.to_string()})),
-                        )
-                            .into_response();
-                    }
-                }
-            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_m3u() {
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };
+            if explorer {
+                let mut items = collect_explorer_items(
+                    channels,
+                    |item| {
+                        Some(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from_m3u(item, true)))
+                    },
+                    &input.name,
+                )
+                .await;
+                apply_overlay_input(&mut items, input, app_state).await;
+                return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
+            }
             let converted_stream = channels.map(move |entry| {
                 entry.map(|item| rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(item)))
             });
-            if has_overrides {
-                match collect_stream_items(converted_stream).await {
-                    Ok(mut items) => {
-                        apply_overlay_input(&mut items, input, app_state).await;
-                        return stream_json_or_bin_response_stream(accept, tokio_stream::iter(items)).into_response();
-                    }
-                    Err(err) => {
-                        log::error!("Failed to read input item: {err}");
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(json!({"error": err.to_string()})),
-                        )
-                            .into_response();
-                    }
-                }
-            }
             return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_stalker() {
             // TODO refactor
@@ -269,7 +287,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 .map(|item| preview_item(&encrypt_secret, &resource_url, input.id, UiPlaylistItem::from(item)))
                 .collect();
             interner_gc();
-            if has_overrides {
+            if explorer {
                 apply_overlay_input(&mut channels, input, app_state).await;
             }
             return json_or_bin_response(accept, &channels).into_response();
@@ -461,5 +479,23 @@ mod tests {
 
         assert!(rewritten.logo.starts_with("/api/v1/playlist/resource/"), "{}", rewritten.logo);
         assert!(!rewritten.logo.contains("192.168.1.20"), "{}", rewritten.logo);
+    }
+
+    #[tokio::test]
+    async fn test_b4_collect_explorer_items_skips_unreadable_records() {
+        use crate::repository::LockedReceiverStream;
+        use shared::error::TuliproxError;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let _ = tx.send(Ok(sample_item("http://example.com/logo1.png"))).await;
+        let _ = tx.send(Err(TuliproxError::RepositoryStorage("Corrupt record".to_string()))).await;
+        let _ = tx.send(Ok(sample_item("http://example.com/logo2.png"))).await;
+        drop(tx);
+
+        let stream = LockedReceiverStream::new_empty(rx);
+        let collected = super::collect_explorer_items(stream, Some, "test_source").await;
+        assert_eq!(collected.len(), 2, "corrupt record must be skipped");
+        assert_eq!(collected[0].logo.as_ref(), "http://example.com/logo1.png");
+        assert_eq!(collected[1].logo.as_ref(), "http://example.com/logo2.png");
     }
 }

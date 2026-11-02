@@ -904,6 +904,7 @@
       "WINDOW_SECS": "Длина скользящего окна в секундах для агрегатов."
     },
     "PLAYLIST_OVERRIDE": {
+      "ALSO_SET_TITLE": "Списки и клиенты Xtream показывают заголовок. Если включено, при изменении имени заголовок получает то же значение.",
       "INPUT": "Входной источник плейлиста, переопределения которого проверяются или очищаются.",
       "NAME": "Имя канала или потока из плейлиста, используемое для вывода и сопоставления с EPG.",
       "TITLE": "Отображаемое название элемента (название EXTINF после запятой).",
@@ -1181,9 +1182,10 @@
     "EXPLORER_CATCHUP_BADGE": "Архив",
     "EXPLORER_EDITED_BADGE": "изменено",
     "EPISODE": "Эпизод",
-    "EXPLORER_ITEM_META": "{cluster} · ID {id} · Источник „{input}“",
+    "EXPLORER_ITEM_META": "{cluster} · ID провайдера {id} · Виртуальный ID {virtual_id} · Источник „{input}“",
     "EXPLORER_EPG_ID_TMDB": "EPG-ID / TMDB",
     "EXPLORER_LOGO_URL": "URL логотипа / постера",
+    "EXPLORER_FILTER_RATING_MIN": "Минимальный рейтинг",
     "EXPLORER_FILTER_RATING_GTE": "★ ≥ {rating}",
     "EXPLORER_PAGE_RANGE": "{start}-{end} из {total}",
     "EXPLORER_CLEARED": "(очищено)",
@@ -1216,6 +1218,9 @@
     "EXPLORER_SCOPE_INPUT": "Для input (все targets)",
     "EXPLORER_SCOPE_TARGET": "Только этот target",
     "EXPLORER_SORT_ADDED": "Добавлено",
+    "EXPLORER": "Обозреватель",
+    "EXPLORER_SHOW_EPISODES": "Показать серии",
+    "EXPLORER_CHNO_SHORT": "№",
     "EXPLORER_SORT_CHANNEL_NO": "Номер канала",
     "EXPLORER_SORT_LAST_MODIFIED": "Последнее изменение",
     "EXPLORER_SORT_PREFIX": "Сортировка: ",
@@ -2154,7 +2159,7 @@
     "EXPLORER_BULK_DISABLED_HINT": "Поле нельзя редактировать в массовом режиме",
     "EXPLORER_BULK_EDIT": "Массовое редактирование",
     "EXPLORER_BULK_RESULTS_TITLE": "Результаты массового сохранения",
-    "EXPLORER_CONFIRM_BULK_MSG": "Вы уверены, что хотите сохранить изменения для следующих источников?",
+    "EXPLORER_CONFIRM_BULK_MSG": "Вы уверены, что хотите применить изменения к {count} элементам в {inputs_count} источниках?",
     "EXPLORER_CONFIRM_BULK_SAVE": "Подтвердить массовое сохранение",
     "EXPLORER_ITEMS_SELECTED": "элементов выбрано",
     "EXPLORER_SET_VALUE": "Установить",
@@ -2249,7 +2254,10 @@
       "UNMAPPED_FIELD_ERRORS": "Сервер отклонил поля, которые этот редактор не показывает: {errors}",
       "STALE_REVISION": "Устаревшая ревизия (409)",
       "ORPHANS_LOAD_FAILED": "Не удалось загрузить переопределения: {error}",
-      "EPG_SEARCH_FAILED": "Ошибка поиска EPG: {error}"
+      "EPG_SEARCH_FAILED": "Ошибка поиска EPG: {error}",
+      "PARSE_ERROR": "Файл переопределений поврежден: {error}",
+      "SCHEMA_ERROR": "Неподдерживаемая версия схемы переопределения: {version}",
+      "SAVE_FAILED_ERROR": "Ошибка сохранения: {error}"
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Выберите EPG для просмотра содержимого.",

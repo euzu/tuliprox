@@ -4,8 +4,8 @@ use crate::{
             identity::Id,
             sort::{extract_added, extract_last_modified, extract_year, is_edited, is_within_new_window},
         },
-        table::{PagedTable, TableDefinition},
-        AppIcon,
+        table::{PagedTable, TableDefinition, PAGE_SIZES},
+        AppIcon, Checkbox, IconButton,
     },
     i18n::use_translation,
 };
@@ -21,8 +21,8 @@ const POSTER_GRID_PAGE_SIZE: usize = 120;
 
 crate::app::components::define_table_columns! {
     enum VodTableColumn {
-        Actions => ("actions", "") { can_hide: false },
-        Select => ("select", "") { can_hide: false },
+        Actions => ("actions", "") { can_hide: false, content: false },
+        Select => ("select", "") { can_hide: false, content: false },
         Logo => ("logo", "LABEL.LOGO"),
         Title => ("title", "LABEL.TITLE") { can_hide: false },
         Year => ("year", "LABEL.EXPLORER_SORT_YEAR"),
@@ -71,15 +71,17 @@ fn freshness_badge_key(item: &UiPlaylistItem, cluster: XtreamCluster, now: u64) 
 pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
     let translate = use_translation();
     let page = use_state(|| 1u32);
+    let list_page_size = use_state(|| PAGE_SIZES[1]);
     let columns = use_memo((), |()| VodTableColumn::columns());
 
+    let is_vod_list = props.is_list_view && props.cluster == XtreamCluster::Video;
+    let page_size_num = if is_vod_list { usize::from(*list_page_size).max(1) } else { POSTER_GRID_PAGE_SIZE };
     let total_items = props.items.len();
-    let total_pages =
-        ((total_items + POSTER_GRID_PAGE_SIZE.saturating_sub(1)) / POSTER_GRID_PAGE_SIZE.max(1)).max(1) as u32;
+    let total_pages = total_items.div_ceil(page_size_num).max(1) as u32;
     let current_page = (*page).clamp(1, total_pages);
 
-    let start_idx = ((current_page.saturating_sub(1) as usize) * POSTER_GRID_PAGE_SIZE).min(total_items);
-    let end_idx = (start_idx + POSTER_GRID_PAGE_SIZE).min(total_items);
+    let start_idx = ((current_page.saturating_sub(1) as usize) * page_size_num).min(total_items);
+    let end_idx = (start_idx + page_size_num).min(total_items);
     let page_items = &props.items[start_idx..end_idx];
 
     let handle_prev = {
@@ -130,13 +132,7 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                     let select_label = translate.t("LABEL.EXPLORER_SELECT_PAGE");
                     html! {
                         <span class="row-cell-select" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
-                            <input
-                                type="checkbox"
-                                class="tp__checkbox"
-                                aria-label={select_label}
-                                checked={all_selected}
-                                {onchange}
-                            />
+                            <Checkbox aria_label={Some(select_label)} checked={all_selected} onchange={onchange} />
                         </span>
                     }
                 }
@@ -147,6 +143,8 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
 
         let on_popup_menu = props.on_popup_menu.clone();
         let on_select_item = props.on_select_item.clone();
+        let on_open_series = props.on_open_series.clone();
+        let cluster = props.cluster;
         let translate_cell = translate.clone();
         let selected_ids = props.selected_ids.clone();
         let on_toggle_select = props.on_toggle_select.clone();
@@ -159,18 +157,14 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                         let pli_popup = pli.clone();
                         let popup_cb = on_popup_menu.clone();
                         html! {
-                            <button
-                                type="button"
-                                class="tp__icon-button"
-                                aria-label={translate_cell.t("LABEL.ACTIONS")}
-                                onclick={Callback::from(move |e: MouseEvent| {
-                                    e.prevent_default();
-                                    e.stop_propagation();
+                            <IconButton
+                                name="row_actions"
+                                icon="Popup"
+                                aria_label={Some(translate_cell.t("LABEL.ACTIONS"))}
+                                onclick={Callback::from(move |(_, e): (String, MouseEvent)| {
                                     popup_cb.emit((pli_popup.clone(), e));
                                 })}
-                            >
-                                <AppIcon name="Popup" />
-                            </button>
+                            />
                         }
                     }
                     Some(VodTableColumn::Select) => {
@@ -184,13 +178,7 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                         let select_label = translate_cell.t("LABEL.EXPLORER_SELECTED_ITEMS");
                         html! {
                             <span class="row-cell-select" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
-                                <input
-                                    type="checkbox"
-                                    class="tp__checkbox"
-                                    aria-label={select_label}
-                                    checked={is_checked}
-                                    {onchange}
-                                />
+                                <Checkbox aria_label={Some(select_label)} checked={is_checked} onchange={onchange} />
                             </span>
                         }
                     }
@@ -210,12 +198,24 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                     }
                     Some(VodTableColumn::Title) => {
                         let on_select = on_select_item.clone();
+                        let on_open = on_open_series.clone();
                         let pli_c = pli.clone();
+                        let on_dblclick = {
+                            let pli_c = pli_c.clone();
+                            Callback::from(move |_: MouseEvent| {
+                                if cluster == XtreamCluster::Series {
+                                    if let Some(ref open_cb) = on_open {
+                                        open_cb.emit(pli_c.clone());
+                                    }
+                                }
+                            })
+                        };
                         html! {
                             <button
                                 type="button"
                                 class="row-cell-nm"
                                 onclick={Callback::from(move |_: MouseEvent| on_select.emit(pli_c.clone()))}
+                                ondblclick={on_dblclick}
                             >
                                 <b>{ pli.title.as_ref() }</b>
                                 <small>{ pli.group.as_ref() }</small>
@@ -230,11 +230,11 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                     }
                     Some(VodTableColumn::Rating) => {
                         let rating = if pli.rating > 0.001 {
-                            format_float_localized(pli.rating, 1, false)
+                            format!("★ {}", format_float_localized(pli.rating, 1, false))
                         } else {
                             "-".to_string()
                         };
-                        html! { <span>{ rating }</span> }
+                        html! { <span class="row-cell-rating">{ rating }</span> }
                     }
                     None => html! {},
                 }
@@ -257,18 +257,29 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
             Callback::from(move |p: u32| page.set(p))
         };
 
+        let on_page_size_change = {
+            let list_page_size = list_page_size.clone();
+            let page = page.clone();
+            Callback::from(move |new_size: u16| {
+                if PAGE_SIZES.contains(&new_size) {
+                    list_page_size.set(new_size);
+                    page.set(1);
+                }
+            })
+        };
+
         return html! {
             <div class="vod-table">
                 <PagedTable<UiPlaylistItem>
                     definition={table_definition}
                     page={current_page}
-                    page_size={POSTER_GRID_PAGE_SIZE as u16}
+                    page_size={*list_page_size}
                     total_items={total_items as u64}
                     total_pages={total_pages}
                     has_prev={current_page > 1}
                     has_next={current_page < total_pages}
                     on_page_change={on_page_change}
-                    on_page_size_change={Callback::noop()}
+                    on_page_size_change={on_page_size_change}
                 />
             </div>
         };
@@ -276,30 +287,35 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
 
     // One clock read per render instead of one per card.
     let now = current_unix_secs();
+    let has_any_selection = !props.selected_ids.is_empty();
 
     html! {
         <div class="poster-grid-container">
-            <div class="grid">
+            <div class={format!("grid {}", if has_any_selection { "has-selection" } else { "" })}>
                 {
                     page_items.iter().map(|item| {
                         let pli = item.clone();
                         let has_logo = !pli.logo.is_empty();
                         let logo_src = pli.logo.to_string();
                         let year = extract_year(&pli.name, &pli.title);
-                        let subtitle = match year {
-                            Some(y) => format!("{y} · {}", pli.group),
-                            None => pli.group.to_string(),
-                        };
+                        // One title (wrapping) plus the year below; the group is shown by the sidebar/select.
+                        let subtitle = year.map(|y| y.to_string()).unwrap_or_default();
                         let badge_key = freshness_badge_key(&pli, props.cluster, now);
                         let edited = is_edited(&pli);
 
                         let on_click = {
                             let on_select = props.on_select_item.clone();
+                            let pli_clone = pli.clone();
+                            Callback::from(move |_: MouseEvent| {
+                                on_select.emit(pli_clone.clone());
+                            })
+                        };
+
+                        let on_dblclick = {
                             let on_open = props.on_open_series.clone();
                             let pli_clone = pli.clone();
                             let cluster = props.cluster;
                             Callback::from(move |_: MouseEvent| {
-                                on_select.emit(pli_clone.clone());
                                 if cluster == XtreamCluster::Series {
                                     if let Some(ref open_cb) = on_open {
                                         open_cb.emit(pli_clone.clone());
@@ -311,9 +327,7 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                         let on_popup_click = {
                             let on_popup = props.on_popup_menu.clone();
                             let pli_clone = pli.clone();
-                            Callback::from(move |e: MouseEvent| {
-                                e.prevent_default();
-                                e.stop_propagation();
+                            Callback::from(move |(_, e): (String, MouseEvent)| {
                                 on_popup.emit((pli_clone.clone(), e));
                             })
                         };
@@ -334,16 +348,11 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                                     if is_checked { "multi-selected" } else { "" }
                                 )}
                                 onclick={on_click}
+                                ondblclick={on_dblclick}
                             >
                                 <div class="img-wrap">
                                     <span class="tp__poster-select" onclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
-                                        <input
-                                            type="checkbox"
-                                            class="tp__checkbox"
-                                            aria-label={translate.t("LABEL.EXPLORER_SELECTED_ITEMS")}
-                                            checked={is_checked}
-                                            onchange={on_card_toggle}
-                                        />
+                                        <Checkbox aria_label={Some(translate.t("LABEL.EXPLORER_SELECTED_ITEMS"))} checked={is_checked} onchange={on_card_toggle} />
                                     </span>
                                     <img class="ph-icon" src="assets/missing-logo.svg" alt="" />
                                     {
@@ -368,45 +377,50 @@ pub fn ExplorerPosterGrid(props: &ExplorerPosterGridProps) -> Html {
                                             html! {}
                                         }
                                     }
+                                    {
+                                        if pli.rating > 0.001 {
+                                            html! { <span class="rt">{ format!("★ {}", format_float_localized(pli.rating, 1, false)) }</span> }
+                                        } else {
+                                            html! {}
+                                        }
+                                    }
+                                    {
+                                        if let Some(key) = badge_key {
+                                            html! { <span class="new">{ translate.t(key) }</span> }
+                                        } else {
+                                            html! {}
+                                        }
+                                    }
+                                    <span class="post-markers">
+                                        {
+                                            if pli.override_state().is_some_and(|s| s.pending) {
+                                                html! { <span class="pnd" title={translate.t("LABEL.EXPLORER_PENDING_UNTIL_UPDATE")}>{ "⏳" }</span> }
+                                            } else {
+                                                html! {}
+                                            }
+                                        }
+                                        {
+                                            if edited {
+                                                html! { <span class="edd"></span> }
+                                            } else {
+                                                html! {}
+                                            }
+                                        }
+                                    </span>
                                 </div>
-                                {
-                                    if pli.rating > 0.001 {
-                                        html! { <span class="rt">{ format!("★ {}", format_float_localized(pli.rating, 1, false)) }</span> }
-                                    } else {
-                                        html! {}
-                                    }
-                                }
-                                {
-                                    if let Some(key) = badge_key {
-                                        html! { <span class="new">{ translate.t(key) }</span> }
-                                    } else {
-                                        html! {}
-                                    }
-                                }
-                                {
-                                    if edited {
-                                        html! { <span class="edd"></span> }
-                                    } else {
-                                        html! {}
-                                    }
-                                }
-                                {
-                                    if pli.override_state().is_some_and(|s| s.pending) {
-                                        html! { <span class="pnd" title={translate.t("LABEL.EXPLORER_PENDING_UNTIL_UPDATE")}>{ "⏳" }</span> }
-                                    } else {
-                                        html! {}
-                                    }
-                                }
-                                <b>{ pli.title.as_ref() }</b>
-                                <small>{ subtitle }</small>
-                                <button
-                                    type="button"
-                                    class="tp__icon-button post-popup"
-                                    aria-label={translate.t("LABEL.ACTIONS")}
-                                    onclick={on_popup_click}
-                                >
-                                    <AppIcon name="Popup" />
-                                </button>
+                                <div class="caption">
+                                    <div class="caption-text">
+                                        <b title={pli.title.to_string()}>{ pli.title.as_ref() }</b>
+                                        <small>{ subtitle }</small>
+                                    </div>
+                                    <IconButton
+                                        name="card_actions"
+                                        icon="Popup"
+                                        class="post-popup"
+                                        aria_label={Some(translate.t("LABEL.ACTIONS"))}
+                                        onclick={on_popup_click}
+                                    />
+                                </div>
                             </div>
                         }
                     }).collect::<Html>()

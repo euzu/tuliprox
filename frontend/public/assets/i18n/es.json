@@ -904,6 +904,7 @@
       "WINDOW_SECS": "Duración en segundos de la ventana móvil usada para los agregados."
     },
     "PLAYLIST_OVERRIDE": {
+      "ALSO_SET_TITLE": "Las listas y los clientes Xtream muestran el título. Si está activado, al cambiar el nombre también se cambia el título al mismo valor.",
       "INPUT": "Fuente de entrada de lista de reproducción cuyas anulaciones se van a inspeccionar o limpiar.",
       "NAME": "El nombre del canal o transmisión de la lista de reproducción utilizado para la salida y la coincidencia de EPG.",
       "TITLE": "Título mostrado del elemento (el título EXTINF después de la coma).",
@@ -1182,9 +1183,10 @@
     "EXPLORER_CATCHUP_BADGE": "Catch-up",
     "EXPLORER_EDITED_BADGE": "modificado",
     "EPISODE": "Episodio",
-    "EXPLORER_ITEM_META": "{cluster} · ID {id} · Entrada „{input}“",
+    "EXPLORER_ITEM_META": "{cluster} · ID del proveedor {id} · ID virtual {virtual_id} · Entrada „{input}“",
     "EXPLORER_EPG_ID_TMDB": "EPG-ID / TMDB",
     "EXPLORER_LOGO_URL": "URL del logo / póster",
+    "EXPLORER_FILTER_RATING_MIN": "Valoración mínima",
     "EXPLORER_FILTER_RATING_GTE": "★ ≥ {rating}",
     "EXPLORER_PAGE_RANGE": "{start}-{end} de {total}",
     "EXPLORER_CLEARED": "(borrado)",
@@ -1217,6 +1219,9 @@
     "EXPLORER_SCOPE_INPUT": "Para input (todos los targets)",
     "EXPLORER_SCOPE_TARGET": "Solo este target",
     "EXPLORER_SORT_ADDED": "Añadido",
+    "EXPLORER": "Explorador",
+    "EXPLORER_SHOW_EPISODES": "Mostrar episodios",
+    "EXPLORER_CHNO_SHORT": "N.º",
     "EXPLORER_SORT_CHANNEL_NO": "Número de canal",
     "EXPLORER_SORT_LAST_MODIFIED": "Última modificación",
     "EXPLORER_SORT_PREFIX": "Ordenar: ",
@@ -2154,7 +2159,7 @@
     "EXPLORER_BULK_DISABLED_HINT": "El campo no se puede editar en modo masivo",
     "EXPLORER_BULK_EDIT": "Edición masiva",
     "EXPLORER_BULK_RESULTS_TITLE": "Resultados de guardado masivo",
-    "EXPLORER_CONFIRM_BULK_MSG": "¿Está seguro de que desea guardar los cambios en las siguientes entradas?",
+    "EXPLORER_CONFIRM_BULK_MSG": "¿Está seguro de que desea aplicar los cambios a {count} elementos en {inputs_count} entradas?",
     "EXPLORER_CONFIRM_BULK_SAVE": "Confirmar guardado masivo",
     "EXPLORER_ITEMS_SELECTED": "elementos seleccionados",
     "EXPLORER_SET_VALUE": "Establecer",
@@ -2249,7 +2254,10 @@
       "UNMAPPED_FIELD_ERRORS": "El servidor rechazó campos que este editor no muestra: {errors}",
       "STALE_REVISION": "Revisión obsoleta (409)",
       "ORPHANS_LOAD_FAILED": "No se pudieron cargar las anulaciones: {error}",
-      "EPG_SEARCH_FAILED": "La búsqueda de EPG falló: {error}"
+      "EPG_SEARCH_FAILED": "La búsqueda de EPG falló: {error}",
+      "PARSE_ERROR": "El archivo de modificaciones tiene un formato incorrecto: {error}",
+      "SCHEMA_ERROR": "Versión de esquema de modificación no compatible: {version}",
+      "SAVE_FAILED_ERROR": "Error al guardar: {error}"
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Seleccione un EPG para ver su contenido.",

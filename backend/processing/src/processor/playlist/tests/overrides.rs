@@ -1210,6 +1210,181 @@ async fn status_hook_records_on_success_and_not_on_failure_through_process_targe
     assert_eq!(store.applied_revision("target-fail", &scope).await, None, "failing run must record nothing");
 }
 
+#[tokio::test]
+async fn test_b6_deleted_files_and_schema_only_file_not_pending() {
+    use tuliprox_repository::{OverrideRepository, OverrideRevision, OverrideStatusStore};
+
+    let temp_overrides = tempfile::tempdir().expect("tempdir");
+    let temp_storage = tempfile::tempdir().expect("tempdir");
+
+    let repo = OverrideRepository::new(temp_overrides.path());
+    let store = Arc::new(OverrideStatusStore::new(temp_storage.path()));
+
+    let target_name = "target-1";
+    let input_scope = OverrideScope::Input("input-a".to_string());
+
+    // 1. Create a schema-only file
+    let schema_only_yaml = "schema_version: 1\n";
+    let file_path = repo.file_path(&input_scope).expect("path");
+    tokio::fs::create_dir_all(file_path.parent().unwrap()).await.expect("create dir");
+    tokio::fs::write(&file_path, schema_only_yaml.as_bytes()).await.expect("write schema-only file");
+    let rev1 = OverrideRevision::from_bytes(schema_only_yaml.as_bytes());
+
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.name = target_name.to_string();
+    let input = Arc::new(ConfigInput { name: "input-a".intern(), ..ConfigInput::default() });
+
+    // Verify it is initially pending before the run
+    assert!(store.is_pending(target_name, &input_scope, &rev1).await);
+
+    // Load overrides for target
+    let set =
+        TargetOverrideSet::load_from_dir(temp_overrides.path(), &target, &[Arc::clone(&input)], &["input-a"]).await;
+    // Revisions must not be dropped!
+    assert_eq!(set.revisions.len(), 1, "revisions must contain the schema-only file revision");
+
+    // Record success
+    let app_config = test_app_config(temp_overrides.path(), temp_storage.path());
+    let ctx = test_processing_context(app_config, Some(Arc::clone(&store)));
+    super::super::target::record_target_overrides_status(&ctx, target_name, Some(&set)).await;
+
+    // After run, schema-only file is NOT pending!
+    assert!(
+        !store.is_pending(target_name, &input_scope, &rev1).await,
+        "schema-only file must not be pending after run"
+    );
+
+    // 2. Now delete the override file
+    repo.delete_file(&input_scope, &rev1).await.expect("delete file");
+    let current_rev = OverrideRevision::empty();
+
+    // Target previously had a record, so before the next run it is pending because recorded != current (rev1 != empty)
+    assert!(store.is_pending(target_name, &input_scope, &current_rev).await);
+
+    // Next run: no files exist
+    let set_empty =
+        TargetOverrideSet::load_from_dir(temp_overrides.path(), &target, &[Arc::clone(&input)], &["input-a"]).await;
+    assert!(set_empty.has_no_files());
+
+    super::super::target::record_target_overrides_status(&ctx, target_name, Some(&set_empty)).await;
+
+    // After next run, deleted files are NOT pending!
+    assert!(
+        !store.is_pending(target_name, &input_scope, &current_rev).await,
+        "deleted file must not be pending after next run"
+    );
+}
+
+#[tokio::test]
+async fn test_b7_filter_revisions_to_consumed_inputs() {
+    use tuliprox_repository::OverrideRepository;
+
+    let temp_overrides = tempfile::tempdir().expect("tempdir");
+    let repo = OverrideRepository::new(temp_overrides.path());
+
+    let scope_a = OverrideScope::Input("input-a".to_string());
+    let scope_b = OverrideScope::Input("input-b".to_string());
+
+    let yaml_a = "schema_version: 1\nlive:\n  1:\n    name: A\n";
+    let yaml_b = "schema_version: 1\nlive:\n  2:\n    name: B\n";
+
+    let path_a = repo.file_path(&scope_a).expect("path a");
+    let path_b = repo.file_path(&scope_b).expect("path b");
+    tokio::fs::create_dir_all(path_a.parent().unwrap()).await.expect("create dir");
+
+    tokio::fs::write(&path_a, yaml_a.as_bytes()).await.expect("write a");
+    tokio::fs::write(&path_b, yaml_b.as_bytes()).await.expect("write b");
+
+    let mut target = ConfigTarget::from(&ConfigTargetDto::default());
+    target.name = "target-only-a".to_string();
+
+    let input_a = Arc::new(ConfigInput { name: "input-a".intern(), ..ConfigInput::default() });
+    let input_b = Arc::new(ConfigInput { name: "input-b".intern(), ..ConfigInput::default() });
+
+    // Target only consumes input-a
+    let set = TargetOverrideSet::load_from_dir(
+        temp_overrides.path(),
+        &target,
+        &[Arc::clone(&input_a), Arc::clone(&input_b)],
+        &["input-a"],
+    )
+    .await;
+
+    // Must only have revisions and applied_files for input-a, NOT input-b
+    assert_eq!(set.revisions.len(), 1);
+    assert_eq!(set.revisions[0].0, scope_a);
+    assert_eq!(set.applied_files.len(), 1);
+    assert!(set.applied_files[0].contains("input-a"));
+}
+
+#[test]
+fn test_b8_resolve_item_uuid_lazy() {
+    let mut item = make_live_item("1", "src", "Original", "News");
+    let non_nil_uuid = item.get_uuid();
+    item.header.uuid = non_nil_uuid;
+
+    // When item.header.uuid is non-nil, resolve_item_uuid returns it directly without evaluating fallback
+    assert_eq!(super::overrides::resolve_item_uuid(&item), Some(non_nil_uuid));
+}
+
+#[test]
+fn test_b9_apply_overrides_only_inserts_existing_keys() {
+    let mut input_map = HashMap::new();
+    let mut lookup = HashMap::new();
+    let ov = Arc::new(ItemOverride { name: FieldDelta::Set("Overridden".to_string()), ..Default::default() });
+    let key = OverrideKey::new(OverrideItemKind::Live, "1");
+    lookup.insert(key, ov);
+    input_map.insert(Arc::from("src"), OverrideLookup::from(lookup));
+
+    let input = ConfigInput { name: "src".intern(), ..ConfigInput::default() };
+    let aliases = InputAliasMap::from_inputs(&[Arc::new(input)]);
+    let set = TargetOverrideSet::new(input_map, HashMap::new(), aliases, Vec::new());
+
+    let mut items = vec![
+        make_live_item("1", "src", "Item 1", "News"), // has override
+        make_live_item("2", "src", "Item 2", "News"), // NO override
+        make_live_item("3", "src", "Item 3", "News"), // NO override
+    ];
+
+    let outcome = apply_overrides(&mut items, &set);
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(items[0].header.name.as_ref(), "Overridden");
+    assert_eq!(items[1].header.name.as_ref(), "Item 2");
+    assert_eq!(items[2].header.name.as_ref(), "Item 3");
+}
+
+#[test]
+fn test_b10_regroup_preserves_pre_existing_empty_groups() {
+    let mut groups = vec![
+        PlaylistGroup { id: 1, title: "EmptyBefore".intern(), channels: vec![], xtream_cluster: XtreamCluster::Live },
+        PlaylistGroup {
+            id: 2,
+            title: "SourceGroup".intern(),
+            channels: vec![make_live_item("1", "src", "Item 1", "SourceGroup")],
+            xtream_cluster: XtreamCluster::Live,
+        },
+    ];
+
+    // Move item 1 from SourceGroup to TargetGroup
+    groups[1].channels[0].header.group = "TargetGroup".intern();
+    let uuid = groups[1].channels[0].header.uuid;
+
+    let mut locked = HashMap::new();
+    locked.insert(
+        uuid,
+        Arc::new(ItemOverride { group: FieldDelta::Set("TargetGroup".to_string()), ..Default::default() }),
+    );
+
+    regroup_moved_items(&mut groups, &locked);
+
+    // SourceGroup became empty, so it must be removed.
+    // EmptyBefore was empty before the move, so it must NOT be removed!
+    let titles: Vec<&str> = groups.iter().map(|g| g.title.as_ref()).collect();
+    assert!(titles.contains(&"EmptyBefore"), "Pre-existing empty group must be preserved");
+    assert!(!titles.contains(&"SourceGroup"), "Group emptied by move must be removed");
+    assert!(titles.contains(&"TargetGroup"), "New group created by move must exist");
+}
+
 #[test]
 #[ignore = "manual benchmark test"]
 fn benchmark_pipeline_100k_items() {

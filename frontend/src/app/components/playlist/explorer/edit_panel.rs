@@ -2,24 +2,27 @@ use crate::{
     app::{
         components::{
             playlist::explorer::{
-                detail_panel::item_meta_label, epg_picker::EpgPicker, identity::Id, image_preview::ImagePreview,
+                detail_panel::item_meta_label,
+                epg_picker::EpgPicker,
+                identity::{item_override_id, Id},
+                image_preview::ImagePreview,
             },
             recording::target_name_for_id,
-            TextButton,
+            IconButton, RadioButtonGroup, TextButton,
         },
         context::{ConfigContext, PlaylistExplorerContext},
     },
     generate_form_reducer,
     hooks::use_service_context,
+    html_if,
     i18n::{use_translation, YewI18n},
     use_default_form_reducer,
 };
 use shared::{
     model::{
         InputRefreshPolicy, InputUpdateAction, ItemFieldsDto, ItemOverridePatch, ItemPatchDto, OverrideFieldOp,
-        OverrideItemKind, OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, PlaylistRequest,
-        SeriesStreamProperties, UiItemExplorerMeta, UiOverrideState, UiPlaylistCategories, UiPlaylistGroup,
-        UiPlaylistItem, XtreamCluster,
+        OverrideItemKind, OverrideProvenanceDto, OverrideSaveRequest, OverrideScopeDto, Permission, PlaylistRequest,
+        SeriesStreamProperties, UiOverrideState, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster,
     },
     utils::parse_localized_float,
 };
@@ -28,7 +31,6 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-use web_sys::MouseEvent;
 use yew::{platform::spawn_local, prelude::*};
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -97,23 +99,6 @@ pub struct FieldDeltas {
     pub reset_fields: HashSet<String>,
     pub clear_fields: HashSet<String>,
     pub remove_unknown: Vec<String>,
-}
-
-#[allow(dead_code)]
-pub fn handle_name_change(
-    new_name: &str,
-    also_set_title: bool,
-    form: &mut PlaylistOverrideDto,
-    deltas: &mut FieldDeltas,
-) {
-    form.name = new_name.to_string();
-    deltas.reset_fields.remove("name");
-    deltas.clear_fields.remove("name");
-    if also_set_title {
-        form.title = new_name.to_string();
-        deltas.reset_fields.remove("title");
-        deltas.clear_fields.remove("title");
-    }
 }
 
 #[must_use]
@@ -205,6 +190,101 @@ pub fn build_item_patch(
 }
 
 #[must_use]
+pub fn patch_playlist_item_from_patch(
+    item: &UiPlaylistItem,
+    patch: &ItemOverridePatch,
+    provenance: Option<&OverrideProvenanceDto>,
+    has_remaining_deltas: bool,
+) -> UiPlaylistItem {
+    let mut updated = item.clone();
+
+    // 1. Name
+    if let Some(ref op) = patch.name {
+        match op {
+            OverrideFieldOp::Set(s) => updated.name = Arc::from(s.as_str()),
+            OverrideFieldOp::Clear => updated.name = Arc::from(""),
+            OverrideFieldOp::Reset => {
+                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
+                    updated.name = Arc::from(p.name.as_str());
+                }
+            }
+        }
+    }
+
+    // 2. Title
+    if let Some(ref op) = patch.title {
+        match op {
+            OverrideFieldOp::Set(s) => updated.title = Arc::from(s.as_str()),
+            OverrideFieldOp::Clear => updated.title = Arc::from(""),
+            OverrideFieldOp::Reset => {
+                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
+                    updated.title = Arc::from(p.title.as_str());
+                }
+            }
+        }
+    }
+
+    // 3. Group
+    if let Some(ref op) = patch.group {
+        match op {
+            OverrideFieldOp::Set(s) => updated.group = Arc::from(s.as_str()),
+            OverrideFieldOp::Clear => updated.group = Arc::from(""),
+            OverrideFieldOp::Reset => {
+                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
+                    updated.group = Arc::from(p.group.as_str());
+                }
+            }
+        }
+    }
+
+    // 4. Logo
+    if let Some(ref op) = patch.logo {
+        match op {
+            OverrideFieldOp::Set(s) => updated.logo = Arc::from(s.as_str()),
+            OverrideFieldOp::Clear => updated.logo = Arc::from(""),
+            OverrideFieldOp::Reset => {
+                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
+                    updated.logo = Arc::from(p.logo.as_deref().unwrap_or(""));
+                }
+            }
+        }
+    }
+
+    // 5. EPG channel ID
+    if let Some(ref op) = patch.epg_channel_id {
+        match op {
+            OverrideFieldOp::Set(s) => {
+                let trimmed = s.trim();
+                updated.epg_channel_id = if trimmed.is_empty() { None } else { Some(Arc::from(trimmed)) };
+            }
+            OverrideFieldOp::Clear => updated.epg_channel_id = None,
+            OverrideFieldOp::Reset => {
+                if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
+                    updated.epg_channel_id = p.epg_channel_id.as_ref().map(|s| Arc::from(s.as_str()));
+                }
+            }
+        }
+    }
+
+    // 6. Rating
+    if let Some(ref op) = patch.rating {
+        match op {
+            OverrideFieldOp::Set(r) => updated.rating = *r,
+            OverrideFieldOp::Clear => updated.rating = 0.0,
+            OverrideFieldOp::Reset => updated.rating = 0.0,
+        }
+    }
+
+    // 7. Explorer metadata
+    let mut meta = updated.explorer_meta.take().unwrap_or_default();
+    meta.override_state =
+        UiOverrideState { edited: has_remaining_deltas, pending: true, ambiguous: meta.override_state.ambiguous };
+    updated.explorer_meta = Some(meta);
+
+    updated
+}
+
+#[must_use]
 pub fn patch_playlist_item(
     item: &UiPlaylistItem,
     form: &PlaylistOverrideDto,
@@ -212,75 +292,42 @@ pub fn patch_playlist_item(
     provenance: Option<&OverrideProvenanceDto>,
     has_remaining_deltas: bool,
 ) -> UiPlaylistItem {
-    let mut updated = item.clone();
+    let mut patch = ItemOverridePatch::default();
 
-    // 1. Name
-    if deltas.reset_fields.contains("name") {
-        if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-            updated.name = Arc::from(p.name.as_str());
-        }
-    } else if !form.name.is_empty() {
-        updated.name = Arc::from(form.name.as_str());
+    macro_rules! handle_string_field {
+        ($field:ident) => {
+            if deltas.reset_fields.contains(stringify!($field)) {
+                patch.$field = Some(OverrideFieldOp::Reset);
+            } else if deltas.clear_fields.contains(stringify!($field)) {
+                patch.$field = Some(OverrideFieldOp::Clear);
+            } else if !form.$field.is_empty() {
+                patch.$field = Some(OverrideFieldOp::Set(form.$field.clone()));
+            }
+        };
     }
 
-    // 2. Title
-    if deltas.reset_fields.contains("title") {
-        if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-            updated.title = Arc::from(p.title.as_str());
-        }
-    } else if !form.title.is_empty() {
-        updated.title = Arc::from(form.title.as_str());
-    }
+    handle_string_field!(name);
+    handle_string_field!(title);
+    handle_string_field!(group);
+    handle_string_field!(logo);
 
-    // 3. Group
-    if deltas.reset_fields.contains("group") {
-        if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-            updated.group = Arc::from(p.group.as_str());
-        }
-    } else if !form.group.is_empty() {
-        updated.group = Arc::from(form.group.as_str());
-    }
-
-    // 4. Logo
-    if deltas.clear_fields.contains("logo") {
-        updated.logo = Arc::from("");
-    } else if deltas.reset_fields.contains("logo") {
-        if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-            updated.logo = Arc::from(p.logo.as_deref().unwrap_or(""));
-        }
-    } else if !form.logo.is_empty() {
-        updated.logo = Arc::from(form.logo.as_str());
-    }
-
-    // 5. EPG channel ID
-    if deltas.clear_fields.contains("epg_channel_id") {
-        updated.epg_channel_id = None;
-    } else if deltas.reset_fields.contains("epg_channel_id") {
-        if let Some(p) = provenance.and_then(|pr| pr.provider.as_ref()) {
-            updated.epg_channel_id = p.epg_channel_id.as_ref().map(|s| Arc::from(s.as_str()));
-        }
+    if deltas.reset_fields.contains("epg_channel_id") {
+        patch.epg_channel_id = Some(OverrideFieldOp::Reset);
+    } else if deltas.clear_fields.contains("epg_channel_id") {
+        patch.epg_channel_id = Some(OverrideFieldOp::Clear);
     } else if !form.epg_channel_id.trim().is_empty() {
-        updated.epg_channel_id = Some(Arc::from(form.epg_channel_id.trim()));
+        patch.epg_channel_id = Some(OverrideFieldOp::Set(form.epg_channel_id.trim().to_string()));
     }
 
-    // 6. Rating
-    if deltas.clear_fields.contains("rating") {
-        updated.rating = 0.0;
-    } else if !deltas.reset_fields.contains("rating") {
-        if let Some(rating) = parse_localized_float(form.rating.trim()) {
-            updated.rating = rating;
-        }
+    if deltas.reset_fields.contains("rating") {
+        patch.rating = Some(OverrideFieldOp::Reset);
+    } else if deltas.clear_fields.contains("rating") {
+        patch.rating = Some(OverrideFieldOp::Clear);
+    } else if let Some(rating) = parse_localized_float(form.rating.trim()) {
+        patch.rating = Some(OverrideFieldOp::Set(rating));
     }
 
-    // 7. Explorer metadata
-    let existing_epg_state = updated.explorer_meta.and_then(|m| m.epg_state);
-    let ambiguous = updated.explorer_meta.is_some_and(|m| m.override_state.ambiguous);
-    updated.explorer_meta = Some(UiItemExplorerMeta {
-        override_state: UiOverrideState { edited: has_remaining_deltas, pending: true, ambiguous },
-        epg_state: existing_epg_state,
-    });
-
-    updated
+    patch_playlist_item_from_patch(item, &patch, provenance, has_remaining_deltas)
 }
 
 #[must_use]
@@ -289,35 +336,90 @@ pub fn replace_item_in_categories(
     patched_item: UiPlaylistItem,
 ) -> UiPlaylistCategories {
     let target_vid = patched_item.virtual_id;
-    let target_pid = patched_item.provider_id.clone();
     let cluster = patched_item.xtream_cluster;
 
     let update_group_list = |groups: Option<&Vec<Rc<UiPlaylistGroup>>>| -> Option<Vec<Rc<UiPlaylistGroup>>> {
         let groups = groups?;
-        let mut new_groups = Vec::with_capacity(groups.len());
-        let mut found = false;
-        for g in groups {
-            if !found && g.channels.iter().any(|ch| ch.virtual_id == target_vid || ch.provider_id == target_pid) {
-                let mut new_channels = Vec::with_capacity(g.channels.len());
-                for ch in &g.channels {
-                    if ch.virtual_id == target_vid || ch.provider_id == target_pid {
-                        new_channels.push(Rc::new(patched_item.clone()));
-                        found = true;
-                    } else {
-                        new_channels.push(ch.clone());
+        let old_group_idx = groups.iter().position(|g| g.channels.iter().any(|ch| ch.virtual_id == target_vid));
+        let Some(old_idx) = old_group_idx else {
+            return Some(groups.clone());
+        };
+
+        let old_group = &groups[old_idx];
+        let target_title = &patched_item.group;
+
+        if old_group.title.as_ref() == target_title.as_ref() {
+            // Group unchanged: replace channel in place in old_group
+            let mut new_groups = Vec::with_capacity(groups.len());
+            for (idx, g) in groups.iter().enumerate() {
+                if idx == old_idx {
+                    let mut new_channels = Vec::with_capacity(g.channels.len());
+                    for ch in &g.channels {
+                        if ch.virtual_id == target_vid {
+                            new_channels.push(Rc::new(patched_item.clone()));
+                        } else {
+                            new_channels.push(ch.clone());
+                        }
                     }
+                    new_groups.push(Rc::new(UiPlaylistGroup {
+                        id: g.id,
+                        title: g.title.clone(),
+                        channels: new_channels,
+                        xtream_cluster: g.xtream_cluster,
+                    }));
+                } else {
+                    new_groups.push(g.clone());
                 }
-                new_groups.push(Rc::new(UiPlaylistGroup {
-                    id: g.id,
-                    title: g.title.clone(),
-                    channels: new_channels,
-                    xtream_cluster: g.xtream_cluster,
-                }));
-            } else {
-                new_groups.push(g.clone());
             }
+            Some(new_groups)
+        } else {
+            // Group changed: move item from old_group to dest_group
+            let dest_group_idx = groups.iter().position(|g| g.title.as_ref() == target_title.as_ref());
+            let mut new_groups = Vec::with_capacity(groups.len() + 1);
+
+            for (idx, g) in groups.iter().enumerate() {
+                if idx == old_idx {
+                    let filtered_channels: Vec<Rc<UiPlaylistItem>> =
+                        g.channels.iter().filter(|ch| ch.virtual_id != target_vid).cloned().collect();
+                    if !filtered_channels.is_empty() {
+                        new_groups.push(Rc::new(UiPlaylistGroup {
+                            id: g.id,
+                            title: g.title.clone(),
+                            channels: filtered_channels,
+                            xtream_cluster: g.xtream_cluster,
+                        }));
+                    }
+                } else if Some(idx) == dest_group_idx {
+                    let mut new_channels = Vec::with_capacity(g.channels.len() + 1);
+                    new_channels.extend(g.channels.iter().cloned());
+                    new_channels.push(Rc::new(patched_item.clone()));
+                    new_groups.push(Rc::new(UiPlaylistGroup {
+                        id: g.id,
+                        title: g.title.clone(),
+                        channels: new_channels,
+                        xtream_cluster: g.xtream_cluster,
+                    }));
+                } else {
+                    new_groups.push(g.clone());
+                }
+            }
+
+            if dest_group_idx.is_none() {
+                let new_id = if patched_item.category_id != 0 {
+                    patched_item.category_id
+                } else {
+                    groups.iter().map(|g| g.id).max().unwrap_or(0).saturating_add(1)
+                };
+                new_groups.push(Rc::new(UiPlaylistGroup {
+                    id: new_id,
+                    title: patched_item.group.clone(),
+                    channels: vec![Rc::new(patched_item)],
+                    xtream_cluster: cluster,
+                }));
+            }
+
+            Some(new_groups)
         }
-        Some(new_groups)
     };
 
     match cluster {
@@ -336,6 +438,100 @@ pub fn replace_item_in_categories(
             vod: categories.vod.clone(),
             series: update_group_list(categories.series.as_ref()),
         },
+    }
+}
+
+#[must_use]
+pub fn apply_bulk_patches_to_categories(
+    categories: &UiPlaylistCategories,
+    patch_map: &HashMap<u32, UiPlaylistItem>,
+) -> UiPlaylistCategories {
+    if patch_map.is_empty() {
+        return categories.clone();
+    }
+
+    let update_group_list =
+        |groups: Option<&Vec<Rc<UiPlaylistGroup>>>, cluster: XtreamCluster| -> Option<Vec<Rc<UiPlaylistGroup>>> {
+            let groups = groups?;
+            let relevant_patches: Vec<&UiPlaylistItem> =
+                patch_map.values().filter(|it| it.xtream_cluster == cluster).collect();
+            if relevant_patches.is_empty()
+                && !groups.iter().any(|g| g.channels.iter().any(|ch| patch_map.contains_key(&ch.virtual_id)))
+            {
+                return Some(groups.clone());
+            }
+
+            let mut new_groups = Vec::with_capacity(groups.len());
+            let mut handled_dest_groups: HashSet<Arc<str>> = HashSet::new();
+
+            for g in groups {
+                let mut new_channels = Vec::with_capacity(g.channels.len());
+                let mut modified = false;
+
+                for ch in &g.channels {
+                    if let Some(patched) = patch_map.get(&ch.virtual_id) {
+                        modified = true;
+                        if patched.group.as_ref() == g.title.as_ref() {
+                            new_channels.push(Rc::new(patched.clone()));
+                        }
+                    } else {
+                        new_channels.push(ch.clone());
+                    }
+                }
+
+                for patched in &relevant_patches {
+                    if patched.group.as_ref() == g.title.as_ref()
+                        && !g.channels.iter().any(|ch| ch.virtual_id == patched.virtual_id)
+                    {
+                        modified = true;
+                        new_channels.push(Rc::new((*patched).clone()));
+                    }
+                }
+
+                if !new_channels.is_empty() {
+                    if modified {
+                        new_groups.push(Rc::new(UiPlaylistGroup {
+                            id: g.id,
+                            title: g.title.clone(),
+                            channels: new_channels,
+                            xtream_cluster: g.xtream_cluster,
+                        }));
+                    } else {
+                        new_groups.push(g.clone());
+                    }
+                    handled_dest_groups.insert(g.title.clone());
+                }
+            }
+
+            for patched in relevant_patches {
+                if !handled_dest_groups.contains(&patched.group) {
+                    let items_for_new_grp: Vec<Rc<UiPlaylistItem>> = patch_map
+                        .values()
+                        .filter(|it| it.xtream_cluster == cluster && it.group == patched.group)
+                        .map(|it| Rc::new(it.clone()))
+                        .collect();
+                    let new_id = if patched.category_id != 0 {
+                        patched.category_id
+                    } else {
+                        groups.iter().map(|g| g.id).max().unwrap_or(0).saturating_add(1)
+                    };
+                    new_groups.push(Rc::new(UiPlaylistGroup {
+                        id: new_id,
+                        title: patched.group.clone(),
+                        channels: items_for_new_grp,
+                        xtream_cluster: cluster,
+                    }));
+                    handled_dest_groups.insert(patched.group.clone());
+                }
+            }
+
+            Some(new_groups)
+        };
+
+    UiPlaylistCategories {
+        live: update_group_list(categories.live.as_ref(), XtreamCluster::Live),
+        vod: update_group_list(categories.vod.as_ref(), XtreamCluster::Video),
+        series: update_group_list(categories.series.as_ref(), XtreamCluster::Series),
     }
 }
 
@@ -501,7 +697,11 @@ pub fn provenance_value_label(translate: &YewI18n, info: &FieldProvenanceInfo) -
 }
 
 #[must_use]
-pub fn find_duplicate_chno(chno_str: &str, current_item_id: &str, live_items: &[Rc<UiPlaylistItem>]) -> Option<String> {
+pub fn find_duplicate_chno(
+    chno_str: &str,
+    current_virtual_id: u32,
+    chno_map: &HashMap<u32, Vec<Rc<UiPlaylistItem>>>,
+) -> Option<String> {
     let trimmed = chno_str.trim();
     if trimmed.is_empty() {
         return None;
@@ -511,31 +711,32 @@ pub fn find_duplicate_chno(chno_str: &str, current_item_id: &str, live_items: &[
         return None;
     }
 
-    for item in live_items {
-        if item.provider_id.as_ref() == current_item_id {
-            continue;
-        }
-        if let Some(item_chno) =
-            crate::app::components::playlist::explorer::sort::extract_channel_no(&item.name, &item.title)
-        {
-            if item_chno == target_num {
-                return Some(format!("{} ({})", item.name, item.title));
+    if let Some(items) = chno_map.get(&target_num) {
+        for item in items {
+            if item.virtual_id == current_virtual_id {
+                continue;
             }
+            return Some(format!("{} ({})", item.name, item.title));
         }
     }
     None
 }
 
-fn collect_live_items(categories: Option<&UiPlaylistCategories>) -> Vec<Rc<UiPlaylistItem>> {
-    let mut items = Vec::new();
+#[must_use]
+pub fn build_channel_no_map(categories: Option<&UiPlaylistCategories>) -> HashMap<u32, Vec<Rc<UiPlaylistItem>>> {
+    let mut map: HashMap<u32, Vec<Rc<UiPlaylistItem>>> = HashMap::new();
     if let Some(cat) = categories {
         if let Some(ref live_groups) = cat.live {
             for group in live_groups {
-                items.extend(group.channels.iter().cloned());
+                for item in &group.channels {
+                    if let Some(chno) = crate::app::components::playlist::explorer::sort::item_chno(item) {
+                        map.entry(chno).or_default().push(item.clone());
+                    }
+                }
             }
         }
     }
-    items
+    map
 }
 
 fn get_unknown_fields(scope: OverrideScopeDto, provenance: Option<&OverrideProvenanceDto>) -> Vec<(String, String)> {
@@ -596,7 +797,7 @@ fn initialize_form_data(
         ..Default::default()
     };
 
-    if let Some(chno) = crate::app::components::playlist::explorer::sort::extract_channel_no(&item.name, &item.title) {
+    if let Some(chno) = crate::app::components::playlist::explorer::sort::item_chno(item) {
         form.chno = chno.to_string();
     }
 
@@ -814,6 +1015,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
     let is_target_view = target_id.is_some();
     let active_scope = props.active_scope.clone();
     let has_saved = use_state(|| false);
+    let can_write = services.auth.has_permission(Permission::PlaylistWrite);
 
     let provenance = use_state(|| None::<OverrideProvenanceDto>);
     let base_revision = use_state(String::new);
@@ -846,7 +1048,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
         let field_errors = field_errors.clone();
         let translate = translate.clone();
 
-        use_effect_with((*active_scope, item.provider_id.clone()), move |(scope, _)| {
+        use_effect_with((*active_scope, item.virtual_id, item.input_name.clone()), move |(scope, _, _)| {
             let services = services.clone();
             let item = item.clone();
             let provenance = provenance.clone();
@@ -900,7 +1102,34 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                 // empty revision; a failed read is not, and must disable saving.
                 if !scope_name.is_empty() {
                     match services.playlist.get_overrides(scope, &scope_name).await {
-                        Ok(Some(file)) => base_revision.set(file.revision),
+                        Ok(Some(file)) => {
+                            if let Some(ref parse_err) = file.parse_error {
+                                failed = true;
+                                let message =
+                                    translate.t("MESSAGES.PLAYLIST_EXPLORER.PARSE_ERROR").replace("{error}", parse_err);
+                                services.toastr.error(message.clone());
+                                load_error.set(Some(message));
+                            } else if let Some(schema_ver) = file.schema_error {
+                                failed = true;
+                                let message = translate
+                                    .t("MESSAGES.PLAYLIST_EXPLORER.SCHEMA_ERROR")
+                                    .replace("{version}", &schema_ver.to_string());
+                                services.toastr.error(message.clone());
+                                load_error.set(Some(message));
+                            } else {
+                                base_revision.set(file.revision);
+                                let item_ov_id = item_override_id(&item);
+                                let mut err_map = HashMap::new();
+                                for fe in file.field_errors {
+                                    if fe.entry.as_deref() == Some(item_ov_id) || fe.entry.is_none() {
+                                        err_map.insert(fe.field, fe.message_key);
+                                    }
+                                }
+                                if !err_map.is_empty() {
+                                    field_errors.set(err_map);
+                                }
+                            }
+                        }
                         Ok(None) => base_revision.set(String::new()),
                         Err(err) => {
                             failed = true;
@@ -916,7 +1145,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                 // 4. Load item provenance
                 match services
                     .playlist
-                    .get_override_item(item.input_name.as_ref(), kind, item.provider_id.as_ref(), target_id)
+                    .get_override_item(item.input_name.as_ref(), kind, item_override_id(&item), target_id)
                     .await
                 {
                     Ok(prov_opt) => {
@@ -946,19 +1175,19 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
 
     let is_ambiguous = provenance.as_ref().is_some_and(|p| p.ambiguous);
 
-    // The live catalog is only walked when the playlist is replaced, never per render.
+    // Precompute channel-number -> items map once per catalog revision (use_memo)
     let catalog = explorer_ctx.as_ref().and_then(|ctx| (*ctx.playlist).clone());
-    let live_items = use_memo((catalog.map(Id::new), props.playlist_revision), |(catalog, _)| {
-        catalog.as_ref().map_or_else(Vec::new, |cat| collect_live_items(Some(&**cat)))
+    let live_chno_map = use_memo((catalog.map(Id::new), props.playlist_revision), |(catalog, _)| {
+        Rc::new(build_channel_no_map(catalog.as_ref().map(|cat| &**cat)))
     });
 
     // Only recomputed when the channel number actually changed, not on every keystroke.
     let chno_changed = kind == OverrideItemKind::Live && form_state.form.chno != initial_form.chno;
     let duplicate_chno_warning = use_memo(
-        (chno_changed, form_state.form.chno.clone(), Id::new(live_items.clone())),
-        |(changed, chno, live_items)| {
+        (chno_changed, form_state.form.chno.clone(), Id::new(live_chno_map.clone())),
+        |(changed, chno, live_chno_map)| {
             if *changed {
-                find_duplicate_chno(chno, item.provider_id.as_ref(), live_items)
+                find_duplicate_chno(chno, item.virtual_id, live_chno_map)
             } else {
                 None
             }
@@ -966,14 +1195,16 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
     );
 
     // Scope toggle handlers
-    let set_input_scope = {
+    let on_scope_select = {
         let active_scope = active_scope.clone();
-        Callback::from(move |_: MouseEvent| active_scope.set(OverrideScopeDto::Input))
-    };
-
-    let set_target_scope = {
-        let active_scope = active_scope.clone();
-        Callback::from(move |_: MouseEvent| active_scope.set(OverrideScopeDto::Target))
+        Callback::from(move |selection: Rc<Vec<String>>| {
+            let scope = if selection.first().map(String::as_str) == Some("input") {
+                OverrideScopeDto::Input
+            } else {
+                OverrideScopeDto::Target
+            };
+            active_scope.set(scope);
+        })
     };
 
     // Manual update handler
@@ -1033,12 +1264,13 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
         let provenance = provenance.clone();
         let has_saved = has_saved.clone();
         let is_saving = is_saving.clone();
+        let load_error = load_error.clone();
         let on_saved = props.on_saved.clone();
 
         Callback::from(move |_: String| {
             // A second click while the first request is in flight would hit the revision the
             // first one just wrote.
-            if *is_saving {
+            if *is_saving || !services.auth.has_permission(Permission::PlaylistWrite) {
                 return;
             }
 
@@ -1050,6 +1282,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
             let base_rev = (*base_revision).clone();
             let field_errors = field_errors.clone();
             let is_saving = is_saving.clone();
+            let load_error = load_error.clone();
             let item = item.clone();
             let provenance = provenance.clone();
             let base_revision = base_revision.clone();
@@ -1164,7 +1397,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
             let patch_dto = ItemPatchDto {
                 input: if active_scope == OverrideScopeDto::Target { Some(item.input_name.to_string()) } else { None },
                 kind,
-                id: item.provider_id.to_string(),
+                id: item_override_id(&item).to_string(),
                 patch,
                 hint,
             };
@@ -1190,10 +1423,11 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                         // The form is now the server state: it becomes the new baseline so the
                         // next save does not resend reset/clear operations.
                         initial_form.set(form.clone());
+                        let saved_deltas = (*deltas).clone();
                         deltas.set(FieldDeltas::default());
                         match services
                             .playlist
-                            .get_override_item(item.input_name.as_ref(), kind, item.provider_id.as_ref(), target_id)
+                            .get_override_item(item.input_name.as_ref(), kind, item_override_id(&item), target_id)
                             .await
                         {
                             Ok(prov_opt) => {
@@ -1204,7 +1438,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                 let patched_item = patch_playlist_item(
                                     &item,
                                     &form,
-                                    &FieldDeltas::default(),
+                                    &saved_deltas,
                                     prov_opt.as_ref(),
                                     has_remaining_deltas,
                                 );
@@ -1223,30 +1457,38 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                         }
                     }
                     crate::services::OverrideSaveResult::Conflict(conflict) => {
-                        services.toastr.error(translate.t("MESSAGES.PLAYLIST_EXPLORER.SAVE_CONFLICT"));
-                        // The revision in the conflict is the one the server holds; adopting it and
-                        // reloading the form is the only way out of a 409 loop.
-                        base_revision.set(conflict.current_revision.clone());
-                        deltas.set(FieldDeltas::default());
-                        field_errors.set(HashMap::new());
-                        match services
-                            .playlist
-                            .get_override_item(item.input_name.as_ref(), kind, item.provider_id.as_ref(), target_id)
-                            .await
-                        {
-                            Ok(reloaded_prov) => {
-                                let reloaded_form =
-                                    initialize_form_data(&item, reloaded_prov.as_ref(), None, active_scope);
-                                initial_form.set(reloaded_form.clone());
-                                form_state.dispatch(OverrideEditFormAction::SetAll(reloaded_form));
-                                provenance.set(reloaded_prov);
-                            }
-                            Err(err) => {
-                                services.toastr.error(
-                                    translate
-                                        .t("MESSAGES.PLAYLIST_EXPLORER.LOAD_FAILED")
-                                        .replace("{error}", &err.to_string()),
-                                );
+                        if let Some(err_text) = conflict.error {
+                            let msg = translate
+                                .t("MESSAGES.PLAYLIST_EXPLORER.SAVE_FAILED_ERROR")
+                                .replace("{error}", &err_text);
+                            services.toastr.error(msg.clone());
+                            load_error.set(Some(msg));
+                        } else {
+                            services.toastr.error(translate.t("MESSAGES.PLAYLIST_EXPLORER.SAVE_CONFLICT"));
+                            // The revision in the conflict is the one the server holds; adopting it and
+                            // reloading the form is the only way out of a 409 loop.
+                            base_revision.set(conflict.current_revision.clone());
+                            deltas.set(FieldDeltas::default());
+                            field_errors.set(HashMap::new());
+                            match services
+                                .playlist
+                                .get_override_item(item.input_name.as_ref(), kind, item_override_id(&item), target_id)
+                                .await
+                            {
+                                Ok(reloaded_prov) => {
+                                    let reloaded_form =
+                                        initialize_form_data(&item, reloaded_prov.as_ref(), None, active_scope);
+                                    initial_form.set(reloaded_form.clone());
+                                    form_state.dispatch(OverrideEditFormAction::SetAll(reloaded_form));
+                                    provenance.set(reloaded_prov);
+                                }
+                                Err(err) => {
+                                    services.toastr.error(
+                                        translate
+                                            .t("MESSAGES.PLAYLIST_EXPLORER.LOAD_FAILED")
+                                            .replace("{error}", &err.to_string()),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1287,22 +1529,22 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
 
     let also_set_title_cb = {
         let also_set_title = also_set_title.clone();
-        Callback::from(move |e: Event| {
-            if let Some(target) = e.target_dyn_into::<web_sys::HtmlInputElement>() {
-                also_set_title.set(target.checked());
-            }
-        })
+        Callback::from(move |value: bool| also_set_title.set(value))
     };
-    let name_extra_header = html! {
-        <label class="tp__explorer-checkbox-label">
-            <input
-                type="checkbox"
-                class="tp__checkbox"
-                checked={*also_set_title}
-                onchange={also_set_title_cb}
+    // Same markup as `edit_field_bool!`: ToggleSwitch followed by the standard field label.
+    let name_also_set_title = html! {
+        <div class="tp__form-field tp__form-field__bool">
+            <crate::app::components::ToggleSwitch
+                value={*also_set_title}
+                readonly={false}
+                on_change={also_set_title_cb}
             />
-            <span>{ translate.t("LABEL.EXPLORER_ALSO_SET_TITLE") }</span>
-        </label>
+            <crate::app::components::FieldLabel
+                label={translate.t("LABEL.EXPLORER_ALSO_SET_TITLE")}
+                field_id={"PLAYLIST_OVERRIDE.ALSO_SET_TITLE".to_string()}
+                hint_key={Some("PLAYLIST_OVERRIDE.ALSO_SET_TITLE".to_string())}
+            />
+        </div>
     };
     let also_set_title_val = *also_set_title;
 
@@ -1317,7 +1559,6 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                 class={"tp__explorer-logo-preview"}
             />
         }),
-        extra_header: None,
     };
 
     let on_epg_change = {
@@ -1339,10 +1580,10 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                 target_id={target_id}
                 input={Some(item.input_name.to_string())}
                 field_id={Some("PLAYLIST_OVERRIDE.EPG_CHANNEL_ID".to_string())}
+                label={Some(translate.t("LABEL.EPG_CHANNEL_ID"))}
             />
         }),
         extra_content: None,
-        extra_header: None,
     };
 
     let is_prov_logo_small =
@@ -1357,114 +1598,155 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                 class={"tp__explorer-logo-preview"}
             />
         }),
-        extra_header: None,
     };
 
     html! {
-        <div class="det tp__explorer-edit-panel">
-            <div class="hero">
-                <b>{ item.title.clone() }</b>
-            </div>
-            <div class="in">
-                <h2>{ translate.t("LABEL.EXPLORER_EDIT_TITLE") }</h2>
-                <div class="meta">
-                    { item_meta_label(&translate, item) }
+            <div class="det tp__explorer-edit-panel">
+                <div class="hero">
+                    <IconButton
+                        name="close_edit"
+                        icon="Back"
+                        class="tp__explorer-panel-back"
+                        aria_label={Some(translate.t("LABEL.BACK"))}
+                        onclick={let on_close = props.on_close.clone(); Callback::from(move |(_name, _): (String, MouseEvent)| on_close.emit(()))}
+                    />
+                    <b>{ item.title.clone() }</b>
                 </div>
+                <div class="in">
+                    <h2>{ translate.t("LABEL.EXPLORER_EDIT_TITLE") }</h2>
+                    <div class="meta">
+                        { item_meta_label(&translate, item) }
+                    </div>
 
-                <div class="scope">
-                    {
-                        if is_target_view {
-                            html! {
-                                <>
-                                    <button
-                                        type="button"
-                                        class={if *active_scope == OverrideScopeDto::Input { "on" } else { "" }}
-                                        aria-pressed={(*active_scope == OverrideScopeDto::Input).to_string()}
-                                        onclick={set_input_scope}
-                                    >
+                    <div class="scope">
+                        {
+                            if is_target_view {
+                                html! {
+    <RadioButtonGroup
+                                        options={Rc::new(vec!["input".to_string(), "target".to_string()])}
+                                        labels={Some(Rc::new(vec![translate.t("LABEL.EXPLORER_SCOPE_INPUT"), translate.t("LABEL.EXPLORER_SCOPE_TARGET")]))}
+                                        selected={Rc::new(vec![if *active_scope == OverrideScopeDto::Input { "input" } else { "target" }.to_string()])}
+                                        on_select={on_scope_select}
+                                    />
+                                }
+                            } else {
+                                html! {
+                                    <span class="on">
                                         { translate.t("LABEL.EXPLORER_SCOPE_INPUT") }
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class={if *active_scope == OverrideScopeDto::Target { "on" } else { "" }}
-                                        aria-pressed={(*active_scope == OverrideScopeDto::Target).to_string()}
-                                        onclick={set_target_scope}
-                                    >
-                                        { translate.t("LABEL.EXPLORER_SCOPE_TARGET") }
-                                    </button>
-                                </>
-                            }
-                        } else {
-                            html! {
-                                <span class="on">
-                                    { translate.t("LABEL.EXPLORER_SCOPE_INPUT") }
-                                </span>
+                                    </span>
+                                }
                             }
                         }
-                    }
-                </div>
+                    </div>
 
-                {
-                    if is_ambiguous {
-                        html! {
-                            <div class="tp__explorer-notice warning">
-                                { translate.t("LABEL.EXPLORER_AMBIGUOUS_NOTICE") }
-                            </div>
-                        }
-                    } else {
-                        html! {}
-                    }
-                }
-
-                {
-                    if let Some(ref err) = *load_error {
-                        html! {
-                            <div class="tp__explorer-notice warning">
-                                { err.clone() }
-                            </div>
-                        }
-                    } else {
-                        html! {}
-                    }
-                }
-
-                <div class="tp__explorer-notice info">
                     {
-                        if *has_saved {
-                            translate.t("LABEL.EXPLORER_MAPPER_NOTICE_SAVED")
-                        } else {
-                            translate.t("LABEL.EXPLORER_MAPPER_NOTICE")
-                        }
-                    }
-                </div>
-
-                {
-                    if let Some(ref prov) = *provenance {
-                        if prov.pending_per_target.is_empty() {
-                            html! {}
-                        } else {
+                        if is_ambiguous {
                             html! {
-                                <div class="tp__explorer-pending-list">
-                                    { for prov.pending_per_target.iter().map(|(target, is_pending)| html! {
-                                        <span class={format!("chip {}", if *is_pending { "on" } else { "" })}>
-                                            { format!("{}: {}", target, if *is_pending { translate.t("LABEL.EXPLORER_PENDING") } else { translate.t("LABEL.EXPLORER_UP_TO_DATE") }) }
-                                        </span>
-                                    })}
+                                <div class="tp__explorer-notice warning">
+                                    { translate.t("LABEL.EXPLORER_AMBIGUOUS_NOTICE") }
                                 </div>
                             }
+                        } else {
+                            html! {}
                         }
-                    } else {
-                        html! {}
                     }
-                }
 
-                <div class="tp__explorer-fields-scroll">
                     {
-                        render_field_row(
-                            "name",
-                            "LABEL.NAME",
-                            &form_state.form.name,
-                            &initial_form.name,
+                        if let Some(ref err) = *load_error {
+                            html! {
+                                <div class="tp__explorer-notice warning">
+                                    { err.clone() }
+                                </div>
+                            }
+                        } else {
+                            html! {}
+                        }
+                    }
+
+                    <div class="tp__explorer-notice info">
+                        {
+                            if *has_saved {
+                                translate.t("LABEL.EXPLORER_MAPPER_NOTICE_SAVED")
+                            } else {
+                                translate.t("LABEL.EXPLORER_MAPPER_NOTICE")
+                            }
+                        }
+                    </div>
+
+                    {
+                        if let Some(ref prov) = *provenance {
+                            if prov.pending_per_target.is_empty() {
+                                html! {}
+                            } else {
+                                html! {
+                                    <div class="tp__explorer-pending-list">
+                                        { for prov.pending_per_target.iter().map(|(target, is_pending)| html! {
+                                            <span class={format!("chip {}", if *is_pending { "on" } else { "" })}>
+                                                { format!("{}: {}", target, if *is_pending { translate.t("LABEL.EXPLORER_PENDING") } else { translate.t("LABEL.EXPLORER_UP_TO_DATE") }) }
+                                            </span>
+                                        })}
+                                    </div>
+                                }
+                            }
+                        } else {
+                            html! {}
+                        }
+                    }
+
+                    <div class="tp__explorer-fields-scroll">
+                        {
+                            render_field_row(
+                                "name",
+                                "LABEL.NAME",
+                                &form_state.form.name,
+                                &initial_form.name,
+                                *active_scope,
+                                provenance.as_ref(),
+                                &deltas,
+                                &field_errors,
+                                false,
+                                {
+                                    let form_state = form_state.clone();
+                                    let deltas = deltas.clone();
+                                    Callback::from(move |val: String| {
+                                        let mut d = (*deltas).clone();
+                                        d.reset_fields.remove("name");
+                                        d.clear_fields.remove("name");
+                                        if also_set_title_val {
+                                            d.reset_fields.remove("title");
+                                            d.clear_fields.remove("title");
+                                            form_state.dispatch(OverrideEditFormAction::Title(val.clone()));
+                                        }
+                                        deltas.set(d);
+                                        form_state.dispatch(OverrideEditFormAction::Name(val));
+                                    })
+                                },
+                                {
+                                    let form_state = form_state.clone();
+                                    let deltas = deltas.clone();
+                                    let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "name", p).value.unwrap_or_default());
+                                    Callback::from(move |_| {
+                                        let mut d = (*deltas).clone();
+                                        d.reset_fields.insert("name".to_string());
+                                        d.clear_fields.remove("name");
+                                        deltas.set(d);
+                                        form_state.dispatch(OverrideEditFormAction::Name(fallback.clone()));
+                                    })
+                                },
+                                None,
+                                &translate,
+                                Some(FieldRowOptions {
+                                    custom_input: None,
+                                    extra_content: Some(name_also_set_title),
+                                }),
+                            )
+                        }
+
+                        { render_field_row(
+                            "title",
+                            "LABEL.TITLE",
+                            &form_state.form.title,
+                            &initial_form.title,
                             *active_scope,
                             provenance.as_ref(),
                             &deltas,
@@ -1475,288 +1757,139 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                 let deltas = deltas.clone();
                                 Callback::from(move |val: String| {
                                     let mut d = (*deltas).clone();
-                                    d.reset_fields.remove("name");
-                                    d.clear_fields.remove("name");
-                                    if also_set_title_val {
-                                        d.reset_fields.remove("title");
-                                        d.clear_fields.remove("title");
-                                        form_state.dispatch(OverrideEditFormAction::Title(val.clone()));
-                                    }
+                                    d.reset_fields.remove("title");
+                                    d.clear_fields.remove("title");
                                     deltas.set(d);
-                                    form_state.dispatch(OverrideEditFormAction::Name(val));
+                                    form_state.dispatch(OverrideEditFormAction::Title(val));
                                 })
                             },
                             {
                                 let form_state = form_state.clone();
                                 let deltas = deltas.clone();
-                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "name", p).value.unwrap_or_default());
+                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "title", p).value.unwrap_or_default());
                                 Callback::from(move |_| {
                                     let mut d = (*deltas).clone();
-                                    d.reset_fields.insert("name".to_string());
-                                    d.clear_fields.remove("name");
+                                    d.reset_fields.insert("title".to_string());
+                                    d.clear_fields.remove("title");
                                     deltas.set(d);
-                                    form_state.dispatch(OverrideEditFormAction::Name(fallback.clone()));
+                                    form_state.dispatch(OverrideEditFormAction::Title(fallback.clone()));
                                 })
                             },
                             None,
                             &translate,
-                            Some(FieldRowOptions {
-                                custom_input: None,
-                                extra_content: None,
-                                extra_header: Some(name_extra_header),
-                            }),
-                        )
-                    }
+                            None,
+                        ) }
 
-                    { render_field_row(
-                        "title",
-                        "LABEL.TITLE",
-                        &form_state.form.title,
-                        &initial_form.title,
-                        *active_scope,
-                        provenance.as_ref(),
-                        &deltas,
-                        &field_errors,
-                        false,
                         {
-                            let form_state = form_state.clone();
-                            let deltas = deltas.clone();
-                            Callback::from(move |val: String| {
-                                let mut d = (*deltas).clone();
-                                d.reset_fields.remove("title");
-                                d.clear_fields.remove("title");
-                                deltas.set(d);
-                                form_state.dispatch(OverrideEditFormAction::Title(val));
-                            })
-                        },
-                        {
-                            let form_state = form_state.clone();
-                            let deltas = deltas.clone();
-                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "title", p).value.unwrap_or_default());
-                            Callback::from(move |_| {
-                                let mut d = (*deltas).clone();
-                                d.reset_fields.insert("title".to_string());
-                                d.clear_fields.remove("title");
-                                deltas.set(d);
-                                form_state.dispatch(OverrideEditFormAction::Title(fallback.clone()));
-                            })
-                        },
-                        None,
-                        &translate,
-                        None,
-                    ) }
-
-                    {
-                        if kind == OverrideItemKind::Live {
-                            html! {
-                                <div class="tp__explorer-hint">
-                                    { translate.t("LABEL.EXPLORER_NAME_VS_TITLE_NOTE") }
-                                </div>
+                            if kind == OverrideItemKind::Live {
+                                html! {
+                                    <div class="tp__explorer-hint">
+                                        { translate.t("LABEL.EXPLORER_NAME_VS_TITLE_NOTE") }
+                                    </div>
+                                }
+                            } else {
+                                html! {}
                             }
-                        } else {
-                            html! {}
                         }
-                    }
 
-                    { render_field_row(
-                        "group",
-                        "LABEL.GROUP",
-                        &form_state.form.group,
-                        &initial_form.group,
-                        *active_scope,
-                        provenance.as_ref(),
-                        &deltas,
-                        &field_errors,
-                        false,
-                        {
-                            let form_state = form_state.clone();
-                            let deltas = deltas.clone();
-                            Callback::from(move |val: String| {
-                                let mut d = (*deltas).clone();
-                                d.reset_fields.remove("group");
-                                d.clear_fields.remove("group");
-                                deltas.set(d);
-                                form_state.dispatch(OverrideEditFormAction::Group(val));
-                            })
-                        },
-                        {
-                            let form_state = form_state.clone();
-                            let deltas = deltas.clone();
-                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "group", p).value.unwrap_or_default());
-                            Callback::from(move |_| {
-                                let mut d = (*deltas).clone();
-                                d.reset_fields.insert("group".to_string());
-                                d.clear_fields.remove("group");
-                                deltas.set(d);
-                                form_state.dispatch(OverrideEditFormAction::Group(fallback.clone()));
-                            })
-                        },
-                        None,
-                        &translate,
-                        None,
-                    ) }
-
-                    {
-                        render_field_row(
-                            "logo",
-                            "LABEL.LOGO",
-                            &form_state.form.logo,
-                            &initial_form.logo,
+                        { render_field_row(
+                            "group",
+                            "LABEL.GROUP",
+                            &form_state.form.group,
+                            &initial_form.group,
                             *active_scope,
                             provenance.as_ref(),
                             &deltas,
                             &field_errors,
-                            true,
+                            false,
                             {
                                 let form_state = form_state.clone();
                                 let deltas = deltas.clone();
                                 Callback::from(move |val: String| {
                                     let mut d = (*deltas).clone();
-                                    d.reset_fields.remove("logo");
-                                    d.clear_fields.remove("logo");
+                                    d.reset_fields.remove("group");
+                                    d.clear_fields.remove("group");
                                     deltas.set(d);
-                                    form_state.dispatch(OverrideEditFormAction::Logo(val));
+                                    form_state.dispatch(OverrideEditFormAction::Group(val));
                                 })
                             },
                             {
                                 let form_state = form_state.clone();
                                 let deltas = deltas.clone();
-                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "logo", p).value.unwrap_or_default());
+                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "group", p).value.unwrap_or_default());
                                 Callback::from(move |_| {
                                     let mut d = (*deltas).clone();
-                                    d.reset_fields.insert("logo".to_string());
-                                    d.clear_fields.remove("logo");
+                                    d.reset_fields.insert("group".to_string());
+                                    d.clear_fields.remove("group");
                                     deltas.set(d);
-                                    form_state.dispatch(OverrideEditFormAction::Logo(fallback.clone()));
+                                    form_state.dispatch(OverrideEditFormAction::Group(fallback.clone()));
                                 })
                             },
-                            Some({
-                                let form_state = form_state.clone();
-                                let deltas = deltas.clone();
-                                Callback::from(move |_| {
-                                    let mut d = (*deltas).clone();
-                                    d.clear_fields.insert("logo".to_string());
-                                    d.reset_fields.remove("logo");
-                                    deltas.set(d);
-                                    form_state.dispatch(OverrideEditFormAction::Logo(String::new()));
-                                })
-                            }),
+                            None,
                             &translate,
-                            Some(logo_opts),
-                        )
-                    }
+                            None,
+                        ) }
 
-                    // Live specific fields
-                    {
-                        if kind == OverrideItemKind::Live {
-                            html! {
-                                <>
-                                    { render_field_row(
-                                        "chno",
-                                        "LABEL.CHNO",
-                                        &form_state.form.chno,
-                                        &initial_form.chno,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("chno");
-                                                d.clear_fields.remove("chno");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Chno(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "chno", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("chno".to_string());
-                                                d.clear_fields.remove("chno");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Chno(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("chno".to_string());
-                                                d.reset_fields.remove("chno");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Chno(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
+                        {
+                            render_field_row(
+                                "logo",
+                                "LABEL.LOGO",
+                                &form_state.form.logo,
+                                &initial_form.logo,
+                                *active_scope,
+                                provenance.as_ref(),
+                                &deltas,
+                                &field_errors,
+                                true,
+                                {
+                                    let form_state = form_state.clone();
+                                    let deltas = deltas.clone();
+                                    Callback::from(move |val: String| {
+                                        let mut d = (*deltas).clone();
+                                        d.reset_fields.remove("logo");
+                                        d.clear_fields.remove("logo");
+                                        deltas.set(d);
+                                        form_state.dispatch(OverrideEditFormAction::Logo(val));
+                                    })
+                                },
+                                {
+                                    let form_state = form_state.clone();
+                                    let deltas = deltas.clone();
+                                    let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "logo", p).value.unwrap_or_default());
+                                    Callback::from(move |_| {
+                                        let mut d = (*deltas).clone();
+                                        d.reset_fields.insert("logo".to_string());
+                                        d.clear_fields.remove("logo");
+                                        deltas.set(d);
+                                        form_state.dispatch(OverrideEditFormAction::Logo(fallback.clone()));
+                                    })
+                                },
+                                Some({
+                                    let form_state = form_state.clone();
+                                    let deltas = deltas.clone();
+                                    Callback::from(move |_| {
+                                        let mut d = (*deltas).clone();
+                                        d.clear_fields.insert("logo".to_string());
+                                        d.reset_fields.remove("logo");
+                                        deltas.set(d);
+                                        form_state.dispatch(OverrideEditFormAction::Logo(String::new()));
+                                    })
+                                }),
+                                &translate,
+                                Some(logo_opts),
+                            )
+                        }
 
-                                    {
-                                        if let Some(conflict_name) = (*duplicate_chno_warning).clone() {
-                                            html! {
-                                                <div class="tp__explorer-error-msg">
-                                                    { format!("{}: {}", translate.t("LABEL.EXPLORER_DUPLICATE_CHNO_WARN"), conflict_name) }
-                                                </div>
-                                            }
-                                        } else {
-                                            html! {}
-                                        }
-                                    }
-
-                                    {
-                                        render_field_row(
-                                            "epg_channel_id",
-                                            "LABEL.EPG_CHANNEL_ID",
-                                            &form_state.form.epg_channel_id,
-                                            &initial_form.epg_channel_id,
-                                            *active_scope,
-                                            provenance.as_ref(),
-                                            &deltas,
-                                            &field_errors,
-                                            true,
-                                            on_epg_change,
-                                            {
-                                                let form_state = form_state.clone();
-                                                let deltas = deltas.clone();
-                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "epg_channel_id", p).value.unwrap_or_default());
-                                                Callback::from(move |_| {
-                                                    let mut d = (*deltas).clone();
-                                                    d.reset_fields.insert("epg_channel_id".to_string());
-                                                    d.clear_fields.remove("epg_channel_id");
-                                                    deltas.set(d);
-                                                    form_state.dispatch(OverrideEditFormAction::EpgChannelId(fallback.clone()));
-                                                })
-                                            },
-                                            Some({
-                                                let form_state = form_state.clone();
-                                                let deltas = deltas.clone();
-                                                Callback::from(move |_| {
-                                                    let mut d = (*deltas).clone();
-                                                    d.clear_fields.insert("epg_channel_id".to_string());
-                                                    d.reset_fields.remove("epg_channel_id");
-                                                    deltas.set(d);
-                                                    form_state.dispatch(OverrideEditFormAction::EpgChannelId(String::new()));
-                                                })
-                                            }),
-                                            &translate,
-                                            Some(epg_opts),
-                                        )
-                                    }
-
-                                    {
-                                        render_field_row(
-                                            "logo_small",
-                                            "LABEL.LOGO_SMALL",
-                                            &form_state.form.logo_small,
-                                            &initial_form.logo_small,
+                        // Live specific fields
+                        {
+                            if kind == OverrideItemKind::Live {
+                                html! {
+                                    <>
+                                        { render_field_row(
+                                            "chno",
+                                            "LABEL.CHNO",
+                                            &form_state.form.chno,
+                                            &initial_form.chno,
                                             *active_scope,
                                             provenance.as_ref(),
                                             &deltas,
@@ -1767,22 +1900,22 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                                 let deltas = deltas.clone();
                                                 Callback::from(move |val: String| {
                                                     let mut d = (*deltas).clone();
-                                                    d.reset_fields.remove("logo_small");
-                                                    d.clear_fields.remove("logo_small");
+                                                    d.reset_fields.remove("chno");
+                                                    d.clear_fields.remove("chno");
                                                     deltas.set(d);
-                                                    form_state.dispatch(OverrideEditFormAction::LogoSmall(val));
+                                                    form_state.dispatch(OverrideEditFormAction::Chno(val));
                                                 })
                                             },
                                             {
                                                 let form_state = form_state.clone();
                                                 let deltas = deltas.clone();
-                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "logo_small", p).value.unwrap_or_default());
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "chno", p).value.unwrap_or_default());
                                                 Callback::from(move |_| {
                                                     let mut d = (*deltas).clone();
-                                                    d.reset_fields.insert("logo_small".to_string());
-                                                    d.clear_fields.remove("logo_small");
+                                                    d.reset_fields.insert("chno".to_string());
+                                                    d.clear_fields.remove("chno");
                                                     deltas.set(d);
-                                                    form_state.dispatch(OverrideEditFormAction::LogoSmall(fallback.clone()));
+                                                    form_state.dispatch(OverrideEditFormAction::Chno(fallback.clone()));
                                                 })
                                             },
                                             Some({
@@ -1790,442 +1923,545 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                                 let deltas = deltas.clone();
                                                 Callback::from(move |_| {
                                                     let mut d = (*deltas).clone();
-                                                    d.clear_fields.insert("logo_small".to_string());
-                                                    d.reset_fields.remove("logo_small");
+                                                    d.clear_fields.insert("chno".to_string());
+                                                    d.reset_fields.remove("chno");
                                                     deltas.set(d);
-                                                    form_state.dispatch(OverrideEditFormAction::LogoSmall(String::new()));
+                                                    form_state.dispatch(OverrideEditFormAction::Chno(String::new()));
                                                 })
                                             }),
                                             &translate,
-                                            Some(logo_small_opts),
-                                        )
-                                    }
-                                </>
-                            }
-                        } else {
-                            html! {}
-                        }
-                    }
+                                            None,
+                                        ) }
 
-                    // VOD / Series specific fields
-                    {
-                        if kind == OverrideItemKind::Vod || kind == OverrideItemKind::Series {
-                            html! {
-                                <>
-                                    { render_field_row(
-                                        "tmdb",
-                                        "LABEL.TMDB",
-                                        &form_state.form.tmdb,
-                                        &initial_form.tmdb,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
                                         {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("tmdb");
-                                                d.clear_fields.remove("tmdb");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Tmdb(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "tmdb", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("tmdb".to_string());
-                                                d.clear_fields.remove("tmdb");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Tmdb(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("tmdb".to_string());
-                                                d.reset_fields.remove("tmdb");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Tmdb(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-
-                                    { render_field_row(
-                                        "rating",
-                                        "LABEL.RATING",
-                                        &form_state.form.rating,
-                                        &initial_form.rating,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("rating");
-                                                d.clear_fields.remove("rating");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Rating(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "rating", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("rating".to_string());
-                                                d.clear_fields.remove("rating");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Rating(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("rating".to_string());
-                                                d.reset_fields.remove("rating");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Rating(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-
-                                    { render_field_row(
-                                        "release_date",
-                                        "LABEL.RELEASE_DATE",
-                                        &form_state.form.release_date,
-                                        &initial_form.release_date,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("release_date");
-                                                d.clear_fields.remove("release_date");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::ReleaseDate(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "release_date", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("release_date".to_string());
-                                                d.clear_fields.remove("release_date");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::ReleaseDate(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("release_date".to_string());
-                                                d.reset_fields.remove("release_date");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::ReleaseDate(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-
-                                    { render_field_row(
-                                        "plot",
-                                        "LABEL.PLOT",
-                                        &form_state.form.plot,
-                                        &initial_form.plot,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("plot");
-                                                d.clear_fields.remove("plot");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Plot(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "plot", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("plot".to_string());
-                                                d.clear_fields.remove("plot");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Plot(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("plot".to_string());
-                                                d.reset_fields.remove("plot");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Plot(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-
-                                    { render_field_row(
-                                        "genre",
-                                        "LABEL.GENRE",
-                                        &form_state.form.genre,
-                                        &initial_form.genre,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("genre");
-                                                d.clear_fields.remove("genre");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Genre(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "genre", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("genre".to_string());
-                                                d.clear_fields.remove("genre");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Genre(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("genre".to_string());
-                                                d.reset_fields.remove("genre");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Genre(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-
-                                    { render_field_row(
-                                        "cast",
-                                        "LABEL.CAST",
-                                        &form_state.form.cast,
-                                        &initial_form.cast,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("cast");
-                                                d.clear_fields.remove("cast");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Cast(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "cast", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("cast".to_string());
-                                                d.clear_fields.remove("cast");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Cast(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("cast".to_string());
-                                                d.reset_fields.remove("cast");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Cast(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-
-                                    { render_field_row(
-                                        "director",
-                                        "LABEL.DIRECTOR",
-                                        &form_state.form.director,
-                                        &initial_form.director,
-                                        *active_scope,
-                                        provenance.as_ref(),
-                                        &deltas,
-                                        &field_errors,
-                                        true,
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |val: String| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.remove("director");
-                                                d.clear_fields.remove("director");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Director(val));
-                                            })
-                                        },
-                                        {
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "director", p).value.unwrap_or_default());
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.reset_fields.insert("director".to_string());
-                                                d.clear_fields.remove("director");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Director(fallback.clone()));
-                                            })
-                                        },
-                                        Some({
-                                            let form_state = form_state.clone();
-                                            let deltas = deltas.clone();
-                                            Callback::from(move |_| {
-                                                let mut d = (*deltas).clone();
-                                                d.clear_fields.insert("director".to_string());
-                                                d.reset_fields.remove("director");
-                                                deltas.set(d);
-                                                form_state.dispatch(OverrideEditFormAction::Director(String::new()));
-                                            })
-                                        }),
-                                        &translate,
-                                        None,
-                                    ) }
-                                </>
-                            }
-                        } else {
-                            html! {}
-                        }
-                    }
-
-                    // Unknown fields section
-                    {
-                        if unknown_fields.is_empty() {
-                            html! {}
-                        } else {
-                            html! {
-                                <div class="tp__explorer-unknown-section">
-                                    <h4>{ translate.t("LABEL.EXPLORER_UNKNOWN_FIELDS") }</h4>
-                                    { for unknown_fields.into_iter().map(|(k, v)| {
-                                        let remove_k = k.clone();
-                                        let deltas = deltas.clone();
-                                        let on_remove = Callback::from(move |_: MouseEvent| {
-                                            let mut d = (*deltas).clone();
-                                            if !d.remove_unknown.contains(&remove_k) {
-                                                d.remove_unknown.push(remove_k.clone());
-                                                deltas.set(d);
+                                            if let Some(conflict_name) = (*duplicate_chno_warning).clone() {
+                                                html! {
+                                                    <div class="tp__explorer-error-msg">
+                                                        { format!("{}: {}", translate.t("LABEL.EXPLORER_DUPLICATE_CHNO_WARN"), conflict_name) }
+                                                    </div>
+                                                }
+                                            } else {
+                                                html! {}
                                             }
-                                        });
-                                        html! {
-                                            <div class="tp__explorer-unknown-row">
-                                                <span>{ format!("{}: {}", k, v) }</span>
-                                                <button type="button" class="btn-remove" onclick={on_remove}>
-                                                    { translate.t("LABEL.EXPLORER_REMOVE_UNKNOWN") }
-                                                </button>
-                                            </div>
                                         }
-                                    })}
-                                </div>
+
+                                        {
+                                            render_field_row(
+                                                "epg_channel_id",
+                                                "LABEL.EPG_CHANNEL_ID",
+                                                &form_state.form.epg_channel_id,
+                                                &initial_form.epg_channel_id,
+                                                *active_scope,
+                                                provenance.as_ref(),
+                                                &deltas,
+                                                &field_errors,
+                                                true,
+                                                on_epg_change,
+                                                {
+                                                    let form_state = form_state.clone();
+                                                    let deltas = deltas.clone();
+                                                    let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "epg_channel_id", p).value.unwrap_or_default());
+                                                    Callback::from(move |_| {
+                                                        let mut d = (*deltas).clone();
+                                                        d.reset_fields.insert("epg_channel_id".to_string());
+                                                        d.clear_fields.remove("epg_channel_id");
+                                                        deltas.set(d);
+                                                        form_state.dispatch(OverrideEditFormAction::EpgChannelId(fallback.clone()));
+                                                    })
+                                                },
+                                                Some({
+                                                    let form_state = form_state.clone();
+                                                    let deltas = deltas.clone();
+                                                    Callback::from(move |_| {
+                                                        let mut d = (*deltas).clone();
+                                                        d.clear_fields.insert("epg_channel_id".to_string());
+                                                        d.reset_fields.remove("epg_channel_id");
+                                                        deltas.set(d);
+                                                        form_state.dispatch(OverrideEditFormAction::EpgChannelId(String::new()));
+                                                    })
+                                                }),
+                                                &translate,
+                                                Some(epg_opts),
+                                            )
+                                        }
+
+                                        {
+                                            render_field_row(
+                                                "logo_small",
+                                                "LABEL.LOGO_SMALL",
+                                                &form_state.form.logo_small,
+                                                &initial_form.logo_small,
+                                                *active_scope,
+                                                provenance.as_ref(),
+                                                &deltas,
+                                                &field_errors,
+                                                true,
+                                                {
+                                                    let form_state = form_state.clone();
+                                                    let deltas = deltas.clone();
+                                                    Callback::from(move |val: String| {
+                                                        let mut d = (*deltas).clone();
+                                                        d.reset_fields.remove("logo_small");
+                                                        d.clear_fields.remove("logo_small");
+                                                        deltas.set(d);
+                                                        form_state.dispatch(OverrideEditFormAction::LogoSmall(val));
+                                                    })
+                                                },
+                                                {
+                                                    let form_state = form_state.clone();
+                                                    let deltas = deltas.clone();
+                                                    let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "logo_small", p).value.unwrap_or_default());
+                                                    Callback::from(move |_| {
+                                                        let mut d = (*deltas).clone();
+                                                        d.reset_fields.insert("logo_small".to_string());
+                                                        d.clear_fields.remove("logo_small");
+                                                        deltas.set(d);
+                                                        form_state.dispatch(OverrideEditFormAction::LogoSmall(fallback.clone()));
+                                                    })
+                                                },
+                                                Some({
+                                                    let form_state = form_state.clone();
+                                                    let deltas = deltas.clone();
+                                                    Callback::from(move |_| {
+                                                        let mut d = (*deltas).clone();
+                                                        d.clear_fields.insert("logo_small".to_string());
+                                                        d.reset_fields.remove("logo_small");
+                                                        deltas.set(d);
+                                                        form_state.dispatch(OverrideEditFormAction::LogoSmall(String::new()));
+                                                    })
+                                                }),
+                                                &translate,
+                                                Some(logo_small_opts),
+                                            )
+                                        }
+                                    </>
+                                }
+                            } else {
+                                html! {}
                             }
                         }
-                    }
-                </div>
 
-                // Toolbar
-                <div class="tp__dialog__toolbar">
-                    <div class="tp__dialog__toolbar-left">
-                        <TextButton
-                            class="secondary"
-                            name="cancel"
-                            icon="Cancel"
-                            title={translate.t("LABEL.CANCEL")}
-                            onclick={on_close}
-                        />
+                        // VOD / Series specific fields
+                        {
+                            if kind == OverrideItemKind::Vod || kind == OverrideItemKind::Series {
+                                html! {
+                                    <>
+                                        { render_field_row(
+                                            "tmdb",
+                                            "LABEL.TMDB",
+                                            &form_state.form.tmdb,
+                                            &initial_form.tmdb,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("tmdb");
+                                                    d.clear_fields.remove("tmdb");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Tmdb(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "tmdb", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("tmdb".to_string());
+                                                    d.clear_fields.remove("tmdb");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Tmdb(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("tmdb".to_string());
+                                                    d.reset_fields.remove("tmdb");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Tmdb(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+
+                                        { render_field_row(
+                                            "rating",
+                                            "LABEL.RATING",
+                                            &form_state.form.rating,
+                                            &initial_form.rating,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("rating");
+                                                    d.clear_fields.remove("rating");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Rating(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "rating", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("rating".to_string());
+                                                    d.clear_fields.remove("rating");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Rating(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("rating".to_string());
+                                                    d.reset_fields.remove("rating");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Rating(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+
+                                        { render_field_row(
+                                            "release_date",
+                                            "LABEL.RELEASE_DATE",
+                                            &form_state.form.release_date,
+                                            &initial_form.release_date,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("release_date");
+                                                    d.clear_fields.remove("release_date");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::ReleaseDate(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "release_date", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("release_date".to_string());
+                                                    d.clear_fields.remove("release_date");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::ReleaseDate(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("release_date".to_string());
+                                                    d.reset_fields.remove("release_date");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::ReleaseDate(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+
+                                        { render_field_row(
+                                            "plot",
+                                            "LABEL.PLOT",
+                                            &form_state.form.plot,
+                                            &initial_form.plot,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("plot");
+                                                    d.clear_fields.remove("plot");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Plot(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "plot", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("plot".to_string());
+                                                    d.clear_fields.remove("plot");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Plot(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("plot".to_string());
+                                                    d.reset_fields.remove("plot");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Plot(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+
+                                        { render_field_row(
+                                            "genre",
+                                            "LABEL.GENRE",
+                                            &form_state.form.genre,
+                                            &initial_form.genre,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("genre");
+                                                    d.clear_fields.remove("genre");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Genre(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "genre", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("genre".to_string());
+                                                    d.clear_fields.remove("genre");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Genre(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("genre".to_string());
+                                                    d.reset_fields.remove("genre");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Genre(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+
+                                        { render_field_row(
+                                            "cast",
+                                            "LABEL.CAST",
+                                            &form_state.form.cast,
+                                            &initial_form.cast,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("cast");
+                                                    d.clear_fields.remove("cast");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Cast(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "cast", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("cast".to_string());
+                                                    d.clear_fields.remove("cast");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Cast(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("cast".to_string());
+                                                    d.reset_fields.remove("cast");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Cast(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+
+                                        { render_field_row(
+                                            "director",
+                                            "LABEL.DIRECTOR",
+                                            &form_state.form.director,
+                                            &initial_form.director,
+                                            *active_scope,
+                                            provenance.as_ref(),
+                                            &deltas,
+                                            &field_errors,
+                                            true,
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |val: String| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.remove("director");
+                                                    d.clear_fields.remove("director");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Director(val));
+                                                })
+                                            },
+                                            {
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                let fallback = provenance.as_ref().map_or_else(String::new, |p| reset_fallback(*active_scope, "director", p).value.unwrap_or_default());
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.reset_fields.insert("director".to_string());
+                                                    d.clear_fields.remove("director");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Director(fallback.clone()));
+                                                })
+                                            },
+                                            Some({
+                                                let form_state = form_state.clone();
+                                                let deltas = deltas.clone();
+                                                Callback::from(move |_| {
+                                                    let mut d = (*deltas).clone();
+                                                    d.clear_fields.insert("director".to_string());
+                                                    d.reset_fields.remove("director");
+                                                    deltas.set(d);
+                                                    form_state.dispatch(OverrideEditFormAction::Director(String::new()));
+                                                })
+                                            }),
+                                            &translate,
+                                            None,
+                                        ) }
+                                    </>
+                                }
+                            } else {
+                                html! {}
+                            }
+                        }
+
+                        // Unknown fields section
+                        {
+                            if unknown_fields.is_empty() {
+                                html! {}
+                            } else {
+                                html! {
+                                    <div class="tp__explorer-unknown-section">
+                                        <h4>{ translate.t("LABEL.EXPLORER_UNKNOWN_FIELDS") }</h4>
+                                        { for unknown_fields.into_iter().map(|(k, v)| {
+                                            let remove_k = k.clone();
+                                            let deltas = deltas.clone();
+                                            let on_remove = Callback::from(move |_: String| {
+                                                let mut d = (*deltas).clone();
+                                                if !d.remove_unknown.contains(&remove_k) {
+                                                    d.remove_unknown.push(remove_k.clone());
+                                                    deltas.set(d);
+                                                }
+                                            });
+                                            html! {
+                                                <div class="tp__explorer-unknown-row">
+                                                    <span>{ format!("{}: {}", k, v) }</span>
+                                                    <TextButton
+                                                        name="remove_unknown"
+                                                        class="secondary"
+                                                        icon="Delete"
+                                                        title={translate.t("LABEL.EXPLORER_REMOVE_UNKNOWN")}
+                                                        onclick={on_remove}
+                                                    />
+                                                </div>
+                                            }
+                                        })}
+                                    </div>
+                                }
+                            }
+                        }
                     </div>
-                    <div class="tp__dialog__toolbar-right">
-                        <TextButton
-                            class="secondary"
-                            name="update_now"
-                            icon="Refresh"
-                            title={translate.t("LABEL.EXPLORER_UPDATE_NOW")}
-                            onclick={handle_update_now}
-                        />
-                        <TextButton
-                            class="primary"
-                            name="save"
-                            icon="Save"
-                            title={translate.t("LABEL.SAVE")}
-                            disabled={is_ambiguous || *is_loading || load_error.is_some() || *is_saving}
-                            onclick={handle_save}
-                        />
+
+                    // Toolbar
+                    <div class="tp__dialog__toolbar">
+                        <div class="tp__dialog__toolbar-left">
+                            <TextButton
+                                class="secondary"
+                                name="cancel"
+                                icon="Cancel"
+                                title={translate.t("LABEL.CANCEL")}
+                                onclick={on_close}
+                            />
+                        </div>
+                        <div class="tp__dialog__toolbar-right">
+                            <TextButton
+                                name="update_now"
+                                icon="Refresh"
+                                title={translate.t("LABEL.EXPLORER_UPDATE_NOW")}
+                                onclick={handle_update_now}
+                            />
+                            <TextButton
+                                class="secondary"
+                                name="save"
+                                icon="Save"
+                                title={translate.t("LABEL.SAVE")}
+                                disabled={!can_write || is_ambiguous || *is_loading || load_error.is_some() || *is_saving}
+                                onclick={handle_save}
+                            />
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
-    }
+        }
 }
 
 #[derive(Default)]
 struct FieldRowOptions {
     custom_input: Option<Html>,
     extra_content: Option<Html>,
-    extra_header: Option<Html>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2240,14 +2476,14 @@ fn render_field_row(
     field_errors: &UseStateHandle<HashMap<String, String>>,
     clearable: bool,
     on_change: Callback<String>,
-    on_reset: Callback<MouseEvent>,
-    on_clear: Option<Callback<MouseEvent>>,
+    on_reset: Callback<String>,
+    on_clear: Option<Callback<String>>,
     translate: &crate::i18n::YewI18n,
     opts: Option<FieldRowOptions>,
 ) -> Html {
-    let (custom_input, extra_content, extra_header) = match opts {
-        Some(o) => (o.custom_input, o.extra_content, o.extra_header),
-        None => (None, None, None),
+    let (custom_input, extra_content) = match opts {
+        Some(o) => (o.custom_input, o.extra_content),
+        None => (None, None),
     };
 
     let is_modified = current_value != initial_value
@@ -2268,40 +2504,6 @@ fn render_field_row(
 
     html! {
         <div class={format!("tp__explorer-field-row {}", if is_modified { "chg" } else { "" })}>
-            <div class="tp__explorer-field-header">
-                <span class="lbl-wrap">
-                    { translate.t(label_key) }
-                    { if is_modified { html! { <span class="o">{ " · " }{ translate.t("LABEL.EXPLORER_EDITED_BADGE") }</span> } } else { html! {} } }
-                    { extra_header.unwrap_or_default() }
-                </span>
-                <span class="tp__explorer-actions">
-                    <button
-                        type="button"
-                        class="rst"
-                        title={fallback_text.clone()}
-                        aria-label={format!("{} {}", translate.t("LABEL.RESET"), fallback_text)}
-                        onclick={on_reset}
-                    >
-                        { "↺ " }{ translate.t("LABEL.RESET") }
-                    </button>
-                    {
-                        if clearable {
-                            if let Some(on_clear) = on_clear {
-                                html! {
-                                    <button type="button" class="clr" onclick={on_clear}>
-                                        { "✕ " }{ translate.t("LABEL.EXPLORER_CLEAR_FIELD") }
-                                    </button>
-                                }
-                            } else {
-                                html! {}
-                            }
-                        } else {
-                            html! {}
-                        }
-                    }
-                </span>
-            </div>
-
             <div class="tp__form-field tp__form-field__text">
                 {
                     if let Some(custom) = custom_input {
@@ -2309,8 +2511,7 @@ fn render_field_row(
                     } else {
                         html! {
                             <crate::app::components::input::Input
-                                label={Option::<String>::None}
-                                aria_label={Some(translate.t(label_key))}
+                                label={Some(translate.t(label_key))}
                                 name={field_id}
                                 field_id={Some(full_field_id)}
                                 autocomplete={true}
@@ -2323,6 +2524,36 @@ fn render_field_row(
                 { extra_content.unwrap_or_default() }
             </div>
 
+            <div class="tp__explorer-field-meta">
+                { html_if!(is_modified, {
+                    <span class="o">{ translate.t("LABEL.EXPLORER_EDITED_BADGE") }</span>
+                })}
+                <span class="tp__explorer-actions">
+                    <TextButton
+                        name="reset"
+                        class="tp__explorer-field-action"
+                        icon="Refresh"
+                        title={translate.t("LABEL.RESET")}
+                        hint={Some(fallback_text.clone())}
+                        aria_label={Some(format!("{} {}", translate.t("LABEL.RESET"), fallback_text))}
+                        onclick={on_reset}
+                    />
+                    {
+                        match on_clear {
+                            Some(on_clear) if clearable => html! {
+                                <TextButton
+                                    name="clear"
+                                    class="tp__explorer-field-action"
+                                    icon="Clear"
+                                    title={translate.t("LABEL.EXPLORER_CLEAR_FIELD")}
+                                    onclick={on_clear}
+                                />
+                            },
+                            _ => html! {},
+                        }
+                    }
+                </span>
+            </div>
             <div class="tp__explorer-provenance-info">
                 { format!("{}: {}, {}: {}",
                     translate.t("LABEL.EXPLORER_EFFECTIVE_VALUE"),

@@ -1,10 +1,13 @@
 @forward "app_header";
 @forward "app";
 @forward "components/input";
+@forward "components/autocomplete_input";
 @forward "components/menu_item";
 @forward "components/icon_button";
 @forward "components/text_button";
 @forward "components/toggle_switch";
+@forward "components/checkbox";
+@forward "components/split_button";
 @forward "components/table";
 @forward "components/task_status";
 @forward "components/panel";

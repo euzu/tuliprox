@@ -260,7 +260,25 @@ fn apply_live_properties(live: &mut LiveStreamProperties, ov: &ItemOverride) {
 
 fn apply_video_properties(video: &mut VideoStreamProperties, ov: &ItemOverride) {
     apply_str_delta!(video.name, ov.name);
-    apply_str_delta!(video.stream_icon, ov.logo);
+    match &ov.logo {
+        FieldDelta::Keep => {}
+        FieldDelta::Clear => {
+            video.stream_icon = Arc::from("");
+            if let Some(details) = video.details.as_mut() {
+                details.movie_image = None;
+                details.cover_big = None;
+                details.backdrop_path = None;
+            }
+        }
+        FieldDelta::Set(v) => {
+            let val: Arc<str> = Arc::from(v.as_str());
+            video.stream_icon = Arc::clone(&val);
+            if let Some(details) = video.details.as_mut() {
+                details.movie_image = Some(Arc::clone(&val));
+                details.cover_big = Some(val);
+            }
+        }
+    }
 
     match ov.tmdb {
         FieldDelta::Keep => {}
@@ -317,7 +335,16 @@ fn apply_video_properties(video: &mut VideoStreamProperties, ov: &ItemOverride) 
 
 fn apply_series_properties(series: &mut SeriesStreamProperties, ov: &ItemOverride) {
     apply_str_delta!(series.name, ov.name);
-    apply_str_delta!(series.cover, ov.logo);
+    match &ov.logo {
+        FieldDelta::Keep => {}
+        FieldDelta::Clear => {
+            series.cover = Arc::from("");
+            series.backdrop_path = None;
+        }
+        FieldDelta::Set(v) => {
+            series.cover = Arc::from(v.as_str());
+        }
+    }
 
     match ov.tmdb {
         FieldDelta::Keep => {}

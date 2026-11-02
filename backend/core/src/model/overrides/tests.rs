@@ -506,6 +506,7 @@ fn verify_video_overrides(set_ov: &ItemOverride, clear_ov: &ItemOverride) {
     assert_eq!(details.release_date, None);
 }
 
+#[allow(clippy::float_cmp)]
 fn verify_series_overrides(set_ov: &ItemOverride, clear_ov: &ItemOverride) {
     let mut series_header = PlaylistItemHeader {
         additional_properties: Some(StreamProperties::Series(Box::default())),
@@ -620,4 +621,65 @@ fn apply_override_set_and_clear_each_field() {
     verify_video_overrides(&set_ov, &clear_ov);
     verify_series_overrides(&set_ov, &clear_ov);
     verify_fallback_overrides(&set_ov, &clear_ov);
+}
+
+#[test]
+fn test_video_and_series_logo_fallbacks_cleared_and_overridden() {
+    use shared::model::VideoStreamDetailProperties;
+
+    // Test Video
+    let mut video_header = PlaylistItemHeader {
+        additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+            stream_icon: Arc::from("http://provider.example/icon.png"),
+            details: Some(VideoStreamDetailProperties {
+                movie_image: Some(Arc::from("http://provider.example/movie.png")),
+                cover_big: Some(Arc::from("http://provider.example/cover.png")),
+                backdrop_path: Some(vec![Arc::from("http://provider.example/backdrop.png")]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+
+    // Test Set: set value should win over fallbacks
+    let set_ov =
+        ItemOverride { logo: FieldDelta::Set("http://new.example/custom.png".to_string()), ..Default::default() };
+    apply_override(&mut video_header, &set_ov);
+    let Some(StreamProperties::Video(v)) = &video_header.additional_properties else {
+        panic!("expected Video");
+    };
+    assert_eq!(v.stream_icon.as_ref(), "http://new.example/custom.png");
+    let details = v.details.as_ref().unwrap();
+    assert_eq!(details.movie_image.as_deref(), Some("http://new.example/custom.png"));
+    assert_eq!(details.cover_big.as_deref(), Some("http://new.example/custom.png"));
+
+    // Test Clear: should clear stream_icon and all fallbacks
+    let clear_ov = ItemOverride { logo: FieldDelta::Clear, ..Default::default() };
+    apply_override(&mut video_header, &clear_ov);
+    let Some(StreamProperties::Video(v)) = &video_header.additional_properties else {
+        panic!("expected Video");
+    };
+    assert_eq!(v.stream_icon.as_ref(), "");
+    let details = v.details.as_ref().unwrap();
+    assert_eq!(details.movie_image, None);
+    assert_eq!(details.cover_big, None);
+    assert_eq!(details.backdrop_path, None);
+
+    // Test Series
+    let mut series_header = PlaylistItemHeader {
+        additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+            cover: Arc::from("http://provider.example/cover.png"),
+            backdrop_path: Some(vec![Arc::from("http://provider.example/backdrop.png")]),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+
+    apply_override(&mut series_header, &clear_ov);
+    let Some(StreamProperties::Series(s)) = &series_header.additional_properties else {
+        panic!("expected Series");
+    };
+    assert_eq!(s.cover.as_ref(), "");
+    assert_eq!(s.backdrop_path, None);
 }

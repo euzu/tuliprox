@@ -145,25 +145,57 @@ impl PlaylistService {
         .and_then(|response| response.ok_or(Error::RequestError))
     }
 
+    pub fn playlist_content_url(&self, cluster: XtreamCluster, explorer: bool) -> String {
+        let base = match cluster {
+            XtreamCluster::Live => &self.playlist_api_live_path,
+            XtreamCluster::Video => &self.playlist_api_vod_path,
+            XtreamCluster::Series => &self.playlist_api_series_path,
+        };
+        if explorer {
+            format!("{base}?explorer=true")
+        } else {
+            base.clone()
+        }
+    }
+
     pub async fn get_playlist_categories(
         &self,
         playlist_request: &PlaylistRequest,
     ) -> Option<Rc<UiPlaylistCategories>> {
+        self.get_playlist_categories_opts(playlist_request, false).await
+    }
+
+    pub async fn get_playlist_categories_for_explorer(
+        &self,
+        playlist_request: &PlaylistRequest,
+    ) -> Option<Rc<UiPlaylistCategories>> {
+        self.get_playlist_categories_opts(playlist_request, true).await
+    }
+
+    pub async fn get_playlist_categories_opts(
+        &self,
+        playlist_request: &PlaylistRequest,
+        explorer: bool,
+    ) -> Option<Rc<UiPlaylistCategories>> {
+        let live_url = self.playlist_content_url(XtreamCluster::Live, explorer);
+        let vod_url = self.playlist_content_url(XtreamCluster::Video, explorer);
+        let series_url = self.playlist_content_url(XtreamCluster::Series, explorer);
+
         let (live_res, vod_res, series_res) = join!(
             request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
-                &self.playlist_api_live_path,
+                &live_url,
                 playlist_request,
                 None,
                 Some(Encoding::Cbor),
             ),
             request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
-                &self.playlist_api_vod_path,
+                &vod_url,
                 playlist_request,
                 None,
                 Some(Encoding::Cbor),
             ),
             request_post::<&PlaylistRequest, Vec<UiPlaylistItem>>(
-                &self.playlist_api_series_path,
+                &series_url,
                 playlist_request,
                 None,
                 Some(Encoding::Cbor),
@@ -454,7 +486,7 @@ mod tests {
         build_input_playlist_update_request, build_playlist_update_bulk_request, build_playlist_update_request,
     };
     use crate::model::{InputUpdateCapabilities, InputUpdateCapabilitiesExt};
-    use shared::model::{ConfigInputDto, InputRefreshOverride, InputRefreshPolicy, InputType};
+    use shared::model::{ConfigInputDto, InputRefreshOverride, InputRefreshPolicy, InputType, XtreamCluster};
 
     #[test]
     fn playlist_update_action_rescan_sends_selected_ids_without_a_provider_policy() {
@@ -613,5 +645,16 @@ mod tests {
         assert_eq!(service.overrides_discard_path, "/api/v1/playlist/overrides/discard");
         assert_eq!(service.epg_search_path, "/api/v1/playlist/epg/search");
         assert_eq!(service.overrides_orphans_path, "/api/v1/playlist/overrides/orphans");
+    }
+
+    #[test]
+    fn playlist_content_urls_append_explorer_param_only_when_requested() {
+        let service = super::PlaylistService::from_base("/");
+        assert_eq!(service.playlist_content_url(XtreamCluster::Live, false), "/api/v1/playlist/live");
+        assert_eq!(service.playlist_content_url(XtreamCluster::Live, true), "/api/v1/playlist/live?explorer=true");
+        assert_eq!(service.playlist_content_url(XtreamCluster::Video, false), "/api/v1/playlist/vod");
+        assert_eq!(service.playlist_content_url(XtreamCluster::Video, true), "/api/v1/playlist/vod?explorer=true");
+        assert_eq!(service.playlist_content_url(XtreamCluster::Series, false), "/api/v1/playlist/series");
+        assert_eq!(service.playlist_content_url(XtreamCluster::Series, true), "/api/v1/playlist/series?explorer=true");
     }
 }

@@ -131,6 +131,13 @@ impl OverrideStatusStore {
         state.applied_revision(target, scope)
     }
 
+    /// Whether `target` previously had a status record in the store.
+    pub async fn has_target(&self, target: &str) -> bool {
+        let mut guard = self.state.lock().await;
+        let state = self.load_locked(&mut guard).await;
+        state.targets.contains_key(target)
+    }
+
     /// `true` if `current` differs from the revision recorded for `scope` by the last successful
     /// run of `target`, or if nothing was recorded yet.
     ///

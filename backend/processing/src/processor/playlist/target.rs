@@ -94,21 +94,25 @@ pub(crate) async fn record_target_overrides_status<E: EventSink + Clone + 'stati
     target_name: &str,
     overrides: Option<&TargetOverrideSet>,
 ) {
-    let Some(overrides) = overrides else {
-        return;
-    };
-    if overrides.has_no_files() {
-        return;
-    }
     let Some(ref store) = ctx.override_status else {
         return;
     };
-    let diagnostics = tuliprox_repository::OverrideRunDiagnostics::new(
-        overrides.applied_files.clone(),
-        overrides.skipped_files.clone(),
-        overrides.ambiguous_keys_count(),
-    );
-    if let Err(err) = store.record_success(target_name, overrides.revisions.clone(), diagnostics).await {
+    let files_exist = overrides.is_some_and(|o| !o.has_no_files());
+    if !files_exist && !store.has_target(target_name).await {
+        return;
+    }
+    let (revisions, diagnostics) = match overrides {
+        Some(o) => (
+            o.revisions.clone(),
+            tuliprox_repository::OverrideRunDiagnostics::new(
+                o.applied_files.clone(),
+                o.skipped_files.clone(),
+                o.ambiguous_keys_count(),
+            ),
+        ),
+        None => (Vec::new(), tuliprox_repository::OverrideRunDiagnostics::default()),
+    };
+    if let Err(err) = store.record_success(target_name, revisions, diagnostics).await {
         log::warn!("Failed to record override status for target '{target_name}': {err}");
     }
 }
@@ -457,7 +461,9 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
     let bouquet_filter = load_target_bouquet_filter(ctx, &target.name).await.map_err(|err| vec![err])?;
-    let target_overrides = Arc::new(TargetOverrideSet::load_for_target(input_overrides, &ctx.config, target).await);
+    let target_input_names: Vec<&str> = playlists.iter().map(|p| p.input.name.as_ref()).collect();
+    let target_overrides =
+        Arc::new(TargetOverrideSet::load_for_target(input_overrides, &ctx.config, target, &target_input_names).await);
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {

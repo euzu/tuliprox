@@ -23,8 +23,8 @@ use crate::{
     model::{ConfigInput, ConfigTarget},
     repository::{
         iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist,
-        iter_raw_xtream_target_playlist, LoadedOverrides, LockedReceiverStream, OverrideParseResult, OverridePatchItem,
-        OverrideRevision, OverrideScope, OverrideWriteError, ParsedOverrideFile,
+        iter_raw_xtream_target_playlist, LoadedOverrides, OverrideParseResult, OverridePatchItem, OverrideRevision,
+        OverrideScope, OverrideWriteError, ParsedOverrideFile,
     },
 };
 use axum::{
@@ -176,14 +176,14 @@ fn resolve_scope(
     let sources = app_state.app_config.sources.load();
     match scope_dto {
         OverrideScopeDto::Input => {
+            let aliases = InputAliasMap::from_inputs(&sources.inputs);
+            let parent = parent_input_name(&aliases, name);
             let input = sources
                 .inputs
                 .iter()
-                .find(|input| input.name.as_ref() == name)
+                .find(|input| input.name.as_ref() == parent.as_str())
                 .cloned()
                 .ok_or_else(|| OverrideApiError::not_found(format!("Unknown input '{name}'")))?;
-            let aliases = InputAliasMap::from_inputs(&sources.inputs);
-            let parent = parent_input_name(&aliases, name);
             Ok(ResolvedScope { scope: OverrideScope::Input(parent), input: Some(input) })
         }
         OverrideScopeDto::Target => {
@@ -321,26 +321,6 @@ struct InventoryItem {
     fields: ItemFieldsDto,
 }
 
-/// Result of scanning the stored playlists of one input.
-#[derive(Default)]
-struct InventoryScan {
-    items: Vec<InventoryItem>,
-    /// Records the reader could not decode; the scan is then not authoritative.
-    skipped_records: usize,
-    /// Every stored database of the input existed.
-    complete: bool,
-}
-
-impl InventoryScan {
-    /// Whether the scan may be used to call entries orphaned: a missing database or an unreadable
-    /// record never marks anything as orphaned.
-    fn is_authoritative(&self) -> bool { self.complete && self.skipped_records == 0 }
-
-    fn keys(&self) -> HashSet<(OverrideItemKind, &str)> {
-        self.items.iter().map(|item| (item.key.kind, item.key.id.as_ref())).collect()
-    }
-}
-
 fn visible_text_opt(value: &str) -> Option<String> {
     (!value.is_empty() && !looks_credential_bearing(value)).then(|| value.to_string())
 }
@@ -402,23 +382,6 @@ fn read_failure(source: &str, name: &str, err: &TuliproxError) -> OverrideApiErr
     OverrideApiError::internal("Failed to read the stored playlist database; see the server log")
 }
 
-async fn drain_inventory<R, F>(
-    mut records: LockedReceiverStream<Result<R, TuliproxError>>,
-    mut map: F,
-    out: &mut Vec<InventoryItem>,
-) -> Result<usize, TuliproxError>
-where
-    F: FnMut(&R) -> Option<InventoryItem>,
-{
-    while let Some(entry) = records.next().await {
-        let record = entry?;
-        if let Some(item) = map(&record) {
-            out.push(item);
-        }
-    }
-    Ok(records.skipped_records())
-}
-
 /// Streams the stored records of one cluster of an input, stopping as soon as `visit` returns `true`.
 ///
 /// A missing database yields no records rather than an error: the caller is looking for data that may
@@ -478,47 +441,109 @@ async fn scan_input_item_matches(
         matches.len() > 1
     })
     .await?;
+
+    if matches.len() < 2 {
+        for alias in input.aliases.as_deref().unwrap_or_default().iter().filter(|a| a.enabled) {
+            let alias_input = input.as_input(alias);
+            scan_input_cluster(app_state, &alias_input, cluster_for(key.kind), aliases, |found| {
+                if found.key != *key {
+                    return false;
+                }
+                matches.push(found.fields);
+                matches.len() > 1
+            })
+            .await?;
+            if matches.len() > 1 {
+                break;
+            }
+        }
+    }
     Ok(matches)
 }
 
-/// Scans the stored input playlists; `complete` stays `false` when a database is missing.
-async fn scan_input_inventory(
+async fn scan_single_input_orphan_keys(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     aliases: &InputAliasMap,
-) -> Result<InventoryScan, OverrideApiError> {
+    keys: &mut HashSet<(OverrideItemKind, Arc<str>)>,
+) -> Result<bool, OverrideApiError> {
     let app_config = &app_state.app_config;
-    let mut scan = InventoryScan::default();
-
-    if input.input_type.is_xtream() {
-        let mut complete = true;
-        for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
-            let Some(records) = iter_raw_xtream_input_playlist(app_config, input, cluster).await else {
-                complete = false;
-                continue;
-            };
-            let skipped = drain_inventory(
-                records,
-                |item: &XtreamPlaylistItem| xtream_inventory_item(item, aliases),
-                &mut scan.items,
-            )
-            .await
-            .map_err(|err| read_failure("input", &input.name, &err))?;
-            scan.skipped_records += skipped;
-        }
-        scan.complete = complete;
-    } else if input.input_type.is_m3u() {
-        let Some(records) = iter_raw_m3u_input_playlist(app_config, input, None).await else {
-            return Ok(scan);
-        };
-        scan.skipped_records =
-            drain_inventory(records, |item: &M3uPlaylistItem| m3u_inventory_item(item, aliases), &mut scan.items)
-                .await
-                .map_err(|err| read_failure("input", &input.name, &err))?;
-        scan.complete = true;
+    if !input_is_loaded_successfully(app_state, &input.name).await {
+        return Ok(false);
     }
+    if input.input_type.is_xtream() {
+        for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+            let Some(mut records) = iter_raw_xtream_input_playlist(app_config, input, cluster).await else {
+                return Ok(false);
+            };
+            while let Some(res) = records.next().await {
+                let item = match res {
+                    Ok(item) => item,
+                    Err(err) => {
+                        log::warn!("Unreadable record for input '{}': {err}", input.name);
+                        return Ok(false);
+                    }
+                };
+                let id = Arc::from(item.provider_id.to_string());
+                let header = PlaylistItemHeader {
+                    id,
+                    url: Arc::clone(&item.url),
+                    input_name: Arc::clone(&item.input_name),
+                    item_type: item.item_type,
+                    ..Default::default()
+                };
+                if let Some(key) = override_key(&header, aliases) {
+                    keys.insert((key.kind, key.id));
+                }
+            }
+            if records.skipped_records() > 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    } else if input.input_type.is_m3u() {
+        let Some(mut records) = iter_raw_m3u_input_playlist(app_config, input, None).await else {
+            return Ok(false);
+        };
+        while let Some(res) = records.next().await {
+            let item = match res {
+                Ok(item) => item,
+                Err(err) => {
+                    log::warn!("Unreadable record for input '{}': {err}", input.name);
+                    return Ok(false);
+                }
+            };
+            let header = header_of(Arc::clone(&item.provider_id), &item.url, &item.input_name, item.item_type);
+            if let Some(key) = override_key(&header, aliases) {
+                keys.insert((key.kind, key.id));
+            }
+        }
+        Ok(records.skipped_records() == 0)
+    } else {
+        Ok(true)
+    }
+}
 
-    Ok(scan)
+/// Scans the stored input playlists of the parent and all enabled aliases;
+/// returns `None` if any member inventory is missing or unreliable.
+async fn scan_input_orphan_inventory(
+    app_state: &Arc<AppState>,
+    parent: &ConfigInput,
+    aliases: &InputAliasMap,
+) -> Result<Option<HashSet<(OverrideItemKind, Arc<str>)>>, OverrideApiError> {
+    let mut keys = HashSet::new();
+    let parent_ok = scan_single_input_orphan_keys(app_state, parent, aliases, &mut keys).await?;
+    if !parent_ok {
+        return Ok(None);
+    }
+    for alias in parent.aliases.as_deref().unwrap_or_default().iter().filter(|a| a.enabled) {
+        let alias_input = parent.as_input(alias);
+        let alias_ok = scan_single_input_orphan_keys(app_state, &alias_input, aliases, &mut keys).await?;
+        if !alias_ok {
+            return Ok(None);
+        }
+    }
+    Ok(Some(keys))
 }
 
 /// The record of a target that carries `kind`/`id`, if the target stores a playlist at all.
@@ -973,13 +998,13 @@ async fn input_is_loaded_successfully(app_state: &Arc<AppState>, input_name: &st
 }
 
 fn orphan_state(
-    keys: Option<&HashSet<(OverrideItemKind, &str)>>,
+    keys: Option<&HashSet<(OverrideItemKind, Arc<str>)>>,
     kind: OverrideItemKind,
     id: &str,
 ) -> OverrideEntryState {
     match keys {
         None => OverrideEntryState::Unknown,
-        Some(keys) if keys.contains(&(kind, id)) => OverrideEntryState::Active,
+        Some(keys) if keys.contains(&(kind, Arc::from(id))) => OverrideEntryState::Active,
         Some(_) => OverrideEntryState::Orphaned,
     }
 }
@@ -990,7 +1015,7 @@ fn push_orphan_entries(
     file: &str,
     input: Option<&str>,
     sections: &InputOverrideSections,
-    keys: Option<&HashSet<(OverrideItemKind, &str)>>,
+    keys: Option<&HashSet<(OverrideItemKind, Arc<str>)>>,
 ) {
     for kind in [OverrideItemKind::Live, OverrideItemKind::Vod, OverrideItemKind::Series] {
         for (id, item) in section(sections, kind) {
@@ -1072,9 +1097,7 @@ async fn orphan_entries(
     let aliases = InputAliasMap::from_inputs(&sources.inputs);
     drop(sources);
 
-    let scan = scan_input_inventory(app_state, &input, &aliases).await?;
-    let trusted = scan.is_authoritative() && input_is_loaded_successfully(app_state, &parent).await;
-    let keys = trusted.then(|| scan.keys());
+    let keys = scan_input_orphan_inventory(app_state, &input, &aliases).await?;
 
     let mut entries = Vec::new();
     let input_scope = OverrideScope::Input(parent.clone());

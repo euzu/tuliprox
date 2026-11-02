@@ -142,7 +142,7 @@ async fn two_concurrent_saves_one_conflicts() -> TestResult {
     let one_ok = r1.is_ok() ^ r2.is_ok();
     assert!(one_ok, "Exactly one concurrent save must succeed: r1={r1:?}, r2={r2:?}");
 
-    let conflict_err = if r1.is_err() { r1.unwrap_err() } else { r2.unwrap_err() };
+    let conflict_err = if let Err(err) = r1 { err } else { r2.unwrap_err() };
     assert!(matches!(conflict_err, OverrideWriteError::Conflict { .. }));
 
     Ok(())

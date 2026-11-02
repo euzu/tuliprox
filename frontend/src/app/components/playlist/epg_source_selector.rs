@@ -18,6 +18,8 @@ use yew::prelude::*;
 #[derive(Properties, PartialEq, Clone)]
 pub struct EpgSourceSelectorProps {
     #[prop_or_default]
+    pub hide_title: bool,
+    #[prop_or_default]
     pub source_types: Option<Vec<ExplorerSourceType>>,
     #[prop_or_default]
     pub on_select: Callback<PlaylistEpgRequest>,

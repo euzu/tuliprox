@@ -31,6 +31,7 @@ fn create_test_item(
         explorer_meta: Some(UiItemExplorerMeta {
             override_state: UiOverrideState { edited, pending: false, ambiguous: false },
             epg_state,
+            ..Default::default()
         }),
     })
 }
@@ -171,4 +172,124 @@ fn new_window_only_accepts_real_recent_timestamps() {
     assert!(is_within_new_window(Some(now - NEW_ITEM_WINDOW_SECS + 1), now));
     assert!(!is_within_new_window(Some(now - NEW_ITEM_WINDOW_SECS - 1), now));
     assert!(!is_within_new_window(Some(now + 60), now), "future timestamps are provider data errors");
+}
+
+fn create_timestamp_item(
+    virtual_id: u32,
+    provider_id: &str,
+    cluster: XtreamCluster,
+    added: Option<u64>,
+    last_modified: Option<u64>,
+) -> Rc<UiPlaylistItem> {
+    Rc::new(UiPlaylistItem {
+        virtual_id,
+        provider_id: Arc::from(provider_id),
+        name: Arc::from(provider_id),
+        title: Arc::from(provider_id),
+        group: Arc::from("Group A"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: cluster,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("input-1"),
+        epg_channel_id: None,
+        explorer_meta: Some(UiItemExplorerMeta {
+            override_state: UiOverrideState::default(),
+            epg_state: None,
+            override_id: None,
+            added,
+            last_modified,
+            chno: None,
+        }),
+    })
+}
+
+#[test]
+fn sort_vod_by_added_desc_and_asc_missing_last() {
+    let item_200 = create_timestamp_item(1, "p200", XtreamCluster::Video, Some(200), None);
+    let item_missing = create_timestamp_item(2, "pmissing", XtreamCluster::Video, None, None);
+    let item_100 = create_timestamp_item(3, "p100", XtreamCluster::Video, Some(100), None);
+
+    // Descending: newest first (200, 100, None last)
+    let mut items_desc = vec![Rc::clone(&item_100), Rc::clone(&item_missing), Rc::clone(&item_200)];
+    sort_items(&mut items_desc, ExplorerSort::Added, true);
+    assert_eq!(items_desc[0].provider_id.as_ref(), "p200");
+    assert_eq!(items_desc[1].provider_id.as_ref(), "p100");
+    assert_eq!(items_desc[2].provider_id.as_ref(), "pmissing");
+
+    // Ascending: oldest first (100, 200, None last)
+    let mut items_asc = vec![Rc::clone(&item_100), Rc::clone(&item_missing), Rc::clone(&item_200)];
+    sort_items(&mut items_asc, ExplorerSort::Added, false);
+    assert_eq!(items_asc[0].provider_id.as_ref(), "p100");
+    assert_eq!(items_asc[1].provider_id.as_ref(), "p200");
+    assert_eq!(items_asc[2].provider_id.as_ref(), "pmissing");
+}
+
+#[test]
+fn sort_series_by_last_modified_with_fallback_to_added() {
+    let series_modified_300 = create_timestamp_item(1, "s300", XtreamCluster::Series, Some(100), Some(300));
+    let series_added_fallback_250 = create_timestamp_item(2, "s250", XtreamCluster::Series, Some(250), None);
+    let series_missing = create_timestamp_item(3, "smissing", XtreamCluster::Series, None, None);
+
+    // Descending: s300 (last_modified 300), s250 (fallback added 250), smissing (missing -> last)
+    let mut items_desc =
+        vec![Rc::clone(&series_missing), Rc::clone(&series_added_fallback_250), Rc::clone(&series_modified_300)];
+    sort_items(&mut items_desc, ExplorerSort::LastModified, true);
+    assert_eq!(items_desc[0].provider_id.as_ref(), "s300");
+    assert_eq!(items_desc[1].provider_id.as_ref(), "s250");
+    assert_eq!(items_desc[2].provider_id.as_ref(), "smissing");
+
+    // Ascending: s250 (fallback added 250), s300 (last_modified 300), smissing (missing -> last)
+    let mut items_asc =
+        vec![Rc::clone(&series_missing), Rc::clone(&series_added_fallback_250), Rc::clone(&series_modified_300)];
+    sort_items(&mut items_asc, ExplorerSort::LastModified, false);
+    assert_eq!(items_asc[0].provider_id.as_ref(), "s250");
+    assert_eq!(items_asc[1].provider_id.as_ref(), "s300");
+    assert_eq!(items_asc[2].provider_id.as_ref(), "smissing");
+}
+
+#[test]
+fn channel_number_comes_from_meta_not_from_the_name() {
+    let with_meta = |vid: u32, name: &str, chno: Option<u32>| {
+        let mut item =
+            (*create_test_item(vid, &format!("p{vid}"), name, name, 0.0, XtreamCluster::Live, None, None, false))
+                .clone();
+        if let Some(meta) = item.explorer_meta.as_mut() {
+            meta.chno = chno;
+        }
+        Rc::new(item)
+    };
+    // A leading number in the name is part of the name ("7 RADIO"), not the channel number.
+    let radio = with_meta(1, "7 RADIO ARTA", Some(202_362));
+    let first = with_meta(2, "ZDF", Some(2));
+    let unset = with_meta(3, "1 Unset", None);
+    assert_eq!(item_chno(&radio), Some(202_362));
+    assert_eq!(item_chno(&unset), None);
+
+    let mut items = vec![Rc::clone(&unset), Rc::clone(&radio), Rc::clone(&first)];
+    sort_items(&mut items, ExplorerSort::ChannelNo, false);
+    let order: Vec<&str> = items.iter().map(|i| i.provider_id.as_ref()).collect();
+    assert_eq!(order, ["p2", "p1", "p3"]);
+}
+
+#[test]
+fn sort_ids_round_trip_and_start_direction() {
+    for sort in ExplorerSort::ALL {
+        assert_eq!(ExplorerSort::from_id(sort.id()), Some(sort));
+    }
+    assert_eq!(ExplorerSort::from_id("unknown"), None);
+    assert!(ExplorerSort::Added.default_desc());
+    assert!(ExplorerSort::LastModified.default_desc());
+    assert!(!ExplorerSort::ChannelNo.default_desc());
+    assert!(!ExplorerSort::Title.default_desc());
+}
+
+#[test]
+fn rating_filter_uses_selected_threshold_only_when_active() {
+    let item = create_test_item(1, "p1", "Movie", "Movie", 6.5, XtreamCluster::Video, None, None, false);
+    assert!(passes_rating_filter(&item, false, 9));
+    assert!(passes_rating_filter(&item, true, 6));
+    assert!(!passes_rating_filter(&item, true, 7));
 }

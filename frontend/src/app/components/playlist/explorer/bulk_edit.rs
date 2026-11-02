@@ -2,8 +2,12 @@ use crate::{
     app::components::{
         custom_dialog::CustomDialog,
         input::Input,
-        playlist::explorer::{epg_picker::EpgPicker, identity::Id, image_preview::ImagePreview},
-        DropDownOption, DropDownSelection, FieldLabel, Select, TextButton,
+        playlist::explorer::{
+            epg_picker::EpgPicker,
+            identity::{item_override_id, Id},
+            image_preview::ImagePreview,
+        },
+        DropDownOption, DropDownSelection, FieldLabel, IconButton, Select, TextButton,
     },
     hooks::use_service_context,
     i18n::use_translation,
@@ -18,7 +22,6 @@ use shared::{
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     rc::Rc,
-    sync::Arc,
 };
 use yew::{create_portal, platform::spawn_local, prelude::*};
 
@@ -57,7 +60,7 @@ pub fn group_patches_by_parent_input(
         let dto = ItemPatchDto {
             input: Some(input_name.clone()),
             kind: OverrideItemKind::from(item.item_type),
-            id: item.provider_id.to_string(),
+            id: item_override_id(item).to_string(),
             patch: patch.clone(),
             hint: Some(format!("{} / {}", item.group, item.title)),
         };
@@ -66,7 +69,6 @@ pub fn group_patches_by_parent_input(
     map
 }
 
-#[allow(dead_code)]
 pub fn prepare_bulk_input_save_requests(
     base_revisions: &HashMap<String, String>,
     items: &[Rc<UiPlaylistItem>],
@@ -82,7 +84,6 @@ pub fn prepare_bulk_input_save_requests(
         .collect()
 }
 
-#[allow(dead_code)]
 pub fn prepare_bulk_target_save_request(
     target_name: &str,
     base_revision: &str,
@@ -94,7 +95,7 @@ pub fn prepare_bulk_target_save_request(
         .map(|item| ItemPatchDto {
             input: Some(item.input_name.to_string()),
             kind: OverrideItemKind::from(item.item_type),
-            id: item.provider_id.to_string(),
+            id: item_override_id(item).to_string(),
             patch: patch.clone(),
             hint: Some(format!("{} / {}", item.group, item.title)),
         })
@@ -129,7 +130,6 @@ pub struct BulkResultsSummary {
 }
 
 impl BulkResultsSummary {
-    #[allow(dead_code)]
     pub fn is_all_success(&self) -> bool {
         !self.results.is_empty() && self.results.iter().all(|r| matches!(r.status, BulkInputStatus::Saved(_)))
     }
@@ -148,38 +148,7 @@ impl BulkResultsSummary {
 pub fn summarize_bulk_results(results: Vec<BulkInputResult>) -> BulkResultsSummary { BulkResultsSummary { results } }
 
 pub fn patch_playlist_item_bulk(item: &UiPlaylistItem, patch: &ItemOverridePatch) -> UiPlaylistItem {
-    let mut updated = item.clone();
-
-    if let Some(op) = &patch.group {
-        match op {
-            OverrideFieldOp::Set(g) => updated.group = Arc::from(g.as_str()),
-            OverrideFieldOp::Clear => updated.group = Arc::from(""),
-            OverrideFieldOp::Reset => {}
-        }
-    }
-
-    if let Some(op) = &patch.logo {
-        match op {
-            OverrideFieldOp::Set(l) => updated.logo = Arc::from(l.as_str()),
-            OverrideFieldOp::Clear => updated.logo = Arc::from(""),
-            OverrideFieldOp::Reset => {}
-        }
-    }
-
-    if let Some(op) = &patch.epg_channel_id {
-        match op {
-            OverrideFieldOp::Set(e) => updated.epg_channel_id = Some(Arc::from(e.as_str())),
-            OverrideFieldOp::Clear => updated.epg_channel_id = None,
-            OverrideFieldOp::Reset => {}
-        }
-    }
-
-    let mut meta = updated.explorer_meta.unwrap_or_default();
-    meta.override_state.edited = true;
-    meta.override_state.pending = true;
-    updated.explorer_meta = Some(meta);
-
-    updated
+    crate::app::components::playlist::explorer::edit_panel::patch_playlist_item_from_patch(item, patch, None, true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -388,35 +357,34 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
             spawn_local(async move {
                 if scope == OverrideScopeDto::Input {
                     let grouped = group_patches_by_parent_input(&items[..], &patch);
+                    let mut base_revisions = HashMap::new();
                     let mut input_results = Vec::new();
 
-                    for (input_name, patches) in grouped {
-                        let count = patches.len();
-                        // 1. Fetch current revision. A failed read must not silently start from
-                        // an empty revision, so it is reported in the result list.
-                        let current_rev =
-                            match services.playlist.get_overrides(OverrideScopeDto::Input, &input_name).await {
-                                Ok(Some(f)) => f.revision,
-                                Ok(None) => String::new(),
-                                Err(err) => {
-                                    input_results.push(BulkInputResult {
-                                        input: input_name.clone(),
-                                        count: patches.len(),
-                                        status: BulkInputStatus::Error(err.to_string()),
-                                    });
-                                    continue;
-                                }
-                            };
+                    for (input_name, patches) in &grouped {
+                        match services.playlist.get_overrides(OverrideScopeDto::Input, input_name).await {
+                            Ok(Some(f)) => {
+                                base_revisions.insert(input_name.clone(), f.revision);
+                            }
+                            Ok(None) => {
+                                base_revisions.insert(input_name.clone(), String::new());
+                            }
+                            Err(err) => {
+                                input_results.push(BulkInputResult {
+                                    input: input_name.clone(),
+                                    count: patches.len(),
+                                    status: BulkInputStatus::Error(err.to_string()),
+                                });
+                            }
+                        }
+                    }
 
-                        // 2. Build request
-                        let req = OverrideSaveRequest {
-                            scope: OverrideScopeDto::Input,
-                            name: input_name.clone(),
-                            base_revision: current_rev,
-                            patches,
-                        };
-
-                        // 3. Save
+                    let requests = prepare_bulk_input_save_requests(&base_revisions, &items[..], &patch);
+                    for req in requests {
+                        if !base_revisions.contains_key(&req.name) {
+                            continue;
+                        }
+                        let count = req.patches.len();
+                        let input_name = req.name.clone();
                         let save_res = services.playlist.save_overrides(&req).await;
                         let status = match save_res {
                             crate::services::OverrideSaveResult::Ok(rev) => BulkInputStatus::Saved(rev.revision),
@@ -478,12 +446,12 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                         crate::services::OverrideSaveResult::Err(e) => BulkInputStatus::Error(e),
                     };
 
-                    let is_success = matches!(status, BulkInputStatus::Saved(_));
                     let summary = summarize_bulk_results(vec![BulkInputResult {
                         input: target_name,
                         count: items.len(),
                         status,
                     }]);
+                    let is_success = summary.is_all_success();
 
                     if is_success {
                         let patched_items: Vec<UiPlaylistItem> =
@@ -536,6 +504,13 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
         <div class="det tp__explorer-edit-panel tp__explorer-bulk-panel">
             <div class="in tp__explorer-bulk-panel-content">
                 <div class="tp__explorer-edit-header">
+                    <IconButton
+                        name="close_bulk"
+                        icon="Back"
+                        class="tp__explorer-panel-back"
+                        aria_label={Some(translate.t("LABEL.BACK"))}
+                        onclick={let on_close = props.on_close.clone(); Callback::from(move |(_name, _): (String, MouseEvent)| on_close.emit(()))}
+                    />
                     <h2>{ translate.t("LABEL.EXPLORER_BULK_EDIT") }</h2>
                     <div class="meta">
                         <span class="tp__explorer-count-badge">
@@ -819,7 +794,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                                     <TextButton
                                         class="primary"
                                         name="execute_bulk_save"
-                                        icon="Check"
+                                        icon="CheckMark"
                                         title={translate.t("LABEL.EXPLORER_CONFIRM")}
                                         disabled={*is_saving}
                                         onclick={execute_save}
@@ -871,7 +846,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                                     <TextButton
                                         class="primary"
                                         name="close_results"
-                                        icon="Check"
+                                        icon="CheckMark"
                                         title={translate.t("LABEL.OK")}
                                         onclick={on_close_results}
                                     />

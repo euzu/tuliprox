@@ -4,12 +4,11 @@ use yew::prelude::*;
 /// Resolves the URL for an image preview.
 /// - Provider values (which may already be sealed `/api/v1/playlist/resource` URLs) load through that URL.
 /// - User-typed URLs are loaded directly in the browser and are never proxied or sent to server.
-pub fn resolve_preview_image_url(url: &str, is_provider_value: bool) -> Option<String> {
+pub fn resolve_preview_image_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let _ = is_provider_value;
     Some(trimmed.to_string())
 }
 
@@ -37,7 +36,7 @@ pub fn ImagePreview(props: &ImagePreviewProps) -> Html {
         });
     }
 
-    let preview_url = resolve_preview_image_url(&props.url, props.is_provider_value);
+    let preview_url = resolve_preview_image_url(&props.url);
     let Some(src) = preview_url else {
         return html! {
             <div class={classes!("tp__image-preview", "tp__image-preview--empty", props.class.clone())}>

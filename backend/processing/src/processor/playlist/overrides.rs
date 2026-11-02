@@ -181,15 +181,40 @@ impl TargetOverrideSet {
         input_overrides: &Arc<InputOverrideSet>,
         app_config: &AppConfig,
         target: &ConfigTarget,
+        target_input_names: &[&str],
+    ) -> Self {
+        let paths = app_config.paths.load();
+        let override_dir = tuliprox_core::utils::resolve_override_dir(&paths.config_path);
+        Self::load_from_input_set(input_overrides, &override_dir, target, target_input_names).await
+    }
+
+    pub async fn load(app_config: &AppConfig, target: &ConfigTarget, playlists: &[FetchedPlaylist<'_>]) -> Self {
+        let input_set = Arc::new(InputOverrideSet::load(app_config).await);
+        let names: Vec<&str> = playlists.iter().map(|p| p.input.name.as_ref()).collect();
+        Self::load_for_target(&input_set, app_config, target, &names).await
+    }
+
+    pub async fn load_from_dir(
+        override_dir: &Path,
+        target: &ConfigTarget,
+        inputs: &[Arc<ConfigInput>],
+        target_input_names: &[&str],
+    ) -> Self {
+        let input_set = Arc::new(InputOverrideSet::load_from_dir(override_dir, inputs).await);
+        Self::load_from_input_set(&input_set, override_dir, target, target_input_names).await
+    }
+
+    async fn load_from_input_set(
+        input_overrides: &InputOverrideSet,
+        override_dir: &Path,
+        target: &ConfigTarget,
+        target_input_names: &[&str],
     ) -> Self {
         if !input_overrides.exists {
             return Self::empty(Some((*input_overrides.aliases).clone()));
         }
 
-        let paths = app_config.paths.load();
-        let override_dir = tuliprox_core::utils::resolve_override_dir(&paths.config_path);
-        let repo = OverrideRepository::new(&override_dir);
-
+        let repo = OverrideRepository::new(override_dir);
         let target_scope = OverrideScope::Target(target.name.clone());
         let target_file_path = match repo.file_path(&target_scope) {
             Ok(path) => Some(path),
@@ -205,13 +230,53 @@ impl TargetOverrideSet {
             false
         };
 
-        if !target_file_exists && input_overrides.input.is_empty() && input_overrides.skipped_files.is_empty() {
-            return Self::empty(Some((*input_overrides.aliases).clone()));
+        // Filter input revisions, applied_files, skipped_files and input map to the parent inputs the target consumes
+        let mut consumed_parents: HashSet<Arc<str>> = HashSet::new();
+        for name in target_input_names {
+            let parent = input_overrides.aliases.parent_of(name).unwrap_or(name);
+            consumed_parents.insert(Arc::from(parent));
         }
 
-        let mut revisions = input_overrides.revisions.clone();
-        let mut applied_files = input_overrides.applied_files.clone();
-        let mut skipped_files = input_overrides.skipped_files.clone();
+        let mut expected_file_names: HashSet<String> = HashSet::new();
+        for parent in &consumed_parents {
+            let scope = OverrideScope::Input(parent.to_string());
+            if let Ok(path) = repo.file_path(&scope) {
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    expected_file_names.insert(file_name.to_string());
+                }
+            }
+        }
+
+        let mut revisions: Vec<(OverrideScope, OverrideRevision)> = input_overrides
+            .revisions
+            .iter()
+            .filter(|(scope, _)| match scope {
+                OverrideScope::Input(parent) => consumed_parents.contains(parent.as_str()),
+                OverrideScope::Target(_) => true,
+            })
+            .cloned()
+            .collect();
+
+        let mut applied_files: Vec<String> = input_overrides
+            .applied_files
+            .iter()
+            .filter(|name| expected_file_names.contains(name.as_str()))
+            .cloned()
+            .collect();
+
+        let mut skipped_files: Vec<SkippedOverrideFile> = input_overrides
+            .skipped_files
+            .iter()
+            .filter(|skipped| expected_file_names.contains(&skipped.name))
+            .cloned()
+            .collect();
+
+        let mut input_map = HashMap::new();
+        for (parent, lookup) in input_overrides.input.iter() {
+            if consumed_parents.contains(parent) {
+                input_map.insert(Arc::clone(parent), lookup.clone());
+            }
+        }
 
         let target_map = if let (true, Some(target_path)) = (target_file_exists, target_file_path.as_deref()) {
             load_target_override(
@@ -229,69 +294,9 @@ impl TargetOverrideSet {
         };
 
         Self {
-            input: Arc::clone(&input_overrides.input),
+            input: Arc::new(input_map),
             target: target_map,
             aliases: Some(Arc::clone(&input_overrides.aliases)),
-            revisions,
-            target_locked: Mutex::new(HashMap::new()),
-            applied_files,
-            skipped_files,
-            ambiguous_keys: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    pub async fn load(app_config: &AppConfig, target: &ConfigTarget, _playlists: &[FetchedPlaylist<'_>]) -> Self {
-        let input_set = Arc::new(InputOverrideSet::load(app_config).await);
-        Self::load_for_target(&input_set, app_config, target).await
-    }
-
-    pub async fn load_from_dir(
-        override_dir: &Path,
-        target: &ConfigTarget,
-        inputs: &[Arc<ConfigInput>],
-        _target_input_names: &[&str],
-    ) -> Self {
-        let input_set = Arc::new(InputOverrideSet::load_from_dir(override_dir, inputs).await);
-        if !input_set.exists {
-            return Self::empty(Some((*input_set.aliases).clone()));
-        }
-
-        let repo = OverrideRepository::new(override_dir);
-        let target_scope = OverrideScope::Target(target.name.clone());
-        let target_file_path = repo.file_path(&target_scope).ok();
-        let target_file_exists = if let Some(ref path) = target_file_path {
-            tokio::fs::try_exists(path).await.unwrap_or(false)
-        } else {
-            false
-        };
-
-        if !target_file_exists && input_set.input.is_empty() && input_set.skipped_files.is_empty() {
-            return Self::empty(Some((*input_set.aliases).clone()));
-        }
-
-        let mut revisions = input_set.revisions.clone();
-        let mut applied_files = input_set.applied_files.clone();
-        let mut skipped_files = input_set.skipped_files.clone();
-
-        let target_map = if let (true, Some(target_path)) = (target_file_exists, target_file_path.as_deref()) {
-            load_target_override(
-                &repo,
-                target_scope,
-                target_path,
-                &input_set.aliases,
-                &mut revisions,
-                &mut applied_files,
-                &mut skipped_files,
-            )
-            .await
-        } else {
-            HashMap::new()
-        };
-
-        Self {
-            input: Arc::clone(&input_set.input),
-            target: target_map,
-            aliases: Some(Arc::clone(&input_set.aliases)),
             revisions,
             target_locked: Mutex::new(HashMap::new()),
             applied_files,
@@ -431,7 +436,17 @@ pub struct OverrideApplyOutcome {
 
 #[inline]
 pub fn resolve_item_uuid(item: &PlaylistItem) -> Option<UUIDType> {
-    resolve_item_uuid_from_parts(item.header.uuid, item.get_uuid(), &item.header.id)
+    if item.header.uuid == UUIDType::default() {
+        let fallback = item.get_uuid();
+        if fallback == UUIDType::default() {
+            log::debug!("Item with nil uuid cannot be locked: id={}", item.header.id);
+            None
+        } else {
+            Some(fallback)
+        }
+    } else {
+        Some(item.header.uuid)
+    }
 }
 
 #[inline]
@@ -441,7 +456,7 @@ pub fn resolve_item_uuid_from_parts(stored_uuid: UUIDType, fallback_uuid: UUIDTy
     } else if fallback_uuid != UUIDType::default() {
         Some(fallback_uuid)
     } else {
-        log::warn!("Item with nil uuid cannot be locked: id={id}");
+        log::debug!("Item with nil uuid cannot be locked: id={id}");
         None
     }
 }
@@ -461,24 +476,28 @@ pub fn apply_overrides(items: &mut [PlaylistItem], set: &TargetOverrideSet) -> O
         let runtime_input = item.header.input_name.as_ref();
         let parent_str = aliases.parent_of(runtime_input).unwrap_or(runtime_input);
 
-        let has_input_overrides = set.input.get(parent_str).is_some_and(|l| !l.is_empty());
-        let has_target_overrides = set.target.get(parent_str).is_some_and(|l| !l.is_empty());
+        let input_lookup = set.input.get(parent_str);
+        let target_lookup = set.target.get(parent_str);
 
-        if has_input_overrides || has_target_overrides {
+        if input_lookup.is_some_and(|l| !l.is_empty()) || target_lookup.is_some_and(|l| !l.is_empty()) {
             if let Some(key) = override_key(&item.header, aliases) {
-                match key_counts.entry((parent_str, key.clone())) {
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert((1, idx));
-                        item_keys.push(Some(key));
+                let has_ov = input_lookup.is_some_and(|l| l.get(&key).is_some())
+                    || target_lookup.is_some_and(|l| l.get(&key).is_some());
+                if has_ov {
+                    match key_counts.entry((parent_str, key.clone())) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert((1, idx));
+                            item_keys.push(Some(key));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            let (count, first_idx) = e.get_mut();
+                            *count += 1;
+                            item_keys[*first_idx] = None;
+                            item_keys.push(None);
+                        }
                     }
-                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                        let (count, first_idx) = e.get_mut();
-                        *count += 1;
-                        item_keys[*first_idx] = None;
-                        item_keys.push(None);
-                    }
+                    continue;
                 }
-                continue;
             }
         }
         item_keys.push(None);
@@ -487,14 +506,10 @@ pub fn apply_overrides(items: &mut [PlaylistItem], set: &TargetOverrideSet) -> O
     let mut ambiguous: Vec<OverrideKey> = Vec::new();
     for ((parent_str, key), (count, _)) in &key_counts {
         if *count > 1 {
-            let has_override = set.input.get(*parent_str).is_some_and(|l| l.get(key).is_some())
-                || set.target.get(*parent_str).is_some_and(|l| l.get(key).is_some());
-            if has_override {
-                log::warn!(
-                    "Ambiguous override key for parent '{parent_str}': {key:?} occurs {count} times, skipping override"
-                );
-                ambiguous.push(key.clone());
-            }
+            log::warn!(
+                "Ambiguous override key for parent '{parent_str}': {key:?} occurs {count} times, skipping override"
+            );
+            ambiguous.push(key.clone());
         }
     }
     drop(key_counts);
@@ -590,6 +605,7 @@ pub fn regroup_moved_items<S: std::hash::BuildHasher>(
     }
 
     let mut moved: Vec<PlaylistItem> = Vec::new();
+    let mut emptied_group_ids: HashSet<u32> = HashSet::new();
 
     for group in groups.iter_mut() {
         let group_title = Arc::clone(&group.title);
@@ -598,6 +614,7 @@ pub fn regroup_moved_items<S: std::hash::BuildHasher>(
         }) {
             continue;
         }
+        let had_items = !group.channels.is_empty();
         let mut kept = Vec::with_capacity(group.channels.len());
         for item in group.channels.drain(..) {
             if resolve_item_uuid(&item).is_some_and(|uuid| locked.contains_key(&uuid))
@@ -607,6 +624,9 @@ pub fn regroup_moved_items<S: std::hash::BuildHasher>(
             } else {
                 kept.push(item);
             }
+        }
+        if had_items && kept.is_empty() {
+            emptied_group_ids.insert(group.id);
         }
         group.channels = kept;
     }
@@ -630,5 +650,5 @@ pub fn regroup_moved_items<S: std::hash::BuildHasher>(
         }
     }
 
-    groups.retain(|g| !g.channels.is_empty());
+    groups.retain(|g| !emptied_group_ids.contains(&g.id) || !g.channels.is_empty());
 }

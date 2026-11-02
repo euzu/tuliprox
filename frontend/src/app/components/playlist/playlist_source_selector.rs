@@ -82,7 +82,7 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                     let set_loading = set_loading.clone();
                     let req = request;
                     spawn_local(async move {
-                        let playlist = services.playlist.get_playlist_categories(&req).await;
+                        let playlist = services.playlist.get_playlist_categories_for_explorer(&req).await;
                         playlist_explorer_ctx_clone.playlist.set(playlist);
                         playlist_explorer_ctx_clone.playlist_request.set(Some(req));
                         set_loading.set(false);

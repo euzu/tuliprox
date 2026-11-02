@@ -239,6 +239,12 @@ The hash is stable across accounts on the same panel (credentials and host play 
 stream path itself changes. Reads of the stored inventory never return a provider URL, and a field whose value
 looks credential-bearing (a logo URL carrying an account, for example) is blanked instead of shown.
 
+> **Accounts in the URL path.** Only credentials tuliprox knows are removed: the `username` / `password` of the
+> input and its aliases, and the `username` / `password` query values. When an M3U input carries its account only
+> inside the stream path (`http://host/live/<user>/<pass>/abc123.m3u8`) and its items have no provider id, set
+> `username` and `password` on the input (and on each alias). Otherwise the account segments become part of the
+> hash, and swapping the account changes every `urlhash-v1` key and orphans the overrides of that input.
+
 ---
 
 ## 7. Ambiguous ids
@@ -265,6 +271,10 @@ are file content and do not disappear with it. The Explorer and
 - **unknown** — the input has no reliable stored inventory (it was never updated, the last run failed, or a
   record could not be read). Nothing is claimed about the entry; it may still apply after the next update.
 
+For an input with `aliases` the inventory is the union of the parent and every enabled alias, because each alias
+account keeps its own stored playlist. When one of them has no reliable inventory, every entry is `unknown`.
+Input names in the override API and the Explorer may be given as the parent or as any alias name.
+
 Orphan classification is deliberately conservative: a missing database or an unreadable record makes the whole
 scan non-authoritative, and every entry is then reported as `unknown` instead of `orphaned`.
 
@@ -290,7 +300,9 @@ the file and the revision.
   `<storage dir>/override_status.json` records which revisions each target's last *successful* run applied; an
   entry is pending for a target while its file revision differs from that record. Input edits are therefore
   pending per target, which the Explorer and `get_override_item` report as `pending_per_target`. A failed update
-  leaves every revision pending.
+  leaves every revision pending. A target only tracks the input files of the inputs it consumes, so editing an
+  unrelated input never marks it pending. Deleting all override files clears the pending state with the next
+  successful run, and so does a file without entries. One-shot command line runs record the status too.
 
 `POST /api/v1/playlist/update` (or `update_playlists` over MCP) triggers the run; nothing else applies an edit.
 
@@ -516,11 +528,17 @@ The Explorer is the playlist browser of the Web UI (**Playlist > Explore** in th
 playlist of the selected target or input, overlaid with the saved overrides, so what it displays is what the
 target publishes — including pending markers.
 
+The Explorer loads its lists with `?explorer=true` on the playlist content endpoints. Only then does the server
+attach per-item metadata (override state, EPG state, `override_id`, `added`, `last_modified`, channel number); other callers keep
+the compact, streamed response. Editing, bulk edit and cleanup need the `playlist.write` permission; users with
+read access only see the details.
+
 ### 12.1 Layout
 
 - **Cluster tabs** — `Live`, `VOD`, `Series`, each with its item count. Live uses a compact list, VOD and series
   use a poster grid with a list view toggle.
-- **Sidebar** — `All groups` plus one entry per group with its item count, followed by the virtual groups
+- **Sidebar** — resizable with its drag handle (the width is remembered per browser); `All groups` plus one entry
+  per group with its item count, followed by the virtual groups
   `⚠ Without EPG` (live only) and `✎ Edited` (all clusters). The virtual groups are counts of the items
   currently known, so they collapse to zero once the edits are discarded.
 - **Main area** — the item list or grid of the selected group, sorted by the active sort order.
@@ -532,15 +550,24 @@ target publishes — including pending markers.
 - **Row actions** — every table starts with the row action menu (☰) in its first column; the second column holds
   the selection checkbox used by bulk edit.
 
+On narrow screens (phones) the layout changes: the group list becomes a group selector in the toolbar, the
+detail and edit panel open full screen with a back button, the live table hides the logo and status columns
+(they can be shown again in the columns panel, which keeps a separate layout for phones), and the filter row
+scrolls horizontally.
+
 ### 12.2 Sorting defaults
 
-- **Live**: channel number, ascending. Items without a recognizable number sort last, then by provider id.
-- **VOD**: `Added`, descending.
-- **Series**: `Last modified`, descending.
+- **Live**: channel number, ascending. The number is the one the stored playlist carries (a leading number in
+  the channel name is not used); items without one sort last, then by provider id.
+- **VOD**: `Added`, descending (newest first), using the provider's `added` timestamp.
+- **Series**: `Last modified`, descending, using the provider's `last_modified` timestamp, falling back to `added`.
 
 The selector offers channel number, name and group for live, and added/title/year/rating or
 last modified/title/year/rating for VOD and series. Switching the cluster resets the sort to that cluster's
 default. Where a sort key is missing from an item it sorts last; ties break on provider id so the order is stable.
+
+VOD and series also offer a rating filter (`★ ≥ 6`): a click switches it on and off, and the menu next to it picks
+the minimum number of stars (1 to 9). Picking a value switches the filter on.
 
 ### 12.3 EPG states
 
@@ -566,14 +593,17 @@ editor. VOD and series items have no EPG state.
 - **Provenance**: every field shows the provider value, the input and target override and the effective value with
   its source. In target scope, *Reset* falls back to the input override when one exists.
 - **Save**: only changed fields are sent. A conflict (`409`) reloads the current file and tells you to repeat the
-  change; validation errors (`422`) are shown at the field. After a save the item is marked `edited` and `pending`
+  change; validation errors (`422`) are shown at the field. A file that cannot be parsed (hand-edited YAML with a
+  syntax error, or an unsupported `schema_version`) is reported in the panel and blocks saving in that scope until
+  it is repaired. After a save the item is marked `edited` and `pending`
   at once, and *Update now* starts a playlist update.
 - **Bulk edit**: select items with the checkboxes and open *Bulk Edit*. Each field starts at *Unchanged*; choose
   *Set*, *Clear* or *Reset* for the fields to change. `chno`, `name`, `title` and `tmdb` cannot be bulk-edited. In
   input scope a selection that spans several inputs is saved per input after a confirmation that names the inputs
   and counts; the result is reported per input (saved, conflict or validation error).
 - **EPG id picker**: the `epg_channel_id` editor suggests candidates from `GET /playlist/epg/search` (prefix
-  matches first) instead of asking for a raw id. It searches only stored EPG data (the target EPG database or the
+  matches first) instead of asking for a raw id. Typing searches; the value is taken when a suggestion is picked,
+  or when the typed id is confirmed with Enter or the field is left. It searches only stored EPG data (the target EPG database or the
   input's cached EPG files) and never contacts a provider.
 - **Image preview**: logo, small logo and poster URLs are previewed before they are saved. Provider images load
   through the Web UI resource proxy; a URL you type is loaded by your browser only and is never fetched by the

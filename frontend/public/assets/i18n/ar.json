@@ -904,6 +904,7 @@
       "WINDOW_SECS": "مدة النافذة المتحركة بالثواني المستخدمة في التجميعات."
     },
     "PLAYLIST_OVERRIDE": {
+      "ALSO_SET_TITLE": "تعرض القوائم وعملاء Xtream العنوان. عند التفعيل، يؤدي تغيير الاسم إلى تعيين العنوان بالقيمة نفسها أيضًا.",
       "INPUT": "مصدر قائمة التشغيل المدخلة لفحص تجاوزاتها أو تنظيفها.",
       "NAME": "اسم القناة أو البث من قائمة التشغيل المستخدم للإخراج ومطابقة EPG.",
       "TITLE": "عنوان العرض للعنصر (عنوان EXTINF بعد الفاصلة).",
@@ -1181,9 +1182,10 @@
     "EXPLORER_CATCHUP_BADGE": "إعادة البث",
     "EXPLORER_EDITED_BADGE": "معدل",
     "EPISODE": "حلقة",
-    "EXPLORER_ITEM_META": "{cluster} · ID {id} · الإدخال „{input}“",
+    "EXPLORER_ITEM_META": "{cluster} · معرّف المزوّد {id} · المعرّف الافتراضي {virtual_id} · الإدخال „{input}“",
     "EXPLORER_EPG_ID_TMDB": "EPG-ID / TMDB",
     "EXPLORER_LOGO_URL": "رابط الشعار / الملصق",
+    "EXPLORER_FILTER_RATING_MIN": "الحد الأدنى للتقييم",
     "EXPLORER_FILTER_RATING_GTE": "★ ≥ {rating}",
     "EXPLORER_PAGE_RANGE": "{start}-{end} من {total}",
     "EXPLORER_CLEARED": "(تم المسح)",
@@ -1216,6 +1218,9 @@
     "EXPLORER_SCOPE_INPUT": "للمدخل (كافة الأهداف)",
     "EXPLORER_SCOPE_TARGET": "هذا الهدف فقط",
     "EXPLORER_SORT_ADDED": "أضيف",
+    "EXPLORER": "المستكشف",
+    "EXPLORER_SHOW_EPISODES": "عرض الحلقات",
+    "EXPLORER_CHNO_SHORT": "رقم",
     "EXPLORER_SORT_CHANNEL_NO": "رقم القناة",
     "EXPLORER_SORT_LAST_MODIFIED": "آخر تعديل",
     "EXPLORER_SORT_PREFIX": "ترتيب: ",
@@ -2154,7 +2159,7 @@
     "EXPLORER_BULK_DISABLED_HINT": "لا يمكن تعديل الحقل في الوضع المتعدد",
     "EXPLORER_BULK_EDIT": "تعديل جماعي",
     "EXPLORER_BULK_RESULTS_TITLE": "نتائج الحفظ الجماعي",
-    "EXPLORER_CONFIRM_BULK_MSG": "هل أنت متأكد من حفظ التغييرات عبر المدخلات التالية؟",
+    "EXPLORER_CONFIRM_BULK_MSG": "هل أنت متأكد من تطبيق التغييرات على {count} عنصر عبر {inputs_count} من المدخلات؟",
     "EXPLORER_CONFIRM_BULK_SAVE": "تأكيد الحفظ الجماعي",
     "EXPLORER_ITEMS_SELECTED": "عناصر محددة",
     "EXPLORER_SET_VALUE": "تعيين",
@@ -2249,7 +2254,10 @@
       "UNMAPPED_FIELD_ERRORS": "رفض الخادم حقولاً لا يعرضها هذا المحرر: {errors}",
       "STALE_REVISION": "إصدار قديم (409)",
       "ORPHANS_LOAD_FAILED": "تعذر تحميل التجاوزات: {error}",
-      "EPG_SEARCH_FAILED": "فشل البحث في EPG: {error}"
+      "EPG_SEARCH_FAILED": "فشل البحث في EPG: {error}",
+      "PARSE_ERROR": "ملف التجاوز غير صالح: {error}",
+      "SCHEMA_ERROR": "إصدار مخطط التجاوز غير مدعوم: {version}",
+      "SAVE_FAILED_ERROR": "فشل الحفظ: {error}"
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "حدد EPG لعرض محتواه.",

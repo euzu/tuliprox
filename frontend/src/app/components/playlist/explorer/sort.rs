@@ -14,6 +14,39 @@ pub enum ExplorerSort {
 }
 
 impl ExplorerSort {
+    const ALL: [Self; 8] = [
+        Self::ChannelNo,
+        Self::Name,
+        Self::Group,
+        Self::Added,
+        Self::Title,
+        Self::Year,
+        Self::Rating,
+        Self::LastModified,
+    ];
+
+    /// Stable id used as the option value of the sort selector.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::ChannelNo => "ChannelNo",
+            Self::Name => "Name",
+            Self::Group => "Group",
+            Self::Added => "Added",
+            Self::Title => "Title",
+            Self::Year => "Year",
+            Self::Rating => "Rating",
+            Self::LastModified => "LastModified",
+        }
+    }
+
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> { Self::ALL.into_iter().find(|s| s.id() == id) }
+
+    /// Direction a sort starts with: newest, best rated and latest year first; text and numbers ascending.
+    #[must_use]
+    pub fn default_desc(self) -> bool { matches!(self, Self::Added | Self::Year | Self::Rating | Self::LastModified) }
+
     #[must_use]
     pub fn label_key(&self) -> &'static str {
         match self {
@@ -38,30 +71,9 @@ pub fn default_sort_for_kind(cluster: XtreamCluster) -> (ExplorerSort, bool) {
     }
 }
 
+/// Channel number the stored playlist carries for `item` (explorer metadata), `None` when unset.
 #[must_use]
-pub fn extract_channel_no(name: &str, title: &str) -> Option<u32> {
-    for s in [name, title] {
-        let trimmed = s.trim_start();
-        let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-        if !digits.is_empty() {
-            let rest = &trimmed[digits.len()..];
-            if rest.is_empty()
-                || rest.starts_with('.')
-                || rest.starts_with(':')
-                || rest.starts_with('-')
-                || rest.starts_with(')')
-                || rest.starts_with(']')
-                || rest.starts_with(' ')
-                || rest.starts_with('\t')
-            {
-                if let Ok(num) = digits.parse::<u32>() {
-                    return Some(num);
-                }
-            }
-        }
-    }
-    None
-}
+pub fn item_chno(item: &UiPlaylistItem) -> Option<u32> { item.explorer_meta.as_ref().and_then(|m| m.chno) }
 
 #[must_use]
 pub fn extract_year(name: &str, title: &str) -> Option<u32> {
@@ -129,10 +141,18 @@ pub fn cluster_label_key(cluster: XtreamCluster) -> &'static str {
 }
 
 #[must_use]
-pub fn extract_added(_item: &UiPlaylistItem) -> Option<u64> { None }
+pub fn extract_added(item: &UiPlaylistItem) -> Option<u64> { item.explorer_meta.as_ref().and_then(|m| m.added) }
 
 #[must_use]
-pub fn extract_last_modified(_item: &UiPlaylistItem) -> Option<u64> { None }
+pub fn extract_last_modified(item: &UiPlaylistItem) -> Option<u64> {
+    item.explorer_meta.as_ref().and_then(|m| {
+        if item.xtream_cluster == XtreamCluster::Series {
+            m.last_modified.or(m.added)
+        } else {
+            m.last_modified
+        }
+    })
+}
 
 /// Window in which a newly added VOD item, or an updated series, is considered fresh.
 pub const NEW_ITEM_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
@@ -174,13 +194,9 @@ fn compare_with_missing_last<T: Ord>(
 
 pub fn sort_items(items: &mut [Rc<UiPlaylistItem>], sort: ExplorerSort, desc: bool) {
     items.sort_by(|a, b| match sort {
-        ExplorerSort::ChannelNo => compare_with_missing_last(
-            extract_channel_no(&a.name, &a.title),
-            extract_channel_no(&b.name, &b.title),
-            desc,
-            &a.provider_id,
-            &b.provider_id,
-        ),
+        ExplorerSort::ChannelNo => {
+            compare_with_missing_last(item_chno(a), item_chno(b), desc, &a.provider_id, &b.provider_id)
+        }
         ExplorerSort::Name => compare_with_missing_last(
             extract_name(&a.name),
             extract_name(&b.name),
@@ -260,3 +276,9 @@ pub fn epg_badge_label_key(state: Option<ExplorerEpgState>) -> Option<&'static s
 #[cfg(test)]
 #[path = "sort.test.rs"]
 mod tests;
+
+/// Rating filter of VOD/series: when active, keep items rated at least `min` stars (0-10 scale).
+#[must_use]
+pub fn passes_rating_filter(item: &UiPlaylistItem, active: bool, min: u8) -> bool {
+    !active || item.rating >= f64::from(min)
+}

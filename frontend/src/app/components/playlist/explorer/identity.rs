@@ -70,9 +70,63 @@ pub fn use_identity_revision<T: 'static>(value: &Option<Rc<T>>) -> u32 {
 /// `Ref` temporary outlive the handle, which the borrow checker rejects in tail position.
 fn read_revision(handle: &Rc<RefCell<u32>>) -> u32 { *handle.borrow() }
 
+/// Returns the effective override identity of a playlist item.
+///
+/// Uses `explorer_meta.override_id` when present, falling back to `provider_id`.
+#[must_use]
+pub fn item_override_id(item: &shared::model::UiPlaylistItem) -> &str {
+    item.explorer_meta.as_ref().and_then(|m| m.override_id.as_deref()).unwrap_or(item.provider_id.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::model::{PlaylistItemType, UiItemExplorerMeta, UiPlaylistItem, XtreamCluster};
+    use std::sync::Arc;
+
+    #[test]
+    fn item_override_id_prefers_override_id_over_provider_id() {
+        let item_with_override = UiPlaylistItem {
+            virtual_id: 1,
+            provider_id: Arc::from("pid-123"),
+            name: Arc::from("Channel"),
+            title: Arc::from("Channel"),
+            group: Arc::from("Group"),
+            logo: Arc::from(""),
+            url: Arc::from(""),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: Arc::from("input"),
+            epg_channel_id: None,
+            explorer_meta: Some(UiItemExplorerMeta {
+                override_id: Some(Arc::from("urlhash-v1:abc123blake3")),
+                ..Default::default()
+            }),
+        };
+
+        assert_eq!(item_override_id(&item_with_override), "urlhash-v1:abc123blake3");
+
+        let item_without_override = UiPlaylistItem {
+            virtual_id: 2,
+            provider_id: Arc::from("pid-456"),
+            name: Arc::from("Channel"),
+            title: Arc::from("Channel"),
+            group: Arc::from("Group"),
+            logo: Arc::from(""),
+            url: Arc::from(""),
+            item_type: PlaylistItemType::Live,
+            xtream_cluster: XtreamCluster::Live,
+            category_id: 1,
+            rating: 0.0,
+            input_name: Arc::from("input"),
+            epg_channel_id: None,
+            explorer_meta: None,
+        };
+
+        assert_eq!(item_override_id(&item_without_override), "pid-456");
+    }
 
     #[test]
     fn equal_values_in_different_allocations_are_not_equal() {
