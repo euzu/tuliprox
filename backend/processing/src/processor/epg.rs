@@ -1036,7 +1036,8 @@ mod tests {
             ..shared::model::EpgSmartMatchConfigDto::default()
         };
         dto.prepare().expect("valid smart-match config");
-        let config = EpgConfig { sources: vec![], smart_match: Some(EpgSmartMatchConfig::from(dto)) };
+        let config =
+            EpgConfig { configured_sources: None, sources: vec![], smart_match: Some(EpgSmartMatchConfig::from(dto)) };
         super::EpgIdCache::new(Some(&config))
     }
 
@@ -1048,7 +1049,8 @@ mod tests {
             ..shared::model::EpgSmartMatchConfigDto::default()
         };
         dto.prepare().expect("valid smart-match config");
-        let config = EpgConfig { sources: vec![], smart_match: Some(EpgSmartMatchConfig::from(dto)) };
+        let config =
+            EpgConfig { configured_sources: None, sources: vec![], smart_match: Some(EpgSmartMatchConfig::from(dto)) };
         super::EpgIdCache::new(Some(&config))
     }
 
@@ -1088,7 +1090,7 @@ mod tests {
             EpgSmartMatchConfig::from(dto)
         });
         let mut input = ConfigInput::from(ConfigInputDto::default());
-        input.epg = Some(EpgConfig { sources: vec![], smart_match });
+        input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match });
         let groups = vec![PlaylistGroup {
             id: 1,
             title: "Live".intern(),
@@ -1293,7 +1295,7 @@ mod tests {
             .unwrap();
 
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let channel = shared::model::PlaylistItem {
                 header: PlaylistItemHeader {
                     name: "Demo".intern(),
@@ -1415,7 +1417,7 @@ mod tests {
             )
             .unwrap();
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let groups = vec![PlaylistGroup {
                 id: 1,
                 title: "Live".intern(),
@@ -1462,7 +1464,7 @@ mod tests {
             .unwrap();
 
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let item = |name: &str, epg_id: Option<&str>, item_type: PlaylistItemType| PlaylistItem {
                 header: PlaylistItemHeader {
                     name: name.intern(),
@@ -1554,7 +1556,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let groups = vec![PlaylistGroup {
                 id: 1,
                 title: "Live".intern(),
@@ -1597,7 +1599,7 @@ mod tests {
             .unwrap();
 
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let groups = vec![
                 PlaylistGroup {
                     id: 1,
@@ -1645,7 +1647,7 @@ mod tests {
             fs::write(&epg_path, "<tv></tv>").unwrap();
 
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let groups = vec![PlaylistGroup {
                 id: 1,
                 title: "Live".intern(),
@@ -1799,7 +1801,7 @@ mod tests {
             write_ics_file(&ics_path);
 
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
             let groups = vec![PlaylistGroup {
                 id: 1,
                 title: "Live".intern(),
@@ -1842,7 +1844,11 @@ mod tests {
             };
             smart_dto.prepare().expect("smart config");
             let mut input = ConfigInput::from(ConfigInputDto::default());
-            input.epg = Some(EpgConfig { sources: vec![], smart_match: Some(EpgSmartMatchConfig::from(smart_dto)) });
+            input.epg = Some(EpgConfig {
+                configured_sources: None,
+                sources: vec![],
+                smart_match: Some(EpgSmartMatchConfig::from(smart_dto)),
+            });
             let groups = vec![PlaylistGroup {
                 id: 1,
                 title: "Live".intern(),
