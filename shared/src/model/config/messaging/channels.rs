@@ -70,27 +70,6 @@ impl RestMessagingConfigDto {
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct DiscordMessagingConfigDto {
-    pub url: String,
-    /// Template per event, keyed by event id wire name.
-    ///
-    /// Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...) and
-    /// canonical dotted ids (`recording.completed`) are both accepted;
-    /// `MessagingConfig::prepare` resolves them and warns on a key that
-    /// matches no known event.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<String, String>,
-    /// Per-channel routing. Inherits the global `notify_on` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<ChannelRoutingDto>,
-}
-
-impl DiscordMessagingConfigDto {
-    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.templates.is_empty() }
-}
-
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct PushoverMessagingConfigDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub url: Option<String>,
@@ -158,8 +137,8 @@ impl GotifyMessagingConfigDto {
 
 /// Slack incoming webhook.
 ///
-/// Not a Discord clone: Block Kit differs enough from Discord embeds that
-/// reusing the Discord payload shape produces bad output.
+/// Slack Block Kit differs from other webhook payload shapes, so it has its own
+/// channel rather than reusing a generic one.
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SlackMessagingConfigDto {

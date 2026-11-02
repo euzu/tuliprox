@@ -249,5 +249,13 @@ unit tests. The rendering is frontend behaviour that this page did not exercise 
 
 ## Localisation of the form
 
-Field titles and descriptions in the schema are plain text. Translated text for the plugin's own UI goes in
-`ui/locales/<lang>.json`, which is described in [Custom UI](./custom-ui.md#localisation).
+A `title` or `description` in the schema that is a key of the plugin's locale files is shown translated; any other
+value is shown as written, so a plugin without locale files keeps plain text. List the languages in `ui.locales` and
+ship one flat file per language in `ui/locales/<lang>.json` (the file format and the `en` fallback are described in
+[Custom UI](./custom-ui.md#localisation)). A key missing from a language falls back to `en`.
+
+```json
+{ "properties": { "url": { "title": "settings.url.title", "description": "settings.url.description" } } }
+```
+
+`plugins/discord-notifier` is a complete example: every schema text is a key, in `en`, `ru`, `es` and `ar`.

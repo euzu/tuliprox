@@ -44,7 +44,7 @@ fn recording_template_filenames_match_the_legacy_names() {
     // and friends. The canonical dotted ids produce the same stems, so
     // existing template files keep being discovered.
     assert_eq!(registry::RECORDING_COMPLETED.template_filename("telegram"), "telegram_recording_completed.templ");
-    assert_eq!(registry::RECORDING_STARTED.template_filename("discord"), "discord_recording_started.templ");
+    assert_eq!(registry::RECORDING_STARTED.template_filename("telegram"), "telegram_recording_started.templ");
     assert_eq!(registry::RECORDING_FAILED.template_filename("rest"), "rest_recording_failed.templ");
 }
 

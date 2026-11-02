@@ -2,9 +2,9 @@ use crate::model::macros;
 use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, CommandMessagingConfigDto, DiscordMessagingConfigDto, DiskAlertConfigDto,
-    GotifyMessagingConfigDto, MessagingConfigDto, NtfyMessagingConfigDto, PushoverMessagingConfigDto,
-    RestMessagingConfigDto, SlackMessagingConfigDto, TelegramMessagingConfigDto,
+    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, GotifyMessagingConfigDto, MessagingConfigDto,
+    NtfyMessagingConfigDto, PushoverMessagingConfigDto, RestMessagingConfigDto, SlackMessagingConfigDto,
+    TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -198,40 +198,6 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
             headers,
             templates: template_keys_to_wire(&model.templates),
             routing: Some(ChannelRoutingDto::from(&model.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DiscordMessagingConfig {
-    pub url: String,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl DiscordMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("discord", &mut self.templates, templates_dir);
-    }
-}
-
-macros::from_impl!(DiscordMessagingConfig);
-impl From<&DiscordMessagingConfigDto> for DiscordMessagingConfig {
-    fn from(dto: &DiscordMessagingConfigDto) -> Self {
-        Self {
-            url: dto.url.clone(),
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&DiscordMessagingConfig> for DiscordMessagingConfigDto {
-    fn from(instance: &DiscordMessagingConfig) -> Self {
-        Self {
-            url: instance.url.clone(),
-            templates: template_keys_to_wire(&instance.templates),
-            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -434,7 +400,6 @@ pub struct MessagingConfig {
     pub telegram: Option<TelegramMessagingConfig>,
     pub rest: Option<RestMessagingConfig>,
     pub pushover: Option<PushoverMessagingConfig>,
-    pub discord: Option<DiscordMessagingConfig>,
     pub ntfy: Option<NtfyMessagingConfig>,
     pub gotify: Option<GotifyMessagingConfig>,
     pub slack: Option<SlackMessagingConfig>,
@@ -458,9 +423,6 @@ impl MessagingConfig {
         }
         if let Some(r) = &mut self.rest {
             r.prepare(&templates_dir);
-        }
-        if let Some(d) = &mut self.discord {
-            d.prepare(&templates_dir);
         }
         if let Some(p) = &mut self.pushover {
             p.prepare(&templates_dir);
@@ -489,7 +451,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             telegram: dto.telegram.as_ref().map(Into::into),
             rest: dto.rest.as_ref().map(Into::into),
             pushover: dto.pushover.as_ref().map(Into::into),
-            discord: dto.discord.as_ref().map(Into::into),
             ntfy: dto.ntfy.as_ref().map(Into::into),
             gotify: dto.gotify.as_ref().map(Into::into),
             slack: dto.slack.as_ref().map(Into::into),
@@ -506,7 +467,6 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             telegram: instance.telegram.as_ref().map(Into::into),
             rest: instance.rest.as_ref().map(Into::into),
             pushover: instance.pushover.as_ref().map(Into::into),
-            discord: instance.discord.as_ref().map(Into::into),
             ntfy: instance.ntfy.as_ref().map(Into::into),
             gotify: instance.gotify.as_ref().map(Into::into),
             slack: instance.slack.as_ref().map(Into::into),

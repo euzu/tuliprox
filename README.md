@@ -314,7 +314,6 @@ Tuliprox uses a shared event backbone so operational events can feed the Web UI,
 Supported notification channels include:
 
 - Telegram
-- Discord
 - Pushover
 - REST webhooks
 - ntfy

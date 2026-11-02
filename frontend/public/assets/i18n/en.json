@@ -412,13 +412,6 @@
       "REPEAT_INTERVAL_SECS": "How often (in seconds) to re-send the alert while the disk stays in the same warning or critical state.\n\nSet to 0 to disable re-arming. Default: 3600 (1h)."
     },
     "DEFAULT": "No dedicated explanation is available for this field yet.",
-    "DISCORD": {
-      "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
-    },
-    "DISCORD_MESSAGING_CONFIG": {
-      "TEMPLATES": "Handlebars templates for Discord message bodies.",
-      "URL": "Discord webhook URL for sending notification messages."
-    },
     "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
     "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",

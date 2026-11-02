@@ -21,14 +21,12 @@ fn clean_strips_empty_subconfigs() {
         telegram: Some(TelegramMessagingConfigDto::default()),
         rest: Some(RestMessagingConfigDto::default()),
         pushover: Some(PushoverMessagingConfigDto::default()),
-        discord: Some(DiscordMessagingConfigDto::default()),
         ..Default::default()
     };
     messaging.clean();
     assert!(messaging.telegram.is_none());
     assert!(messaging.rest.is_none());
     assert!(messaging.pushover.is_none());
-    assert!(messaging.discord.is_none());
 }
 
 #[test]

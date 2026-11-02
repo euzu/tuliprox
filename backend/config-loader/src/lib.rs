@@ -1174,12 +1174,6 @@ pub async fn persist_messaging_templates(
     };
 
     if let Some(messaging) = &mut cfg.messaging {
-        // Discord
-        if let Some(discord) = &mut messaging.discord {
-            for (kind, template) in &mut discord.templates {
-                *template = persist_single_template("discord", Some(kind.as_str()), template, &templates_dir).await?;
-            }
-        }
         // Telegram
         if let Some(telegram) = &mut messaging.telegram {
             for (kind, template) in &mut telegram.templates {

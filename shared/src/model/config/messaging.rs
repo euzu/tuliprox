@@ -22,8 +22,6 @@ pub struct MessagingConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushover: Option<PushoverMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discord: Option<DiscordMessagingConfigDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ntfy: Option<NtfyMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gotify: Option<GotifyMessagingConfigDto>,
@@ -42,7 +40,6 @@ impl MessagingConfigDto {
             && (self.telegram.is_none() || self.telegram.as_ref().is_some_and(TelegramMessagingConfigDto::is_empty))
             && (self.rest.is_none() || self.rest.as_ref().is_some_and(RestMessagingConfigDto::is_empty))
             && (self.pushover.is_none() || self.pushover.as_ref().is_some_and(PushoverMessagingConfigDto::is_empty))
-            && (self.discord.is_none() || self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty))
             && (self.ntfy.is_none() || self.ntfy.as_ref().is_some_and(NtfyMessagingConfigDto::is_empty))
             && (self.gotify.is_none() || self.gotify.as_ref().is_some_and(GotifyMessagingConfigDto::is_empty))
             && (self.slack.is_none() || self.slack.as_ref().is_some_and(SlackMessagingConfigDto::is_empty))
@@ -58,9 +55,6 @@ impl MessagingConfigDto {
         }
         if self.pushover.as_ref().is_some_and(PushoverMessagingConfigDto::is_empty) {
             self.pushover = None;
-        }
-        if self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty) {
-            self.discord = None;
         }
         if self.ntfy.as_ref().is_some_and(NtfyMessagingConfigDto::is_empty) {
             self.ntfy = None;
@@ -87,7 +81,7 @@ mod channels;
 mod routing;
 mod secrets;
 pub use channels::{
-    CommandMessagingConfigDto, DiscordMessagingConfigDto, GotifyMessagingConfigDto, NtfyMessagingConfigDto,
-    PushoverMessagingConfigDto, RestMessagingConfigDto, SlackMessagingConfigDto, TelegramMessagingConfigDto,
+    CommandMessagingConfigDto, GotifyMessagingConfigDto, NtfyMessagingConfigDto, PushoverMessagingConfigDto,
+    RestMessagingConfigDto, SlackMessagingConfigDto, TelegramMessagingConfigDto,
 };
 pub use routing::{ChannelRoutingDto, DiskAlertConfigDto};

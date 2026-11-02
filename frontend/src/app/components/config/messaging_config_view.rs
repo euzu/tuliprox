@@ -16,8 +16,8 @@ use crate::{
     i18n::use_translation,
 };
 use shared::model::{
-    DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
-    RestMessagingConfigDto, TelegramMessagingConfigDto,
+    DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto, RestMessagingConfigDto,
+    TelegramMessagingConfigDto,
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -32,10 +32,8 @@ const LABEL_MARKDOWN: &str = "LABEL.MARKDOWN";
 const LABEL_URL: &str = "LABEL.URL";
 const LABEL_TOKEN: &str = "LABEL.TOKEN";
 const LABEL_USER: &str = "LABEL.USER";
-const LABEL_DISCORD: &str = "LABEL.DISCORD";
 const LABEL_METHOD: &str = "LABEL.METHOD";
 const LABEL_HEADERS: &str = "LABEL.HEADERS";
-const LABEL_WEBHOOK_URL: &str = "LABEL.WEBHOOK_URL";
 const LABEL_ADD_HEADER: &str = "LABEL.ADD_HEADER";
 const LABEL_DISK_ALERT: &str = "LABEL.DISK_ALERT";
 const LABEL_DISK_ALERT_WARN_PERCENT: &str = "LABEL.DISK_ALERT_WARN_PERCENT";
@@ -60,15 +58,6 @@ generate_form_reducer!(
         Url => url: String,
         Method => method: Option<String>,
         Headers => headers: Vec<String>,
-        Templates => templates: std::collections::HashMap<String, String>,
-    }
-);
-
-generate_form_reducer!(
-    state: DiscordMessagingConfigFormState { form: DiscordMessagingConfigDto },
-    action_name: DiscordMessagingConfigFormAction,
-    fields {
-        Url => url: String,
         Templates => templates: std::collections::HashMap<String, String>,
     }
 );
@@ -126,9 +115,6 @@ pub fn MessagingConfigView() -> Html {
         modified: false,
     });
 
-    let discord_state =
-        use_reducer(|| DiscordMessagingConfigFormState { form: DiscordMessagingConfigDto::default(), modified: false });
-
     let disk_alert_state =
         use_reducer(|| DiskAlertConfigFormState { form: DiskAlertConfigDto::default(), modified: false });
 
@@ -156,24 +142,21 @@ pub fn MessagingConfigView() -> Html {
             telegram_state.form.clone(),
             rest_state.form.clone(),
             pushover_state.form.clone(),
-            discord_state.form.clone(),
             disk_alert_state.form.clone(),
             messaging_state.modified,
             telegram_state.modified,
             rest_state.modified,
             pushover_state.modified,
-            discord_state.modified,
             disk_alert_state.modified,
         );
         use_emit_mapped(
             dependencies,
             config_view_ctx.on_form_change.clone(),
-            |(m, t, r, p, d, da, mm, tm, rm, pm, dm, dam)| {
+            |(m, t, r, p, da, mm, tm, rm, pm, dam)| {
                 let mut form = m;
                 form.telegram = Some(t);
                 form.rest = Some(r);
                 form.pushover = Some(p);
-                form.discord = Some(d);
                 // The `DiskAlert` entry in `notify_on` is the on/off switch
                 // for disk alerts: the runtime only fires alerts when
                 // `notify_on` contains `DiskAlert` AND a `disk_alert` block
@@ -184,7 +167,7 @@ pub fn MessagingConfigView() -> Html {
                     .matches(shared::model::notification::registry::SYSTEM_DISK_ALERT);
                 form.disk_alert = if subscribed { Some(da) } else { None };
 
-                let modified = mm || tm || rm || pm || dm || dam;
+                let modified = mm || tm || rm || pm || dam;
                 ConfigForm::Messaging(modified, form)
             },
         );
@@ -219,14 +202,6 @@ pub fn MessagingConfigView() -> Html {
             msg_config.pushover.as_ref().map_or_else(PushoverMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((pushover_cfg, *config_view_ctx.edit_mode), move |(pushover_cfg, _mode)| {
             p_state.dispatch(PushoverMessagingConfigFormAction::SetAll(pushover_cfg.clone()));
-            || ()
-        });
-
-        let discord_state = discord_state.clone();
-        let discord_cfg =
-            msg_config.discord.as_ref().map_or_else(DiscordMessagingConfigDto::default, std::clone::Clone::clone);
-        use_effect_with((discord_cfg, *config_view_ctx.edit_mode), move |(discord_cfg, _mode)| {
-            discord_state.dispatch(DiscordMessagingConfigFormAction::SetAll(discord_cfg.clone()));
             || ()
         });
 
@@ -299,22 +274,6 @@ pub fn MessagingConfigView() -> Html {
         },
     };
 
-    let render_discord = |discord: Option<&DiscordMessagingConfigDto>| match discord {
-        Some(entry) => html! {
-          <Card class="tp__config-view__card">
-              <h1>{translate.t(LABEL_DISCORD)}</h1>
-              { config_field_hide!(entry, translate.t(LABEL_WEBHOOK_URL), url) }
-              { render_templates_view(&entry.templates) }
-          </Card>
-        },
-        None => html! {
-          <Card class="tp__config-view__card">
-              <h1>{translate.t(LABEL_DISCORD)}</h1>
-              { config_field_empty!(translate.t(LABEL_WEBHOOK_URL), "DISCORD_MESSAGING_CONFIG.URL") }
-          </Card>
-        },
-    };
-
     let render_pushover = |pushover: Option<&PushoverMessagingConfigDto>| match pushover {
         Some(entry) => html! {
         <Card class="tp__config-view__card">
@@ -371,7 +330,6 @@ pub fn MessagingConfigView() -> Html {
           {render_telegram(msg_state.form.telegram.as_ref())}
           {render_rest(msg_state.form.rest.as_ref())}
           {render_pushover(msg_state.form.pushover.as_ref())}
-          {render_discord(msg_state.form.discord.as_ref())}
           {render_disk_alert(msg_state.form.disk_alert.as_ref())}
         </div>
         </>
@@ -433,32 +391,6 @@ pub fn MessagingConfigView() -> Html {
                 }
             })
             .collect::<Html>();
-        let discord_template_fields = notify_on_options
-            .iter()
-            .map(|kind| {
-                let kind_str = translate.t(&event_label_key(kind));
-                let current_val = discord_state.form.templates.get(kind).cloned().unwrap_or_default();
-                let discord_state = discord_state.clone();
-                let kind = kind.clone();
-                html! {
-                    <TextArea
-                        label={kind_str}
-                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
-                        value={current_val}
-                        collapse_on_empty={true}
-                        on_change={Callback::from(move |val: String| {
-                            let mut updated = discord_state.form.templates.clone();
-                            if val.is_empty() {
-                                updated.remove(&kind);
-                            } else {
-                                updated.insert(kind.clone(), val);
-                            }
-                            discord_state.dispatch(DiscordMessagingConfigFormAction::Templates(updated));
-                        })}
-                    />
-                }
-            })
-            .collect::<Html>();
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
@@ -504,15 +436,6 @@ pub fn MessagingConfigView() -> Html {
                     { edit_field_text_option!(pushover_state, translate.t(LABEL_URL), url, PushoverMessagingConfigFormAction::Url) }
                     { edit_field_text!(pushover_state, translate.t(LABEL_TOKEN), token, PushoverMessagingConfigFormAction::Token, true) }
                     { edit_field_text!(pushover_state, translate.t(LABEL_USER), user, PushoverMessagingConfigFormAction::User) }
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_DISCORD)}</h1>
-                    { edit_field_text!(discord_state, translate.t(LABEL_WEBHOOK_URL), url, DiscordMessagingConfigFormAction::Url, true) }
-                    <div class="tp__messaging-config__templates">
-                        <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                        { discord_template_fields }
-                    </div>
                 </Card>
 
                 <Card class="tp__config-view__card">

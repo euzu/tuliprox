@@ -94,7 +94,7 @@ instead of your mount point.
 | `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
 | `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
 | `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (Telegram, Discord, etc.).                          | [See section](#5-messaging-messaging)           |
+| `messaging`       | Webhooks & Push-Notifications (Telegram, ntfy, etc.; Discord via a plugin).     | [See section](#5-messaging-messaging)           |
 | `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
 | `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
 | `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
@@ -838,12 +838,6 @@ messaging:
       playlist.update.completed: 'file:///config/messaging_templates/telegram_playlist_update_completed.templ'
       recording.completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
 
-  # Discord: Webhook integration
-  discord:
-    url: "<WEBHOOK_URL>"
-    templates:
-      system.info: '{"content": "🚀 Tuliprox Info: {{message}}"}'
-
   # Pushover: Simple mobile push alerts
   pushover:
     token: "<API_TOKEN>"
@@ -896,8 +890,9 @@ messaging:
     routing:
       min_severity: critical        # only wake me for real problems
 
-  discord:
-    url: "<WEBHOOK_URL>"
+  ntfy:
+    url: "<SERVER_URL>"
+    topic: "<TOPIC>"
     routing:
       notify_on: [ "playlist.*", "recording.*" ]
       quiet_hours: "23:00-07:00"    # deferred, never dropped
@@ -921,7 +916,7 @@ attempt, retried per channel with capped exponential backoff, and
 dead-lettered after `max_attempts`.
 
 Retry is at-most-once **per channel**: a message that reached Telegram but
-not Discord is retried only against Discord, so a retry never duplicates a
+not ntfy is retried only against ntfy, so a retry never duplicates a
 delivered message.
 
 * A `429` or `503` is retried, and a provider's `Retry-After` is honoured
@@ -955,9 +950,9 @@ asked for this one explicitly.
 
 ### 5.2 Templating (Handlebars)
 
-**Every** channel supports templates - Telegram, Discord, REST, Pushover, ntfy, Gotify, Slack and `command`.
+**Every** channel supports templates - Telegram, REST, Pushover, ntfy, Gotify, Slack and `command`.
 Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies, which allows rich, structured
-notifications (e.g. Discord embeds or Markdown tables).
+notifications (e.g. Slack blocks or Markdown tables).
 
 Templates are keyed by event id:
 
@@ -968,7 +963,7 @@ telegram:
 ```
 
 A `{prefix}_{event}.templ` file dropped into `/config/messaging_templates/` is picked up automatically -
-`telegram_recording_completed.templ`, `discord_playlist_update_failed.templ`, and so on. Dots in the event id become
+`telegram_recording_completed.templ`, `ntfy_playlist_update_failed.templ`, and so on. Dots in the event id become
 underscores in the filename.
 
 Templates are resolved and compiled **once** and then cached: local files are re-read when their mtime changes,
@@ -1077,7 +1072,7 @@ users are suppressed.
 {{/each}}
 ```
 
-**Discord (Complex Embed):**
+**JSON webhook body (embed-style):**
 
 ```handlebars
 {
@@ -1099,7 +1094,7 @@ users are suppressed.
 ### 5.3 Disk-Space Alerts (`messaging.disk_alert`)
 
 Tuliprox monitors the free space on the **current working directory's mount** and notifies you via the
-standard messaging channels (Telegram, Discord, Pushover, REST) before the disk fills up. The feature is
+standard messaging channels (Telegram, Pushover, REST) before the disk fills up. The feature is
 **opt-in**: no `disk_alert` block means no monitoring and no notifications.
 
 **How it works:** A background loop in `backend/app/src/api/sys_usage.rs` ticks every **2 seconds** (fixed

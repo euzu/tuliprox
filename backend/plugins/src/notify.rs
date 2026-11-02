@@ -28,6 +28,18 @@ use tuliprox_plugin_api::bindings::{
 
 const HOOK: PluginHook = PluginHook::SendNotification;
 
+/// How long one delivery may take. Messaging gives a send 30 s (a webhook host
+/// that accepts and never answers must not stall the outbox), so the plugin
+/// call gets the same: the 5 s `plugins.max_exec` of an ordinary hook would
+/// turn a slow but successful provider answer into a retry. It is never below
+/// the plugin's own `max_exec`, and `plugins.max_task_exec` still caps it.
+const NOTIFICATION_EXEC: Duration = Duration::from_secs(30);
+
+fn notification_exec(dispatcher: &HookDispatcher<'_>, own: Duration) -> Duration {
+    let task_exec = dispatcher.runtime().config().task_exec;
+    NOTIFICATION_EXEC.min(task_exec).max(own)
+}
+
 /// What `send-notification` itself answered, as opposed to the call failing.
 type Answer = Result<(), DeliveryError>;
 
@@ -76,7 +88,8 @@ async fn call_one(
         .notification_hooks
         .as_ref()
         .ok_or_else(|| CallError::Instantiate("does not export notification-hooks".to_string()))?;
-    let mut live = dispatcher.open(loaded).await?;
+    let exec = notification_exec(dispatcher, loaded.prepared.limits().exec);
+    let mut live = dispatcher.open_with(loaded, exec).await?;
     let instance = live.instance();
     let guest = indices.load(live.store_mut(), &instance).map_err(bind)?;
     let wit = Notification {

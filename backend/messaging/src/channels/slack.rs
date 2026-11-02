@@ -1,7 +1,7 @@
 //! Slack incoming webhook.
 //!
-//! Not a Discord clone: Block Kit differs enough from Discord embeds that
-//! reusing the Discord payload shape produces bad output.
+//! Block Kit differs enough from other webhook payload shapes that reusing one
+//! produces bad output.
 
 use crate::channel::{
     delivery_for_status, parse_retry_after, ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage,

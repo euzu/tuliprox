@@ -1,0 +1,18 @@
+id: discord-notifier
+name: Discord Notifier
+version: 1.0.0
+api_version: 1
+author: tuliprox
+description: >
+  Delivers tuliprox notifications to a Discord webhook as an embed or plain
+  text. Routing, quiet hours, suppression and retries are the host's; this
+  plugin formats the message and speaks to Discord.
+capabilities:
+  notifications: true
+  network: true
+hooks:
+  - notifications.send
+ui:
+  locales: [en, ru, es, ar]   # ui/locales/<lang>.json; en is the fallback
+  config_section:
+    schema: config-schema.json

@@ -10,7 +10,6 @@
 //! send path.
 
 pub mod command;
-pub mod discord;
 pub mod gotify;
 pub mod ntfy;
 pub mod plugin;
@@ -42,7 +41,6 @@ pub enum Channel {
     Telegram(telegram::TelegramChannel),
     Rest(rest::RestChannel),
     Pushover(pushover::PushoverChannel),
-    Discord(discord::DiscordChannel),
     Ntfy(ntfy::NtfyChannel),
     Gotify(gotify::GotifyChannel),
     Slack(slack::SlackChannel),
@@ -59,7 +57,6 @@ macro_rules! delegate {
             Channel::Telegram($inner) => $call,
             Channel::Rest($inner) => $call,
             Channel::Pushover($inner) => $call,
-            Channel::Discord($inner) => $call,
             Channel::Ntfy($inner) => $call,
             Channel::Gotify($inner) => $call,
             Channel::Slack($inner) => $call,
@@ -95,7 +92,6 @@ impl Channel {
             Channel::Telegram(c) => c.send(msg).await,
             Channel::Rest(c) => c.send(msg).await,
             Channel::Pushover(c) => c.send(msg).await,
-            Channel::Discord(c) => c.send(msg).await,
             Channel::Ntfy(c) => c.send(msg).await,
             Channel::Gotify(c) => c.send(msg).await,
             Channel::Slack(c) => c.send(msg).await,
@@ -192,9 +188,6 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
     }
     if let Some(cfg) = messaging.pushover.as_ref() {
         channels.push(Channel::Pushover(pushover::PushoverChannel::new(cfg.clone(), client.clone())));
-    }
-    if let Some(cfg) = messaging.discord.as_ref() {
-        channels.push(Channel::Discord(discord::DiscordChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.ntfy.as_ref() {
         channels.push(Channel::Ntfy(ntfy::NtfyChannel::new(cfg.clone(), client.clone())));

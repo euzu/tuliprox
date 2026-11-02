@@ -4,6 +4,11 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.discord` is removed.** The built-in Discord channel (and its `discord_*.templ` templates and the Web UI
+  form) is gone; the config key is no longer accepted, so a config that still contains it fails to load with
+  `unknown field`. Install and configure the `discord-notifier` plugin instead (`plugins.plugins`, id
+  `discord-notifier`, setting `url`).
+
 - **The in-memory log ring buffer behind the Web-UI Live Logs now follows the root log filter.** Previously,
   the ring buffer stored every record that passed the global maximum log level, exposing noisy dependency logs
   and foreign-crate debug records even when stdout filtered them out. The ring buffer is now gated directly on the
@@ -197,6 +202,13 @@
   id added.
 
 ## 🌟 New Features
+
+- **Discord notifications are a plugin.** The `discord-notifier` plugin (`plugins/discord-notifier`,
+  `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
+  instance name as footer) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
+  suppression and the retrying outbox apply as for every channel. Its settings form ships its own translations
+  (English, Russian, Spanish, Arabic) through `ui/locales`. See [Discord Notifier](docs/src/plugins/discord-notifier.md).
+  Notification plugin calls now run under a 30 s deadline instead of `plugins.max_exec`.
 
 - **Playlist target analytics and stats view.** A new Web UI page "Playlist > Stats" (directly below "Update",
   requiring `playlist.read`) displays per-target statistics computed on every playlist update:

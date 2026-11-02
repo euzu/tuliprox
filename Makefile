@@ -244,6 +244,13 @@ plugin-examples: ## Build + package the example plugins and the rendered templat
 	@./bin/package-plugin.sh target/plugin-examples/template/my-plugin
 	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
 
+.PHONY: plugin-discord-notifier
+plugin-discord-notifier: ## Build + package the discord-notifier plugin (wasm32-wasip2) into target/plugin-discord-notifier
+	@echo "==> Building discord-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-discord-notifier
+	@./bin/package-plugin.sh plugins/discord-notifier --out target/plugin-discord-notifier/discord-notifier.tlpx
+	@echo "✅ discord-notifier written to target/plugin-discord-notifier/discord-notifier.tlpx"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"

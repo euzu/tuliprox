@@ -93,8 +93,8 @@ async fn render_for<'a>(
 /// Send `event` to exactly one channel, by its stable id.
 ///
 /// This is the entry point the outbox worker drives: it retries per
-/// channel, so a message that reached Telegram but not Discord is re-sent
-/// only to Discord.
+/// channel, so a message that reached Telegram but not ntfy is re-sent
+/// only to ntfy.
 pub async fn send_event_to_channel(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -324,7 +324,7 @@ mod tests {
     /// Adapter onto the new pipeline.
     ///
     /// These tests predate the channel/envelope refactor and assert that the
-    /// documented Discord and Telegram templates still render exactly as
+    /// documented JSON-embed and Telegram templates still render exactly as
     /// before, so they are kept pointed at the real renderer rather than
     /// rewritten.
     async fn render_template(
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_discord_template() {
+    async fn test_render_json_embed_template() {
         use shared::model::{InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
 
         let input_stats = InputStats {

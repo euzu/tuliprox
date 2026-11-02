@@ -412,13 +412,6 @@
       "REPEAT_INTERVAL_SECS": "Con qué frecuencia (en segundos) se reenvía la alerta mientras el disco permanece en el mismo estado de advertencia o crítico.\n\nEstablezca 0 para deshabilitar el reenvío. Por defecto: 3600 (1h)."
     },
     "DEFAULT": "Aún no hay una explicación específica disponible para este campo.",
-    "DISCORD": {
-      "TEMPLATE_MESSAGE": "Cuerpo de la plantilla de mensaje para las notificaciones de Discord."
-    },
-    "DISCORD_MESSAGING_CONFIG": {
-      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de Discord.",
-      "URL": "URL del webhook de Discord para enviar mensajes de notificación."
-    },
     "BEST_MATCH_THRESHOLD": "Umbral de alta confianza (0-100). Las coincidencias por encima de este valor se aceptan inmediatamente como la mejor candidata.",
     "DNS_MAX_ADDRS": "Límite opcional de direcciones IP resueltas conservadas por nombre de host. Déjelo vacío para no establecer un límite explícito.",
     "FUZZY_MATCHING": "Permite la coincidencia por similitud difusa si falla la coincidencia exacta de ID normalizado.",
