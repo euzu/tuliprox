@@ -322,8 +322,15 @@ impl HlsProxyManager {
                     session.plan_live_window(crate::live_window::HlsLiveWindowView::for_lease(&lease)).as_ref()
                         == Some(plan)
                 });
-                if (!plan.is_current(&session) || !view_matches) && !retained {
-                    return Outcome::Rejected(Reject::ManifestGenerationUnavailable);
+                if !retained {
+                    if !plan.is_current(&session) {
+                        return Outcome::Rejected(Reject::ManifestGenerationUnavailable);
+                    }
+                    if !view_matches {
+                        // Activation can change Entry to Active after preparation.
+                        // Replan against the current lease without accepting the old view.
+                        return Outcome::Rejected(Reject::SnapshotChanged);
+                    }
                 }
             }
             for (seq, revision) in &mut std::sync::Arc::make_mut(publication).revisions {

@@ -14,6 +14,8 @@ pub(super) struct HlsCachedTransientManifestRead {
 mod access;
 mod admission;
 mod cached;
+#[cfg(test)]
+pub(super) use cached::{HlsManifestPublicationBarrier, HLS_MANIFEST_PUBLICATION_BARRIER};
 mod canonical_owner;
 #[cfg(test)]
 pub(super) use canonical_owner::{await_hls_terminal_or_refresh, current_hls_refresh_lease};

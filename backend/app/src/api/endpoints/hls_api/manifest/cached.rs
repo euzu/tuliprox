@@ -28,6 +28,27 @@ use tuliprox_hls::api::{
 type HlsPreparedManifest =
     (HlsMaterializedSharedManifest, HlsLeaseManifestSnapshot, HlsPublishedTransientResourceIds, u64);
 
+#[cfg(test)]
+#[derive(Default)]
+pub(in crate::api::endpoints::hls_api) struct HlsManifestPublicationBarrier {
+    pub prepared: tokio::sync::Notify,
+    pub resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(in crate::api::endpoints::hls_api) static HLS_MANIFEST_PUBLICATION_BARRIER:
+        std::cell::RefCell<Option<Arc<HlsManifestPublicationBarrier>>>;
+}
+
+#[cfg(test)]
+async fn hls_manifest_publication_checkpoint() {
+    if let Ok(Some(barrier)) = HLS_MANIFEST_PUBLICATION_BARRIER.try_with(|slot| slot.borrow_mut().take()) {
+        barrier.prepared.notify_one();
+        barrier.resume.notified().await;
+    }
+}
+
 pub(in crate::api::endpoints::hls_api) async fn hls_exhausted_startup_response(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
@@ -508,7 +529,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         );
         return Some(hls_cached_manifest_temporarily_unavailable());
     };
-    let view = HlsCachedManifestViewContext::new(
+    let mut view = HlsCachedManifestViewContext::new(
         &proxy_session_id,
         access_lease_id,
         access_lease_state,
@@ -523,6 +544,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             .proxy
             .access_lease_response_snapshot(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
             .await?;
+        let access_lease_state = view.access_lease_state;
         if let Some(response) =
             super::hls_terminal_playback_response(app_state, &lease, &proxy_session_id, access_lease_id)
         {
@@ -685,6 +707,8 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                     return Some(hls_cached_manifest_temporarily_unavailable());
                 }
                 let startup_snapshot = snapshot.clone();
+                #[cfg(test)]
+                hls_manifest_publication_checkpoint().await;
                 let admission_at_ms = app_state.hls.proxy.now_ms();
                 let outcome = if retained_plan.is_some() || retained_origin_generation {
                     app_state
@@ -716,7 +740,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         .await
                 };
                 if fast_start && !outcome.is_committed() {
-                    if let Some(current) = app_state
+                    let current = app_state
                         .hls
                         .proxy
                         .access_lease_response_snapshot(
@@ -724,11 +748,11 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                             &proxy_session_id,
                             app_state.hls.proxy.now_ms(),
                         )
-                        .await
-                    {
+                        .await;
+                    if let Some(current) = current.as_ref() {
                         if let Some(response) = super::hls_terminal_playback_response(
                             app_state,
-                            &current,
+                            current,
                             &proxy_session_id,
                             access_lease_id,
                         ) {
@@ -740,6 +764,9 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                             tuliprox_hls::api::HlsLeaseManifestPublicationRejectReason::SnapshotChanged,
                         )
                     {
+                        if let Some(current) = current {
+                            view.access_lease_state = current.state;
+                        }
                         continue;
                     }
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
