@@ -1312,6 +1312,11 @@
 
 ## 🐛 Fixes
 
+- **Web UI posters and logos no longer fail with providers that only serve players.** The image proxy behind the
+  Web UI forwarded the browser's User-Agent to the provider; providers that block browsers answered 403, so most VOD
+  and series posters stayed empty in the Playlist Explorer. The proxy now drops the browser's User-Agent and sends the
+  headers of the input that hosts the image, or the configured `default_user_agent`.
+
 - **Playlist Update: "All" selects, status badges use status dots.** Clicking "All" under "Affected targets" now
   always selects every target instead of toggling all of them off on a second click; single targets still switch on
   and off. Status badges (input result, cluster chips, update details) show a round status dot in front of the label,

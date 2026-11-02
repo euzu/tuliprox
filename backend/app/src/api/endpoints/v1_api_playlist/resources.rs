@@ -1,7 +1,9 @@
 use super::playlist_webplayer;
 use crate::{
     api::{
-        api_utils::resource_proxy_response, endpoints::api_playlist_utils::STALKER_RESOURCE_SCHEME, model::AppState,
+        api_utils::{resource_input_for_url, resource_proxy_response},
+        endpoints::api_playlist_utils::STALKER_RESOURCE_SCHEME,
+        model::AppState,
     },
     iptv::stalker::client::validate_public_playable_url,
     model::{AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigInputUpdateQuality},
@@ -104,6 +106,22 @@ pub(super) fn resolve_provider_url_for_request(
     }
 }
 
+/// Headers of a Web UI image request that may reach the provider. The browser's own User-Agent is
+/// dropped: providers that only serve players answer it with 403, which left most posters empty.
+/// The input's configured headers or the configured default User-Agent apply instead.
+fn web_ui_resource_headers(req_headers: &axum::http::HeaderMap) -> axum::http::HeaderMap {
+    let mut headers = req_headers.clone();
+    headers.remove(axum::http::header::USER_AGENT);
+    headers
+}
+
+/// The input whose server hosts `resource_url`, so its configured headers (User-Agent, ...) are sent.
+fn web_ui_resource_input(app_state: &Arc<AppState>, resource_url: &str) -> Option<Arc<ConfigInput>> {
+    let url = shared::model::persisted_resource_url(resource_url)?;
+    let sources = app_state.app_config.sources.load();
+    sources.inputs.iter().find(|input| resource_input_for_url(Some(input), url.as_ref()).is_some()).cloned()
+}
+
 pub(super) async fn playlist_resource(
     req_headers: axum::http::HeaderMap,
     axum::extract::Path(resource): axum::extract::Path<String>,
@@ -118,7 +136,9 @@ pub(super) async fn playlist_resource(
         // a public destination goes out through the proxy-aware fetch, which honours a configured
         // proxy, while one that is not provably public is fetched directly so the request cannot leave
         // through a proxy that has no route to it.
-        resource_proxy_response(&app_state, &resource_url, &req_headers, None).await.into_response()
+        let headers = web_ui_resource_headers(&req_headers);
+        let input = web_ui_resource_input(&app_state, &resource_url);
+        resource_proxy_response(&app_state, &resource_url, &headers, input.as_deref()).await.into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
     }
@@ -177,5 +197,21 @@ pub(super) async fn playlist_resolve_url(
         PlaylistUrlResolveRequest::Provider { playlist_request, url } => {
             resolve_provider_url_for_request(&app_state.app_config, &playlist_request, &url).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod web_ui_resource_tests {
+    use super::web_ui_resource_headers;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn browser_user_agent_is_not_forwarded_to_the_provider() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 Chrome/140"));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("image/avif,image/webp"));
+        let forwarded = web_ui_resource_headers(&headers);
+        assert!(forwarded.get(header::USER_AGENT).is_none());
+        assert_eq!(forwarded.get(header::ACCEPT).and_then(|v| v.to_str().ok()), Some("image/avif,image/webp"));
     }
 }
