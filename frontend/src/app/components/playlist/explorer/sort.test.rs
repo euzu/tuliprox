@@ -293,3 +293,14 @@ fn rating_filter_uses_selected_threshold_only_when_active() {
     assert!(passes_rating_filter(&item, true, 6));
     assert!(!passes_rating_filter(&item, true, 7));
 }
+
+#[test]
+fn items_without_channel_number_keep_playlist_order() {
+    // An input has no channel numbers: sorting must not reshuffle it by provider id.
+    let a = create_test_item(1, "z-last-id", "A", "A", 0.0, XtreamCluster::Live, None, None, false);
+    let b = create_test_item(2, "a-first-id", "B", "B", 0.0, XtreamCluster::Live, None, None, false);
+    let mut items = vec![Rc::clone(&a), Rc::clone(&b)];
+    sort_items(&mut items, ExplorerSort::ChannelNo, false);
+    let order: Vec<&str> = items.iter().map(|i| i.name.as_ref()).collect();
+    assert_eq!(order, ["A", "B"]);
+}

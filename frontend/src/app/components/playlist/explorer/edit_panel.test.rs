@@ -506,3 +506,30 @@ fn find_duplicate_chno_uses_precomputed_map() {
     let dup_none = find_duplicate_chno("99", 2, &map);
     assert_eq!(dup_none, None);
 }
+
+#[test]
+fn patch_from_patch_updates_channel_number_meta() {
+    let item = UiPlaylistItem {
+        virtual_id: 7,
+        provider_id: Arc::from("7"),
+        name: Arc::from("Ch"),
+        title: Arc::from("Ch"),
+        group: Arc::from("G"),
+        logo: Arc::from(""),
+        url: Arc::from(""),
+        item_type: PlaylistItemType::Live,
+        xtream_cluster: XtreamCluster::Live,
+        category_id: 1,
+        rating: 0.0,
+        input_name: Arc::from("in"),
+        epg_channel_id: None,
+        explorer_meta: Some(shared::model::UiItemExplorerMeta { chno: Some(10), ..Default::default() }),
+    };
+    let set = ItemOverridePatch { chno: Some(OverrideFieldOp::Set(42)), ..Default::default() };
+    let updated = patch_playlist_item_from_patch(&item, &set, None, true);
+    assert_eq!(updated.explorer_meta.as_ref().and_then(|m| m.chno), Some(42));
+
+    let clear = ItemOverridePatch { chno: Some(OverrideFieldOp::Clear), ..Default::default() };
+    let cleared = patch_playlist_item_from_patch(&item, &clear, None, true);
+    assert_eq!(cleared.explorer_meta.as_ref().and_then(|m| m.chno), None);
+}

@@ -173,6 +173,7 @@ fn compare_with_missing_last<T: Ord>(
     provider_id_a: &str,
     provider_id_b: &str,
 ) -> std::cmp::Ordering {
+    let both_missing = opt_a.is_none() && opt_b.is_none();
     let cmp = match (opt_a, opt_b) {
         (None, None) => std::cmp::Ordering::Equal,
         (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -185,7 +186,9 @@ fn compare_with_missing_last<T: Ord>(
             }
         }
     };
-    if cmp == std::cmp::Ordering::Equal {
+    // Both values missing: keep the playlist order (the sort is stable). Only equal values tie-break
+    // on provider id, so an input without channel numbers is not reshuffled by id.
+    if cmp == std::cmp::Ordering::Equal && !both_missing {
         provider_id_a.cmp(provider_id_b)
     } else {
         cmp

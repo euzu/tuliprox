@@ -558,13 +558,14 @@ scrolls horizontally.
 ### 12.2 Sorting defaults
 
 - **Live**: channel number, ascending. The number is the one the stored playlist carries (a leading number in
-  the channel name is not used); items without one sort last, then by provider id.
+  the channel name is not used); items without one sort last in playlist order.
 - **VOD**: `Added`, descending (newest first), using the provider's `added` timestamp.
 - **Series**: `Last modified`, descending, using the provider's `last_modified` timestamp, falling back to `added`.
 
 The selector offers channel number, name and group for live, and added/title/year/rating or
 last modified/title/year/rating for VOD and series. Switching the cluster resets the sort to that cluster's
-default. Where a sort key is missing from an item it sorts last; ties break on provider id so the order is stable.
+default. Where a sort key is missing from an item it sorts last, in playlist order (an input has no channel
+numbers, so its live list keeps the provider order); equal values break ties on provider id.
 
 VOD and series also offer a rating filter (`★ ≥ 6`): a click switches it on and off, and the menu next to it picks
 the minimum number of stars (1 to 9). Picking a value switches the filter on.

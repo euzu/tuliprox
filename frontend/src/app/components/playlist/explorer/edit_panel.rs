@@ -277,6 +277,13 @@ pub fn patch_playlist_item_from_patch(
 
     // 7. Explorer metadata
     let mut meta = updated.explorer_meta.take().unwrap_or_default();
+    if let Some(ref op) = patch.chno {
+        meta.chno = match op {
+            OverrideFieldOp::Set(n) => Some(*n).filter(|n| *n > 0),
+            OverrideFieldOp::Clear => None,
+            OverrideFieldOp::Reset => provenance.and_then(|pr| pr.provider.as_ref()).map(|p| p.chno).filter(|n| *n > 0),
+        };
+    }
     meta.override_state =
         UiOverrideState { edited: has_remaining_deltas, pending: true, ambiguous: meta.override_state.ambiguous };
     updated.explorer_meta = Some(meta);
@@ -2444,7 +2451,7 @@ pub fn ExplorerEditPanel(props: &ExplorerEditPanelProps) -> Html {
                                 onclick={handle_update_now}
                             />
                             <TextButton
-                                class="secondary"
+                                class="primary"
                                 name="save"
                                 icon="Save"
                                 title={translate.t("LABEL.SAVE")}

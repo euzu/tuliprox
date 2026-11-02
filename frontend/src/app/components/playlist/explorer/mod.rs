@@ -921,52 +921,73 @@ pub fn PlaylistExplorer() -> Html {
         })
     };
 
-    let mobile_group_options = {
-        let mut opts = Vec::new();
-        let selected_group = (*selected_group).clone();
+    // Built only on mobile, and only when its inputs change: thousands of groups must not be walked
+    // on every click.
+    let mobile_group_options = use_memo(
+        (
+            *is_mobile,
+            playlist_revision,
+            *active_cluster,
+            (*selected_group).clone(),
+            *edited_count,
+            *without_epg_count,
+            total_items,
+            Id::new(groups_for_cluster.clone()),
+        ),
+        {
+            let translate = translate.clone();
+            let active_cluster = *active_cluster;
+            let groups_for_cluster = groups_for_cluster.clone();
+            move |(mobile, _, _, selected_group, edited_count, without_epg_count, total_items, _)| {
+                if !*mobile {
+                    return Rc::new(Vec::new());
+                }
+                let total_items = *total_items;
+                let mut opts = Vec::new();
 
-        // 1. All groups
-        opts.push(DropDownOption::new(
-            "__all__",
-            html! { <>{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_ALL") }{ format!(" ({total_items})") }</> },
-            selected_group == SelectedGroup::All,
-        ));
-
-        // 2. Without EPG (live only)
-        if *active_cluster == XtreamCluster::Live {
-            let without_epg_count = *without_epg_count;
-            opts.push(DropDownOption::new(
-                "__without_epg__",
-                html! { <>{ "⚠ " }{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_WITHOUT_EPG") }{ format!(" ({without_epg_count})") }</> },
-                selected_group == SelectedGroup::WithoutEpg,
-            ));
-        }
-
-        // 3. Edited
-        let edited_count = *edited_count;
-        opts.push(DropDownOption::new(
-            "__edited__",
-            html! { <>{ "✎ " }{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED") }{ format!(" ({edited_count})") }</> },
-            selected_group == SelectedGroup::Edited,
-        ));
-
-        // 4. Every group with its count
-        if let Some(ref groups) = *groups_for_cluster {
-            for g in groups.iter() {
-                let is_sel = match &selected_group {
-                    SelectedGroup::Group(title) => title == &g.title,
-                    _ => false,
-                };
+                // 1. All groups
                 opts.push(DropDownOption::new(
-                    &format!("grp:{}", g.title),
-                    html! { <>{ g.title.clone() }{ format!(" ({})", g.channels.len()) }</> },
-                    is_sel,
+                    "__all__",
+                    html! { <>{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_ALL") }{ format!(" ({total_items})") }</> },
+                    *selected_group == SelectedGroup::All,
                 ));
-            }
-        }
 
-        Rc::new(opts)
-    };
+                // 2. Without EPG (live only)
+                if active_cluster == XtreamCluster::Live {
+                    let without_epg_count = *without_epg_count;
+                    opts.push(DropDownOption::new(
+                        "__without_epg__",
+                        html! { <>{ "⚠ " }{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_WITHOUT_EPG") }{ format!(" ({without_epg_count})") }</> },
+                        *selected_group == SelectedGroup::WithoutEpg,
+                    ));
+                }
+
+                // 3. Edited
+                let edited_count = *edited_count;
+                opts.push(DropDownOption::new(
+                    "__edited__",
+                    html! { <>{ "✎ " }{ translate.t("LABEL.EXPLORER_VIRTUAL_GROUP_EDITED") }{ format!(" ({edited_count})") }</> },
+                    *selected_group == SelectedGroup::Edited,
+                ));
+
+                // 4. Every group with its count
+                if let Some(ref groups) = *groups_for_cluster {
+                    for g in groups.iter() {
+                        let is_sel = match selected_group {
+                            SelectedGroup::Group(title) => title == &g.title,
+                            _ => false,
+                        };
+                        opts.push(DropDownOption::new(
+                            &format!("grp:{}", g.title),
+                            html! { <>{ g.title.clone() }{ format!(" ({})", g.channels.len()) }</> },
+                            is_sel,
+                        ));
+                    }
+                }
+                Rc::new(opts)
+            }
+        },
+    );
 
     let handle_mobile_group_select = {
         let handle_select_group = handle_select_group.clone();
@@ -1241,7 +1262,7 @@ pub fn PlaylistExplorer() -> Html {
                                         <Select
                                             name="explorer_mobile_group"
                                             class="tp__explorer-group-select sel"
-                                            options={mobile_group_options}
+                                            options={(*mobile_group_options).clone()}
                                             on_select={handle_mobile_group_select}
                                             close_on_resize=true
                                         />
