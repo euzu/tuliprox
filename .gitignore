@@ -68,6 +68,8 @@ backend/app/Cargo.lock
 /.claude/
 /.mcp.json
 AGENTS.md
+# ...except the plugin authoring guide: it is project documentation, not local tooling.
+!/plugins/AGENTS.md
 GOAL.md
 
 # Local refactoring measurements (clippy inventories, cargo metadata, timings).
