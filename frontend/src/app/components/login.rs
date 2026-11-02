@@ -58,9 +58,8 @@ pub fn Login() -> Html {
         let password_ref = password_ref.clone();
         Callback::from(move |_: String| {
             if !authenticator.loading {
-                let fields_valid =
-                    username_ref.cast::<HtmlInputElement>().is_some_and(|input| input.report_validity())
-                        && password_ref.cast::<HtmlInputElement>().is_some_and(|input| input.report_validity());
+                let fields_valid = username_ref.cast::<HtmlInputElement>().is_some_and(|input| input.report_validity())
+                    && password_ref.cast::<HtmlInputElement>().is_some_and(|input| input.report_validity());
                 if fields_valid {
                     authenticator.run();
                 }

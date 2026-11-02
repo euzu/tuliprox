@@ -44,11 +44,11 @@ Sanity first: `GET $TP/api/v1/plugins` lists `matrix-notifier` with state `enabl
 
 Expected: `count` is `1` (it may be 2 if the boot refresh was still delivering; reset and retry
 once it is quiet). `last[0].body` starts with `[INFO] Playlist update finished: 1 input(s), 1 target(s)`, ends with
-`-- playlist.update.completed` (plus ` @ <instance>` when `messaging` names an instance), and `formatted_body`
-starts with `<strong>[INFO] `. `last[0].txn_id` has the form `tuliprox-<32 hex>-<unix seconds>`;
+`-- playlist.update.completed` (plus `@ <instance>` when `messaging` names an instance), and `formatted_body`
+starts with `<strong>[INFO]`. `last[0].txn_id` has the form `tuliprox-<32 hex>-<unix seconds>`;
 `txn_ids_seen` has exactly that one id with value `1`.
 
-Plugin side (`plog`): one line `sent [INFO] `...` as tuliprox-...` with the same txn id. The
+Plugin side (`plog`): one line `sent [INFO]`...`as tuliprox-...` with the same txn id. The
 access token appears nowhere (plugin logs redact it, and the plugin never logs it).
 
 Server log: no warning from the plugin. `grep matrix-notifier $RUN/server.log` shows no failure.
@@ -75,13 +75,13 @@ Retries visible in three places:
   at about +0 s, +5 s, +15 s, +35 s, +75 s, +155 s.
 - `$RUN/work/notification_outbox.json`: one entry with `"pending": ["plugin.matrix-notifier"]`,
   `attempts` rising and `next_attempt_at` moving out by the doubling backoff.
-- `plog`: `will retry `...` (tuliprox-<fp>-<T0>): homeserver answered 503 ...`; the txn id is
+- `plog`: `will retry`...`(tuliprox-<fp>-<T0>): homeserver answered 503 ...`; the txn id is
   IDENTICAL on every line (it keeps the first attempt's timestamp).
 
 `stats` while down: `count` `0`, `attempts` rising, `rejected` `{"503": N}`, and `txn_ids_seen`
 holds one id with value N.
 
-3. Bring the homeserver back: `curl -s -X POST $HS/_mode -d '{"fail":null}'`.
+1. Bring the homeserver back: `curl -s -X POST $HS/_mode -d '{"fail":null}'`.
 
 Expected at the next retry: `count` `1`, `rejected` stops growing, `plog` shows
 `sent [INFO] ... as <the same txn id>`, `notification_outbox.json` no longer holds the entry
@@ -96,7 +96,7 @@ Expected at the next retry: `count` `1`, `rejected` stops growing, `plog` shows
 Expected: `count` is `1` already, `attempts` is 3 or more, `rejected` `{"503": N}`, and `txn_ids_seen`
 has ONE id with value N (every retry reused it). No second message appears.
 
-3. `curl -s -X POST $HS/_mode -d '{"fail_after_store":null}'` and wait for the next retry.
+1. `curl -s -X POST $HS/_mode -d '{"fail_after_store":null}'` and wait for the next retry.
 
 Expected: that retry answers 200 with the same `event_id`, `count` stays `1`, and the outbox
 entry is gone. One notification, one message, despite N attempts.
@@ -111,7 +111,7 @@ Kill the mock (`kill %1` or the pid), `refresh`, wait for one retry: `plog` show
 
 `curl -s -X POST $HS/_reset; curl -s -X POST $HS/_mode -d '{"rate_limit":1,"retry_after_ms":3000}'`, `refresh`.
 
-Expected: `plog` shows `rate limited, retry `...` (tuliprox-...) in 3s`; the second attempt
+Expected: `plog` shows `rate limited, retry`...`(tuliprox-...) in 3s`; the second attempt
 comes about 3 s after the first (not the 5 s default backoff: a provider delay wins), and then
 `count` is `1` with the same txn id. `rejected` is `{"429": 1}`.
 
@@ -120,7 +120,7 @@ comes about 3 s after the first (not the 5 s default backoff: a provider delay w
 `curl -s -X POST $HS/_reset; curl -s -X POST $HS/_mode -d '{"rate_limit":0,"fail":null}'`, restart
 the mock with `--token other` (or change `access_token` in the settings), `refresh`.
 
-Expected: the mock answers 401, `plog` shows `refused `...`: homeserver answered 401: M_UNKNOWN_TOKEN: ...`,
+Expected: the mock answers 401, `plog` shows `refused`...`: homeserver answered 401: M_UNKNOWN_TOKEN: ...`,
 `server.log` shows `notification_permanently_rejected` for `plugin.matrix-notifier` ONCE, and the
 outbox entry is gone with no retry.
 
@@ -184,5 +184,5 @@ it as delivered).
    `"********"` keeps the stored one). `refresh`.
    Expected: no `matrix-notifier` line in `plog`, `stats` `attempts` unchanged. The host skipped it.
 2. Remove `routing.min_severity`, set the plugin `min_severity: warn`. `refresh`.
-   Expected: `plog` has `skipped `...`: INFO is below min_severity Warn`, `stats` `attempts`
+   Expected: `plog` has `skipped`...`: INFO is below min_severity Warn`, `stats` `attempts`
    unchanged (nothing sent), the outbox entry is gone. The plugin skipped it.

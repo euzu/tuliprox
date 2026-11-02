@@ -131,7 +131,7 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 1. `runtime.rs`: shared Engine, epoch ticker, `InstancePre` cache, store limits.
 2. `host_fns.rs`: log (rate-limited + ring buffer), kv (`tuliprox-btree` per plugin per §18 Q10,
-  + quotas), unrestricted-destination `wasi:http` outbound composed from the Phase 0A
+  \+ quotas), unrestricted-destination `wasi:http` outbound composed from the Phase 0A
   bounded transport/executor (size and header caps, cancellation, deadlines,
   redirect credential stripping, concurrency/rate limits, retry safety and
   breaker), cache-image (`image_cache.rs`, hash store + quota).
@@ -342,7 +342,7 @@ reuse table). The items are independent and can run as parallel lanes (§19).
     save) and plugin `config_tab`s (schema-driven or sandboxed frame).
  6. Plugin metrics rendered in the existing dashboard stats/metrics cards
     (label, value, unit, severity accent).
- - *W6b status (2026-10-31): items 0–6 and 3a **built and linted, untested**;
+   *W6b status (2026-10-31): items 0–6 and 3a **built and linted, untested**;
    item 7 as an unpublished package directory (`packages/plugin-ui-types/`,
    `"private": true`).* Seen working in a served UI with the `ui-demo`
    fixture: menu page, config section, schema config tab, extension field in
@@ -394,21 +394,31 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 9 — Repository Marketplace *(after Phase 8)*
 
- 1. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Define a versioned `marketplace.json` format at the root of each repository.
+ 1. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one
+    pre-existing upstream crash, history §2.6 W9).*
+    Define a versioned `marketplace.json` format at the root of each repository.
     A source is configured by the direct HTTPS/raw URL to that file; Tuliprox
     does not clone repositories or resolve Git-provider default branches.
- 2. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Catalog entries describe plugins and releases: ID, name, description,
+ 2. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one
+    pre-existing upstream crash, history §2.6 W9).*
+    Catalog entries describe plugins and releases: ID, name, description,
     author, license, category, version, HTTPS package URL, and minimum
     Tuliprox/plugin API compatibility, requested capabilities, and changelog.
     No publisher-provided package hash, signing key, or signature is included.
- 3. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Add multiple repository sources to the existing plugin config, with
+ 3. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one
+    pre-existing upstream crash, history §2.6 W9).*
+    Add multiple repository sources to the existing plugin config, with
     add/edit/enable/disable/remove controls in both config and UI. Both surfaces
     update the same persisted settings. Cache catalogs and show sync time/errors.
- 4. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Add repository/catalog management endpoints and a Marketplace UI for
+ 4. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one
+    pre-existing upstream crash, history §2.6 W9).*
+    Add repository/catalog management endpoints and a Marketplace UI for
     browsing, searching, selecting a compatible release, and reviewing its
     metadata/capabilities before install. Reuse existing validation, approval,
     and enable flows; calculate the installed hash locally during approval.
- 5. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one pre-existing upstream crash, history §2.6 W9).* Record the selected source and installed version. If an ID exists in
+ 5. ✅ *W9 (2026-11-01): built + linted; manual checks 1–3 + UI run on a live server against a local test marketplace; tests T0–T5 pass (one
+    pre-existing upstream crash, history §2.6 W9).*
+    Record the selected source and installed version. If an ID exists in
     multiple sources, require an explicit source choice. Removing a source
     leaves its installed plugins in place.
     - *Exit criteria:* add a source through either config or UI, browse it, and
@@ -417,14 +427,20 @@ reuse table). The items are independent and can run as parallel lanes (§19).
 
 ### Phase 10 — Updates and Boot Automation *(after Phase 9)*
 
- 1. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests written, not run (awaiting the owner's test approval).* Add manual update checks and a global `auto_update_on_boot` option, exposed
+ 1. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests
+    written, not run (awaiting the owner's test approval).*
+    Add manual update checks and a global `auto_update_on_boot` option, exposed
     in config and UI and defaulting to `false`. Keep version pinning available
     for plugins that should not move automatically.
- 2. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests written, not run (awaiting the owner's test approval).* On boot, check for updates to already-installed, enabled plugins from their
+ 2. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests
+    written, not run (awaiting the owner's test approval).*
+    On boot, check for updates to already-installed, enabled plugins from their
    configured source. Use a strict time budget without gating Tuliprox startup;
    if the check/download misses the budget or the source fails, start the
    current plugin and retry on the next boot.
- 3. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests written, not run (awaiting the owner's test approval).* Validate compatibility and package contents, stage and atomically activate
+ 3. ✅ *W10 (2026-11-01): built + linted; manual checks 1–8 run on a live server against a local test marketplace (history §2.6 W10); tests
+    written, not run (awaiting the owner's test approval).*
+    Validate compatibility and package contents, stage and atomically activate
     the update, then record the new locally computed hash. Do not silently grant
     new capabilities; require the existing admin approval flow if they change.
     Roll back to the prior package if activation fails. Never install or enable

@@ -60,7 +60,7 @@ print(d if not isinstance(d,(dict,list)) else json.dumps(d))' "$1"; }
 ## 2. Settings (`config-schema.json` and the secret)
 
 1. `curl -s $API/plugins/sports-enricher/settings`. Expect `api_key` as `********`, `api_base_url`, `leagues`, `group_emoji: true`.
-2. Config page, plugin section (web UI at http://127.0.0.1:18980/): the SchemaForm shows four fields; the API key is a password
+2. Config page, plugin section (web UI at <http://127.0.0.1:18980/>): the SchemaForm shows four fields; the API key is a password
    field with no default and the leagues are a list.
 
 ## 3. Playlist, EPG, VOD and metrics (server outputs)
@@ -126,7 +126,8 @@ name mentions, the generic logo of the sport.
 
 ### 3.5 Synthetic EPG (`enrich-programmes`)
 
-`curl -s "$S/xmltv.php?$U"` (UTC server timezone). Expect `<programme>` entries whose `title` is the match and whose `start` looks like `20261101204500 +0000`:
+`curl -s "$S/xmltv.php?$U"` (UTC server timezone). Expect `<programme>` entries whose `title` is the match and whose `start` looks like
+`20261101204500 +0000`:
 
 | channel id | programmes added by the plugin |
 | --- | --- |
@@ -187,7 +188,7 @@ into `details` for that reason, and skips a record with no `details`.
 
 ## 4. UI (web UI, isolated browser context)
 
-Boot without `TULIPROX_PLUGIN_FROZEN_CLOCK`, mock without `--base`, then open http://127.0.0.1:18980/ in a fresh
+Boot without `TULIPROX_PLUGIN_FROZEN_CLOCK`, mock without `--base`, then open <http://127.0.0.1:18980/> in a fresh
 `browser.newContext()` (the shared Playwright browser is driven by other sessions).
 
 - **Menu `Sports Guide`** (title from `menu.title`; `de` and `fr` in the language switch give `Sport-Guide`, `Guide du sport`):

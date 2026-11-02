@@ -1537,6 +1537,7 @@ belongs in a **task** that the existing scheduler runs off the refresh path.
   So tasks are a **unit** variant `ScheduleTaskType::PluginTask` plus two
   optional fields on the schedule entry, validated together in `Prepare`
   against the registry:
+
   ```yaml
   schedules:
     - schedule: "0 0 4 * * *"
@@ -1544,6 +1545,7 @@ belongs in a **task** that the existing scheduler runs off the refresh path.
       plugin: sports-enricher
       task: refresh-fixtures
   ```
+
   The manifest `default_schedule` only prefills the UI. Nothing runs until
   the operator adds the schedule entry, the same opt-in rule as strategy hooks.
 - **Execution.** A task gets its own instance (from the §7 memory budget),
@@ -2412,7 +2414,7 @@ Paths reflect the 18-crate workspace and the split in §7.0. Revision 1's
 | `backend/app/src/api/endpoints/plugins_api.rs` | axum router following the existing `endpoints/` convention; delegates to `tuliprox_plugins::api` |
 | `backend/app/src/api/tasks/plugin_event_bridge.rs` | `subscribe_filtered(mask)` subscriber, modelled directly on the existing [`notification_bridge.rs`](backend/app/src/api/tasks/notification_bridge.rs) — same `Lagged`/`Closed` handling, same `record_lag` |
 | `shared/src/model/config/plugins.rs` | `PluginsConfigDto` (YAML/UI-facing), following the DTO → runtime `From` pattern of `rate_limit.rs` |
-| `backend/core/src/model/config/plugins.rs` | runtime `PluginsConfig` (`enabled`, `directory`, global clamps as `Bytes`/`Millis`, per-plugin entries: id/enabled/priority/settings); `impl Prepare` with a chosen `Ctx<'a>`. **Frozen W2 schema** (YAML key → runtime type, default): `enabled` → `bool`, `false`; `directory` → `String`, `plugins` under the config dir (Phase S); `max_total_memory` → `Bytes`, `512MB`; `max_memory` → `Bytes`, `128MB` (per-instance ceiling); `max_exec` → `Millis`, `5s`; `max_task_exec` → `Millis`, `10m`; `max_instances` → `u16`, `4`; `plugins: [{id, enabled (true), priority (100, lower runs first), settings (JSON object, string values may be `${env:VAR}`)}]`. Runtime keeps settings **unresolved**. `resolved_settings()` expands `${env:…}` through `resolve_env_var` at instantiation, so the runtime config report and the DTO round-trip never see resolved secrets |
+| `backend/core/src/model/config/plugins.rs` | runtime `PluginsConfig` (`enabled`, `directory`, global clamps as `Bytes`/`Millis`, per-plugin entries: id/enabled/priority/settings); `impl Prepare` with a chosen `Ctx<'a>`. **Frozen W2 schema** (YAML key → runtime type, default): `enabled` → `bool`, `false`; `directory` → `String`, `plugins` under the config dir (Phase S); `max_total_memory` → `Bytes`, `512MB`; `max_memory` → `Bytes`, `128MB` (per-instance ceiling); `max_exec` → `Millis`, `5s`; `max_task_exec` → `Millis`, `10m`; `max_instances` → `u16`, `4`; `plugins: [{id, enabled (true), priority (100, lower runs first), settings (JSON object, string values may be`${env:VAR}`)}]`. Runtime keeps settings **unresolved**. `resolved_settings()` expands `${env:…}` through `resolve_env_var` at instantiation, so the runtime config report and the DTO round-trip never see resolved secrets |
 | `backend/messaging/src/channels/plugin.rs` | `PluginChannel`: `impl NotificationChannel`, joins the `Channel` enum and its `delegate!` arms (§7) |
 | `backend/plugins/src/tasks.rs` | task registry from manifests, `run_task` with task deadline + concurrency policy, `kv_generation` bump, stats (rev 4.2) |
 | `backend/plugins/src/rpc.rs` | `rpc.call` dispatch: export lookup, `input_schema` validation, result cap, read/write kind |
@@ -2821,7 +2823,8 @@ critical code stays in the core.
 4. **Frontend-side WASM plugins** — v1 uses JS in sandboxed frames for custom UI;
    a later version could allow Yew-compatible WASM UI plugins, but there is no
    stable ABI for that today. Revisit post-v1.
-5. **Marketplace/registry** — ~~out of scope; directory drop + upload only.~~ *Superseded by rev 4.3:* a repository marketplace is Phase 9 (W9), boot updates Phase 10; see §1 *Post-v1 marketplace direction* and §18 *W9 seam freeze*.
+5. **Marketplace/registry** — ~~out of scope; directory drop + upload only.~~ *Superseded by rev 4.3:* a repository marketplace is Phase 9
+   (W9), boot updates Phase 10; see §1 *Post-v1 marketplace direction* and §18 *W9 seam freeze*.
 6. **`InputType` / `TargetType` variants.** Both are closed `EnumString` + serde
    enums, and `TargetType::capabilities()` is an exhaustive table by design.
    Rev 4 adds a cost: `InputType` derives `Copy`, `Default`, `EnumIter`,
@@ -2959,12 +2962,12 @@ critical code stays in the core.
     Trakt and TMDB-Trending adapters. Is a plugin curation adapter
     (`fetch-candidates` → kernel) in scope for v1, or post-v1? It is the
     natural extraction path for Trakt (§15), but it is a new hook interface.
-13. **Task triggers beyond cron.** Should tasks also fire on events (e.g. after
+12. **Task triggers beyond cron.** Should tasks also fire on events (e.g. after
     `playlist.update`) via the manifest, or must event-driven work stay in
     `on-event`? v1: cron + manual only.
-14. **MCP for plugin tasks.** v1 never exposes "run task" as an MCP tool. Revisit
+13. **MCP for plugin tasks.** v1 never exposes "run task" as an MCP tool. Revisit
     if operators ask for assistant-driven maintenance, behind write mode.
-12. **Probe success events.** Is there a v1 consumer for a
+14. **Probe success events.** Is there a v1 consumer for a
     `stream.probe.completed` kind? If not, drop `on-probe-result` from the v1
     WIT and keep it additive for 1.x.
 
@@ -3636,6 +3639,7 @@ that exports it targets a W8+ host, which its manifest `tuliprox:` range must
 say.
 
 **Settings versions.**
+
 - Schema version: an optional top-level integer `"version"` (≥ 1) in the
   settings schema, defaulting to 1. It is accepted by the §11 subset.
 - Stored version: `settings_version` on the `plugins.plugins[]` entry. It is
@@ -3660,6 +3664,7 @@ hashed (no TOCTOU between hashing and compiling). Trust on first use (an
 enabled entry with no pin) is unchanged and still undecided (W7 item (e)).
 
 **Registry API frozen for D (C implements in `registry.rs`, D calls).**
+
 - `Registry::swap_pin(&self, id, pin: ApprovalPin) -> io::Result<Option<ApprovalPin>>`
   writes the new pin and returns the previous one.
 - `Registry::restore_pin(&self, id, previous: Option<ApprovalPin>) -> io::Result<()>`
@@ -3671,6 +3676,7 @@ enabled entry with no pin) is unchanged and still undecided (W7 item (e)).
   `run_candidate_init`.
 
 **Safe replacement (D).**
+
 - An update is an upload of an installed id. It stages and runs the full
   validation, and the review carries `capability_diff` against the installed
   pin. `mcp` is never carried over: the approve body decides it.
@@ -3690,12 +3696,14 @@ enabled entry with no pin) is unchanged and still undecided (W7 item (e)).
   and runs the same activation check. The summary shows `rollback`.
 
 **DTO additions (seam, `shared/src/model/plugins_dto.rs`).**
+
 - `PluginSummaryDto` gains `settings_review` (filled by C) and `update` and
   `rollback` (filled by D).
 - New `PluginUpdateDto`, `PluginRollbackDto` and `PluginCapabilityDiffDto`.
 - `PluginUploadReviewDto` gains `capability_diff` (filled by D).
 
 **Ownership (W8).**
+
 - C: `registry.rs`, `settings.rs`, `api.rs`, `manifest/**`, `plugins_settings_api.rs`,
   `app_state/plugin_state.rs`, `core/src/model/config/plugins.rs`,
   `plugins/plugin-sdk/**`, `plugins/plugin-sdk-macros/**`, `plugin_settings.rs`,
@@ -3785,6 +3793,7 @@ Schema is `plugins/plugin-api/marketplace.schema.json` (published; lane F).
   before incompatible.
 
 **Fetch policy (`marketplace/fetch.rs`).**
+
 - `https://` only for the catalog URL, the package URL and every redirect hop
   (this subsumes the downgrade check), manual redirects (limit 5) on a
   no-redirect client, no credentials sent. `file://` and every other scheme are
@@ -3891,6 +3900,7 @@ patch (`.git/w10-status/w10-seam.patch`) carries the config fields, the update
 DTOs, the three event kinds and this section.
 
 **Re-anchor facts (W10).**
+
 - `install.rs`: an update's approve runs `begin_replacement` → `FsSwap::prepare`
   (sweeps this id's `.swap~…` leftovers, copies the current package to
   `.swap~new~`, moves the old prior to `.swap~bak~`, the copy to
@@ -3943,6 +3953,7 @@ package that is not a marketplace update of the same plugin.
 
 **Eligibility (K).** An update is *eligible* when it has no blocker
 (`PluginUpdateBlockerDto`):
+
 - capabilities ⊆ the pin's capabilities (else `capabilities_added`);
 - if the pin has `mcp: true`, the release's MCP-exposed rpc exports ⊆ the
   installed version's (else `mcp_exposure_widened`); the unattended path
@@ -4007,6 +4018,7 @@ headroom. Emitted by the boot runner's app glue and by `POST …/{id}/update`.
 `RESERVED_IDS` (`install.rs`) gains `updates` in the seam, so `/plugins/updates` never collides with `/plugins/{id}`.
 
 **Ownership (W10).**
+
 - K: `backend/plugins/src/marketplace/updates.rs` (new), `marketplace/mod.rs`,
   `migration.rs` (the dry run), tests `backend/plugins/tests/updates.rs`.
 - B: `install.rs` (+ `install/*`), `tasks.rs` (running-task count), new

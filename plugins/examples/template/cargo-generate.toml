@@ -7,4 +7,4 @@ ignore = [".git", "target", "Cargo.lock"]
 
 [placeholders.sdk_path]
 type = "string"
-prompt = "Absolute path to the tuliprox plugins/plugin-sdk/ directory (for example /home/you/tuliprox/plugin-sdk)"
+prompt = "Absolute path to the tuliprox plugins/plugin-sdk/ directory (for example /srv/tuliprox/plugin-sdk)"
