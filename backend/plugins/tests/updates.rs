@@ -119,8 +119,12 @@ fn expect(id: &str, version: &str, source: &str) -> MarketplaceExpect {
 /// Install `bytes` as a marketplace install from `source`.
 async fn install_from(env: &Env, id: &str, version: &str, bytes: Vec<u8>, source: &str, caps: &[&str], mcp: bool) {
     let guard = env.system.install_lock().await;
-    env.system.api_upload_from_marketplace(&guard, bytes, expect(id, version, source)).await.expect("stage");
-    env.system.api_approve(&guard, id, &approve_body(caps, mcp), &env.config).await.expect("approve");
+    let review =
+        env.system.api_upload_from_marketplace(&guard, bytes, expect(id, version, source)).await.expect("stage");
+    // The approve body must echo the hash the review showed, or the install is refused.
+    let mut body = approve_body(caps, mcp);
+    body.wasm_sha256 = review.wasm_sha256;
+    env.system.api_approve(&guard, id, &body, &env.config).await.expect("approve");
 }
 
 /// Install `demo` 1.0.0 from the main source.
