@@ -373,7 +373,7 @@ fn prepare_target_applies_after_epg_mapping_before_sampling_stats() {
                 smart_dto.prepare().expect("smart config");
                 let mut input = ConfigInput::from(ConfigInputDto::default());
                 input.name = "input".intern();
-                input.epg = Some(EpgConfig {
+                input.epg = Some(EpgConfig { configured_sources: None,
                     sources: vec![],
                     smart_match: Some(EpgSmartMatchConfig::from(smart_dto)),
                 });
@@ -467,7 +467,7 @@ fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
 
                 let mut input = ConfigInput::from(ConfigInputDto::default());
                 input.name = "input".intern();
-                input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+                input.epg = Some(EpgConfig { configured_sources: None, sources: vec![], smart_match: None });
                 let groups = vec![PlaylistGroup {
                     id: 1,
                     title: "Live".intern(),

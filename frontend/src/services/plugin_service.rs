@@ -9,10 +9,9 @@ use shared::{
     model::{
         MarketplaceDto, MarketplaceInstallDto, MarketplaceQueryDto, PluginApproveDto, PluginBootReportDto,
         PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginRepositoryAddDto, PluginRepositoryDto,
-        PluginRepositoryInfoDto,
-        PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto, PluginSummaryDto,
-        PluginTaskDto, PluginUpdatePolicy, PluginUpdatePolicyDto, PluginUpdateRequestDto, PluginUpdateResultDto,
-        PluginUpdateSettingsDto, PluginUpdatesDto, PluginUploadErrorDto, PluginUploadReviewDto,
+        PluginRepositoryInfoDto, PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto,
+        PluginSummaryDto, PluginTaskDto, PluginUpdatePolicy, PluginUpdatePolicyDto, PluginUpdateRequestDto,
+        PluginUpdateResultDto, PluginUpdateSettingsDto, PluginUpdatesDto, PluginUploadErrorDto, PluginUploadReviewDto,
     },
     utils::{concat_path, concat_path_leading_slash},
 };

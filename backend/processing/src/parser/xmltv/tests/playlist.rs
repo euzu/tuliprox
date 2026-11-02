@@ -232,6 +232,7 @@ fn epg_priority_merge_preserves_exact_id_match_when_smart_match_is_enabled() {
         smart_cfg.prepare().expect("smart match config");
         let tv_guide = TVGuide::new(vec![xmltv_source(epg_path, 0, false)]);
         let mut id_cache = EpgIdCache::new(Some(&tuliprox_core::model::EpgConfig {
+            configured_sources: None,
             sources: vec![],
             smart_match: Some(EpgSmartMatchConfig::from(smart_cfg)),
         }));

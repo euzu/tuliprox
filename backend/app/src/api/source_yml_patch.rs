@@ -1009,6 +1009,8 @@ pub(crate) fn merge_runtime_document(
         .unwrap_or(0);
     for (input, updated) in next.inputs.iter_mut().zip(doc.inputs) {
         let input = Arc::make_mut(input);
+        let root_changed =
+            input.url != updated.url || input.username != updated.username || input.password != updated.password;
         input.url = updated.url;
         input.username = updated.username;
         input.password = updated.password;
@@ -1044,6 +1046,9 @@ pub(crate) fn merge_runtime_document(
                 converted.push(runtime);
             }
             input.aliases = Some(converted);
+        }
+        if root_changed {
+            input.refresh_auto_epg_sources()?;
         }
     }
     next.group_lookup = shared::model::provider_saturation::build_group_lookup(&next.inputs);

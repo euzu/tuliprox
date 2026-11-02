@@ -9,10 +9,10 @@ use shared::{
     error::TuliproxError,
     foundation::Filter,
     model::{
-        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
-        FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerInputConfigDto,
-        MediaServerLibrarySelector, PluginHook, ProviderAccountIdentity, StagedInputType, StalkerAuthMode,
-        StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, EpgConfigDto,
+        EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, PluginHook, ProviderAccountIdentity, StagedInputType,
+        StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
         get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
@@ -157,6 +157,53 @@ impl MediaServerInputConfig {
 }
 
 impl ConfigInput {
+    /// Re-resolves declared XMLTV `auto` sources using the current account and alias data.
+    pub fn refresh_auto_epg_sources(&mut self) -> Result<(), TuliproxError> {
+        let Some(epg) = self.epg.as_ref() else {
+            return Ok(());
+        };
+        let Some(sources) = epg.configured_sources.as_ref() else {
+            return Ok(());
+        };
+        if !sources
+            .iter()
+            .any(|source| source.source_type == EpgSourceTypeDto::Xmltv && source.url.eq_ignore_ascii_case("auto"))
+        {
+            return Ok(());
+        }
+        let mut input = ConfigInputDto {
+            name: Arc::clone(&self.name),
+            input_type: self.input_type,
+            url: self.url.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            aliases: self.aliases.as_ref().map(|aliases| {
+                aliases
+                    .iter()
+                    .map(|alias| ConfigInputAliasDto {
+                        id: alias.id,
+                        name: Arc::clone(&alias.name),
+                        url: alias.url.clone(),
+                        username: alias.username.clone(),
+                        password: alias.password.clone(),
+                        priority: alias.priority,
+                        max_connections: alias.max_connections,
+                        exp_date: alias.exp_date,
+                        enabled: alias.enabled,
+                        stalker: None,
+                    })
+                    .collect()
+            }),
+            epg: Some(EpgConfigDto { sources: Some(sources.clone()), ..Default::default() }),
+            ..Default::default()
+        };
+        input.prepare_epg(true)?;
+        if let (Some(epg), Some(prepared)) = (self.epg.as_mut(), input.epg) {
+            epg.sources = prepared.t_sources.iter().map(crate::model::EpgSource::from).collect();
+        }
+        Ok(())
+    }
+
     /// The `media_server` block of this input, or a discovery error naming `provider`.
     fn media_server_config(&self, provider: &'static str) -> Result<&MediaServerInputConfig, MediaServerError> {
         self.media_server.as_ref().ok_or_else(|| {

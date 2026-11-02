@@ -200,7 +200,9 @@ fn unique_id(base: &str, taken: &[String]) -> String {
     if !taken.iter().any(|id| id == base) {
         return base.to_string();
     }
-    (2usize..)
+    // Each taken id blocks at most one suffix number, so `taken.len() + 3` numbers
+    // always contain a free one; the bound keeps the search finite for clippy.
+    (2..taken.len() + 3)
         .map(|number| {
             let suffix = format!("-{number}");
             let stem: String = base.chars().take(SOURCE_ID_MAX_LEN - suffix.len()).collect();
@@ -215,13 +217,10 @@ fn unique_id(base: &str, taken: &[String]) -> String {
 #[cfg(feature = "plugins")]
 fn source_identity(catalog_name: Option<&str>, resolved_url: &str, taken: &[String]) -> (String, String) {
     let host = host_of(resolved_url);
-    let name = catalog_name
-        .map(str::to_string)
-        .or_else(|| host.clone())
-        .unwrap_or_else(|| "Marketplace source".to_string());
-    let base = id_from_text(&name)
-        .or_else(|| host.as_deref().and_then(id_from_text))
-        .unwrap_or_else(|| "source".to_string());
+    let name =
+        catalog_name.map(str::to_string).or_else(|| host.clone()).unwrap_or_else(|| "Marketplace source".to_string());
+    let base =
+        id_from_text(&name).or_else(|| host.as_deref().and_then(id_from_text)).unwrap_or_else(|| "source".to_string());
     (unique_id(&base, taken), name)
 }
 

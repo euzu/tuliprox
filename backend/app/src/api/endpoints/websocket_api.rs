@@ -850,6 +850,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
             ActiveUserConnectionChange, ConfigType, ConnectionDenied, EventKind, NotificationDeadLetter,
