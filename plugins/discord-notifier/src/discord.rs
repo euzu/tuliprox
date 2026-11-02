@@ -44,6 +44,14 @@ const TITLE_LIMIT: usize = 256;
 const DESCRIPTION_LIMIT: usize = 4096;
 /// Embed footer text limit.
 const FOOTER_LIMIT: usize = 2048;
+/// Embed field name limit.
+const FIELD_NAME_LIMIT: usize = 256;
+/// Embed field value limit.
+const FIELD_VALUE_LIMIT: usize = 1024;
+/// Fields in one embed.
+const MAX_FIELDS: usize = 25;
+/// Characters in one embed: title, description, footer and every field name and value together.
+const EMBED_TOTAL_LIMIT: usize = 6000;
 
 /// No provider may park a retry for longer than this.
 const MAX_RETRY_AFTER_SECS: u64 = 24 * 60 * 60;
@@ -56,21 +64,66 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(25);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Style {
-    /// One embed: title, body, severity colour, instance footer.
+    /// One embed: title, the event's sections as fields (else the body),
+    /// severity colour, instance footer and time.
     #[default]
     Embed,
     /// Plain `content`.
     Text,
 }
 
-/// The one field of the event JSON this plugin reads besides the notification.
+/// A titled block of plain-text lines of the event (`sections` of the event JSON).
 #[derive(Deserialize)]
+struct Section {
+    #[serde(default)]
+    heading: String,
+    #[serde(default)]
+    lines: Vec<String>,
+}
+
+/// What this plugin reads of the event JSON besides the notification itself.
+#[derive(Deserialize, Default)]
 struct Event {
     #[serde(default)]
     instance: Option<String>,
+    /// Unix seconds.
+    #[serde(default)]
+    timestamp: Option<i64>,
+    #[serde(default)]
+    sections: Vec<Section>,
 }
 
 fn cut(text: &str, limit: usize) -> String { text.chars().take(limit).collect() }
+
+/// `text` with the characters Discord reads as markdown escaped, so a playlist
+/// called `my_list*` shows as written. `>` and `#` only count at the start of a
+/// line, so `a -> b` stays readable. At most `limit` characters come out and an
+/// escape is never cut from its character.
+fn escape_cut(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0;
+    let mut line_start = true;
+    for ch in text.chars() {
+        let needs_escape = match ch {
+            '\\' | '*' | '_' | '~' | '`' | '|' | '[' | ']' => true,
+            '>' | '#' => line_start,
+            _ => false,
+        };
+        let width = if needs_escape { 2 } else { 1 };
+        if count + width > limit {
+            break;
+        }
+        if needs_escape {
+            out.push('\\');
+        }
+        out.push(ch);
+        count += width;
+        line_start = ch == '\n' || (line_start && ch.is_whitespace());
+    }
+    out
+}
+
+fn chars(text: &str) -> usize { text.chars().count() }
 
 const fn color(severity: Severity) -> u32 {
     match severity {
@@ -80,31 +133,123 @@ const fn color(severity: Severity) -> u32 {
     }
 }
 
+/// `text` escaped and cut to `limit` characters, ending in `…` when something was cut.
+fn escape_ellipsis(text: &str, limit: usize) -> String {
+    let full = escape_cut(text, usize::MAX);
+    if chars(&full) <= limit {
+        return full;
+    }
+    format!("{}…", escape_cut(text, limit.saturating_sub(1)))
+}
+
+/// The sections as embed fields, within Discord's limits: at most 25 fields, 1024
+/// characters a value, and `budget` characters for all of them together. A
+/// section with no line is skipped, a value that does not fit ends in `…`, and
+/// what had to be left out is said in a last field.
+fn section_fields(sections: &[Section], budget: usize) -> Vec<serde_json::Value> {
+    /// Characters kept back for the closing note.
+    const NOTE_RESERVE: usize = 64;
+    let usable: Vec<(&str, String)> = sections
+        .iter()
+        .filter_map(|section| {
+            let lines: Vec<&str> =
+                section.lines.iter().map(|line| line.trim_end()).filter(|line| !line.trim().is_empty()).collect();
+            (!lines.is_empty()).then(|| (section.heading.trim(), lines.join("\n")))
+        })
+        .collect();
+    // One slot stays free for the note when there are more sections than slots.
+    let slots = if usable.len() > MAX_FIELDS { MAX_FIELDS - 1 } else { MAX_FIELDS };
+    let mut left = budget;
+    let mut fields = Vec::new();
+    for (heading, text) in usable.iter().take(slots) {
+        let name = if heading.is_empty() { "\u{200b}".to_string() } else { escape_cut(heading, FIELD_NAME_LIMIT) };
+        let room = left.saturating_sub(NOTE_RESERVE);
+        if chars(&name) + 2 > room {
+            break;
+        }
+        let value = escape_ellipsis(text, FIELD_VALUE_LIMIT.min(room - chars(&name)));
+        left = left.saturating_sub(chars(&name) + chars(&value));
+        fields.push(serde_json::json!({ "name": name, "value": value, "inline": false }));
+    }
+    let omitted = usable.len() - fields.len();
+    if omitted > 0 {
+        fields.push(serde_json::json!({
+            "name": "…",
+            "value": format!("{omitted} more section(s) not shown"),
+            "inline": false,
+        }));
+    }
+    fields
+}
+
 /// The request body for `msg`.
 pub fn request_body(msg: &Notification, style: Style) -> String {
     match style {
-        Style::Text => {
-            serde_json::json!({ "content": cut(&msg.body, CONTENT_LIMIT), "allowed_mentions": { "parse": [] } })
-                .to_string()
-        }
+        Style::Text => serde_json::json!({
+            "content": escape_cut(&msg.body, CONTENT_LIMIT),
+            "allowed_mentions": { "parse": [] },
+        })
+        .to_string(),
         Style::Embed => {
-            let instance = serde_json::from_str::<Event>(&msg.payload).ok().and_then(|event| event.instance);
-            let footer = instance.filter(|name| !name.trim().is_empty()).unwrap_or_else(|| "tuliprox".to_string());
-            // A body that only repeats the title adds nothing under it.
-            let description =
-                if msg.body.trim() == msg.title.trim() { String::new() } else { cut(&msg.body, DESCRIPTION_LIMIT) };
-            serde_json::json!({
-                "embeds": [{
-                    "title": cut(&msg.title, TITLE_LIMIT),
-                    "description": description,
-                    "color": color(msg.severity),
-                    "footer": { "text": cut(&footer, FOOTER_LIMIT) },
-                }],
-                "allowed_mentions": { "parse": [] },
-            })
-            .to_string()
+            let event = serde_json::from_str::<Event>(&msg.payload).unwrap_or_default();
+            let footer = event
+                .instance
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map_or_else(|| "tuliprox".to_string(), |name| cut(name, FOOTER_LIMIT));
+            let title = cut(&msg.title, TITLE_LIMIT);
+            // With sections the detail is in the fields: the body is the same
+            // facts as one text, so it is left out. Without them it is the detail.
+            let has_sections =
+                event.sections.iter().any(|section| section.lines.iter().any(|line| !line.trim().is_empty()));
+            let description = if has_sections || msg.body.trim() == msg.title.trim() {
+                String::new()
+            } else {
+                escape_cut(&msg.body, DESCRIPTION_LIMIT)
+            };
+            let budget = EMBED_TOTAL_LIMIT.saturating_sub(chars(&title) + chars(&description) + chars(&footer));
+            let mut embed = serde_json::json!({
+                "title": title,
+                "description": description,
+                "color": color(msg.severity),
+                "footer": { "text": footer },
+            });
+            if has_sections {
+                embed["fields"] = serde_json::Value::Array(section_fields(&event.sections, budget));
+            }
+            if let Some(time) = event.timestamp.and_then(iso8601) {
+                embed["timestamp"] = serde_json::Value::String(time);
+            }
+            serde_json::json!({ "embeds": [embed], "allowed_mentions": { "parse": [] } }).to_string()
         }
     }
+}
+
+/// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`, as Discord reads an embed time. `None`
+/// outside the years 0000-9999.
+fn iso8601(unix: i64) -> Option<String> {
+    let days = unix.div_euclid(86_400);
+    let rest = unix.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60))
+}
+
+/// The proleptic Gregorian date of a day count since 1970-01-01 (Howard
+/// Hinnant's `civil_from_days`, the inverse of [`days_from_civil`]).
+const fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
 }
 
 /// Post `msg` to the webhook `url` and say how the attempt ended.
@@ -414,6 +559,107 @@ mod tests {
         }
         let exact = "é".repeat(2000);
         assert_eq!(parsed(&note(&exact, "{}"), Style::Text)["content"], exact.as_str());
+    }
+
+    fn sectioned(sections: &str) -> Notification {
+        note("fallback body", &format!(r#"{{"instance":"tv-box","timestamp":784111777,"sections":{sections}}}"#))
+    }
+
+    #[test]
+    fn sections_become_fields_and_replace_the_body_text() {
+        let msg = sectioned(
+            r#"[{"heading":"Sources","lines":["demo-in (M3u)","1/2 -> 1/2 groups/channels, 0 error(s), 3 secs"]},
+                {"heading":"Targets","lines":["main: ok"]}]"#,
+        );
+        let embed = &parsed(&msg, Style::Embed)["embeds"][0];
+        assert_eq!(embed["description"], "", "the sections carry the body's facts");
+        let fields = embed["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0]["name"], "Sources");
+        assert_eq!(fields[0]["value"], "demo-in (M3u)\n1/2 -> 1/2 groups/channels, 0 error(s), 3 secs");
+        assert_eq!(fields[0]["inline"], false);
+        assert_eq!(fields[1]["name"], "Targets");
+        assert_eq!(embed["timestamp"], "1994-11-06T08:49:37Z");
+        assert_eq!(embed["footer"]["text"], "tv-box");
+    }
+
+    #[test]
+    fn an_event_without_sections_keeps_the_body_and_has_no_fields_key() {
+        let embed = &parsed(&note("the body", r#"{"sections":[]}"#), Style::Embed)["embeds"][0];
+        assert_eq!(embed["description"], "the body");
+        assert!(embed.get("fields").is_none());
+        assert!(embed.get("timestamp").is_none(), "no time in the event, none in the embed");
+    }
+
+    #[test]
+    fn markdown_in_names_is_escaped_in_fields_the_body_and_plain_content() {
+        let msg = sectioned(r#"[{"heading":"my_list*","lines":["a_b *c* ~d~ `e` |f| >g #h [i]"]}]"#);
+        let field = &parsed(&msg, Style::Embed)["embeds"][0]["fields"][0];
+        assert_eq!(field["name"], "my\\_list\\*");
+        assert_eq!(field["value"], "a\\_b \\*c\\* \\~d\\~ \\`e\\` \\|f\\| >g #h \\[i\\]");
+        assert_eq!(parsed(&note("x_y", "{}"), Style::Text)["content"], "x\\_y");
+        assert_eq!(parsed(&note("x_y", "{}"), Style::Embed)["embeds"][0]["description"], "x\\_y");
+    }
+
+    #[test]
+    fn a_quote_or_heading_marker_is_escaped_only_at_the_start_of_a_line() {
+        assert_eq!(escape_cut("a -> b # c", 100), "a -> b # c");
+        assert_eq!(
+            escape_cut("> quote\n# head\n  > indented\nx > y", 100),
+            "\\> quote\n\\# head\n  \\> indented\nx > y"
+        );
+    }
+
+    #[test]
+    fn empty_sections_and_blank_headings_are_handled() {
+        let msg = sectioned(
+            r#"[{"heading":"Empty","lines":[]},{"heading":"Blank","lines":["  ",""]},{"heading":" ","lines":["kept"]}]"#,
+        );
+        let fields = parsed(&msg, Style::Embed)["embeds"][0]["fields"].as_array().unwrap().clone();
+        assert_eq!(fields.len(), 1, "a section with no text is not a field");
+        assert_eq!(fields[0]["name"], "\u{200b}", "Discord needs a non-empty name");
+        assert_eq!(fields[0]["value"], "kept");
+        // Only empty sections: it is as if the event had none, so the body shows.
+        let embed = &parsed(&sectioned(r#"[{"heading":"Empty","lines":[]}]"#), Style::Embed)["embeds"][0];
+        assert_eq!(embed["description"], "fallback body");
+        assert!(embed.get("fields").is_none());
+    }
+
+    #[test]
+    fn a_long_value_is_cut_with_an_ellipsis_and_the_embed_stays_inside_discords_limits() {
+        let long = "x".repeat(3000);
+        let msg = sectioned(&format!(r#"[{{"heading":"Big","lines":["{long}"]}}]"#));
+        let field = &parsed(&msg, Style::Embed)["embeds"][0]["fields"][0];
+        let value = field["value"].as_str().unwrap();
+        assert_eq!(value.chars().count(), 1024);
+        assert!(value.ends_with('…'));
+
+        // 60 sections of 200 characters: far past 25 fields and 6000 characters.
+        let many: Vec<String> =
+            (0..60).map(|n| format!(r#"{{"heading":"Section {n}","lines":["{}"]}}"#, "y".repeat(200))).collect();
+        let embed = parsed(&sectioned(&format!("[{}]", many.join(","))), Style::Embed)["embeds"][0].clone();
+        let fields = embed["fields"].as_array().unwrap();
+        assert!(fields.len() <= 25, "{} fields", fields.len());
+        let total: usize =
+            ["title", "description"].iter().map(|key| embed[key].as_str().unwrap().chars().count()).sum::<usize>()
+                + embed["footer"]["text"].as_str().unwrap().chars().count()
+                + fields
+                    .iter()
+                    .map(|f| f["name"].as_str().unwrap().chars().count() + f["value"].as_str().unwrap().chars().count())
+                    .sum::<usize>();
+        assert!(total <= 6000, "{total} characters");
+        let last = fields.last().unwrap();
+        assert_eq!(last["name"], "…");
+        assert!(last["value"].as_str().unwrap().contains("more section(s) not shown"));
+    }
+
+    #[test]
+    fn dates_are_written_as_utc_iso_8601() {
+        assert_eq!(iso8601(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        assert_eq!(iso8601(784_111_777).as_deref(), Some("1994-11-06T08:49:37Z"));
+        assert_eq!(iso8601(951_782_400).as_deref(), Some("2000-02-29T00:00:00Z"));
+        assert_eq!(iso8601(-86_400).as_deref(), Some("1969-12-31T00:00:00Z"));
+        assert_eq!(iso8601(i64::MAX), None);
     }
 
     #[test]

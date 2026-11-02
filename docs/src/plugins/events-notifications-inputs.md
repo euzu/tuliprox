@@ -86,6 +86,13 @@ suppression and outbox as a built-in channel. Source: `backend/messaging/src/cha
   `max_per_hour` and `dedup_window_secs` (`plugins/examples/matrix-notifier/README.md`). An invalid block is ignored
   with a warning, and the defaults apply.
 - **Severity.** `info`, `warn` and `error` map to the plugin's levels. `critical` is delivered as `error`.
+- **Content.** `title` is a one-line summary and `body` the complete plain-text fallback. `payload` is the event as
+  JSON: `id`, `severity`, `timestamp` (Unix seconds), `instance` (when configured), `fields` (the typed payload of the
+  event) and `sections`. `sections` is the event's detail in a neutral form, a list of
+  `{ "heading": "Sources", "lines": ["..."] }` blocks of plain text without markup, for example the sources and targets
+  of a playlist update or the groups of a watch change. A plugin lays them out as it likes (Discord Notifier turns them
+  into embed fields); `body` carries the same facts as one text. An event with no detail beyond its body has no
+  `sections` key.
 - **Delivery results.** The guest returns one of three `DeliveryError` values, and the host maps them as follows
   (`backend/plugins/src/notify.rs`):
 

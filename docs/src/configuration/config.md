@@ -993,6 +993,10 @@ Every template sees a uniform `event` object, plus the legacy top-level keys doc
 * `{{event.title}}`: One-line summary. Always present.
 * `{{event.body}}`: Plain-text body. Always present.
 * `{{event.fields}}`: The typed payload for this event.
+* `{{event.sections}}`: The event's detail as neutral blocks of plain-text lines, each with a `heading` and `lines`
+  (for a playlist update: `Sources`, `Targets` and `Errors`; for a watch change: one block per list). The same on
+  every channel and absent when an event has no detail beyond its body, so one loop renders it anywhere:
+  `{{#each event.sections}}{{heading}}{{#each lines}}\n{{this}}{{/each}}{{/each}}`.
 * `{{event.timestamp}}`: Unix seconds. Use `{{timestamp}}` for the RFC 3339 form.
 
 The legacy keys below continue to work exactly as before, so existing templates need no change:

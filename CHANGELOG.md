@@ -203,9 +203,15 @@
 
 ## 🌟 New Features
 
+- **Notification events carry their detail as neutral `sections`.** A playlist update lists its sources, targets and
+  errors, and a watch change its groups, as blocks of plain-text lines (`heading`, `lines`) built once by the host. They
+  are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
+  can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
+  `sections` key.
+
 - **Discord notifications are a plugin.** The `discord-notifier` plugin (`plugins/discord-notifier`,
   `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
-  instance name as footer) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
+  instance name as footer, the event's detail as fields) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
   suppression and the retrying outbox apply as for every channel. Its settings form ships its own translations
   (English, Russian, Spanish, Arabic) through `ui/locales`. See [Discord Notifier](docs/src/plugins/discord-notifier.md).
   Notification plugin calls now run under a 30 s deadline instead of `plugins.max_exec`.
