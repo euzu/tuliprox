@@ -2,11 +2,13 @@ mod accordion;
 mod accordion_panel;
 mod api_user;
 mod authentication;
+mod autocomplete_input;
 pub mod bouquet_editor;
 mod breadcrumbs;
 mod button_utils;
 mod card;
 mod cell_value;
+mod checkbox;
 mod chip;
 mod collapse_panel;
 mod config;
@@ -47,6 +49,7 @@ mod search;
 mod select;
 mod select_helpers;
 mod sidebar;
+mod split_button;
 mod svg_icon;
 mod table;
 mod tabset;
@@ -90,4 +93,4 @@ pub(crate) use self::{
     task_status_badge::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*,
     userlist::*, websocket_status::*,
 };
-pub use self::{confirm_dialog::*, content_dialog::*, table::*};
+pub use self::{autocomplete_input::*, checkbox::*, confirm_dialog::*, content_dialog::*, split_button::*, table::*};

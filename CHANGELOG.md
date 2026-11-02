@@ -198,6 +198,38 @@
 
 ## 🌟 New Features
 
+- **Manual item overrides and a redesigned Playlist Explorer.** Single playlist items can now be corrected without a
+  mapper script: an override file per input (`overrides/input/<name>.yml`) or per target
+  (`overrides/target/<name>.yml`, keyed by `inputs:`) stores field changes for individual live channels, movies and
+  series, keyed by a stable item id. Per field, an absent key keeps the provider value, a value replaces it and
+  `null` clears it; `name`, `title` and `group` can be set or kept but not cleared, and the allowed fields and their
+  validation depend on the item kind (`chno` 1-999999 and an EPG id only for live items, `tmdb`, `release_date`
+  (`YYYY-MM-DD`) and a 0-10 `rating` only for video and series, logos must be `http(s)` URLs). Input overrides apply
+  in every target that uses the input, target overrides in one target only and win field by field. Both are applied
+  before the target pipeline, so filters and renames see the edited values, and target override fields are re-applied
+  after every later stage (VOD/series resolution, EPG assignment, mapping, curation, appearance merge, sorting,
+  channel-number and counter assignment), so no later rule can undo them. Items are identified by their provider id,
+  which stays valid across alias accounts of the same panel; M3U items without a usable id use
+  `urlhash-v1:<blake3>` over a canonical URL with scheme, host, port and credentials removed. Override files carry a
+  content revision and every write is an optimistic, atomic replace, so a stale save answers `409` instead of
+  overwriting a concurrent edit; malformed or unsupported files are skipped and never rewritten. Edits apply on the
+  next playlist update, and `storage_dir/override_status.json` tracks which revision each target's last successful
+  run applied, so a pending edit is reported per target. New endpoints: `GET`/`POST /api/v1/playlist/overrides`,
+  `GET /api/v1/playlist/overrides/item` (provider, input override, target override and processed record of one item),
+  `GET /api/v1/playlist/overrides/orphans` (entries classified `active`/`orphaned`/`unknown`, plus orphaned files) and
+  `POST /api/v1/playlist/overrides/discard`; `GET /api/v1/playlist/items` gained the `override_id` field, and
+  `GET /api/v1/playlist/epg/search` suggests EPG channel ids. The same feature is available over MCP with
+  `get_overrides`, `get_override_item`, `save_overrides`, `discard_overrides`, `list_override_orphans` and
+  `search_epg_ids`. The Playlist Explorer was redesigned around it: Live list and VOD/Series poster grids with
+  per-cluster sorting defaults, EPG states per live item, the virtual groups `Without EPG` and `Edited`, provider-id
+  search, a detail panel that edits fields for the input (all targets) or for the selected target only with
+  per-field provenance, bulk edit, an EPG id picker, image preview and an override cleanup view. New theme tokens
+  `--theme-palette-explorer-*` / `--theme-brand-explorer-*` style it in every theme. See
+  [Playlist Item Overrides & Playlist Explorer](docs/src/configuration/playlist-overrides.md).
+
+- **Theme `vibrant-elegance` is selectable.** Its stylesheet existed but was never included, so the theme could not
+  be chosen; it is now part of the theme picker.
+
 - **Playlist target analytics and stats view.** A new Web UI page "Playlist > Stats" (directly below "Update",
   requiring `playlist.read`) displays per-target statistics computed on every playlist update:
   live channel, movie, series, and resolved episode counts alongside group and category totals, catch-up channels
@@ -1279,6 +1311,11 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Web UI posters and logos no longer fail with providers that only serve players.** The image proxy behind the
+  Web UI forwarded the browser's User-Agent to the provider; providers that block browsers answered 403, so most VOD
+  and series posters stayed empty in the Playlist Explorer. The proxy now drops the browser's User-Agent and sends the
+  headers of the input that hosts the image, or the configured `default_user_agent`.
 
 - **Playlist Update: "All" selects, status badges use status dots.** Clicking "All" under "Affected targets" now
   always selects every target instead of toggling all of them off on a second click; single targets still switch on

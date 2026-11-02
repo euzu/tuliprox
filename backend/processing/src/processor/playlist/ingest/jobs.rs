@@ -467,6 +467,7 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink> Clone for PlaylistProcessingCo
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance.clone(),
+            override_status: self.override_status.clone(),
         }
     }
 }

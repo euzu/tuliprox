@@ -491,7 +491,7 @@ mod tests {
         shared::model::McpConfigDto { enabled: true, read_only, ..Default::default() }
     }
 
-    fn token(config: &Config, permissions: Permission) -> String {
+    fn token(config: &Config, permissions: impl Into<shared::model::PermissionSet>) -> String {
         let web_auth = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).expect("web auth");
         create_jwt_web_user(
             web_auth,
@@ -707,8 +707,10 @@ mod tests {
             assert_eq!(schema["additionalProperties"], false, "{}", tool.name);
             let properties = schema["properties"].as_object().expect("properties");
             for name in properties.keys() {
-                // a duplicated key would silently collapse during JSON parsing
-                let declaration = format!("\"{name}\":{{");
+                // A duplicated key would silently collapse during JSON parsing. Only a
+                // declaration that starts with the type is counted, so a nested object may
+                // reuse a top-level name (an override patch carries its own `name` field).
+                let declaration = format!("\"{name}\":{{\"type\"");
                 assert_eq!(tool.input_schema.matches(&declaration).count(), 1, "{} declares {name} twice", tool.name);
             }
             let required: Vec<&str> = schema
@@ -846,6 +848,209 @@ mod tests {
     fn no_arguments_means_no_query() {
         let request = build_tool_request(tool("get_status"), None, "/api/v1").unwrap();
         assert_eq!(request.uri, "/api/v1/status");
+    }
+
+    // ---- override tools ---------------------------------------------------
+
+    const OVERRIDE_TOOLS: [&str; 6] = [
+        "get_overrides",
+        "get_override_item",
+        "list_override_orphans",
+        "search_epg_ids",
+        "save_overrides",
+        "discard_overrides",
+    ];
+
+    #[test]
+    fn override_tools_are_thin_adapters_over_their_rest_routes() {
+        let expected = [
+            ("get_overrides", McpToolKind::Read, McpToolMethod::Get, "/playlist/overrides"),
+            ("get_override_item", McpToolKind::Read, McpToolMethod::Get, "/playlist/overrides/item"),
+            ("list_override_orphans", McpToolKind::Read, McpToolMethod::Get, "/playlist/overrides/orphans"),
+            ("search_epg_ids", McpToolKind::Read, McpToolMethod::Get, "/playlist/epg/search"),
+            ("save_overrides", McpToolKind::Write, McpToolMethod::Post, "/playlist/overrides"),
+            ("discard_overrides", McpToolKind::Write, McpToolMethod::Post, "/playlist/overrides/discard"),
+        ];
+        for (name, kind, method, path) in expected {
+            let tool = tool(name);
+            assert_eq!(tool.kind, kind, "{name}");
+            assert_eq!(tool.method, method, "{name}");
+            assert_eq!(tool.path, path, "{name}");
+        }
+        // The two writes are hidden as long as the server is read-only.
+        let read_only: Vec<_> = tools_list(true).iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect();
+        let writable: Vec<_> = tools_list(false).iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect();
+        for name in ["get_overrides", "get_override_item", "list_override_orphans", "search_epg_ids"] {
+            assert!(read_only.contains(&name.to_string()), "{name} is missing read-only");
+        }
+        for name in ["save_overrides", "discard_overrides"] {
+            assert!(!read_only.contains(&name.to_string()), "{name} must not be listed read-only");
+            assert!(writable.contains(&name.to_string()), "{name} is missing writable");
+        }
+    }
+
+    /// Every object in a schema is closed, at any depth.
+    fn assert_closed_objects(value: &Value, path: &str) {
+        let Some(object) = value.as_object() else { return };
+        if object.contains_key("properties") {
+            assert_eq!(object.get("additionalProperties"), Some(&Value::Bool(false)), "{path} is not closed");
+        }
+        for (key, child) in object {
+            assert_closed_objects(child, &format!("{path}.{key}"));
+        }
+    }
+
+    #[test]
+    fn override_schemas_are_strict_and_document_every_property() {
+        for name in OVERRIDE_TOOLS {
+            let tool = tool(name);
+            assert!(tool.description.len() > 200, "{name} description too short");
+            let schema: Value = serde_json::from_str(tool.input_schema).expect("schema is JSON");
+            assert_eq!(schema["type"], "object", "{name}");
+            assert_eq!(schema["additionalProperties"], false, "{name}");
+            assert_closed_objects(&schema, name);
+            for (property, definition) in schema["properties"].as_object().expect("properties") {
+                let description = definition["description"].as_str().unwrap_or_default();
+                assert!(!description.is_empty(), "{name}.{property} has no description");
+            }
+            for required in schema.get("required").and_then(Value::as_array).into_iter().flatten() {
+                assert!(
+                    schema["properties"].get(required.as_str().unwrap()).is_some(),
+                    "{name} requires an undeclared field"
+                );
+            }
+        }
+        assert_eq!(tool("get_overrides").schema()["required"], json!(["scope", "name"]));
+        assert_eq!(tool("list_override_orphans").schema()["required"], json!(["input"]));
+        assert_eq!(tool("search_epg_ids").schema()["required"], json!(["q"]));
+        assert_eq!(tool("get_override_item").schema()["required"], json!(["input", "kind", "id"]));
+        assert_eq!(tool("save_overrides").schema()["required"], json!(["scope", "name", "base_revision", "patches"]));
+        assert_eq!(tool("discard_overrides").schema()["required"], json!(["scope", "name", "base_revision"]));
+        assert_eq!(schema_enum("save_overrides", "scope"), ["input", "target"]);
+        assert_eq!(schema_enum("discard_overrides", "scope"), ["input", "target"]);
+    }
+
+    #[test]
+    fn override_patch_schema_documents_the_tagged_op_format() {
+        let schema = tool("save_overrides").schema();
+        let item = &schema["properties"]["patches"]["items"];
+        assert_eq!(item["additionalProperties"], false);
+        assert_eq!(item["required"], json!(["kind", "id", "patch"]));
+        assert_eq!(item["properties"]["kind"]["enum"], json!(["live", "vod", "series"]));
+        let patch = &item["properties"]["patch"];
+        assert_eq!(patch["additionalProperties"], false);
+        let fields: Vec<&String> = patch["properties"].as_object().unwrap().keys().collect();
+        assert!(fields.iter().any(|field| field.as_str() == "name"), "the patch schema has no name field");
+        for field in [
+            "audio_track",
+            "cast",
+            "chno",
+            "director",
+            "epg_channel_id",
+            "genre",
+            "group",
+            "logo",
+            "logo_small",
+            "name",
+            "parent_code",
+            "plot",
+            "rating",
+            "rec",
+            "release_date",
+            "time_shift",
+            "title",
+            "tmdb",
+        ] {
+            let definition = &patch["properties"][field];
+            assert_eq!(definition["properties"]["op"]["enum"], json!(["set", "clear", "reset"]), "{field}");
+            assert_eq!(definition["required"], json!(["op"]), "{field}");
+            assert_eq!(definition["additionalProperties"], false, "{field}");
+            assert!(definition["properties"]["value"]["type"].is_string(), "{field} has no value type");
+            assert!(
+                definition["description"].as_str().unwrap_or_default().contains("Live items only")
+                    || definition["description"].as_str().unwrap_or_default().contains("Video and series only")
+                    || definition["description"].as_str().unwrap_or_default().contains("All item kinds"),
+                "{field} does not say which item kinds it applies to"
+            );
+        }
+        assert_eq!(patch["properties"]["remove_unknown"]["items"], json!({ "type": "string" }));
+        let discard_item = &tool("discard_overrides").schema()["properties"]["items"]["items"];
+        assert_eq!(discard_item["required"], json!(["kind", "id"]));
+        assert_eq!(discard_item["additionalProperties"], false);
+    }
+
+    #[test]
+    fn override_descriptions_name_the_follow_up_tools_and_the_409_rule() {
+        let save = tool("save_overrides").description;
+        for needle in ["base_revision", "get_overrides", "409", "update_playlists", "query_playlist_items", "op"] {
+            assert!(save.contains(needle), "save_overrides description lacks {needle}");
+        }
+        for needle in ["set", "clear", "reset"] {
+            assert!(save.contains(needle), "save_overrides description lacks the {needle} op");
+        }
+        let discard = tool("discard_overrides").description;
+        for needle in ["base_revision", "get_overrides", "409", "update_playlists"] {
+            assert!(discard.contains(needle), "discard_overrides description lacks {needle}");
+        }
+        assert!(tool("get_overrides").description.contains("revision"));
+        assert!(tool("get_overrides").description.contains("query_playlist_items"));
+        assert!(tool("get_override_item").description.contains("query_playlist_items"));
+        assert!(tool("list_override_orphans").description.contains("discard_overrides"));
+        assert!(tool("search_epg_ids").description.contains("epg_channel_id"));
+    }
+
+    #[test]
+    fn override_arguments_become_the_documented_query_and_body() {
+        let request = build_tool_request(
+            tool("get_overrides"),
+            Some(&args(json!({ "scope": "target", "name": "my target" }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/overrides?scope=target&name=my+target");
+        let request = build_tool_request(
+            tool("get_override_item"),
+            Some(&args(json!({ "input": "m3u-input", "kind": "vod", "id": "42", "target_id": 2 }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/overrides/item?input=m3u-input&kind=vod&id=42&target_id=2");
+        let request = build_tool_request(
+            tool("search_epg_ids"),
+            Some(&args(json!({ "q": "news hd", "input": "m3u-input", "limit": 5 }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/epg/search?q=news+hd&input=m3u-input&limit=5");
+
+        // Nested bodies survive the adapter unchanged: the REST handler sees the
+        // tagged operations, not a stringified version of them.
+        let patches = json!([{
+            "kind": "live",
+            "id": "p1",
+            "patch": { "group": { "op": "set", "value": "News" }, "title": { "op": "clear" } }
+        }]);
+        let request = build_tool_request(
+            tool("save_overrides"),
+            Some(&args(json!({ "scope": "input", "name": "m3u-input", "base_revision": "r1", "patches": patches }))),
+            "/api/v1",
+        )
+        .unwrap();
+        assert_eq!(request.uri, "/api/v1/playlist/overrides");
+        let body: Value = serde_json::from_slice(&request.body.expect("body")).unwrap();
+        assert_eq!(body["scope"], "input");
+        assert_eq!(body["base_revision"], "r1");
+        assert_eq!(body["patches"][0]["patch"]["group"], json!({ "op": "set", "value": "News" }));
+        assert_eq!(body["patches"][0]["patch"]["title"], json!({ "op": "clear" }));
+
+        let err = build_tool_request(
+            tool("save_overrides"),
+            Some(&args(json!({ "scope": "input", "name": "n", "patches": [] }))),
+            "/api/v1",
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("base_revision"), "{err}");
     }
 
     #[test]
@@ -1153,6 +1358,280 @@ mod tests {
         assert!(tool_text(&reply).starts_with("HTTP 403"), "{}", tool_text(&reply));
     }
 
+    // ---- override tools over the REST routes ------------------------------
+
+    const OVERRIDE_INPUT: &str = "m3u-input";
+    const OVERRIDE_TARGET: &str = "m3u-target";
+
+    /// A playground with one input, one target and override files in a temp dir,
+    /// so the override tools hit the real handlers of the `/api/v1` router.
+    struct OverrideFixture {
+        _dir: tempfile::TempDir,
+        router: Router,
+        reader: String,
+        writer: String,
+    }
+
+    fn override_input() -> Arc<crate::model::ConfigInput> {
+        use shared::utils::Internable;
+
+        Arc::new(crate::model::ConfigInput {
+            id: 1,
+            name: OVERRIDE_INPUT.intern(),
+            input_type: shared::model::InputType::M3u,
+            url: "http://provider.example/get.php?username=user&password=pass".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..crate::model::ConfigInput::default()
+        })
+    }
+
+    fn override_target() -> Arc<crate::model::ConfigTarget> {
+        use shared::foundation::Filter;
+
+        Arc::new(crate::model::ConfigTarget {
+            curation: None,
+            id: 1,
+            enabled: true,
+            name: OVERRIDE_TARGET.to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default().into(),
+            output: vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+                filename: None,
+                include_type_in_url: false,
+                mask_redirect_url: false,
+                filter: None,
+            })],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(arc_swap::ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: shared::model::ProcessingOrder::default(),
+            execution_plan: tuliprox_core::model::TargetExecutionPlan::default(),
+            watch: None,
+            use_memory_cache: false,
+        })
+    }
+
+    /// `ConfigPaths` without any directory, as the default test state holds it.
+    fn empty_paths() -> shared::model::ConfigPaths {
+        shared::model::ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }
+    }
+
+    fn override_fixture(mcp_read_only: bool) -> OverrideFixture {
+        use shared::utils::Internable;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("config");
+        let storage_dir = dir.path().join("storage");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::create_dir_all(&storage_dir).expect("storage dir");
+
+        let mut config = config_with_mcp(true, enabled(mcp_read_only));
+        config.storage_dir = storage_dir.to_string_lossy().into_owned();
+        let reader = bearer(&token(&config, Permission::PlaylistRead));
+        let writer = bearer(&token(&config, Permission::PlaylistRead | Permission::PlaylistWrite));
+
+        let app_state = create_test_app_state(config);
+        app_state.app_config.paths.store(Arc::new(shared::model::ConfigPaths {
+            config_path: config_dir.to_string_lossy().into_owned(),
+            storage_path: storage_dir.to_string_lossy().into_owned(),
+            ..empty_paths()
+        }));
+        let inputs = vec![override_input()];
+        app_state.app_config.sources.store(Arc::new(crate::model::SourcesConfig {
+            group_lookup: shared::model::provider_saturation::build_group_lookup(&inputs),
+            inputs,
+            sources: vec![crate::model::ConfigSource {
+                inputs: vec![OVERRIDE_INPUT.intern()],
+                targets: vec![override_target()],
+            }],
+            ..Default::default()
+        }));
+
+        let v1 = v1_api_register(true, &app_state, "");
+        let router = mcp_api_register_if_enabled::<()>(&v1, &app_state, true, "").expect("mcp enabled").with_state(());
+        OverrideFixture { _dir: dir, router, reader, writer }
+    }
+
+    fn header_of(token: &str) -> [(&str, &str); 1] { [("authorization", token)] }
+
+    /// Reads an override file through the tool and returns its parsed body.
+    async fn read_overrides(fixture: &OverrideFixture, scope: &str, name: &str) -> Value {
+        let headers = header_of(&fixture.reader);
+        let arguments = json!({ "scope": scope, "name": name });
+        let (_, reply) = post(&fixture.router, &call("get_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], false, "{}", tool_text(&reply));
+        serde_json::from_str(tool_text(&reply)).expect("override file JSON")
+    }
+
+    /// Saves the given patches and returns the revision the handler answered.
+    async fn save_overrides(fixture: &OverrideFixture, base: &str, patches: Value) -> Value {
+        match save_overrides_result(fixture, base, patches).await {
+            Ok(saved) => saved,
+            Err(text) => panic!("save_overrides failed: {text}"),
+        }
+    }
+
+    /// Saves the given patches and returns the revision or the tool error text.
+    async fn save_overrides_result(fixture: &OverrideFixture, base: &str, patches: Value) -> Result<Value, String> {
+        let headers = header_of(&fixture.writer);
+        let arguments = json!({ "scope": "input", "name": OVERRIDE_INPUT, "base_revision": base, "patches": patches });
+        let (_, reply) = post(&fixture.router, &call("save_overrides", arguments), &headers).await;
+        let text = tool_text(&reply).to_owned();
+        if reply["result"]["isError"] == Value::Bool(true) {
+            return Err(text);
+        }
+        serde_json::from_str(&text).map_err(|err| format!("{err}: {text}"))
+    }
+
+    #[tokio::test]
+    async fn save_overrides_round_trips_set_clear_and_reset_through_the_rest_handler() {
+        let fixture = override_fixture(false);
+        let base = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(base["entries"], json!([]), "a fresh input has no overrides");
+        let base = base["revision"].as_str().expect("revision").to_owned();
+
+        // set: the tagged op reaches the handler and is stored as the value
+        let saved = save_overrides(
+            &fixture,
+            &base,
+            json!([{ "kind": "live", "id": "p1", "patch": { "group": { "op": "set", "value": "News" } } }]),
+        )
+        .await;
+        let revision = saved["revision"].as_str().expect("revision").to_owned();
+        assert_ne!(revision, base, "a write changes the revision");
+
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["revision"], revision);
+        assert_eq!(file["entries"][0]["id"], "p1");
+        assert_eq!(file["entries"][0]["kind"], "live");
+        assert_eq!(file["entries"][0]["fields"]["group"], "News");
+
+        // clear: the field is stored as a null delta next to the set one
+        let saved = save_overrides(
+            &fixture,
+            &revision,
+            json!([{ "kind": "live", "id": "p1", "patch": { "chno": { "op": "clear" } } }]),
+        )
+        .await;
+        let revision = saved["revision"].as_str().expect("revision").to_owned();
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["entries"][0]["fields"]["group"], "News");
+        assert!(file["entries"][0]["fields"].as_object().unwrap().contains_key("chno"), "{file}");
+        assert_eq!(file["entries"][0]["fields"]["chno"], Value::Null);
+        // name, title and group can never be cleared; the handler rejects it as a field error
+        let unsupported = save_overrides_result(
+            &fixture,
+            &revision,
+            json!([{ "kind": "live", "id": "p1", "patch": { "title": { "op": "clear" } } }]),
+        )
+        .await
+        .expect_err("a clear of title is a field error");
+        assert!(unsupported.contains("cannot_clear"), "{unsupported}");
+
+        // reset: both overrides are dropped and the entry disappears
+        let saved = save_overrides(
+            &fixture,
+            &revision,
+            json!([{ "kind": "live", "id": "p1", "patch": {
+                "group": { "op": "reset" }, "chno": { "op": "reset" }
+            } }]),
+        )
+        .await;
+        assert!(saved["revision"].as_str().is_some_and(|revision| !revision.is_empty()));
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["entries"], json!([]), "a reset of every field removes the entry: {file}");
+    }
+
+    #[tokio::test]
+    async fn save_overrides_reports_a_stale_revision_and_accepts_the_reread_one() {
+        let fixture = override_fixture(false);
+        let base = read_overrides(&fixture, "input", OVERRIDE_INPUT).await["revision"].as_str().unwrap().to_owned();
+        let patches = json!([{ "kind": "live", "id": "p1", "patch": { "group": { "op": "set", "value": "A" } } }]);
+        let saved = save_overrides(&fixture, &base, patches.clone()).await;
+        assert!(saved["revision"].as_str().is_some());
+
+        // the first revision is stale now: 409 with the revision to retry against
+        let headers = header_of(&fixture.writer);
+        let arguments = json!({ "scope": "input", "name": OVERRIDE_INPUT, "base_revision": base, "patches": patches });
+        let (_, reply) = post(&fixture.router, &call("save_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], true);
+        let text = tool_text(&reply);
+        assert!(text.starts_with("HTTP 409"), "{text}");
+        assert!(text.contains("current_revision"), "the 409 body carries the revision to retry with: {text}");
+
+        let current = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        let current = current["revision"].as_str().unwrap().to_owned();
+        save_overrides(&fixture, &current, patches).await;
+    }
+
+    #[tokio::test]
+    async fn discard_overrides_removes_a_stored_entry_through_the_rest_handler() {
+        let fixture = override_fixture(false);
+        let base = read_overrides(&fixture, "input", OVERRIDE_INPUT).await["revision"].as_str().unwrap().to_owned();
+        let saved = save_overrides(
+            &fixture,
+            &base,
+            json!([{ "kind": "live", "id": "p1", "patch": { "name": { "op": "set", "value": "Renamed" } } }]),
+        )
+        .await;
+        let revision = saved["revision"].as_str().unwrap().to_owned();
+
+        let headers = header_of(&fixture.writer);
+        let arguments = json!({
+            "scope": "input", "name": OVERRIDE_INPUT, "base_revision": revision,
+            "items": [{ "kind": "live", "id": "p1" }]
+        });
+        let (_, reply) = post(&fixture.router, &call("discard_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], false, "{}", tool_text(&reply));
+        let file = read_overrides(&fixture, "input", OVERRIDE_INPUT).await;
+        assert_eq!(file["entries"], json!([]), "{file}");
+    }
+
+    #[tokio::test]
+    async fn override_writes_are_refused_when_the_server_is_read_only() {
+        let fixture = override_fixture(true);
+        let headers = header_of(&fixture.writer);
+        for name in ["save_overrides", "discard_overrides"] {
+            let arguments = json!({ "scope": "input", "name": OVERRIDE_INPUT, "base_revision": "r" });
+            let (_, reply) = post(&fixture.router, &call(name, arguments), &headers).await;
+            assert_eq!(reply["error"]["code"], i64::from(INVALID_PARAMS), "{name}");
+        }
+        let (_, reply) = post(&fixture.router, &rpc(1, "tools/list", json!({})), &headers).await;
+        let names: Vec<_> =
+            reply["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"save_overrides"), "{names:?}");
+        assert!(!names.contains(&"discard_overrides"), "{names:?}");
+        assert!(names.contains(&"get_overrides"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn override_writes_need_the_playlist_write_permission() {
+        let fixture = override_fixture(false);
+        let headers = header_of(&fixture.reader);
+        let arguments = json!({
+            "scope": "input", "name": OVERRIDE_INPUT, "base_revision": "r",
+            "patches": [{ "kind": "live", "id": "p1", "patch": { "group": { "op": "set", "value": "A" } } }]
+        });
+        let (_, reply) = post(&fixture.router, &call("save_overrides", arguments), &headers).await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(tool_text(&reply).starts_with("HTTP 403"), "{}", tool_text(&reply));
+    }
+
     #[tokio::test]
     async fn oversized_results_are_truncated_with_a_marker() {
         let mcp = shared::model::McpConfigDto { max_response_bytes: 16, ..enabled(true) };
@@ -1231,7 +1710,10 @@ mod tests {
                 "list_playlist_sources",
                 "query_playlist_items",
                 "query_target_epg_channels",
-                "get_target_epg_channel"
+                "get_target_epg_channel",
+                "get_overrides",
+                "get_override_item",
+                "list_override_orphans"
             ]
         );
         let reply = call_stub(&stub_state("{}", StatusCode::OK), "get_status").await;

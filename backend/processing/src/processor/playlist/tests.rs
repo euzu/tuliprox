@@ -147,6 +147,8 @@ mod staged_overlay;
 
 mod support;
 
+mod overrides;
+
 use self::support::{
     apply_staged_overlay_groups, catalog_membership, catalog_test_item, complete_catalog_evaluation,
     playlist_update_run_result, test_group, PlaylistRunCollectSink,

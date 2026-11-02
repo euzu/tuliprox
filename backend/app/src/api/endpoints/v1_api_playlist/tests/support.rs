@@ -174,6 +174,7 @@ pub(in crate::api::endpoints::v1_api_playlist::tests) fn test_app_state_with_man
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests_with_sender(manual_update_sender),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
     })
 }

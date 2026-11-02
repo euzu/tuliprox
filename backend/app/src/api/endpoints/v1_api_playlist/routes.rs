@@ -1,9 +1,10 @@
 use super::{
     get_target_epg_channel, list_playlist_sources, playlist_analytics, playlist_analytics_unmapped_csv,
-    playlist_content_live, playlist_content_series, playlist_content_vod, playlist_epg, playlist_episode_item,
-    playlist_filter_preview, playlist_recording_stream, playlist_resolve_url, playlist_resource, playlist_series_info,
-    playlist_update, playlist_update_status, playlist_webplayer_stream, query_playlist_items,
-    query_target_epg_channels,
+    playlist_content_live, playlist_content_series, playlist_content_vod, playlist_epg, playlist_epg_search,
+    playlist_episode_item, playlist_filter_preview, playlist_override_item, playlist_overrides_discard,
+    playlist_overrides_get, playlist_overrides_orphans, playlist_overrides_save, playlist_recording_stream,
+    playlist_resolve_url, playlist_resource, playlist_series_info, playlist_update, playlist_update_status,
+    playlist_webplayer_stream, query_playlist_items, query_target_epg_channels,
 };
 use crate::api::{
     auth_middleware::permission_layer,
@@ -35,6 +36,13 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
         .route("/playlist/series_info/{virtual_id}/{provider_id}", axum::routing::post(playlist_series_info))
         .route("/playlist/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
         .route("/playlist/filter/preview", axum::routing::post(playlist_filter_preview))
+        // The override Explorer is part of the playlist API, so it is mounted here as well: without
+        // this, the endpoints answer 404 when authentication is disabled.
+        .route("/playlist/overrides", axum::routing::get(playlist_overrides_get).post(playlist_overrides_save))
+        .route("/playlist/overrides/item", axum::routing::get(playlist_override_item))
+        .route("/playlist/overrides/orphans", axum::routing::get(playlist_overrides_orphans))
+        .route("/playlist/overrides/discard", axum::routing::post(playlist_overrides_discard))
+        .route("/playlist/epg/search", axum::routing::get(playlist_epg_search))
 }
 
 pub fn v1_api_playlist_register_public(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
@@ -66,10 +74,16 @@ pub fn v1_api_playlist_register_with_permissions(
         .route("/series_info/{virtual_id}/{provider_id}", axum::routing::post(playlist_series_info))
         .route("/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
         .route("/filter/preview", axum::routing::post(playlist_filter_preview))
+        .route("/overrides", axum::routing::get(playlist_overrides_get))
+        .route("/overrides/item", axum::routing::get(playlist_override_item))
+        .route("/overrides/orphans", axum::routing::get(playlist_overrides_orphans))
+        .route("/epg/search", axum::routing::get(playlist_epg_search))
         .layer(permission_layer!(app_state, Permission::PlaylistRead));
 
     let write_routes = Router::new()
         .route("/update", axum::routing::post(playlist_update))
+        .route("/overrides", axum::routing::post(playlist_overrides_save))
+        .route("/overrides/discard", axum::routing::post(playlist_overrides_discard))
         .layer(permission_layer!(app_state, Permission::PlaylistWrite));
 
     let epg_routes = Router::new()

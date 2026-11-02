@@ -19,7 +19,14 @@ pub struct CollapsePanelProps {
 #[component]
 pub fn CollapsePanel(props: &CollapsePanelProps) -> Html {
     let expanded = use_state(|| props.expanded);
-    // let panel_ref = use_node_ref();
+
+    {
+        let expanded = expanded.clone();
+        use_effect_with(props.expanded, move |&prop_exp| {
+            expanded.set(prop_exp);
+            || ()
+        });
+    }
 
     let toggle = {
         let expanded = expanded.clone();

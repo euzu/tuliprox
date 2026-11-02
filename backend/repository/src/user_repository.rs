@@ -594,7 +594,7 @@ mod tests {
     use super::*;
     use crate::test_config::{app_config_from, empty_paths};
     use shared::model::{ClusterFlags, ConfigPaths, ProxyType, ProxyUserStatus};
-    use std::{env::temp_dir, sync::Arc};
+    use std::sync::Arc;
     use tempfile::tempdir;
     use tuliprox_core::model::Config;
 
@@ -658,11 +658,13 @@ mod tests {
             ],
         };
 
+        let config_dir = tempdir().expect("tempdir should succeed");
+        let storage_dir = tempdir().expect("tempdir should succeed");
         let cfg = app_config_from(
             Config::default(),
             ConfigPaths {
-                config_path: temp_dir().to_string_lossy().to_string(),
-                storage_path: temp_dir().to_string_lossy().to_string(),
+                config_path: config_dir.path().to_string_lossy().to_string(),
+                storage_path: storage_dir.path().to_string_lossy().to_string(),
                 ..empty_paths()
             },
             None,

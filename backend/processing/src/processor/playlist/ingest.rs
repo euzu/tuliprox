@@ -116,6 +116,7 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub(crate) library_update_mode: LibraryUpdateMode,
     /// Inputs in maintenance: their persisted state is reused, their provider is not contacted.
     pub maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
+    pub override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -148,6 +149,7 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,
+            override_status: None,
         }
     }
 }

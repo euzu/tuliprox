@@ -15,6 +15,9 @@ The **Stats** page is located in the sidebar under the **Playlist** section, dir
 - **EPG**: Timeline program guide and channel mapping status.
 - **Playlist settings**: Target-level playlist configuration and tuning.
 
+The viewer overlays manual item overrides on the stored playlist, so an item can be corrected in place — see
+[Playlist Item Overrides & Playlist Explorer](../configuration/playlist-overrides.md).
+
 ### Permissions
 
 - **`playlist.read`**: Required to open the Stats page, inspect target metrics, and download the unmapped channels CSV export.

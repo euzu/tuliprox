@@ -82,6 +82,12 @@ pub struct PagedTableProps<T: PartialEq + Clone + 'static> {
     pub on_page_change: Callback<u32>,
     /// Callback when page size changes
     pub on_page_size_change: Callback<u16>,
+    /// Makes whole rows clickable and reports the clicked item (see `Table`).
+    #[prop_or_default]
+    pub on_row_click: Option<Callback<Rc<T>>>,
+    /// Row key of the row to highlight as selected (see `Table`).
+    #[prop_or_default]
+    pub selected_row_key: Option<AttrValue>,
 }
 
 #[component]
@@ -96,6 +102,8 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
         has_next,
         on_page_change,
         on_page_size_change,
+        on_row_click,
+        selected_row_key,
     } = props.clone();
 
     let translate = use_translation();
@@ -148,7 +156,7 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
 
     html! {
         <div class="tp__paged-table">
-            <Table<T> {definition} />
+            <Table<T> {definition} {on_row_click} {selected_row_key} />
             if total_items > 0 {
                 <div class="tp__paged-table__controls">
                     <div class="tp__paged-table__paging-info">

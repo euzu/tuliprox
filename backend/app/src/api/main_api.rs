@@ -196,6 +196,7 @@ fn spawn_metadata_trigger_update(
                             .with_maintenance(Arc::clone(&app_state_clone.maintenance))
                             .with_metadata_manager(app_state_clone.metadata_manager.clone())
                             .with_pre_processed_inputs(pre_processed_inputs.clone())
+                            .with_override_status(app_state_clone.override_status_store())
                             .with_acquired_permit(lock),
                         )
                         .await;
@@ -401,6 +402,7 @@ async fn create_shared_data(
         metadata_manager,
         auth: AuthState::new(token_revocations),
         playlist_updates: PlaylistUpdateControl::new(Arc::clone(forced_targets), manual_update_sender),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance,
     };
 
@@ -443,6 +445,7 @@ async fn run_manual_update_worker(
             .with_provider_manager(Arc::clone(&app_state.active_provider))
             .with_maintenance(Arc::clone(&app_state.maintenance))
             .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
+            .with_override_status(app_state.override_status_store())
             .with_acquired_permit(permit),
         )
         .await;
@@ -521,6 +524,7 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                     .with_disabled_headers(disabled_headers)
                     .with_provider_manager(provider_manager)
                     .with_maintenance(Arc::clone(&app_state_clone.maintenance))
+                    .with_override_status(app_state_clone.override_status_store())
                     .with_metadata_manager(metadata_manager),
             )
             .await;
@@ -1233,6 +1237,7 @@ mod tests {
                 metadata_manager,
                 auth: crate::api::model::AuthState::for_tests(),
                 playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+                overrides: crate::api::model::OverrideState::default(),
                 maintenance: crate::api::model::create_test_maintenance(""),
             })
         }

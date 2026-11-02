@@ -200,7 +200,7 @@ fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let mut duplicates = HashSet::new();
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None)
+    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None, None)
         .expect("target processing should succeed");
     let mut groups = processed.source.take_groups();
 

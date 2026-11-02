@@ -306,7 +306,9 @@ pub use self::{
     clock::{get_build_time, get_server_time, get_uptime_secs, init_uptime_clock},
     local_files::serve_file,
     provider_urls::get_stream_alternative_url,
-    resources::{resource_input_for_url, resource_proxy_response, resource_redirect_or_proxy, resource_response},
+    resources::{
+        is_same_origin, resource_input_for_url, resource_proxy_response, resource_redirect_or_proxy, resource_response,
+    },
     response::{
         bin_response, empty_json_list_response, empty_json_response_as_array, empty_json_response_as_object,
         json_or_bin_response, json_response, redirect, reentry_suppressed_response, separate_number_and_remainder,

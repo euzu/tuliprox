@@ -1,5 +1,11 @@
 #![allow(clippy::wildcard_imports)]
-use super::*;
+use super::{
+    overrides::{
+        reapply_target_overrides_ext, regroup_moved_items, resolve_item_uuid, InputOverrideSet, TargetOverrideSet,
+    },
+    *,
+};
+use shared::model::ItemOverride;
 
 pub(crate) fn join_arc_strs(values: &[Arc<str>], separator: &str) -> String {
     let mut result = String::new();
@@ -10,6 +16,105 @@ pub(crate) fn join_arc_strs(values: &[Arc<str>], separator: &str) -> String {
         result.push_str(value.as_ref());
     }
     result
+}
+
+pub(crate) fn check_duplicate_manual_chno(
+    target_name: &str,
+    playlist: &[PlaylistGroup],
+    locked: &HashMap<UUIDType, Arc<ItemOverride>>,
+) -> Vec<u32> {
+    if locked.is_empty() {
+        return Vec::new();
+    }
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    let mut locked_chnos: HashSet<u32> = HashSet::new();
+
+    for group in playlist {
+        for chan in &group.channels {
+            if chan.header.chno != 0 {
+                *counts.entry(chan.header.chno).or_default() += 1;
+                if let Some(uuid) = resolve_item_uuid(chan) {
+                    if locked.contains_key(&uuid) {
+                        locked_chnos.insert(chan.header.chno);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut duplicates: Vec<u32> = counts
+        .into_iter()
+        .filter(|(chno, count)| *count > 1 && locked_chnos.contains(chno))
+        .map(|(chno, _)| chno)
+        .collect();
+    duplicates.sort_unstable();
+
+    for chno in &duplicates {
+        log::warn!("Target '{target_name}': duplicate manual channel number {chno}");
+    }
+    duplicates
+}
+
+pub(crate) fn reapply_to_groups(groups: &mut Vec<PlaylistGroup>, locked: &HashMap<UUIDType, Arc<ItemOverride>>) {
+    reapply_to_groups_ext(groups, locked, false);
+}
+
+pub(crate) fn reapply_to_groups_skip_chno(
+    groups: &mut Vec<PlaylistGroup>,
+    locked: &HashMap<UUIDType, Arc<ItemOverride>>,
+) {
+    reapply_to_groups_ext(groups, locked, true);
+}
+
+pub(crate) fn reapply_to_groups_ext(
+    groups: &mut Vec<PlaylistGroup>,
+    locked: &HashMap<UUIDType, Arc<ItemOverride>>,
+    skip_chno: bool,
+) {
+    if locked.is_empty() {
+        return;
+    }
+    if reapply_target_overrides_ext(groups.iter_mut().flat_map(|g| &mut g.channels), locked, skip_chno) {
+        regroup_moved_items(groups, locked);
+    }
+}
+
+pub(crate) fn reapply_to_fpl(fpl: &mut FetchedPlaylist<'_>, locked: &HashMap<UUIDType, Arc<ItemOverride>>) {
+    if locked.is_empty() {
+        return;
+    }
+    debug_assert!(fpl.is_memory(), "reapply_to_fpl called on non-memory playlist");
+    let mut groups = fpl.source.take_groups();
+    reapply_to_groups(&mut groups, locked);
+    fpl.source = MemoryPlaylistSource::new(groups).into_source();
+}
+
+pub(crate) async fn record_target_overrides_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+    ctx: &PlaylistProcessingContext<E, M>,
+    target_name: &str,
+    overrides: Option<&TargetOverrideSet>,
+) {
+    let Some(ref store) = ctx.override_status else {
+        return;
+    };
+    let files_exist = overrides.is_some_and(|o| !o.has_no_files());
+    if !files_exist && !store.has_target(target_name).await {
+        return;
+    }
+    let (revisions, diagnostics) = match overrides {
+        Some(o) => (
+            o.revisions.clone(),
+            tuliprox_repository::OverrideRunDiagnostics::new(
+                o.applied_files.clone(),
+                o.skipped_files.clone(),
+                o.ambiguous_keys_count(),
+            ),
+        ),
+        None => (Vec::new(), tuliprox_repository::OverrideRunDiagnostics::default()),
+    };
+    if let Err(err) = store.record_success(target_name, revisions, diagnostics).await {
+        log::warn!("Failed to record override status for target '{target_name}': {err}");
+    }
 }
 
 pub(crate) fn target_waiting_message(target: &str, input: &str) -> String {
@@ -61,6 +166,7 @@ pub(crate) struct TargetJobResult {
     pub(crate) result: Result<(), Vec<TuliproxError>>,
     pub(crate) errors: Vec<TuliproxError>,
     pub(crate) processing: PipelineStats,
+    pub(crate) overrides: Option<Arc<TargetOverrideSet>>,
 }
 
 pub(crate) fn collect_target_task_result(
@@ -111,6 +217,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
     }
     analytics_info.input_statuses = Arc::new(input_statuses);
     let analytics_info = Arc::new(analytics_info);
+    let shared_input_overrides = Arc::new(InputOverrideSet::load(&ctx.config).await);
     if !process_parallel {
         let mut target_stats = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
@@ -125,15 +232,20 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                 accepted_empty_clusters,
                 consume_input_source,
                 &analytics_info,
+                &shared_input_overrides,
             )
             .await;
             match result {
                 Ok(prepared) => {
                     let processing = prepared.processing.clone();
+                    let overrides = Arc::clone(&prepared.overrides);
                     let (result, mut finalization_errors) = finalize_prepared_target(Arc::clone(ctx), prepared).await;
                     errors.append(&mut finalization_errors);
                     match result {
-                        Ok(()) => target_stats.push(TargetStats::success_with_processing(&target.name, processing)),
+                        Ok(()) => {
+                            record_target_overrides_status(ctx, &target.name, Some(&overrides)).await;
+                            target_stats.push(TargetStats::success_with_processing(&target.name, processing));
+                        }
                         Err(mut target_errors) => {
                             target_stats.push(TargetStats::failure_with_processing(&target.name, processing));
                             errors.append(&mut target_errors);
@@ -185,11 +297,13 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             accepted_empty_clusters,
             false,
             &analytics_info,
+            &shared_input_overrides,
         )
         .await
         {
             Ok(prepared) => {
                 let processing = prepared.processing.clone();
+                let overrides = Arc::clone(&prepared.overrides);
                 let task_ctx = Arc::clone(ctx);
                 let target_name = target.name.clone();
                 tasks.spawn(async move {
@@ -202,9 +316,14 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                         std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
                     completion.send_replace(true);
                     match finalized {
-                        Ok((result, errors)) => {
-                            TargetJobResult { index, name: target_name, result, errors, processing }
-                        }
+                        Ok((result, errors)) => TargetJobResult {
+                            index,
+                            name: target_name,
+                            result,
+                            errors,
+                            processing,
+                            overrides: Some(overrides),
+                        },
                         Err(_) => TargetJobResult {
                             index,
                             name: target_name.clone(),
@@ -213,6 +332,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                             ))]),
                             errors: Vec::new(),
                             processing,
+                            overrides: Some(overrides),
                         },
                     }
                 });
@@ -232,6 +352,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                     result: Err(target_errors),
                     errors: Vec::new(),
                     processing: PipelineStats::default(),
+                    overrides: None,
                 });
             }
         }
@@ -247,6 +368,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
         errors.append(&mut target_result.errors);
         match target_result.result {
             Ok(()) => {
+                record_target_overrides_status(ctx, &target_result.name, target_result.overrides.as_deref()).await;
                 target_stats.push(TargetStats::success_with_processing(&target_result.name, target_result.processing));
             }
             Err(mut target_errors) => {
@@ -291,6 +413,7 @@ pub(crate) struct PreparedTarget {
     pub(crate) processing: PipelineStats,
     pub(crate) accepted_empty_clusters: ClusterFlags,
     pub(crate) analytics_input: TargetAnalyticsInput,
+    pub(crate) overrides: Arc<TargetOverrideSet>,
 }
 
 async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
@@ -307,7 +430,7 @@ async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataU
     Ok(bouquet_filter)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: &PlaylistProcessingContext<E, M>,
     playlists: &mut [FetchedPlaylist<'_>],
@@ -317,6 +440,7 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     accepted_empty_clusters: ClusterFlags,
     consume_input_source: bool,
     analytics_info: &Arc<SourceAnalyticsInfo>,
+    input_overrides: &Arc<InputOverrideSet>,
 ) -> Result<PreparedTarget, Vec<TuliproxError>> {
     debug_if_enabled!("Processing order is {}", &target.processing_order);
     log_memory_snapshot(format!("target '{}' start", target.name).as_str());
@@ -337,6 +461,9 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
     let bouquet_filter = load_target_bouquet_filter(ctx, &target.name).await.map_err(|err| vec![err])?;
+    let target_input_names: Vec<&str> = playlists.iter().map(|p| p.input.name.as_ref()).collect();
+    let target_overrides =
+        Arc::new(TargetOverrideSet::load_for_target(input_overrides, &ctx.config, target, &target_input_names).await);
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     for provider_fpl in playlists.iter_mut() {
@@ -349,9 +476,16 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let (mut processed_fpl, input_outcome) =
-            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source, bouquet_filter.as_ref())
-                .map_err(|err| vec![err])?;
+        let (mut processed_fpl, input_outcome) = execute_pipe(
+            target,
+            &pipe,
+            provider_fpl,
+            &mut duplicates,
+            consume_input_source,
+            bouquet_filter.as_ref(),
+            Some(&target_overrides),
+        )
+        .map_err(|err| vec![err])?;
         debug!("Target '{}' input '{}' pipeline outcome: {input_outcome:?}", target.name, provider_fpl.input.name);
         aggregate_outcome.merge(input_outcome);
         log_memory_snapshot(
@@ -359,6 +493,12 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         );
         processed_fpl.sort_by_provider_ordinal();
         playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        {
+            let locked = target_overrides.target_locked();
+            if !locked.is_empty() {
+                reapply_to_fpl(&mut processed_fpl, &locked);
+            }
+        }
         log_memory_snapshot(
             format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str(),
         );
@@ -366,23 +506,41 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         let input_epg_start = new_epg.len();
         let epg_assign_options = EpgAssignOptions::from_target_options(target.options.as_ref());
         process_playlist_epg(&mut processed_fpl, &mut new_epg, epg_assign_options).await;
+        {
+            let locked = target_overrides.target_locked();
+            if !locked.is_empty() {
+                reapply_to_fpl(&mut processed_fpl, &locked);
+            }
+        }
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
         let deduplicate = target.execution_plan.pre_transform_identity_dedup;
-        if let Some(groups) = map_playlist_at_stage(
+        if let Some(mut groups) = map_playlist_at_stage(
             &mut processed_fpl.source,
             target,
             MappingStage::AfterEpg,
             deduplicate.then_some(&mut duplicates),
         ) {
+            let locked = target_overrides.target_locked();
+            if !locked.is_empty() {
+                reapply_to_groups(&mut groups, &locked);
+            }
             processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
         }
         if epg_assign_options.adopt_guide_id_case && processed_fpl.epg.is_some() {
             adopt_guide_live_epg_id_case(&mut processed_fpl, &new_epg[input_epg_start..]);
+            let locked = target_overrides.target_locked();
+            if !locked.is_empty() {
+                reapply_to_fpl(&mut processed_fpl, &locked);
+            }
         }
         if clear_invalid_epg_ids && processed_fpl.epg.is_some() {
             clear_invalid_live_epg_ids(&mut processed_fpl, &new_epg[input_epg_start..]);
+            let locked = target_overrides.target_locked();
+            if !locked.is_empty() {
+                reapply_to_fpl(&mut processed_fpl, &locked);
+            }
         }
         if let Some(stat) = stats.get_mut(&processed_fpl.input.name) {
             stat.processed_stats.group_count = processed_fpl.get_group_count();
@@ -412,6 +570,7 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         processing: aggregate_outcome.to_stats(),
         accepted_empty_clusters,
         analytics_input,
+        overrides: target_overrides,
     })
 }
 
@@ -481,14 +640,35 @@ pub(crate) fn prepare_eligible_catalog(
     playlist
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaylistViewKind {
+    Base,
+    Xtream,
+}
+
+impl PlaylistViewKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Xtream => "Xtream",
+        }
+    }
+
+    pub(crate) fn warns_duplicates(self) -> bool { matches!(self, Self::Base) }
+}
+
 fn finalize_playlist_view(
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
     step: &mut StepMeasure,
-    view: &str,
+    view_kind: PlaylistViewKind,
+    locked: Option<&HashMap<UUIDType, Arc<ItemOverride>>>,
 ) -> Vec<PlaylistGroup> {
     let mut playlist = flatten_groups(playlist);
-    step.tick(&finalization_step_label(view, "appearance merge"));
+    step.tick(&finalization_step_label(view_kind.label(), "appearance merge"));
+    if let Some(locked) = locked.filter(|l| !l.is_empty()) {
+        reapply_to_groups(&mut playlist, locked);
+    }
 
     for stage in FINALIZATION_ORDER.into_iter().skip(2) {
         match stage {
@@ -497,19 +677,36 @@ fn finalize_playlist_view(
             }
             FinalizationStage::Sort => {
                 if sort_playlist(target, &mut playlist) {
-                    step.tick(&finalization_step_label(view, "playlist sort"));
-                    log_memory_snapshot(format!("target '{}' {view} after_playlist_sort", target.name).as_str());
+                    step.tick(&finalization_step_label(view_kind.label(), "playlist sort"));
+                    log_memory_snapshot(
+                        format!("target '{}' {} after_playlist_sort", target.name, view_kind.label()).as_str(),
+                    );
                 }
             }
             FinalizationStage::AssignChannelNumbers => {
+                if let Some(locked) = locked.filter(|l| !l.is_empty()) {
+                    reapply_to_groups(&mut playlist, locked);
+                }
                 assign_channel_no_playlist(&mut playlist);
-                step.tick(&finalization_step_label(view, "assigning channel numbers"));
-                log_memory_snapshot(format!("target '{}' {view} after_assign_channel_numbers", target.name).as_str());
+                if view_kind.warns_duplicates() {
+                    if let Some(locked) = locked.filter(|l| !l.is_empty()) {
+                        check_duplicate_manual_chno(&target.name, &playlist, locked);
+                    }
+                }
+                step.tick(&finalization_step_label(view_kind.label(), "assigning channel numbers"));
+                log_memory_snapshot(
+                    format!("target '{}' {} after_assign_channel_numbers", target.name, view_kind.label()).as_str(),
+                );
             }
             FinalizationStage::AssignCounters => {
                 map_playlist_counter(target, &mut playlist);
-                step.tick(&finalization_step_label(view, "assigning channel counter"));
-                log_memory_snapshot(format!("target '{}' {view} after_assign_channel_counter", target.name).as_str());
+                if let Some(locked) = locked.filter(|l| !l.is_empty()) {
+                    reapply_to_groups_skip_chno(&mut playlist, locked);
+                }
+                step.tick(&finalization_step_label(view_kind.label(), "assigning channel counter"));
+                log_memory_snapshot(
+                    format!("target '{}' {} after_assign_channel_counter", target.name, view_kind.label()).as_str(),
+                );
             }
         }
     }
@@ -557,6 +754,7 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: Arc<PlaylistProcessingContext<E, M>>,
     prepared: PreparedTarget,
@@ -589,7 +787,7 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     }
 
     let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &mut step);
-    let views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
+    let mut views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
     if views.base.is_empty()
         && views.xtream.is_none()
         && views.publication_plan == PlaylistPublicationPlan::Ordinary
@@ -605,14 +803,25 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
             .await;
         return (Ok(()), errors);
     }
+
+    let locked_map = prepared.overrides.target_locked.lock().clone();
+    let locked = if locked_map.is_empty() { None } else { Some(&locked_map) };
+    if let Some(locked) = locked {
+        reapply_to_groups(&mut views.base, locked);
+        if let Some(ref mut xtream) = views.xtream {
+            reapply_to_groups(xtream, locked);
+        }
+    }
     if views.publication_plan != PlaylistPublicationPlan::Ordinary {
         step.tick("target curation");
         log_memory_snapshot(format!("target '{}' after_curation", target.name).as_str());
     }
 
-    let mut finalized_base = finalize_playlist_view(target, views.base, &mut step, "base");
-    let mut finalized_xtream =
-        views.xtream.map(|playlist| finalize_playlist_view(target, playlist, &mut step, "Xtream"));
+    let mut finalized_base = finalize_playlist_view(target, views.base, &mut step, PlaylistViewKind::Base, locked);
+    let mut finalized_xtream = views
+        .xtream
+        .map(|playlist| finalize_playlist_view(target, playlist, &mut step, PlaylistViewKind::Xtream, locked));
+    drop(locked_map);
     retain_epg_referenced_by_groups(&finalized_base, &mut new_epg);
 
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
@@ -979,6 +1188,12 @@ pub(crate) struct TargetPlaylistViews {
     pub(crate) publication_plan: PlaylistPublicationPlan,
 }
 
+/// Builds the curated playlist views for base and Xtream outputs.
+///
+/// Note on curated Xtream categories: items copied into curated categories (or cloned
+/// for the Xtream base catalog) are created after the pipeline re-apply stage and therefore
+/// inherit any locked override values. Both `views.base` and `views.xtream` then pass through
+/// subsequent finalization stages where locked overrides continue to be re-applied.
 pub(crate) fn build_curated_playlist_views(
     playlist: Vec<PlaylistGroup>,
     evaluation: &CurationEvaluation,

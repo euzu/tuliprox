@@ -30,17 +30,20 @@ use serde_json::Value;
 use shared::{
     error::TuliproxError,
     model::{
-        InputType, M3uPlaylistItem, PlaylistItemType, StreamProperties, TargetType, XtreamCluster, XtreamPlaylistItem,
+        InputType, M3uPlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, TargetType, XtreamCluster,
+        XtreamPlaylistItem,
     },
 };
 use std::{borrow::Cow, future::Future, sync::Arc};
 use tokio_stream::StreamExt;
+use tuliprox_core::model::{override_key, InputAliasMap};
 
 query_enum! {
     /// Record fields a client can project with `fields`.
     pub(in crate::api::endpoints) enum ItemField {
         VirtualId => "virtual_id",
         ProviderId => "provider_id",
+        OverrideId => "override_id",
         Name => "name",
         Title => "title",
         Group => "group",
@@ -69,6 +72,7 @@ query_enum! {
         Group => "group",
         EpgChannelId => "epg_channel_id",
         ProviderId => "provider_id",
+        OverrideId => "override_id",
         InputName => "input_name",
     }
 }
@@ -131,6 +135,9 @@ pub(in crate::api::endpoints) trait StoredPlaylistRecord {
     fn provider_id(&self) -> Cow<'_, str>;
     /// Runs `visit` on the provider id without allocating; the search path calls it for every scanned record.
     fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T;
+    /// The id this item's overrides are filed under (`override_key` of the record's identity), `None` when the
+    /// item has no id or its input is not part of `aliases`. Costly, so only the projection and search ask for it.
+    fn override_id(&self, aliases: &InputAliasMap) -> Option<Arc<str>>;
     fn name(&self) -> &str;
     fn title(&self) -> &str;
     fn group(&self) -> &str;
@@ -165,6 +172,11 @@ impl StoredPlaylistRecord for XtreamPlaylistItem {
 
     fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { with_decimal(self.provider_id, visit) }
 
+    fn override_id(&self, aliases: &InputAliasMap) -> Option<Arc<str>> {
+        let id: Arc<str> = Arc::from(self.provider_id.to_string());
+        override_key_id(id, &self.url, &self.input_name, self.item_type, aliases)
+    }
+
     fn epg_channel_id(&self) -> Option<&str> { self.epg_channel_id.as_deref() }
 
     fn item_type(&self) -> PlaylistItemType { self.item_type }
@@ -189,6 +201,10 @@ impl StoredPlaylistRecord for M3uPlaylistItem {
 
     fn with_provider_id<T>(&self, visit: impl FnOnce(&str) -> T) -> T { visit(&self.provider_id) }
 
+    fn override_id(&self, aliases: &InputAliasMap) -> Option<Arc<str>> {
+        override_key_id(Arc::clone(&self.provider_id), &self.url, &self.input_name, self.item_type, aliases)
+    }
+
     fn epg_channel_id(&self) -> Option<&str> { self.epg_channel_id.as_deref() }
 
     fn item_type(&self) -> PlaylistItemType { self.item_type }
@@ -202,6 +218,25 @@ impl StoredPlaylistRecord for M3uPlaylistItem {
     fn source_ordinal(&self) -> u32 { self.source_ordinal }
 
     fn additional_properties(&self) -> Option<&StreamProperties> { self.additional_properties.as_ref() }
+}
+
+/// The id under which a stored record's overrides are filed: the identity `override_key` derives from the record's
+/// provider id, url and input, exactly like the override files do.
+fn override_key_id(
+    id: Arc<str>,
+    url: &Arc<str>,
+    input_name: &Arc<str>,
+    item_type: PlaylistItemType,
+    aliases: &InputAliasMap,
+) -> Option<Arc<str>> {
+    let header = PlaylistItemHeader {
+        id,
+        url: Arc::clone(url),
+        input_name: Arc::clone(input_name),
+        item_type,
+        ..PlaylistItemHeader::default()
+    };
+    override_key(&header, aliases).map(|key| key.id)
 }
 
 /// Runs `visit` on the decimal form of `value`, which is formatted into a stack buffer.
@@ -229,7 +264,7 @@ fn with_decimal<T>(value: u32, visit: impl FnOnce(&str) -> T) -> T {
 const DROPPED_PROPERTY_KEYS: &[&str] = &["direct_source", "source", "extra_attributes", "video", "audio"];
 
 /// Text that carries credentials in a form that can be recognized by looking at the value alone.
-fn looks_credential_bearing(text: &str) -> bool {
+pub(in crate::api::endpoints) fn looks_credential_bearing(text: &str) -> bool {
     if let Some(scheme_end) = text.find("://") {
         let authority = text[scheme_end + 3..].split(['/', '?', '#']).next().unwrap_or_default();
         if authority.contains('@') {
@@ -310,10 +345,18 @@ impl EpgLookup {
     }
 }
 
-fn field_value<R: StoredPlaylistRecord>(record: &R, field: ItemField, epg: Option<&EpgLookup>) -> Value {
+fn field_value<R: StoredPlaylistRecord>(
+    record: &R,
+    field: ItemField,
+    epg: Option<&EpgLookup>,
+    aliases: Option<&InputAliasMap>,
+) -> Value {
     match field {
         ItemField::VirtualId => Value::from(record.virtual_id()),
         ItemField::ProviderId => Value::from(record.provider_id().into_owned()),
+        ItemField::OverrideId => {
+            aliases.and_then(|aliases| record.override_id(aliases)).map_or(Value::Null, |id| Value::from(&*id))
+        }
         ItemField::Name => Value::from(record.name()),
         ItemField::Title => Value::from(record.title()),
         ItemField::Group => Value::from(record.group()),
@@ -351,18 +394,33 @@ impl Serialize for ItemRow {
 }
 
 /// The record as a JSON object holding exactly `fields`, in that order.
-fn project<R: StoredPlaylistRecord>(record: &R, fields: &[ItemField], epg: Option<&EpgLookup>) -> ItemRow {
-    ItemRow(fields.iter().map(|field| (field.name(), field_value(record, *field, epg))).collect())
+fn project<R: StoredPlaylistRecord>(
+    record: &R,
+    fields: &[ItemField],
+    epg: Option<&EpgLookup>,
+    aliases: Option<&InputAliasMap>,
+) -> ItemRow {
+    ItemRow(fields.iter().map(|field| (field.name(), field_value(record, *field, epg, aliases))).collect())
 }
 
 /// Whether `needle` occurs in the `field` text of the record, without allocating.
-fn search_matches<R: StoredPlaylistRecord>(record: &R, field: ItemSearchField, needle: &CaseInsensitiveNeedle) -> bool {
+///
+/// `override_id` is matched exactly: it is an id, not text, and a substring of a hash is a false positive.
+fn search_matches<R: StoredPlaylistRecord>(
+    record: &R,
+    field: ItemSearchField,
+    needle: &CaseInsensitiveNeedle,
+    aliases: Option<&InputAliasMap>,
+) -> bool {
     match field {
         ItemSearchField::Name => needle.is_in(record.name()),
         ItemSearchField::Title => needle.is_in(record.title()),
         ItemSearchField::Group => needle.is_in(record.group()),
         ItemSearchField::EpgChannelId => needle.is_in(record.epg_channel_id().unwrap_or_default()),
         ItemSearchField::ProviderId => record.with_provider_id(|provider_id| needle.is_in(provider_id)),
+        ItemSearchField::OverrideId => {
+            aliases.and_then(|aliases| record.override_id(aliases)).is_some_and(|id| needle.is_exact(&id))
+        }
         ItemSearchField::InputName => needle.is_in(record.input_name()),
     }
 }
@@ -374,6 +432,8 @@ struct ItemFilter<'a> {
     group: Option<&'a str>,
     epg: Option<&'a EpgLookup>,
     epg_status: &'a [EpgStatus],
+    /// Only set when `override_id` is projected or searched; `None` keeps the record scan free of it.
+    aliases: Option<&'a InputAliasMap>,
 }
 
 impl ItemFilter<'_> {
@@ -382,7 +442,7 @@ impl ItemFilter<'_> {
             return false;
         }
         if let Some(needle) = self.needle {
-            if !self.search_fields.iter().any(|field| search_matches(record, *field, needle)) {
+            if !self.search_fields.iter().any(|field| search_matches(record, *field, needle, self.aliases)) {
                 return false;
             }
         }
@@ -459,7 +519,7 @@ where
             return;
         }
         if window.contains(total_matched) {
-            items.push(project(&record, fields, filter.epg));
+            items.push(project(&record, fields, filter.epg, filter.aliases));
         }
         total_matched += 1;
     })
@@ -553,6 +613,12 @@ impl ValidatedItemsQuery {
     }
 
     fn wants_epg(&self) -> bool { !self.epg_status.is_empty() || self.fields.contains(&ItemField::EpgStatus) }
+
+    /// Whether the request needs the override-key alias map: `override_id` is projected, or searched by text.
+    fn wants_override_id(&self) -> bool {
+        self.fields.contains(&ItemField::OverrideId)
+            || (self.needle.is_some() && self.search_fields.contains(&ItemSearchField::OverrideId))
+    }
 }
 
 #[derive(Serialize)]
@@ -626,6 +692,7 @@ async fn read_target_page(
     app_state: &Arc<AppState>,
     target: &ConfigTarget,
     query: &ValidatedItemsQuery,
+    aliases: Option<&InputAliasMap>,
 ) -> Result<SourcePage, InspectError> {
     let output = if target.has_output(TargetType::Xtream) {
         TargetType::Xtream
@@ -645,6 +712,7 @@ async fn read_target_page(
         group: query.group.as_deref(),
         epg: lookup.as_ref(),
         epg_status: &query.epg_status,
+        aliases,
     };
     let cluster = query.cluster;
     let app_config = &app_state.app_config;
@@ -676,6 +744,7 @@ async fn read_input_page(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     query: &ValidatedItemsQuery,
+    aliases: Option<&InputAliasMap>,
 ) -> Result<SourcePage, InspectError> {
     let filter = ItemFilter {
         needle: query.needle.as_ref(),
@@ -683,6 +752,7 @@ async fn read_input_page(
         group: query.group.as_deref(),
         epg: None,
         epg_status: &[],
+        aliases,
     };
     let cluster = query.cluster;
     let app_config = &app_state.app_config;
@@ -728,6 +798,10 @@ async fn load_epg_lookup(
 
 async fn run_items_query(app_state: &Arc<AppState>, query: ItemsQuery) -> Result<serde_json::Value, InspectError> {
     let query = ValidatedItemsQuery::parse(query)?;
+    // Built once per request, and only when the request can need it: the projection and the search are the only
+    // consumers of the override key.
+    let aliases =
+        query.wants_override_id().then(|| InputAliasMap::from_inputs(&app_state.app_config.sources.load().inputs));
     let to_json = |response: ItemsResponse<'_>| {
         serde_json::to_value(response)
             .map_err(|err| InspectError::internal(format!("Failed to encode response: {err}")))
@@ -736,7 +810,7 @@ async fn run_items_query(app_state: &Arc<AppState>, query: ItemsQuery) -> Result
         SourceName::Target(name) => {
             let target = find_target_by_name(&app_state.app_config, name)
                 .ok_or_else(|| InspectError::not_found(format!("Unknown target '{name}'")))?;
-            let page = read_target_page(app_state, &target, &query).await?;
+            let page = read_target_page(app_state, &target, &query, aliases.as_ref()).await?;
             to_json(ItemsResponse::new("target", name, &query, page))
         }
         SourceName::Input(name) => {
@@ -749,7 +823,7 @@ async fn run_items_query(app_state: &Arc<AppState>, query: ItemsQuery) -> Result
                 .find(|input| input.name.as_ref() == name.as_str())
                 .cloned()
                 .ok_or_else(|| InspectError::not_found(format!("Unknown input '{name}'")))?;
-            let page = read_input_page(app_state, &input, &query).await?;
+            let page = read_input_page(app_state, &input, &query, aliases.as_ref()).await?;
             to_json(ItemsResponse::new("input", name, &query, page))
         }
     }

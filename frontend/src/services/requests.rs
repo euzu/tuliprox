@@ -152,6 +152,47 @@ fn unexpected_response_error(message: String) -> Error {
     }
 }
 
+/// Maps a non-success HTTP status onto the shared [`Error`] vocabulary.
+///
+/// `None` means the status carries no generic error, either because the caller decodes a
+/// typed body (`422`) or because the status is not part of the protocol.
+fn status_error(status: u16, message: &str) -> Option<Error> {
+    let text = || {
+        if message.trim().is_empty() {
+            status.to_string()
+        } else {
+            message.to_string()
+        }
+    };
+    match status {
+        400 => Some(Error::BadRequest(text())),
+        401 => Some(Error::Unauthorized),
+        403 => Some(Error::Forbidden(if message.trim().is_empty() {
+            "Forbidden".to_string()
+        } else {
+            message.to_string()
+        })),
+        404 => Some(Error::NotFound),
+        409 => Some(Error::Conflict(if message.trim().is_empty() {
+            "Configuration conflict (409)".to_string()
+        } else {
+            message.to_string()
+        })),
+        412 => Some(Error::PreconditionFailed(message.to_string())),
+        428 => Some(Error::PreconditionRequired(if message.trim().is_empty() {
+            "Missing precondition header (428)".to_string()
+        } else {
+            message.to_string()
+        })),
+        500 => Some(Error::InternalServerError(if message.trim().is_empty() {
+            "Internal Server Error".to_string()
+        } else {
+            message.to_string()
+        })),
+        _ => None,
+    }
+}
+
 const TOKEN_KEY: &str = "tuliprox.token";
 pub fn get_token() -> Option<String> { LocalStorage::get(TOKEN_KEY).ok() }
 
@@ -240,49 +281,6 @@ where
                     Ok(ResponseMeta { body: Some(decoded), headers: response_headers })
                 }
                 204 => Ok(ResponseMeta { body: None, headers: response_headers }),
-                400 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::BadRequest("400".to_string()))
-                    } else {
-                        Err(Error::BadRequest(message))
-                    }
-                }
-                401 => Err(Error::Unauthorized),
-                403 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::Forbidden("Forbidden".to_string()))
-                    } else {
-                        Err(Error::Forbidden(message))
-                    }
-                }
-                404 => Err(Error::NotFound),
-                409 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::Conflict("Configuration conflict (409)".to_string()))
-                    } else {
-                        Err(Error::Conflict(message))
-                    }
-                }
-                412 => Err(Error::PreconditionFailed(extract_error_message(response).await)),
-                428 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
-                    } else {
-                        Err(Error::PreconditionRequired(message))
-                    }
-                }
-                500 => {
-                    let message = extract_error_message(response).await;
-                    if message.trim().is_empty() {
-                        Err(Error::InternalServerError("Internal Server Error".to_string()))
-                    } else {
-                        Err(Error::InternalServerError(message))
-                    }
-                }
                 422 => {
                     let ct = response.headers().get("content-type").unwrap_or_default();
                     let is_json = ct.contains(CONTENT_TYPE_JSON);
@@ -302,7 +300,14 @@ where
                         Err(Error::DeserializeError)
                     }
                 }
-                _ => Err(unexpected_response_error(extract_error_message(response).await)),
+                _ => {
+                    let message =
+                        if matches!(status, 401 | 404) { String::new() } else { extract_error_message(response).await };
+                    match status_error(status, &message) {
+                        Some(error) => Err(error),
+                        None => Err(unexpected_response_error(message)),
+                    }
+                }
             }
         }
         Err(e) => {
@@ -446,6 +451,73 @@ where
 {
     request(RequestMethod::Post, url, body, content_type, response_type, request_headers, Some(response_header_keys))
         .await
+}
+
+/// A failed write request whose failure body is decoded by the caller.
+///
+/// Endpoints that answer a failure with a typed body (409 conflict, 422 field errors) cannot
+/// use [`request`], which maps every non-success status onto [`Error`] and drops the body.
+/// This keeps the auth header, the dummy token and the status mapping in one place while
+/// leaving the body to the caller.
+#[derive(Debug)]
+pub struct WriteFailure<E> {
+    /// `0` when the request never reached the server.
+    pub status: u16,
+    /// Shared error mapping for the status, `None` for statuses decoded by the caller.
+    pub error: Option<Error>,
+    /// Decoded failure body, when the payload could be deserialized into `E`.
+    pub body: Option<E>,
+    /// Human readable failure text (the decoded `error` field when the body carried one).
+    pub message: String,
+}
+
+impl<E> WriteFailure<E> {
+    fn transport(error: Error) -> Self { Self { status: 0, error: Some(error), body: None, message: String::new() } }
+
+    /// Error text for callers that cannot use the typed body.
+    #[must_use]
+    pub fn into_message(self) -> String { self.error.map_or(self.message, |error| error.to_string()) }
+}
+
+/// JSON `POST` whose failure body is deserialized into `E` instead of being folded into a string.
+pub async fn request_post_with_error_body<B, T, E>(url: &str, body: B) -> Result<Option<T>, WriteFailure<E>>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+    E: DeserializeOwned,
+{
+    check_dummy_token();
+
+    let encoded = Encoding::Json.encode(&body).map_err(WriteFailure::transport)?;
+    let mut request = Request::post(url);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+    request = request.header("Accept", Encoding::Json.as_content_type());
+    let request =
+        apply_encoded_body(request, encoded, Encoding::Json.as_content_type()).map_err(WriteFailure::transport)?;
+
+    let response = request.send().await.map_err(|err| {
+        error!("{err}");
+        WriteFailure::transport(Error::RequestError)
+    })?;
+
+    let status = response.status();
+    if (200..300).contains(&status) {
+        let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
+        if !should_decode_success_body::<T>(status, &content_type) {
+            let _ = response.binary().await;
+            return Ok(None);
+        }
+        let encoding = encoding_from_content_type(&content_type).unwrap_or(Encoding::Json);
+        return decode_response_body::<T>(response, encoding).await.map(Some).map_err(WriteFailure::transport);
+    }
+
+    let bytes = response.binary().await.unwrap_or_default();
+    let message = serde_json::from_slice::<ErrorInfo>(&bytes)
+        .map_or_else(|_| String::from_utf8_lossy(&bytes).trim().to_string(), |info| info.error);
+    let body = serde_json::from_slice::<E>(&bytes).ok();
+    Err(WriteFailure { status, error: status_error(status, &message), body, message })
 }
 
 /// Put request with a body
