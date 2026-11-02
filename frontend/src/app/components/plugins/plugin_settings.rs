@@ -1,6 +1,10 @@
 use crate::{
     app::components::{
-        plugins::schema_form::{prefill_defaults, schema_supported, SchemaForm},
+        plugins::{
+            plugin_i18n::translate_schema,
+            plugin_slot::use_plugin_ui,
+            schema_form::{prefill_defaults, schema_supported, SchemaForm},
+        },
         AppIcon, ContentDialog, LoadingIndicator,
     },
     hooks::use_service_context,
@@ -55,6 +59,7 @@ fn pretty_json(value: &Value) -> String { serde_json::to_string_pretty(value).un
 pub fn PluginSettings(props: &PluginSettingsProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let plugin_ui = use_plugin_ui();
 
     let loaded = use_state(|| None::<LoadedSettings>);
     let loading = use_state(|| true);
@@ -189,6 +194,9 @@ pub fn PluginSettings(props: &PluginSettingsProps) -> Html {
         .with_disabled(*saving || *loading || !can_save)],
     };
 
+    // The plugin's own texts for the active language: the schema's titles and descriptions are
+    // keys of its locale files.
+    let strings = plugin_ui.as_ref().map(|ui| ui.strings_for(&props.plugin_id)).unwrap_or_default();
     let body = if let Some(message) = load_error.as_ref() {
         html! {
             <div class="tp__plugin-settings__error tp__input-error" role="alert">
@@ -200,7 +208,7 @@ pub fn PluginSettings(props: &PluginSettingsProps) -> Html {
             Some(schema) => html! {
                 <SchemaForm
                     key={generation.to_string()}
-                    schema={schema.clone()}
+                    schema={translate_schema(schema, &strings)}
                     value={(*draft).clone()}
                     secrets={settings.secrets.clone()}
                     errors={(*field_errors).clone()}

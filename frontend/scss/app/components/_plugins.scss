@@ -1,3 +1,5 @@
+@use '../../size';
+
 // Plugin UI: install review, slots, frames, config extensions and the
 // plugin metric cards. Plugin frames bring their own styles inside the
 // sandbox; this only lays out the host side.
@@ -183,6 +185,103 @@
 // lower rows (the update and settings notices, the rollback control).
 .tp__plugins__card {
   flex-shrink: 0;
+}
+
+// The installed plugins as compact cards, three to a row. An open log panel needs the width, so
+// that card takes the whole row.
+.tp__plugins__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--margin-small);
+  align-items: start;
+  flex-shrink: 0;
+
+  @media (max-width: size.$dashboard-mobile-breakpoint) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: size.$mobile-breakpoint) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.tp__plugins__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--margin-mini);
+  min-width: 0;
+  font-size: var(--font-size-sm);
+
+  &--wide {
+    grid-column: 1 / -1;
+  }
+
+  .tp__plugins__header {
+    display: flex;
+    flex-direction: column;
+    gap: var(--margin-micro);
+  }
+
+  .tp__plugins__title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--margin-mini);
+
+    h3 {
+      margin: 0;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .tp__plugins__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--margin-micro) var(--margin-mini);
+    color: var(--theme-brand-text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  // Icon-only buttons: the label is the tooltip and the accessible name.
+  .tp__plugins__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--margin-micro);
+
+    .tp__plugins__action {
+      padding: var(--margin-micro) var(--margin-mini);
+
+      span {
+        display: none;
+      }
+    }
+  }
+
+  .tp__plugins__description {
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    color: var(--theme-brand-text-muted);
+  }
+
+  .tp__plugins__counters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--margin-micro) var(--margin-small);
+    color: var(--theme-brand-text-muted);
+    font-size: var(--font-size-xs);
+  }
+
+  .tp__plugins__tasks h4 {
+    margin: 0;
+    font-size: var(--font-size-xs);
+  }
 }
 
 // The Marketplace tab (sources, filters, catalog cards) and the origin chip on a plugin card.

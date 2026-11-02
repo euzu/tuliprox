@@ -93,23 +93,23 @@ async fn load_entries(service: Rc<PluginService>) -> Result<Vec<PluginEntry>, St
 }
 
 fn render_task_summary(translate: &YewI18n, tasks: &[PluginTaskDto]) -> Html {
+    // A plugin without tasks has nothing to show here; saying so on every card only costs space.
+    if tasks.is_empty() {
+        return html! {};
+    }
     html! {
         <div class="tp__plugins__tasks">
             <h4>{ format!("{} ({})", translate.t("LABEL.PLUGIN_TASKS"), tasks.len()) }</h4>
-            if tasks.is_empty() {
-                <span class="tp__plugins__muted">{ translate.t("LABEL.PLUGIN_NO_TASKS") }</span>
-            } else {
-                <ul>
-                    { for tasks.iter().map(|task| html! {
-                        <li key={task.id.clone()}>
-                            { task.title.clone() }
-                            if let Some(schedule) = task.default_schedule.as_ref() {
-                                { " - " }<code>{ schedule.clone() }</code>
-                            }
-                        </li>
-                    }) }
-                </ul>
-            }
+            <ul>
+                { for tasks.iter().map(|task| html! {
+                    <li key={task.id.clone()}>
+                        { task.title.clone() }
+                        if let Some(schedule) = task.default_schedule.as_ref() {
+                            { " - " }<code>{ schedule.clone() }</code>
+                        }
+                    </li>
+                }) }
+            </ul>
         </div>
     }
 }
@@ -263,68 +263,89 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
         Callback::from(move |_: String| on_rollback.emit((id.clone(), name.clone(), version.clone())))
     };
     html! {
-        <Card key={summary.id.clone()} class="tp__plugins__card">
+        <Card key={summary.id.clone()} class={classes!("tp__plugins__card", logs_open.then_some("tp__plugins__card--wide"))}>
             <div class="tp__plugins__header">
-                <h3>{ summary.name.clone() }</h3>
-                if let Some(version) = summary.version.as_ref() {
-                    <span class="tp__plugins__version">{ format!("{} {version}", translate.t("LABEL.VERSION")) }</span>
-                }
-                <span class={classes!("tp__task-status", state_modifier(summary.state))}>
-                    { translate.t(state_label_key(summary.state)) }
-                </span>
-                if let Some(origin) = summary.origin.as_ref() {
-                    <span class="tp__plugins__origin">
-                        { format!("{} {} @ {}", translate.t("LABEL.PLUGIN_MARKETPLACE_INSTALLED_FROM"), origin.source, origin.version) }
+                <div class="tp__plugins__title">
+                    <h3>{ summary.name.clone() }</h3>
+                    if actions.can_write {
+                        <ToggleSwitch
+                            key={format!("{}-{}", summary.id, actions.generation)}
+                            value={summary.enabled}
+                            readonly={actions.busy || !can_toggle(summary.state)}
+                            aria_label={format!("{} {}", translate.t("LABEL.ENABLED"), summary.name)}
+                            on_change={toggle}
+                        />
+                    }
+                </div>
+                <div class="tp__plugins__meta">
+                    if let Some(version) = summary.version.as_ref() {
+                        <span class="tp__plugins__version">{ format!("{} {version}", translate.t("LABEL.VERSION")) }</span>
+                    }
+                    <span class={classes!("tp__task-status", state_modifier(summary.state))}>
+                        { translate.t(state_label_key(summary.state)) }
                     </span>
-                }
-                <TextButton
-                    name={format!("settings-{}", summary.id)}
-                    icon="Settings"
-                    title={translate.t("LABEL.SETTINGS")}
-                    onclick={open_settings}
-                />
-                <TextButton
-                    name={format!("logs-{}", summary.id)}
-                    icon="Log"
-                    title={translate.t("LABEL.LOGS")}
-                    onclick={toggle_logs}
-                />
-                if actions.can_write {
-                    <ToggleSwitch
-                        key={format!("{}-{}", summary.id, actions.generation)}
-                        value={summary.enabled}
-                        readonly={actions.busy || !can_toggle(summary.state)}
-                        aria_label={format!("{} {}", translate.t("LABEL.ENABLED"), summary.name)}
-                        on_change={toggle}
-                    />
-                    if summary.state == PluginStateDto::Failed {
-                        <TextButton
-                            name={format!("reenable-{}", summary.id)}
-                            icon="Refresh"
-                            title={translate.t("LABEL.PLUGIN_REENABLE")}
-                            disabled={actions.busy}
-                            onclick={reenable}
-                        />
+                    if let Some(origin) = summary.origin.as_ref() {
+                        <span class="tp__plugins__origin">
+                            { format!("{} {} @ {}", translate.t("LABEL.PLUGIN_MARKETPLACE_INSTALLED_FROM"), origin.source, origin.version) }
+                        </span>
                     }
-                    if summary.rollback.is_some() {
-                        <TextButton
-                            name={format!("rollback-{}", summary.id)}
-                            icon="Refresh"
-                            title={translate.t("LABEL.PLUGIN_ROLLBACK")}
-                            aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_ROLLBACK"), summary.name)}
-                            disabled={actions.busy}
-                            onclick={rollback}
-                        />
-                    }
+                </div>
+                <div class="tp__plugins__actions">
                     <TextButton
-                        name={format!("uninstall-{}", summary.id)}
-                        icon="Delete"
-                        title={translate.t("LABEL.PLUGIN_UNINSTALL")}
-                        aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_UNINSTALL"), summary.name)}
-                        disabled={actions.busy}
-                        onclick={uninstall}
+                        name={format!("settings-{}", summary.id)}
+                        icon="Settings"
+                        class="tp__plugins__action"
+                        title={translate.t("LABEL.SETTINGS")}
+                        hint={Some(translate.t("LABEL.SETTINGS"))}
+                        aria_label={format!("{} {}", translate.t("LABEL.SETTINGS"), summary.name)}
+                        onclick={open_settings}
                     />
-                }
+                    <TextButton
+                        name={format!("logs-{}", summary.id)}
+                        icon="Log"
+                        class="tp__plugins__action"
+                        title={translate.t("LABEL.LOGS")}
+                        hint={Some(translate.t("LABEL.LOGS"))}
+                        aria_label={format!("{} {}", translate.t("LABEL.LOGS"), summary.name)}
+                        onclick={toggle_logs}
+                    />
+                    if actions.can_write {
+                        if summary.state == PluginStateDto::Failed {
+                            <TextButton
+                                name={format!("reenable-{}", summary.id)}
+                                icon="Refresh"
+                                class="tp__plugins__action"
+                                title={translate.t("LABEL.PLUGIN_REENABLE")}
+                                hint={Some(translate.t("LABEL.PLUGIN_REENABLE"))}
+                                aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_REENABLE"), summary.name)}
+                                disabled={actions.busy}
+                                onclick={reenable}
+                            />
+                        }
+                        if summary.rollback.is_some() {
+                            <TextButton
+                                name={format!("rollback-{}", summary.id)}
+                                icon="Refresh"
+                                class="tp__plugins__action"
+                                title={translate.t("LABEL.PLUGIN_ROLLBACK")}
+                                hint={Some(translate.t("LABEL.PLUGIN_ROLLBACK"))}
+                                aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_ROLLBACK"), summary.name)}
+                                disabled={actions.busy}
+                                onclick={rollback}
+                            />
+                        }
+                        <TextButton
+                            name={format!("uninstall-{}", summary.id)}
+                            icon="Delete"
+                            class="tp__plugins__action"
+                            title={translate.t("LABEL.PLUGIN_UNINSTALL")}
+                            hint={Some(translate.t("LABEL.PLUGIN_UNINSTALL"))}
+                            aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_UNINSTALL"), summary.name)}
+                            disabled={actions.busy}
+                            onclick={uninstall}
+                        />
+                    }
+                </div>
             </div>
             if let Some(description) = summary.description.as_ref() {
                 <p class="tp__plugins__description">{ description.clone() }</p>
@@ -821,7 +842,7 @@ pub fn PluginsView() -> Html {
             html! { <NoContent text={translate.t("MESSAGES.PLUGIN_LIST_EMPTY")} /> }
         } else {
             html! {
-                <>{ for entries.iter().map(|entry| {
+                <div class="tp__plugins__grid">{ for entries.iter().map(|entry| {
                     let logs_open = logs_for.as_deref() == Some(entry.summary.id.as_str());
                     let actions = RowActions {
                         can_write,
@@ -842,7 +863,7 @@ pub fn PluginsView() -> Html {
                         on_policy: &on_policy,
                     };
                     render_entry(&translate, entry, &actions, logs_open)
-                }) }</>
+                }) }</div>
             }
         }
     } else {
