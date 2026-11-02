@@ -468,11 +468,15 @@ async fn scan_single_input_orphan_keys(
     keys: &mut HashSet<(OverrideItemKind, Arc<str>)>,
 ) -> Result<bool, OverrideApiError> {
     let app_config = &app_state.app_config;
-    if !input_is_loaded_successfully(app_state, &input.name).await {
+    let status = load_input_status(app_state, &input.name).await;
+    if !status_is_loaded_successfully(&status) {
         return Ok(false);
     }
     if input.input_type.is_xtream() {
         for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+            if !status.clusters.contains_key(cluster.as_ref()) {
+                continue;
+            }
             let Some(mut records) = iter_raw_xtream_input_playlist(app_config, input, cluster).await else {
                 return Ok(false);
             };
@@ -987,12 +991,15 @@ pub(super) struct OrphansQuery {
     input: Option<String>,
 }
 
-/// Whether the input's last run loaded successfully; a failed or missing run never marks entries
-/// as orphaned.
-async fn input_is_loaded_successfully(app_state: &Arc<AppState>, input_name: &str) -> bool {
+async fn load_input_status(app_state: &Arc<AppState>, input_name: &str) -> crate::processing::input_cache::InputStatus {
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
     let storage_path = crate::processing::input_cache::resolve_input_storage_path(&storage_dir, input_name).await;
-    let status = crate::processing::input_cache::load_input_status_async(&storage_path).await;
+    crate::processing::input_cache::load_input_status_async(&storage_path).await
+}
+
+/// Whether the input's last run loaded successfully; a failed or missing run never marks entries
+/// as orphaned.
+fn status_is_loaded_successfully(status: &crate::processing::input_cache::InputStatus) -> bool {
     !status.clusters.is_empty()
         && status.clusters.values().all(|cluster| cluster.status == crate::processing::input_cache::ClusterState::Ok)
 }

@@ -197,3 +197,11 @@ fn bulk_patch_supports_all_ui_fields() {
     assert_eq!(cleared.epg_channel_id, None);
     assert_eq!(cleared.rating, 0.0);
 }
+
+#[test]
+fn bulk_inputs_list_class_matches_stylesheet() {
+    let source = include_str!("bulk_edit.rs").split("#[cfg(test)]").next().unwrap();
+    assert!(source.contains("class=\"tp__bulk-inputs-list\""));
+    let styles = include_str!("../../../../../scss/app/components/playlist/_playlist_explorer.scss");
+    assert!(styles.contains(".tp__bulk-inputs-list"));
+}

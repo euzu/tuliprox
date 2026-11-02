@@ -190,6 +190,7 @@ pub fn Search(props: &SearchProps) -> Html {
                      {
                       <DropDownIconButton multi_select={true}
                         class={if search_fields.as_ref().is_some_and(|fields| !fields.is_empty()) { "option-active" } else { "" }}
+                        aria_label={translate.t("LABEL.SEARCH_FIELDS")}
                         close_on_resize=true
                         popup_placement={PopupMenuPlacement::BottomEndFlip}
                         popup_gap={Some(SEARCH_POPUP_GAP_PX)}
@@ -201,5 +202,18 @@ pub fn Search(props: &SearchProps) -> Html {
                 }
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn search_fields_dropdown_is_labelled() {
+        let source = include_str!("search.rs").split("#[cfg(test)]").next().unwrap();
+        let dropdown = source.split("<DropDownIconButton").nth(1).expect("fields dropdown");
+        assert!(dropdown.contains("aria_label={translate.t(\"LABEL.SEARCH_FIELDS\")}"));
+        let en: serde_json::Value =
+            serde_json::from_str(include_str!("../../../public/assets/i18n/en.json")).expect("en.json");
+        assert!(en["LABEL"]["SEARCH_FIELDS"].is_string(), "LABEL.SEARCH_FIELDS is missing from en.json");
     }
 }

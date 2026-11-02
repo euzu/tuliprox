@@ -768,7 +768,7 @@ pub fn BulkEditPanel(props: &BulkEditPanelProps) -> Html {
                                         .replace("{count}", &count.to_string())
                                         .replace("{inputs_count}", &input_counts.len().to_string()) }
                                 </p>
-                                <ul class="tp__explorer-bulk-inputs-list">
+                                <ul class="tp__bulk-inputs-list">
                                     { for input_counts.iter().map(|(inp, cnt)| {
                                         html! {
                                             <li key={inp.clone()}>

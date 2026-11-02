@@ -335,6 +335,26 @@ impl Fixture {
             .expect("status written");
     }
 
+    fn write_input_status_with_clusters(&self, name: &str, cluster_names: &[&str]) {
+        use crate::processing::input_cache::{ClusterStatus, InputStatus, STATUS_FILE};
+        let storage = self.input_storage(name);
+        std::fs::create_dir_all(&storage).expect("input storage");
+        let mut clusters = HashMap::new();
+        for &c in cluster_names {
+            clusters.insert(
+                c.to_string(),
+                ClusterStatus {
+                    status: crate::processing::input_cache::ClusterState::Ok,
+                    timestamp: 1,
+                    last_update: None,
+                },
+            );
+        }
+        let status = InputStatus { clusters, last_input_update: None, epg_sources: Vec::new() };
+        std::fs::write(storage.join(STATUS_FILE), serde_json::to_vec(&status).expect("status json"))
+            .expect("status written");
+    }
+
     fn write_target_playlist(&self, name: &str, items: Vec<M3uPlaylistItem>) {
         let config = self.app_state.app_config.config.load_full();
         let target_path = get_target_storage_path(&config, name).expect("target path");
@@ -671,6 +691,38 @@ async fn orphan_failed_input_is_unknown() {
     let (status, body) = fixture.get(&format!("/playlist/overrides/orphans?input={OTHER_INPUT}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["entries"].as_array().is_none_or(Vec::is_empty), "{body}");
+}
+
+#[tokio::test]
+async fn orphan_scan_skips_absent_xtream_clusters() {
+    let fixture = fixture();
+    // OTHER_INPUT is an Xtream input. Only live cluster is written to disk and recorded in status.
+    fixture.write_xtream_input_playlist(OTHER_INPUT, vec![xtream_record(1, 42, "Live One", "Live Group", OTHER_INPUT)]);
+    fixture.write_input_status(OTHER_INPUT, crate::processing::input_cache::ClusterState::Ok);
+
+    let base = fixture.revision("input", OTHER_INPUT).await;
+    let body =
+        save_body("input", OTHER_INPUT, &base, json!([patch(None, "live", "42", json!({ "name": set("Edited") }))]));
+    let (status, body) = fixture.post("/playlist/overrides", body).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = fixture.get(&format!("/playlist/overrides/orphans?input={OTHER_INPUT}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries = body["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{body}");
+    assert_eq!(
+        entries[0]["state"], "active",
+        "an input with absent series cluster should still report active live entries: {body}"
+    );
+
+    // When a cluster IS recorded in status (e.g. series: Ok) but its file is missing,
+    // the existing failure behavior is preserved (entry state becomes unknown).
+    fixture.write_input_status_with_clusters(OTHER_INPUT, &["live", "series"]);
+    let (status, body) = fixture.get(&format!("/playlist/overrides/orphans?input={OTHER_INPUT}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries = body["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{body}");
+    assert_eq!(entries[0]["state"], "unknown", "a recorded cluster whose file is missing must make scan fail: {body}");
 }
 
 #[tokio::test]

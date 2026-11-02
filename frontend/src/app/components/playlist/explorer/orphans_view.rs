@@ -569,9 +569,9 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                         html! {}
                     } else {
                         html! {
-                            <div class="tp__orphaned-files-section">
+                            <div class="tp__orphans-files-section">
                                 <h3>{ translate.t("LABEL.EXPLORER_ORPHANED_FILES") }</h3>
-                                <div class="tp__orphaned-files-list">
+                                <div class="tp__orphans-files-list">
                                     {
                                         for orphaned_files.into_iter().map(|file| {
                                             let delete_file = delete_file.clone();
@@ -580,7 +580,7 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
                                                 delete_file.emit(f.clone());
                                             });
                                             html! {
-                                                <div key={format!("{}:{}", file.scope, file.name)} class="tp__orphaned-file-row">
+                                                <div key={format!("{}:{}", file.scope, file.name)} class="tp__orphans-file-row">
                                                     <span class="tp__orphaned-file-name">
                                                         { translate.t("LABEL.EXPLORER_FILE_SCOPE")
                                                             .replace("{file}", &file.name)
@@ -617,4 +617,17 @@ pub fn ExplorerOrphansView(props: &ExplorerOrphansViewProps) -> Html {
             </div>
         </CustomDialog>
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn orphan_file_classes_match_stylesheet() {
+        let source = include_str!("orphans_view.rs").split("#[cfg(test)]").next().unwrap();
+        let styles = include_str!("../../../../../scss/app/components/playlist/_playlist_explorer.scss");
+        for class in ["tp__orphans-files-section", "tp__orphans-files-list", "tp__orphans-file-row"] {
+            assert!(source.contains(&format!("class=\"{class}\"")), "component does not use {class}");
+            assert!(styles.contains(&format!(".{class}")), "stylesheet does not define .{class}");
+        }
+    }
 }

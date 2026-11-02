@@ -1,7 +1,7 @@
 use super::playlist_webplayer;
 use crate::{
     api::{
-        api_utils::{resource_input_for_url, resource_proxy_response},
+        api_utils::{is_same_origin, resource_proxy_response},
         endpoints::api_playlist_utils::STALKER_RESOURCE_SCHEME,
         model::AppState,
     },
@@ -115,11 +115,38 @@ fn web_ui_resource_headers(req_headers: &axum::http::HeaderMap) -> axum::http::H
     headers
 }
 
+/// Credential headers. A Web UI resource token carries only the URL, not the input it came from,
+/// so an origin match may come from any playlist URL; credentials are never sent on that basis.
+fn is_credential_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(name.as_str(), "authorization" | "proxy-authorization" | "cookie")
+        || ["auth", "token", "secret", "api-key", "apikey"].iter().any(|part| name.contains(part))
+}
+
+/// The origin URL of `input` that serves `resource`: its own URL, or for a `provider://` input
+/// the matching URL of its provider.
+fn input_origin_for(input: &ConfigInput, resource: &Url) -> Option<String> {
+    match input.get_resolve_provider(&input.url) {
+        Some(provider) => provider.urls.iter().find(|url| is_same_origin(url, resource)).map(ToString::to_string),
+        None => is_same_origin(&input.url, resource).then(|| input.url.clone()),
+    }
+}
+
 /// The input whose server hosts `resource_url`, so its configured headers (User-Agent, ...) are sent.
+/// The copy is fetched with GET, as image requests always are, and without credential headers.
+/// Its URL is the matched origin, so the proxy's own origin check accepts it.
 fn web_ui_resource_input(app_state: &Arc<AppState>, resource_url: &str) -> Option<Arc<ConfigInput>> {
     let url = shared::model::persisted_resource_url(resource_url)?;
+    let resource = Url::parse(url.as_ref()).ok()?;
     let sources = app_state.app_config.sources.load();
-    sources.inputs.iter().find(|input| resource_input_for_url(Some(input), url.as_ref()).is_some()).cloned()
+    sources.inputs.iter().find_map(|input| {
+        let origin = input_origin_for(input, &resource)?;
+        let mut prepared = input.as_ref().clone();
+        prepared.url = origin;
+        prepared.method = shared::model::InputFetchMethod::GET;
+        prepared.headers.retain(|name, _| !is_credential_header(name));
+        Some(Arc::new(prepared))
+    })
 }
 
 pub(super) async fn playlist_resource(
@@ -202,8 +229,17 @@ pub(super) async fn playlist_resolve_url(
 
 #[cfg(test)]
 mod web_ui_resource_tests {
-    use super::web_ui_resource_headers;
+    use super::{web_ui_resource_headers, web_ui_resource_input};
+    use crate::{
+        api::api_utils::resource_input_for_url,
+        model::{ConfigInput, ConfigProvider, ProviderDnsCache, SourcesConfig},
+    };
     use axum::http::{header, HeaderMap, HeaderValue};
+    use shared::{
+        model::{InputFetchMethod, InputType, ProviderUrlSelectionPolicy},
+        utils::Internable,
+    };
+    use std::{collections::HashMap, sync::Arc};
 
     #[test]
     fn browser_user_agent_is_not_forwarded_to_the_provider() {
@@ -213,5 +249,86 @@ mod web_ui_resource_tests {
         let forwarded = web_ui_resource_headers(&headers);
         assert!(forwarded.get(header::USER_AGENT).is_none());
         assert_eq!(forwarded.get(header::ACCEPT).and_then(|v| v.to_str().ok()), Some("image/avif,image/webp"));
+    }
+
+    #[tokio::test]
+    async fn provider_scheme_input_resolves_origins_and_sanitizes_for_web_ui() {
+        let provider = Arc::new(ConfigProvider {
+            name: "demo".into(),
+            urls: vec!["http://10.0.0.1:8080".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+            current_url_index: std::sync::atomic::AtomicUsize::new(0),
+            dns: None,
+            dns_cache: Arc::new(ProviderDnsCache::default()),
+        });
+
+        let mut headers = HashMap::new();
+        headers.insert("user-agent".to_string(), "DemoPlayer/1.0".to_string());
+        headers.insert("authorization".to_string(), "Bearer secret-token".to_string());
+        headers.insert("cookie".to_string(), "session=abc".to_string());
+        headers.insert("x-api-key".to_string(), "key-123".to_string());
+
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider-input".intern(),
+            input_type: InputType::Xtream,
+            url: "provider://demo".to_string(),
+            provider_configs: Some(vec![provider]),
+            headers,
+            method: InputFetchMethod::POST,
+            enabled: true,
+            ..Default::default()
+        });
+
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let sources = SourcesConfig { inputs: vec![Arc::clone(&input)], ..Default::default() };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let logo_url = "http://10.0.0.1:8080/logo.png";
+        let matched = web_ui_resource_input(&app_state, logo_url).expect("provider input should resolve and match");
+
+        // Finding 2: Origin is resolved so resource_input_for_url also matches
+        assert!(resource_input_for_url(Some(&matched), logo_url).is_some());
+        assert_eq!(matched.headers.get("user-agent").map(String::as_str), Some("DemoPlayer/1.0"));
+
+        // Finding 3: Auth headers stripped
+        assert!(!matched.headers.contains_key("authorization"));
+        assert!(!matched.headers.contains_key("cookie"));
+        assert!(!matched.headers.contains_key("x-api-key"));
+
+        // Finding 4: Method is GET even though input was POST
+        assert_eq!(matched.method, InputFetchMethod::GET);
+    }
+
+    #[tokio::test]
+    async fn http_scheme_input_sanitizes_auth_headers_and_forces_get_method() {
+        let mut headers = HashMap::new();
+        headers.insert("user-agent".to_string(), "CustomUA/2.0".to_string());
+        headers.insert("authorization".to_string(), "Basic dXNlcjpwYXNz".to_string());
+        headers.insert("cookie".to_string(), "token=xyz".to_string());
+
+        let input = Arc::new(ConfigInput {
+            id: 2,
+            name: "http-input".intern(),
+            input_type: InputType::M3u,
+            url: "http://example.com:8080/playlist.m3u8".to_string(),
+            headers,
+            method: InputFetchMethod::POST,
+            enabled: true,
+            ..Default::default()
+        });
+
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let sources = SourcesConfig { inputs: vec![Arc::clone(&input)], ..Default::default() };
+        app_state.app_config.sources.store(Arc::new(sources));
+
+        let logo_url = "http://example.com:8080/logo.png";
+        let matched = web_ui_resource_input(&app_state, logo_url).expect("http input should match by origin");
+
+        assert!(resource_input_for_url(Some(&matched), logo_url).is_some());
+        assert_eq!(matched.headers.get("user-agent").map(String::as_str), Some("CustomUA/2.0"));
+        assert!(!matched.headers.contains_key("authorization"));
+        assert!(!matched.headers.contains_key("cookie"));
+        assert_eq!(matched.method, InputFetchMethod::GET);
     }
 }

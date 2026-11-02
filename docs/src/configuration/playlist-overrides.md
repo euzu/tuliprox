@@ -329,7 +329,7 @@ TOKEN=$(curl -s -X POST "$BASE_URL/auth/token" \
 M3U items, or the exact match of `search_field=override_id` — is the id every override endpoint takes.
 
 ```bash
-curl -s "$BASE_URL/api/v1/playlist/items?target=my_target&cluster=live&search=BBC&fields=override_id,name,title" \
+curl -s "$BASE_URL/api/v1/playlist/items?target=my_target&cluster=live&search=BBC&fields=override_id&fields=name&fields=title" \
     -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" | jq .
 ```
 

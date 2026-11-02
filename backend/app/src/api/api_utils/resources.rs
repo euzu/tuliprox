@@ -327,14 +327,19 @@ pub(super) async fn fetch_resource_with_timeout(
     None
 }
 
+/// Whether `source` and `resource` share scheme, host and port.
+pub fn is_same_origin(source: &str, resource: &Url) -> bool {
+    Url::parse(source).is_ok_and(|source| {
+        source.scheme() == resource.scheme()
+            && source.host_str() == resource.host_str()
+            && source.port_or_known_default() == resource.port_or_known_default()
+    })
+}
+
 pub fn resource_input_for_url<'a>(input: Option<&'a ConfigInput>, resource_url: &str) -> Option<&'a ConfigInput> {
     let input = input?;
-    let source = Url::parse(&input.url).ok()?;
     let resource = Url::parse(resource_url).ok()?;
-    (source.scheme() == resource.scheme()
-        && source.host_str() == resource.host_str()
-        && source.port_or_known_default() == resource.port_or_known_default())
-    .then_some(input)
+    is_same_origin(&input.url, &resource).then_some(input)
 }
 
 pub async fn resource_redirect_or_proxy(
