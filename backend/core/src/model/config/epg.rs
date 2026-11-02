@@ -141,6 +141,8 @@ pub struct IcsDummyPolicy {
 #[derive(Debug, Clone)]
 pub struct EpgConfig {
     pub sources: Vec<EpgSource>,
+    /// Original declarations, retained separately from resolved and deduplicated runtime sources.
+    pub configured_sources: Option<Vec<EpgSourceDto>>,
     pub smart_match: Option<EpgSmartMatchConfig>,
 }
 
@@ -149,6 +151,7 @@ impl From<&EpgConfigDto> for EpgConfig {
     fn from(dto: &EpgConfigDto) -> Self {
         Self {
             sources: dto.t_sources.iter().map(EpgSource::from).collect(),
+            configured_sources: dto.sources.clone(),
             smart_match: dto.smart_match.as_ref().map(EpgSmartMatchConfig::from),
         }
     }
@@ -158,6 +161,67 @@ impl From<&EpgConfigDto> for EpgConfig {
 mod tests {
     use super::*;
     use shared::model::{EpgSourceTypeDto, IcsEpgSourceConfigDto};
+
+    #[test]
+    fn runtime_epg_conversion_preserves_configured_source_origin() {
+        let mut input = shared::model::ConfigInputDto {
+            url: "http://provider.example".into(),
+            username: Some("old-user".into()),
+            password: Some("old-pass".into()),
+            epg: Some(EpgConfigDto {
+                sources: Some(vec![
+                    EpgSourceDto { url: "AuTo".into(), priority: -2, logo_override: true, ..Default::default() },
+                    EpgSourceDto {
+                        url: "http://provider.example/xmltv.php?username=old-user&password=old-pass".into(),
+                        priority: 4,
+                        ..Default::default()
+                    },
+                    EpgSourceDto {
+                        source_type: EpgSourceTypeDto::Ics,
+                        url: "https://calendar.example/events.ics".into(),
+                        channel_id: Some("calendar".into()),
+                        channel_title: Some("Events".into()),
+                        match_names: vec!["Calendar".into()],
+                        ics: Some(IcsEpgSourceConfigDto::default()),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        input.prepare_epg(true).unwrap();
+        let dto = input.epg.as_ref().unwrap();
+        assert_eq!(dto.t_sources.len(), 2);
+        let runtime = EpgConfig::from(dto);
+        assert_eq!(runtime.configured_sources, dto.sources);
+        assert_eq!(runtime.clone().configured_sources, dto.sources);
+        assert_eq!(runtime.configured_sources.as_ref().unwrap().len(), 3);
+        let mut runtime = crate::model::ConfigInput::from(&input);
+        runtime.username = Some("new-user".into());
+        runtime.refresh_auto_epg_sources().unwrap();
+        let refreshed = runtime.epg.as_ref().unwrap();
+        assert_eq!(refreshed.configured_sources, dto.sources);
+        assert_eq!(refreshed.sources.len(), 3);
+        assert!(refreshed.sources[0].url.contains("username=new-user"));
+        assert_eq!(refreshed.sources[1].priority, 4);
+        assert_eq!(refreshed.sources[2].channel_id.as_deref(), Some("calendar"));
+    }
+
+    #[test]
+    fn auto_refresh_leaves_runtime_sources_without_origin_unchanged() {
+        let source = EpgSource::from(&EpgSourceDto {
+            url: "http://provider.example/xmltv.php?username=old-user&password=old-pass".into(),
+            ..Default::default()
+        });
+        let mut input = crate::model::ConfigInput {
+            username: Some("new-user".into()),
+            epg: Some(EpgConfig { sources: vec![source.clone()], configured_sources: None, smart_match: None }),
+            ..Default::default()
+        };
+        input.refresh_auto_epg_sources().unwrap();
+        assert_eq!(input.epg.as_ref().unwrap().sources[0].url, source.url);
+    }
 
     #[test]
     fn epg_source_dto_type_xmltv_maps_to_runtime_xmltv() {

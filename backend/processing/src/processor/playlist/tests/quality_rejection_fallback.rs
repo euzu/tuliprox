@@ -1694,7 +1694,7 @@ async fn maintenance_input_skips_epg_download_and_keeps_existing_file() {
         match_names: Vec::new(),
         ics: None,
     };
-    input.epg = Some(EpgConfig { sources: vec![epg_source.clone()], smart_match: None });
+    input.epg = Some(EpgConfig { configured_sources: None, sources: vec![epg_source.clone()], smart_match: None });
     let storage_dir = temp.path().to_string_lossy().into_owned();
     let epg_path =
         crate::epg::get_input_raw_epg_file_path(&epg_source, &input, &storage_dir).await.expect("epg file path");

@@ -118,6 +118,40 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
 }
 
+#[cfg(feature = "test-support")]
+impl PlaylistProcessingContext<shared::model::NoopSink> {
+    /// Builds an isolated acquisition context for cross-crate EPG tests using real configuration.
+    pub fn for_epg_test(config: Arc<AppConfig>, client: reqwest::Client) -> Self {
+        Self {
+            client,
+            run_id: "epg-test".into(),
+            execution_order: PlaylistUpdateRunOrder::from(1),
+            config,
+            user_targets: Arc::new(ProcessTargets {
+                enabled: false,
+                inputs: Vec::new(),
+                targets: Vec::new(),
+                target_names: Vec::new(),
+            }),
+            events: shared::model::NoopSink,
+            playlist_state: None,
+            disabled_headers: None,
+            processed_inputs: Arc::default(),
+            input_completions: Arc::default(),
+            input_locks: Arc::default(),
+            provider_manager: None,
+            metadata_manager: None,
+            pre_processed_inputs: None,
+            stalker_refresh_mode: StalkerRefreshMode::Complete,
+            partial_refresh: Arc::default(),
+            had_quality_rejections: Arc::default(),
+            input_refresh: None,
+            library_update_mode: LibraryUpdateMode::ExistingCatalog,
+            maintenance: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod pipeline_transparency_tests;
 
