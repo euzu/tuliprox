@@ -7,7 +7,7 @@ use crate::{
     services::PluginActionError,
 };
 use js_sys::Date;
-use shared::model::{PluginRepositoryDto, PluginRepositoryInfoDto};
+use shared::model::{PluginRepositoryAddDto, PluginRepositoryDto, PluginRepositoryInfoDto};
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use yew::{component, html, platform::spawn_local, use_state, Callback, Html, Properties};
@@ -35,14 +35,14 @@ struct SourceDialogProps {
     on_close: Callback<()>,
 }
 
-/// The add/edit dialog of one source. The server's `422` and `409` problems stay in the dialog.
+/// The add/edit dialog of one source. Adding asks for the url only: the id and
+/// the name come from the catalog. Editing shows them, and changes the url and
+/// the enabled switch. The server's `422`, `409` and fetch problems stay in the dialog.
 #[component]
 fn SourceDialog(props: &SourceDialogProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let editing = props.initial.is_some();
-    let id = use_state(|| props.initial.as_ref().map(|source| source.id.clone()).unwrap_or_default());
-    let name = use_state(|| props.initial.as_ref().map(|source| source.name.clone()).unwrap_or_default());
     let url = use_state(|| props.initial.as_ref().map(|source| source.url.clone()).unwrap_or_default());
     let enabled = use_state(|| props.initial.as_ref().is_none_or(|source| source.enabled));
     let busy = use_state(|| false);
@@ -50,13 +50,11 @@ fn SourceDialog(props: &SourceDialogProps) -> Html {
 
     let save = {
         let services = services.clone();
-        let id = id.clone();
-        let name = name.clone();
         let url = url.clone();
         let enabled = enabled.clone();
         let busy = busy.clone();
         let error = error.clone();
-        let original = props.initial.as_ref().map(|source| source.id.clone());
+        let initial = props.initial.clone();
         let on_saved = props.on_saved.clone();
         let on_close = props.on_close.clone();
         Callback::from(move |()| {
@@ -64,22 +62,21 @@ fn SourceDialog(props: &SourceDialogProps) -> Html {
                 return;
             }
             busy.set(true);
-            let body = PluginRepositoryDto {
-                id: id.trim().to_owned(),
-                name: name.trim().to_owned(),
-                url: url.trim().to_owned(),
-                enabled: *enabled,
-            };
+            let url = url.trim().to_owned();
+            let initial = initial.clone();
+            let enabled = *enabled;
             let services = services.clone();
-            let original = original.clone();
             let busy = busy.clone();
             let error = error.clone();
             let on_saved = on_saved.clone();
             let on_close = on_close.clone();
             spawn_local(async move {
-                let result = match original.as_deref() {
-                    Some(original) => services.plugins.update_repository(original, &body).await,
-                    None => services.plugins.add_repository(&body).await,
+                let result = match initial {
+                    Some(source) => {
+                        let body = PluginRepositoryDto { id: source.id.clone(), name: source.name, url, enabled };
+                        services.plugins.update_repository(&source.id, &body).await
+                    }
+                    None => services.plugins.add_repository(&PluginRepositoryAddDto { url }).await,
                 };
                 match result {
                     Ok(_) => {
@@ -116,14 +113,6 @@ fn SourceDialog(props: &SourceDialogProps) -> Html {
         )
         .with_disabled(*busy)],
     };
-    let on_id = {
-        let id = id.clone();
-        Callback::from(move |value: String| id.set(value))
-    };
-    let on_name = {
-        let name = name.clone();
-        Callback::from(move |value: String| name.set(value))
-    };
     let on_url = {
         let url = url.clone();
         Callback::from(move |value: String| url.set(value))
@@ -137,20 +126,18 @@ fn SourceDialog(props: &SourceDialogProps) -> Html {
     let content = html! {
         <div class="tp__plugins__source-dialog">
             <h2>{ translate.t(title_key) }</h2>
-            if editing {
-                <p><span class="tp__plugins__muted">{ translate.t("LABEL.ID") }{ ": " }</span><code>{ (*id).clone() }</code></p>
-            } else {
-                <Input name="source_id" label={translate.t("LABEL.ID")} value={(*id).clone()} on_change={on_id}
-                    required=true />
+            if let Some(source) = props.initial.as_ref() {
+                <p><span class="tp__plugins__muted">{ translate.t("LABEL.ID") }{ ": " }</span><code>{ source.id.clone() }</code></p>
+                <p><span class="tp__plugins__muted">{ translate.t("LABEL.NAME") }{ ": " }</span>{ source.name.clone() }</p>
             }
-            <Input name="source_name" label={translate.t("LABEL.NAME")} value={(*name).clone()} on_change={on_name}
-                required=true />
             <Input name="source_url" label={translate.t("LABEL.URL")} value={(*url).clone()} on_change={on_url}
                 placeholder={Some("https://example.com/marketplace.json".to_owned())} required=true />
-            <label class="tp__plugins__source-enabled">
-                <ToggleSwitch value={*enabled} aria_label={translate.t("LABEL.ENABLED")} on_change={on_enabled} />
-                { " " }{ translate.t("LABEL.ENABLED") }
-            </label>
+            if editing {
+                <label class="tp__plugins__source-enabled">
+                    <ToggleSwitch value={*enabled} aria_label={translate.t("LABEL.ENABLED")} on_change={on_enabled} />
+                    { " " }{ translate.t("LABEL.ENABLED") }
+                </label>
+            }
             if let Some(err) = error.as_ref() {
                 <div class="tp__plugins__error tp__input-error" role="alert">
                     <strong>{ err.error.clone() }</strong>

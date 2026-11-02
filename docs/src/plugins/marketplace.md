@@ -16,7 +16,9 @@ not at the repository page.
 You can add sources in two places. Both edit the same list in `config.yml`:
 
 - In `config.yml`, under `plugins.repositories`.
-- In the UI, in the Plugin Manager, on the **Marketplace** tab, under **Sources**.
+- In the UI, in the Plugin Manager, on the **Marketplace** tab, under **Sources**. **Add source** asks for the URL only.
+  Tuliprox fetches the catalog and takes the source name from its `name` field. The id is made from that name, with a
+  numeric suffix if the id is already taken. If the catalog has no name, the host of the URL is used.
 
 ```yaml
 plugins:
@@ -34,7 +36,7 @@ plugins:
 | Field | Rule |
 | --- | --- |
 | `id` | Unique among the sources. It has the same shape as a plugin id. |
-| `name` | Required. Shown in the UI. |
+| `name` | Required in `config.yml`. Shown in the UI. The UI sets it from the catalog's `name` when you add a source or change its URL. |
 | `url` | Must be `https`. It may be a `${env:VAR}` reference, which is resolved when the config is loaded. |
 | `enabled` | A disabled source is not browsed and is not synced. |
 

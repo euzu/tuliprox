@@ -159,6 +159,26 @@ pub async fn sync_source(
     }
 }
 
+/// The display name the catalog at `url` declares, fetched now and not cached.
+/// Used when a source is added: its id and name come from the catalog. `None`
+/// when the catalog has no name (or only a blank one).
+///
+/// # Errors
+/// The [`MarketplaceError`] of the fetch or the parse.
+pub async fn probe_source_name(
+    client: &Client,
+    policy: FetchPolicy,
+    url: &str,
+) -> Result<Option<String>, MarketplaceError> {
+    match fetch_catalog(client, policy, url, None, None).await? {
+        CatalogFetch::Fresh { bytes, .. } => {
+            let (catalog, _warnings) = parse(&bytes, policy.allow_http).map_err(MarketplaceError::Catalog)?;
+            Ok(catalog.name.map(|name| name.trim().to_string()).filter(|name| !name.is_empty()))
+        }
+        CatalogFetch::NotModified => Ok(None),
+    }
+}
+
 /// The info row of `source` from its cache; no network.
 pub async fn source_info(data_dir: &Path, source: &PluginRepository) -> PluginRepositoryInfoDto {
     info(source, &load(data_dir, source).await)

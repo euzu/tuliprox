@@ -51,8 +51,8 @@ pub use activation::{
 pub use boot_update::{boot_report_path, read_boot_report, record_recovered, run_boot_update};
 pub use install::{ActivatedUpdate, InstallGuard, InstallRejection, MarketplaceExpect};
 pub use marketplace::{
-    browse, fetch_package, has_catalog, remove_cache, resolve_release, source_info, source_warnings, sync_source,
-    Blocker, Eligibility, FetchPolicy, MarketplaceError, ReleaseLookup, ResolvedRelease, UpdateCandidate,
+    browse, fetch_package, has_catalog, probe_source_name, remove_cache, resolve_release, source_info, source_warnings,
+    sync_source, Blocker, Eligibility, FetchPolicy, MarketplaceError, ReleaseLookup, ResolvedRelease, UpdateCandidate,
     CATALOG_MAX_BYTES, PACKAGE_MAX_BYTES,
 };
 pub use mcp_tools::{PluginMcpTool, PluginMcpToolKind};

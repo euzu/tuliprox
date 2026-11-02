@@ -8,7 +8,8 @@ use serde::de::DeserializeOwned;
 use shared::{
     model::{
         MarketplaceDto, MarketplaceInstallDto, MarketplaceQueryDto, PluginApproveDto, PluginBootReportDto,
-        PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginRepositoryDto, PluginRepositoryInfoDto,
+        PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginRepositoryAddDto, PluginRepositoryDto,
+        PluginRepositoryInfoDto,
         PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto, PluginSummaryDto,
         PluginTaskDto, PluginUpdatePolicy, PluginUpdatePolicyDto, PluginUpdateRequestDto, PluginUpdateResultDto,
         PluginUpdateSettingsDto, PluginUpdatesDto, PluginUploadErrorDto, PluginUploadReviewDto,
@@ -207,10 +208,11 @@ impl PluginService {
         request_get(&self.repositories_path(), None, None).await.map(Option::unwrap_or_default)
     }
 
-    /// `POST …/repositories`: add a source (`422` on validation, `409` on a duplicate id).
+    /// `POST …/repositories`: add a source by its url; the server takes the id and name from the catalog
+    /// (`422` on a bad url, the fetch error status when the catalog cannot be read).
     pub async fn add_repository(
         &self,
-        repository: &PluginRepositoryDto,
+        repository: &PluginRepositoryAddDto,
     ) -> Result<PluginRepositoryInfoDto, PluginActionError> {
         let payload =
             serde_json::to_string(repository).map_err(|_| PluginActionError::transport(&Error::RequestError))?;

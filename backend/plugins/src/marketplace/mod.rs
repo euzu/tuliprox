@@ -16,8 +16,8 @@ mod format;
 mod updates;
 
 pub use catalog::{
-    browse, has_catalog, remove_cache, resolve_release, source_info, source_warnings, sync_source, ReleaseLookup,
-    ResolvedRelease,
+    browse, has_catalog, probe_source_name, remove_cache, resolve_release, source_info, source_warnings, sync_source,
+    ReleaseLookup, ResolvedRelease,
 };
 pub use fetch::{fetch_package, FetchPolicy, MarketplaceError, CATALOG_MAX_BYTES, PACKAGE_MAX_BYTES};
 pub use updates::{Blocker, Eligibility, UpdateCandidate};

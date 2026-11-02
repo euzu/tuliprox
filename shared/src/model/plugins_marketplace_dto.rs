@@ -5,6 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The request body of `POST /api/v1/plugins/repositories`. The id and the name
+/// of a new source come from its catalog, so only the url is given. A new
+/// source is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRepositoryAddDto {
+    pub url: String,
+}
+
 /// Where an installed plugin came from: the marketplace source id and the
 /// release version installed from it. Absent for an upload or a directory drop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
