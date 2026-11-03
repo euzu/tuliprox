@@ -6,7 +6,7 @@
 //! outbox apply to a plugin channel exactly as to a built-in one.
 
 use super::DEFAULT_SEND_TIMEOUT;
-use crate::channel::{Delivery, NotificationChannel, RenderedMessage};
+use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
 use log::warn;
 use shared::model::{
     notification::{EventId, Severity},
@@ -97,6 +97,14 @@ impl PluginChannel {
 
 impl NotificationChannel for PluginChannel {
     fn id(&self) -> &'static str { self.id }
+
+    /// The plugin gets the event's own body and the event JSON; operator
+    /// templates are a built-in channel feature.
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities { supports_templates: false, max_body_bytes: None }
+    }
+
+    fn template_for(&self, _event: EventId) -> Option<&str> { None }
 
     fn routing(&self) -> &ChannelRouting { &self.routing }
 
@@ -202,6 +210,8 @@ mod tests {
         let notifier = notifier(vec![declared("notify-floor", Some(serde_json::json!({"min_severity": "error"})))]);
         let channel = channels_of(&notifier).remove(0);
         let event = shared::model::notification::registry::SYSTEM_INFO;
+        assert!(channel.template_for(event).is_none());
+        assert!(!channel.capabilities().supports_templates);
         assert!(!channel.wants(event, Severity::Warn));
         assert!(channel.wants(event, Severity::Error));
     }

@@ -1,0 +1,24 @@
+*🔄 Playlist Update Report*
+
+{{#each stats}}
+*📥 Source Stats*
+{{#each inputs}}
+• *{{name}}* (`{{type}}`)
+  ⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}`
+  📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ *`{{processed.groups}}`*/*`{{processed.channels}}`*
+{{/each}}
+
+*🚀 Targets*
+{{#each targets}}
+✅ `{{target}}`
+{{/each}}
+{{/each}}
+
+{{#if processing.errors}}
+*❌ Processing Errors*
+```
+{{processing.errors}}
+```
+{{/if}}
+
+_Timestamp: {{timestamp}}_

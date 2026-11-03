@@ -413,6 +413,13 @@
       "REPEAT_INTERVAL_SECS": "How often (in seconds) to re-send the alert while the disk stays in the same warning or critical state.\n\nSet to 0 to disable re-arming. Default: 3600 (1h)."
     },
     "DEFAULT": "No dedicated explanation is available for this field yet.",
+    "DISCORD": {
+      "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
+    },
+    "DISCORD_MESSAGING_CONFIG": {
+      "TEMPLATES": "Handlebars templates for Discord message bodies.",
+      "URL": "Discord webhook URL for sending notification messages."
+    },
     "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
     "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
@@ -608,7 +615,9 @@
       "READ_ONLY": "Hides and rejects tools that change state. Forced to read-only when Web UI authentication is disabled."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type."
+      "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
+      "REST_HEADERS": "Custom HTTP headers sent with REST notification requests (JSON format).",
+      "TELEGRAM_CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "Logs which WebUI user initiated or is viewing the metadata processing.",
@@ -650,6 +659,11 @@
       "ENABLED": "Enables DNS/IP-connect behavior for this provider.",
       "KEEP_VHOST": "If enabled, keeps the original hostname in the Host header while connecting by resolved IP.",
       "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10)."
+    },
+    "PUSHOVER_MESSAGING_CONFIG": {
+      "TOKEN": "Pushover application API token.",
+      "URL": "Optional custom Pushover API URL. Leave empty to use the default.",
+      "USER": "Pushover user key identifying the notification recipient."
     },
     "PROVIDER_FORM": {
       "URL_SELECTION_POLICY": "Controls how each new request chooses its starting provider URL. `resume_last_working` starts with the last successful URL. `restart_from_first` always begins again at the first configured URL and only fails over if that request encounters an error.",
@@ -723,6 +737,12 @@
       "BACKOFF_MILLIS": "The wait time between failed request attempts (e.g. 250ms).",
       "BACKOFF_MULTIPLIER": "Multiplies the base backoff after each failed attempt to create an exponential delay."
     },
+    "REST_MESSAGING_CONFIG": {
+      "HEADERS": "Custom HTTP headers to send with the request (JSON format).",
+      "METHOD": "HTTP method used for the notification request (e.g. POST, PUT). Default: POST.",
+      "TEMPLATES": "Handlebars templates for REST notification message bodies.",
+      "URL": "Target URL that receives the notification webhook."
+    },
     "REVERSE_PROXY_CONFIG": {
       "ADMISSION_STRATEGIES": "Defines what Tuliprox may still try after the normal user admission is already exhausted.\n\nUse this to control short transition grace during switching or to evict an existing user stream, either from the same IP only or across the whole user account, instead of rejecting the new request immediately.\n\nStrategies are evaluated from top to bottom.\n\nGrace strategies only work when `grace_period_millis` is greater than 0. Only one grace strategy can be active at a time.",
       "FAILOVER_REDIRECT_PATTERNS": "Regex patterns determining which HTTP error responses trigger an automatic failover rotation.",
@@ -792,6 +812,17 @@
       "FILTER": "Global filter expression applied to the target before creating explicit outputs.",
       "FORCE_REDIRECT": "Forces streams directly to the proxy or the provider instead of resolving individually.",
       "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
+    },
+    "TELEGRAM_CONFIG": {
+      "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
+      "MARKDOWN": "If enabled, messages are sent as MarkdownV2 formatted text.",
+      "TEMPLATES": "Handlebars templates for Telegram message bodies."
+    },
+    "TELEGRAM_MESSAGING_CONFIG": {
+      "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
+      "CHAT_IDS": "List of Telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'.",
+      "MARKDOWN": "If enabled, messages are sent as MarkdownV2 formatted text.",
+      "TEMPLATES": "Handlebars templates for Telegram message bodies."
     },
     "TMDB_CONFIG": {
       "API_KEY": "Your TMDB API key.\n\nYou only need this if you want to use your own TMDB account limits.",
@@ -956,6 +987,7 @@
     "ACTIVE_USER_CONNECTIONS": "Active user connections",
     "ADD_ALIAS": "Add Alias",
     "ADD_ATTRIBUTE": "Add Attribute",
+    "ADD_CHAT_ID": "Add ChatId",
     "ADD_DEVICE": "Add Device",
     "ADD_DIRECTORY": "Add Directory",
     "ADD_EPG_SOURCE": "Add EPG Source",
@@ -1031,6 +1063,7 @@
     "BACKUP_DIR": "Backup dir",
     "BEST_MATCH_THRESHOLD": "Best Match Threshold",
     "BODY_TEMPLATE": "Body Template",
+    "BOT_TOKEN": "Bot Token",
     "BOUQUETS": "Bouquets",
     "BUFFER_ENABLED": "Buffer Enabled",
     "BUFFER_SIZE": "Buffer Size",
@@ -1047,6 +1080,7 @@
     "CF_HEADER": "Remove Cloudflare headers",
     "CHANNEL": "Channel",
     "CHANNELS": "Channels",
+    "CHAT_IDS": "Chat Ids",
     "CLEANUP": "Cleanup",
     "CATCHUP_SESSION_TTL_SECS": "Catchup Session TTL (secs)",
     "CLEAR": "Clear",
@@ -1317,6 +1351,7 @@
     "MAPPER": "Mapper",
     "MAPPING": "Mapping",
     "MAPPING_PATH": "Mapping Path",
+    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "Mask redirect url",
     "MATCH_AS_ASCII": "Match as ascii",
     "MATCH_THRESHOLD": "Match Threshold",
@@ -1584,6 +1619,7 @@
     "PROVIDER_URLS": "Provider URLs",
     "PROXY": "Proxy",
     "PROXY_CONFIG": "Proxy",
+    "PUSHOVER": "Pushover",
     "QOS_AGGREGATION": "QoS Aggregation",
     "QOS_AGGREGATION_ENABLED": "Enable QoS aggregation",
     "RATE_LIMIT": "Rate Limit",
@@ -1713,6 +1749,7 @@
     "RESOURCE_REWRITE_DISABLED": "Resource Rewrite Disabled",
     "RESERVE_SLOTS_FOR_USERS": "Reserve slots for users",
     "RESET": "Reset",
+    "REST": "Rest",
     "RETRY": "Retry",
     "REVERSE": "Reverse",
     "REVERSE_PROXY": "Reverse Proxy",
@@ -1857,6 +1894,7 @@
     "TARGET": "Target",
     "TARGETS": "Targets",
     "TECH": "Tech",
+    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "Threshold score",
     "TEMPLATES": "Templates",
     "TEMPLATE_PATH": "Template Path",

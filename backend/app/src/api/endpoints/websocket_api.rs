@@ -944,7 +944,7 @@ mod tests {
             EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
                 shared::model::notification::registry::SYSTEM_ERROR,
                 3,
-                vec!["plugin.example".to_string()],
+                vec!["telegram".to_string()],
                 0,
             )),
             EventMessage::ConnectionDenied(ConnectionDenied::new("u".into(), "1.2.3.4".into(), 1, 0)),

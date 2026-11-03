@@ -47,7 +47,8 @@ pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &Cance
             match message {
                 Ok(message) => {
                     if let Some(event) = to_notification(&message) {
-                        tuliprox_messaging::send_event(&app_state.app_config, event).await;
+                        let client = app_state.http_clients.default.load();
+                        tuliprox_messaging::send_event(&app_state.app_config, &client, event).await;
                     }
                 }
                 // Capacity is 10. Falling behind must not kill the bridge -
@@ -653,7 +654,7 @@ mod tests {
             EventMessage::NotificationDeadLettered(NotificationDeadLetter::new(
                 shared::model::notification::registry::SYSTEM_ERROR,
                 3,
-                vec!["plugin.example".to_string()],
+                vec!["telegram".to_string()],
                 0,
             )),
             EventMessage::ConnectionDenied(ConnectionDenied::new("u".into(), "1.2.3.4".into(), 1, 0)),

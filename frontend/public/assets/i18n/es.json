@@ -413,6 +413,13 @@
       "REPEAT_INTERVAL_SECS": "Con qué frecuencia (en segundos) se reenvía la alerta mientras el disco permanece en el mismo estado de advertencia o crítico.\n\nEstablezca 0 para deshabilitar el reenvío. Por defecto: 3600 (1h)."
     },
     "DEFAULT": "Aún no hay una explicación específica disponible para este campo.",
+    "DISCORD": {
+      "TEMPLATE_MESSAGE": "Cuerpo de la plantilla de mensaje para las notificaciones de Discord."
+    },
+    "DISCORD_MESSAGING_CONFIG": {
+      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de Discord.",
+      "URL": "URL del webhook de Discord para enviar mensajes de notificación."
+    },
     "BEST_MATCH_THRESHOLD": "Umbral de alta confianza (0-100). Las coincidencias por encima de este valor se aceptan inmediatamente como la mejor candidata.",
     "DNS_MAX_ADDRS": "Límite opcional de direcciones IP resueltas conservadas por nombre de host. Déjelo vacío para no establecer un límite explícito.",
     "FUZZY_MATCHING": "Permite la coincidencia por similitud difusa si falla la coincidencia exacta de ID normalizado.",
@@ -608,7 +615,9 @@
       "READ_ONLY": "Oculta y rechaza las herramientas que modifican el estado. Se fuerza a solo lectura cuando la autenticación de la interfaz web está desactivada."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "Seleccione eventos (p. ej. 'info', 'stats', 'error') que activan notificaciones para este tipo específico."
+      "NOTIFY_ON": "Seleccione eventos (p. ej. 'info', 'stats', 'error') que activan notificaciones para este tipo específico.",
+      "REST_HEADERS": "Cabeceras HTTP personalizadas enviadas con las solicitudes de notificación REST (formato JSON).",
+      "TELEGRAM_CHAT_IDS": "Lista de ID de chat de Telegram para recibir notificaciones. Formato: '<chat_id>' o '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "Registra qué usuario de la WebUI inició o está viendo el procesamiento de metadatos.",
@@ -650,6 +659,11 @@
       "ENABLED": "Habilita el comportamiento de DNS/conexión por IP para este proveedor.",
       "KEEP_VHOST": "Si está habilitado, mantiene el nombre de host original en la cabecera Host al conectar mediante IP resuelta.",
       "REFRESH_SECS": "Intervalo de actualización DNS en segundos para los nombres de host del proveedor (el valor mínimo efectivo es 10)."
+    },
+    "PUSHOVER_MESSAGING_CONFIG": {
+      "TOKEN": "Token de API de la aplicación Pushover.",
+      "URL": "URL de API de Pushover personalizada opcional. Déjela vacía para usar la predeterminada.",
+      "USER": "Clave de usuario de Pushover que identifica al destinatario de la notificación."
     },
     "PROVIDER_FORM": {
       "URL_SELECTION_POLICY": "Controla cómo cada nueva solicitud elige su URL de proveedor inicial. `resume_last_working` comienza con la última URL exitosa. `restart_from_first` siempre comienza de nuevo en la primera URL configurada y solo conmuta si esa solicitud encuentra un error.",
@@ -723,6 +737,12 @@
       "BACKOFF_MILLIS": "El tiempo de espera entre intentos de solicitud fallidos (p. ej. 250ms).",
       "BACKOFF_MULTIPLIER": "Multiplica el retroceso base tras cada intento fallido para crear un retraso exponencial."
     },
+    "REST_MESSAGING_CONFIG": {
+      "HEADERS": "Cabeceras HTTP personalizadas para enviar con la solicitud (formato JSON).",
+      "METHOD": "Método HTTP utilizado para la solicitud de notificación (p. ej. POST, PUT). Por defecto: POST.",
+      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de notificación REST.",
+      "URL": "URL de destino que recibe el webhook de notificación."
+    },
     "REVERSE_PROXY_CONFIG": {
       "ADMISSION_STRATEGIES": "Define lo que Tuliprox todavía puede intentar después de que la admisión normal del usuario ya se haya agotado.\n\nÚselo para controlar una gracia de transición corta durante el cambio, o para desalojar un stream de usuario existente, ya sea solo desde la misma IP o en toda la cuenta de usuario, en lugar de rechazar inmediatamente la nueva solicitud.\n\nLas estrategias se evalúan de arriba a abajo.\n\nLas estrategias de gracia solo funcionan cuando `grace_period_millis` es mayor que 0. Solo una estrategia de gracia puede estar activa a la vez.",
       "FAILOVER_REDIRECT_PATTERNS": "Patrones de expresión regular que determinan qué respuestas de error HTTP activan una rotación automática de conmutación por error.",
@@ -792,6 +812,17 @@
       "FILTER": "Expresión de filtro global aplicada al destino antes de crear salidas explícitas.",
       "FORCE_REDIRECT": "Fuerza los streams directamente al proxy o al proveedor en lugar de resolverlos individualmente.",
       "PROCESSING_ORDER": "Determina la prioridad o la secuencia en la que se emparejan y listan los canales de destino."
+    },
+    "TELEGRAM_CONFIG": {
+      "BOT_TOKEN": "Token de la API de Bot de Telegram. Obténgalo de @BotFather.",
+      "MARKDOWN": "Si está habilitado, los mensajes se envían como texto con formato MarkdownV2.",
+      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de Telegram."
+    },
+    "TELEGRAM_MESSAGING_CONFIG": {
+      "BOT_TOKEN": "Token de la API de Bot de Telegram. Obténgalo de @BotFather.",
+      "CHAT_IDS": "Lista de ID de chat de Telegram para recibir notificaciones. Formato: '<chat_id>' o '<chat_id>:<thread_id>'.",
+      "MARKDOWN": "Si está habilitado, los mensajes se envían como texto con formato MarkdownV2.",
+      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de Telegram."
     },
     "TMDB_CONFIG": {
       "API_KEY": "Su clave API de TMDB.\n\nSolo necesita esto si desea usar los límites de su propia cuenta de TMDB.",
@@ -956,6 +987,7 @@
     "ACTIVE_USER_CONNECTIONS": "Conexiones de usuario activas",
     "ADD_ALIAS": "Añadir alias",
     "ADD_ATTRIBUTE": "Añadir atributo",
+    "ADD_CHAT_ID": "Añadir ChatId",
     "ADD_DEVICE": "Añadir dispositivo",
     "ADD_DIRECTORY": "Añadir directorio",
     "ADD_EPG_SOURCE": "Añadir fuente EPG",
@@ -1031,6 +1063,7 @@
     "BACKUP_DIR": "Directorio de copia de seguridad",
     "BEST_MATCH_THRESHOLD": "Umbral de mejor coincidencia",
     "BODY_TEMPLATE": "Plantilla del cuerpo",
+    "BOT_TOKEN": "Token del bot",
     "BOUQUETS": "Bouquets",
     "BUFFER_ENABLED": "Búfer habilitado",
     "BUFFER_SIZE": "Tamaño del búfer",
@@ -1047,6 +1080,7 @@
     "CF_HEADER": "Eliminar cabeceras de Cloudflare",
     "CHANNEL": "Canal",
     "CHANNELS": "Canales",
+    "CHAT_IDS": "Chat Ids",
     "CLEANUP": "Limpieza",
     "CATCHUP_SESSION_TTL_SECS": "TTL de sesión de catchup (segs)",
     "CLEAR": "Limpiar",
@@ -1317,6 +1351,7 @@
     "MAPPER": "Mapeador",
     "MAPPING": "Mapeo",
     "MAPPING_PATH": "Ruta de mapeo",
+    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "Enmascarar URL de redirección",
     "MATCH_AS_ASCII": "Coincidir como ASCII",
     "MATCH_THRESHOLD": "Umbral de coincidencia",
@@ -1584,6 +1619,7 @@
     "PROVIDER_URLS": "URL del proveedor",
     "PROXY": "Proxy",
     "PROXY_CONFIG": "Proxy",
+    "PUSHOVER": "Pushover",
     "QOS_AGGREGATION": "Agregación de QoS",
     "QOS_AGGREGATION_ENABLED": "Habilitar agregación de QoS",
     "RATE_LIMIT": "Límite de tasa",
@@ -1713,6 +1749,7 @@
     "RESOURCE_REWRITE_DISABLED": "Reescritura de recursos deshabilitada",
     "RESERVE_SLOTS_FOR_USERS": "Reservar espacios para usuarios",
     "RESET": "Restablecer",
+    "REST": "Rest",
     "RETRY": "Reintentar",
     "REVERSE": "Inverso",
     "REVERSE_PROXY": "Proxy inverso",
@@ -1857,6 +1894,7 @@
     "TARGET": "Destino",
     "TARGETS": "Destinos",
     "TECH": "Técnico",
+    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "Puntuación umbral",
     "TEMPLATES": "Plantillas",
     "TEMPLATE_PATH": "Ruta de plantilla",

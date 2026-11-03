@@ -413,6 +413,13 @@
       "REPEAT_INTERVAL_SECS": "كل كم ثانية يتم إعادة إرسال التنبيه أثناء بقاء القرص في نفس حالة التحذير أو الحرج.\n\nاضبط على 0 لتعطيل إعادة التسليح. الافتراضي: 3600 (ساعة)."
     },
     "DEFAULT": "لا يوجد شرح مخصص متاح لهذا الحقل بعد.",
+    "DISCORD": {
+      "TEMPLATE_MESSAGE": "نموذج جسم الرسالة لإشعارات Discord."
+    },
+    "DISCORD_MESSAGING_CONFIG": {
+      "TEMPLATES": "قوالب Handlebars لأجسام رسائل Discord.",
+      "URL": "عنوان URL لـ webhook Discord لإرسال رسائل الإشعارات."
+    },
     "BEST_MATCH_THRESHOLD": "عتبة الثقة العالية (0-100). تُقبل المطابقات التي تتجاوز هذه القيمة فورًا كأفضل مرشح.",
     "DNS_MAX_ADDRS": "حد اختياري لعناوين IP التي يتم حلها والمُحتفظ بها لكل اسم مضيف. اتركه فارغًا لعدم وجود حد صريح.",
     "FUZZY_MATCHING": "يسمح بمطابقة التشابه الضبابي إذا فشلت المطابقة الدقيقة للمعرفات المعيارية.",
@@ -608,7 +615,9 @@
       "READ_ONLY": "يخفي الأدوات التي تغيّر الحالة ويرفضها. تُفرض القراءة فقط عند تعطيل مصادقة واجهة الويب."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "حدد الأحداث (مثل 'info'، 'stats'، 'error') التي تُفعّل الإشعارات لهذا النوع المحدد."
+      "NOTIFY_ON": "حدد الأحداث (مثل 'info'، 'stats'، 'error') التي تُفعّل الإشعارات لهذا النوع المحدد.",
+      "REST_HEADERS": "رؤوس HTTP مخصصة تُرسل مع طلبات إشعار REST (بتنسيق JSON).",
+      "TELEGRAM_CHAT_IDS": "قائمة معرفات محادثة Telegram لتلقي الإشعارات. التنسيق: '<chat_id>' أو '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "يسجل أي مستخدم WebUI بدأ أو يشاهد معالجة البيانات الوصفية.",
@@ -650,6 +659,11 @@
       "ENABLED": "يُفعّل سلوك DNS/IP-connect لهذا المزود.",
       "KEEP_VHOST": "إذا تم التفعيل، يحتفظ باسم المضيف الأصلي في رأس المضيف أثناء الاتصال عبر IP المُحَل.",
       "REFRESH_SECS": "فاصل تحديث DNS بالثواني لأسماء مضيف المزود (الحد الأدنى للقيمة الفعالة هو 10)."
+    },
+    "PUSHOVER_MESSAGING_CONFIG": {
+      "TOKEN": "رمز API لتطبيق Pushover.",
+      "URL": "عنوان URL اختياري مخصص لـ Pushover API. اتركه فارغًا لاستخدام الافتراضي.",
+      "USER": "مفتاح مستخدم Pushover الذي يحدد متلقي الإشعار."
     },
     "PROVIDER_FORM": {
       "URL_SELECTION_POLICY": "يتحكم في كيفية اختيار كل طلب جديد لـ URL البدء للمزود. `resume_last_working` يبدأ من آخر URL ناجح. `restart_from_first` يبدأ دائمًا من أول URL مُكوّن مرة أخرى ولا يتجاوز الفشل إلا إذا واجه هذا الطلب خطأ.",
@@ -723,6 +737,12 @@
       "BACKOFF_MILLIS": "وقت الانتظار بين محاولات الطلب الفاشلة (مثل 250 مللي ثانية).",
       "BACKOFF_MULTIPLIER": "يضاعف الارتداد الأساسي بعد كل محاولة فاشلة لإنشاء تأخير أُسي."
     },
+    "REST_MESSAGING_CONFIG": {
+      "HEADERS": "رؤوس HTTP مخصصة لإرسالها مع الطلب (بتنسيق JSON).",
+      "METHOD": "طريقة HTTP المستخدمة لطلب الإشعار (مثل POST، PUT). الافتراضي: POST.",
+      "TEMPLATES": "قوالب Handlebars لأجسام رسائل إشعار REST.",
+      "URL": "عنوان URL المستهدف الذي يتلقى webhook الإشعار."
+    },
     "REVERSE_PROXY_CONFIG": {
       "ADMISSION_STRATEGIES": "يحدد ما قد يحاوله Tuliprox أيضًا بعد استنفاد قبول المستخدم العادي.\n\nاستخدم هذا للتحكم في سماح الانتقال القصير أثناء التبديل أو لطرد بث مستخدم موجود، إما من نفس IP فقط أو عبر حساب المستخدم بالكامل، بدلاً من رفض الطلب الجديد فورًا.\n\nيتم تقييم الاستراتيجيات من الأعلى إلى الأسفل.\n\nتعمل استراتيجيات السماح فقط عندما تكون `grace_period_millis` أكبر من 0. يمكن تفعيل استراتيجية سماح واحدة فقط في وقت واحد.",
       "FAILOVER_REDIRECT_PATTERNS": "أنماط تعبير منتظم تحدد استجابات خطأ HTTP التي تُفعّل دوران تجاوز الفشل التلقائي.",
@@ -792,6 +812,17 @@
       "FILTER": "تعبير تصفية عام مطبق على الهدف قبل إنشاء مخرجات صريحة.",
       "FORCE_REDIRECT": "يُجبر البث مباشرة على الوكيل أو المزود بدلاً من الحل بشكل فردي.",
       "PROCESSING_ORDER": "يحدد الأولوية أو التسلسل الذي يتم به مطابقة قنوات الهدف وإدراجها."
+    },
+    "TELEGRAM_CONFIG": {
+      "BOT_TOKEN": "رمز Telegram Bot API. احصل عليه من @BotFather.",
+      "MARKDOWN": "إذا تم التفعيل، يتم إرسال الرسائل كنص مُنسق MarkdownV2.",
+      "TEMPLATES": "قوالب Handlebars لأجسام رسائل Telegram."
+    },
+    "TELEGRAM_MESSAGING_CONFIG": {
+      "BOT_TOKEN": "رمز Telegram Bot API. احصل عليه من @BotFather.",
+      "CHAT_IDS": "قائمة معرفات محادثة Telegram لتلقي الإشعارات. التنسيق: '<chat_id>' أو '<chat_id>:<thread_id>'.",
+      "MARKDOWN": "إذا تم التفعيل، يتم إرسال الرسائل كنص مُنسق MarkdownV2.",
+      "TEMPLATES": "قوالب Handlebars لأجسام رسائل Telegram."
     },
     "TMDB_CONFIG": {
       "API_KEY": "مفتاح TMDB API الخاص بك.\n\nتحتاج إلى هذا فقط إذا كنت تريد استخدام حدود حساب TMDB الخاص بك.",
@@ -958,6 +989,7 @@
     "ACTIVE_USER_CONNECTIONS": "اتصالات المستخدم النشطة",
     "ADD_ALIAS": "إضافة اسم مستعار",
     "ADD_ATTRIBUTE": "إضافة سمة",
+    "ADD_CHAT_ID": "إضافة معرف محادثة",
     "ADD_DEVICE": "إضافة جهاز",
     "ADD_DIRECTORY": "إضافة دليل",
     "ADD_EPG_SOURCE": "إضافة مصدر EPG",
@@ -1031,6 +1063,7 @@
     "BACKUP_DIR": "دليل النسخ الاحتياطي",
     "BEST_MATCH_THRESHOLD": "حد أفضل تطابق",
     "BODY_TEMPLATE": "قالب الجسم",
+    "BOT_TOKEN": "رمز الروبوت",
     "BUFFER_ENABLED": "المخزن المؤقت مفعّل",
     "BUFFER_SIZE": "حجم المخزن المؤقت",
     "BUILD_TIME": "وقت البناء",
@@ -1046,6 +1079,7 @@
     "CF_HEADER": "إزالة رؤوس Cloudflare",
     "CHANNEL": "قناة",
     "CHANNELS": "قنوات",
+    "CHAT_IDS": "معرفات المحادثة",
     "CLEANUP": "تنظيف",
     "CATCHUP_SESSION_TTL_SECS": "TTL جلسة Catchup (ثواني)",
     "CLEAR": "مسح",
@@ -1316,6 +1350,7 @@
     "MAPPER": "مُعيّن",
     "MAPPING": "تعيين",
     "MAPPING_PATH": "مسار التعيين",
+    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "إخفاء عنوان URL للتحويل",
     "MATCH_AS_ASCII": "مطابقة ASCII",
     "MATCH_THRESHOLD": "حد المطابقة",
@@ -1584,6 +1619,7 @@
     "PROVIDER_URLS": "عناوين URL للمزود",
     "PROXY": "وكيل",
     "PROXY_CONFIG": "وكيل",
+    "PUSHOVER": "Pushover",
     "QOS_AGGREGATION": "تجميع QoS",
     "QOS_AGGREGATION_ENABLED": "تفعيل تجميع QoS",
     "RATE_LIMIT": "تحديد المعدل",
@@ -1632,6 +1668,7 @@
     "RESOURCE_REWRITE_DISABLED": "إعادة كتابة المورد معطلة",
     "RESERVE_SLOTS_FOR_USERS": "حجز فتحات للمستخدمين",
     "RESET": "إعادة تعيين",
+    "REST": "REST",
     "RETRY": "إعادة المحاولة",
     "REVERSE": "عكسي",
     "REVERSE_PROXY": "وكيل عكسي",
@@ -1790,6 +1827,7 @@
     "TARGET": "هدف",
     "TARGETS": "الأهداف",
     "TECH": "تقنية",
+    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "درجة العتبة",
     "TEMPLATES": "القوالب",
     "TEMPLATE_PATH": "مسار القالب",

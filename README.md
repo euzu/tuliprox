@@ -243,7 +243,7 @@ Tuliprox can be configured and monitored directly from the browser.
 - **RBAC Administration** for users, groups, and permission grants
 - **Stream View** with bandwidth, transferred bytes, player information, comments, and EPG details
 - **Stream History & QoS** views for reliability analysis
-- **Messaging Configuration** with channel routing and test/preview support
+- **Messaging Configuration** with channel routing, templates, and test/preview support
 - Configurable landing page and stream-field visibility
 - Multiple themes including a color-vision-deficiency-friendly option
 - Runtime-discovered UI languages with RTL support
@@ -315,8 +315,15 @@ Tuliprox uses a shared event backbone so operational events can feed the Web UI,
 
 Supported notification channels include:
 
-- Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and local command execution (structured event JSON on stdin),
-  all as plugins (under `plugins/notifiers/`)
+- Telegram
+- Discord
+- Pushover
+- REST webhooks
+- ntfy
+- Gotify
+- Slack
+- Local command execution with structured event JSON on stdin
+- Each of them is also available as an optional plugin (under `plugins/notifiers/`)
 
 Notification capabilities include:
 
@@ -328,8 +335,9 @@ Notification capabilities include:
 - Durable delivery with retry handling for transient failures
 - Dead-letter tracking for notifications that permanently fail
 - Provider `Retry-After` support where applicable
-- HMAC-SHA256 signing for webhooks (REST plugin)
-- Preview/test endpoint to see what each channel would be sent without sending it
+- HMAC-SHA256 signing for REST webhooks
+- Per-channel Handlebars templates
+- Preview/test endpoint so templates can be rendered without sending them
 - Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload  
   failures, metadata failures, scheduled-task failures, recording lifecycle, disk alerts, and more
 - Playlist change tracking: get told when channels in the groups you care about change, or when whole groups appear

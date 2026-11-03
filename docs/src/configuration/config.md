@@ -88,20 +88,20 @@ instead of your mount point.
 
 ### Subsections (Object Keys)
 
-| Block             | Description                                                                                                                | Link                                            |
-| :---------------- | :------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------- |
-| `api`             | Internal web server binding settings.                                                                                      | [See section](#1-api-server-api)                |
-| `web_ui`          | Web Dashboard, RBAC, and Authentication.                                                                                   | [See section](#2-web-ui--administration-web_ui) |
-| `log`             | Console output verbosity and sanitization.                                                                                 | [See section](#3-logging-log)                   |
-| `schedules`       | Automated background tasks (Cronjobs).                                                                                     | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (`command`; Telegram, Discord, Slack, Gotify, ntfy, Pushover and REST webhooks via plugins). | [See section](#5-messaging-messaging)           |
-| `video`           | Extension mapping and Web UI download behavior.                                                                            | [See section](#6-video--web-search-video)       |
-| `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                                                          | [See section](#7-outgoing-proxy-proxy)          |
-| `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using.                                          | [See section](#8-ip-check-ipcheck)              |
-| `hdhomerun`       | Virtual DVB-C/T network tuner emulation.                                                                                   | [See section](#9-hdhomerun-emulation-hdhomerun) |
-| `library`         | Local Media Library integration.                                                                                           | [See Local Library](./local-library.md)         |
-| `reverse_proxy`   | Streaming buffers, rate limits, caching.                                                                                   | [See Reverse Proxy](./reverse-proxy.md)         |
-| `metadata_update` | TMDB matching, FFprobe processing, Job Queues.                                                                             | [See Metadata Update](./metadata-update.md)     |
+| Block             | Description                                                                       | Link                                            |
+|:------------------|:----------------------------------------------------------------------------------|:------------------------------------------------|
+| `api`             | Internal web server binding settings.                                             | [See section](#1-api-server-api)                |
+| `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
+| `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
+| `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
+| `messaging`       | Webhooks & Push-Notifications (Telegram, Discord, etc.).                          | [See section](#5-messaging-messaging)           |
+| `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
+| `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
+| `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
+| `hdhomerun`       | Virtual DVB-C/T network tuner emulation.                                          | [See section](#9-hdhomerun-emulation-hdhomerun) |
+| `library`         | Local Media Library integration.                                                  | [See Local Library](./local-library.md)         |
+| `reverse_proxy`   | Streaming buffers, rate limits, caching.                                          | [See Reverse Proxy](./reverse-proxy.md)         |
+| `metadata_update` | TMDB matching, FFprobe processing, Job Queues.                                    | [See Metadata Update](./metadata-update.md)     |
 
 *(Note: The advanced topics **Local Library**, **Reverse Proxy** and **Metadata Update** are extremely extensive and
 have their own
@@ -762,7 +762,8 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 > **Upgrading:** the old event names (`info`, `stats`, `error`, `watch`,
 > `disk_alert`, `recording_started`, `recording_completed`,
 > `recording_failed`) are still accepted and are rewritten to their
-> canonical ids the next time the config is saved.
+> canonical ids the next time the config is saved. Existing configs and
+> existing template files keep working untouched.
 
 #### Available Events
 
@@ -826,46 +827,82 @@ Severity is one of `info`, `warn`, `error`, `critical`, in that order.
 messaging:
   notify_on: [ "playlist.update.failed", "recording.*", "provider.account.*", "system.disk.alert" ]
 
-  disk_alert: {}   # optional, see 5.2
+  # Telegram: Supports Markdown and Group Topics
+  telegram:
+    markdown: true
+    bot_token: "<TOKEN>"
+    chat_ids:
+      - "<CHAT_ID>"
+      - "<CHAT_ID>:<MESSAGE_THREAD_ID>" # Use colon to target a specific topic/thread
+    templates:
+      playlist.update.completed: 'file:///config/messaging_templates/telegram_playlist_update_completed.templ'
+      recording.completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
 
-# Every channel is a notifier plugin (Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks, a local
-# command). Install and approve it in the Plugin Manager and configure it here:
-plugins:
-  enabled: true
-  plugins:
-    - id: telegram-notifier
-      enabled: true
-      settings:
-        bot_token: "${env:TELEGRAM_BOT_TOKEN}"
-        chat_ids: [ "<CHAT_ID>" ]
+  # Discord: Webhook integration
+  discord:
+    url: "<WEBHOOK_URL>"
+    templates:
+      system.info: '{"content": "🚀 Tuliprox Info: {{message}}"}'
+
+  # Pushover: Simple mobile push alerts
+  pushover:
+    token: "<API_TOKEN>"
+    user: "<USER_KEY>"
+
+  # ntfy: Self-hosted push, no account needed
+  ntfy:
+    url: "https://ntfy.sh"
+    topic: "my-tuliprox"
+    # token: "<BEARER_TOKEN>"   # only for a protected topic
+
+  # Gotify
+  gotify:
+    url: "https://gotify.local"
+    token: "<APP_TOKEN>"
+
+  # Slack incoming webhook
+  slack:
+    url: "<WEBHOOK_URL>"
+
+  # REST: Generic webhook/API support
+  rest:
+    url: "https://my-api.local/alert"
+    method: "POST"
+    headers:
+      - "Content-Type: application/json"
+    signing_secret: "<SHARED_SECRET>"   # optional, see 5.4
+    templates:
+      system.error: '{"text": "Alert: {{message}}", "type": "{{kind}}"}'
+
+  # command: run a local program with the event JSON on stdin
+  command:
+    program: "/config/scripts/notify.sh"
+    args: [ "--from-tuliprox" ]
+    timeout_secs: 30
 ```
-
-The plugin pages ([Telegram](../plugins/telegram-notifier.md), [Discord](../plugins/discord-notifier.md),
-[Slack](../plugins/slack-notifier.md), [Gotify](../plugins/gotify-notifier.md), [ntfy](../plugins/ntfy-notifier.md),
-[Pushover](../plugins/pushover-notifier.md), [REST](../plugins/rest-notifier.md),
-[Command](../plugins/command-notifier.md)) list each one's settings.
 
 ### 5.1.1 Per-Channel Routing
 
-Every notifier plugin takes an optional `routing` block inside its `settings`. Without one it inherits the
-global `notify_on`.
+Every channel takes an optional `routing` block. Without one it inherits the
+global `notify_on`, so existing configs are unaffected.
 
 ```yaml
 messaging:
   notify_on: [ "*" ]
 
-plugins:
-  plugins:
-    - id: command-notifier
-      enabled: true
-      settings:
-        program: "/config/scripts/notify.sh"
-        routing:
-          min_severity: warn            # only run it for real problems
-          notify_on: [ "playlist.*", "recording.*" ]
-          quiet_hours: "23:00-07:00"    # deferred, never dropped
-          max_per_hour: 20              # circuit breaker
-          dedup_window_secs: 3600       # suppress a repeated event
+  pushover:
+    token: "<API_TOKEN>"
+    user: "<USER_KEY>"
+    routing:
+      min_severity: critical        # only wake me for real problems
+
+  discord:
+    url: "<WEBHOOK_URL>"
+    routing:
+      notify_on: [ "playlist.*", "recording.*" ]
+      quiet_hours: "23:00-07:00"    # deferred, never dropped
+      max_per_hour: 20              # circuit breaker
+      dedup_window_secs: 3600       # suppress a repeated event
 ```
 
 | Field               | Meaning                                                                                                                                                                                                   |
@@ -883,15 +920,16 @@ are persisted to `{storage_dir}/notification_outbox.json` before the first
 attempt, retried per channel with capped exponential backoff, and
 dead-lettered after `max_attempts`.
 
-Retry is at-most-once **per channel**: a message that reached one channel but
-not another is retried only against the one that failed, so a retry never duplicates a
+Retry is at-most-once **per channel**: a message that reached Telegram but
+not Discord is retried only against Discord, so a retry never duplicates a
 delivered message.
 
-* A plugin answers each attempt as delivered, *transient* (retried with backoff), *retry after N seconds* (a provider's
-  `Retry-After` is honoured rather than retried straight back into the same rate limit) or *permanent*.
-* A *permanent* failure (a wrong token, a malformed webhook URL) cannot be helped by retrying, so it is dead-lettered
-  immediately instead of consuming every attempt.
-* Each channel has a 30 second limit per attempt, and channels are attempted
+* A `429` or `503` is retried, and a provider's `Retry-After` is honoured
+  rather than being retried straight back into the same rate limit.
+* A `404` or `401` is **permanent** - retrying a malformed webhook URL
+  cannot help, so it is dead-lettered immediately instead of consuming
+  every attempt.
+* Each channel has a 30 second request timeout, and channels are attempted
   concurrently, so one unresponsive host cannot stall the others.
 
 Tuning lives under `video.recording.notifications`
@@ -900,24 +938,172 @@ Tuning lives under `video.recording.notifications`
 
 ### 5.1.3 Testing Your Configuration
 
-`POST /api/v1/config/messaging/test` builds and optionally sends a chosen
-event, and returns the body each channel was handed.
+`POST /api/v1/config/messaging/test` renders and optionally sends a chosen
+event, and returns the exact rendered body per channel.
 
 ```json
-{ "event": "recording.completed", "channel": "command", "preview": true }
+{ "event": "recording.completed", "channel": "telegram", "preview": true }
 ```
 
 * `event` - any event id. Defaults to `system.info`.
-* `channel` - restrict to one channel id (`plugin.<plugin id>`). Omit for all configured channels.
-* `preview` - show what would be sent, send nothing.
+* `channel` - restrict to one channel id. Omit for all configured channels.
+* `preview` - render only, send nothing. Use this to iterate on a template
+  without spamming a channel.
 
 The test deliberately bypasses `notify_on` and the suppression window: you
 asked for this one explicitly.
 
-### 5.2 Disk-Space Alerts (`messaging.disk_alert`)
+### 5.2 Templating (Handlebars)
+
+**Every** channel supports templates - Telegram, Discord, REST, Pushover, ntfy, Gotify, Slack and `command`.
+Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies, which allows rich, structured
+notifications (e.g. Discord embeds or Markdown tables).
+
+Templates are keyed by event id:
+
+```yaml
+telegram:
+  templates:
+    recording.completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
+```
+
+A `{prefix}_{event}.templ` file dropped into `/config/messaging_templates/` is picked up automatically -
+`telegram_recording_completed.templ`, `discord_playlist_update_failed.templ`, and so on. Dots in the event id become
+underscores in the filename.
+
+Templates are resolved and compiled **once** and then cached: local files are re-read when their mtime changes,
+remote templates revalidate on a 5 minute TTL, and a remote template that cannot be refreshed serves the cached copy
+rather than silently falling back to the built-in text.
+
+If no template applies, the channel sends the event's built-in `title` and `body`, which are always populated and
+always human-readable.
+
+#### Loading Methods
+
+1. **Raw String:** Define the template directly in your `config.yaml` (best for simple one-liners).
+2. **URI:** Reference a local file (`file://...`) or a remote resource (`http://...`).
+
+> **Note:** If you save your configuration via the **Web UI**, raw template strings are automatically moved to
+> individual files in `/config/messaging_templates/` to keep your main configuration clean.
+
+#### Available Context Variables
+
+The Handlebars engine provides a rich context object. Depending on the `kind` of notification, different variables are
+populated:
+
+Every template sees a uniform `event` object, plus the legacy top-level keys documented below:
+
+* `{{event.id}}`: The canonical event id, e.g. `recording.completed`.
+* `{{event.severity}}`: `info`, `warn`, `error` or `critical`.
+* `{{event.title}}`: One-line summary. Always present.
+* `{{event.body}}`: Plain-text body. Always present.
+* `{{event.fields}}`: The typed payload for this event.
+* `{{event.sections}}`: The event's detail as neutral blocks of plain-text lines, each with a `heading` and `lines`
+  (for a playlist update: `Sources`, `Targets` and `Errors`; for a watch change: one block per list). The same on
+  every channel and absent when an event has no detail beyond its body, so one loop renders it anywhere:
+  `{{#each event.sections}}{{heading}}{{#each lines}}\n{{this}}{{/each}}{{/each}}`.
+* `{{event.timestamp}}`: Unix seconds. Use `{{timestamp}}` for the RFC 3339 form.
+
+The legacy keys below continue to work exactly as before, so existing templates need no change:
+
+* `{{message}}`: The primary text payload. Used for human-readable `info` messages or the summary of an `error`.
+* `{{kind}}`: The event category (`Info`, `Stats`, `Error`, `Watch`, ...). Use this in Handlebars helpers (e.g.,
+  `{{#if (eq kind "error")}}`) to create conditional layouts.
+* `{{severity}}`: The event severity.
+* `{{timestamp}}`: The event occurrence time in UTC (ISO 8601 / RFC3339 format).
+* `{{stats}}`: **Execution Metrics & Performance.** A comprehensive list of statistics for the last update cycle,
+  covering both ingestion and generation phases.
+  * **Structure:** A nested list containing `inputs` (Source-level metrics) and `targets` (Output-level metrics).
+  * **Access:** Iterate over the main list to access individual source or target reports. Use nested loops for
+    detailed input/target breakdowns: `{{#each stats}} {{#each inputs}} ... {{/each}} {{/each}}`.
+  * **Key Properties:**
+    * **Metadata:** Access `name`, `type`, and `took` (execution duration) for each entry.
+    * **Error Tracking:** `errors` provides a count of failed items or connection issues during that specific phase.
+    * **Filtering Delta:** Compare `raw` counts (total items received from the provider) vs. `processed` counts (
+      items that survived your Mapping DSL and filters) to monitor your "Red Thread" efficiency.
+    * **Target Processing:** A target may include a `processing` object with exact filter inspected/retained/removed
+      counts, renamed item/field counts, matched mapping rules, emitted virtual items, and mapping diagnostics. The
+      object is omitted when no processing work was recorded, so existing templates remain compatible.
+* `{{processing}}`: **Engine State & Telemetry.** Provides insight into the *internal execution environment* during the
+  task. It includes data on memory allocation peaks, active worker threads, and non-blocking diagnostic warnings.
+  * **Access:** Access properties directly via dot-notation (e.g., `{{processing.memory_peak_mb}}`). Use this to
+    monitor system health and resource consumption during heavy mapping cycles.
+* `{{watch}}`: **Change Tracking Data.** Available for `playlist.watch.changed`. One event per target and update.
+  * `watch.target`: the target name.
+  * `watch.groups_added` / `watch.groups_removed`: `{ items, total, truncated }`, absent when there is none.
+  * `watch.channels_added` / `watch.channels_removed`: list of `{ group, items, total, truncated }`, absent when
+    there is none.
+  * `watch.changes`: the raw list; each entry has a `kind` (`groups_added`, `groups_removed`, `channels_added`,
+    `channels_removed`).
+  * `items` may be shorter than `total` (`truncated: true`), or empty when an update changed more than 500 channels.
+  * **Example:**
+
+    ```handlebars
+    {{#if watch.groups_added}}
+    🆕 New groups:
+    {{#each watch.groups_added.items}}
+    • {{this}}
+    {{/each}}
+    {{/if}}
+    {{#each watch.channels_added}}
+    ➕ {{group}} ({{total}}):
+    {{#each items}}
+    • {{this}}
+    {{/each}}
+    {{/each}}
+    ```
+
+* `{{recording}}`: **DVR Lifecycle Data.** Available for `recording_started`, `recording_completed`, and
+  `recording_failed`. Common fields are `programme_title`, `channel`, `effective_start`, `effective_end`,
+  `visibility`, `output_filename`, and `failure_reason` for failed recordings.
+
+* `{{disk}}`: **Disk Alert Data.** Available for `system.disk.alert`: `level`, `percent`, `total_bytes`,
+  `used_bytes`, `free_bytes`.
+
+Recording lifecycle notifications are global-channel notifications. Tuliprox sends them for shared recordings,
+legacy administrator recordings, and built-in administrator private recordings. Private recordings owned by regular
+users are suppressed.
+
+#### Template Examples
+
+**Telegram (Markdown Report):**
+
+```handlebars
+*🔄 Playlist Update Report*
+
+{{#each stats}}
+*📥 Source Stats*
+{{#each inputs}}
+• *{{name}}* (`{{type}}`)
+  ⏱️ Took: `{{took}}` | ❌ Errors: `{{errors}}`
+  📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ *`{{processed.groups}}`*/*`{{processed.channels}}`*
+{{/each}}
+{{/each}}
+```
+
+**Discord (Complex Embed):**
+
+```handlebars
+{
+  "content": "Tuliprox Notification",
+  "embeds": [{
+    "title": "Event: {{kind}}",
+    "description": "{{message}}",
+    "color": 3447003,
+    "fields": [
+      {{#each stats}}
+      { "name": "Source {{@index}}", "value": "Processed {{#each inputs}}{{name}} {{/each}}", "inline": false }
+      {{/each}}
+    ],
+    "footer": { "text": "Reported at {{timestamp}}" }
+  }]
+}
+```
+
+### 5.3 Disk-Space Alerts (`messaging.disk_alert`)
 
 Tuliprox monitors the free space on the **current working directory's mount** and notifies you via the
-notifier plugins before the disk fills up. The feature is
+standard messaging channels (Telegram, Discord, Pushover, REST) before the disk fills up. The feature is
 **opt-in**: no `disk_alert` block means no monitoring and no notifications.
 
 **How it works:** A background loop in `backend/app/src/api/sys_usage.rs` ticks every **2 seconds** (fixed
@@ -961,6 +1147,15 @@ messaging:
     # (1 hour). This is NOT the sampling interval — sampling is fixed at
     # 2 seconds and is not currently configurable.
     repeat_interval_secs: 3600
+
+  telegram:
+    bot_token: "<TOKEN>"
+    chat_ids: [ "<CHAT_ID>" ]
+    templates:
+      # Custom templates per level. Plain-text defaults are used if omitted.
+      disk_alert_warn: "⚠️ Disk is {{percent}}% full (Warn threshold)."
+      disk_alert_critical: "🚨 Disk is {{percent}}% full — cleanup now!"
+      disk_alert_normal: "✅ Disk back to normal at {{percent}}%."
 ```
 
 > **Note on `mounts`:** Earlier drafts of this section described a `mounts` config field. The current
@@ -968,33 +1163,63 @@ messaging:
 > mount (see `DiskProbe::for_cwd()` in `backend/app/src/api/sys_usage.rs`). If you need to monitor a different
 > path, change the working directory of the Tuliprox process.
 
-The notification is a plain-text line, e.g.:
+**Available Handlebars Variables** (all `disk_alert_*` templates):
+
+* `{{level}}` — The new level after the transition (`Warn`, `Critical`, or `Normal`).
+* `{{percent}}` — Current percent-used, rounded to one decimal place.
+* `{{free_bytes}}` / `{{total_bytes}}` / `{{used_bytes}}` — Raw byte counts for the sampled mount.
+* `{{timestamp}}` — Event time in UTC (ISO 8601 / RFC3339).
+
+**Available template keys per channel** (Handlebars): `disk_alert_warn`, `disk_alert_critical`,
+`disk_alert_normal`. If a template is not configured for a level, Tuliprox falls back to a clear plain-text
+default line, e.g.:
 
 > `[WARN] Disk is 82.3% full (free=3.4GB total=19.0GB).`
-
-Disk alerts are sent through **every** channel whose subscription matches `system.disk.alert`. Use the standard
-`notify_on` list (and a plugin's `routing` block) to control which channels receive them.
+> **Note:** Disk alerts are sent through **every** configured messaging channel. If you want a channel to
+> ignore disk alerts, simply do not declare the matching `disk_alert_*` template key for it and it will still
+> receive the plain-text default. Use the standard `notify_on` list to control which event kinds are sent at
+> all.
 
 ---
 
-### 5.3 Webhook Signing
+### 5.4 Webhook Signing
 
-Webhook delivery, including the HMAC-SHA256 signature (`X-Tuliprox-Timestamp` and `X-Tuliprox-Signature`) that lets the
-receiver verify the sender and reject a replay, is a feature of the REST Notifier plugin. See
-[REST Notifier](../plugins/rest-notifier.md#signing).
+Set `rest.signing_secret` and every request carries:
 
-### 5.4 Running a Local Program
+```text
+X-Tuliprox-Timestamp: 1700000000
+X-Tuliprox-Signature: sha256=<hex>
+```
 
-Running a local program for each notification is a feature of the Command Notifier plugin: the program gets the event
-JSON on stdin, plus `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and `TULIPROX_EVENT_TITLE` in its environment, and is
-started directly, never through a shell. It needs the `process` capability, which the admin approves knowingly. See
-[Command Notifier](../plugins/command-notifier.md).
+The signature is HMAC-SHA256 over `{timestamp}.{body}` using the shared secret. The timestamp is inside the signed
+payload, so a captured request cannot be replayed later with a fresh timestamp header. Verify it by recomputing the
+HMAC and comparing in constant time, and reject requests whose timestamp is too far from your clock.
 
-### 5.5 Secrets in the Web UI
+### 5.5 Running a Local Program
 
-Secrets in plugin settings (the fields a plugin marks write-only, such as a bot token or a webhook URL) are masked as
-`********` when the configuration is read back through the API. Leaving a masked value untouched when you save keeps the stored secret;
-replacing it writes the new one through.
+The `command` channel runs a local program with the event JSON on stdin, plus `TULIPROX_EVENT_ID`,
+`TULIPROX_EVENT_SEVERITY` and `TULIPROX_EVENT_TITLE` in the environment.
+
+```yaml
+messaging:
+  command:
+    program: "/config/scripts/notify.sh"
+    args: [ "--from-tuliprox" ]
+    timeout_secs: 30
+```
+
+The program is executed **directly, never through a shell**, so there are no quoting rules to get wrong and event
+content cannot be interpreted as shell syntax.
+
+> **Security:** this runs arbitrary code as the tuliprox process user. It is opt-in and never configured by default.
+> Treat the script as part of your trusted computing base.
+
+### 5.6 Secrets in the Web UI
+
+Channel secrets - the Telegram bot token, Pushover token and user key, ntfy and Gotify tokens, the REST signing
+secret, and any `Authorization`-style REST header - are masked as `********` when the configuration is read back
+through the API. Leaving a masked value untouched when you save keeps the stored secret; replacing it writes the new
+one through.
 
 ## 6. Video & Web Search (`video`)
 

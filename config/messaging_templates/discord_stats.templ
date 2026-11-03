@@ -1,0 +1,37 @@
+{
+  "username": "Tuliprox",
+  "avatar_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/frontend/public/assets/tuliprox-logo.svg",
+  "embeds": [
+    {
+      "title": "🔄 Playlist Update Report",
+      "color": 3310335,
+      "fields": [
+        {{#each stats}}
+        {
+          "name": "📥 Source Stats",
+          "value": "{{#each inputs}}**{{json_escape name}}** (`{{json_escape type}}`)\n⏱️ Took: `{{json_escape took}}` | ❌ Errors: `{{errors}}` \n📊 `{{raw.groups}}`/`{{raw.channels}}` ➔ **`{{processed.groups}}`**/**`{{processed.channels}}`**\n{{#unless @last}}\n{{/unless}}{{/each}}",
+          "inline": false
+        },
+        {
+          "name": "🚀 Targets",
+          "value": "{{#each targets}}✅ `{{json_escape target}}`{{#unless @last}}\n{{/unless}}{{/each}}",
+          "inline": false
+        }{{#unless @last}},{{/unless}}
+        {{/each}}
+        {{#if processing.errors}}
+        {{#if stats}},{{/if}}
+        {
+          "name": "❌ Processing Errors",
+          "value": "```{{json_escape processing.errors}}```",
+          "inline": false
+        }
+        {{/if}}
+      ],
+      "footer": {
+        "text": "Tuliprox • Automated Task",
+        "icon_url": "https://raw.githubusercontent.com/euzu/tuliprox/refs/heads/develop/frontend/public/assets/tuliprox-logo.svg"
+      },
+      "timestamp": "{{timestamp}}"
+    }
+  ]
+}

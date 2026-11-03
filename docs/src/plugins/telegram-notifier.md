@@ -33,7 +33,7 @@ outbox apply exactly as for the built-in channels (see *Per-Channel Routing* in 
 | `style`     | `html`  | `html`: the title and the section headings in bold. `text`: plain text.                                                     |
 | `routing`   | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                                             |
 
-Migrating from the built-in channel: `bot_token` and `chat_ids` keep their meaning and format. `markdown: true` is replaced by
+Compared with the built-in `messaging.telegram` channel: `bot_token` and `chat_ids` keep their meaning and format. `markdown: true` is replaced by
 `style: html`; the plugin does not use MarkdownV2 and does not read `messaging_templates/telegram_*.templ`.
 
 ## What Telegram receives

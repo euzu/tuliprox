@@ -241,6 +241,27 @@ pub fn mask_credentials(s: &str) -> String {
     }
 }
 
+pub fn humanize_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+
+    for c in s.chars() {
+        if c == '_' {
+            result.push(' ');
+            capitalize_next = true;
+        } else if capitalize_next {
+            for up in c.to_uppercase() {
+                result.push(up);
+            }
+            capitalize_next = false;
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 pub fn deunicode_string(s: &str) -> Cow<'_, str> { deunicode_with_tofu_cow(s, "[?]") }
 
 /// Converts text into a lowercase, URL- and filename-safe slug.
