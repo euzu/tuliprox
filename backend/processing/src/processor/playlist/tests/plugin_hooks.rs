@@ -1,6 +1,7 @@
 #![allow(clippy::unused_async_trait_impl, reason = "the PluginHost methods are async fns without awaits in this spy")]
 use super::{
-    execute_pipeline_on_groups, execute_pipeline_on_items, prepare_eligible_catalog, target::finalize_playlist_view,
+    execute_pipeline_on_groups, execute_pipeline_on_items, prepare_eligible_catalog,
+    target::{finalize_playlist_view, PlaylistViewKind},
 };
 use crate::processor::playlist::ingest::apply_playlist_loaded_hook;
 use shared::{
@@ -90,7 +91,7 @@ async fn after_filter_hook_sees_filtered_items_and_its_group_rename_is_regrouped
     let host = RenameGroupHost::default();
     let pipe = [TransformStage::Filter, TransformStage::Rename, TransformStage::Map];
 
-    let (groups, outcome) = execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host)
+    let (groups, outcome) = execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host, None)
         .await
         .expect("hook must not abort");
 
@@ -108,7 +109,7 @@ async fn after_filter_hook_fires_wherever_processing_order_puts_the_filter() {
     let host = RenameGroupHost::default();
     let pipe = [TransformStage::Map, TransformStage::Rename, TransformStage::Filter];
 
-    let (groups, _) = execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host)
+    let (groups, _) = execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host, None)
         .await
         .expect("hook must not abort");
 
@@ -120,7 +121,7 @@ async fn after_filter_hook_fires_wherever_processing_order_puts_the_filter() {
 async fn no_plugins_leaves_the_pipeline_output_unchanged() {
     let pipe = [TransformStage::Filter, TransformStage::Rename, TransformStage::Map];
 
-    let (groups, _) = execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &NoPlugins)
+    let (groups, _) = execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &NoPlugins, None)
         .await
         .expect("NoPlugins never aborts");
 
@@ -132,7 +133,7 @@ async fn abort_target_failure_propagates_as_an_error() {
     let host = RenameGroupHost { abort: true, ..RenameGroupHost::default() };
 
     let result =
-        execute_pipeline_on_items(items(), &filtered_target(), "input", &[TransformStage::Filter], &host).await;
+        execute_pipeline_on_items(items(), &filtered_target(), "input", &[TransformStage::Filter], &host, None).await;
 
     let abort = result.expect_err("abort-target must stop the pipeline");
     assert_eq!(abort.hook, PluginHook::AfterFilter);
@@ -320,9 +321,19 @@ async fn finalize<P: PluginHost>(
     shared_chnos: &mut Option<std::collections::HashMap<(shared::model::UUIDType, u32), u32>>,
 ) -> Vec<PlaylistGroup> {
     let mut step = StepMeasure::new("test", |_, _| {});
-    finalize_playlist_view(plugins, target, playlist, &mut step, view, shared_chnos, &mut PluginRunReport::default())
-        .await
-        .expect("no plugin aborts")
+    let kind = if view == "Xtream" { PlaylistViewKind::Xtream } else { PlaylistViewKind::Base };
+    finalize_playlist_view(
+        plugins,
+        target,
+        playlist,
+        &mut step,
+        kind,
+        shared_chnos,
+        &mut PluginRunReport::default(),
+        None,
+    )
+    .await
+    .expect("no plugin aborts")
 }
 
 #[tokio::test]
@@ -330,7 +341,7 @@ async fn stage_hooks_fire_around_every_stage_in_pipe_order() {
     let host = Spy::default();
     let pipe = [TransformStage::Filter, TransformStage::Rename, TransformStage::Map];
 
-    execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host).await.expect("no abort");
+    execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host, None).await.expect("no abort");
 
     assert_eq!(
         host.calls(),
@@ -343,7 +354,7 @@ async fn stage_hooks_follow_a_custom_processing_order() {
     let host = Spy::default();
     let pipe = [TransformStage::Map, TransformStage::Filter];
 
-    execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host).await.expect("no abort");
+    execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host, None).await.expect("no abort");
 
     assert_eq!(host.calls(), ["before-map", "after-map", "before-filter", "after-filter"]);
 }
@@ -352,11 +363,11 @@ async fn stage_hooks_follow_a_custom_processing_order() {
 async fn stage_hooks_do_not_fire_for_the_series_episode_pipeline() {
     let host = Spy::default();
     let pipe = [TransformStage::Filter, TransformStage::Rename, TransformStage::Map];
-    execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host).await.expect("no abort");
+    execute_pipeline_on_items(items(), &filtered_target(), "input", &pipe, &host, None).await.expect("no abort");
     assert_eq!(host.calls().len(), 6);
 
     // `execute_pipeline_on_groups` takes no host at all: running it must not add a call.
-    let (groups, _) = execute_pipeline_on_groups(two_groups(), &filtered_target(), &pipe);
+    let (groups, _) = execute_pipeline_on_groups(two_groups(), &filtered_target(), &pipe, None);
 
     assert_eq!(host.calls().len(), 6, "episodes never re-fire the stage hooks");
     assert!(groups.iter().all(|group| group.channels.is_empty() || !group.title.is_empty()));
@@ -720,6 +731,7 @@ async fn series_episode_pipeline_merges_filter_eval_report_into_caller_report() 
             input_refresh: None,
             library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
             maintenance: None,
+            override_status: None,
             plugins: host,
         };
 

@@ -428,6 +428,8 @@ impl PlaylistEntry for PlaylistItem {
                     self.get_item_type(),
                     self.get_virtual_id(),
                     self.get_category_id().unwrap_or(0),
+                    &self.header.url,
+                    options.default_container_extension(&self.header.input_name),
                 )
             })
         } else {

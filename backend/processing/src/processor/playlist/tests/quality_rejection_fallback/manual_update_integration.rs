@@ -548,6 +548,7 @@ async fn manual_update_library_empty_does_not_authorize_foreign_forced_empty_tar
         false,
         &HashMap::new(),
         &Arc::default(),
+        &Arc::default(),
     )
     .await
     .unwrap();

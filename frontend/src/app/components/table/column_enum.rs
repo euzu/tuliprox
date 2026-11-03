@@ -6,11 +6,12 @@ pub(crate) struct TableColumnSpec {
     pub can_hide: bool,
     pub content: bool,
     pub sortable: bool,
+    pub default_visible: bool,
 }
 
 impl TableColumnSpec {
     pub const fn new(id: &'static str, label: &'static str) -> Self {
-        Self { id, label, header_label: None, can_hide: true, content: true, sortable: false }
+        Self { id, label, header_label: None, can_hide: true, content: true, sortable: false, default_visible: true }
     }
 
     pub const fn header_label(&self) -> &'static str {
@@ -25,6 +26,7 @@ impl TableColumnSpec {
             can_hide: self.can_hide,
             content: self.content,
             sortable: self.sortable,
+            default_visible: self.default_visible,
             ..super::TableColumn::translated(self.id, self.label)
         }
     }
@@ -59,6 +61,7 @@ macro_rules! define_table_columns {
             const fn label(self) -> &'static str { match self { $(Self::$variant => $label),+ } }
             const fn header_label(self) -> &'static str { self.definition().header_label() }
 
+            #[allow(dead_code)]
             fn columns() -> Vec<$crate::app::components::TableColumn> {
                 Self::ALL.iter().map(|column| column.definition().metadata()).collect()
             }

@@ -242,6 +242,7 @@ async fn curation_production_wiring_does_not_fall_back_to_the_generic_client() {
         accepted_empty_clusters: ClusterFlags::empty(),
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         analytics_input: TargetAnalyticsInput::default(),
+        overrides: Arc::new(crate::processor::playlist::overrides::TargetOverrideSet::empty(None)),
     };
     let (result, _, _) = finalize_prepared_target(Arc::clone(&run.context), prepared).await;
     assert!(result.is_ok());
@@ -267,6 +268,7 @@ async fn curation_failure_respects_empty_input_authorization() {
             accepted_empty_clusters: if authorized { ClusterFlags::Vod } else { ClusterFlags::empty() },
             library_empty: tuliprox_repository::LibraryEmptyPublication::None,
             analytics_input: TargetAnalyticsInput::default(),
+            overrides: Arc::new(crate::processor::playlist::overrides::TargetOverrideSet::empty(None)),
         };
         let (result, _, _) =
             target::finalize_prepared_target_with_tmdb(Arc::clone(&run.context), prepared, Some(&run.tmdb_client))

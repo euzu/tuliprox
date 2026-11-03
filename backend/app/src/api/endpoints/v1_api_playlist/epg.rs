@@ -121,6 +121,59 @@ async fn load_ics_epg_source_channels(
         .map(|channel| vec![channel])
 }
 
+/// Channels of an input's EPG sources, read from the raw cache files on disk only.
+///
+/// This is the stored-data-only counterpart of [`load_epg_channels_for_input`]: a source whose
+/// cache file is absent or unreadable contributes nothing and is never fetched from the provider.
+/// Callers that must not cause upstream traffic (the Explorer's channel search) use this one.
+pub(super) async fn load_cached_epg_channels_for_input(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+) -> Vec<EpgChannel> {
+    let Some(epg_config) = input.epg.as_ref() else {
+        return Vec::new();
+    };
+
+    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+    let mut channels_by_source = Vec::new();
+
+    for epg_source in &epg_config.sources {
+        let Ok(raw_epg_path) = get_input_raw_epg_file_path(epg_source, input, &storage_dir).await else {
+            continue;
+        };
+        let channels = {
+            let _cache_lock = app_state.app_config.file_locks.read_lock(&raw_epg_path).await;
+            if !file_exists_async(&raw_epg_path).await {
+                continue;
+            }
+            match epg_source.source_type {
+                EpgSourceType::Xmltv => parse_xmltv_for_web_ui_from_file(&raw_epg_path).await.ok(),
+                EpgSourceType::Ics => {
+                    let (Some(ics_config), Some(channel_id)) = (epg_source.ics.as_ref(), epg_source.channel_id.clone())
+                    else {
+                        continue;
+                    };
+                    parse_ics_file_to_channel(&raw_epg_path, channel_id, epg_source.channel_title.clone(), ics_config)
+                        .await
+                        .ok()
+                        .map(|channel| vec![channel])
+                }
+            }
+        };
+        let Some(channels) = channels else {
+            debug!("Skipping cached EPG source {}: cache unreadable", sanitize_sensitive_info(epg_source.url.as_str()));
+            continue;
+        };
+        channels_by_source.push((epg_source.priority, channels));
+    }
+
+    if channels_by_source.is_empty() {
+        return Vec::new();
+    }
+    channels_by_source.sort_by_key(|(priority, _)| *priority);
+    merge_epg_channels_by_priority_with_dummy_policies(channels_by_source, Vec::new())
+}
+
 pub(super) async fn load_epg_channels_for_input(
     app_state: &Arc<AppState>,
     input: &ConfigInput,

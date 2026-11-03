@@ -243,6 +243,7 @@ fn processing_context_with_events<E: EventSink>(storage_dir: &Path, events: E) -
         had_quality_rejections: Arc::new(AtomicBool::new(false)),
         maintenance: None,
         plugins: shared::model::NoPlugins,
+        override_status: None,
     }
 }
 

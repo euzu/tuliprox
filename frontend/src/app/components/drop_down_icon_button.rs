@@ -7,6 +7,7 @@ use crate::{
     html_if,
 };
 use std::{collections::HashSet, rc::Rc};
+use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::MouseEvent;
 use yew::{classes, component, html, use_effect_with, use_state, Callback, Classes, Html, NodeRef, Properties};
 use yew_hooks::use_set;
@@ -61,6 +62,8 @@ pub struct DropDownIconButtonProps {
     pub aria_invalid: Option<bool>,
     #[prop_or_default]
     pub aria_describedby: Option<String>,
+    #[prop_or_default]
+    pub close_on_resize: bool,
 }
 
 #[component]
@@ -75,6 +78,33 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         use_effect_with(props.options.clone(), move |options| {
             let selections = options.iter().filter(|x| x.selected).map(|x| x.id.clone()).collect::<HashSet<String>>();
             set_selections.set(selections);
+        });
+    }
+
+    {
+        let set_is_open = popup_is_open.clone();
+        let close_on_resize = props.close_on_resize;
+        use_effect_with((*popup_is_open, close_on_resize), move |(is_open, close_on_resize)| {
+            let mut cleanup = None;
+            if *is_open && *close_on_resize {
+                let handler = Closure::<dyn FnMut(web_sys::Event)>::wrap(Box::new(move |_| {
+                    set_is_open.set(false);
+                }));
+                if let Some(win) = web_sys::window() {
+                    let _ = win.add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+                    cleanup = Some(move || {
+                        if let Some(win) = web_sys::window() {
+                            let _ = win.remove_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+                        }
+                        drop(handler);
+                    });
+                }
+            }
+            move || {
+                if let Some(c) = cleanup {
+                    c();
+                }
+            }
         });
     }
 

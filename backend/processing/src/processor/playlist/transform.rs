@@ -2,7 +2,7 @@
 use super::*;
 use shared::{
     foundation::{NoPluginCalls, PluginCallBatch, PluginCallDecisions},
-    model::{HookCtx, PlaylistEntry, PluginAbort, PluginHook, PluginHost, PluginRunReport},
+    model::{HookCtx, ItemOverride, PlaylistEntry, PluginAbort, PluginHook, PluginHost, PluginRunReport},
 };
 
 pub(crate) fn retain_playlist_items(
@@ -390,13 +390,16 @@ pub(crate) enum GroupingPolicy {
     ExactSequential,
 }
 
-pub(crate) struct TransformBuffer {
+pub(crate) struct TransformBuffer<'a> {
     pub(crate) items: Vec<PlaylistItem>,
     pub(crate) grouping: GroupingPolicy,
+    pub(crate) locked: Option<&'a HashMap<UUIDType, Arc<ItemOverride>>>,
 }
 
-impl TransformBuffer {
-    pub(crate) fn new(items: Vec<PlaylistItem>) -> Self { Self { items, grouping: GroupingPolicy::ExactCategory } }
+impl<'a> TransformBuffer<'a> {
+    pub(crate) fn new(items: Vec<PlaylistItem>, locked: Option<&'a HashMap<UUIDType, Arc<ItemOverride>>>) -> Self {
+        Self { items, grouping: GroupingPolicy::ExactCategory, locked }
+    }
 
     pub(crate) fn apply_filter(&mut self, target: &ConfigTarget) -> FilterOutcome {
         self.apply_filter_with(target, &NoPluginCalls)
@@ -485,6 +488,17 @@ impl TransformBuffer {
         Some(outcome)
     }
 
+    pub(crate) fn reapply_locked(&mut self) -> bool {
+        let Some(locked) = self.locked.filter(|l| !l.is_empty()) else {
+            return false;
+        };
+        let moved = reapply_target_overrides(self.items.iter_mut(), locked);
+        if moved {
+            self.reorder_for_grouping();
+        }
+        moved
+    }
+
     pub(crate) fn reorder_for_grouping(&mut self) {
         let mut buckets: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
         for item in std::mem::take(&mut self.items) {
@@ -551,7 +565,7 @@ pub(crate) fn group_items(items: Vec<PlaylistItem>, policy: GroupingPolicy) -> V
 }
 
 fn apply_stage(
-    buffer: &mut TransformBuffer,
+    buffer: &mut TransformBuffer<'_>,
     outcome: &mut PipelineOutcome,
     target: &ConfigTarget,
     stage: TransformStage,
@@ -568,8 +582,14 @@ fn apply_stage(
                 buffer.normalize_filter_grouping();
             }
         }
-        TransformStage::Rename => outcome.rename = buffer.apply_rename(target),
-        TransformStage::Map => outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing),
+        TransformStage::Rename => {
+            outcome.rename = buffer.apply_rename(target);
+            buffer.reapply_locked();
+        }
+        TransformStage::Map => {
+            outcome.mapping = buffer.apply_mapping(target, MappingStage::Processing);
+            buffer.reapply_locked();
+        }
     }
 }
 
@@ -584,9 +604,10 @@ pub(crate) async fn execute_pipeline_on_items<P: PluginHost>(
     input: &str,
     pipe: &[TransformStage],
     plugins: &P,
+    locked: Option<&HashMap<UUIDType, Arc<ItemOverride>>>,
 ) -> Result<(Vec<PlaylistGroup>, PipelineOutcome), PluginAbort> {
     let ctx = HookCtx::new(&target.name).with_input(input);
-    run_stages(TransformBuffer::new(items), target, pipe, plugins, &ctx, true).await
+    run_stages(TransformBuffer::new(items, locked), target, pipe, plugins, &ctx, true).await
 }
 
 /// The stage loop of both async pipelines. Stage hooks run only when
@@ -594,7 +615,7 @@ pub(crate) async fn execute_pipeline_on_items<P: PluginHost>(
 /// prepared right before the Filter stage, over the items as that stage sees
 /// them.
 async fn run_stages<P: PluginHost>(
-    mut buffer: TransformBuffer,
+    mut buffer: TransformBuffer<'_>,
     target: &ConfigTarget,
     pipe: &[TransformStage],
     plugins: &P,
@@ -637,11 +658,12 @@ pub(crate) fn execute_pipeline_on_groups(
     groups: Vec<PlaylistGroup>,
     target: &ConfigTarget,
     pipe: &[TransformStage],
+    locked: Option<&HashMap<UUIDType, Arc<ItemOverride>>>,
 ) -> (Vec<PlaylistGroup>, PipelineOutcome) {
     if pipe.is_empty() {
         return (groups, PipelineOutcome::default());
     }
-    let mut buffer = TransformBuffer::new(groups.into_iter().flat_map(|group| group.channels).collect());
+    let mut buffer = TransformBuffer::new(groups.into_iter().flat_map(|group| group.channels).collect(), locked);
     let mut outcome = PipelineOutcome::default();
     for &stage in pipe {
         apply_stage(&mut buffer, &mut outcome, target, stage, None);
@@ -660,13 +682,14 @@ pub(crate) async fn execute_pipeline_on_groups_with_filter_calls<P: PluginHost>(
     input: &str,
     pipe: &[TransformStage],
     plugins: &P,
+    locked: Option<&HashMap<UUIDType, Arc<ItemOverride>>>,
 ) -> (Vec<PlaylistGroup>, PipelineOutcome) {
     let has_plugin_terms =
         target.filter.processing.as_ref().is_some_and(|filter| filter.plugin_calls().next().is_some());
     if !has_plugin_terms {
-        return execute_pipeline_on_groups(groups, target, pipe);
+        return execute_pipeline_on_groups(groups, target, pipe, locked);
     }
-    let buffer = TransformBuffer::new(groups.into_iter().flat_map(|group| group.channels).collect());
+    let buffer = TransformBuffer::new(groups.into_iter().flat_map(|group| group.channels).collect(), locked);
     let ctx = HookCtx::new(&target.name).with_input(input);
     match run_stages(buffer, target, pipe, plugins, &ctx, false).await {
         Ok(result) => result,
@@ -682,6 +705,7 @@ pub(crate) async fn execute_pipe<'a, P: PluginHost>(
     consume_source: bool,
     bouquet_filter: Option<&tuliprox_core::model::TargetBouquetFilter>,
     plugins: &P,
+    overrides: Option<&TargetOverrideSet>,
 ) -> Result<(FetchedPlaylist<'a>, PipelineOutcome), TuliproxError> {
     let mut source = if consume_source {
         if fpl.is_memory() {
@@ -705,27 +729,43 @@ pub(crate) async fn execute_pipe<'a, P: PluginHost>(
     // leaves are read-only at the pipeline boundary. Cross-input dedup for disk
     // sources runs later in `deduplicate_playlist` during target finalization.
     let deduplicate_memory = is_memory && pre_transform_dedup_enabled;
-    let mut items = Vec::new();
     let mut rejected = 0usize;
     let mut duplicates_removed = 0usize;
-    let mut total_items = 0usize;
 
-    for mut item in source.into_items() {
-        total_items += 1;
+    let mut items: Vec<PlaylistItem> = source.into_items().collect();
+    let total_items = items.len();
+
+    let (applied_count, ambiguous_count) =
+        if let Some(set) = overrides.filter(|set| set.has_overrides_for(fpl.input.name.as_ref())) {
+            let outcome = apply_overrides(&mut items, set);
+            set.target_locked.lock().extend(outcome.target_locked);
+            set.record_ambiguous_keys(outcome.ambiguous.len());
+            (outcome.applied, outcome.ambiguous.len())
+        } else {
+            (0, 0)
+        };
+
+    items.retain_mut(|item| {
         if is_memory {
             item.header.freeze_input_stream_id();
         }
         if bouquet_filter.is_some_and(|filter| !filter.allows(item.header.xtream_cluster, &item.header.group)) {
             rejected += 1;
-            continue;
+            return false;
         }
         if deduplicate_memory && !duplicates.insert(item.get_uuid()) {
             duplicates_removed += 1;
-            continue;
+            return false;
         }
-        items.push(item);
-    }
+        true
+    });
 
+    if applied_count > 0 || ambiguous_count > 0 {
+        debug!(
+            "Target '{}' input '{}': applied {} override(s), {} ambiguous item(s)",
+            target.name, fpl.input.name, applied_count, ambiguous_count
+        );
+    }
     if rejected > 0 {
         debug!(
             "Target '{}' bouquet prefilter for input '{}': rejected {}/{} items",
@@ -739,9 +779,12 @@ pub(crate) async fn execute_pipe<'a, P: PluginHost>(
         );
     }
 
-    let (groups, outcome) = execute_pipeline_on_items(items, target, &fpl.input.name, pipe, plugins)
-        .await
-        .map_err(|abort| TuliproxError::Plugin(abort.to_string()))?;
+    // Owned copy: a lock guard must not be held across the plugin hooks' await points.
+    let locked_owned = overrides.map(|set| set.target_locked().clone());
+    let (groups, outcome) =
+        execute_pipeline_on_items(items, target, &fpl.input.name, pipe, plugins, locked_owned.as_ref())
+            .await
+            .map_err(|abort| TuliproxError::Plugin(abort.to_string()))?;
     let new_fpl = FetchedPlaylist {
         input: fpl.input,
         source: MemoryPlaylistSource::new(groups).into_source(),

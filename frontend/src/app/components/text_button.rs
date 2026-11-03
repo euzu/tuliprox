@@ -26,6 +26,9 @@ pub struct TextButtonProps {
     pub aria_haspopup: Option<String>,
     #[prop_or(None)]
     pub hint: Option<String>,
+    /// Optional count/badge shown after the title (e.g. tab item counts).
+    #[prop_or(None)]
+    pub badge: Option<String>,
 }
 
 #[component]
@@ -57,6 +60,9 @@ fn text_button_view(props: &TextButtonProps, handle_click: Callback<MouseEvent>)
             <AppIcon name={props.icon.clone()}></AppIcon>
          }
          <span>{props.title.clone()}</span>
+         if let Some(badge) = props.badge.as_ref() {
+            <span class="tp__text-button__badge">{ badge.clone() }</span>
+         }
         </button>
     }
 }

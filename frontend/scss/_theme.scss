@@ -18,6 +18,7 @@
 @use './themes/theme-nord';
 @use './themes/theme-cvd-friendly-dark';
 @use './themes/theme-cvd-friendly-bright';
+@use './themes/theme-vibrant-elegance';
 
 
 :root,
@@ -359,6 +360,20 @@ body {
   --theme-brand-epg-program-time-active: var(--theme-palette-epg-program-time-active);
   --theme-brand-epg-past-surface: var(--theme-palette-epg-past-surface);
   --theme-brand-epg-now-line: var(--theme-palette-epg-now-line);
+
+  --theme-brand-explorer-poster-placeholder-1: var(--theme-palette-explorer-poster-placeholder-1);
+  --theme-brand-explorer-poster-placeholder-2: var(--theme-palette-explorer-poster-placeholder-2);
+  --theme-brand-explorer-rating-surface: var(--theme-palette-explorer-rating-surface);
+  --theme-brand-explorer-rating-text: var(--theme-palette-explorer-rating-text);
+  --theme-brand-explorer-new-surface: var(--theme-palette-explorer-new-surface);
+  --theme-brand-explorer-new-text: var(--theme-palette-explorer-new-text);
+  --theme-brand-explorer-edited: var(--theme-palette-explorer-edited);
+  --theme-brand-explorer-edited-surface: var(--theme-palette-explorer-edited-surface);
+  --theme-brand-explorer-epg-missing: var(--theme-palette-explorer-epg-missing);
+  --theme-brand-explorer-epg-missing-surface: var(--theme-palette-explorer-epg-missing-surface);
+  --theme-brand-explorer-row-hover: var(--theme-palette-explorer-row-hover);
+  --theme-brand-explorer-selected: var(--theme-palette-explorer-selected);
+  --theme-brand-explorer-text-secondary: var(--theme-palette-explorer-text-secondary);
 
   --theme-brand-particle-1: var(--theme-palette-particle-1);
   --theme-brand-particle-2: var(--theme-palette-particle-2);

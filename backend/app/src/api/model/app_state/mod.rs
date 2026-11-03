@@ -22,6 +22,7 @@ mod change_detection;
 mod hls_state;
 mod http_clients;
 mod network_access;
+mod override_state;
 mod playlist_update_control;
 mod plugin_state;
 mod recording_state;
@@ -40,8 +41,8 @@ pub use self::test_support::{
     counting_runtime, create_test_app_state, create_test_app_state_with_plugins, create_test_maintenance,
 };
 pub use self::{
-    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, playlist_update_control::*, plugin_state::*,
-    recording_state::*, reload::*, resource_cache::*, view::*,
+    auth_state::*, cancel_tokens::*, hls_state::*, http_clients::*, override_state::*, playlist_update_control::*,
+    plugin_state::*, recording_state::*, reload::*, resource_cache::*, view::*,
 };
 
 /// Root server state. It always lives behind one `Arc<AppState>` and is never
@@ -67,6 +68,8 @@ pub struct AppState {
     pub metadata_manager: Arc<MetadataUpdateManager>,
     pub auth: AuthState,
     pub playlist_updates: PlaylistUpdateControl,
+    /// Manual override files and the applied-revision store, shared by every request.
+    pub overrides: OverrideState,
     /// Inputs taken out of service; read on every new stream request.
     pub maintenance: Arc<MaintenanceRegistry>,
     /// Plugin hooks handed to every playlist update this server runs.

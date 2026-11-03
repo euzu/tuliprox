@@ -327,6 +327,7 @@ specific provider.
 | `resolve_delay` / `probe_delay`            | Int      | `2`     | **Ban Protection:** Hard wait time (in seconds) between API or Probe requests to the *same* provider! Prevents API spamming.                                                                                                           |
 | `resolve_filter`                           | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                                                                             |
 | `probe_filter`                             | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                                                                               |
+| `default_container_extension`              | String   | `mp4`   | Extension published when neither the provider nor the stream URL states one (default `mp4`). Applied at delivery, never stored; a configured value replaces the default but never overrides a provider value. Needed for Stalker VOD.  |
 
 For M3U inputs, `flussonic_hls_catchup: bounded_archive` generates a `catchup-source` for live entries with
 `catchup="fs"`, no existing source, and a `/CHANNEL/mono.m3u8` URL. The generated URL uses

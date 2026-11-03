@@ -68,6 +68,10 @@ pub struct ConfigInputOptions {
     pub probe_live_interval_hours: u32,
     pub resolve_filter: Option<Filter>,
     pub probe_filter: Option<Filter>,
+    /// Container extension published for movies and series episodes when neither the provider nor the
+    /// stream URL states one. `None` means the built-in default applies. Applied at delivery, never
+    /// persisted into a playlist item.
+    pub default_container_extension: Option<String>,
 }
 
 macros::from_impl!(ConfigInputOptions);
@@ -117,6 +121,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             probe_live_interval_hours: dto.probe_live_interval_hours,
             resolve_filter: dto.t_resolve_filter.clone(),
             probe_filter: dto.t_probe_filter.clone(),
+            default_container_extension: dto.default_container_extension.clone(),
         }
     }
 }
@@ -157,6 +162,15 @@ impl MediaServerInputConfig {
 }
 
 impl ConfigInput {
+    /// Configured `options.default_container_extension`, when the input publishes one.
+    ///
+    /// The value is applied while a playlist document is built and never stored, so it stays the
+    /// single place where a missing VOD/series container is filled from configuration.
+    #[inline]
+    pub fn default_container_extension(&self) -> Option<&str> {
+        self.options.as_ref()?.default_container_extension.as_deref()
+    }
+
     /// Re-resolves declared XMLTV `auto` sources using the current account and alias data.
     pub fn refresh_auto_epg_sources(&mut self) -> Result<(), TuliproxError> {
         let Some(epg) = self.epg.as_ref() else {

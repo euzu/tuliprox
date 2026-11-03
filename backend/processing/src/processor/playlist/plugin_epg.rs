@@ -426,6 +426,7 @@ mod tests {
                 input_refresh: None,
                 library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
                 maintenance: None,
+                override_status: None,
                 plugins: EpgHost,
             };
 
@@ -519,6 +520,7 @@ mod tests {
                 input_refresh: None,
                 library_update_mode: crate::processor::playlist::LibraryUpdateMode::default(),
                 maintenance: None,
+                override_status: None,
                 plugins: EmptyEpgHost,
             };
 

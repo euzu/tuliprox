@@ -54,7 +54,7 @@ async fn execute_pipe_applies_target_bouquet_prefilter() {
             .unwrap();
 
     let (mut processed, _outcome) =
-        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins)
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins, None)
             .await
             .expect("target processing should succeed");
     let groups = processed.source.take_groups();
@@ -116,7 +116,7 @@ async fn execute_pipe_prefilter_does_not_suppress_allowed_duplicate() {
             .unwrap();
 
     let (mut processed, _outcome) =
-        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins)
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins, None)
             .await
             .expect("target processing should succeed");
     let groups = processed.source.take_groups();
@@ -265,7 +265,7 @@ fn filter_stage_can_remove_every_item() {
     let mut target = ConfigTarget::from(&ConfigTargetDto::default());
     target.filter = get_filter(r#"name ~ "Allowed""#, None).expect("filter should parse").into();
 
-    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter], None);
 
     assert!(groups.is_empty());
     assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 1, retained: 0, removed: 1 }));
@@ -281,7 +281,7 @@ fn missing_processing_filter_skips_filter_stage() {
     }];
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter], None);
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].channels.len(), 1);
@@ -300,7 +300,7 @@ fn missing_processing_filter_preserves_filter_stage_group_normalization() {
     ];
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter]);
+    let (groups, outcome) = execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter], None);
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].channels.len(), 2);
@@ -328,7 +328,7 @@ fn pipeline_reports_filter_and_rename_outcomes() {
     })]);
 
     let (groups, outcome) =
-        execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter, TransformStage::Rename]);
+        execute_pipeline_on_groups(groups, &target, &[TransformStage::Filter, TransformStage::Rename], None);
 
     assert_eq!(groups[0].channels[0].header.name.as_ref(), "Renamed");
     assert_eq!(outcome.filter, Some(FilterOutcome { inspected: 2, retained: 1, removed: 1 }));

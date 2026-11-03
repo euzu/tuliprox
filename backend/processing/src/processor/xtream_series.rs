@@ -141,7 +141,8 @@ async fn playlist_resolve_series_info<E: EventSink + Clone + 'static, M: Metadat
     // Apply pipe transformations to new groups. No stage hooks here; filter
     // plugin terms are evaluated for the episodes.
     let (new_playlist, pipeline_outcome) =
-        execute_pipeline_on_groups_with_filter_calls(groups_to_add, target, &fpl.input.name, pipe, &ctx.plugins).await;
+        execute_pipeline_on_groups_with_filter_calls(groups_to_add, target, &fpl.input.name, pipe, &ctx.plugins, None)
+            .await;
     debug!("Resolved series pipeline outcome: {pipeline_outcome:?}");
 
     // Apply resolved episodes to playlist

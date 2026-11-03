@@ -2,6 +2,14 @@
 
 use crate::model::{ClusterFlags, RuntimeConfigReportFormat, SyslogFacility, SyslogFormat};
 
+/// Published `container_extension` for a movie or series episode when neither the provider nor the
+/// item URL states one.
+///
+/// Clients build the playback URL as `<stream_id>.<container_extension>`; an empty value makes some of
+/// them drop the item entirely (`BouquetMakerXtream` builds no VOD bouquet). `mp4` is the token most
+/// players accept, and the value is catalog metadata only — playback resolves the real stream.
+pub const DEFAULT_CONTAINER_EXTENSION: &str = "mp4";
+
 pub const fn is_zero_u8(v: &u8) -> bool { *v == 0 }
 pub const fn is_zero_u16(v: &u16) -> bool { *v == 0 }
 pub const fn is_zero_i16(v: &i16) -> bool { *v == 0 }

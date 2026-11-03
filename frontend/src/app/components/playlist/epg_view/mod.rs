@@ -5,7 +5,8 @@ use crate::{
                 ensure_recording_available, epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput,
                 PaddingBounds, RecordingForm,
             },
-            use_plugin_ui, EpgSourceSelector, HorizontalShrinkPanel, IconButton, NoContent, PluginSlot, Search,
+            use_plugin_ui, Breadcrumbs, EpgSourceSelector, HorizontalShrinkPanel, IconButton, NoContent, PluginSlot,
+            Search,
         },
         context::ConfigContext,
     },
@@ -229,6 +230,7 @@ pub fn EpgView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
+    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.PLAYLIST_EPG")]));
     let grid_model = use_state(|| None::<ModelRef>);
     let container_ref = use_node_ref();
     let channels_ref = use_node_ref();
@@ -1342,13 +1344,14 @@ pub fn EpgView() -> Html {
 
     html! {
         <div class="tp__epg tp__list-view">
+            <Breadcrumbs items={&*breadcrumbs}/>
             <div class="tp__epg__header">
                 <h1>{translate.t("LABEL.PLAYLIST_EPG")}</h1>
                 <div class="tp__epg__header-toolbar">
                     <Search onsearch={handle_search}/>
                 </div>
             </div>
-            <EpgSourceSelector on_select={handle_select_source} />
+            <EpgSourceSelector on_select={handle_select_source} hide_title=true />
             <div class="tp__epg__main">
                 { group_panel }
                 <div class="tp__epg__body" ref={container_ref}>

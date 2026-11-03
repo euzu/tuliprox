@@ -273,6 +273,7 @@ mod tests {
             web_ui_request: false,
             encrypt_secret: [0; 16],
             resource_host_policies: Arc::default(),
+            default_container_extensions: Arc::default(),
         };
 
         prepare_xtream_resource_hosts(&item, &options).await;

@@ -303,5 +303,141 @@ fn parse_sxxeyy_fallback(token: &str) -> Option<(u32, u32)> {
     Some((season, episode))
 }
 
+#[inline]
+fn is_rfc3986_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'~'
+}
+
+const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
+
+fn append_percent_encoded_rfc3986(bytes: &[u8], out: &mut String) {
+    for &b in bytes {
+        if is_rfc3986_unreserved(b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX_CHARS[(b >> 4) as usize] as char);
+            out.push(HEX_CHARS[(b & 0x0f) as usize] as char);
+        }
+    }
+}
+
+fn percent_decode_bytes(s: &str) -> std::borrow::Cow<'_, [u8]> {
+    let bytes = s.as_bytes();
+    if !bytes.contains(&b'%') {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+type QueryBytePair<'a> = (std::borrow::Cow<'a, [u8]>, std::borrow::Cow<'a, [u8]>);
+
+/// Computes the canonical override URL according to spec (v1):
+/// 1. Parse URL; drop scheme, user info, host and port.
+/// 2. Path: split into segments and percent-decode each to bytes. Remove a segment only when it
+///    equals, as a whole segment, a credential. All other segments stay unchanged.
+/// 3. Query: percent-decode names and values to bytes, drop parameters `username` and `password`
+///    (case-insensitive name match), drop parameters whose value equals a credential,
+///    keep all others, sort by name then value.
+/// 4. Re-encode with RFC 3986 unreserved percent-encoding and join as `<path>?<query>`.
+pub fn canonical_override_url<S: AsRef<str>>(url: &str, credentials: &[S]) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.cannot_be_a_base() {
+        return None;
+    }
+
+    let decoded_creds: Vec<std::borrow::Cow<'_, [u8]>> = credentials
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|c| !c.is_empty())
+        .flat_map(|c| {
+            let raw = c.as_bytes();
+            let decoded = percent_decode_bytes(c);
+            if decoded.as_ref() == raw {
+                vec![std::borrow::Cow::Borrowed(raw)]
+            } else {
+                vec![std::borrow::Cow::Borrowed(raw), decoded]
+            }
+        })
+        .collect();
+
+    let raw_segments = parsed.path_segments()?.collect::<Vec<_>>();
+    let mut kept_segments = Vec::new();
+    for seg in raw_segments {
+        let decoded = percent_decode_bytes(seg);
+        if !decoded.is_empty()
+            && decoded_creds.iter().any(|c| seg.as_bytes() == c.as_ref() || decoded.as_ref() == c.as_ref())
+        {
+            continue;
+        }
+        kept_segments.push(decoded);
+    }
+
+    let mut params: Vec<QueryBytePair<'_>> = Vec::new();
+    if let Some(q) = parsed.query() {
+        for pair in q.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (raw_key, raw_val) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = percent_decode_bytes(raw_key);
+            let val = percent_decode_bytes(raw_val);
+
+            if key.eq_ignore_ascii_case(b"username") || key.eq_ignore_ascii_case(b"password") {
+                continue;
+            }
+            if !val.is_empty()
+                && decoded_creds.iter().any(|c| raw_val.as_bytes() == c.as_ref() || val.as_ref() == c.as_ref())
+            {
+                continue;
+            }
+            params.push((key, val));
+        }
+    }
+    params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut out = String::with_capacity(url.len());
+    for seg in &kept_segments {
+        out.push('/');
+        append_percent_encoded_rfc3986(seg, &mut out);
+    }
+    if kept_segments.is_empty() {
+        out.push('/');
+    }
+
+    if !params.is_empty() {
+        out.push('?');
+        for (i, (k, v)) in params.iter().enumerate() {
+            if i > 0 {
+                out.push('&');
+            }
+            append_percent_encoded_rfc3986(k, &mut out);
+            out.push('=');
+            append_percent_encoded_rfc3986(v, &mut out);
+        }
+    }
+
+    Some(out)
+}
+
+pub fn override_url_hash<S: AsRef<str>>(url: &str, credentials: &[S]) -> Option<String> {
+    let canonical = canonical_override_url(url, credentials)?;
+    let hash = blake3::hash(canonical.as_bytes());
+    Some(format!("urlhash-v1:{}", hash.to_hex()))
+}
+
 #[cfg(test)]
 mod tests;

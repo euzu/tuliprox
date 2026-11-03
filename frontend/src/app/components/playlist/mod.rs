@@ -1,7 +1,7 @@
-mod channel_detail;
 mod epg_config_view;
 mod epg_source_selector;
 mod epg_view;
+pub mod explorer;
 mod filter_view;
 mod input;
 mod input_table;

@@ -230,6 +230,7 @@ async fn run_playlist_update_inner(
         .with_maintenance(Arc::clone(&app_state.maintenance))
         .with_metadata_manager(Arc::clone(&app_state.metadata_manager))
         .with_plugins(crate::api::model::share_plugins(&app_state.plugins))
+        .with_override_status(app_state.override_status_store())
         .with_acquired_permit(permit),
     )
     .await;

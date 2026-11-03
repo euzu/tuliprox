@@ -84,12 +84,13 @@ mod input_status;
 mod m3u_quality;
 mod manual_update;
 use manual_update::LibraryUpdateMode;
+pub(crate) mod overrides;
 mod plugin_epg;
 mod plugin_output;
 mod target;
 mod transform;
 
-pub use self::{analytics::*, ingest::*, target::*, transform::*};
+pub use self::{analytics::*, ingest::*, overrides::*, target::*, transform::*};
 
 /// Work the composition root runs once the playlist lock is held, before the
 /// update proper starts.
@@ -155,6 +156,7 @@ pub struct ProcessingRun<
     library_update_mode: LibraryUpdateMode,
     maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
     plugins: P,
+    override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
 }
 
 impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataSink> {
@@ -189,6 +191,7 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataS
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,
             plugins: NoPlugins,
+            override_status: None,
         }
     }
 }
@@ -220,7 +223,17 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance,
             plugins: self.plugins,
+            override_status: self.override_status,
         }
+    }
+
+    #[must_use]
+    pub fn with_override_status(
+        mut self,
+        status: impl Into<Option<Arc<tuliprox_repository::OverrideStatusStore>>>,
+    ) -> Self {
+        self.override_status = status.into();
+        self
     }
 
     #[must_use]
@@ -272,6 +285,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance,
             plugins: self.plugins,
+            override_status: self.override_status,
         }
     }
 
@@ -298,6 +312,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, 
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance,
             plugins,
+            override_status: self.override_status,
         }
     }
 
@@ -376,6 +391,7 @@ pub async fn exec_processing<
         library_update_mode,
         maintenance,
         plugins,
+        override_status,
     } = run;
 
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
@@ -455,6 +471,7 @@ pub async fn exec_processing<
         library_update_mode,
         maintenance,
         plugins,
+        override_status,
     };
 
     let start_time = Instant::now();

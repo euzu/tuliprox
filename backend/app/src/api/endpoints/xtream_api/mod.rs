@@ -1367,6 +1367,9 @@ pub async fn xtream_get_stream_info_response(
     }
 
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
+    // Resolved through the member name, so an item fetched by an alias finds its parent's option.
+    let member_input = app_state.app_config.get_input_by_member_name(&pli.input_name);
+    let configured_container_extension = member_input.as_deref().and_then(ConfigInput::default_container_extension);
     let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
     // handle local items, media server, and items with embedded details
     // (e.g. M3U-synthesized SeriesInfo carrying seasons/episodes).
@@ -1434,7 +1437,7 @@ pub async fn xtream_get_stream_info_response(
     // fallback with basic info
     match cluster {
         XtreamCluster::Video => {
-            let content = create_vod_info_from_item(&pli);
+            let content = create_vod_info_from_item(&pli, configured_container_extension);
             try_unwrap_body!(axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())

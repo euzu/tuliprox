@@ -201,7 +201,7 @@ async fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
     let (mut processed, _outcome) =
-        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None, &NoPlugins)
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None, &NoPlugins, None)
             .await
             .expect("target processing should succeed");
     let mut groups = processed.source.take_groups();

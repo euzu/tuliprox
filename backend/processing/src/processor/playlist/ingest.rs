@@ -119,6 +119,7 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
     /// Plugin hooks awaited by the pipeline; [`NoPlugins`] compiles them out.
     pub plugins: P,
+    pub override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -152,6 +153,7 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,
             plugins: NoPlugins,
+            override_status: None,
         }
     }
 }

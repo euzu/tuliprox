@@ -288,6 +288,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy_a
         metadata_manager,
         auth: crate::api::model::AuthState::for_tests(),
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
         plugins: crate::api::model::AppPlugins::default(),
     })

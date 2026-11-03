@@ -485,6 +485,7 @@ impl<E: EventSink + Clone, M: MetadataUpdateSink, P: PluginHost> Clone for Playl
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance.clone(),
             plugins: self.plugins.clone(),
+            override_status: self.override_status.clone(),
         }
     }
 }

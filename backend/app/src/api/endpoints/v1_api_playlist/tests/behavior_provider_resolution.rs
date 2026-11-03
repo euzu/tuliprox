@@ -274,6 +274,7 @@ async fn playlist_live_input_route_supports_stalker_inputs() {
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
+            default_container_extension: None,
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,
@@ -421,6 +422,7 @@ async fn initial_stalker_playback_resolution_uses_the_requested_items_own_comman
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
+            default_container_extension: None,
         }),
         stalker: Some(crate::model::StalkerInputConfig {
             device: None,

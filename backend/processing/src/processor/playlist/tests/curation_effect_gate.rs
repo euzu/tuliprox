@@ -78,6 +78,7 @@ pub(super) fn processing_context(
         plugins: shared::model::NoPlugins,
         input_refresh: None,
         library_update_mode: LibraryUpdateMode::ExistingCatalog,
+        override_status: None,
     }
 }
 
@@ -242,6 +243,7 @@ async fn assert_curation_preserves_empty_mixed_output_guard(canonical: Option<sh
         accepted_empty_clusters: ClusterFlags::Vod,
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         analytics_input: TargetAnalyticsInput::default(),
+        overrides: Arc::new(TargetOverrideSet::empty(None)),
     };
 
     let (result, errors, _) = finalize_prepared_target(Arc::new(context), prepared).await;
@@ -334,6 +336,7 @@ async fn complete_empty_curation_publishes_empty_watch_group_state() {
         accepted_empty_clusters: ClusterFlags::empty(),
         library_empty: tuliprox_repository::LibraryEmptyPublication::None,
         analytics_input: TargetAnalyticsInput::default(),
+        overrides: Arc::new(TargetOverrideSet::empty(None)),
     };
     let (result, errors, _) = finalize_prepared_target(Arc::new(context), prepared).await;
     server.await.expect("Trakt server should finish");

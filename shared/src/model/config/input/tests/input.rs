@@ -93,6 +93,41 @@ fn test_config_input_options_dto_filter_none_prepares_successfully() {
 }
 
 #[test]
+fn config_input_options_default_container_extension_is_normalized() {
+    let mut dto = ConfigInputOptionsDto {
+        default_container_extension: Some(" .MKV ".to_string()),
+        ..ConfigInputOptionsDto::default()
+    };
+    dto.prepare(None).expect("a valid extension prepares");
+    assert_eq!(dto.default_container_extension.as_deref(), Some("mkv"));
+}
+
+#[test]
+fn config_input_options_default_container_extension_rejects_placeholders() {
+    for rejected in ["null", "~", "tar.gz", "mp 4", ""] {
+        let mut dto = ConfigInputOptionsDto {
+            default_container_extension: Some(rejected.to_string()),
+            ..ConfigInputOptionsDto::default()
+        };
+        if rejected.is_empty() {
+            dto.prepare(None).expect("a blank value is equivalent to unset");
+            assert_eq!(dto.default_container_extension, None);
+        } else {
+            let error = dto.prepare(None).expect_err("placeholder must be rejected");
+            assert!(error.to_string().contains("default_container_extension"), "unexpected error: {error}");
+        }
+    }
+}
+
+#[test]
+fn config_input_options_default_container_extension_is_unset_by_default() {
+    let mut dto = ConfigInputOptionsDto::default();
+    dto.prepare(None).expect("default prepares");
+    assert_eq!(dto.default_container_extension, None);
+    assert!(dto.is_empty());
+}
+
+#[test]
 fn config_input_options_serializes_shared_skip_names() {
     let dto = ConfigInputOptionsDto {
         skip_live: true,

@@ -138,6 +138,7 @@ pub fn create_test_app_state_with_plugins(config: Config, plugins: super::AppPlu
         metadata_manager,
         auth: AuthState::for_tests(),
         playlist_updates: PlaylistUpdateControl::for_tests(),
+        overrides: crate::api::model::OverrideState::default(),
         maintenance,
         plugins,
     })
