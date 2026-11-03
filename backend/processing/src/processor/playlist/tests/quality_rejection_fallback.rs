@@ -774,10 +774,18 @@ async fn pipeline_transparency_shows_failure_survives_xtream_fetch_and_reload() 
                 assert_eq!(cluster.decision, None);
                 assert_eq!(cluster.quality, None);
             } else {
-                assert_eq!(cluster.technical_state, None, "do not attribute Shows failure to a sibling");
+                assert_eq!(
+                    cluster.technical_state,
+                    if disk { None } else { Some(PersistedPlaylistUpdateTechnicalState::Succeeded) },
+                    "a staged-only disk candidate is distinct from a published in-memory sibling"
+                );
                 assert_eq!(cluster.decision, Some(PlaylistUpdateClusterDecision::Accepted));
             }
-            assert_eq!(cluster.active_count, None, "failed batch does not prove final activation");
+            assert_eq!(
+                cluster.active_count,
+                if cluster.cluster == XtreamCluster::Series || disk { None } else { cluster.candidate_count },
+                "only completed sibling publications confirm their active population"
+            );
         }
         let storage = input_storage_path(&ctx, &input).await;
         let saved = input_cache::load_input_status(&storage);
@@ -1720,3 +1728,5 @@ fn resolve_stage_checks_maintenance_before_any_provider_work() {
     let series = body.find("playlist_resolve_series(").expect("series resolve call");
     assert!(gate < series, "the gate must run before resolve and probe");
 }
+
+mod cluster_status_evidence;

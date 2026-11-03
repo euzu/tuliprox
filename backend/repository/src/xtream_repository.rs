@@ -63,6 +63,8 @@ pub enum XtreamClusterPublishOutcome {
 pub struct XtreamClusterPublishBatchResult {
     /// Clusters whose publication or retention completed.
     pub outcomes: Vec<XtreamClusterPublishOutcome>,
+    /// Explicit identities of completed publications or retentions, in outcome order.
+    pub completed_clusters: Vec<XtreamCluster>,
     /// Quality acceptances evaluated before any later technical failure.
     pub quality_acceptances: Vec<ClusterUpdateAcceptance>,
     /// Quality rejections evaluated before any later technical failure.
@@ -160,3 +162,7 @@ pub use self::{
     },
     target_publish::{write_playlist_batch_item_upsert, write_playlist_item_update, xtream_write_playlist},
 };
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "xtream_repository/publication_fixture.rs"]
+pub mod publication_fixture;

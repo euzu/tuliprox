@@ -28,7 +28,8 @@
               "active_count": 100,
               "threshold": 95,
               "quality": 1,
-              "decision": "rejected"
+              "decision": "rejected",
+              "technical_state": "succeeded"
             },
             {
               "cluster": "Video",
@@ -65,7 +66,8 @@
               "source": "provider",
               "candidate_count": 0,
               "active_count": 0,
-              "decision": "accepted"
+              "decision": "accepted",
+              "technical_state": "succeeded"
             },
             {
               "cluster": "Series",
@@ -73,7 +75,8 @@
               "source": "provider",
               "candidate_count": 0,
               "active_count": 0,
-              "decision": "accepted"
+              "decision": "accepted",
+              "technical_state": "succeeded"
             }
           ]
         },
@@ -96,19 +99,22 @@
               "cluster": "Live",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             },
             {
               "cluster": "Video",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             },
             {
               "cluster": "Series",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             }
           ]
         },
@@ -149,7 +155,8 @@
               "active_count": 100,
               "threshold": 95,
               "quality": 100,
-              "decision": "accepted"
+              "decision": "accepted",
+              "technical_state": "succeeded"
             },
             {
               "cluster": "Video",
@@ -186,7 +193,8 @@
               "source": "provider",
               "candidate_count": 0,
               "active_count": 0,
-              "decision": "accepted"
+              "decision": "accepted",
+              "technical_state": "succeeded"
             },
             {
               "cluster": "Series",
@@ -194,7 +202,8 @@
               "source": "provider",
               "candidate_count": 0,
               "active_count": 0,
-              "decision": "accepted"
+              "decision": "accepted",
+              "technical_state": "succeeded"
             }
           ]
         },
@@ -217,19 +226,22 @@
               "cluster": "Live",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             },
             {
               "cluster": "Video",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             },
             {
               "cluster": "Series",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             }
           ]
         },
@@ -336,19 +348,22 @@
               "cluster": "Live",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             },
             {
               "cluster": "Video",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             },
             {
               "cluster": "Series",
               "requested": true,
               "source": "provider",
-              "decision": "technical_error"
+              "decision": "technical_error",
+              "technical_state": "failed"
             }
           ]
         },

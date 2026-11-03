@@ -8,6 +8,9 @@ description = "Provider clients for Xtream, M3U and Stalker portals"
 [lints]
 workspace = true
 
+[features]
+test-support = ["tuliprox-repository/test-support"]
+
 [dependencies]
 shared = { workspace = true }
 tuliprox-core = { workspace = true }
@@ -28,6 +31,7 @@ tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]
+tuliprox-repository = { workspace = true, features = ["test-support"] }
 http = "1.4.0"
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util", "macros"] }

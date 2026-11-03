@@ -2,7 +2,7 @@ use super::*;
 use std::fmt::Write;
 use tuliprox_repository::{load_input_m3u_playlist, raw_group_catalog_path, RawInputGroupCatalog};
 
-fn document(prefix: &str, counts: [usize; 3]) -> String {
+pub(super) fn document(prefix: &str, counts: [usize; 3]) -> String {
     let mut text = String::from("#EXTM3U\n");
     for (cluster, count) in XTREAM_CLUSTER.into_iter().zip(counts) {
         for index in 0..count {

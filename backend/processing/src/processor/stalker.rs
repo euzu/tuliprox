@@ -247,26 +247,32 @@ pub async fn download_stalker_playlist(
     let yielded = matches!(&outcome, StalkerRefreshOutcome::Yielded { .. });
     let terminal = matches!(&outcome, StalkerRefreshOutcome::Terminal(_));
     let mut errors = Vec::new();
+    let mut completed_clusters = Vec::new();
     let mut quality_acceptances = Vec::new();
     let mut quality_rejections = Vec::new();
     let mut force_updates = Vec::new();
     match outcome {
         StalkerRefreshOutcome::Complete {
+            completed_clusters: completed,
             quality_acceptances: completed_acceptances,
             quality_rejections: completed_rejections,
             force_updates: completed_force_updates,
         } => {
+            completed_clusters = completed;
             quality_acceptances = completed_acceptances;
             quality_rejections = completed_rejections;
             force_updates = completed_force_updates;
         }
         StalkerRefreshOutcome::Failed {
+            completed_clusters: completed,
             quality_acceptances: completed_acceptances,
             quality_rejections: completed_rejections,
             force_updates: completed_force_updates,
             error,
         } => {
             return PlaylistFetch::failed(error)
+                .persisted(!completed.is_empty())
+                .with_completed_clusters(completed)
                 .with_quality_acceptances(completed_acceptances)
                 .with_quality_rejections(completed_rejections)
                 .with_force_updates(completed_force_updates);
@@ -289,6 +295,7 @@ pub async fn download_stalker_playlist(
             errors.push(err);
             return PlaylistFetch::groups(Vec::new())
                 .with_errors(errors)
+                .with_completed_clusters(completed_clusters)
                 .with_quality_acceptances(quality_acceptances)
                 .with_quality_rejections(quality_rejections)
                 .with_force_updates(force_updates)
@@ -307,6 +314,7 @@ pub async fn download_stalker_playlist(
     if !materialize_active {
         return PlaylistFetch::groups(Vec::new())
             .with_errors(errors)
+            .with_completed_clusters(completed_clusters)
             .with_quality_acceptances(quality_acceptances)
             .with_quality_rejections(quality_rejections)
             .with_force_updates(force_updates)
@@ -369,6 +377,7 @@ pub async fn download_stalker_playlist(
     parser::log_stalker_download_summary(&input.name, counts[0], counts[1], counts[2]);
     PlaylistFetch::groups(groups)
         .with_errors(errors)
+        .with_completed_clusters(completed_clusters)
         .with_quality_acceptances(quality_acceptances)
         .with_quality_rejections(quality_rejections)
         .with_force_updates(force_updates)

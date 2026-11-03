@@ -37,6 +37,8 @@ pub struct PlaylistFetch {
     /// Clusters explicitly identified at a failing acquisition/publication boundary.
     /// Unscoped errors must not be assigned to clusters by consumers.
     pub failed_clusters: Vec<XtreamCluster>,
+    /// Explicitly completed cluster acquisitions/publications; independent of Quality.
+    pub completed_clusters: Vec<XtreamCluster>,
     /// Completed normal Quality evaluations whose candidates were accepted.
     pub quality_acceptances: Vec<ClusterUpdateAcceptance>,
     /// Completed cluster updates that were rejected by the domain policy.
@@ -76,6 +78,12 @@ impl PlaylistFetch {
     #[must_use]
     pub fn with_errors(mut self, errors: Vec<TuliproxError>) -> Self {
         self.errors = errors;
+        self
+    }
+
+    #[must_use]
+    pub fn with_completed_clusters(mut self, clusters: Vec<XtreamCluster>) -> Self {
+        self.completed_clusters = clusters;
         self
     }
 

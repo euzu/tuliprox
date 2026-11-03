@@ -184,11 +184,13 @@ fn next_phase_after_series(selection: StalkerClusterSelection) -> StalkerRefresh
 #[derive(Debug)]
 pub enum StalkerRefreshOutcome {
     Complete {
+        completed_clusters: Vec<XtreamCluster>,
         quality_acceptances: Vec<ClusterUpdateAcceptance>,
         quality_rejections: Vec<ClusterUpdateRejection>,
         force_updates: Vec<ClusterForceUpdate>,
     },
     Failed {
+        completed_clusters: Vec<XtreamCluster>,
         quality_acceptances: Vec<ClusterUpdateAcceptance>,
         quality_rejections: Vec<ClusterUpdateRejection>,
         force_updates: Vec<ClusterForceUpdate>,
@@ -314,15 +316,26 @@ async fn publish_completed_refresh(
     identity_fingerprint: u64,
     checkpoint: &StalkerCheckpoint,
     accepted_selection_mask: u8,
+    completed_clusters: &mut Vec<XtreamCluster>,
 ) -> Result<(), TuliproxError> {
     let manifest =
         publish_selection(storage_path, identity_fingerprint, checkpoint.generation, accepted_selection_mask).await?;
+    for (mask, cluster) in [
+        (LIVE_SELECTION, XtreamCluster::Live),
+        (VOD_SELECTION, XtreamCluster::Video),
+        (SERIES_SELECTION, XtreamCluster::Series),
+    ] {
+        if checkpoint.selection_mask & mask != 0 {
+            completed_clusters.push(cluster);
+        }
+    }
     clear_checkpoint(storage_path).await?;
     cleanup_obsolete_generations(storage_path, &manifest).await?;
     Ok(())
 }
 
 struct StalkerRefreshReports {
+    completed_clusters: Vec<XtreamCluster>,
     quality_acceptances: Vec<ClusterUpdateAcceptance>,
     quality_rejections: Vec<ClusterUpdateRejection>,
     force_updates: Vec<ClusterForceUpdate>,
@@ -331,11 +344,22 @@ struct StalkerRefreshReports {
 
 impl StalkerRefreshReports {
     fn into_outcome(self) -> StalkerRefreshOutcome {
-        let Self { quality_acceptances, quality_rejections, force_updates, error } = self;
+        let Self { completed_clusters, quality_acceptances, quality_rejections, force_updates, error } = self;
         if let Some(error) = error {
-            StalkerRefreshOutcome::Failed { quality_acceptances, quality_rejections, force_updates, error }
+            StalkerRefreshOutcome::Failed {
+                completed_clusters,
+                quality_acceptances,
+                quality_rejections,
+                force_updates,
+                error,
+            }
         } else {
-            StalkerRefreshOutcome::Complete { quality_acceptances, quality_rejections, force_updates }
+            StalkerRefreshOutcome::Complete {
+                completed_clusters,
+                quality_acceptances,
+                quality_rejections,
+                force_updates,
+            }
         }
     }
 }
@@ -362,7 +386,8 @@ async fn finish_completed_refresh(
         quality_acceptances: _,
         force_updates: _,
     } = publication;
-    publish_completed_refresh(storage_path, identity_fingerprint, checkpoint, accepted_selection_mask).await?;
+    publish_completed_refresh(storage_path, identity_fingerprint, checkpoint, accepted_selection_mask, &mut Vec::new())
+        .await?;
     Ok(quality_rejections)
 }
 
@@ -387,6 +412,7 @@ async fn finish_completed_refresh_checked(
         quality_rejections,
         force_updates,
     } = publication;
+    let mut completed_clusters = Vec::new();
     let completion_result = async {
         ensure_completed_refresh_has_usable_playlist(
             app_config,
@@ -396,10 +422,23 @@ async fn finish_completed_refresh_checked(
             accepted_selection_mask,
         )
         .await?;
-        publish_completed_refresh(storage_path, identity_fingerprint, checkpoint, accepted_selection_mask).await
+        publish_completed_refresh(
+            storage_path,
+            identity_fingerprint,
+            checkpoint,
+            accepted_selection_mask,
+            &mut completed_clusters,
+        )
+        .await
     }
     .await;
-    Ok(StalkerRefreshReports { quality_acceptances, quality_rejections, force_updates, error: completion_result.err() })
+    Ok(StalkerRefreshReports {
+        completed_clusters,
+        quality_acceptances,
+        quality_rejections,
+        force_updates,
+        error: completion_result.err(),
+    })
 }
 
 struct StalkerGenerationPublication {
@@ -1213,9 +1252,11 @@ mod tests {
             finish_completed_refresh_checked(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 0, 0))
                 .await?;
 
-        let StalkerRefreshOutcome::Failed { quality_acceptances, .. } = reports.into_outcome() else {
+        let StalkerRefreshOutcome::Failed { completed_clusters, quality_acceptances, .. } = reports.into_outcome()
+        else {
             return Err("expected failed Stalker completion with retained reports".into());
         };
+        assert_eq!(completed_clusters, Vec::new());
         assert_eq!(
             quality_acceptances,
             vec![ClusterUpdateAcceptance {
@@ -1258,9 +1299,11 @@ mod tests {
             finish_completed_refresh_checked(&app_config, temp.path(), identity, &checkpoint, update_quality(90, 0, 0))
                 .await?;
 
-        let StalkerRefreshOutcome::Failed { quality_acceptances, .. } = reports.into_outcome() else {
+        let StalkerRefreshOutcome::Failed { completed_clusters, quality_acceptances, .. } = reports.into_outcome()
+        else {
             return Err("expected failed Stalker completion with retained reports".into());
         };
+        assert_eq!(completed_clusters, [XtreamCluster::Live]);
         assert_eq!(quality_acceptances.len(), 1);
         assert_eq!(quality_acceptances[0].cluster, XtreamCluster::Live);
         let published = load_active_manifest(temp.path(), identity).await?;
