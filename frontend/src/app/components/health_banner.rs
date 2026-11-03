@@ -5,7 +5,11 @@ use crate::{
     model::ViewType,
     utils::set_location_hash,
 };
-use gloo_timers::callback::Interval;
+use gloo_timers::callback::{Interval, Timeout};
+use std::{cell::RefCell, rc::Rc};
+
+mod popover;
+use popover::{HealthPopover, DETAILS_ID};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -132,16 +136,26 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
-fn open_popover_callback<E: 'static>(
-    popover_open: UseStateHandle<bool>,
-    now_ms: UseStateHandle<f64>,
-    update_popover_pos: Callback<()>,
-) -> Callback<E> {
-    Callback::from(move |_| {
-        popover_open.set(true);
-        now_ms.set(js_sys::Date::now());
-        update_popover_pos.emit(());
-    })
+#[derive(Default)]
+struct OpenConditions {
+    badge_hover: bool,
+    panel_hover: bool,
+    focus: bool,
+    dismissed: bool,
+}
+
+impl OpenConditions {
+    fn wants_open(&self) -> bool { !self.dismissed && (self.badge_hover || self.panel_hover || self.focus) }
+}
+
+type CloseTimer = Rc<RefCell<Option<Timeout>>>;
+
+fn schedule_close(timer: &CloseTimer, conditions: Rc<RefCell<OpenConditions>>, open: UseStateHandle<bool>) {
+    *timer.borrow_mut() = Some(Timeout::new(180, move || {
+        if !conditions.borrow().wants_open() {
+            open.set(false);
+        }
+    }));
 }
 
 #[component]
@@ -150,7 +164,9 @@ pub fn HealthBanner() -> Html {
     let status_ctx = use_context::<StatusContext>();
     let config_ctx = use_context::<ConfigContext>();
     let banner_ref = use_node_ref();
-    let popover_pos = use_state(|| (0.0_f64, 0.0_f64));
+    let panel_ref = use_node_ref();
+    let conditions = use_mut_ref(OpenConditions::default);
+    let close_timer = use_mut_ref(|| None::<Timeout>);
     let popover_open = use_state(|| false);
     let now_ms = use_state(js_sys::Date::now);
 
@@ -238,43 +254,124 @@ pub fn HealthBanner() -> Html {
     };
     let aria_label = format!("{}: {label}", translate.t("LABEL.HEALTH_BANNER"));
 
-    let onclick = Callback::from(|_| set_location_hash(ViewType::Stats.as_str()));
-    let onkeydown = Callback::from(|e: KeyboardEvent| {
-        if e.key() == "Enter" || e.key() == " " {
-            e.prevent_default();
+    let dismiss = {
+        let open = popover_open.clone();
+        let conditions = conditions.clone();
+        let timer = close_timer.clone();
+        let panel = panel_ref.clone();
+        let badge = banner_ref.clone();
+        Callback::from(move |()| {
+            let focused_badge = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.active_element())
+                .zip(badge.cast::<web_sys::Element>())
+                .is_some_and(|(active, badge)| badge.contains(Some(&active)));
+            {
+                let mut conditions = conditions.borrow_mut();
+                conditions.dismissed = true;
+                conditions.panel_hover = false;
+                conditions.focus = focused_badge;
+            }
+            timer.borrow_mut().take();
+            if let Some(panel) = panel.cast::<web_sys::Element>() {
+                let _ = panel.remove_attribute("data-positioned");
+            }
+            open.set(false);
+        })
+    };
+    let onclick = {
+        let dismiss = dismiss.clone();
+        Callback::from(move |_| {
+            dismiss.emit(());
             set_location_hash(ViewType::Stats.as_str());
-        }
-    });
-
-    let update_popover_pos = {
-        let banner_ref = banner_ref.clone();
-        let popover_pos = popover_pos.clone();
-        Callback::from(move |(): ()| {
-            if let Some(el) = banner_ref.cast::<web_sys::Element>() {
-                let rect = el.get_bounding_client_rect();
-                let viewport_w = web_sys::window()
-                    .and_then(|w| w.inner_width().ok())
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(rect.right());
-                let top = rect.bottom() + 8.0;
-                let right = (viewport_w - rect.right()).max(0.0);
-                popover_pos.set((top, right));
+        })
+    };
+    let onkeydown = {
+        let dismiss = dismiss.clone();
+        Callback::from(move |e: KeyboardEvent| {
+            if e.key() == "Enter" || e.key() == " " {
+                e.prevent_default();
+                dismiss.emit(());
+                set_location_hash(ViewType::Stats.as_str());
             }
         })
     };
-    let onmouseenter =
-        open_popover_callback::<MouseEvent>(popover_open.clone(), now_ms.clone(), update_popover_pos.clone());
-    let onfocus = open_popover_callback::<FocusEvent>(popover_open.clone(), now_ms.clone(), update_popover_pos.clone());
-    let onmouseleave = {
-        let popover_open = popover_open.clone();
-        Callback::from(move |_: MouseEvent| popover_open.set(false))
+    let hover = |panel: bool, enter: bool| {
+        let conditions = conditions.clone();
+        let timer = close_timer.clone();
+        let open = popover_open.clone();
+        Callback::from(move |_: MouseEvent| {
+            {
+                let mut conditions = conditions.borrow_mut();
+                if panel {
+                    conditions.panel_hover = enter;
+                } else {
+                    conditions.badge_hover = enter;
+                }
+                if enter {
+                    conditions.dismissed = false;
+                }
+            }
+            timer.borrow_mut().take();
+            if enter {
+                open.set(true);
+            } else {
+                schedule_close(&timer, conditions.clone(), open.clone());
+            }
+        })
+    };
+    let onfocus = {
+        let conditions = conditions.clone();
+        let timer = close_timer.clone();
+        let open = popover_open.clone();
+        Callback::from(move |_: FocusEvent| {
+            let mut conditions = conditions.borrow_mut();
+            conditions.focus = true;
+            conditions.dismissed = false;
+            timer.borrow_mut().take();
+            open.set(true);
+        })
     };
     let onblur = {
-        let popover_open = popover_open.clone();
-        Callback::from(move |_: FocusEvent| popover_open.set(false))
+        let conditions = conditions.clone();
+        let timer = close_timer.clone();
+        let open = popover_open.clone();
+        let badge = banner_ref.clone();
+        let panel = panel_ref.clone();
+        Callback::from(move |event: FocusEvent| {
+            use wasm_bindgen::JsCast;
+            let target = event.related_target().and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+            conditions.borrow_mut().focus = target.as_ref().is_some_and(|target| {
+                [badge.cast::<web_sys::Element>(), panel.cast::<web_sys::Element>()]
+                    .into_iter()
+                    .flatten()
+                    .any(|element| element.contains(Some(target)))
+            });
+            schedule_close(&timer, conditions.clone(), open.clone());
+        })
     };
-    let (popover_top, popover_right) = *popover_pos;
-    let popover_style = format!("top:{popover_top:.0}px;right:{popover_right:.0}px");
+    let on_focus_change = {
+        let conditions = conditions.clone();
+        let timer = close_timer.clone();
+        let open = popover_open.clone();
+        Callback::from(move |focused: bool| {
+            {
+                let mut conditions = conditions.borrow_mut();
+                if conditions.focus == focused {
+                    return;
+                }
+                conditions.focus = focused;
+            }
+            timer.borrow_mut().take();
+            if !focused {
+                schedule_close(&timer, conditions.clone(), open.clone());
+            }
+        })
+    };
+    {
+        let timer = close_timer.clone();
+        use_effect_with((), move |()| move || drop(timer.borrow_mut().take()));
+    }
 
     // Popover signal rows.
     let ws_signal = match ws_status {
@@ -288,7 +385,9 @@ pub fn HealthBanner() -> Html {
         None => translate.t("LABEL.HEALTH_UNKNOWN"),
     };
 
-    let providers_summary = if provider_rows.is_empty() {
+    let providers_summary = if !has_status {
+        translate.t("LABEL.HEALTH_UNKNOWN")
+    } else if provider_rows.is_empty() {
         translate.t("LABEL.HEALTH_PROVIDERS_NONE")
     } else {
         let warn_count = provider_rows.iter().filter(|p| p.signal != Signal::Ok).count();
@@ -309,10 +408,9 @@ pub fn HealthBanner() -> Html {
                 <div class="tp__health-banner__provider">
                     <span class={classes!("tp__health-banner__signal", row.signal.modifier())} aria-hidden="true" />
                     <span class="tp__health-banner__provider-name">{ row.name.to_string() }</span>
-                    <span class="tp__health-banner__bar" aria-hidden="true">
-                        <span class="tp__health-banner__bar-fill" style={format!("width:{:.0}%", ratio * 100.0)} />
-                    </span>
-                    <span class="tp__health-banner__provider-value">{ value }</span>
+                    <progress class={classes!("tp__health-banner__bar", row.signal.modifier())}
+                        aria-hidden="true" max="1" value={ratio.to_string()} />
+                    <bdi class="tp__health-banner__provider-value" dir="ltr">{ value }</bdi>
                 </div>
             }
         })
@@ -331,22 +429,31 @@ pub fn HealthBanner() -> Html {
     });
 
     html! {
+        <>
         <div
-            ref={banner_ref}
+            ref={banner_ref.clone()}
             class={classes!("tp__health-banner", health.modifier())}
             role="button"
             aria-label={aria_label}
+            aria-expanded={popover_open.to_string()}
+            aria-controls={(*popover_open).then_some(DETAILS_ID)}
+            aria-describedby={(*popover_open).then_some(DETAILS_ID)}
             tabindex="0"
             onclick={onclick}
             onkeydown={onkeydown}
-            onmouseenter={onmouseenter}
-            onmouseleave={onmouseleave}
-            onfocus={onfocus}
-            onblur={onblur}
+            onmouseenter={hover(false, true)}
+            onmouseleave={hover(false, false)}
+            onfocus={onfocus.clone()}
+            onblur={onblur.clone()}
         >
             <span class="tp__health-banner__dot" aria-hidden="true" />
             <span class="tp__health-banner__label" role="status" aria-live="polite" aria-atomic="true">{ label }</span>
-            <div class="tp__health-banner__popover" role="presentation" style={popover_style}>
+        </div>
+        if *popover_open {
+            <HealthPopover anchor={banner_ref} panel={panel_ref} label={translate.t("LABEL.HEALTH_BANNER")}
+                on_close={dismiss} on_focus_change={on_focus_change}
+                onmouseenter={hover(true, true)} onmouseleave={hover(true, false)}
+                onfocus={onfocus} onblur={onblur}>
                 <div class="tp__health-banner__popover-head">
                     <span class="tp__health-banner__popover-title">{ translate.t("LABEL.HEALTH_BANNER") }</span>
                     <span class="tp__health-banner__popover-since">{ format_elapsed(elapsed_secs) }</span>
@@ -361,19 +468,50 @@ pub fn HealthBanner() -> Html {
                     <span class="tp__health-banner__row-label">{ translate.t("LABEL.HEALTH_PROVIDERS") }</span>
                     <span class="tp__health-banner__row-value">{ providers_summary }</span>
                 </div>
-                { provider_detail }
-            </div>
-        </div>
+                if !provider_rows.is_empty() {
+                    <div class="tp__health-banner__providers" tabindex="0" role="region"
+                        aria-label={translate.t("LABEL.HEALTH_PROVIDERS")}>
+                        { provider_detail }
+                    </div>
+                }
+            </HealthPopover>
+        }
+        </>
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_health, compute_saturated, Health};
+    use super::{compute_health, compute_saturated, Health, OpenConditions};
     use std::{
         collections::{BTreeMap, HashMap},
         sync::Arc,
     };
+
+    #[test]
+    fn health_banner_escape_stays_dismissed_until_a_new_entry_or_focus() {
+        let mut conditions = OpenConditions { badge_hover: true, focus: true, ..Default::default() };
+        assert!(conditions.wants_open());
+        conditions.dismissed = true;
+        assert!(!conditions.wants_open());
+        conditions.badge_hover = false;
+        conditions.focus = false;
+        assert!(!conditions.wants_open());
+        conditions.panel_hover = true;
+        conditions.dismissed = false;
+        assert!(conditions.wants_open());
+    }
+
+    #[test]
+    fn health_banner_reading_or_focus_keeps_panel_open_after_leaving_badge() {
+        let mut conditions = OpenConditions { panel_hover: true, ..Default::default() };
+        assert!(conditions.wants_open());
+        conditions.panel_hover = false;
+        conditions.focus = true;
+        assert!(conditions.wants_open());
+        conditions.focus = false;
+        assert!(!conditions.wants_open());
+    }
 
     #[test]
     fn compute_health_starts_unknown_without_websocket_status() {

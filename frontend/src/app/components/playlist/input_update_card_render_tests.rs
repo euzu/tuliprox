@@ -52,6 +52,7 @@ fn render_content(card: &InputUpdateCardModel, view: &InputUpdateRunView) -> Htm
         card.capabilities,
         html! { <div class="tp__playlist-update-view__input-card-footer">{"Last update"}</div> },
         html! { <section class="tp__playlist-update-view__input-targets">{"Affected targets"}</section> },
+        Html::default(),
         str::to_string,
     )
 }
@@ -223,9 +224,9 @@ fn pipeline_transparency_input_update_card_series_failure_survives_reload_and_fo
         let telemetry: PlaylistUpdateInputTelemetry = serde_json::from_value(serde_json::json!({
             "refresh_policy": InputRefreshPolicy::FORCE,
             "clusters": [
-                {"cluster": XtreamCluster::Live, "requested": true, "source": "provider", "decision": "accepted"},
+                {"cluster": XtreamCluster::Live, "requested": true, "source": "provider", "decision": "accepted", "technical_state": "succeeded"},
                 {"cluster": XtreamCluster::Series, "requested": true, "source": "provider", "decision": decision, "technical_state": "failed"},
-                {"cluster": XtreamCluster::Video, "requested": true, "source": "provider", "decision": "accepted"}
+                {"cluster": XtreamCluster::Video, "requested": true, "source": "provider", "decision": "accepted", "technical_state": "succeeded"}
             ]
         })).unwrap();
         let running = Rc::new(PlaylistUpdateCardStatuses::for_connection(connection)).reduce(
@@ -289,7 +290,7 @@ fn update_overview_badges_cluster_labels() {
 fn content_badge_labels(card: &InputUpdateCardModel, view: &InputUpdateRunView) -> Vec<String> {
     let translations: serde_json::Value =
         serde_json::from_str(include_str!("../../../../public/assets/i18n/en.json")).unwrap();
-    let rendered = input_content(view, card.capabilities, Html::default(), Html::default(), |key| {
+    let rendered = input_content(view, card.capabilities, Html::default(), Html::default(), Html::default(), |key| {
         translations
             .pointer(&format!("/{}", key.replace('.', "/")))
             .and_then(serde_json::Value::as_str)
@@ -360,7 +361,7 @@ fn update_overview_badges_no_mixed_cluster_vocabulary() {
                 path: None,
             }));
         }
-        let node = input_content(&view, card.capabilities, Html::default(), Html::default(), |key| {
+        let node = input_content(&view, card.capabilities, Html::default(), Html::default(), Html::default(), |key| {
             translations
                 .pointer(&format!("/{}", key.replace('.', "/")))
                 .and_then(serde_json::Value::as_str)
@@ -602,6 +603,243 @@ fn input_update_card_header_badges_share_geometry_and_have_no_input_prefix() {
             assert!(!badge.attributes.iter().any(|(name, _)| name == "style"));
             assert_eq!(visible_text(&rendered, true).trim(), status.label_key());
             assert!(has_status_dot(badge));
+        }
+    }
+}
+
+#[test]
+fn cluster_status_without_quality_uses_general_provider_result_and_keeps_failure_priority() {
+    for input_type in [InputType::Xtream, InputType::Stalker, InputType::M3u] {
+        for (general, label) in [("ok", "LABEL.UPDATE_STATUS_SUCCESS"), ("failed", "LABEL.UPDATE_STATUS_FAILED")] {
+            for snapshot in
+                [serde_json::Value::Null, serde_json::json!({"source":"provider","quality_guard_threshold":0})]
+            {
+                let sources = SourcesConfigDto {
+                    inputs: vec![ConfigInputDto { id: 17, enabled: true, input_type, ..Default::default() }],
+                    ..Default::default()
+                };
+                let persisted:PlaylistUpdateStatusDto=serde_json::from_value(serde_json::json!({"inputs":[{"input_id":17,"clusters":[{"cluster":"Live","status":general,"timestamp":7,"last_update":snapshot}]}]})).unwrap();
+                let cards = build_input_update_card_models(&sources, &persisted);
+                let view =
+                    build_input_update_run_views(&sources, &cards, &PlaylistUpdateCardStatuses::default(), &persisted)
+                        .remove(0);
+                let cluster = view.cluster_results.iter().find(|c| c.cluster == XtreamCluster::Live).unwrap();
+                assert_eq!(cluster.outcome, None, "general success does not invent Quality acceptance");
+                assert_eq!(cluster_summary_status(cluster).label_key(), label);
+                let rendered = render_content(&cards[0], &view);
+                let chip = tags(&rendered)
+                    .into_iter()
+                    .find(|tag| {
+                        has_attribute(tag, "role", "listitem")
+                            && tag.attributes.iter().any(|(key, value)| key == "aria-label" && value.contains(label))
+                    })
+                    .unwrap();
+                assert!(has_status_dot(chip));
+                assert!(!visible_text(&rendered, true).contains("QUALITY_ACHIEVED"));
+            }
+        }
+    }
+    let (card, mut view) = card_view(InputType::Xtream);
+    let cluster = &mut view.cluster_results[0];
+    cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Failed);
+    cluster.outcome = Some(InputClusterOutcomeView::Accepted);
+    assert_eq!(cluster_summary_status(cluster), ClusterSummaryStatus::TechnicalError);
+    assert!(visible_text(&render_content(&card, &view), true).contains("LABEL.UPDATE_STATUS_FAILED"));
+}
+
+#[test]
+fn cluster_quality_acceptance_without_publication_does_not_claim_technical_success() {
+    let (_, mut view) = card_view(InputType::Xtream);
+    let cluster = &mut view.cluster_results[0];
+    cluster.source = Some(InputDataSourceView::Provider);
+    cluster.outcome = Some(InputClusterOutcomeView::Accepted);
+    cluster.technical_state = None;
+    cluster.quality = Some(95);
+    cluster.threshold = Some(90);
+    assert_eq!(cluster_summary_status(cluster), ClusterSummaryStatus::Unavailable);
+    assert!(matches!(quality_presentation(cluster, None), Some(QualityPresentation::Evaluated { quality: 95, .. })));
+    cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Failed);
+    assert_eq!(cluster_summary_status(cluster), ClusterSummaryStatus::TechnicalError);
+    cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Succeeded);
+    assert_eq!(cluster_summary_status(cluster), ClusterSummaryStatus::Accepted);
+}
+
+#[test]
+fn cluster_success_survives_a_later_target_failure_in_the_same_run() {
+    use crate::model::PlaylistUpdateCardStatusAction;
+    use shared::model::{
+        PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunStateEvent, PlaylistUpdateState,
+    };
+    use std::rc::Rc;
+    let sources = SourcesConfigDto {
+        inputs: vec![ConfigInputDto { id: 17, enabled: true, input_type: InputType::Xtream, ..Default::default() }],
+        ..Default::default()
+    };
+    let persisted = PlaylistUpdateStatusDto::default();
+    let cards = build_input_update_card_models(&sources, &persisted);
+    let connection = WebSocketConnectionContext::new(3, true);
+    let telemetry: PlaylistUpdateInputTelemetry =
+        serde_json::from_value(serde_json::json!({"refresh_policy":InputRefreshPolicy::NORMAL,"clusters":[
+        {"cluster":"Live","requested":true,"source":"provider","technical_state":"succeeded"},
+        {"cluster":"Video","requested":true,"source":"provider","technical_state":"succeeded"},
+        {"cluster":"Series","requested":true,"source":"provider","technical_state":"succeeded"}]}))
+        .unwrap();
+    let state = Rc::new(PlaylistUpdateCardStatuses::for_connection(connection))
+        .reduce(PlaylistUpdateCardStatusAction::Progress {
+            connection_context: connection,
+            progress: PlaylistUpdateProgressEvent::input_completed(
+                "input-then-target".into(),
+                7.into(),
+                17,
+                PlaylistUpdateState::Success,
+                "provider",
+                "input complete",
+            )
+            .with_input_telemetry(telemetry),
+        })
+        .reduce(PlaylistUpdateCardStatusAction::Completed {
+            connection_context: connection,
+            completed: PlaylistUpdateRunStateEvent::correlated(
+                "input-then-target".into(),
+                7.into(),
+                PlaylistUpdateState::Failure,
+            ),
+        });
+    let view = build_input_update_run_views(&sources, &cards, &state, &persisted).remove(0);
+    assert_eq!(view.input_state, InputUpdateCardStatus::Success);
+    assert_eq!(view.overall_state, InputUpdateCardStatus::Failed);
+    assert!(view
+        .cluster_results
+        .iter()
+        .all(|cluster| cluster_summary_status(cluster) == ClusterSummaryStatus::Accepted));
+    assert!(visible_text(&card_status_badge(&view, str::to_string), true).contains("UPDATE_STATUS_FAILED"));
+}
+
+#[test]
+fn pipeline_transparency_compact_populations_keep_zero_missing_and_exact_large_differences() {
+    assert_eq!(population_difference(None, Some(0)), None);
+    assert_eq!(population_difference(Some(0), None), None);
+    assert_eq!(population_difference(Some(0), Some(0)), None);
+    assert_eq!(population_difference(Some(9705), Some(9673)).as_deref(), Some("−32"));
+    assert_eq!(population_difference(Some(usize::MAX), Some(usize::MAX - 1)).as_deref(), Some("−1"));
+    assert_eq!(population_difference(Some(0), Some(usize::MAX)), Some(format!("+{}", usize::MAX)));
+    let (_, mut view) = card_view(InputType::Xtream);
+    let cluster = &mut view.cluster_results[0];
+    cluster.baseline_count = None;
+    cluster.candidate_count = Some(0);
+    cluster.active_count = Some(0);
+    let rendered = population_details(cluster, &str::to_string);
+    assert_eq!(tags(&rendered).iter().filter(|t| t.tag() == "dt").count(), 2);
+    assert_eq!(tags(&rendered).iter().filter(|t| t.tag() == "dd").count(), 2);
+    assert!(!visible_text(&rendered, true).contains("BASELINE"));
+    assert!(!tags(&rendered).iter().any(|t| has_attribute(t, "role", "img")));
+    cluster.candidate_count = None;
+    cluster.active_count = None;
+    assert_eq!(tags(&population_details(cluster, &str::to_string)).len(), 0);
+}
+
+#[test]
+fn pipeline_transparency_compact_quality_keeps_accepted_separate_from_technical_failure() {
+    let (_, mut view) = card_view(InputType::Xtream);
+    let cluster = &mut view.cluster_results[0];
+    cluster.threshold = Some(90);
+    cluster.quality = Some(100);
+    cluster.outcome = Some(InputClusterOutcomeView::Accepted);
+    cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Failed);
+    let rendered = cluster_details(17, cluster, None, &str::to_string);
+    let text = visible_text(&rendered, true);
+    assert!(text.contains("LABEL.UPDATE_STATUS_FAILED"));
+    assert!(text.contains("DECISION") && text.contains("CLUSTER_ACCEPTED"));
+    assert!(text.contains("100%") && text.contains("90%"));
+    assert_eq!(tags(&rendered).iter().filter(|t| t.tag() == "svg").count(), 1);
+    assert!(tags(&rendered).iter().any(|t| has_attribute(
+        t,
+        "class",
+        "tp__playlist-update-view__quality-visual tp__playlist-update-view__quality-visual--accepted"
+    )));
+    cluster.outcome = Some(InputClusterOutcomeView::Rejected);
+    cluster.technical_state = Some(PersistedPlaylistUpdateTechnicalState::Succeeded);
+    cluster.quality = Some(0);
+    let zero = cluster_details(17, cluster, None, &str::to_string);
+    assert!(visible_text(&zero, true).contains("0%"));
+    assert!(tags(&zero).iter().any(|t| t.tag() == "rect" && has_attribute(t, "width", "0")));
+    assert!(!visible_text(&zero, true).contains("DECISION"), "same typed rejection is already in its cluster badge");
+    for policy in [InputRefreshPolicy::FORCE, InputRefreshPolicy::NORMAL] {
+        if policy == InputRefreshPolicy::NORMAL {
+            cluster.quality = None;
+        }
+        let unknown = quality_details(cluster, Some(policy), &str::to_string);
+        assert!(!tags(&unknown).iter().any(|t| t.tag() == "svg"));
+    }
+    cluster.threshold = None;
+    let disabled = quality_details(cluster, None, &str::to_string);
+    assert!(visible_text(&disabled, true).contains("DISABLED"));
+    assert!(!tags(&disabled).iter().any(|t| t.tag() == "svg"));
+}
+
+#[test]
+fn pipeline_transparency_compact_targets_have_fixed_rule_cells_ids_and_unknown_fallback() {
+    let (_, mut view) = card_view(InputType::Xtream);
+    view.target_results = [11, 12]
+        .into_iter()
+        .map(|id| TargetRunView {
+            target_id: id,
+            target_name: "duplicate".into(),
+            input_ids: vec![17],
+            pipeline: Some(TargetPipelineView {
+                processing_order: shared::model::ProcessingOrder::Mrf,
+                filter_summary: RuleStageSummary { configured_count: 9 },
+                rename_summary: RuleStageSummary { configured_count: 0 },
+                mapping_summary: RuleStageSummary { configured_count: 2 },
+            }),
+        })
+        .collect();
+    let rendered = target_details(&view, "targets".into(), &str::to_string);
+    let all = tags(&rendered);
+    assert_eq!(all.iter().filter(|t| has_attribute(t, "scope", "row")).count(), 2);
+    assert_eq!(all.iter().filter(|t| has_attribute(t, "scope", "col")).count(), 5);
+    for id in [11, 12] {
+        assert!(all.iter().any(|t| has_attribute(t, "id", &format!("input-update-card-17-target-{id}-pipeline"))));
+    }
+    for row in &view.target_results {
+        let rendered = target_pipeline_details(17, row, &str::to_string);
+        let cells = tags(&rendered).into_iter().filter(|t| t.tag() == "td").collect::<Vec<_>>();
+        assert_eq!(cells.len(), 4);
+        for (cell, label, number) in [(cells[1], "FILTER", "9"), (cells[2], "RENAME", "0"), (cells[3], "MAPPING", "2")]
+        {
+            let text = visible_text(cell.children().unwrap(), true);
+            assert!(text.contains(label) && text.contains(number));
+            assert!(cell
+                .attributes
+                .iter()
+                .any(|(k, v)| k == "headers" && v.contains(&format!("target-{}-pipeline", row.target_id))));
+        }
+    }
+    view.target_results[0].pipeline = None;
+    let missing = target_pipeline_details(17, &view.target_results[0], &str::to_string);
+    assert!(visible_text(&missing, true).contains("DATA_UNAVAILABLE"));
+    assert!(!tags(&missing).iter().any(|t| t.tag() == "bdi"));
+    assert!(!tags(&rendered).iter().any(|t| t.attributes.iter().any(|(k, _)| k == "style" || k == "tabindex")));
+}
+
+#[test]
+fn pipeline_transparency_compact_labels_exist_in_every_product_locale() {
+    for locale in [
+        include_str!("../../../../public/assets/i18n/en.json"),
+        include_str!("../../../../public/assets/i18n/es.json"),
+        include_str!("../../../../public/assets/i18n/ru.json"),
+        include_str!("../../../../public/assets/i18n/ar.json"),
+    ] {
+        let values: serde_json::Value = serde_json::from_str(locale).unwrap();
+        for key in ["CONFIGURED_RULES", "TARGET_ORDER", "POPULATION_DIFFERENCE", "QUALITY_GRAPH_LABEL"] {
+            assert!(values["MESSAGES"]["PLAYLIST_UPDATE"][key].as_str().is_some_and(|s| !s.is_empty()));
+        }
+        assert!(values["MESSAGES"]["PLAYLIST_UPDATE"]["POPULATION_DIFFERENCE"]
+            .as_str()
+            .unwrap()
+            .contains("{difference}"));
+        for parameter in ["{quality}", "{threshold}"] {
+            assert!(values["MESSAGES"]["PLAYLIST_UPDATE"]["QUALITY_GRAPH_LABEL"].as_str().unwrap().contains(parameter));
         }
     }
 }

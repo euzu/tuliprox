@@ -136,6 +136,14 @@ async fn playlist_update_status_staged_reporter_trace_matches_persistence_before
         assert_eq!(telemetry.source, None);
         assert_eq!(telemetry.clusters[0].source, Some(PlaylistUpdateDataSource::Provider));
         assert_eq!(telemetry.clusters[0].threshold, Some(95));
+        assert_eq!(
+            telemetry.clusters[0].technical_state,
+            Some(if expected == PlaylistUpdateState::Failure {
+                PersistedPlaylistUpdateTechnicalState::Failed
+            } else {
+                PersistedPlaylistUpdateTechnicalState::Succeeded
+            })
+        );
         if expected == PlaylistUpdateState::Partial {
             assert_eq!(telemetry.clusters[0].decision, Some(PlaylistUpdateClusterDecision::Rejected));
             assert_eq!(telemetry.clusters[0].active_count, Some(100));
