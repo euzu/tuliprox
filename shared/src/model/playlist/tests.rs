@@ -21,6 +21,7 @@ fn sample_options() -> XtreamMappingOptions {
         flags: XtreamMappingFlags::RewriteResourceUrl.into(),
         encrypt_secret: [3u8; 16],
         resource_host_policies: Arc::default(),
+        default_container_extensions: Arc::default(),
     }
 }
 

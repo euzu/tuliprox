@@ -359,6 +359,7 @@
       "URLS": "Ordered list of provider base URLs. Tuliprox rotates through them on failover."
     },
     "CONFIG_INPUT_OPTIONS": {
+      "DEFAULT_CONTAINER_EXTENSION": "Extension published for movies and series episodes when neither the provider nor the stream URL states one. Defaults to mp4; a configured value replaces the default and never overrides a provider value. Applied when the playlist is served, never stored.",
       "PROBE_DELAY": "Delay in seconds between probe requests (default 2) to reduce provider pressure.",
       "PROBE_LIVE": "Enables background technical analysis for live channels to detect codecs and resolution.",
       "PROBE_LIVE_INTERVAL_HOURS": "Interval in hours between re-probing live channels (default: 120).",
@@ -1861,6 +1862,7 @@
     "STREAM_HISTORY_REASON": "Reason",
     "STREAM_HISTORY_CONFIDENCE": "Confidence",
     "CONTAINER": "Container",
+    "CONTAINER_EXTENSION": "Container extension",
     "STREAM_HISTORY_TIME": "Time",
     "STREAM_HISTORY_TO": "To",
     "STREAM_HISTORY_ENABLED": "Enable stream history",
