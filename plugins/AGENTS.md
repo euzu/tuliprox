@@ -187,9 +187,11 @@ mod plugin {
 
 ### Notification plugins (a message channel)
 
-- Start from `plugins/notifiers/discord-notifier` (embeds) or `plugins/notifiers/slack-notifier` (Block Kit): same shape, two services.
+- Start from the closest plugin in `plugins/notifiers/`: `discord-notifier` (embeds), `slack-notifier` (Block Kit),
+  `gotify-notifier` and `ntfy-notifier` (push messages, plain text or markdown): same shape, different services.
   Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a
-  `DeliveryError`) and `notify::iso8601` (times).
+  `DeliveryError`) and `notify::iso8601` (times), `notify::sections_of` (the event's sections) and, for a service that renders markdown,
+  `notify::markdown` (escaping, hard line breaks, sections as bold headings).
 - Hook `notifications.send`, capability `notifications` (plus `network` to call a service). The channel appears as
   `plugin.<id>`. The host applies routing, quiet hours, suppression and the retrying outbox; the plugin only formats and
   sends, then answers with a `DeliveryError`: `Transient` (retry with backoff), `RetryAfter(secs)` (a `u32` in seconds,

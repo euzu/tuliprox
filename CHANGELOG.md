@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.ntfy` is removed.** The built-in ntfy channel is gone; the config key is no longer accepted, so a config
+  that still contains it fails to load with `unknown field`. Install and configure the `ntfy-notifier` plugin instead
+  (`plugins.plugins`, id `ntfy-notifier`, settings `url`, `topic` and optionally `token`).
+
 - **`messaging.gotify` is removed.** The built-in Gotify channel is gone; the config key is no longer accepted, so a
   config that still contains it fails to load with `unknown field`. Install and configure the `gotify-notifier` plugin
   instead (`plugins.plugins`, id `gotify-notifier`, settings `url` and `token`).
@@ -216,6 +220,15 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **ntfy notifications are a plugin.** The `ntfy-notifier` plugin (`plugins/notifiers/ntfy-notifier`,
+  `make plugin-ntfy-notifier`) publishes to an ntfy topic through ntfy's JSON API, so a title or a message can carry any
+  Unicode text (the header form had to strip emoji from titles). Events carry their domain and, for a warning or an error,
+  a warning or alarm tag as ntfy tags; the message is cut at ntfy's 4096-byte limit on a character boundary; with
+  `style: markdown` the event's sections are sent as markdown for the ntfy web app. A protected topic's token is only sent in the
+  `Authorization` header. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [ntfy Notifier](docs/src/plugins/ntfy-notifier.md). The SDK's `notify` module gained `Section`, `sections_of` and a
+  `markdown` helper (escaping, hard line breaks, sections as bold headings), which the Gotify plugin now uses too.
 
 - **Gotify notifications are a plugin.** The `gotify-notifier` plugin (`plugins/notifiers/gotify-notifier`,
   `make plugin-gotify-notifier`) pushes notifications to a Gotify server, as plain text or, with `style: markdown`, as the

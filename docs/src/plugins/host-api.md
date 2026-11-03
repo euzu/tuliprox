@@ -157,6 +157,10 @@ a config reload. `enabled` defaults to `true`. Removing a source leaves the plug
   of a notification plugin (2xx delivered, 408 and 429 retried, 5xx except 501 and 505 transient, the rest permanent).
   `notify::parse_retry_after` reads the header in seconds or as an HTTP date (at most 24 h) and `notify::iso8601` writes a
   Unix time as `YYYY-MM-DDTHH:MM:SSZ`.
+- `notify::sections_of(payload)` reads the event's channel-neutral `sections` (`Section { heading, lines }`) out of a
+  notification's `payload`, and `notify::markdown::{sections, lines, escape_line}` turn them, or plain text, into escaped
+  markdown for services that render it: bold headings, hard line breaks, and a leading `>`, `#`, `-`, `+` or `1.` escaped
+  so event text cannot become a quote, a heading or a list.
 - `Secret<T>` wraps a secret value. Its `Debug` and `Display` print `********`, and it does not implement `Serialize`.
   `expose()` gives the plain value.
 

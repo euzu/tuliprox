@@ -96,27 +96,6 @@ impl PushoverMessagingConfigDto {
     }
 }
 
-/// [ntfy](https://ntfy.sh) - self-hosted push, no account, no bot token.
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct NtfyMessagingConfigDto {
-    /// Server base URL, e.g. `https://ntfy.sh`.
-    pub url: String,
-    /// Topic to publish to.
-    pub topic: String,
-    /// Bearer token for a protected topic.
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    pub token: Option<String>,
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<ChannelRoutingDto>,
-}
-
-impl NtfyMessagingConfigDto {
-    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.topic.trim().is_empty() }
-}
-
 /// Run a local program, with the event JSON on stdin.
 ///
 /// The escape hatch that means nobody has to wait for a channel to be

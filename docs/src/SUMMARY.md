@@ -44,6 +44,7 @@
   - [Discord Notifier](./plugins/discord-notifier.md)
   - [Slack Notifier](./plugins/slack-notifier.md)
   - [Gotify Notifier](./plugins/gotify-notifier.md)
+  - [ntfy Notifier](./plugins/ntfy-notifier.md)
   - [Plugin Marketplace](./plugins/marketplace.md)
   - [Publishing a Marketplace](./plugins/marketplace-publishing.md)
   - [Security Model](./plugins/security.md)

@@ -34,11 +34,6 @@ impl MessagingConfigDto {
             redact(&mut pushover.token);
             redact(&mut pushover.user);
         }
-        if let Some(ntfy) = self.ntfy.as_mut() {
-            if let Some(token) = ntfy.token.as_mut() {
-                redact(token);
-            }
-        }
         if let Some(rest) = self.rest.as_mut() {
             if let Some(secret) = rest.signing_secret.as_mut() {
                 redact(secret);
@@ -65,11 +60,6 @@ impl MessagingConfigDto {
         if let (Some(incoming), Some(stored)) = (self.pushover.as_mut(), current.pushover.as_ref()) {
             restore(&mut incoming.token, &stored.token);
             restore(&mut incoming.user, &stored.user);
-        }
-        if let (Some(incoming), Some(stored)) = (self.ntfy.as_mut(), current.ntfy.as_ref()) {
-            if let (Some(token), Some(original)) = (incoming.token.as_mut(), stored.token.as_ref()) {
-                restore(token, original);
-            }
         }
         if let (Some(incoming), Some(stored)) = (self.rest.as_mut(), current.rest.as_ref()) {
             if let (Some(secret), Some(original)) = (incoming.signing_secret.as_mut(), stored.signing_secret.as_ref()) {

@@ -94,7 +94,7 @@ instead of your mount point.
 | `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
 | `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
 | `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (Telegram, ntfy, etc.; Discord, Slack and Gotify via plugins). | [See section](#5-messaging-messaging)           |
+| `messaging`       | Webhooks & Push-Notifications (Telegram, Pushover, etc.; Discord, Slack, Gotify and ntfy via plugins). | [See section](#5-messaging-messaging)           |
 | `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
 | `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
 | `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
@@ -843,12 +843,6 @@ messaging:
     token: "<API_TOKEN>"
     user: "<USER_KEY>"
 
-  # ntfy: Self-hosted push, no account needed
-  ntfy:
-    url: "https://ntfy.sh"
-    topic: "my-tuliprox"
-    # token: "<BEARER_TOKEN>"   # only for a protected topic
-
   # REST: Generic webhook/API support
   rest:
     url: "https://my-api.local/alert"
@@ -881,9 +875,8 @@ messaging:
     routing:
       min_severity: critical        # only wake me for real problems
 
-  ntfy:
-    url: "<SERVER_URL>"
-    topic: "<TOPIC>"
+  rest:
+    url: "https://my-api.local/alert"
     routing:
       notify_on: [ "playlist.*", "recording.*" ]
       quiet_hours: "23:00-07:00"    # deferred, never dropped
@@ -907,7 +900,7 @@ attempt, retried per channel with capped exponential backoff, and
 dead-lettered after `max_attempts`.
 
 Retry is at-most-once **per channel**: a message that reached Telegram but
-not ntfy is retried only against ntfy, so a retry never duplicates a
+not Pushover is retried only against Pushover, so a retry never duplicates a
 delivered message.
 
 * A `429` or `503` is retried, and a provider's `Retry-After` is honoured
@@ -941,7 +934,7 @@ asked for this one explicitly.
 
 ### 5.2 Templating (Handlebars)
 
-**Every** channel supports templates - Telegram, REST, Pushover, ntfy and `command`.
+**Every** channel supports templates - Telegram, REST, Pushover and `command`.
 Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies, which allows rich, structured
 notifications (e.g. JSON payloads or Markdown tables).
 
@@ -954,7 +947,7 @@ telegram:
 ```
 
 A `{prefix}_{event}.templ` file dropped into `/config/messaging_templates/` is picked up automatically -
-`telegram_recording_completed.templ`, `ntfy_playlist_update_failed.templ`, and so on. Dots in the event id become
+`telegram_recording_completed.templ`, `rest_playlist_update_failed.templ`, and so on. Dots in the event id become
 underscores in the filename.
 
 Templates are resolved and compiled **once** and then cached: local files are re-read when their mtime changes,
@@ -1202,7 +1195,7 @@ content cannot be interpreted as shell syntax.
 
 ### 5.6 Secrets in the Web UI
 
-Channel secrets - the Telegram bot token, Pushover token and user key, the ntfy token, the REST signing
+Channel secrets - the Telegram bot token, Pushover token and user key, the REST signing
 secret, and any `Authorization`-style REST header - are masked as `********` when the configuration is read back
 through the API. Leaving a masked value untouched when you save keeps the stored secret; replacing it writes the new
 one through.

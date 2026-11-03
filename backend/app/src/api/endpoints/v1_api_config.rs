@@ -1079,7 +1079,7 @@ pub struct MessagingTestRequest {
     /// Event id to simulate. Defaults to `system.info`.
     #[serde(default)]
     pub event: Option<String>,
-    /// Restrict to one channel by its stable id (`telegram`, `ntfy`, ...).
+    /// Restrict to one channel by its stable id (`telegram`, `pushover`, ...).
     /// Absent means every configured channel.
     #[serde(default)]
     pub channel: Option<String>,

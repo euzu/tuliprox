@@ -49,22 +49,6 @@ pub enum Style {
     Markdown,
 }
 
-/// A titled block of plain-text lines of the event (`sections` of the event JSON).
-#[derive(Deserialize)]
-struct Section {
-    #[serde(default)]
-    heading: String,
-    #[serde(default)]
-    lines: Vec<String>,
-}
-
-/// What this plugin reads of the event JSON besides the notification itself.
-#[derive(Deserialize, Default)]
-struct Event {
-    #[serde(default)]
-    sections: Vec<Section>,
-}
-
 /// Gotify's 0-10 priority scale. There is no `critical`: it is delivered as `error`.
 const fn priority(severity: Severity) -> u8 {
     match severity {
@@ -77,59 +61,14 @@ const fn priority(severity: Severity) -> u8 {
 /// The message endpoint of the server at `url`, without a doubled slash.
 fn endpoint(url: &str) -> String { format!("{}/message", url.trim().trim_end_matches('/')) }
 
-/// One line of plain text as a markdown line: the characters markdown reads
-/// are escaped, and a leading `>`, `#`, `-`, `+` or `1.` is too, so a line can
-/// never become a quote, a heading or a list.
-fn escape_line(line: &str) -> String {
-    let trimmed = line.trim_start();
-    let indent = &line[..line.len() - trimmed.len()];
-    let mut out = String::from(indent);
-    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
-    let numbered = digits > 0 && matches!(trimmed[digits..].chars().next(), Some('.' | ')'));
-    for (at, ch) in trimmed.chars().enumerate() {
-        let leading_marker = at == 0 && matches!(ch, '>' | '#' | '-' | '+');
-        let numbered_marker = numbered && at == digits;
-        if matches!(ch, '\\' | '*' | '_' | '~' | '`' | '|' | '[' | ']' | '<' | '&') || leading_marker || numbered_marker
-        {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// Plain text lines as markdown lines with hard breaks, which markdown needs to
-/// keep one line per line.
-fn markdown_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
-    lines.map(escape_line).collect::<Vec<_>>().join("  \n")
-}
-
-/// The sections as markdown: a bold heading and its lines, a blank line between sections.
-fn sections_markdown(sections: &[Section]) -> Option<String> {
-    let blocks: Vec<String> = sections
-        .iter()
-        .filter_map(|section| {
-            let lines: Vec<&str> =
-                section.lines.iter().map(|line| line.trim_end()).filter(|line| !line.trim().is_empty()).collect();
-            if lines.is_empty() {
-                return None;
-            }
-            let heading = section.heading.trim();
-            let body = markdown_lines(lines.into_iter());
-            Some(if heading.is_empty() { body } else { format!("**{}**  \n{body}", escape_line(heading)) })
-        })
-        .collect();
-    (!blocks.is_empty()).then(|| blocks.join("\n\n"))
-}
-
 /// The request body for `msg`.
 pub fn request_body(msg: &Notification, style: Style) -> String {
     let priority = priority(msg.severity);
     match style {
         Style::Text => json!({ "title": msg.title, "message": msg.body, "priority": priority }).to_string(),
         Style::Markdown => {
-            let event = serde_json::from_str::<Event>(&msg.payload).unwrap_or_default();
-            let message = sections_markdown(&event.sections).unwrap_or_else(|| markdown_lines(msg.body.lines()));
+            let message = notify::markdown::sections(&notify::sections_of(&msg.payload))
+                .unwrap_or_else(|| notify::markdown::lines(msg.body.lines()));
             json!({
                 "title": msg.title,
                 "message": message,
@@ -259,30 +198,6 @@ mod tests {
             Style::Markdown,
         );
         assert_eq!(empty["message"], "fallback body", "only empty sections: the body shows");
-    }
-
-    #[test]
-    fn markdown_characters_and_line_start_markers_are_escaped() {
-        assert_eq!(
-            escape_line("my_list *x* ~y~ `z` |w| [a] <b> a&b"),
-            "my\\_list \\*x\\* \\~y\\~ \\`z\\` \\|w\\| \\[a\\] \\<b> a\\&b"
-        );
-        assert_eq!(escape_line("> quote"), "\\> quote");
-        assert_eq!(escape_line("# head"), "\\# head");
-        assert_eq!(escape_line("- item"), "\\- item");
-        assert_eq!(escape_line("+ item"), "\\+ item");
-        assert_eq!(escape_line("1. first"), "1\\. first");
-        assert_eq!(escape_line("12) first"), "12\\) first");
-        assert_eq!(escape_line("  > indented"), "  \\> indented");
-        // Mid-line they are ordinary text, so `a -> b` stays readable.
-        assert_eq!(escape_line("a -> b # c - d 1. e"), "a -> b # c - d 1. e");
-        assert_eq!(escape_line("v1.2 released"), "v1.2 released");
-    }
-
-    #[test]
-    fn a_heading_is_escaped_with_the_same_rules() {
-        let value = parsed(&sectioned(r#"[{"heading":"R_D *team*","lines":["ok"]}]"#), Style::Markdown);
-        assert_eq!(value["message"], "**R\\_D \\*team\\***  \nok");
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //!   [`DeliveryError`] the host's outbox understands.
 //! * [`parse_retry_after`] reads a `Retry-After` header in either legal form.
 //! * [`iso8601`] writes a Unix time the way chat APIs read a timestamp.
+//! * [`Section`] and [`sections_of`] read the event's channel-neutral `sections` out of a notification's `payload`.
+//! * [`markdown`] turns plain text and sections into escaped markdown, for services that render it.
 //!
 //! # Status mapping
 //!
@@ -18,6 +20,7 @@
 //! meaning "now") and capped at 24 hours. A reason never contains anything but the status.
 
 use crate::{clock, wit::notification_hooks::DeliveryError};
+use serde::Deserialize;
 
 /// No provider may park a retry for longer than this.
 const MAX_RETRY_AFTER_SECS: u64 = 24 * 60 * 60;
@@ -160,6 +163,81 @@ const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+/// A titled block of plain-text lines of an event (an entry of `sections` in the
+/// notification's `payload`). It carries no markup; a plugin lays it out in the
+/// format of its service.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Section {
+    #[serde(default)]
+    pub heading: String,
+    #[serde(default)]
+    pub lines: Vec<String>,
+}
+
+/// The `sections` of a notification's `payload` (the event as JSON); empty when
+/// the event has none or the payload is not JSON.
+#[must_use]
+pub fn sections_of(payload: &str) -> Vec<Section> {
+    #[derive(Deserialize, Default)]
+    struct Detail {
+        #[serde(default)]
+        sections: Vec<Section>,
+    }
+    serde_json::from_str::<Detail>(payload).unwrap_or_default().sections
+}
+
+/// Markdown for services that render it (Gotify, ntfy, Matrix).
+pub mod markdown {
+    use super::Section;
+
+    /// One line of plain text as a markdown line: the characters markdown reads
+    /// are escaped, and a leading `>`, `#`, `-`, `+` or `1.` is too, so a line can
+    /// never become a quote, a heading or a list.
+    pub fn escape_line(line: &str) -> String {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        let mut out = String::from(indent);
+        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        let numbered = digits > 0 && matches!(trimmed[digits..].chars().next(), Some('.' | ')'));
+        for (at, ch) in trimmed.chars().enumerate() {
+            let leading_marker = at == 0 && matches!(ch, '>' | '#' | '-' | '+');
+            let numbered_marker = numbered && at == digits;
+            if matches!(ch, '\\' | '*' | '_' | '~' | '`' | '|' | '[' | ']' | '<' | '&')
+                || leading_marker
+                || numbered_marker
+            {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    /// Plain text lines as markdown lines with hard breaks, which markdown needs to
+    /// keep one line per line.
+    pub fn lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+        lines.map(escape_line).collect::<Vec<_>>().join("  \n")
+    }
+
+    /// The sections as markdown: a bold heading and its lines, a blank line between sections.
+    pub fn sections(sections: &[Section]) -> Option<String> {
+        let blocks: Vec<String> = sections
+            .iter()
+            .filter_map(|section| {
+                let kept: Vec<&str> =
+                    section.lines.iter().map(|line| line.trim_end()).filter(|line| !line.trim().is_empty()).collect();
+                if kept.is_empty() {
+                    return None;
+                }
+                let heading = section.heading.trim();
+                let body = lines(kept.into_iter());
+                Some(if heading.is_empty() { body } else { format!("**{}**  \n{body}", escape_line(heading)) })
+            })
+            .collect();
+        (!blocks.is_empty()).then(|| blocks.join("\n\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +344,55 @@ mod tests {
         assert_eq!(iso8601(951_782_400).as_deref(), Some("2000-02-29T00:00:00Z"));
         assert_eq!(iso8601(-86_400).as_deref(), Some("1969-12-31T00:00:00Z"));
         assert_eq!(iso8601(i64::MAX), None);
+    }
+
+    #[test]
+    fn markdown_characters_and_line_start_markers_are_escaped() {
+        assert_eq!(
+            markdown::escape_line("my_list *x* ~y~ `z` |w| [a] <b> a&b"),
+            "my\\_list \\*x\\* \\~y\\~ \\`z\\` \\|w\\| \\[a\\] \\<b> a\\&b"
+        );
+        assert_eq!(markdown::escape_line("> quote"), "\\> quote");
+        assert_eq!(markdown::escape_line("# head"), "\\# head");
+        assert_eq!(markdown::escape_line("- item"), "\\- item");
+        assert_eq!(markdown::escape_line("+ item"), "\\+ item");
+        assert_eq!(markdown::escape_line("1. first"), "1\\. first");
+        assert_eq!(markdown::escape_line("12) first"), "12\\) first");
+        assert_eq!(markdown::escape_line("  > indented"), "  \\> indented");
+        // Mid-line they are ordinary text, so `a -> b` stays readable.
+        assert_eq!(markdown::escape_line("a -> b # c - d 1. e"), "a -> b # c - d 1. e");
+        assert_eq!(markdown::escape_line("v1.2 released"), "v1.2 released");
+    }
+
+    #[test]
+    fn sections_become_bold_headings_with_hard_line_breaks_and_a_blank_line_between() {
+        let sections = sections_of(
+            r#"{"sections":[{"heading":"Sources","lines":["demo-in (M3u)","1/2 -> 1/2 groups/channels"]},{"heading":"Targets","lines":["main: ok"]}]}"#,
+        );
+        assert_eq!(
+            markdown::sections(&sections).as_deref(),
+            Some("**Sources**  \ndemo-in (M3u)  \n1/2 -> 1/2 groups/channels\n\n**Targets**  \nmain: ok")
+        );
+        assert_eq!(markdown::lines("first\nsecond".lines()), "first  \nsecond");
+    }
+
+    #[test]
+    fn a_heading_is_escaped_with_the_same_rules_and_an_empty_one_is_left_out() {
+        let sections = vec![
+            Section { heading: "R_D *team*".to_string(), lines: vec!["ok".to_string()] },
+            Section { heading: "Empty".to_string(), lines: vec![] },
+            Section { heading: "Blank".to_string(), lines: vec!["  ".to_string()] },
+            Section { heading: " ".to_string(), lines: vec!["kept".to_string()] },
+        ];
+        assert_eq!(markdown::sections(&sections).as_deref(), Some("**R\\_D \\*team\\***  \nok\n\nkept"));
+        assert_eq!(markdown::sections(&sections[1..3]), None, "nothing to show");
+    }
+
+    #[test]
+    fn the_sections_of_a_payload_are_read_and_anything_else_is_empty() {
+        assert_eq!(sections_of(r#"{"id":"x","sections":[{"heading":"H","lines":["l"]}]}"#).len(), 1);
+        assert_eq!(sections_of("{}"), Vec::<Section>::new());
+        assert_eq!(sections_of("not json"), Vec::<Section>::new());
+        assert_eq!(sections_of(r#"{"sections":"nope"}"#), Vec::<Section>::new());
     }
 }

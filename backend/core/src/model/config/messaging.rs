@@ -2,8 +2,8 @@ use crate::model::macros;
 use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, NtfyMessagingConfigDto,
-    PushoverMessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto,
+    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
+    RestMessagingConfigDto, TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -245,44 +245,6 @@ impl From<&PushoverMessagingConfig> for PushoverMessagingConfigDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct NtfyMessagingConfig {
-    pub url: String,
-    pub topic: String,
-    pub token: Option<String>,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl NtfyMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("ntfy", &mut self.templates, templates_dir); }
-}
-
-macros::from_impl!(NtfyMessagingConfig);
-impl From<&NtfyMessagingConfigDto> for NtfyMessagingConfig {
-    fn from(dto: &NtfyMessagingConfigDto) -> Self {
-        Self {
-            url: dto.url.trim_end_matches('/').to_string(),
-            topic: dto.topic.clone(),
-            token: dto.token.clone(),
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&NtfyMessagingConfig> for NtfyMessagingConfigDto {
-    fn from(instance: &NtfyMessagingConfig) -> Self {
-        Self {
-            url: instance.url.clone(),
-            topic: instance.topic.clone(),
-            token: instance.token.clone(),
-            templates: template_keys_to_wire(&instance.templates),
-            routing: Some(ChannelRoutingDto::from(&instance.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandMessagingConfig {
     pub program: String,
     pub args: Vec<String>,
@@ -330,7 +292,6 @@ pub struct MessagingConfig {
     pub telegram: Option<TelegramMessagingConfig>,
     pub rest: Option<RestMessagingConfig>,
     pub pushover: Option<PushoverMessagingConfig>,
-    pub ntfy: Option<NtfyMessagingConfig>,
     pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
@@ -355,9 +316,6 @@ impl MessagingConfig {
         if let Some(p) = &mut self.pushover {
             p.prepare(&templates_dir);
         }
-        if let Some(n) = &mut self.ntfy {
-            n.prepare(&templates_dir);
-        }
         if let Some(c) = &mut self.command {
             c.prepare(&templates_dir);
         }
@@ -373,7 +331,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             telegram: dto.telegram.as_ref().map(Into::into),
             rest: dto.rest.as_ref().map(Into::into),
             pushover: dto.pushover.as_ref().map(Into::into),
-            ntfy: dto.ntfy.as_ref().map(Into::into),
             command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
@@ -387,7 +344,6 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             telegram: instance.telegram.as_ref().map(Into::into),
             rest: instance.rest.as_ref().map(Into::into),
             pushover: instance.pushover.as_ref().map(Into::into),
-            ntfy: instance.ntfy.as_ref().map(Into::into),
             command: instance.command.as_ref().map(Into::into),
             disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }
