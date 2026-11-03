@@ -317,8 +317,7 @@ Supported notification channels include:
 - Pushover
 - REST webhooks
 - ntfy
-- Gotify
-- Discord and Slack, as plugins (`plugins/notifiers/discord-notifier`, `plugins/notifiers/slack-notifier`)
+- Discord, Slack and Gotify, as plugins (`plugins/notifiers/discord-notifier`, `plugins/notifiers/slack-notifier`, `plugins/notifiers/gotify-notifier`)
 - Local command execution with structured event JSON on stdin
 
 Notification capabilities include:

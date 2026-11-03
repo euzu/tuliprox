@@ -148,7 +148,6 @@ impl MessagingConfigDto {
             self.rest.as_ref().and_then(|c| c.routing.as_ref()),
             self.pushover.as_ref().and_then(|c| c.routing.as_ref()),
             self.ntfy.as_ref().and_then(|c| c.routing.as_ref()),
-            self.gotify.as_ref().and_then(|c| c.routing.as_ref()),
             self.command.as_ref().and_then(|c| c.routing.as_ref()),
         ]
         .into_iter()

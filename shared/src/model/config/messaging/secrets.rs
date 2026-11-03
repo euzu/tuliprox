@@ -39,9 +39,6 @@ impl MessagingConfigDto {
                 redact(token);
             }
         }
-        if let Some(gotify) = self.gotify.as_mut() {
-            redact(&mut gotify.token);
-        }
         if let Some(rest) = self.rest.as_mut() {
             if let Some(secret) = rest.signing_secret.as_mut() {
                 redact(secret);
@@ -73,9 +70,6 @@ impl MessagingConfigDto {
             if let (Some(token), Some(original)) = (incoming.token.as_mut(), stored.token.as_ref()) {
                 restore(token, original);
             }
-        }
-        if let (Some(incoming), Some(stored)) = (self.gotify.as_mut(), current.gotify.as_ref()) {
-            restore(&mut incoming.token, &stored.token);
         }
         if let (Some(incoming), Some(stored)) = (self.rest.as_mut(), current.rest.as_ref()) {
             if let (Some(secret), Some(original)) = (incoming.signing_secret.as_mut(), stored.signing_secret.as_ref()) {

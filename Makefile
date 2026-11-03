@@ -245,7 +245,7 @@ plugin-examples: ## Build + package the example plugins and the rendered templat
 	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
 
 # The notification plugins that live in this repository, under plugins/notifiers/<id>.
-NOTIFIER_PLUGINS := discord-notifier slack-notifier
+NOTIFIER_PLUGINS := discord-notifier slack-notifier gotify-notifier
 
 .PHONY: plugin-notifiers
 plugin-notifiers: ## Build + package every notifier plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
@@ -269,6 +269,13 @@ plugin-slack-notifier: ## Build + package the slack-notifier plugin (wasm32-wasi
 	@mkdir -p target/plugin-slack-notifier
 	@./bin/package-plugin.sh plugins/notifiers/slack-notifier --out target/plugin-slack-notifier/slack-notifier.tlpx
 	@echo "✅ slack-notifier written to target/plugin-slack-notifier/slack-notifier.tlpx"
+
+.PHONY: plugin-gotify-notifier
+plugin-gotify-notifier: ## Build + package the gotify-notifier plugin (wasm32-wasip2) into target/plugin-gotify-notifier
+	@echo "==> Building gotify-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-gotify-notifier
+	@./bin/package-plugin.sh plugins/notifiers/gotify-notifier --out target/plugin-gotify-notifier/gotify-notifier.tlpx
+	@echo "✅ gotify-notifier written to target/plugin-gotify-notifier/gotify-notifier.tlpx"
 
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count

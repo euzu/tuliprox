@@ -10,7 +10,6 @@
 //! send path.
 
 pub mod command;
-pub mod gotify;
 pub mod ntfy;
 pub mod plugin;
 pub mod pushover;
@@ -41,7 +40,6 @@ pub enum Channel {
     Rest(rest::RestChannel),
     Pushover(pushover::PushoverChannel),
     Ntfy(ntfy::NtfyChannel),
-    Gotify(gotify::GotifyChannel),
     Command(command::CommandChannel),
     /// A wasm plugin that exports `send-notification`; reached through the
     /// registered [`PluginNotifier`].
@@ -56,7 +54,6 @@ macro_rules! delegate {
             Channel::Rest($inner) => $call,
             Channel::Pushover($inner) => $call,
             Channel::Ntfy($inner) => $call,
-            Channel::Gotify($inner) => $call,
             Channel::Command($inner) => $call,
             Channel::Plugin($inner) => $call,
         }
@@ -90,7 +87,6 @@ impl Channel {
             Channel::Rest(c) => c.send(msg).await,
             Channel::Pushover(c) => c.send(msg).await,
             Channel::Ntfy(c) => c.send(msg).await,
-            Channel::Gotify(c) => c.send(msg).await,
             Channel::Command(c) => c.send(msg).await,
             Channel::Plugin(c) => c.send(msg).await,
         }
@@ -186,10 +182,7 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
         channels.push(Channel::Pushover(pushover::PushoverChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.ntfy.as_ref() {
-        channels.push(Channel::Ntfy(ntfy::NtfyChannel::new(cfg.clone(), client.clone())));
-    }
-    if let Some(cfg) = messaging.gotify.as_ref() {
-        channels.push(Channel::Gotify(gotify::GotifyChannel::new(cfg.clone(), client)));
+        channels.push(Channel::Ntfy(ntfy::NtfyChannel::new(cfg.clone(), client)));
     }
     if let Some(cfg) = messaging.command.as_ref() {
         // No HTTP client: this one shells out.

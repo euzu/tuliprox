@@ -24,8 +24,6 @@ pub struct MessagingConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ntfy: Option<NtfyMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gotify: Option<GotifyMessagingConfigDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_alert: Option<DiskAlertConfigDto>,
@@ -39,7 +37,6 @@ impl MessagingConfigDto {
             && (self.rest.is_none() || self.rest.as_ref().is_some_and(RestMessagingConfigDto::is_empty))
             && (self.pushover.is_none() || self.pushover.as_ref().is_some_and(PushoverMessagingConfigDto::is_empty))
             && (self.ntfy.is_none() || self.ntfy.as_ref().is_some_and(NtfyMessagingConfigDto::is_empty))
-            && (self.gotify.is_none() || self.gotify.as_ref().is_some_and(GotifyMessagingConfigDto::is_empty))
             && (self.command.is_none() || self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty))
     }
 
@@ -55,9 +52,6 @@ impl MessagingConfigDto {
         }
         if self.ntfy.as_ref().is_some_and(NtfyMessagingConfigDto::is_empty) {
             self.ntfy = None;
-        }
-        if self.gotify.as_ref().is_some_and(GotifyMessagingConfigDto::is_empty) {
-            self.gotify = None;
         }
         if self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty) {
             self.command = None;
@@ -75,7 +69,7 @@ mod channels;
 mod routing;
 mod secrets;
 pub use channels::{
-    CommandMessagingConfigDto, GotifyMessagingConfigDto, NtfyMessagingConfigDto, PushoverMessagingConfigDto,
-    RestMessagingConfigDto, TelegramMessagingConfigDto,
+    CommandMessagingConfigDto, NtfyMessagingConfigDto, PushoverMessagingConfigDto, RestMessagingConfigDto,
+    TelegramMessagingConfigDto,
 };
 pub use routing::{ChannelRoutingDto, DiskAlertConfigDto};

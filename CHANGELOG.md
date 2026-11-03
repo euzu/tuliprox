@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.gotify` is removed.** The built-in Gotify channel is gone; the config key is no longer accepted, so a
+  config that still contains it fails to load with `unknown field`. Install and configure the `gotify-notifier` plugin
+  instead (`plugins.plugins`, id `gotify-notifier`, settings `url` and `token`).
+
 - **`messaging.slack` is removed.** The built-in Slack channel is gone; the config key is no longer accepted, so a
   config that still contains it fails to load with `unknown field`. Install and configure the `slack-notifier` plugin
   instead (`plugins.plugins`, id `slack-notifier`, setting `url`).
@@ -212,6 +216,12 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **Gotify notifications are a plugin.** The `gotify-notifier` plugin (`plugins/notifiers/gotify-notifier`,
+  `make plugin-gotify-notifier`) pushes notifications to a Gotify server, as plain text or, with `style: markdown`, as the
+  event's sections in markdown that Gotify clients render. The application token travels in the `X-Gotify-Key` header
+  instead of the URL, so it cannot end up in a proxy log or an error. Its settings form ships its own translations
+  (English, Russian, Spanish, Arabic). See [Gotify Notifier](docs/src/plugins/gotify-notifier.md).
 
 - **Slack notifications are a plugin.** The `slack-notifier` plugin (`plugins/notifiers/slack-notifier`,
   `make plugin-slack-notifier`) delivers notifications to a Slack incoming webhook as Block Kit blocks (a header, the
