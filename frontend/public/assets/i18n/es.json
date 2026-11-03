@@ -607,8 +607,7 @@
       "READ_ONLY": "Oculta y rechaza las herramientas que modifican el estado. Se fuerza a solo lectura cuando la autenticación de la interfaz web está desactivada."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "Seleccione eventos (p. ej. 'info', 'stats', 'error') que activan notificaciones para este tipo específico.",
-      "TELEGRAM_CHAT_IDS": "Lista de ID de chat de Telegram para recibir notificaciones. Formato: '<chat_id>' o '<chat_id>:<thread_id>'."
+      "NOTIFY_ON": "Seleccione eventos (p. ej. 'info', 'stats', 'error') que activan notificaciones para este tipo específico."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "Registra qué usuario de la WebUI inició o está viendo el procesamiento de metadatos.",
@@ -793,17 +792,6 @@
       "FORCE_REDIRECT": "Fuerza los streams directamente al proxy o al proveedor en lugar de resolverlos individualmente.",
       "PROCESSING_ORDER": "Determina la prioridad o la secuencia en la que se emparejan y listan los canales de destino."
     },
-    "TELEGRAM_CONFIG": {
-      "BOT_TOKEN": "Token de la API de Bot de Telegram. Obténgalo de @BotFather.",
-      "MARKDOWN": "Si está habilitado, los mensajes se envían como texto con formato MarkdownV2.",
-      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de Telegram."
-    },
-    "TELEGRAM_MESSAGING_CONFIG": {
-      "BOT_TOKEN": "Token de la API de Bot de Telegram. Obténgalo de @BotFather.",
-      "CHAT_IDS": "Lista de ID de chat de Telegram para recibir notificaciones. Formato: '<chat_id>' o '<chat_id>:<thread_id>'.",
-      "MARKDOWN": "Si está habilitado, los mensajes se envían como texto con formato MarkdownV2.",
-      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de Telegram."
-    },
     "TMDB_CONFIG": {
       "API_KEY": "Su clave API de TMDB.\n\nSolo necesita esto si desea usar los límites de su propia cuenta de TMDB.",
       "CACHE_DURATION_DAYS": "Cuántos días permanecen en caché los resultados de TMDB antes de actualizarse.\n\nUna caché más larga significa menos llamadas a la API.",
@@ -945,7 +933,6 @@
     "ACTIVE_USER_CONNECTIONS": "Conexiones de usuario activas",
     "ADD_ALIAS": "Añadir alias",
     "ADD_ATTRIBUTE": "Añadir atributo",
-    "ADD_CHAT_ID": "Añadir ChatId",
     "ADD_DEVICE": "Añadir dispositivo",
     "ADD_DIRECTORY": "Añadir directorio",
     "ADD_EPG_SOURCE": "Añadir fuente EPG",
@@ -1021,7 +1008,6 @@
     "BACKUP_DIR": "Directorio de copia de seguridad",
     "BEST_MATCH_THRESHOLD": "Umbral de mejor coincidencia",
     "BODY_TEMPLATE": "Plantilla del cuerpo",
-    "BOT_TOKEN": "Token del bot",
     "BOUQUETS": "Bouquets",
     "BUFFER_ENABLED": "Búfer habilitado",
     "BUFFER_SIZE": "Tamaño del búfer",
@@ -1038,7 +1024,6 @@
     "CF_HEADER": "Eliminar cabeceras de Cloudflare",
     "CHANNEL": "Canal",
     "CHANNELS": "Canales",
-    "CHAT_IDS": "Chat Ids",
     "CLEANUP": "Limpieza",
     "CATCHUP_SESSION_TTL_SECS": "TTL de sesión de catchup (segs)",
     "CLEAR": "Limpiar",
@@ -1256,7 +1241,6 @@
     "MAPPER": "Mapeador",
     "MAPPING": "Mapeo",
     "MAPPING_PATH": "Ruta de mapeo",
-    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "Enmascarar URL de redirección",
     "MATCH_AS_ASCII": "Coincidir como ASCII",
     "MATCH_THRESHOLD": "Umbral de coincidencia",
@@ -1792,7 +1776,6 @@
     "TARGET": "Destino",
     "TARGETS": "Destinos",
     "TECH": "Técnico",
-    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "Puntuación umbral",
     "TEMPLATES": "Plantillas",
     "TEMPLATE_PATH": "Ruta de plantilla",

@@ -1,7 +1,6 @@
-/// Placeholder substituted for a channel secret on the way out to a client.
+/// Placeholder substituted for a secret on the way out to a client.
 ///
-/// A client that sends it back unchanged means "keep what is stored"; see
-/// [`MessagingConfigDto::restore_redacted_secrets`].
+/// A client that sends it back unchanged means "keep what is stored".
 pub const REDACTED_SECRET: &str = "********";
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -16,8 +15,6 @@ pub struct MessagingConfigDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notify_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub telegram: Option<TelegramMessagingConfigDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_alert: Option<DiskAlertConfigDto>,
@@ -27,14 +24,10 @@ impl MessagingConfigDto {
     pub fn is_empty(&self) -> bool {
         self.notify_on.is_empty()
             && (self.disk_alert.is_none() || self.disk_alert.as_ref().is_some_and(DiskAlertConfigDto::is_empty))
-            && (self.telegram.is_none() || self.telegram.as_ref().is_some_and(TelegramMessagingConfigDto::is_empty))
             && (self.command.is_none() || self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
-        if self.telegram.as_ref().is_some_and(TelegramMessagingConfigDto::is_empty) {
-            self.telegram = None;
-        }
         if self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty) {
             self.command = None;
         }
@@ -49,6 +42,5 @@ mod tests;
 
 mod channels;
 mod routing;
-mod secrets;
-pub use channels::{CommandMessagingConfigDto, TelegramMessagingConfigDto};
+pub use channels::CommandMessagingConfigDto;
 pub use routing::{ChannelRoutingDto, DiskAlertConfigDto};

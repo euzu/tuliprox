@@ -607,8 +607,7 @@
       "READ_ONLY": "يخفي الأدوات التي تغيّر الحالة ويرفضها. تُفرض القراءة فقط عند تعطيل مصادقة واجهة الويب."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "حدد الأحداث (مثل 'info'، 'stats'، 'error') التي تُفعّل الإشعارات لهذا النوع المحدد.",
-      "TELEGRAM_CHAT_IDS": "قائمة معرفات محادثة Telegram لتلقي الإشعارات. التنسيق: '<chat_id>' أو '<chat_id>:<thread_id>'."
+      "NOTIFY_ON": "حدد الأحداث (مثل 'info'، 'stats'، 'error') التي تُفعّل الإشعارات لهذا النوع المحدد."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "يسجل أي مستخدم WebUI بدأ أو يشاهد معالجة البيانات الوصفية.",
@@ -793,17 +792,6 @@
       "FORCE_REDIRECT": "يُجبر البث مباشرة على الوكيل أو المزود بدلاً من الحل بشكل فردي.",
       "PROCESSING_ORDER": "يحدد الأولوية أو التسلسل الذي يتم به مطابقة قنوات الهدف وإدراجها."
     },
-    "TELEGRAM_CONFIG": {
-      "BOT_TOKEN": "رمز Telegram Bot API. احصل عليه من @BotFather.",
-      "MARKDOWN": "إذا تم التفعيل، يتم إرسال الرسائل كنص مُنسق MarkdownV2.",
-      "TEMPLATES": "قوالب Handlebars لأجسام رسائل Telegram."
-    },
-    "TELEGRAM_MESSAGING_CONFIG": {
-      "BOT_TOKEN": "رمز Telegram Bot API. احصل عليه من @BotFather.",
-      "CHAT_IDS": "قائمة معرفات محادثة Telegram لتلقي الإشعارات. التنسيق: '<chat_id>' أو '<chat_id>:<thread_id>'.",
-      "MARKDOWN": "إذا تم التفعيل، يتم إرسال الرسائل كنص مُنسق MarkdownV2.",
-      "TEMPLATES": "قوالب Handlebars لأجسام رسائل Telegram."
-    },
     "TMDB_CONFIG": {
       "API_KEY": "مفتاح TMDB API الخاص بك.\n\nتحتاج إلى هذا فقط إذا كنت تريد استخدام حدود حساب TMDB الخاص بك.",
       "CACHE_DURATION_DAYS": "كم يوم تبقى نتائج TMDB مخزنة مؤقتًا قبل التحديث.\n\nذاكرة التخزين المؤقت الأطول تعني استدعاءات API أقل.",
@@ -947,7 +935,6 @@
     "ACTIVE_USER_CONNECTIONS": "اتصالات المستخدم النشطة",
     "ADD_ALIAS": "إضافة اسم مستعار",
     "ADD_ATTRIBUTE": "إضافة سمة",
-    "ADD_CHAT_ID": "إضافة معرف محادثة",
     "ADD_DEVICE": "إضافة جهاز",
     "ADD_DIRECTORY": "إضافة دليل",
     "ADD_EPG_SOURCE": "إضافة مصدر EPG",
@@ -1021,7 +1008,6 @@
     "BACKUP_DIR": "دليل النسخ الاحتياطي",
     "BEST_MATCH_THRESHOLD": "حد أفضل تطابق",
     "BODY_TEMPLATE": "قالب الجسم",
-    "BOT_TOKEN": "رمز الروبوت",
     "BUFFER_ENABLED": "المخزن المؤقت مفعّل",
     "BUFFER_SIZE": "حجم المخزن المؤقت",
     "BUILD_TIME": "وقت البناء",
@@ -1037,7 +1023,6 @@
     "CF_HEADER": "إزالة رؤوس Cloudflare",
     "CHANNEL": "قناة",
     "CHANNELS": "قنوات",
-    "CHAT_IDS": "معرفات المحادثة",
     "CLEANUP": "تنظيف",
     "CATCHUP_SESSION_TTL_SECS": "TTL جلسة Catchup (ثواني)",
     "CLEAR": "مسح",
@@ -1255,7 +1240,6 @@
     "MAPPER": "مُعيّن",
     "MAPPING": "تعيين",
     "MAPPING_PATH": "مسار التعيين",
-    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "إخفاء عنوان URL للتحويل",
     "MATCH_AS_ASCII": "مطابقة ASCII",
     "MATCH_THRESHOLD": "حد المطابقة",
@@ -1725,7 +1709,6 @@
     "TARGET": "هدف",
     "TARGETS": "الأهداف",
     "TECH": "تقنية",
-    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "درجة العتبة",
     "TEMPLATES": "القوالب",
     "TEMPLATE_PATH": "مسار القالب",

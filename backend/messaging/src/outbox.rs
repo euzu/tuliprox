@@ -12,8 +12,8 @@
 //! dead-lettered after `max_attempts`.
 //!
 //! Per-channel retry is what makes delivery at-most-once *per channel*: a
-//! message that reached Telegram but not REST is retried only against
-//! REST, so a retry can never duplicate a delivered message.
+//! message that reached one channel but not another is retried only against
+//! the other, so a retry can never duplicate a delivered message.
 
 use crate::{channel::Delivery, configured_channels, send_event_to_channel};
 use log::{debug, error, info};
@@ -346,7 +346,7 @@ async fn drain_due<E: EventSink>(
 fn quiet_hours_defer_for(app_config: &Arc<AppConfig>, pending: &[String]) -> Option<Duration> {
     let cfg = app_config.config.load();
     let messaging = cfg.messaging.as_ref()?;
-    let set = crate::channels::channels(app_config, messaging);
+    let set = crate::channels::channels(messaging);
     let mut shortest: Option<Duration> = None;
     for channel_id in pending {
         let channel = set.iter().find(|c| c.id() == channel_id)?;

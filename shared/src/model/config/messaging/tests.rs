@@ -16,14 +16,6 @@ fn clean_preserves_disk_alert_with_non_default_values() {
 }
 
 #[test]
-fn clean_strips_empty_subconfigs() {
-    let mut messaging =
-        MessagingConfigDto { telegram: Some(TelegramMessagingConfigDto::default()), ..Default::default() };
-    messaging.clean();
-    assert!(messaging.telegram.is_none());
-}
-
-#[test]
 fn prepare_rewrites_legacy_notify_on_names_to_canonical_ids() {
     let mut messaging = MessagingConfigDto {
         notify_on: vec!["disk_alert".to_string(), "recording_completed".to_string()],
@@ -41,55 +33,6 @@ fn prepare_leaves_glob_patterns_untouched() {
     };
     messaging.prepare(false).expect("prepare");
     assert_eq!(messaging.notify_on, vec!["recording.*", "!system.info", "*"]);
-}
-
-#[test]
-fn redaction_masks_every_channel_secret() {
-    let mut messaging = MessagingConfigDto {
-        telegram: Some(TelegramMessagingConfigDto { bot_token: "real-token".to_string(), ..Default::default() }),
-        ..Default::default()
-    };
-    messaging.redact_secrets();
-    assert_eq!(messaging.telegram.as_ref().expect("telegram").bot_token, REDACTED_SECRET);
-}
-
-#[test]
-fn an_empty_secret_is_not_replaced_by_a_mask() {
-    // Otherwise an unconfigured channel would look configured.
-    let mut messaging =
-        MessagingConfigDto { telegram: Some(TelegramMessagingConfigDto::default()), ..Default::default() };
-    messaging.redact_secrets();
-    assert_eq!(messaging.telegram.as_ref().expect("telegram").bot_token, "");
-}
-
-#[test]
-fn a_returned_mask_restores_the_stored_secret() {
-    // Without this the UI round-trip would overwrite the real token with
-    // the mask and silently break the channel.
-    let stored = MessagingConfigDto {
-        telegram: Some(TelegramMessagingConfigDto { bot_token: "real-token".to_string(), ..Default::default() }),
-        ..Default::default()
-    };
-    let mut incoming = MessagingConfigDto {
-        telegram: Some(TelegramMessagingConfigDto { bot_token: REDACTED_SECRET.to_string(), ..Default::default() }),
-        ..Default::default()
-    };
-    incoming.restore_redacted_secrets(&stored);
-    assert_eq!(incoming.telegram.as_ref().expect("telegram").bot_token, "real-token");
-}
-
-#[test]
-fn a_genuinely_changed_secret_is_written_through() {
-    let stored = MessagingConfigDto {
-        telegram: Some(TelegramMessagingConfigDto { bot_token: "old".to_string(), ..Default::default() }),
-        ..Default::default()
-    };
-    let mut incoming = MessagingConfigDto {
-        telegram: Some(TelegramMessagingConfigDto { bot_token: "new".to_string(), ..Default::default() }),
-        ..Default::default()
-    };
-    incoming.restore_redacted_secrets(&stored);
-    assert_eq!(incoming.telegram.as_ref().expect("telegram").bot_token, "new");
 }
 
 #[test]

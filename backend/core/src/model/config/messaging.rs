@@ -2,7 +2,7 @@ use crate::model::macros;
 use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, TelegramMessagingConfigDto,
+    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -111,46 +111,6 @@ impl From<&ChannelRouting> for ChannelRoutingDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct TelegramMessagingConfig {
-    pub bot_token: String,
-    pub chat_ids: Vec<String>,
-    pub markdown: bool,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl TelegramMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("telegram", &mut self.templates, templates_dir);
-    }
-}
-
-macros::from_impl!(TelegramMessagingConfig);
-impl From<&TelegramMessagingConfigDto> for TelegramMessagingConfig {
-    fn from(dto: &TelegramMessagingConfigDto) -> Self {
-        Self {
-            bot_token: dto.bot_token.clone(),
-            chat_ids: dto.chat_ids.clone(),
-            markdown: dto.markdown,
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&TelegramMessagingConfig> for TelegramMessagingConfigDto {
-    fn from(instance: &TelegramMessagingConfig) -> Self {
-        Self {
-            bot_token: instance.bot_token.clone(),
-            chat_ids: instance.chat_ids.clone(),
-            markdown: instance.markdown,
-            templates: template_keys_to_wire(&instance.templates),
-            routing: Some(ChannelRoutingDto::from(&instance.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandMessagingConfig {
     pub program: String,
     pub args: Vec<String>,
@@ -195,7 +155,6 @@ pub struct MessagingConfig {
     /// Raw `notify_on` entries as written in config. Glob patterns and
     /// legacy `MsgKind` names are both accepted.
     pub notify_on: Vec<String>,
-    pub telegram: Option<TelegramMessagingConfig>,
     pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
@@ -211,9 +170,6 @@ impl MessagingConfig {
 
     pub fn prepare(&mut self, config_path: &str) {
         let templates_dir = PathBuf::from(config_path).join("messaging_templates");
-        if let Some(t) = &mut self.telegram {
-            t.prepare(&templates_dir);
-        }
         if let Some(c) = &mut self.command {
             c.prepare(&templates_dir);
         }
@@ -226,7 +182,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
         Self {
             notify_on: dto.notify_on.clone(),
             subscription: EventSubscription::parse(dto.notify_on.iter()),
-            telegram: dto.telegram.as_ref().map(Into::into),
             command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
@@ -237,7 +192,6 @@ impl From<&MessagingConfig> for MessagingConfigDto {
     fn from(instance: &MessagingConfig) -> Self {
         Self {
             notify_on: instance.notify_on.clone(),
-            telegram: instance.telegram.as_ref().map(Into::into),
             command: instance.command.as_ref().map(Into::into),
             disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }
@@ -277,7 +231,7 @@ fn discover_templates(prefix: &str, templates: &mut std::collections::HashMap<Ev
     for descriptor in registry::ALL {
         if let std::collections::hash_map::Entry::Vacant(e) = templates.entry(descriptor.id) {
             // Canonical name first, then any legacy filename that resolves
-            // to the same id, so existing `telegram_disk_alert.templ` files
+            // to the same id, so existing `command_disk_alert.templ` files
             // keep being picked up.
             let candidates = std::iter::once(descriptor.id.template_filename(prefix)).chain(
                 shared::model::notification::LEGACY_ALIASES

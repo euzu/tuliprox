@@ -54,7 +54,6 @@ mod tabset;
 mod tag_list;
 mod task_status_badge;
 mod text_button;
-mod textarea;
 mod theme;
 mod theme_picker;
 mod toastr;
@@ -88,7 +87,7 @@ pub(crate) use self::{
     no_access::*, no_content::*, no_submit_form::*, panel::*, particle_flow_background::*, playlist::*,
     radio_button_group::*, range_slider::*, rbac::*, reveal_content::*, role_based_content::*, search::*, select::*,
     select_helpers::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, tabset::*, tag_list::*,
-    task_status_badge::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*,
-    userlist::*, websocket_status::*,
+    task_status_badge::*, text_button::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
+    websocket_status::*,
 };
 pub use self::{confirm_dialog::*, content_dialog::*, plugins::*, table::*};

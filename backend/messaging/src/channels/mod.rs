@@ -1,9 +1,8 @@
-//! The built-in channels.
+//! The channels: the built-in command channel and the plugin channels.
 //!
 //! Each is one [`NotificationChannel`](crate::channel::NotificationChannel)
-//! impl plus a [`Channel`] variant. Adding another means a module here, an
-//! enum variant, a config field and a line in [`build`] - the dispatcher,
-//! the outbox and the renderer stay untouched.
+//! impl plus a [`Channel`] variant - the dispatcher, the outbox and the
+//! renderer stay untouched.
 //!
 //! [`Channel`] is what makes dispatch static: the match monomorphizes into
 //! a direct call, so there is no vtable and no boxed future anywhere on the
@@ -11,19 +10,14 @@
 
 pub mod command;
 pub mod plugin;
-pub mod telegram;
 
 use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
-use log::warn;
 use shared::model::{
     notification::{EventId, Severity},
     PluginNotifier,
 };
 use std::sync::{Arc, OnceLock, RwLock};
-use tuliprox_core::{
-    model::{AppConfig, ChannelRouting, MessagingConfig},
-    utils::request::create_client,
-};
+use tuliprox_core::model::{ChannelRouting, MessagingConfig};
 
 /// One configured channel.
 ///
@@ -33,7 +27,6 @@ use tuliprox_core::{
 /// the only way an implementation is reached.
 #[derive(Clone)]
 pub enum Channel {
-    Telegram(telegram::TelegramChannel),
     Command(command::CommandChannel),
     /// A wasm plugin that exports `send-notification`; reached through the
     /// registered [`PluginNotifier`].
@@ -44,7 +37,6 @@ pub enum Channel {
 macro_rules! delegate {
     ($self:ident, $inner:ident => $call:expr) => {
         match $self {
-            Channel::Telegram($inner) => $call,
             Channel::Command($inner) => $call,
             Channel::Plugin($inner) => $call,
         }
@@ -74,7 +66,6 @@ impl Channel {
     /// what unifies them without boxing.
     pub async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         match self {
-            Channel::Telegram(c) => c.send(msg).await,
             Channel::Command(c) => c.send(msg).await,
             Channel::Plugin(c) => c.send(msg).await,
         }
@@ -84,24 +75,14 @@ impl Channel {
 /// The channels configured right now, in a stable order.
 pub type ChannelSet = Vec<Channel>;
 
-/// Per-channel request timeout.
+/// Per-channel send timeout.
 ///
-/// The shared client sets no request timeout at all, and the outbox awaits
-/// sends in sequence - so one webhook host that accepts a connection and
-/// never answers used to stall every pending notification, including the
+/// The outbox awaits sends in sequence, so one channel that accepts a call and
+/// never answers would stall every pending notification, including the
 /// recording ones the outbox exists to protect.
 const DEFAULT_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Build an HTTP client for a channel, with a bounded request timeout.
-fn channel_client(app_config: &Arc<AppConfig>) -> reqwest::Client {
-    create_client(app_config).timeout(DEFAULT_SEND_TIMEOUT).build().unwrap_or_else(|err| {
-        warn!("Falling back to a default HTTP client for notifications: {err}");
-        reqwest::Client::new()
-    })
-}
-
-/// The built channel set, so a notification does not rebuild every channel
-/// - and a fresh `reqwest::Client` with them - on every send.
+/// The built channel set, so a notification does not rebuild every channel on every send.
 ///
 /// Invalidated on config reload via [`invalidate`].
 static CACHE: OnceLock<RwLock<Option<ChannelSet>>> = OnceLock::new();
@@ -138,13 +119,13 @@ pub fn set_plugin_notifier(notifier: Option<Arc<dyn PluginNotifier>>) {
 /// Cached: repeated calls return the same channels, so per-channel state
 /// (rate limiting, suppression) survives between notifications.
 #[must_use]
-pub fn channels(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> ChannelSet {
+pub fn channels(messaging: &MessagingConfig) -> ChannelSet {
     if let Ok(guard) = cache().read() {
         if let Some(set) = guard.as_ref() {
             return set.clone();
         }
     }
-    let set = build(app_config, messaging);
+    let set = build(messaging);
     if let Ok(mut guard) = cache().write() {
         *guard = Some(set.clone());
     }
@@ -153,14 +134,9 @@ pub fn channels(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Cha
 
 /// Construct the channel set from config, bypassing the cache.
 #[must_use]
-pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> ChannelSet {
-    let client = channel_client(app_config);
+pub fn build(messaging: &MessagingConfig) -> ChannelSet {
     let mut channels: ChannelSet = Vec::with_capacity(8);
-    if let Some(cfg) = messaging.telegram.as_ref() {
-        channels.push(Channel::Telegram(telegram::TelegramChannel::new(cfg.clone(), Arc::clone(app_config), client)));
-    }
     if let Some(cfg) = messaging.command.as_ref() {
-        // No HTTP client: this one shells out.
         channels.push(Channel::Command(command::CommandChannel::new(cfg.clone())));
     }
     let notifier = PLUGIN_NOTIFIER.read().ok().and_then(|guard| guard.clone());

@@ -41,6 +41,7 @@
   - [Custom UI](./plugins/custom-ui.md)
   - [Events, Notifications, Inputs, Outputs & MCP](./plugins/events-notifications-inputs.md)
   - [Packaging & Publishing](./plugins/packaging.md)
+  - [Telegram Notifier](./plugins/telegram-notifier.md)
   - [Discord Notifier](./plugins/discord-notifier.md)
   - [Slack Notifier](./plugins/slack-notifier.md)
   - [Gotify Notifier](./plugins/gotify-notifier.md)

@@ -47,7 +47,7 @@ pub fn configured_channels(app_config: &Arc<AppConfig>, id: EventId) -> Vec<Stri
     if !is_enabled(id, messaging) {
         return Vec::new();
     }
-    channels::channels(app_config, messaging)
+    channels::channels(messaging)
         .into_iter()
         .filter(|channel| channel.wants(id, severity_of(id)))
         .map(|channel| channel.id().to_string())
@@ -93,8 +93,8 @@ async fn render_for<'a>(
 /// Send `event` to exactly one channel, by its stable id.
 ///
 /// This is the entry point the outbox worker drives: it retries per
-/// channel, so a message that reached Telegram but not REST is re-sent
-/// only to REST.
+/// channel, so a message that reached one channel but not another is re-sent
+/// only to the other.
 pub async fn send_event_to_channel(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -108,7 +108,7 @@ pub async fn send_event_to_channel(
     if !is_enabled(event.id, messaging) {
         return Delivery::Skipped;
     }
-    let Some(channel) = channels::channels(app_config, messaging).into_iter().find(|c| c.id() == channel_id) else {
+    let Some(channel) = channels::channels(messaging).into_iter().find(|c| c.id() == channel_id) else {
         // The channel was removed from the config between enqueue and
         // delivery. Nothing to do, and nothing to retry.
         return Delivery::Skipped;
@@ -192,7 +192,7 @@ pub async fn send_event(app_config: &Arc<AppConfig>, client: &reqwest::Client, e
         },
         None => event,
     };
-    let set: ChannelSet = channels::channels(app_config, messaging);
+    let set: ChannelSet = channels::channels(messaging);
     dispatch(app_config, client, &event, &set).await;
 }
 
@@ -280,7 +280,7 @@ pub async fn render_and_send_test(
     let Some(messaging) = cfg.messaging.as_ref() else {
         return Vec::new();
     };
-    let set = channels::channels(app_config, messaging);
+    let set = channels::channels(messaging);
     let mut results = Vec::with_capacity(set.len());
     for channel in set.iter().filter(|c| only_channel.is_none_or(|want| c.id() == want)) {
         let msg = render_for(app_config, client, channel, event).await;
@@ -324,7 +324,7 @@ mod tests {
     /// Adapter onto the new pipeline.
     ///
     /// These tests predate the channel/envelope refactor and assert that the
-    /// documented JSON-embed and Telegram templates still render exactly as
+    /// documented JSON-embed and markdown templates still render exactly as
     /// before, so they are kept pointed at the real renderer rather than
     /// rewritten.
     async fn render_template(
@@ -487,11 +487,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_telegram_template() {
+    async fn test_render_markdown_report_template() {
         use shared::model::{InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
 
         let input_stats = InputStats {
-            name: "Telegram Input".to_string(),
+            name: "Report Input".to_string(),
             input_type: InputType::Xtream,
             error_count: 2,
             raw_stats: PlaylistStats { group_count: 50, channel_count: 500 },
@@ -538,10 +538,10 @@ mod tests {
         ";
         let output = render_template(&app_cfg, &client, Some(template), &content).await;
 
-        println!("Telegram Output:\n{output}");
+        println!("Markdown report output:\n{output}");
 
         assert!(output.contains("🔄 Playlist Update Report"));
-        assert!(output.contains("Telegram Input"));
+        assert!(output.contains("Report Input"));
         assert!(output.contains("⏱️ Took: `45 secs`"));
         assert!(output.contains("❌ Errors: `2`"));
         assert!(output.contains("Target T1"));

@@ -6,7 +6,6 @@ use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
 use shared::{
-    concat_string,
     defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
     error::TuliproxError,
     foundation::prepare_templates,
@@ -29,14 +28,13 @@ use tuliprox_core::{
     utils,
     utils::{
         config_file_reader, exit, file_exists_async, open_file, read_mappings_file_unprepared, read_templates_file,
-        request::is_uri, resolve_env_var, FileLockManager,
+        resolve_env_var, FileLockManager,
     },
 };
 use tuliprox_repository::{
     backup_api_user_db_file, csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
     merge_api_user,
 };
-use url::Url;
 
 /// Options controlling how configuration files are parsed.
 ///
@@ -1162,79 +1160,6 @@ pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -
         }
     }
     source_config
-}
-
-pub async fn persist_messaging_templates(
-    app_config: &Arc<AppConfig>,
-    cfg: &mut ConfigDto,
-) -> Result<(), TuliproxError> {
-    let templates_dir = {
-        let paths = app_config.paths.load();
-        PathBuf::from(&paths.config_path).join("messaging_templates")
-    };
-
-    if let Some(messaging) = &mut cfg.messaging {
-        // Telegram
-        if let Some(telegram) = &mut messaging.telegram {
-            for (kind, template) in &mut telegram.templates {
-                *template = persist_single_template("telegram", Some(kind.as_str()), template, &templates_dir).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn persist_single_template(
-    prefix: &str,
-    event_key: Option<&str>,
-    template: &str,
-    templates_dir: &Path,
-) -> Result<String, TuliproxError> {
-    if template.is_empty() || is_uri(template) {
-        return Ok(template.to_string());
-    }
-
-    // Treat existing file paths as file URLs
-    if tokio::fs::metadata(template).await.is_ok() {
-        if let Ok(canonical_path) = tokio::fs::canonicalize(template).await {
-            if let Ok(url) = Url::from_file_path(&canonical_path) {
-                return Ok(url.to_string());
-            }
-        }
-        return Ok(template.to_string());
-    }
-
-    // It's a raw string, persist it
-    if !file_exists_async(templates_dir).await {
-        tokio::fs::create_dir_all(templates_dir).await.map_err(|e| {
-            TuliproxError::Config(format!(
-                "Messaging templates dir: failed to create dir: {} {e}",
-                templates_dir.display()
-            ))
-        })?;
-    }
-
-    // Persist under the canonical event id where the key resolves to one,
-    // so a config written with a legacy `MsgKind` name still lands on the
-    // filename the registry will look for.
-    let filename = event_key.map_or_else(
-        || concat_string!(prefix, "_default.templ"),
-        |key| {
-            shared::model::notification::EventId::from_wire(key).map_or_else(
-                || concat_string!(prefix, "_", &key.replace('.', "_"), ".templ"),
-                |id| id.template_filename(prefix),
-            )
-        },
-    );
-
-    let file_path = templates_dir.join(filename);
-    fs::write(&file_path, template)
-        .await
-        .map_err(|e| TuliproxError::Config(format!("Failed to write template file: {e}")))?;
-
-    Url::from_file_path(&file_path).map(|u| u.to_string()).map_err(|()| {
-        TuliproxError::Config(format!("Failed to convert persisted path to file URL: {}", file_path.display()))
-    })
 }
 
 // ---- API user migration (config file <-> user database) ----

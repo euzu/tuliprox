@@ -4,13 +4,22 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.telegram` is removed.** The built-in Telegram channel is gone, together with its form in the Web UI and its
+  Handlebars templates: the config key is no longer accepted, so a config that still contains it fails to load with
+  `unknown field`. Install and configure the `telegram-notifier` plugin instead (`plugins.plugins`, id
+  `telegram-notifier`, settings `bot_token`, `chat_ids` and optionally `style`). `chat_ids` keep their format
+  (`<chat_id>`, `<chat_id>:<thread_id>`, `@channel`). `markdown: true` is replaced by `style: html` (the default: bold
+  title and headings, nothing else is interpreted) or `style: text`; MarkdownV2 is no longer used. The plugin lays the
+  event out itself, so `messaging_templates/telegram_*.templ` files are ignored. Only `command` remains a built-in
+  channel.
+
 - **`messaging.rest` is removed, and with it webhook templates.** The built-in REST channel is gone, together with its form
   in the Web UI: the config key is no longer accepted, so a config that still contains it fails to load with `unknown
   field`. Install and configure the `rest-notifier` plugin instead (`plugins.plugins`, id `rest-notifier`, settings `url`
   and, as needed, `method`, `headers`, `secret_headers`, `signing_secret`). The channel's Handlebars templates do not carry
   over: the plugin sends the event itself as JSON, or its plain-text body. A body shaped for one particular service
   belongs in a notifier plugin for that service. `X-Tuliprox-Timestamp` and `X-Tuliprox-Signature` keep their exact
-  format, so a receiver that verifies them needs no change. Only Telegram and `command` remain built-in channels.
+  format, so a receiver that verifies them needs no change.
 
 - **`messaging.pushover` is removed.** The built-in Pushover channel is gone, together with its form in the Web UI: the
   config key is no longer accepted, so a config that still contains it fails to load with `unknown field`. Install and
@@ -244,6 +253,18 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **Telegram notifications are a plugin.** The `telegram-notifier` plugin (`plugins/notifiers/telegram-notifier`,
+  `make plugin-telegram-notifier`) sends each notification to one or more Telegram chats through a bot: a bold title (marked
+  `⚠️` for a warning and `🚨` for an error), the event's sections as bold headings with their lines, and Telegram's own HTML
+  mode with only `& < >` escaped, so nothing in an event can become markup. A message that would pass Telegram's limit is
+  split between lines into up to 8 parts (counted in UTF-16 units, as Telegram counts), the last one ending in `…`; HTML
+  that Telegram still refuses is sent again as plain text. Chats are `<chat_id>`, `<chat_id>:<thread_id>` (a forum topic) or
+  `@channel`. The plugin remembers, in its key-value store, which part reached which chat, so when one chat is rate limited or
+  down the outbox's retry sends only what is missing instead of repeating the message to the others; a chat the bot was
+  removed from is given up on without failing the rest. A `429` honours Telegram's own `retry_after`. The bot token is part of
+  every request URL, so no error or log line is ever built from a URL or a transport error. Its settings form ships its own
+  translations (English, Russian, Spanish, Arabic). See [Telegram Notifier](docs/src/plugins/telegram-notifier.md).
 
 - **Webhooks are a plugin.** The `rest-notifier` plugin (`plugins/notifiers/rest-notifier`, `make plugin-rest-notifier`) sends
   each notification to any HTTP endpoint with POST, PUT or PATCH: the event as JSON (`id`, `severity`, `timestamp`,

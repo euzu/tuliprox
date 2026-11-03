@@ -8,7 +8,7 @@ use crate::{
 /// Per-channel routing.
 ///
 /// Without this every enabled event went to every configured channel, so
-/// "critical to Telegram, everything to the command channel" was not expressible.
+/// "critical to one channel, everything to the command channel" was not expressible.
 /// Every field is optional and an omitted block inherits the global
 /// `notify_on`.
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -143,13 +143,7 @@ impl MessagingConfigDto {
         if let Some(disk) = &self.disk_alert {
             disk.prepare()?;
         }
-        for routing in [
-            self.telegram.as_ref().and_then(|c| c.routing.as_ref()),
-            self.command.as_ref().and_then(|c| c.routing.as_ref()),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for routing in [self.command.as_ref().and_then(|c| c.routing.as_ref())].into_iter().flatten() {
             routing.prepare()?;
         }
         self.normalize_notify_on();

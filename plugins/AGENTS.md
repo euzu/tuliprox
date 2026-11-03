@@ -193,8 +193,9 @@ mod plugin {
 
 - Start from the closest plugin in `plugins/notifiers/`: `discord-notifier` (embeds), `slack-notifier` (Block Kit),
   `gotify-notifier`, `ntfy-notifier` and `pushover-notifier` (push messages, plain text, markdown or HTML) and
-  `rest-notifier` (a generic webhook: the event as JSON, custom and secret headers, HMAC signing): same shape,
-  different services. A secret that is a list entry (a header) is a list whose `items` are `writeOnly`.
+  `rest-notifier` (a generic webhook: the event as JSON, custom and secret headers, HMAC signing) and
+  `telegram-notifier` (a message that is split into parts and sent to several chats; it keeps the delivered units in the
+  KV store so the outbox's retry never repeats one): same shape, different services. A secret that is a list entry (a header) is a list whose `items` are `writeOnly`.
   Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a
   `DeliveryError`) and `notify::iso8601` (times), `notify::sections_of` (the event's sections) and, for a service that renders markdown,
   `notify::markdown` (escaping, hard line breaks, sections as bold headings).

@@ -607,8 +607,7 @@
       "READ_ONLY": "Hides and rejects tools that change state. Forced to read-only when Web UI authentication is disabled."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
-      "TELEGRAM_CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'."
+      "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "Logs which WebUI user initiated or is viewing the metadata processing.",
@@ -793,17 +792,6 @@
       "FORCE_REDIRECT": "Forces streams directly to the proxy or the provider instead of resolving individually.",
       "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
     },
-    "TELEGRAM_CONFIG": {
-      "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
-      "MARKDOWN": "If enabled, messages are sent as MarkdownV2 formatted text.",
-      "TEMPLATES": "Handlebars templates for Telegram message bodies."
-    },
-    "TELEGRAM_MESSAGING_CONFIG": {
-      "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
-      "CHAT_IDS": "List of Telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'.",
-      "MARKDOWN": "If enabled, messages are sent as MarkdownV2 formatted text.",
-      "TEMPLATES": "Handlebars templates for Telegram message bodies."
-    },
     "TMDB_CONFIG": {
       "API_KEY": "Your TMDB API key.\n\nYou only need this if you want to use your own TMDB account limits.",
       "CACHE_DURATION_DAYS": "How many days TMDB results stay cached before refresh.\n\nLonger cache means fewer API calls.",
@@ -945,7 +933,6 @@
     "ACTIVE_USER_CONNECTIONS": "Active user connections",
     "ADD_ALIAS": "Add Alias",
     "ADD_ATTRIBUTE": "Add Attribute",
-    "ADD_CHAT_ID": "Add ChatId",
     "ADD_DEVICE": "Add Device",
     "ADD_DIRECTORY": "Add Directory",
     "ADD_EPG_SOURCE": "Add EPG Source",
@@ -1021,7 +1008,6 @@
     "BACKUP_DIR": "Backup dir",
     "BEST_MATCH_THRESHOLD": "Best Match Threshold",
     "BODY_TEMPLATE": "Body Template",
-    "BOT_TOKEN": "Bot Token",
     "BOUQUETS": "Bouquets",
     "BUFFER_ENABLED": "Buffer Enabled",
     "BUFFER_SIZE": "Buffer Size",
@@ -1038,7 +1024,6 @@
     "CF_HEADER": "Remove Cloudflare headers",
     "CHANNEL": "Channel",
     "CHANNELS": "Channels",
-    "CHAT_IDS": "Chat Ids",
     "CLEANUP": "Cleanup",
     "CATCHUP_SESSION_TTL_SECS": "Catchup Session TTL (secs)",
     "CLEAR": "Clear",
@@ -1256,7 +1241,6 @@
     "MAPPER": "Mapper",
     "MAPPING": "Mapping",
     "MAPPING_PATH": "Mapping Path",
-    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "Mask redirect url",
     "MATCH_AS_ASCII": "Match as ascii",
     "MATCH_THRESHOLD": "Match Threshold",
@@ -1792,7 +1776,6 @@
     "TARGET": "Target",
     "TARGETS": "Targets",
     "TECH": "Tech",
-    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "Threshold score",
     "TEMPLATES": "Templates",
     "TEMPLATE_PATH": "Template Path",

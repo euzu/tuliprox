@@ -607,8 +607,7 @@
       "READ_ONLY": "Скрывает и отклоняет инструменты, изменяющие состояние. Принудительно включается, если аутентификация веб-интерфейса отключена."
     },
     "MESSAGING_CONFIG": {
-      "NOTIFY_ON": "Выберите события (например, 'info', 'stats', 'error'), которые запускают уведомления для этого конкретного типа.",
-      "TELEGRAM_CHAT_IDS": "Список идентификаторов чатов Telegram для получения уведомлений. Формат: '<chat_id>' или '<chat_id>:<thread_id>'."
+      "NOTIFY_ON": "Выберите события (например, 'info', 'stats', 'error'), которые запускают уведомления для этого конкретного типа."
     },
     "METADATA_LOG_CONFIG": {
       "LOG_ACTIVE_USER": "Регистрирует, какой пользователь WebUI инициировал или просматривает обработку метаданных.",
@@ -793,17 +792,6 @@
       "FORCE_REDIRECT": "Принудительно направляет потоки напрямую на прокси или провайдера, вместо разрешения по отдельности.",
       "PROCESSING_ORDER": "Определяет приоритет или последовательность, в которой каналы цели сопоставляются и перечисляются."
     },
-    "TELEGRAM_CONFIG": {
-      "BOT_TOKEN": "API-токен бота Telegram. Получите его у @BotFather.",
-      "MARKDOWN": "Если включено, сообщения отправляются как текст в формате MarkdownV2.",
-      "TEMPLATES": "Шаблоны Handlebars для тел сообщений Telegram."
-    },
-    "TELEGRAM_MESSAGING_CONFIG": {
-      "BOT_TOKEN": "API-токен бота Telegram. Получите его у @BotFather.",
-      "CHAT_IDS": "Список идентификаторов чатов Telegram для получения уведомлений. Формат: '<chat_id>' или '<chat_id>:<thread_id>'.",
-      "MARKDOWN": "Если включено, сообщения отправляются как текст в формате MarkdownV2.",
-      "TEMPLATES": "Шаблоны Handlebars для тел сообщений Telegram."
-    },
     "TMDB_CONFIG": {
       "API_KEY": "Ваш API-ключ TMDB.\n\nВам нужно это только в том случае, если вы хотите использовать свои собственные лимиты учетной записи TMDB.",
       "CACHE_DURATION_DAYS": "Сколько дней результаты TMDB остаются в кэше перед обновлением.\n\nБолее долгий кэш означает меньше вызовов API.",
@@ -947,7 +935,6 @@
     "ACTIVE_USER_CONNECTIONS": "Активные соединения пользователя",
     "ADD_ALIAS": "Добавить псевдоним",
     "ADD_ATTRIBUTE": "Добавить атрибут",
-    "ADD_CHAT_ID": "Добавить ChatId",
     "ADD_DEVICE": "Добавить устройство",
     "ADD_DIRECTORY": "Добавить директорию",
     "ADD_EPG_SOURCE": "Добавить источник EPG",
@@ -1021,7 +1008,6 @@
     "BACKUP_DIR": "Директория бэкапов",
     "BEST_MATCH_THRESHOLD": "Порог лучшего совпадения",
     "BODY_TEMPLATE": "Шаблон тела",
-    "BOT_TOKEN": "Токен бота",
     "BUFFER_ENABLED": "Буфер включен",
     "BUFFER_SIZE": "Размер буфера",
     "BUILD_TIME": "Время сборки",
@@ -1037,7 +1023,6 @@
     "CF_HEADER": "Удалить заголовки Cloudflare",
     "CHANNEL": "Канал",
     "CHANNELS": "Каналы",
-    "CHAT_IDS": "Chat Id",
     "CLEANUP": "Очистка",
     "CATCHUP_SESSION_TTL_SECS": "TTL сессии catchup (сек)",
     "CLEAR": "Очистить",
@@ -1255,7 +1240,6 @@
     "MAPPER": "Маппер",
     "MAPPING": "Сопоставление",
     "MAPPING_PATH": "Путь сопоставления",
-    "MARKDOWN": "Markdown",
     "MASK_REDIRECT_URL": "Маскировать URL перенаправления",
     "MATCH_AS_ASCII": "Сопоставлять как ASCII",
     "MATCH_THRESHOLD": "Порог совпадения",
@@ -1711,7 +1695,6 @@
     "TARGET": "Цель",
     "TARGETS": "Цели",
     "TECH": "Тех",
-    "TELEGRAM": "Telegram",
     "THRESHOLD_SCORE": "Пороговая оценка",
     "TEMPLATES": "Шаблоны",
     "TEMPLATE_PATH": "Путь шаблонов",

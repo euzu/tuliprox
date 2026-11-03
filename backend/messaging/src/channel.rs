@@ -133,7 +133,7 @@ pub struct RenderedMessage<'a> {
     /// [`NotificationEvent::body`] when no template applies.
     pub body: String,
     /// `true` when `body` came from an operator template rather than the
-    /// built-in rendering. Telegram needs this to decide whether escaping
+    /// built-in rendering. A channel needs this to decide whether escaping
     /// its own output would corrupt deliberate markdown.
     pub templated: bool,
 }

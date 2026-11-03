@@ -94,7 +94,7 @@ instead of your mount point.
 | `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
 | `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
 | `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (Telegram and `command`; Discord, Slack, Gotify, ntfy, Pushover and REST webhooks via plugins). | [See section](#5-messaging-messaging)           |
+| `messaging`       | Webhooks & Push-Notifications (`command`; Telegram, Discord, Slack, Gotify, ntfy, Pushover and REST webhooks via plugins). | [See section](#5-messaging-messaging)           |
 | `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
 | `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
 | `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
@@ -827,22 +827,15 @@ Severity is one of `info`, `warn`, `error`, `critical`, in that order.
 messaging:
   notify_on: [ "playlist.update.failed", "recording.*", "provider.account.*", "system.disk.alert" ]
 
-  # Telegram: Supports Markdown and Group Topics
-  telegram:
-    markdown: true
-    bot_token: "<TOKEN>"
-    chat_ids:
-      - "<CHAT_ID>"
-      - "<CHAT_ID>:<MESSAGE_THREAD_ID>" # Use colon to target a specific topic/thread
-    templates:
-      playlist.update.completed: 'file:///config/messaging_templates/telegram_playlist_update_completed.templ'
-      recording.completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
-
   # command: run a local program with the event JSON on stdin
   command:
     program: "/config/scripts/notify.sh"
     args: [ "--from-tuliprox" ]
     timeout_secs: 30
+    templates:
+      recording.completed: 'file:///config/messaging_templates/command_recording_completed.templ'
+
+# Chat and push services (Telegram, Discord, Slack, ...) are plugins; see the plugin pages.
 ```
 
 ### 5.1.1 Per-Channel Routing
@@ -854,15 +847,10 @@ global `notify_on`, so existing configs are unaffected.
 messaging:
   notify_on: [ "*" ]
 
-  telegram:
-    bot_token: "<TOKEN>"
-    chat_ids: [ "<CHAT_ID>" ]
-    routing:
-      min_severity: critical        # only wake me for real problems
-
   command:
     program: "/config/scripts/notify.sh"
     routing:
+      min_severity: warn            # only run it for real problems
       notify_on: [ "playlist.*", "recording.*" ]
       quiet_hours: "23:00-07:00"    # deferred, never dropped
       max_per_hour: 20              # circuit breaker
@@ -906,7 +894,7 @@ Tuning lives under `video.recording.notifications`
 event, and returns the exact rendered body per channel.
 
 ```json
-{ "event": "recording.completed", "channel": "telegram", "preview": true }
+{ "event": "recording.completed", "channel": "command", "preview": true }
 ```
 
 * `event` - any event id. Defaults to `system.info`.
@@ -919,20 +907,20 @@ asked for this one explicitly.
 
 ### 5.2 Templating (Handlebars)
 
-**Every** channel supports templates - Telegram and `command`.
+The built-in `command` channel supports templates. Plugin channels receive the event itself and lay it out on their own.
 Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies, which allows rich, structured
 notifications (e.g. JSON payloads or Markdown tables).
 
 Templates are keyed by event id:
 
 ```yaml
-telegram:
+command:
   templates:
-    recording.completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
+    recording.completed: 'file:///config/messaging_templates/command_recording_completed.templ'
 ```
 
 A `{prefix}_{event}.templ` file dropped into `/config/messaging_templates/` is picked up automatically -
-`telegram_recording_completed.templ`, `command_playlist_update_failed.templ`, and so on. Dots in the event id become
+`command_recording_completed.templ`, `command_playlist_update_failed.templ`, and so on. Dots in the event id become
 underscores in the filename.
 
 Templates are resolved and compiled **once** and then cached: local files are re-read when their mtime changes,
@@ -1030,7 +1018,7 @@ users are suppressed.
 
 #### Template Examples
 
-**Telegram (Markdown Report):**
+**Markdown report:**
 
 ```handlebars
 *🔄 Playlist Update Report*
@@ -1067,7 +1055,7 @@ users are suppressed.
 ### 5.3 Disk-Space Alerts (`messaging.disk_alert`)
 
 Tuliprox monitors the free space on the **current working directory's mount** and notifies you via the
-standard messaging channels (Telegram and `command`) before the disk fills up. The feature is
+`command` channel and any notifier plugin before the disk fills up. The feature is
 **opt-in**: no `disk_alert` block means no monitoring and no notifications.
 
 **How it works:** A background loop in `backend/app/src/api/sys_usage.rs` ticks every **2 seconds** (fixed
@@ -1112,9 +1100,8 @@ messaging:
     # 2 seconds and is not currently configurable.
     repeat_interval_secs: 3600
 
-  telegram:
-    bot_token: "<TOKEN>"
-    chat_ids: [ "<CHAT_ID>" ]
+  command:
+    program: "/config/scripts/notify.sh"
     templates:
       # Custom templates per level. Plain-text defaults are used if omitted.
       disk_alert_warn: "⚠️ Disk is {{percent}}% full (Warn threshold)."
@@ -1173,8 +1160,8 @@ content cannot be interpreted as shell syntax.
 
 ### 5.6 Secrets in the Web UI
 
-Channel secrets - the Telegram bot token - are masked as `********` when the configuration is read back
-through the API. Leaving a masked value untouched when you save keeps the stored secret; replacing it writes the new
+Secrets in plugin settings (the fields a plugin marks write-only, such as a bot token or a webhook URL) are masked as
+`********` when the configuration is read back through the API. Leaving a masked value untouched when you save keeps the stored secret; replacing it writes the new
 one through.
 
 ## 6. Video & Web Search (`video`)
