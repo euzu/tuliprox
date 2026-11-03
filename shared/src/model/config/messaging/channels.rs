@@ -1,8 +1,5 @@
 use super::ChannelRoutingDto;
-use crate::{
-    defaults::is_false,
-    utils::{is_blank_optional_str, is_blank_optional_string},
-};
+use crate::defaults::is_false;
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,48 +28,6 @@ impl TelegramMessagingConfigDto {
     }
 }
 
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RestMessagingConfigDto {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    pub method: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub headers: Vec<String>,
-    /// HMAC-SHA256 signing secret.
-    ///
-    /// When set, each request carries `X-Tuliprox-Timestamp` and
-    /// `X-Tuliprox-Signature: sha256=<hex>` over `timestamp.body`, so the
-    /// receiving endpoint can verify the sender.
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    pub signing_secret: Option<String>,
-    /// Template per event, keyed by event id wire name.
-    ///
-    /// Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...) and
-    /// canonical dotted ids (`recording.completed`) are both accepted;
-    /// `MessagingConfig::prepare` resolves them and warns on a key that
-    /// matches no known event.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<String, String>,
-    /// Per-channel routing. Inherits the global `notify_on` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<ChannelRoutingDto>,
-}
-
-impl RestMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        self.url.trim().is_empty()
-            && is_blank_optional_str(self.method.as_deref())
-            && self.headers.is_empty()
-            && self.templates.is_empty()
-    }
-}
-
-/// Run a local program, with the event JSON on stdin.
-///
-/// The escape hatch that means nobody has to wait for a channel to be
-/// added upstream. This runs arbitrary code as the tuliprox process user,
-/// so it is opt-in and never configured by default.
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CommandMessagingConfigDto {

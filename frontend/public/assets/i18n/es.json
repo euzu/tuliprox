@@ -608,7 +608,6 @@
     },
     "MESSAGING_CONFIG": {
       "NOTIFY_ON": "Seleccione eventos (p. ej. 'info', 'stats', 'error') que activan notificaciones para este tipo específico.",
-      "REST_HEADERS": "Cabeceras HTTP personalizadas enviadas con las solicitudes de notificación REST (formato JSON).",
       "TELEGRAM_CHAT_IDS": "Lista de ID de chat de Telegram para recibir notificaciones. Formato: '<chat_id>' o '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
@@ -723,12 +722,6 @@
     "RESOURCE_RETRY_CONFIG": {
       "BACKOFF_MILLIS": "El tiempo de espera entre intentos de solicitud fallidos (p. ej. 250ms).",
       "BACKOFF_MULTIPLIER": "Multiplica el retroceso base tras cada intento fallido para crear un retraso exponencial."
-    },
-    "REST_MESSAGING_CONFIG": {
-      "HEADERS": "Cabeceras HTTP personalizadas para enviar con la solicitud (formato JSON).",
-      "METHOD": "Método HTTP utilizado para la solicitud de notificación (p. ej. POST, PUT). Por defecto: POST.",
-      "TEMPLATES": "Plantillas Handlebars para los cuerpos de mensaje de notificación REST.",
-      "URL": "URL de destino que recibe el webhook de notificación."
     },
     "REVERSE_PROXY_CONFIG": {
       "ADMISSION_STRATEGIES": "Define lo que Tuliprox todavía puede intentar después de que la admisión normal del usuario ya se haya agotado.\n\nÚselo para controlar una gracia de transición corta durante el cambio, o para desalojar un stream de usuario existente, ya sea solo desde la misma IP o en toda la cuenta de usuario, en lugar de rechazar inmediatamente la nueva solicitud.\n\nLas estrategias se evalúan de arriba a abajo.\n\nLas estrategias de gracia solo funcionan cuando `grace_period_millis` es mayor que 0. Solo una estrategia de gracia puede estar activa a la vez.",
@@ -1658,7 +1651,6 @@
     "RESOURCE_REWRITE_DISABLED": "Reescritura de recursos deshabilitada",
     "RESERVE_SLOTS_FOR_USERS": "Reservar espacios para usuarios",
     "RESET": "Restablecer",
-    "REST": "Rest",
     "RETRY": "Reintentar",
     "REVERSE": "Inverso",
     "REVERSE_PROXY": "Proxy inverso",

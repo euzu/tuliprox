@@ -2,8 +2,7 @@ use crate::model::macros;
 use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, RestMessagingConfigDto,
-    TelegramMessagingConfigDto,
+    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -152,56 +151,6 @@ impl From<&TelegramMessagingConfig> for TelegramMessagingConfigDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct RestMessagingConfig {
-    pub url: String,
-    pub method: String,
-    pub signing_secret: Option<String>,
-    pub headers: std::collections::HashMap<String, String>,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl RestMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("rest", &mut self.templates, templates_dir); }
-}
-
-macros::from_impl!(RestMessagingConfig);
-impl From<&RestMessagingConfigDto> for RestMessagingConfig {
-    fn from(dto: &RestMessagingConfigDto) -> Self {
-        let mut headers = std::collections::HashMap::new();
-        for h in &dto.headers {
-            if let Some((k, v)) = h.split_once(':') {
-                headers.insert(k.trim().to_string(), v.trim().to_string());
-            } else if !h.trim().is_empty() {
-                warn!("Ignoring malformed header (missing ':'): {h}");
-            }
-        }
-        Self {
-            url: dto.url.clone(),
-            method: dto.method.clone().unwrap_or_else(|| "POST".to_string()),
-            signing_secret: dto.signing_secret.clone(),
-            headers,
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&RestMessagingConfig> for RestMessagingConfigDto {
-    fn from(model: &RestMessagingConfig) -> Self {
-        let headers = model.headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-        Self {
-            url: model.url.clone(),
-            method: Some(model.method.clone()),
-            signing_secret: model.signing_secret.clone(),
-            headers,
-            templates: template_keys_to_wire(&model.templates),
-            routing: Some(ChannelRoutingDto::from(&model.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandMessagingConfig {
     pub program: String,
     pub args: Vec<String>,
@@ -247,7 +196,6 @@ pub struct MessagingConfig {
     /// legacy `MsgKind` names are both accepted.
     pub notify_on: Vec<String>,
     pub telegram: Option<TelegramMessagingConfig>,
-    pub rest: Option<RestMessagingConfig>,
     pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
@@ -266,9 +214,6 @@ impl MessagingConfig {
         if let Some(t) = &mut self.telegram {
             t.prepare(&templates_dir);
         }
-        if let Some(r) = &mut self.rest {
-            r.prepare(&templates_dir);
-        }
         if let Some(c) = &mut self.command {
             c.prepare(&templates_dir);
         }
@@ -282,7 +227,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             notify_on: dto.notify_on.clone(),
             subscription: EventSubscription::parse(dto.notify_on.iter()),
             telegram: dto.telegram.as_ref().map(Into::into),
-            rest: dto.rest.as_ref().map(Into::into),
             command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
@@ -294,7 +238,6 @@ impl From<&MessagingConfig> for MessagingConfigDto {
         Self {
             notify_on: instance.notify_on.clone(),
             telegram: instance.telegram.as_ref().map(Into::into),
-            rest: instance.rest.as_ref().map(Into::into),
             command: instance.command.as_ref().map(Into::into),
             disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }

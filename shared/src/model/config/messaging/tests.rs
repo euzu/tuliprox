@@ -17,14 +17,10 @@ fn clean_preserves_disk_alert_with_non_default_values() {
 
 #[test]
 fn clean_strips_empty_subconfigs() {
-    let mut messaging = MessagingConfigDto {
-        telegram: Some(TelegramMessagingConfigDto::default()),
-        rest: Some(RestMessagingConfigDto::default()),
-        ..Default::default()
-    };
+    let mut messaging =
+        MessagingConfigDto { telegram: Some(TelegramMessagingConfigDto::default()), ..Default::default() };
     messaging.clean();
     assert!(messaging.telegram.is_none());
-    assert!(messaging.rest.is_none());
 }
 
 #[test]
@@ -51,20 +47,10 @@ fn prepare_leaves_glob_patterns_untouched() {
 fn redaction_masks_every_channel_secret() {
     let mut messaging = MessagingConfigDto {
         telegram: Some(TelegramMessagingConfigDto { bot_token: "real-token".to_string(), ..Default::default() }),
-        rest: Some(RestMessagingConfigDto {
-            url: "https://example.test".to_string(),
-            headers: vec!["Authorization: Bearer secret".to_string(), "X-Trace: keep-me".to_string()],
-            ..Default::default()
-        }),
         ..Default::default()
     };
     messaging.redact_secrets();
     assert_eq!(messaging.telegram.as_ref().expect("telegram").bot_token, REDACTED_SECRET);
-    let headers = &messaging.rest.as_ref().expect("rest").headers;
-    assert!(headers.contains(&format!("Authorization: {REDACTED_SECRET}")), "auth header not masked: {headers:?}");
-    // A non-credential header keeps its value; masking everything would
-    // make the config unreadable for no gain.
-    assert!(headers.contains(&"X-Trace: keep-me".to_string()), "harmless header was masked: {headers:?}");
 }
 
 #[test]
@@ -104,28 +90,6 @@ fn a_genuinely_changed_secret_is_written_through() {
     };
     incoming.restore_redacted_secrets(&stored);
     assert_eq!(incoming.telegram.as_ref().expect("telegram").bot_token, "new");
-}
-
-#[test]
-fn a_returned_masked_header_restores_the_stored_one() {
-    let stored = MessagingConfigDto {
-        rest: Some(RestMessagingConfigDto {
-            url: "https://example.test".to_string(),
-            headers: vec!["Authorization: Bearer secret".to_string()],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let mut incoming = MessagingConfigDto {
-        rest: Some(RestMessagingConfigDto {
-            url: "https://example.test".to_string(),
-            headers: vec![format!("Authorization: {REDACTED_SECRET}")],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    incoming.restore_redacted_secrets(&stored);
-    assert_eq!(incoming.rest.as_ref().expect("rest").headers, vec!["Authorization: Bearer secret".to_string()]);
 }
 
 #[test]

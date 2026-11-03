@@ -94,7 +94,7 @@ instead of your mount point.
 | `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
 | `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
 | `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (Telegram, REST and `command`; Discord, Slack, Gotify, ntfy and Pushover via plugins). | [See section](#5-messaging-messaging)           |
+| `messaging`       | Webhooks & Push-Notifications (Telegram and `command`; Discord, Slack, Gotify, ntfy, Pushover and REST webhooks via plugins). | [See section](#5-messaging-messaging)           |
 | `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
 | `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
 | `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
@@ -838,16 +838,6 @@ messaging:
       playlist.update.completed: 'file:///config/messaging_templates/telegram_playlist_update_completed.templ'
       recording.completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
 
-  # REST: Generic webhook/API support
-  rest:
-    url: "https://my-api.local/alert"
-    method: "POST"
-    headers:
-      - "Content-Type: application/json"
-    signing_secret: "<SHARED_SECRET>"   # optional, see 5.4
-    templates:
-      system.error: '{"text": "Alert: {{message}}", "type": "{{kind}}"}'
-
   # command: run a local program with the event JSON on stdin
   command:
     program: "/config/scripts/notify.sh"
@@ -870,8 +860,8 @@ messaging:
     routing:
       min_severity: critical        # only wake me for real problems
 
-  rest:
-    url: "https://my-api.local/alert"
+  command:
+    program: "/config/scripts/notify.sh"
     routing:
       notify_on: [ "playlist.*", "recording.*" ]
       quiet_hours: "23:00-07:00"    # deferred, never dropped
@@ -894,8 +884,8 @@ are persisted to `{storage_dir}/notification_outbox.json` before the first
 attempt, retried per channel with capped exponential backoff, and
 dead-lettered after `max_attempts`.
 
-Retry is at-most-once **per channel**: a message that reached Telegram but
-not REST is retried only against REST, so a retry never duplicates a
+Retry is at-most-once **per channel**: a message that reached one channel but
+not another is retried only against the one that failed, so a retry never duplicates a
 delivered message.
 
 * A `429` or `503` is retried, and a provider's `Retry-After` is honoured
@@ -929,7 +919,7 @@ asked for this one explicitly.
 
 ### 5.2 Templating (Handlebars)
 
-**Every** channel supports templates - Telegram, REST and `command`.
+**Every** channel supports templates - Telegram and `command`.
 Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies, which allows rich, structured
 notifications (e.g. JSON payloads or Markdown tables).
 
@@ -942,7 +932,7 @@ telegram:
 ```
 
 A `{prefix}_{event}.templ` file dropped into `/config/messaging_templates/` is picked up automatically -
-`telegram_recording_completed.templ`, `rest_playlist_update_failed.templ`, and so on. Dots in the event id become
+`telegram_recording_completed.templ`, `command_playlist_update_failed.templ`, and so on. Dots in the event id become
 underscores in the filename.
 
 Templates are resolved and compiled **once** and then cached: local files are re-read when their mtime changes,
@@ -1077,7 +1067,7 @@ users are suppressed.
 ### 5.3 Disk-Space Alerts (`messaging.disk_alert`)
 
 Tuliprox monitors the free space on the **current working directory's mount** and notifies you via the
-standard messaging channels (Telegram, REST) before the disk fills up. The feature is
+standard messaging channels (Telegram and `command`) before the disk fills up. The feature is
 **opt-in**: no `disk_alert` block means no monitoring and no notifications.
 
 **How it works:** A background loop in `backend/app/src/api/sys_usage.rs` ticks every **2 seconds** (fixed
@@ -1158,16 +1148,9 @@ default line, e.g.:
 
 ### 5.4 Webhook Signing
 
-Set `rest.signing_secret` and every request carries:
-
-```text
-X-Tuliprox-Timestamp: 1700000000
-X-Tuliprox-Signature: sha256=<hex>
-```
-
-The signature is HMAC-SHA256 over `{timestamp}.{body}` using the shared secret. The timestamp is inside the signed
-payload, so a captured request cannot be replayed later with a fresh timestamp header. Verify it by recomputing the
-HMAC and comparing in constant time, and reject requests whose timestamp is too far from your clock.
+Webhook delivery, including the HMAC-SHA256 signature (`X-Tuliprox-Timestamp` and `X-Tuliprox-Signature`) that lets the
+receiver verify the sender and reject a replay, is a feature of the REST Notifier plugin. See
+[REST Notifier](../plugins/rest-notifier.md#signing).
 
 ### 5.5 Running a Local Program
 
@@ -1190,8 +1173,7 @@ content cannot be interpreted as shell syntax.
 
 ### 5.6 Secrets in the Web UI
 
-Channel secrets - the Telegram bot token, the REST signing
-secret, and any `Authorization`-style REST header - are masked as `********` when the configuration is read back
+Channel secrets - the Telegram bot token - are masked as `********` when the configuration is read back
 through the API. Leaving a masked value untouched when you save keeps the stored secret; replacing it writes the new
 one through.
 

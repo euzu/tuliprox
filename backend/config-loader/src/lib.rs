@@ -1180,12 +1180,6 @@ pub async fn persist_messaging_templates(
                 *template = persist_single_template("telegram", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
-        // Rest
-        if let Some(rest) = &mut messaging.rest {
-            for (kind, template) in &mut rest.templates {
-                *template = persist_single_template("rest", Some(kind.as_str()), template, &templates_dir).await?;
-            }
-        }
     }
     Ok(())
 }

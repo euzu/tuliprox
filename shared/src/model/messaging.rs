@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(MsgKind::Watch.template_filename("telegram"), "telegram_watch.templ");
         assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
         assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
-        assert_eq!(MsgKind::DiskAlert.template_filename("rest"), "rest_disk_alert.templ");
+        assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
         assert_eq!(MsgKind::DiskAlert.template_filename("telegram"), "telegram_disk_alert.templ");
     }
 

@@ -1,0 +1,26 @@
+[package]
+name = "rest-notifier"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "tuliprox plugin: deliver notifications to a webhook"
+
+# Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
+# by `bin/package-plugin.sh plugins/notifiers/rest-notifier`. No .wasm or
+# .tlpx is ever committed.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tuliprox-plugin-sdk = { path = "../../plugin-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.13"
+sha2 = "0.11"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

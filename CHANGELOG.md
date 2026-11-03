@@ -4,6 +4,14 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.rest` is removed, and with it webhook templates.** The built-in REST channel is gone, together with its form
+  in the Web UI: the config key is no longer accepted, so a config that still contains it fails to load with `unknown
+  field`. Install and configure the `rest-notifier` plugin instead (`plugins.plugins`, id `rest-notifier`, settings `url`
+  and, as needed, `method`, `headers`, `secret_headers`, `signing_secret`). The channel's Handlebars templates do not carry
+  over: the plugin sends the event itself as JSON, or its plain-text body. A body shaped for one particular service
+  belongs in a notifier plugin for that service. `X-Tuliprox-Timestamp` and `X-Tuliprox-Signature` keep their exact
+  format, so a receiver that verifies them needs no change. Only Telegram and `command` remain built-in channels.
+
 - **`messaging.pushover` is removed.** The built-in Pushover channel is gone, together with its form in the Web UI: the
   config key is no longer accepted, so a config that still contains it fails to load with `unknown field`. Install and
   configure the `pushover-notifier` plugin instead (`plugins.plugins`, id `pushover-notifier`, settings `token` and `user`).
@@ -224,6 +232,15 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **Webhooks are a plugin.** The `rest-notifier` plugin (`plugins/notifiers/rest-notifier`, `make plugin-rest-notifier`) sends
+  each notification to any HTTP endpoint with POST, PUT or PATCH: the event as JSON (`id`, `severity`, `timestamp`,
+  `instance`, `title`, `body`, `fields`, `sections`) or the plain-text body, your own headers, and a list of secret headers
+  (such as `Authorization: Bearer ...`) whose whole entries are masked in the Web UI. An optional `signing_secret` adds the
+  HMAC-SHA256 signature. A malformed header entry is reported by its position, never by its text, so a credential cannot
+  reach a log. The breaker, rate limit and concurrency cap the built-in channel carried are the host's own per-plugin
+  outbound limits. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [REST Notifier](docs/src/plugins/rest-notifier.md).
 
 - **Pushover notifications are a plugin.** The `pushover-notifier` plugin (`plugins/notifiers/pushover-notifier`,
   `make plugin-pushover-notifier`) sends notifications to Pushover. The message carries the event's own time as the

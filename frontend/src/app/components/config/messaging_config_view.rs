@@ -11,24 +11,19 @@ use crate::{
         ConfigContext,
     },
     config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
-    config_field_empty, config_field_hide, config_field_optional, config_field_tags, edit_field_bool, edit_field_list,
-    edit_field_number_f64, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field_empty, config_field_hide, config_field_tags, edit_field_bool, edit_field_list, edit_field_number_f64,
+    edit_field_number_u64, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
-use shared::model::{DiskAlertConfigDto, MessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto};
+use shared::model::{DiskAlertConfigDto, MessagingConfigDto, TelegramMessagingConfigDto};
 use std::rc::Rc;
 use yew::prelude::*;
 
 const LABEL_NOTIFY_ON: &str = "LABEL.NOTIFY_ON";
 const LABEL_TELEGRAM: &str = "LABEL.TELEGRAM";
-const LABEL_REST: &str = "LABEL.REST";
 const LABEL_BOT_TOKEN: &str = "LABEL.BOT_TOKEN";
 const LABEL_CHAT_IDS: &str = "LABEL.CHAT_IDS";
 const LABEL_MARKDOWN: &str = "LABEL.MARKDOWN";
-const LABEL_URL: &str = "LABEL.URL";
-const LABEL_METHOD: &str = "LABEL.METHOD";
-const LABEL_HEADERS: &str = "LABEL.HEADERS";
-const LABEL_ADD_HEADER: &str = "LABEL.ADD_HEADER";
 const LABEL_DISK_ALERT: &str = "LABEL.DISK_ALERT";
 const LABEL_DISK_ALERT_WARN_PERCENT: &str = "LABEL.DISK_ALERT_WARN_PERCENT";
 const LABEL_DISK_ALERT_CRITICAL_PERCENT: &str = "LABEL.DISK_ALERT_CRITICAL_PERCENT";
@@ -41,17 +36,6 @@ generate_form_reducer!(
         BotToken => bot_token: String,
         ChatIds => chat_ids: Vec<String>,
         Markdown => markdown: bool,
-        Templates => templates: std::collections::HashMap<String, String>,
-    }
-);
-
-generate_form_reducer!(
-    state: RestMessagingConfigFormState { form: RestMessagingConfigDto },
-    action_name: RestMessagingConfigFormAction,
-    fields {
-        Url => url: String,
-        Method => method: Option<String>,
-        Headers => headers: Vec<String>,
         Templates => templates: std::collections::HashMap<String, String>,
     }
 );
@@ -91,8 +75,6 @@ pub fn MessagingConfigView() -> Html {
         form: TelegramMessagingConfigDto::default(),
         modified: false,
     });
-    let rest_state =
-        use_reducer(|| RestMessagingConfigFormState { form: RestMessagingConfigDto::default(), modified: false });
 
     let disk_alert_state =
         use_reducer(|| DiskAlertConfigFormState { form: DiskAlertConfigDto::default(), modified: false });
@@ -119,17 +101,14 @@ pub fn MessagingConfigView() -> Html {
         let dependencies = (
             messaging_state.form.clone(),
             telegram_state.form.clone(),
-            rest_state.form.clone(),
             disk_alert_state.form.clone(),
             messaging_state.modified,
             telegram_state.modified,
-            rest_state.modified,
             disk_alert_state.modified,
         );
-        use_emit_mapped(dependencies, config_view_ctx.on_form_change.clone(), |(m, t, r, da, mm, tm, rm, dam)| {
+        use_emit_mapped(dependencies, config_view_ctx.on_form_change.clone(), |(m, t, da, mm, tm, dam)| {
             let mut form = m;
             form.telegram = Some(t);
-            form.rest = Some(r);
             // The `DiskAlert` entry in `notify_on` is the on/off switch
             // for disk alerts: the runtime only fires alerts when
             // `notify_on` contains `DiskAlert` AND a `disk_alert` block
@@ -140,7 +119,7 @@ pub fn MessagingConfigView() -> Html {
                 .matches(shared::model::notification::registry::SYSTEM_DISK_ALERT);
             form.disk_alert = if subscribed { Some(da) } else { None };
 
-            let modified = mm || tm || rm || dam;
+            let modified = mm || tm || dam;
             ConfigForm::Messaging(modified, form)
         });
     }
@@ -148,7 +127,6 @@ pub fn MessagingConfigView() -> Html {
     {
         let msg_state = messaging_state.clone();
         let t_state = telegram_state.clone();
-        let r_state = rest_state.clone();
 
         let msg_config: MessagingConfigDto = config_ctx
             .config
@@ -160,12 +138,6 @@ pub fn MessagingConfigView() -> Html {
             msg_config.telegram.as_ref().map_or_else(TelegramMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((telegram_cfg, *config_view_ctx.edit_mode), move |(telegram_cfg, _mode)| {
             t_state.dispatch(TelegramMessagingConfigFormAction::SetAll(telegram_cfg.clone()));
-            || ()
-        });
-
-        let rest_cfg = msg_config.rest.as_ref().map_or_else(RestMessagingConfigDto::default, std::clone::Clone::clone);
-        use_effect_with((rest_cfg, *config_view_ctx.edit_mode), move |(rest_cfg, _mode)| {
-            r_state.dispatch(RestMessagingConfigFormAction::SetAll(rest_cfg.clone()));
             || ()
         });
 
@@ -220,24 +192,6 @@ pub fn MessagingConfigView() -> Html {
         },
     };
 
-    let render_rest = |rest: Option<&RestMessagingConfigDto>| match rest {
-        Some(entry) => html! {
-          <Card class="tp__config-view__card">
-              <h1>{translate.t(LABEL_REST)}</h1>
-              { config_field!(entry, translate.t(LABEL_URL), url) }
-              { config_field_optional!(entry, translate.t(LABEL_METHOD), method) }
-              { config_field_tags!(entry, translate.t(LABEL_HEADERS), headers, "MESSAGING_CONFIG.REST_HEADERS") }
-              { render_templates_view(&entry.templates) }
-          </Card>
-        },
-        None => html! {
-          <Card class="tp__config-view__card">
-              <h1>{translate.t(LABEL_REST)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL), "REST_MESSAGING_CONFIG.URL") }
-          </Card>
-        },
-    };
-
     let render_disk_alert = |disk_alert: Option<&DiskAlertConfigDto>| match disk_alert {
         Some(disk_alert) => html! {
             <Card class="tp__config-view__card">
@@ -273,7 +227,6 @@ pub fn MessagingConfigView() -> Html {
         </div>
         <div class="tp__messaging-config-view__body tp__config-view-page__body">
           {render_telegram(msg_state.form.telegram.as_ref())}
-          {render_rest(msg_state.form.rest.as_ref())}
           {render_disk_alert(msg_state.form.disk_alert.as_ref())}
         </div>
         </>
@@ -309,32 +262,6 @@ pub fn MessagingConfigView() -> Html {
                 }
             })
             .collect::<Html>();
-        let rest_template_fields = notify_on_options
-            .iter()
-            .map(|kind| {
-                let kind_str = translate.t(&event_label_key(kind));
-                let current_val = rest_state.form.templates.get(kind).cloned().unwrap_or_default();
-                let rest_state = rest_state.clone();
-                let kind = kind.clone();
-                html! {
-                    <TextArea
-                        label={kind_str}
-                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", event_label_suffix(&kind)))}
-                        value={current_val}
-                        collapse_on_empty={true}
-                        on_change={Callback::from(move |val: String| {
-                            let mut updated = rest_state.form.templates.clone();
-                            if val.is_empty() {
-                                updated.remove(&kind);
-                            } else {
-                                updated.insert(kind.clone(), val);
-                            }
-                            rest_state.dispatch(RestMessagingConfigFormAction::Templates(updated));
-                        })}
-                    />
-                }
-            })
-            .collect::<Html>();
         html! {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
@@ -361,17 +288,6 @@ pub fn MessagingConfigView() -> Html {
                     <div class="tp__messaging-config__templates">
                         <h3>{translate.t("LABEL.TEMPLATES")}</h3>
                         { telegram_template_fields }
-                    </div>
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_REST)}</h1>
-                    { edit_field_text!(rest_state, translate.t(LABEL_URL), url, RestMessagingConfigFormAction::Url) }
-                    { edit_field_text_option!(rest_state, translate.t(LABEL_METHOD), method, RestMessagingConfigFormAction::Method) }
-                    { edit_field_list!(rest_state, translate.t(LABEL_HEADERS), headers, RestMessagingConfigFormAction::Headers, translate.t(LABEL_ADD_HEADER)) }
-                    <div class="tp__messaging-config__templates">
-                        <h3>{translate.t("LABEL.TEMPLATES")}</h3>
-                        { rest_template_fields }
                     </div>
                 </Card>
 

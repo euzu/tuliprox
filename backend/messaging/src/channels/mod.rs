@@ -11,7 +11,6 @@
 
 pub mod command;
 pub mod plugin;
-pub mod rest;
 pub mod telegram;
 
 use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
@@ -35,7 +34,6 @@ use tuliprox_core::{
 #[derive(Clone)]
 pub enum Channel {
     Telegram(telegram::TelegramChannel),
-    Rest(rest::RestChannel),
     Command(command::CommandChannel),
     /// A wasm plugin that exports `send-notification`; reached through the
     /// registered [`PluginNotifier`].
@@ -47,7 +45,6 @@ macro_rules! delegate {
     ($self:ident, $inner:ident => $call:expr) => {
         match $self {
             Channel::Telegram($inner) => $call,
-            Channel::Rest($inner) => $call,
             Channel::Command($inner) => $call,
             Channel::Plugin($inner) => $call,
         }
@@ -78,7 +75,6 @@ impl Channel {
     pub async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         match self {
             Channel::Telegram(c) => c.send(msg).await,
-            Channel::Rest(c) => c.send(msg).await,
             Channel::Command(c) => c.send(msg).await,
             Channel::Plugin(c) => c.send(msg).await,
         }
@@ -161,14 +157,7 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
     let client = channel_client(app_config);
     let mut channels: ChannelSet = Vec::with_capacity(8);
     if let Some(cfg) = messaging.telegram.as_ref() {
-        channels.push(Channel::Telegram(telegram::TelegramChannel::new(
-            cfg.clone(),
-            Arc::clone(app_config),
-            client.clone(),
-        )));
-    }
-    if let Some(cfg) = messaging.rest.as_ref() {
-        channels.push(Channel::Rest(rest::RestChannel::new(cfg.clone(), client)));
+        channels.push(Channel::Telegram(telegram::TelegramChannel::new(cfg.clone(), Arc::clone(app_config), client)));
     }
     if let Some(cfg) = messaging.command.as_ref() {
         // No HTTP client: this one shells out.

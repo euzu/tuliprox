@@ -314,8 +314,7 @@ Tuliprox uses a shared event backbone so operational events can feed the Web UI,
 Supported notification channels include:
 
 - Telegram
-- REST webhooks
-- Discord, Slack, Gotify, ntfy and Pushover, as plugins (under `plugins/notifiers/`)
+- Discord, Slack, Gotify, ntfy, Pushover and REST webhooks, as plugins (under `plugins/notifiers/`)
 - Local command execution with structured event JSON on stdin
 
 Notification capabilities include:
@@ -328,7 +327,7 @@ Notification capabilities include:
 - Durable delivery with retry handling for transient failures
 - Dead-letter tracking for notifications that permanently fail
 - Provider `Retry-After` support where applicable
-- HMAC-SHA256 signing for REST webhooks
+- HMAC-SHA256 signing for webhooks (REST plugin)
 - Per-channel Handlebars templates
 - Preview/test endpoint so templates can be rendered without sending them
 - Events for provider failures, exhausted pools, priority fallback, user connection denial, auth activity, config reload  
