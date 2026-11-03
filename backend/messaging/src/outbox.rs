@@ -112,7 +112,6 @@ pub fn notification_outbox() -> Option<&'static NotificationOutbox> { OUTBOX.get
 /// Start the outbox worker. Idempotent: only the first call installs one.
 pub fn spawn_notification_outbox<E: EventSink + 'static>(
     app_config: &Arc<AppConfig>,
-    http_client: reqwest::Client,
     config: RecordingNotificationConfig,
     cancel_token: &CancellationToken,
     events: E,
@@ -125,7 +124,7 @@ pub fn spawn_notification_outbox<E: EventSink + 'static>(
     let app_config = Arc::clone(app_config);
     let cancel_token = cancel_token.clone();
     tokio::spawn(async move {
-        run(app_config, http_client, config, receiver, cancel_token, events).await;
+        run(app_config, config, receiver, cancel_token, events).await;
     });
 }
 
@@ -141,7 +140,6 @@ fn legacy_outbox_path(app_config: &Arc<AppConfig>) -> PathBuf {
 
 async fn run<E: EventSink>(
     app_config: Arc<AppConfig>,
-    http_client: reqwest::Client,
     config: RecordingNotificationConfig,
     mut receiver: mpsc::Receiver<NotificationEvent>,
     cancel_token: CancellationToken,
@@ -187,7 +185,7 @@ async fn run<E: EventSink>(
             }
             persist(&path, &file).await;
         }
-        if drain_due(&app_config, &http_client, &config, &mut file, &events).await {
+        if drain_due(&app_config, &config, &mut file, &events).await {
             persist(&path, &file).await;
         }
         health().outbox_depth.store(i64::try_from(file.entries.len()).unwrap_or(i64::MAX), Ordering::Relaxed);
@@ -223,7 +221,6 @@ fn admit(file: &mut OutboxFile, event: NotificationEvent) {
 /// Attempt every due entry. Returns `true` when the outbox changed.
 async fn drain_due<E: EventSink>(
     app_config: &Arc<AppConfig>,
-    client: &reqwest::Client,
     config: &RecordingNotificationConfig,
     file: &mut OutboxFile,
     events: &E,
@@ -265,7 +262,7 @@ async fn drain_due<E: EventSink>(
         let attempts = std::mem::take(&mut entry.pending).into_iter().map(|channel_id| {
             let event = &entry.event;
             async move {
-                let outcome = send_event_to_channel(app_config, client, event, &channel_id).await;
+                let outcome = send_event_to_channel(app_config, event, &channel_id).await;
                 (channel_id, outcome)
             }
         });
@@ -344,9 +341,8 @@ async fn drain_due<E: EventSink>(
 /// `None` when at least one pending channel is awake, so a notification is
 /// never held back by a channel that is not the one blocking it.
 fn quiet_hours_defer_for(app_config: &Arc<AppConfig>, pending: &[String]) -> Option<Duration> {
-    let cfg = app_config.config.load();
-    let messaging = cfg.messaging.as_ref()?;
-    let set = crate::channels::channels(messaging);
+    app_config.config.load().messaging.as_ref()?;
+    let set = crate::channels::channels();
     let mut shortest: Option<Duration> = None;
     for channel_id in pending {
         let channel = set.iter().find(|c| c.id() == channel_id)?;

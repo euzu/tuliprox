@@ -1055,12 +1055,11 @@ pub struct MessagingTestRequest {
     /// Event id to simulate. Defaults to `system.info`.
     #[serde(default)]
     pub event: Option<String>,
-    /// Restrict to one channel by its stable id (`command`, or a plugin channel id).
+    /// Restrict to one channel by its stable id (`plugin.<plugin id>`).
     /// Absent means every configured channel.
     #[serde(default)]
     pub channel: Option<String>,
-    /// Render only, send nothing. Lets a template be iterated without
-    /// spamming a channel.
+    /// Show what would be sent, send nothing.
     #[serde(default)]
     pub preview: bool,
 }
@@ -1075,8 +1074,6 @@ pub struct MessagingTestChannelResult {
     pub reason: Option<String>,
     /// Exactly what the channel was asked to send.
     pub rendered: String,
-    /// Whether an operator template produced `rendered`.
-    pub templated: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1107,10 +1104,8 @@ async fn test_messaging(
     };
 
     let event = tuliprox_messaging::test_event(event_id);
-    let client = app_state.http_clients.default.load();
     let results = tuliprox_messaging::render_and_send_test(
         &app_state.app_config,
-        &client,
         &event,
         request.channel.as_deref(),
         request.preview,
@@ -1127,7 +1122,6 @@ async fn test_messaging(
                 outcome: outcome.outcome,
                 reason: outcome.reason,
                 rendered: outcome.rendered,
-                templated: outcome.templated,
             })
             .collect(),
     };

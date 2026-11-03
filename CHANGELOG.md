@@ -4,6 +4,18 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.command` is removed, and with it the notification templates.** The built-in `command` channel was the last
+  one: the config key is no longer accepted, so a config that still contains it fails to load with `unknown field`, and no
+  channel is built into the server any more. Install, approve and configure the `command-notifier` plugin instead
+  (`plugins.plugins`, id `command-notifier`, settings `program`, `args`, `timeout_secs`). Because a plugin cannot start a
+  program on its own, the plugin asks for the new `process` capability, which the admin approves in the Plugin Manager.
+  Two behaviours differ: `timeout_secs` is at most 25 (default 20), since a plugin call has a 30 second limit, and the
+  program no longer inherits tuliprox's environment, only `PATH` and `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and
+  `TULIPROX_EVENT_TITLE`. With the last channel gone the Handlebars templating of messages is removed too:
+  `templates:` in a channel, `messaging_templates/*.templ` files and the `templated` field of
+  `POST /api/v1/config/messaging/test` no longer exist. A plugin lays the event out itself, and the program gets the event
+  as JSON.
+
 - **`messaging.telegram` is removed.** The built-in Telegram channel is gone, together with its form in the Web UI and its
   Handlebars templates: the config key is no longer accepted, so a config that still contains it fails to load with
   `unknown field`. Install and configure the `telegram-notifier` plugin instead (`plugins.plugins`, id
@@ -253,6 +265,21 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **Plugins can run local programs: the `process` capability.** A new host function, `run-process`
+  (SDK: `tuliprox_plugin_sdk::process`), starts a program on the server and waits for it. It is the one capability that
+  leaves the sandbox, so it has its own entry in the admin's review ("Run local programs: ... Grant it only to a plugin you
+  would trust with a shell"). The program is started directly, never through a shell, with an empty environment except
+  `PATH` and what the plugin passes; input is at most 1 MiB, stdout and stderr are each cut to 64 KiB, the wait is 1 to 300
+  seconds and then the child is killed, and every run is logged by program name. See
+  [Running programs](docs/src/plugins/security.md#running-programs).
+
+- **Local commands are a plugin.** The `command-notifier` plugin (`plugins/notifiers/command-notifier`,
+  `make plugin-command-notifier`) runs a program for each notification with the event as JSON on its standard input, and
+  `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and `TULIPROX_EVENT_TITLE` in its environment. A non-zero exit or a timeout is
+  retried with the program's first line of standard error as the reason; a program that cannot be started is dead-lettered
+  at once. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [Command Notifier](docs/src/plugins/command-notifier.md).
 
 - **Telegram notifications are a plugin.** The `telegram-notifier` plugin (`plugins/notifiers/telegram-notifier`,
   `make plugin-telegram-notifier`) sends each notification to one or more Telegram chats through a bot: a bold title (marked

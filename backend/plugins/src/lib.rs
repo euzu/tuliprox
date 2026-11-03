@@ -34,6 +34,7 @@ mod metrics;
 mod migration;
 mod notify;
 mod output_provider;
+mod process;
 mod registry;
 mod rpc;
 mod runtime;

@@ -201,10 +201,6 @@ impl Config {
             metadata_update.cache_path = meta_path.to_string_lossy().to_string();
         }
 
-        if let Some(messaging) = self.messaging.as_mut() {
-            messaging.prepare(config_path);
-        }
-
         if let Some(plugins) = self.plugins.as_mut() {
             plugins.prepare(config_path)?;
         }

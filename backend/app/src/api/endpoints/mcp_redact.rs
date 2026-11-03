@@ -164,7 +164,7 @@ mod tests {
         let redacted = redact(&json!({
             "config": {
                 "web_ui": { "auth": { "secret": "s3", "token_ttl_mins": 30, "password_hash": "h" } },
-                "messaging": { "command": { "token": "t" }, "webhook": { "Authorization": "Bearer x" } },
+                "messaging": { "service": { "token": "t" }, "webhook": { "Authorization": "Bearer x" } },
                 "proxy": { "url": "http://p", "Username": "u", "PASSWORD": "pw" },
                 "other": { "api_key": ["a", "b"], "apikey": { "k": "v" }, "empty_password": "" }
             }
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(config["web_ui"]["auth"]["secret"], REDACTED_SECRET);
         assert_eq!(config["web_ui"]["auth"]["password_hash"], REDACTED_SECRET);
         assert_eq!(config["web_ui"]["auth"]["token_ttl_mins"], 30);
-        assert_eq!(config["messaging"]["command"]["token"], REDACTED_SECRET);
+        assert_eq!(config["messaging"]["service"]["token"], REDACTED_SECRET);
         assert_eq!(config["messaging"]["webhook"]["Authorization"], REDACTED_SECRET);
         assert_eq!(config["proxy"]["url"], "http://p");
         assert_eq!(config["proxy"]["Username"], REDACTED_SECRET);

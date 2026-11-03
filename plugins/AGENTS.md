@@ -72,7 +72,8 @@ host would accept. Unknown top-level keys are ignored by the host, so a typo is 
   one lowercase id of 2 to 32 letters, digits and `-`. Use one of `notifier`, `playlist`, `epg`, `metadata`, `input`, `output`,
   `stream`, `automation`, `monitoring` (each has a translated name in the Web UI) unless none fits. A notification plugin is
   `notifier`. A value that is not an id makes the manifest invalid.
-- `capabilities:` only what is used: `network`, `storage`, `epg_write`, `image_cache`, `notifications`, `stream_headers`.
+- `capabilities:` only what is used: `network`, `storage`, `epg_write`, `image_cache`, `notifications`, `stream_headers`, `process` (starts local
+  programs; ask for it only when that is the whole point of the plugin, as in `command-notifier`).
 - `hooks:` must match the component's exports exactly, in both directions. A mismatch makes the plugin **invalid**, and an
   invalid plugin fails open (it is skipped, the pipeline carries on, and the output looks like the baseline).
 - `ui.config_section.schema` points at the settings schema; `ui.locales` lists the languages (see below).
@@ -194,6 +195,7 @@ mod plugin {
 - Start from the closest plugin in `plugins/notifiers/`: `discord-notifier` (embeds), `slack-notifier` (Block Kit),
   `gotify-notifier`, `ntfy-notifier` and `pushover-notifier` (push messages, plain text, markdown or HTML) and
   `rest-notifier` (a generic webhook: the event as JSON, custom and secret headers, HMAC signing) and
+  `command-notifier` (runs a local program, through the SDK `process` module) and
   `telegram-notifier` (a message that is split into parts and sent to several chats; it keeps the delivered units in the
   KV store so the outbox's retry never repeats one): same shape, different services. A secret that is a list entry (a header) is a list whose `items` are `writeOnly`.
   Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a

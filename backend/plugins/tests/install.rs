@@ -96,14 +96,14 @@ const EXTENSION: &str = "ui:\n  config_extensions:\n    - section: proxy\n      
 async fn upload_stages_the_package_and_reviews_every_capability() {
     let env = env();
     let guard = env.system.install_lock().await;
-    let caps = "capabilities:\n  network: true\n  storage: true\n  epg_write: true\n  image_cache: true\n  notifications: true\n  stream_headers: true\n";
+    let caps = "capabilities:\n  network: true\n  storage: true\n  epg_write: true\n  image_cache: true\n  notifications: true\n  stream_headers: true\n  process: true\n";
     let review = env.system.api_upload(&guard, package(&manifest("demo", "1.0.0", caps), &[])).await.unwrap();
 
     assert_eq!(review.id, "demo");
     assert_eq!(review.version, "1.0.0");
     assert_eq!(review.wasm_sha256, None);
     let names: Vec<&str> = review.capabilities.iter().map(|capability| capability.name.as_str()).collect();
-    assert_eq!(names, ["network", "storage", "epg_write", "image_cache", "notifications", "stream_headers"]);
+    assert_eq!(names, ["network", "storage", "epg_write", "image_cache", "notifications", "stream_headers", "process"]);
     assert!(review.capabilities.iter().all(|capability| !capability.description.is_empty()));
     assert_eq!(
         review.capabilities[0].description,

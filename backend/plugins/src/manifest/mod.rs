@@ -39,12 +39,20 @@ pub(crate) enum Capability {
     ImageCache,
     Notifications,
     StreamHeaders,
+    Process,
 }
 
 impl Capability {
     /// Every capability, in manifest order.
-    pub(crate) const ALL: [Self; 6] =
-        [Self::Network, Self::Storage, Self::EpgWrite, Self::ImageCache, Self::Notifications, Self::StreamHeaders];
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Network,
+        Self::Storage,
+        Self::EpgWrite,
+        Self::ImageCache,
+        Self::Notifications,
+        Self::StreamHeaders,
+        Self::Process,
+    ];
 
     /// The manifest key.
     pub(crate) const fn as_str(self) -> &'static str {
@@ -55,6 +63,7 @@ impl Capability {
             Self::ImageCache => "image_cache",
             Self::Notifications => "notifications",
             Self::StreamHeaders => "stream_headers",
+            Self::Process => "process",
         }
     }
 }
@@ -70,6 +79,7 @@ pub(crate) struct Capabilities {
     pub image_cache: bool,
     pub notifications: bool,
     pub stream_headers: bool,
+    pub process: bool,
 }
 
 impl Capabilities {
@@ -81,6 +91,7 @@ impl Capabilities {
             Capability::ImageCache => self.image_cache,
             Capability::Notifications => self.notifications,
             Capability::StreamHeaders => self.stream_headers,
+            Capability::Process => self.process,
         }
     }
 

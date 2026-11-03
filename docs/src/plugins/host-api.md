@@ -15,6 +15,7 @@ the SDK offers is built on those imports. The component has no file system or so
 | `get-config` | `get-config() -> string` | The plugin's settings as JSON, with `${env:VAR}` references resolved |
 | `now-unix` | `now-unix() -> s64` | Unix seconds from the host clock. See [Determinism](#determinism-contract) |
 | `cache-image` | `cache-image(url) -> result<string, string>` | Needs capabilities `image_cache` and `network`. Returns a URL served by this server |
+| `run-process` | `run-process(program, args, env, stdin, timeout-secs) -> result<process-output, string>` | Needs capability `process`. Starts a local program and waits. See [Running programs](./security.md#running-programs) |
 
 The `kv-error` cases are `quota-exceeded`, `key-too-large`, `value-too-large`, and `unavailable(string)`.
 
@@ -26,6 +27,11 @@ resolved, and only to that plugin's own instances (`backend/plugins/src/host_fns
 `cache-image` also returns `err`, and the plugin keeps the upstream URL, when the server's resource cache is disabled,
 when the image is over 2 MiB, when the plugin's 64 MiB image quota is spent, or when the type is `image/svg+xml`
 (`backend/plugins/src/image_cache.rs`). In CLI mode there is no resource cache, so it always returns `err`.
+
+`run-process` returns `err` without the `process` capability, for a malformed request (an empty program, more than 256
+arguments, over 1 MiB of input, a NUL byte, an invalid environment name), when the program cannot be started, and when it
+is still running after `timeout-secs` (1 to 300; it is then killed). A program that ran and failed is `ok` with its
+`status`; `status` is `none` when a signal ended it (`backend/plugins/src/process.rs`).
 
 The SDK wraps these functions. The names below are those of `plugins/plugin-sdk/src/`:
 

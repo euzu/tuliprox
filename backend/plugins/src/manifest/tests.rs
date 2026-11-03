@@ -130,7 +130,8 @@ fn the_full_example_parses_into_typed_fields() {
             epg_write: true,
             image_cache: true,
             notifications: false,
-            stream_headers: true
+            stream_headers: true,
+            process: false,
         }
     );
     assert_eq!(manifest.capabilities.granted().len(), 5);

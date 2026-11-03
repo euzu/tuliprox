@@ -1,10 +1,8 @@
 use crate::model::macros;
-use log::warn;
 use shared::model::{
-    notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto,
+    notification::{EventId, EventSubscription, QuietHours, Severity},
+    ChannelRoutingDto, DiskAlertConfigDto, MessagingConfigDto,
 };
-use std::path::{Path, PathBuf};
 
 /// Runtime configuration for the threshold-driven disk-space alert.
 #[derive(Debug, Clone)]
@@ -111,51 +109,10 @@ impl From<&ChannelRouting> for ChannelRoutingDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct CommandMessagingConfig {
-    pub program: String,
-    pub args: Vec<String>,
-    pub timeout: std::time::Duration,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl CommandMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("command", &mut self.templates, templates_dir);
-    }
-}
-
-macros::from_impl!(CommandMessagingConfig);
-impl From<&CommandMessagingConfigDto> for CommandMessagingConfig {
-    fn from(dto: &CommandMessagingConfigDto) -> Self {
-        Self {
-            program: dto.program.clone(),
-            args: dto.args.clone(),
-            timeout: std::time::Duration::from_secs(dto.timeout_secs.unwrap_or(30).max(1)),
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&CommandMessagingConfig> for CommandMessagingConfigDto {
-    fn from(instance: &CommandMessagingConfig) -> Self {
-        Self {
-            program: instance.program.clone(),
-            args: instance.args.clone(),
-            timeout_secs: Some(instance.timeout.as_secs()),
-            templates: template_keys_to_wire(&instance.templates),
-            routing: Some(ChannelRoutingDto::from(&instance.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct MessagingConfig {
     /// Raw `notify_on` entries as written in config. Glob patterns and
     /// legacy `MsgKind` names are both accepted.
     pub notify_on: Vec<String>,
-    pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
     /// `notify_on` parsed once at load. Matching runs per notification, so
@@ -167,13 +124,6 @@ impl MessagingConfig {
     /// The parsed `notify_on` subscription.
     #[must_use]
     pub fn subscription(&self) -> &EventSubscription { &self.subscription }
-
-    pub fn prepare(&mut self, config_path: &str) {
-        let templates_dir = PathBuf::from(config_path).join("messaging_templates");
-        if let Some(c) = &mut self.command {
-            c.prepare(&templates_dir);
-        }
-    }
 }
 
 macros::from_impl!(MessagingConfig);
@@ -182,7 +132,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
         Self {
             notify_on: dto.notify_on.clone(),
             subscription: EventSubscription::parse(dto.notify_on.iter()),
-            command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
     }
@@ -190,62 +139,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
 
 impl From<&MessagingConfig> for MessagingConfigDto {
     fn from(instance: &MessagingConfig) -> Self {
-        Self {
-            notify_on: instance.notify_on.clone(),
-            command: instance.command.as_ref().map(Into::into),
-            disk_alert: instance.disk_alert.as_ref().map(Into::into),
-        }
-    }
-}
-
-/// Resolve config template keys to event ids, warning on anything unknown.
-///
-/// A typo here used to be indistinguishable from an event that never fires.
-fn resolve_template_keys(
-    raw: &std::collections::HashMap<String, String>,
-) -> std::collections::HashMap<EventId, String> {
-    let mut out = std::collections::HashMap::with_capacity(raw.len());
-    for (key, value) in raw {
-        match EventId::from_wire(key) {
-            Some(id) => {
-                out.insert(id, value.clone());
-            }
-            None => warn!("Ignoring messaging template for unknown event `{key}`"),
-        }
-    }
-    out
-}
-
-/// Canonical wire names for round-tripping back into the DTO.
-fn template_keys_to_wire(
-    templates: &std::collections::HashMap<EventId, String>,
-) -> std::collections::HashMap<String, String> {
-    templates.iter().map(|(id, value)| (id.as_str().to_string(), value.clone())).collect()
-}
-
-/// Adopt `{prefix}_{event}.templ` files sitting in the templates directory.
-///
-/// Iterates the event registry rather than a hardcoded variant list, which
-/// is what previously made a newly added kind silently undiscoverable.
-fn discover_templates(prefix: &str, templates: &mut std::collections::HashMap<EventId, String>, templates_dir: &Path) {
-    for descriptor in registry::ALL {
-        if let std::collections::hash_map::Entry::Vacant(e) = templates.entry(descriptor.id) {
-            // Canonical name first, then any legacy filename that resolves
-            // to the same id, so existing `command_disk_alert.templ` files
-            // keep being picked up.
-            let candidates = std::iter::once(descriptor.id.template_filename(prefix)).chain(
-                shared::model::notification::LEGACY_ALIASES
-                    .iter()
-                    .filter(|(_, id)| *id == descriptor.id)
-                    .map(|(legacy, _)| format!("{prefix}_{legacy}.templ")),
-            );
-            for filename in candidates {
-                let file_path = templates_dir.join(filename);
-                if file_path.exists() {
-                    e.insert(format!("file://{}", file_path.to_string_lossy()));
-                    break;
-                }
-            }
-        }
+        Self { notify_on: instance.notify_on.clone(), disk_alert: instance.disk_alert.as_ref().map(Into::into) }
     }
 }

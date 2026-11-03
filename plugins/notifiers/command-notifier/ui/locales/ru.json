@@ -1,0 +1,21 @@
+{
+  "settings.title": "Командный уведомитель",
+  "settings.program.title": "Программа",
+  "settings.program.description": "Запускаемая программа, полным путём (/config/scripts/notify.sh). Она запускается напрямую, без оболочки, от имени пользователя, под которым работает tuliprox, и получает событие в виде JSON на стандартный ввод.",
+  "settings.args.title": "Аргументы",
+  "settings.args.description": "Один элемент на аргумент, передаётся как написано. Оболочка их не обрабатывает, поэтому экранирование не нужно. Не указывайте здесь учётные данные: аргументы видны в списке процессов.",
+  "settings.timeout_secs.title": "Тайм-аут (секунды)",
+  "settings.timeout_secs.description": "Сколько программа может работать, прежде чем её остановят, а уведомление отправят повторно. От 1 до 25; по умолчанию 20.",
+  "settings.routing.title": "Маршрутизация (применяется tuliprox, а не плагином)",
+  "settings.routing.description": "Маршрутизация канала в исходящей очереди уведомлений, тот же блок, что и у любого канала. Все поля необязательны; пустой блок наследует глобальный notify_on.",
+  "settings.routing.notify_on.title": "Переопределение notify_on",
+  "settings.routing.notify_on.description": "Шаблоны идентификаторов событий, заменяющие глобальный notify_on для этого канала (например, playlist.update.*).",
+  "settings.routing.min_severity.title": "Минимальная важность (маршрутизация)",
+  "settings.routing.min_severity.description": "Порог важности на стороне хоста, оценивается по важности события из реестра до вызова плагина.",
+  "settings.routing.quiet_hours.title": "Тихие часы",
+  "settings.routing.quiet_hours.description": "ЧЧ:ММ-ЧЧ:ММ по местному времени. Уведомления в этом окне откладываются, но не теряются.",
+  "settings.routing.max_per_hour.title": "Максимум в час",
+  "settings.routing.max_per_hour.description": "Предохранитель: после этого числа уведомлений за час канал отправляет одно сообщение о подавлении и замолкает.",
+  "settings.routing.dedup_window_secs.title": "Окно дедупликации (секунды)",
+  "settings.routing.dedup_window_secs.description": "Подавлять повторный ключ дедупликации в течение этого числа секунд."
+}

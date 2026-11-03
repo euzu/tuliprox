@@ -60,7 +60,7 @@ supported. A manifest that declares the reserved `epg.resolve-conflict` hook is 
 implemented. [Hook Reference](./hooks.md) lists the hooks with their timing and requirements.
 
 Capabilities are the permissions an admin grants. The manifest names them under `capabilities:`:
-`network`, `storage`, `epg_write`, `image_cache`, `notifications` and `stream_headers`. Nothing is granted by
+`network`, `storage`, `epg_write`, `image_cache`, `notifications`, `stream_headers` and `process`. Nothing is granted by
 default. See [Security Model](./security.md).
 
 ## Fail-open

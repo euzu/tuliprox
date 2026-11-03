@@ -89,6 +89,14 @@ interface host {
 
   variant kv-error { quota-exceeded, key-too-large, value-too-large, unavailable(string) }
 
+  // What a finished program left behind. `status` is none when a signal ended it.
+  // stdout and stderr are each cut to their first 64 KiB.
+  record process-output {
+    status: option<s32>,
+    stdout: list<u8>,
+    stderr: list<u8>,
+  }
+
   log: func(level: log-level, msg: string);   // rate-limited; excess dropped + counted
   kv-get: func(key: string) -> result<option<list<u8>>, kv-error>;
   kv-set: func(key: string, value: list<u8>) -> result<_, kv-error>;
@@ -96,6 +104,11 @@ interface host {
   get-config: func() -> string;    // settings JSON, secrets resolved, own instance only
   now-unix: func() -> s64;         // tuliprox_core::utils::clock::Clock
   cache-image: func(url: string) -> result<string, string>;  // -> locally served URL
+  // Runs a local program (never through a shell) as the tuliprox user and waits for it. Needs the
+  // `process` capability. The program gets an empty environment except PATH and `env`; `stdin` is
+  // written and closed. err: refused, not startable, or still running after `timeout-secs`.
+  run-process: func(program: string, args: list<string>, env: list<tuple<string, string>>,
+                    stdin: list<u8>, timeout-secs: u32) -> result<process-output, string>;
 }
 
 // ——— lifecycle: every plugin exports this ———

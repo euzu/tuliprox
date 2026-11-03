@@ -12,6 +12,15 @@ mod imp {
     pub(crate) fn get_config() -> String { host::get_config() }
     pub(crate) fn now_unix() -> i64 { host::now_unix() }
     pub(crate) fn cache_image(url: &str) -> Result<String, String> { host::cache_image(url) }
+    pub(crate) fn run_process(
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &[u8],
+        timeout_secs: u32,
+    ) -> Result<host::ProcessOutput, String> {
+        host::run_process(program, args, env, stdin, timeout_secs)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,6 +37,15 @@ mod imp {
     pub(crate) fn get_config() -> String { mock::config() }
     pub(crate) fn now_unix() -> i64 { mock::now_unix() }
     pub(crate) fn cache_image(url: &str) -> Result<String, String> { mock::cache_image(url) }
+    pub(crate) fn run_process(
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &[u8],
+        timeout_secs: u32,
+    ) -> Result<host::ProcessOutput, String> {
+        mock::run_process(program, args, env, stdin, timeout_secs)
+    }
 }
 
 pub(crate) use imp::*;

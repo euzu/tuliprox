@@ -809,7 +809,6 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
             });
         tuliprox_messaging::outbox::spawn_notification_outbox(
             &app_state.app_config,
-            app_state.http_clients.default.load().as_ref().clone(),
             notification_cfg,
             &app_state.cancel_tokens.load().recordings,
             Arc::clone(&app_state.event_manager),

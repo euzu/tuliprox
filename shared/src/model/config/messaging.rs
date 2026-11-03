@@ -15,8 +15,6 @@ pub struct MessagingConfigDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notify_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<CommandMessagingConfigDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_alert: Option<DiskAlertConfigDto>,
 }
 
@@ -24,13 +22,9 @@ impl MessagingConfigDto {
     pub fn is_empty(&self) -> bool {
         self.notify_on.is_empty()
             && (self.disk_alert.is_none() || self.disk_alert.as_ref().is_some_and(DiskAlertConfigDto::is_empty))
-            && (self.command.is_none() || self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
-        if self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty) {
-            self.command = None;
-        }
         if self.disk_alert.as_ref().is_some_and(DiskAlertConfigDto::is_empty) {
             self.disk_alert = None;
         }
@@ -40,7 +34,5 @@ impl MessagingConfigDto {
 #[cfg(test)]
 mod tests;
 
-mod channels;
 mod routing;
-pub use channels::CommandMessagingConfigDto;
 pub use routing::{ChannelRoutingDto, DiskAlertConfigDto};

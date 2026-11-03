@@ -35,7 +35,7 @@ sha2.workspace = true
 # `.tlpx` packages. `deflate` is pure Rust; zip 2.6.1's
 # `deflate-flate2` alone does not enable its flate2 dependency.
 zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
-tokio = { workspace = true, features = ["time", "sync", "rt"] }
+tokio = { workspace = true, features = ["time", "sync", "rt", "process", "io-util", "macros"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -15,7 +15,10 @@
 //! ```
 
 use crate::{
-    bindings::tuliprox::plugin::{host::KvError, types::LogLevel},
+    bindings::tuliprox::plugin::{
+        host::{KvError, ProcessOutput},
+        types::LogLevel,
+    },
     http::{Error as HttpError, Method, Request, Response},
 };
 use std::{
@@ -45,6 +48,18 @@ struct Host {
     cached: Vec<String>,
     http_queue: BTreeMap<(String, String), VecDeque<Result<Response, HttpError>>>,
     http_log: Vec<Request>,
+    process_queue: BTreeMap<String, VecDeque<Result<ProcessOutput, String>>>,
+    process_log: Vec<ProcessRun>,
+}
+
+/// One `host::run-process` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRun {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub stdin: Vec<u8>,
+    pub timeout_secs: u32,
 }
 
 impl Host {
@@ -59,6 +74,8 @@ impl Host {
             cached: Vec::new(),
             http_queue: BTreeMap::new(),
             http_log: Vec::new(),
+            process_queue: BTreeMap::new(),
+            process_log: Vec::new(),
         }
     }
 }
@@ -121,6 +138,19 @@ fn queue_http(method: Method, url: &str, outcome: Result<Response, HttpError>) {
     with(|host| host.http_queue.entry((method.as_str().to_string(), url.to_string())).or_default().push_back(outcome));
 }
 
+/// Queues the next result of running `program` (first in, first out). Without one the call
+/// fails with `mock: no result queued for <program>`.
+pub fn process_respond(program: &str, result: Result<crate::process::Output, &str>) {
+    let result = result
+        .map(|output| ProcessOutput { status: output.status, stdout: output.stdout, stderr: output.stderr })
+        .map_err(str::to_string);
+    with(|host| host.process_queue.entry(program.to_string()).or_default().push_back(result));
+}
+
+/// Every program run through [`crate::process`], in call order.
+#[must_use]
+pub fn process_runs() -> Vec<ProcessRun> { with(|host| host.process_log.clone()) }
+
 /// Every request sent through [`crate::http`], in call order.
 #[must_use]
 pub fn http_requests() -> Vec<Request> { with(|host| host.http_log.clone()) }
@@ -174,6 +204,28 @@ pub(crate) fn cache_image(url: &str) -> Result<String, String> {
     with(|host| {
         host.cached.push(url.to_string());
         host.images.get(url).cloned().unwrap_or_else(|| Ok(format!("/mock-cache/{url}")))
+    })
+}
+
+pub(crate) fn run_process(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    stdin: &[u8],
+    timeout_secs: u32,
+) -> Result<ProcessOutput, String> {
+    with(|host| {
+        host.process_log.push(ProcessRun {
+            program: program.to_string(),
+            args: args.to_vec(),
+            env: env.to_vec(),
+            stdin: stdin.to_vec(),
+            timeout_secs,
+        });
+        host.process_queue
+            .get_mut(program)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or_else(|| Err(format!("mock: no result queued for {program}")))
     })
 }
 

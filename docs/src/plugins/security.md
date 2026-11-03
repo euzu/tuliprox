@@ -31,10 +31,31 @@ Capability sentences, from `backend/plugins/src/install.rs`:
 | `image_cache` | "Image cache: may fetch images through the host image cache and serve them from this server (needs network access)." |
 | `notifications` | "Notifications: may register as a notification provider and send messages through it." |
 | `stream_headers` | "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts." |
+| `process` | "Run local programs: may start any program on this server, as the user tuliprox runs as, with arguments and input of its own choosing. Grant it only to a plugin you would trust with a shell." |
 
 A hook that needs a capability makes the manifest invalid if the manifest does not request it: `stream.inject-headers`
 needs `stream_headers`, `epg.transform-programmes` and `epg.enrich-programmes` need `epg_write`, and
 `notifications.send` needs `notifications`.
+
+## Running programs
+
+**The `process` capability is the one that leaves the sandbox.** Once granted, a plugin may start any program on the server
+that runs tuliprox, as the user tuliprox runs as, with arguments and input of its own choosing (`host::run-process`, SDK
+`tuliprox_plugin_sdk::process`). Treat it like giving the plugin a shell: only approve it for a plugin whose author and
+source you trust, and run tuliprox as an unprivileged user. The host cannot tell a harmless script from a harmful one.
+
+What the host does limit, in `backend/plugins/src/process.rs`:
+
+* The program is started directly, never through a shell, so a plugin's arguments are never parsed as shell syntax.
+* The program's environment is empty except `PATH` and the variables the plugin passes. The host process's own environment
+  (which can hold resolved secrets) never reaches a child.
+* At most 256 arguments and 1 MiB of input; stdout and stderr are each cut to their first 64 KiB.
+* The wait is 1 to 300 seconds; after that the child is killed and the call fails. A call the host drops (a plugin call
+  has a 30 s deadline) kills its child too.
+* Every run is logged as `plugin <id> runs the program <program>`, by program name and never by arguments, which may carry
+  a credential.
+
+Without the capability the call fails and nothing starts.
 
 ## Network
 

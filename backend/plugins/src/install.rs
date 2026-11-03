@@ -87,6 +87,9 @@ const S_IFLNK: u32 = 0o120_000;
 /// What `network` allows. The review must say it this way.
 const NETWORK_SENTENCE: &str = "Unrestricted network access: any public, private or loopback HTTP(S) destination.";
 
+/// What `process` allows. The review must say it this way.
+const PROCESS_SENTENCE: &str = "Run local programs: may start any program on this server, as the user tuliprox runs as, with arguments and input of its own choosing. Grant it only to a plugin you would trust with a shell.";
+
 /// Proof that the install mutex is held. Obtained from
 /// [`PluginSystem::install_lock`]; dropping it releases the mutex.
 pub struct InstallGuard<'a> {
@@ -757,6 +760,7 @@ const fn capability_description(capability: Capability) -> &'static str {
         Capability::StreamHeaders => {
             "Stream header injection: may add HTTP headers to upstream stream requests when a client session starts."
         }
+        Capability::Process => PROCESS_SENTENCE,
     }
 }
 

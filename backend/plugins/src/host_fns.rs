@@ -1,9 +1,10 @@
-//! The `host` interface a guest imports: log, kv, get-config, now-unix and
-//! cache-image.
+//! The `host` interface a guest imports: log, kv, get-config, now-unix,
+//! cache-image and run-process.
 
 use crate::{
     kv::{KvHandle, KvWrites},
     logs::PluginLog,
+    process,
     state::HostState,
 };
 use std::sync::Arc;
@@ -92,6 +93,20 @@ impl host::Host for HostState {
     async fn cache_image(&mut self, url: String) -> Result<String, String> {
         let env = Arc::clone(&self.env);
         env.images.cache_image(&env.http, &url).await
+    }
+
+    async fn run_process(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        env_vars: Vec<(String, String)>,
+        stdin: Vec<u8>,
+        timeout_secs: u32,
+    ) -> Result<host::ProcessOutput, String> {
+        let env = Arc::clone(&self.env);
+        let request = process::Request { program, args, env: env_vars, stdin, timeout_secs };
+        let output = process::run(&env.id, env.capabilities.process, request).await?;
+        Ok(host::ProcessOutput { status: output.status, stdout: output.stdout, stderr: output.stderr })
     }
 }
 

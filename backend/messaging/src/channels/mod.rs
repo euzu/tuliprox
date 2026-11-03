@@ -8,16 +8,15 @@
 //! a direct call, so there is no vtable and no boxed future anywhere on the
 //! send path.
 
-pub mod command;
 pub mod plugin;
 
-use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
+use crate::channel::{Delivery, NotificationChannel, RenderedMessage};
 use shared::model::{
     notification::{EventId, Severity},
     PluginNotifier,
 };
 use std::sync::{Arc, OnceLock, RwLock};
-use tuliprox_core::model::{ChannelRouting, MessagingConfig};
+use tuliprox_core::model::ChannelRouting;
 
 /// One configured channel.
 ///
@@ -27,7 +26,6 @@ use tuliprox_core::model::{ChannelRouting, MessagingConfig};
 /// the only way an implementation is reached.
 #[derive(Clone)]
 pub enum Channel {
-    Command(command::CommandChannel),
     /// A wasm plugin that exports `send-notification`; reached through the
     /// registered [`PluginNotifier`].
     Plugin(plugin::PluginChannel),
@@ -37,7 +35,6 @@ pub enum Channel {
 macro_rules! delegate {
     ($self:ident, $inner:ident => $call:expr) => {
         match $self {
-            Channel::Command($inner) => $call,
             Channel::Plugin($inner) => $call,
         }
     };
@@ -47,12 +44,6 @@ impl Channel {
     /// Stable wire id: config key, outbox key, metric label, template prefix.
     #[must_use]
     pub fn id(&self) -> &'static str { delegate!(self, c => c.id()) }
-
-    #[must_use]
-    pub fn capabilities(&self) -> ChannelCapabilities { delegate!(self, c => c.capabilities()) }
-
-    #[must_use]
-    pub fn template_for(&self, event: EventId) -> Option<&str> { delegate!(self, c => c.template_for(event)) }
 
     #[must_use]
     pub fn routing(&self) -> &ChannelRouting { delegate!(self, c => c.routing()) }
@@ -66,7 +57,6 @@ impl Channel {
     /// what unifies them without boxing.
     pub async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
         match self {
-            Channel::Command(c) => c.send(msg).await,
             Channel::Plugin(c) => c.send(msg).await,
         }
     }
@@ -119,13 +109,13 @@ pub fn set_plugin_notifier(notifier: Option<Arc<dyn PluginNotifier>>) {
 /// Cached: repeated calls return the same channels, so per-channel state
 /// (rate limiting, suppression) survives between notifications.
 #[must_use]
-pub fn channels(messaging: &MessagingConfig) -> ChannelSet {
+pub fn channels() -> ChannelSet {
     if let Ok(guard) = cache().read() {
         if let Some(set) = guard.as_ref() {
             return set.clone();
         }
     }
-    let set = build(messaging);
+    let set = build();
     if let Ok(mut guard) = cache().write() {
         *guard = Some(set.clone());
     }
@@ -134,11 +124,8 @@ pub fn channels(messaging: &MessagingConfig) -> ChannelSet {
 
 /// Construct the channel set from config, bypassing the cache.
 #[must_use]
-pub fn build(messaging: &MessagingConfig) -> ChannelSet {
+pub fn build() -> ChannelSet {
     let mut channels: ChannelSet = Vec::with_capacity(8);
-    if let Some(cfg) = messaging.command.as_ref() {
-        channels.push(Channel::Command(command::CommandChannel::new(cfg.clone())));
-    }
     let notifier = PLUGIN_NOTIFIER.read().ok().and_then(|guard| guard.clone());
     if let Some(notifier) = notifier {
         channels.extend(plugin::channels_of(&notifier).into_iter().map(Channel::Plugin));

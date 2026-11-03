@@ -143,9 +143,6 @@ impl MessagingConfigDto {
         if let Some(disk) = &self.disk_alert {
             disk.prepare()?;
         }
-        for routing in [self.command.as_ref().and_then(|c| c.routing.as_ref())].into_iter().flatten() {
-            routing.prepare()?;
-        }
         self.normalize_notify_on();
         Ok(())
     }

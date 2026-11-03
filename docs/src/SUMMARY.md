@@ -48,6 +48,7 @@
   - [ntfy Notifier](./plugins/ntfy-notifier.md)
   - [Pushover Notifier](./plugins/pushover-notifier.md)
   - [REST Notifier](./plugins/rest-notifier.md)
+  - [Command Notifier](./plugins/command-notifier.md)
   - [Plugin Marketplace](./plugins/marketplace.md)
   - [Publishing a Marketplace](./plugins/marketplace-publishing.md)
   - [Security Model](./plugins/security.md)
