@@ -190,7 +190,7 @@
 
   &__provider {
     display: grid;
-    grid-template-columns: 8px minmax(0, 1fr) 42px 48px;
+    grid-template-columns: 8px minmax(0, 1fr) 42px auto;
     align-items: start;
     gap: 8px;
     padding: 7px 0;
