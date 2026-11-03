@@ -39,6 +39,38 @@ pub fn storage_version(path: &Path) -> io::Result<Option<u32>> {
     )))
 }
 
+/// Loads every legacy record without changing the source or skipping errors.
+///
+/// Schema migration must be all-or-nothing; unlike a salvage operation, one
+/// unreadable record invalidates the entire import. V1 normalization happens
+/// only on a temporary copy, and the original metadata is retained.
+pub fn load_legacy_typed<K, V>(source: &Path) -> io::Result<BPlusTree<K, V>>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    let version = storage_version(source)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not a B+Tree"))?;
+    let normalized_source = migration_source(source, version)?;
+    let read_path = normalized_source.as_deref().unwrap_or(source);
+    let result = (|| {
+        let mut query = v2::BPlusTreeQuery::<K, V>::try_new(read_path)?;
+        let mut tree = BPlusTree::new();
+        tree.set_metadata(legacy_metadata(read_path)?);
+        for entry in query.range_iter(Bound::Unbounded, Bound::Unbounded) {
+            let (key, value) = entry.map_err(crate::common::BPlusTreeError::to_io)?;
+            if tree.query(&key).is_some() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "legacy database contains duplicate keys"));
+            }
+            tree.insert(key, value);
+        }
+        Ok(tree)
+    })();
+    if let Some(temporary) = normalized_source {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
 fn migration_source(path: &Path, version: u32) -> io::Result<Option<PathBuf>> {
     if version == LEGACY_V2 {
         return Ok(None);
@@ -520,6 +552,11 @@ mod tests {
         bytes[pos + 7] = 0x00;
         bytes[pos + 8] = 0x00;
         std::fs::write(&path, &bytes)?;
+
+        // Schema migration must refuse the same input that an explicit salvage
+        // operation below is allowed to import with a skipped record.
+        assert!(super::load_legacy_typed::<u32, String>(&path).is_err());
+        assert_eq!(std::fs::read(&path)?, bytes);
 
         let validation = migrate_v2_typed::<u32, String>(&path)?;
         assert_eq!(validation.entries, 2);

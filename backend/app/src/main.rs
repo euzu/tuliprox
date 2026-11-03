@@ -45,7 +45,7 @@ use crate::{
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use log::{error, info, warn};
 use shared::{
     defaults::{CONFIG_FILE, CONFIG_PATH, DEFAULT_STORAGE_DIR, SOURCE_FILE},
@@ -75,6 +75,10 @@ use tuliprox_repository as repository;
 #[command(author = "euzu <euzu@proton.me>")]
 #[command(version)]
 #[command(about = "Extended playlist proxy", long_about = None)]
+#[command(group(ArgGroup::new("user_db_operation").args([
+    "user_db_get", "user_db_check", "user_db_set", "inspect_user_db", "repair_user_db"
+])))]
+#[command(group(ArgGroup::new("user_db_input_operation").args(["user_db_check", "user_db_set"])))]
 struct Args {
     /// Path to .env file for environment variable overrides
     #[arg(short = 'e', long = "env-file")]
@@ -178,11 +182,95 @@ struct Args {
     db_type: Option<String>,
 
     /// Skip creating a backup file before migration
-    #[arg(long = "no-backup", default_value_t = false)]
+    #[arg(long = "no-backup", default_value_t = false, requires = "migrate_db", conflicts_with = "user_db_operation")]
     no_backup: bool,
+
+    /// Read user repair fields as JSON without changing the database
+    #[arg(long = "user-db-get", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    user_db_get: Option<PathBuf>,
+
+    /// Validate the complete user database and optional edited export without writing
+    #[arg(long = "user-db-check", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    user_db_check: Option<PathBuf>,
+
+    /// Import a checked user repair export offline, creating a backup before replacement
+    #[arg(long = "user-db-set", value_name = "PATH", requires = "user_db_input", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    user_db_set: Option<PathBuf>,
+
+    /// Edited JSON export to validate or import
+    #[arg(long = "input", value_name = "PATH", requires = "user_db_input_operation", conflicts_with_all = ["user_db_get", "inspect_user_db", "repair_user_db", "inspect_db", "migrate_db"])]
+    user_db_input: Option<PathBuf>,
+
+    /// Write a new JSON export file instead of printing JSON to stdout
+    #[arg(long = "output", value_name = "PATH", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_user_db", "repair_user_db", "inspect_db", "migrate_db"])]
+    user_db_output: Option<PathBuf>,
+
+    /// Read only this user key; partial exports cannot be imported
+    #[arg(long = "user", value_name = "KEY", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_user_db", "repair_user_db", "inspect_db", "migrate_db"])]
+    user_db_user: Option<String>,
+
+    /// Inspect an API user database and its recovery history without changing either
+    #[arg(
+        long = "inspect-user-db",
+        hide = true,
+        value_name = "PATH",
+        conflicts_with_all = ["repair_user_db", "inspect_db", "migrate_db"]
+    )]
+    inspect_user_db: Option<PathBuf>,
+
+    /// Repair an API user database offline, creating an automatic archive first
+    #[arg(
+        long = "repair-user-db",
+        hide = true,
+        value_name = "PATH",
+        conflicts_with_all = ["inspect_user_db", "inspect_db", "migrate_db"]
+    )]
+    repair_user_db: Option<PathBuf>,
+
+    /// JSON decisions for ambiguous API users; valid only with --repair-user-db
+    #[arg(long = "user-db-decisions", hide = true, value_name = "PATH", requires = "repair_user_db", conflicts_with_all = ["user_db_get", "user_db_check", "user_db_set"])]
+    user_db_decisions: Option<PathBuf>,
+
+    /// Write a new decision template with stored user context and unresolved fields; valid only with --inspect-user-db
+    #[arg(long = "user-db-decision-template", hide = true, value_name = "PATH", requires = "inspect_user_db", conflicts_with_all = ["user_db_get", "user_db_check", "user_db_set"])]
+    user_db_decision_template: Option<PathBuf>,
 }
 
 impl Args {
+    fn database_command(&self) -> Option<repository::DatabaseCommand<'_>> {
+        use repository::DatabaseCommand;
+
+        if let Some(path) = self.inspect_db.as_deref() {
+            return Some(DatabaseCommand::Inspect { path, db_type: self.db_type.as_deref() });
+        }
+        if let Some(path) = self.migrate_db.as_deref() {
+            return Some(DatabaseCommand::Migrate {
+                path,
+                db_type: self.db_type.as_deref(),
+                no_backup: self.no_backup,
+            });
+        }
+        if let Some(path) = self.user_db_get.as_deref() {
+            return Some(DatabaseCommand::UserGet {
+                path,
+                output: self.user_db_output.as_deref(),
+                user: self.user_db_user.as_deref(),
+            });
+        }
+        if let Some(path) = self.user_db_check.as_deref() {
+            return Some(DatabaseCommand::UserCheck { path, input: self.user_db_input.as_deref() });
+        }
+        if let Some(path) = self.user_db_set.as_deref() {
+            return Some(DatabaseCommand::UserSet { path, input: self.user_db_input.as_deref() });
+        }
+        if let Some(path) = self.inspect_user_db.as_deref() {
+            return Some(DatabaseCommand::InspectUser { path, template: self.user_db_decision_template.as_deref() });
+        }
+        self.repair_user_db
+            .as_deref()
+            .map(|path| DatabaseCommand::RepairUser { path, decisions: self.user_db_decisions.as_deref() })
+    }
+
     fn db_viewer_args(&self) -> repository::DbViewerArgs<'_> {
         repository::DbViewerArgs::new(
             self.db_xtream_file_name.as_deref(),
@@ -205,87 +293,6 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 // #[allow(non_upper_case_globals)]
 // #[export_name = "malloc_conf"]
 // pub static malloc_conf: &[u8] = b"lg_prof_interval:25,prof:true,prof_leak:true,prof_active:true,prof_prefix:/tmp/jeprof\0";
-
-fn format_hex_id(id: &[u8; 16]) -> String {
-    use std::fmt::Write;
-    let mut hex = String::with_capacity(32);
-    for b in id {
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex
-}
-
-fn handle_inspect_db(db_path: &Path, db_type: Option<&str>) {
-    match repository::inspect_single_database(db_path, db_type) {
-        Ok(report) => {
-            println!("=== B+Tree Database Inspection ===");
-            println!("Path:              {}", report.path.display());
-            println!("File Size:         {} bytes", report.file_size);
-            if let Some(v) = report.version {
-                println!("Storage Version:   V{v}");
-            } else {
-                println!("Storage Version:   Not a B+Tree file");
-            }
-            println!("Database Type:     {}", report.kind);
-            println!("Healthy Entries:   {}", report.live_entries);
-            if report.corrupted_entries > 0 {
-                println!(
-                    "Corrupted Entries: {} (corrupted LZ4 blocks or deserialization errors)",
-                    report.corrupted_entries
-                );
-            } else {
-                println!("Corrupted Entries: 0");
-            }
-            if let Some(id) = report.database_id {
-                println!("Database ID:       {}", format_hex_id(&id));
-            }
-            if let Some(gen) = report.generation {
-                println!("Generation:        {gen}");
-            }
-            std::process::exit(0);
-        }
-        Err(err) => {
-            eprintln!("Error inspecting database: {err}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) {
-    let make_backup = !no_backup;
-    match repository::migrate_single_database(db_path, db_type, make_backup) {
-        Ok(report) => {
-            if report.already_current {
-                println!(
-                    "Database is already at storage version 3 (current). No migration needed: {}",
-                    report.path.display()
-                );
-                std::process::exit(0);
-            }
-            println!("=== B+Tree Database Migration Complete ===");
-            println!("Path:              {}", report.path.display());
-            println!("Version:           V{} -> V{}", report.original_version, report.target_version);
-            println!("Database Type:     {}", report.kind);
-            if let Some(ref bp) = report.backup_path {
-                println!("Backup Created:    {}", bp.display());
-            }
-            println!("Recovered Entries: {}", report.live_entries);
-            if report.corrupted_entries > 0 {
-                println!("Corrupted Skipped: {} (unreadable records safely bypassed)", report.corrupted_entries);
-            } else {
-                println!("Corrupted Skipped: 0");
-            }
-            println!("Database ID:       {}", format_hex_id(&report.database_id));
-            println!("Generation:        {}", report.generation);
-            println!("Status:            SUCCESS (valid V3 database)");
-            std::process::exit(0);
-        }
-        Err(err) => {
-            eprintln!("Error migrating database: {err}");
-            std::process::exit(1);
-        }
-    }
-}
 
 async fn run_mcp_stdio(mcp_url: Option<&str>) -> i32 {
     let default_url = format!("http://127.0.0.1:{}", shared::defaults::DEFAULT_PORT);
@@ -330,12 +337,8 @@ async fn main() {
         std::process::exit(run_mcp_stdio(args.mcp_url.as_deref()).await);
     }
 
-    if let Some(ref db_path) = args.inspect_db {
-        handle_inspect_db(db_path, args.db_type.as_deref());
-    }
-
-    if let Some(ref db_path) = args.migrate_db {
-        handle_migrate_db(db_path, args.db_type.as_deref(), args.no_backup);
+    if let Some(command) = args.database_command() {
+        repository::run_database_command(command);
     }
 
     db_viewer(&args.db_viewer_args());

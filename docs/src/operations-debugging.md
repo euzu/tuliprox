@@ -8,10 +8,10 @@ This chapter covers the Command Line Interface (CLI), Logging architecture, and 
 
 ## 1. Command Line Arguments (CLI Flags)
 
-While Tuliprox is usually run via Docker, understanding the CLI flags is crucial for debugging and manual interventions.
+Tuliprox supports the same CLI flags when run as a native binary or through Docker.
 
 | Flag                     | Purpose & Technical Background                                                                                                                                                                                                                                                  |
-|:-------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `-s, --server`           | Starts continuous Server Mode (API, Web UI, Background Workers). Without this flag, Tuliprox acts as a "One-Shot" playlist generator that downloads, processes, and immediately exits.                                                                                          |
 | `-H, --home <DIR>`       | Sets the Home Directory. All relative paths in the configuration are resolved against this directory. If not set, resolves via `TULIPROX_HOME` env variable, or finally the binary's directory.                                                                                 |
 | `-c, -i, -a, -m, -T`     | Overrides specific config paths (e.g., `-c /etc/tuliprox/config.yml`). Useful for testing experimental configurations without altering the production setup.                                                                                                                    |
@@ -25,6 +25,12 @@ While Tuliprox is usually run via Docker, understanding the CLI flags is crucial
 | `--migrate-db <PATH>`    | **Database Migration:** Migrates a legacy (V1/V2) database to B+Tree V3. Automatically creates a timestamped backup before migrating. Recovers all healthy records and bypasses damaged entries.                                                                                |
 | `--db-type <TYPE>`       | Explicit database type override for inspection/migration (`series`, `xtream`, `target-xtream`, `m3u`, `target-m3u`, `epg`, etc.). Auto-detected if omitted.                                                                                                                     |
 | `--no-backup`            | Skips creating a `.bak.<timestamp>` file before running `--migrate-db`.                                                                                                                                                                                                         |
+| `--user-db-get <PATH>`   | Read every user's repair fields as JSON. With `--output <FILE>`, create a new editable export; `--user <KEY>` selects one user for inspection.                                                                                                                                  |
+| `--user-db-check <PATH>` | Validate the database or an edited export supplied with `--input <FILE>` without writing database or recovery files.                                                                                                                                                            |
+| `--user-db-set <PATH>`   | Import a complete edited export with `--input <FILE>`, repeat validation, and create a backup before all-or-nothing repair.                                                                                                                                                     |
+| `--input <FILE>`         | Complete JSON user export for `--user-db-check` or `--user-db-set`.                                                                                                                                                                                                             |
+| `--output <FILE>`        | New JSON output file for `--user-db-get`; existing files are never overwritten.                                                                                                                                                                                                 |
+| `--user <KEY>`           | Select one user key for `--user-db-get`; partial exports cannot be imported.                                                                                                                                                                                                    |
 
 ---
 
@@ -352,6 +358,9 @@ Tuliprox uses a custom B+Tree storage engine. Starting with version 3.3.x, the e
 During startup or container updates, Tuliprox automatically migrates legacy V1 and V2 database files (such as `series.db`,
 `live.db`, `video.db`, `m3u_*.db`, `epg.db`) to V3.
 
+> **API user exception:** Do not use the generic salvage command for `api_user.db`; dropping one unreadable user is not safe.
+> Use [API User Database Offline Repair](#api-user-database-offline-repair), which requires every user to be recovered.
+
 ### Standalone Migration & Inspection Script (`bin/migrate_db.sh`)
 
 If you want to manually verify, repair, or migrate a database file before starting the server—or if you need to run migration
@@ -425,6 +434,17 @@ Alternatively, invoke `tuliprox` directly via `docker exec`:
 ```bash
 docker exec -it tuliprox tuliprox --migrate-db /app/data/input_dir/series.db
 ```
+
+### API User Database Offline Repair
+
+Use `--user-db-get` to export the users, resolve unassigned plan/filter values, and validate the edited file with
+`--user-db-check`. Apply the validated file with `--user-db-set`, which creates a backup before repairing the database.
+Unresolved values, invalid input or changed source data prevent the repair. Users are not skipped.
+
+The [step-by-step example](./troubleshooting.md#6-api-user-database-migration-manual-docker-repair) uses a backup of the
+original configuration and a separate working copy. It covers export, editing, validation, repair and the final check.
+
+Repair archives named `api_user_repair_backup_*` are excluded from startup scanning.
 
 ---
 

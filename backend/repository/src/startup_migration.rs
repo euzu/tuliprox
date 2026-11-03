@@ -9,16 +9,16 @@ use super::{
     bplustree::{typed_migration, BPlusTree, BPlusTreeQuery, MAGIC, STORAGE_VERSION},
     MetadataRetryDbKey, MetadataRetryDbValue,
 };
+#[cfg(test)]
+use crate::api_user_recovery::{StoredApiUserV2, StoredApiUserV3, StoredApiUserV4, StoredApiUserV5, StoredApiUserV6};
 use crate::{
-    api_user_recovery::{
-        StoredApiUserV1, StoredApiUserV2, StoredApiUserV3, StoredApiUserV4, StoredApiUserV5, StoredApiUserV6,
-        StoredApiUserV7,
-    },
+    api_user_recovery::{decode_user_record, ApiUserRecovery, ApiUserRepository, StoredApiUserV7},
     qos_snapshot_repository::{QosAggregationCheckpoint, QosSnapshotRecord},
     storage_const,
     target_id_mapping::VirtualIdRecord,
 };
 use log::{info, trace, warn};
+use serde_json::Value;
 // Only the migration tests build the legacy records now that the layouts
 // themselves live in `api_user_recovery`.
 #[cfg(test)]
@@ -32,6 +32,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tuliprox_btree::{publish_staged_database, BPlusTreeMetadata, BPlusTreeStagingArtifacts};
 
 const LEGACY_STORAGE_VERSION: u32 = 1;
 const MARKER_FILE_GUARD_PREFIX: &str = ".db_mergeto_v";
@@ -63,10 +64,11 @@ impl BPlusTreeStartupMigrator {
 
     pub fn run(&self) -> io::Result<BPlusTreeMigrationStats> {
         let mut stats = BPlusTreeMigrationStats::default();
-        self.cleanup_legacy_root_markers(self.migration_marker_path.as_deref())?;
+        let marker_path = self.migration_marker_path.as_deref().filter(|path| !Self::is_repair_archive_location(path));
+        self.cleanup_legacy_root_markers(marker_path)?;
         let resolved_roots = Self::resolve_scan_roots(&self.roots);
         let roots_fingerprint = Self::roots_fingerprint(&resolved_roots);
-        if let Some(marker_path) = &self.migration_marker_path {
+        if let Some(marker_path) = marker_path {
             stats.marker_was_current = Self::marker_matches(marker_path, &roots_fingerprint)?;
         }
         for root in &resolved_roots {
@@ -86,7 +88,7 @@ impl BPlusTreeStartupMigrator {
             }
         }
 
-        if let Some(marker_path) = &self.migration_marker_path {
+        if let Some(marker_path) = marker_path {
             Self::write_migration_marker(marker_path, &roots_fingerprint)?;
         }
 
@@ -99,9 +101,7 @@ impl BPlusTreeStartupMigrator {
         let mut visited_roots: HashSet<PathBuf> = HashSet::new();
 
         for root in &self.roots {
-            if !root.exists() || !root.is_dir() {
-                continue;
-            }
+            let Some(root) = Self::resolve_scan_root(root) else { continue };
             if !visited_roots.insert(root.clone()) {
                 continue;
             }
@@ -154,12 +154,9 @@ impl BPlusTreeStartupMigrator {
 
         // Normalize paths (canonicalize where possible)
         for root in roots {
-            if !root.exists() || !root.is_dir() {
-                continue;
+            if let Some(root) = Self::resolve_scan_root(root) {
+                resolved.push(root);
             }
-            // Try to resolve the absolute/real path, fall back to the original path on failure
-            let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            resolved.push(canon);
         }
 
         // Sort paths so parent directories come before child directories
@@ -177,6 +174,33 @@ impl BPlusTreeStartupMigrator {
         }
 
         final_roots
+    }
+
+    fn is_repair_archive_path(path: &Path) -> bool {
+        path.components().any(|component| {
+            component
+                .as_os_str()
+                .as_encoded_bytes()
+                .starts_with(storage_const::API_USER_REPAIR_BACKUP_PREFIX.as_bytes())
+        })
+    }
+
+    fn resolve_scan_root(root: &Path) -> Option<PathBuf> {
+        if Self::is_repair_archive_path(root) || !root.is_dir() {
+            return None;
+        }
+        let resolved = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        (!Self::is_repair_archive_path(&resolved)).then_some(resolved)
+    }
+
+    fn is_repair_archive_location(path: &Path) -> bool {
+        // Marker paths may not exist yet, or may reach an archive through a
+        // symlink. Resolve the nearest existing ancestor before any marker I/O.
+        Self::is_repair_archive_path(path)
+            || path
+                .ancestors()
+                .find_map(|ancestor| std::fs::canonicalize(ancestor).ok())
+                .is_some_and(|resolved| Self::is_repair_archive_path(&resolved))
     }
 
     fn roots_fingerprint(roots: &[PathBuf]) -> String {
@@ -215,6 +239,9 @@ impl BPlusTreeStartupMigrator {
                     continue;
                 }
                 if file_type.is_dir() {
+                    if Self::is_repair_archive_path(&path) {
+                        continue;
+                    }
                     if visited.insert(path.clone()) {
                         queue.push_back(path);
                     }
@@ -837,7 +864,7 @@ fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VE
 // writes a merge-guard marker so that config-driven user merges cannot
 // overwrite the freshly migrated data.
 
-fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
+pub(crate) fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
     if !merge_guard_path.exists() {
         std::fs::write(merge_guard_path, b"")?;
     }
@@ -846,123 +873,127 @@ fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
 
 pub fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf { config_dir.join(MARKER_FILE_API_USER_GUARD) }
 
-fn migrate_legacy_user_schema<SourceV, Map>(db_path: &Path, merge_guard_path: &Path, map: Map) -> io::Result<bool>
-where
-    SourceV: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
-    Map: FnMut(SourceV) -> StoredApiUserV7,
-{
-    if typed_migration::migrate_v2_typed_map::<String, SourceV, StoredApiUserV7, _>(db_path, map).is_err() {
-        return Ok(false);
+/// Reads the complete source without silently overwriting duplicate user keys.
+pub(crate) fn load_user_records(db_path: &Path, storage_version: u32) -> io::Result<BPlusTree<String, Value>> {
+    if storage_version != STORAGE_VERSION {
+        return typed_migration::load_legacy_typed(db_path);
     }
-    create_user_db_merge_guard(merge_guard_path)?;
-    Ok(true)
+    let mut query = BPlusTreeQuery::<String, Value>::try_new(db_path)?;
+    let mut records = BPlusTree::new();
+    records.set_metadata(query.metadata().clone());
+    for entry in query.iter() {
+        let (key, value) = entry?;
+        if records.query(&key).is_some() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "user database contains duplicate keys"));
+        }
+        records.insert(key, value);
+    }
+    Ok(records)
 }
 
-fn migrate_current_user_schema<SourceV, Map>(db_path: &Path, merge_guard_path: &Path, map: Map) -> io::Result<bool>
-where
-    SourceV: for<'de> serde::Deserialize<'de>,
-    Map: Fn(&SourceV) -> StoredApiUserV7,
-{
-    let Ok(tree) = BPlusTree::<String, SourceV>::load(db_path) else {
-        return Ok(false);
-    };
-    let mut v7_tree = BPlusTree::new();
-    for (key, user) in &tree {
-        v7_tree.insert(key.clone(), map(user));
+/// Read-only variant for the offline inspector. A pending V3 WAL is reported
+/// instead of being replayed as a side effect of opening the database.
+pub(crate) fn load_user_records_read_only(
+    db_path: &Path,
+    storage_version: u32,
+) -> io::Result<BPlusTree<String, Value>> {
+    if storage_version != STORAGE_VERSION {
+        return typed_migration::load_legacy_typed(db_path);
     }
-    v7_tree.store(db_path)?;
-    create_user_db_merge_guard(merge_guard_path)?;
-    Ok(true)
+    let mut query = BPlusTreeQuery::<String, Value>::try_new_read_only(db_path)?;
+    let mut records = BPlusTree::new();
+    records.set_metadata(query.metadata().clone());
+    for entry in query.iter() {
+        let (key, value) = entry?;
+        if records.query(&key).is_some() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "user database contains duplicate keys"));
+        }
+        records.insert(key, value);
+    }
+    Ok(records)
 }
 
-/// Migrates the user database file from V1-V6 schema to V7 (current) in
-/// place and creates a merge-guard file so config-driven merges are skipped
-/// until the operator explicitly removes it.
+/// Publishes only a fully decoded and verified set of migrated users.
+fn store_migrated_users(db_path: &Path, users: &mut BPlusTree<String, StoredApiUserV7>) -> io::Result<()> {
+    let name = db_path.file_name().ok_or_else(|| io::Error::other("user database has no file name"))?;
+    let staging = db_path.with_file_name(format!("{}.{}.v3.tmp", name.to_string_lossy(), uuid::Uuid::new_v4()));
+    let artifacts = BPlusTreeStagingArtifacts::new(db_path, &staging)?;
+    let result = (|| {
+        users.store(&staging)?;
+        let verified = BPlusTree::<String, StoredApiUserV7>::load(&staging)?;
+        if verified.len() != users.len() || verified.get_metadata() != users.get_metadata() {
+            return Err(io::Error::other("migrated user count or database metadata did not verify"));
+        }
+        for (key, expected) in &*users {
+            let actual = verified.query(key).ok_or_else(|| io::Error::other("migrated user is missing"))?;
+            if ApiUserRecovery::from(actual) != ApiUserRecovery::from(expected) {
+                return Err(io::Error::other("migrated user fields did not verify"));
+            }
+        }
+        publish_staged_database::<String, StoredApiUserV7>(&staging, db_path)
+    })();
+    if let Err(error) = artifacts.remove_owned_staging_artifacts() {
+        warn!("Could not remove user migration staging artifacts: {error}");
+    }
+    result
+}
+
+/// Normalizes historical and compact user records to the full V7 layout.
 ///
-/// Returns `true` when a migration was performed, `false` when the file was
-/// already in V7 format or did not exist.
+/// Tracked databases are repaired only from history matching their identity and
+/// revision. Untracked records are decoded individually, without skipping any
+/// invalid or ambiguous entry. Publication happens after all records verify.
+/// Returns whether the user value schema changed; a storage-only upgrade still
+/// writes V3 but does not create the user merge guard.
 pub(crate) fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result<bool> {
     if !db_path.exists() {
         return Ok(false);
     }
-
+    let root = db_path.parent().ok_or_else(|| io::Error::other("user database has no parent directory"))?;
+    let _use_guard = tuliprox_btree::RecoveryUseGuard::try_acquire(&tuliprox_btree::RecoveryPaths {
+        database: db_path.to_path_buf(),
+        directory: root.join("api_user_recovery"),
+    })?;
     let storage_version = typed_migration::storage_version(db_path)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "user database is not a B+Tree"))?;
-    if storage_version <= 2 {
-        if typed_migration::migrate_v2_typed::<String, StoredApiUserV7>(db_path).is_ok() {
+    if !matches!(storage_version, 1 | 2) && storage_version != STORAGE_VERSION {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported user B+Tree storage version"));
+    }
+    if storage_version == STORAGE_VERSION {
+        if BPlusTree::<String, StoredApiUserV7>::load(db_path).is_ok() {
             return Ok(false);
         }
-        if migrate_legacy_user_schema::<StoredApiUserV6, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV7::from_v6(&user)
-        })? {
+        let tracked = {
+            let query = BPlusTreeQuery::<String, Value>::try_new(db_path)?;
+            matches!(query.metadata(), BPlusTreeMetadata::Recovery(_))
+        };
+        if tracked {
+            let root = db_path.parent().ok_or_else(|| io::Error::other("user database has no parent directory"))?;
+            ApiUserRepository::rebuild_from_history(db_path, root)?;
+            create_user_db_merge_guard(merge_guard_path)?;
             return Ok(true);
         }
-        if migrate_legacy_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV7::from_v5(&user)
-        })? {
-            return Ok(true);
-        }
-        if migrate_legacy_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV7::from_v4(&user)
-        })? {
-            return Ok(true);
-        }
-        if migrate_legacy_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV7::from_v3(&user)
-        })? {
-            return Ok(true);
-        }
-        if migrate_legacy_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV7::from_v2(&user)
-        })? {
-            return Ok(true);
-        }
-        if migrate_legacy_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV7::from_v1(&user)
-        })? {
-            return Ok(true);
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Legacy user DB at '{}' could not be read as V1, V2, V3, V4, V5, V6, or V7", db_path.display()),
-        ));
-    }
-    if storage_version != STORAGE_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Unsupported user B+Tree storage version {storage_version} in {}", db_path.display()),
-        ));
     }
 
-    if BPlusTree::<String, StoredApiUserV7>::load(db_path).is_ok() {
-        return Ok(false);
+    let source = load_user_records(db_path, storage_version)?;
+    let mut users = BPlusTree::new();
+    users.set_metadata(source.get_metadata().clone());
+    let mut schema_changed = false;
+    for (key, value) in &source {
+        schema_changed |= value.as_array().is_none_or(|fields| fields.len() != 21);
+        let user = decode_user_record(value.clone()).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("user key {}: {error}", serde_json::to_string(key).unwrap_or_default()),
+            )
+        })?;
+        users.insert(key.clone(), user);
     }
-    if migrate_current_user_schema::<StoredApiUserV6, _>(db_path, merge_guard_path, StoredApiUserV7::from_v6)? {
-        return Ok(true);
+    store_migrated_users(db_path, &mut users)?;
+    if schema_changed {
+        create_user_db_merge_guard(merge_guard_path)?;
     }
-    if migrate_current_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, StoredApiUserV7::from_v5)? {
-        return Ok(true);
-    }
-    if migrate_current_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, StoredApiUserV7::from_v4)? {
-        return Ok(true);
-    }
-    if migrate_current_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, StoredApiUserV7::from_v3)? {
-        return Ok(true);
-    }
-    if migrate_current_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, StoredApiUserV7::from_v2)? {
-        return Ok(true);
-    }
-    if migrate_current_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, StoredApiUserV7::from_v1)? {
-        return Ok(true);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "User DB at '{}' exists but could not be read as V1, V2, V3, V4, V5, V6, or V7 format",
-            db_path.display()
-        ),
-    ))
+    Ok(schema_changed)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -972,8 +1003,8 @@ pub struct AllStartupMigrationStats {
 }
 
 /// Runs all startup migrations in sequence:
-/// 1. B+Tree storage-format migration (V1 -> current binary format)
-/// 2. User DB schema migration (V1-V6 -> V7 `MessagePack` layout)
+/// 1. User DB normalization/recovery into the full V7 layout and current storage format
+/// 2. Storage-format migration for the remaining B+Tree databases
 ///
 /// `config_dir` is the directory that contains `api_user.db` and the merge-guard
 /// marker. `storage_dir` is used for the B+Tree migration marker.
@@ -984,7 +1015,8 @@ fn run_all_startup_migrations(
 ) -> io::Result<AllStartupMigrationStats> {
     let user_db_path = config_dir.join(storage_const::API_USER_DB_FILE);
     let merge_guard_path = user_db_merge_guard_path(config_dir);
-    let user_db_migrated = migrate_user_db_schema(&user_db_path, &merge_guard_path)?;
+    let user_db_migrated = migrate_user_db_schema(&user_db_path, &merge_guard_path)
+        .map_err(|error| crate::user_db_repair::user_db_repair_error(&user_db_path, &error))?;
     let marker_path = bplustree_migration_marker_path(storage_dir);
     let bplustree = BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()?;
 
@@ -1022,7 +1054,7 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
                 );
             }
             if stats.user_db_migrated {
-                info!("User DB schema migrated to V6");
+                info!("User DB schema migrated to V7");
             }
         }
         Err(err) => {

@@ -369,6 +369,83 @@ impl StoredApiUserV7 {
     pub(crate) fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v6(&StoredApiUserV6::from_v1(v1)) }
 }
 
+/// Reads one historical record without guessing which optional string was omitted.
+///
+/// The former V7 writer skipped empty trailing fields individually. A single
+/// surviving string can be either a plan or a filter, so only field-named
+/// recovery history can resolve that case automatically.
+pub(crate) enum UserRecordDecode {
+    Complete(StoredApiUserV7),
+    Ambiguous { user: StoredApiUserV7, value: String },
+}
+
+pub(crate) fn classify_user_record(value: Value) -> io::Result<UserRecordDecode> {
+    let Value::Array(mut fields) = value else {
+        return Err(invalid("stored user record is not a positional array"));
+    };
+    match fields.len() {
+        13 => {
+            return decode_record(Value::Array(fields))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v1(&user)))
+        }
+        14 => {
+            return decode_record(Value::Array(fields))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v2(&user)))
+        }
+        15 => {
+            return decode_record(Value::Array(fields))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v3(&user)))
+        }
+        17 => {
+            return decode_record(Value::Array(fields))
+                .map(|user| UserRecordDecode::Complete(StoredApiUserV7::from_v4(&user)))
+        }
+        18..=20 => {}
+        21 => return decode_record(Value::Array(fields)).map(UserRecordDecode::Complete),
+        _ => return Err(invalid("stored user record has an unsupported field count")),
+    }
+    let trailing = fields.split_off(18);
+    let base: StoredApiUserV5 = decode_record(Value::Array(fields))?;
+    let mut user = StoredApiUserV7::from_v5(&base);
+    match trailing.as_slice() {
+        [] | [Value::Null] => {}
+        [Value::String(value)] => {
+            return Ok(UserRecordDecode::Ambiguous { user, value: value.clone() });
+        }
+        [network] => user.network_access = Some(decode_record(network.clone())?),
+        [Value::String(plan), Value::String(filter)] => {
+            user.plan = Some(plan.clone());
+            user.filter = Some(filter.clone());
+        }
+        [network, Value::String(value)] if !network.is_null() => {
+            user.network_access = Some(decode_record(network.clone())?);
+            return Ok(UserRecordDecode::Ambiguous { user, value: value.clone() });
+        }
+        _ => return Err(invalid("stored user record has an invalid compact V7 layout")),
+    }
+    Ok(UserRecordDecode::Complete(user))
+}
+
+pub(crate) fn decode_user_record(value: Value) -> io::Result<StoredApiUserV7> {
+    match classify_user_record(value)? {
+        UserRecordDecode::Complete(user) => Ok(user),
+        UserRecordDecode::Ambiguous { .. } => Err(ambiguous_user_record()),
+    }
+}
+
+fn decode_record<T: serde::de::DeserializeOwned>(value: Value) -> io::Result<T> {
+    // Serde errors can quote a value; database credentials must never enter logs.
+    serde_json::from_value(value).map_err(|_| invalid("stored user record contains an invalid field"))
+}
+
+fn ambiguous_user_record() -> io::Error {
+    invalid(
+        "ambiguous compact V7 user record: the remaining string may be either plan or filter; \
+         restore matching api_user_recovery history or recover an explicitly field-named user record; \
+         the original user database has not been replaced",
+    )
+}
+
 /// The normalized, field-named recovery record.
 ///
 /// Every legacy layout converges here before anything is written. Unlike the
@@ -405,7 +482,6 @@ pub(crate) struct ApiUserRecovery {
     pub filter: Option<String>,
 }
 
-#[cfg(test)]
 impl From<&StoredApiUserV7> for ApiUserRecovery {
     fn from(v7: &StoredApiUserV7) -> Self {
         Self {
@@ -521,7 +597,8 @@ impl RecoverySchema<String, StoredProxyUserCredentials> for ApiUserRecoverySchem
     }
 
     fn decode_current(&self, value: Value) -> io::Result<StoredProxyUserCredentials> {
-        let recovery: ApiUserRecovery = serde_json::from_value(value).map_err(|error| invalid(error.to_string()))?;
+        let recovery: ApiUserRecovery =
+            serde_json::from_value(value).map_err(|_| invalid("api user recovery record contains an invalid field"))?;
         Ok(StoredProxyUserCredentials::from(&recovery))
     }
 }
@@ -540,6 +617,49 @@ pub(crate) struct ApiUserRepository {
 }
 
 impl ApiUserRepository {
+    pub(crate) fn read_verified_history(
+        db_path: &Path,
+        recovery_root: &Path,
+    ) -> io::Result<(
+        tuliprox_btree::RecoveryVerificationReport,
+        std::collections::BTreeMap<String, StoredProxyUserCredentials>,
+    )> {
+        let paths =
+            RecoveryPaths { database: db_path.to_path_buf(), directory: recovery_root.join("api_user_recovery") };
+        Journal::read_rebuild_history(&paths, &ApiUserRecoverySchema)
+    }
+
+    pub(crate) fn verify_history(
+        db_path: &Path,
+        recovery_root: &Path,
+    ) -> io::Result<tuliprox_btree::RecoveryVerificationReport> {
+        let paths =
+            RecoveryPaths { database: db_path.to_path_buf(), directory: recovery_root.join("api_user_recovery") };
+        Journal::verify_rebuild_history(&paths, &ApiUserRecoverySchema)
+    }
+
+    /// Restores named fields only from verified history bound to this database.
+    pub(crate) fn rebuild_from_history(db_path: &Path, recovery_root: &Path) -> io::Result<RecoveryOpenReport> {
+        let paths =
+            RecoveryPaths { database: db_path.to_path_buf(), directory: recovery_root.join("api_user_recovery") };
+        Journal::rebuild_from_history(paths, ApiUserRecoverySchema, RecoveryPolicy::default())
+    }
+
+    pub(crate) fn rebuild_with_maintenance(
+        db_path: &Path,
+        recovery_root: &Path,
+        maintenance: &tuliprox_btree::RecoveryMaintenanceGuard,
+    ) -> io::Result<RecoveryOpenReport> {
+        let paths =
+            RecoveryPaths { database: db_path.to_path_buf(), directory: recovery_root.join("api_user_recovery") };
+        Journal::rebuild_from_history_with_maintenance(
+            paths,
+            ApiUserRecoverySchema,
+            RecoveryPolicy::default(),
+            maintenance,
+        )
+    }
+
     pub(crate) fn open(db_path: &Path, recovery_root: &Path) -> io::Result<(Self, RecoveryOpenReport)> {
         let paths =
             RecoveryPaths { database: db_path.to_path_buf(), directory: recovery_root.join("api_user_recovery") };

@@ -40,8 +40,9 @@ pub use recovery::RecoveryFaultPoint;
 // record means; the application supplies that through `RecoverySchema`.
 pub use recovery::{
     BPlusTreeRecoveryJournal, CheckpointOutcome, RecoveryBatch, RecoveryCommitReport, RecoveryErrorClass,
-    RecoveryHealth, RecoveryOpenAction, RecoveryOpenReport, RecoveryOperation, RecoveryPaths, RecoveryPolicy,
-    RecoveryRepositoryState, RecoverySchema, RecoveryStoragePlacement, RecoveryVerificationReport,
+    RecoveryHealth, RecoveryMaintenanceGuard, RecoveryOpenAction, RecoveryOpenReport, RecoveryOperation, RecoveryPaths,
+    RecoveryPolicy, RecoveryRepositoryState, RecoverySchema, RecoveryStoragePlacement, RecoveryUseGuard,
+    RecoveryVerificationReport,
 };
 // --- Sorted-index sidecar --------------------------------------------------
 /// Snapshot of a sorted-index sidecar that the database writer rewrites after its own commit.

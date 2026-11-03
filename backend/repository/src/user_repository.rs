@@ -18,7 +18,9 @@ use tuliprox_core::{
 };
 
 // V7 (current): added plan and filter. V1-V6 are migrated to V7 at startup
-// by `bplustree::run_all_startup_migrations`.
+// by `startup_migration::migrate_user_db_schema`.
+// MessagePack encodes fields positionally: empty optional fields must retain
+// their slots as nil so runtime writes remain readable as V7 on the next startup.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredProxyUserCredentials {
     pub target: String,
@@ -39,11 +41,11 @@ pub(crate) struct StoredProxyUserCredentials {
     pub priority: Option<i8>,
     pub soft_connections: Option<u16>,
     pub soft_priority: Option<i8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub network_access: Option<shared::model::NetworkAccessDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub plan: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub filter: Option<String>,
 }
 
@@ -142,7 +144,9 @@ fn api_user_recovery_root(cfg: &AppConfig) -> PathBuf { PathBuf::from(&cfg.paths
 fn open_api_user_repository(cfg: &AppConfig) -> Result<ApiUserRepository, Error> {
     let db_path = get_api_user_db_path(cfg);
     let recovery_root = api_user_recovery_root(cfg);
-    ApiUserRepository::open(&db_path, &recovery_root).map(|(repository, _report)| repository)
+    ApiUserRepository::open(&db_path, &recovery_root)
+        .map(|(repository, _report)| repository)
+        .map_err(|error| crate::user_db_repair::user_db_repair_error(&db_path, &error))
 }
 
 fn add_target_user_to_user_tree(
