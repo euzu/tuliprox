@@ -177,13 +177,25 @@ pub(super) fn HealthPopover(props: &HealthPopoverProps) -> Html {
         });
     }
     {
+        let anchor = props.anchor.clone();
+        let panel = props.panel.clone();
         let close = props.on_close.clone();
         use_effect_with((), move |()| {
             let listeners = web_sys::window().map(|window| {
+                let document = window.document();
                 let escape = close.clone();
                 [
                     EventListener::new(&window, "keydown", move |event| {
                         if event.dyn_ref::<KeyboardEvent>().is_some_and(|key| key.key() == "Escape") {
+                            let focused_panel = document
+                                .as_ref()
+                                .and_then(web_sys::Document::active_element)
+                                .zip(panel.cast::<Element>())
+                                .is_some_and(|(active, panel)| panel.contains(Some(&active)));
+                            // Restore focus before dismiss records the badge's focus state.
+                            if let Some(anchor) = anchor.cast::<HtmlElement>().filter(|_| focused_panel) {
+                                let _ = anchor.focus();
+                            }
                             escape.emit(());
                         }
                     }),
@@ -194,7 +206,7 @@ pub(super) fn HealthPopover(props: &HealthPopoverProps) -> Html {
         });
     }
     // A fixed sibling preserves the natural badge -> details -> toolbar Tab order.
-    // No portal/menu role, focus transfer or badge click handler surrounds this region.
+    // Opening does not move focus; Escape restores it only from inside the panel.
     html! {
         <section id={DETAILS_ID} ref={props.panel.clone()} class="tp__health-banner__popover"
             role="region" aria-label={props.label.clone()} tabindex="0"
