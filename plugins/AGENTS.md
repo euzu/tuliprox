@@ -107,8 +107,9 @@ Rules:
    `settings.<path>.title` and `settings.<path>.description` (`settings.title` for the root,
    `settings.routing.quiet_hours.title` for a nested field).
 2. `ui/locales/<lang>.json` is one **flat** JSON object of strings, one file per language. `en` is the fallback language
-   and always ships (the host enforces it as soon as a `title_key` is used). A key missing from a language falls back to `en`, and a value that is not a key is shown as written, so a
-   forgotten key shows as the raw key text, which is the symptom of a missing translation.
+   and always ships (the host enforces it as soon as a `title_key` is used).
+   A key missing from a language falls back to `en`, and a value that is not a key is shown as written, so a forgotten key shows as the raw
+   key text, which is the symptom of a missing translation.
 3. The manifest lists the languages: `ui: { locales: [en, ru, es, ar], config_section: { schema: config-schema.json } }`.
 4. Every language file has **exactly the same keys** as `en`. Translate for meaning, keep placeholders such as
    `${env:VAR}`, `{name}`, option names (`embed`, `notify_on`), units and code identifiers untouched. RTL languages need
@@ -197,7 +198,8 @@ mod plugin {
   `rest-notifier` (a generic webhook: the event as JSON, custom and secret headers, HMAC signing) and
   `command-notifier` (runs a local program, through the SDK `process` module) and
   `telegram-notifier` (a message that is split into parts and sent to several chats; it keeps the delivered units in the
-  KV store so the outbox's retry never repeats one): same shape, different services. A secret that is a list entry (a header) is a list whose `items` are `writeOnly`.
+  KV store so the outbox's retry never repeats one): same shape, different services.
+  A secret that is a list entry (a header) is a list whose `items` are `writeOnly`.
   Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a
   `DeliveryError`) and `notify::iso8601` (times), `notify::sections_of` (the event's sections) and, for a service that renders markdown,
   `notify::markdown` (escaping, hard line breaks, sections as bold headings).

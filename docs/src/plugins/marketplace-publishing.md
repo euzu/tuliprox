@@ -68,6 +68,17 @@ Each release:
 
 Unknown fields are ignored at every level. Texts are cleaned of control characters and cut to a sensible length.
 
+## Categories
+
+A plugin's `category` is one lowercase id, for example `notifier`. It is optional, and a plugin without one is only listed
+under `All`. The Marketplace shows a chip per category of the current search with its count.
+
+The Web UI has a translated name (English, Russian, Spanish and Arabic) for `notifier`, `playlist`, `epg`, `metadata`,
+`input`, `output`, `stream`, `automation` and `monitoring`. Any other valid id is shown with its words capitalised.
+
+Categories are normalised before they are counted: lower case, with separators turned into `-`. `EPG` and `epg` are one
+filter, and so are `Live TV` and `live_tv`.
+
 ## What happens with mistakes
 
 A problem in the whole file fails the sync and the operator keeps the previous catalog: invalid JSON, a bad

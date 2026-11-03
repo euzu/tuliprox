@@ -22,11 +22,11 @@ outbox apply exactly as for the built-in channels (see *Per-Channel Routing* in 
 
 ## Settings
 
-| Setting   | Default  | Description                                                                                              |
-|-----------|----------|----------------------------------------------------------------------------------------------------------|
-| `url`     | -        | The Slack incoming webhook URL. Write-only in the UI; use `${env:VAR}` to keep it out of the file.       |
+| Setting   | Default  | Description                                                                                                                                                               |
+| --------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`     | -        | The Slack incoming webhook URL. Write-only in the UI; use `${env:VAR}` to keep it out of the file.                                                                        |
 | `style`   | `blocks` | `blocks`: a header with the title, one block per section (or the body) and a footer with the event id, the instance and the time. `text`: the body as plain message text. |
-| `routing` | -        | The per-channel routing block, applied by tuliprox before the plugin is called.                          |
+| `routing` | -        | The per-channel routing block, applied by tuliprox before the plugin is called.                                                                                           |
 
 A warning or an error gets a `[warn]` or `[error]` marker in front of the header, because Slack has no severity field.
 
@@ -38,13 +38,13 @@ has at most 50 blocks. What does not fit is named in a last block.
 
 ## Delivery
 
-| Slack answers                            | Result                                                |
-|------------------------------------------|-------------------------------------------------------|
-| 2xx                                      | delivered                                             |
-| 429, 408                                 | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
-| 5xx except 501 and 505                   | retried with backoff                                  |
-| 501, 505, 3xx and every other 4xx        | dead-lettered                                         |
-| no answer within 25 s                    | retried with backoff                                  |
+| Slack answers                     | Result                                                           |
+| --------------------------------- | ---------------------------------------------------------------- |
+| 2xx                               | delivered                                                        |
+| 429, 408                          | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
+| 5xx except 501 and 505            | retried with backoff                                             |
+| 501, 505, 3xx and every other 4xx | dead-lettered                                                    |
+| no answer within 25 s             | retried with backoff                                             |
 
 The webhook URL never appears in a log line or an error message.
 

@@ -26,12 +26,12 @@ outbox apply exactly as for the built-in channels (see *Per-Channel Routing* in 
 
 ## Settings
 
-| Setting     | Default | Description                                                                                                  |
-|-------------|---------|--------------------------------------------------------------------------------------------------------------|
-| `bot_token` | -       | The bot's API token (`<id>:<secret>`). Write-only in the UI; use `${env:VAR}` to keep it out of the file.    |
+| Setting     | Default | Description                                                                                                                 |
+| ----------- | ------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `bot_token` | -       | The bot's API token (`<id>:<secret>`). Write-only in the UI; use `${env:VAR}` to keep it out of the file.                   |
 | `chat_ids`  | -       | The chats to send to: `<chat_id>`, `<chat_id>:<thread_id>` or `@channel`. The bot must be a member (or admin of a channel). |
-| `style`     | `html`  | `html`: the title and the section headings in bold. `text`: plain text.                                      |
-| `routing`   | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                              |
+| `style`     | `html`  | `html`: the title and the section headings in bold. `text`: plain text.                                                     |
+| `routing`   | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                                             |
 
 Migrating from the built-in channel: `bot_token` and `chat_ids` keep their meaning and format. `markdown: true` is replaced by
 `style: html`; the plugin does not use MarkdownV2 and does not read `messaging_templates/telegram_*.templ`.
@@ -54,12 +54,12 @@ One `sendMessage` per chat and part, `POST https://api.telegram.org/bot<token>/s
 A *unit* is one part for one chat. The plugin remembers the delivered units in its key-value store (for at most three days,
 and at most 100 notifications at once), so a retry sends only what is missing.
 
-| Telegram answers                                   | Result                                                          |
-|----------------------------------------------------|-----------------------------------------------------------------|
-| 2xx                                                | the unit is delivered                                           |
-| 429                                                | retried after Telegram's `retry_after` (or `Retry-After`), at most 24 h |
-| 5xx except 501 and 505, no answer within 10 s      | retried with backoff                                            |
-| 400 (chat not found), 403 (bot blocked or removed), 401 (wrong token) and other 4xx | that chat is given up on; its remaining parts are not sent |
+| Telegram answers                                                                    | Result                                                                  |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 2xx                                                                                 | the unit is delivered                                                   |
+| 429                                                                                 | retried after Telegram's `retry_after` (or `Retry-After`), at most 24 h |
+| 5xx except 501 and 505, no answer within 10 s                                       | retried with backoff                                                    |
+| 400 (chat not found), 403 (bot blocked or removed), 401 (wrong token) and other 4xx | that chat is given up on; its remaining parts are not sent              |
 
 The notification is delivered when every chat that can take it has it. If one chat is refused permanently and another has the
 message, the notification counts as delivered (the log says how many chats were refused). If every chat refuses it, it is

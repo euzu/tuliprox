@@ -22,11 +22,11 @@ retrying outbox apply exactly as for the built-in channels (see *Per-Channel Rou
 
 ## Settings
 
-| Setting   | Default | Description                                                                                              |
-|-----------|---------|----------------------------------------------------------------------------------------------------------|
-| `url`     | -       | The Discord webhook URL. Write-only in the UI; use `${env:VAR}` to keep it out of the file.              |
+| Setting   | Default | Description                                                                                                                                    |
+| --------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`     | -       | The Discord webhook URL. Write-only in the UI; use `${env:VAR}` to keep it out of the file.                                                    |
 | `style`   | `embed` | `embed`: one embed with the title, the body, a colour per severity and the instance name as footer. `text`: the body as plain message content. |
-| `routing` | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                          |
+| `routing` | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                                                                |
 
 Titles are cut at 256 characters, embed descriptions at 4096 and plain content at 2000 (by character). Mentions are
 disabled, so event text cannot ping `@everyone` or a role.
@@ -39,13 +39,13 @@ and list it under `ui.locales` in the manifest (see [Settings](./settings.md#loc
 
 ## Delivery
 
-| Discord answers                          | Result                                                |
-|------------------------------------------|-------------------------------------------------------|
-| 2xx                                      | delivered                                             |
-| 429, 408                                 | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
-| 5xx except 501 and 505                   | retried with backoff                                  |
-| 501, 505, 3xx and every other 4xx        | dead-lettered                                         |
-| no answer within 25 s                    | retried with backoff                                  |
+| Discord answers                   | Result                                                           |
+| --------------------------------- | ---------------------------------------------------------------- |
+| 2xx                               | delivered                                                        |
+| 429, 408                          | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
+| 5xx except 501 and 505            | retried with backoff                                             |
+| 501, 505, 3xx and every other 4xx | dead-lettered                                                    |
+| no answer within 25 s             | retried with backoff                                             |
 
 The webhook URL never appears in a log line or an error message.
 

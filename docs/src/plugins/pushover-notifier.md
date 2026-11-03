@@ -23,13 +23,13 @@ outbox apply exactly as for the built-in channels (see *Per-Channel Routing* in 
 
 ## Settings
 
-| Setting   | Default                                        | Description                                                                                     |
-|-----------|------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| `token`   | -                                              | The API token of your Pushover application. Write-only in the UI; use `${env:VAR}` to keep it out of the file. |
-| `user`    | -                                              | The user (or group) key that receives the notifications. Write-only in the UI; use `${env:VAR}`. |
-| `url`     | `https://api.pushover.net/1/messages.json`     | The messages endpoint. Leave the default unless you use a compatible server.                    |
-| `style`   | `text`                                         | `text`: the body as plain message text. `html`: the event's sections as bold headings with their lines below, shown formatted by the Pushover apps. |
-| `routing` | -                                              | The per-channel routing block, applied by tuliprox before the plugin is called.                 |
+| Setting   | Default                                    | Description                                                                                                                                         |
+| --------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `token`   | -                                          | The API token of your Pushover application. Write-only in the UI; use `${env:VAR}` to keep it out of the file.                                      |
+| `user`    | -                                          | The user (or group) key that receives the notifications. Write-only in the UI; use `${env:VAR}`.                                                    |
+| `url`     | `https://api.pushover.net/1/messages.json` | The messages endpoint. Leave the default unless you use a compatible server.                                                                        |
+| `style`   | `text`                                     | `text`: the body as plain message text. `html`: the event's sections as bold headings with their lines below, shown formatted by the Pushover apps. |
+| `routing` | -                                          | The per-channel routing block, applied by tuliprox before the plugin is called.                                                                     |
 
 ## What Pushover receives
 
@@ -44,14 +44,14 @@ the `html` style). The credentials are in the body, never in the URL.
 
 ## Delivery
 
-| Pushover answers                         | Result                                                |
-|------------------------------------------|-------------------------------------------------------|
-| 2xx                                      | delivered                                             |
-| 429, 408                                 | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
-| 5xx except 501 and 505                   | retried with backoff                                  |
-| 501, 505, 3xx and every other 4xx (a wrong token or user key is a 400) | dead-lettered |
-| no answer within 25 s                    | retried with backoff                                  |
-| `token` or `user` missing, `url` not http(s) | dead-lettered, nothing is sent                    |
+| Pushover answers                                                       | Result                                                           |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| 2xx                                                                    | delivered                                                        |
+| 429, 408                                                               | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
+| 5xx except 501 and 505                                                 | retried with backoff                                             |
+| 501, 505, 3xx and every other 4xx (a wrong token or user key is a 400) | dead-lettered                                                    |
+| no answer within 25 s                                                  | retried with backoff                                             |
+| `token` or `user` missing, `url` not http(s)                           | dead-lettered, nothing is sent                                   |
 
 The token and the user key never appear in a log line or an error message. For that reason the reason Pushover gives for a
 refusal (its `errors` list) is not copied into the log either: a 400 means check the token and the user key.

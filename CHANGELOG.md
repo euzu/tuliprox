@@ -256,9 +256,10 @@
   English, Russian, Spanish and Arabic; any other valid id is shown with its words capitalised. Catalog categories are now
   normalised (lower case, separators become `-`), so `EPG`, `epg` and `Live TV` / `live_tv` are one filter each instead of
   separate entries. The search now takes several words, all of which must start a word in the id, name, description, author or
-  category, in any order (`live` finds the category `live-tv`, not "delivers"), and it applies a moment after the last keystroke. The in-repository plugins and examples declare
-  their category. API: `GET /api/v1/plugins/marketplace` returns `categories` as `[{id, count}]` and a `total` (it was a list of
-  names), and `GET /api/v1/plugins` rows carry `category`. See [Publishing a Marketplace](docs/src/plugins/marketplace-publishing.md#categories).
+  category, in any order (`live` finds the category `live-tv`, not "delivers"), and it applies a moment after the last keystroke.
+  The in-repository plugins and examples declare their category.
+  API: `GET /api/v1/plugins/marketplace` returns `categories` as `[{id, count}]` and a `total` (it was a list of names),
+  and `GET /api/v1/plugins` rows carry `category`. See [Publishing a Marketplace](docs/src/plugins/marketplace-publishing.md#categories).
 
 - **Notification events carry their detail as neutral `sections`.** A playlist update lists its sources, targets and
   errors, and a watch change its groups, as blocks of plain-text lines (`heading`, `lines`) built once by the host. They

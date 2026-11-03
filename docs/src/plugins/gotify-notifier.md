@@ -23,12 +23,12 @@ outbox apply exactly as for the built-in channels (see *Per-Channel Routing* in 
 
 ## Settings
 
-| Setting   | Default | Description                                                                                              |
-|-----------|---------|----------------------------------------------------------------------------------------------------------|
-| `url`     | -       | The base URL of the Gotify server, without `/message`.                                                   |
-| `token`   | -       | The token of a Gotify application. Write-only in the UI; use `${env:VAR}` to keep it out of the file.    |
+| Setting   | Default | Description                                                                                                                                                                           |
+| --------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`     | -       | The base URL of the Gotify server, without `/message`.                                                                                                                                |
+| `token`   | -       | The token of a Gotify application. Write-only in the UI; use `${env:VAR}` to keep it out of the file.                                                                                 |
 | `style`   | `text`  | `text`: the body as plain message text. `markdown`: the event's sections as bold headings with their lines below, rendered by Gotify clients (the plain body when an event has none). |
-| `routing` | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                          |
+| `routing` | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                                                                                                       |
 
 ## What Gotify receives
 
@@ -39,14 +39,14 @@ it, and markdown characters in event text are escaped, so a playlist called `my_
 
 ## Delivery
 
-| Gotify answers                           | Result                                                |
-|------------------------------------------|-------------------------------------------------------|
-| 2xx                                      | delivered                                             |
-| 429, 408                                 | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
-| 5xx except 501 and 505                   | retried with backoff                                  |
-| 501, 505, 3xx and every other 4xx (a wrong token is a 401) | dead-lettered                       |
-| no answer within 25 s                    | retried with backoff                                  |
-| `url` or `token` missing, `url` not http(s) | dead-lettered, nothing is sent                     |
+| Gotify answers                                             | Result                                                           |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- |
+| 2xx                                                        | delivered                                                        |
+| 429, 408                                                   | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
+| 5xx except 501 and 505                                     | retried with backoff                                             |
+| 501, 505, 3xx and every other 4xx (a wrong token is a 401) | dead-lettered                                                    |
+| no answer within 25 s                                      | retried with backoff                                             |
+| `url` or `token` missing, `url` not http(s)                | dead-lettered, nothing is sent                                   |
 
 The token never appears in a log line or an error message.
 

@@ -27,12 +27,12 @@ outbox apply as for every notifier plugin (see *Per-Channel Routing* in the conf
 
 ## Settings
 
-| Setting        | Default | Description                                                                                       |
-|----------------|---------|---------------------------------------------------------------------------------------------------|
-| `program`      | -       | The program to run, as a full path. Started directly, never through a shell.                      |
+| Setting        | Default | Description                                                                                                  |
+| -------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `program`      | -       | The program to run, as a full path. Started directly, never through a shell.                                 |
 | `args`         | -       | One entry per argument, passed as written. Do not put a credential here: arguments show in the process list. |
-| `timeout_secs` | `20`    | 1 to 25. The program is stopped after this long and the notification is retried.                  |
-| `routing`      | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                   |
+| `timeout_secs` | `20`    | 1 to 25. The program is stopped after this long and the notification is retried.                             |
+| `routing`      | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                              |
 
 Migrating from the built-in `messaging.command` channel: `program`, `args` and `timeout_secs` keep their meaning
 (`timeout_secs` is now at most 25, the default 20, because a plugin call has a 30 second limit). Two things differ:
@@ -53,13 +53,13 @@ it fails.
 
 ## Delivery
 
-| The program                                         | Result                                        |
-|-----------------------------------------------------|-----------------------------------------------|
-| exits 0                                             | delivered                                     |
-| exits with another status, or is ended by a signal  | retried with backoff                          |
-| runs past `timeout_secs`                            | stopped, retried with backoff                 |
-| cannot be started (missing, not executable)         | dead-lettered: it fails the same way every time |
-| `program` missing, or `process` not approved        | dead-lettered, nothing is run                 |
+| The program                                        | Result                                          |
+| -------------------------------------------------- | ----------------------------------------------- |
+| exits 0                                            | delivered                                       |
+| exits with another status, or is ended by a signal | retried with backoff                            |
+| runs past `timeout_secs`                           | stopped, retried with backoff                   |
+| cannot be started (missing, not executable)        | dead-lettered: it fails the same way every time |
+| `program` missing, or `process` not approved       | dead-lettered, nothing is run                   |
 
 ## Languages
 

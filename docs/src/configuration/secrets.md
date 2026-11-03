@@ -11,17 +11,17 @@ Tuliprox keeps the repository free of real credentials while making it easy to i
 
 ## What counts as a secret
 
-| File              | Field                                                                                                                                                                        | Example env var                                                                  |
-|:------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------|
-| `source.yml`      | input `url`, `username`, `password`                                                                                                                                          | `CLOUDTV_1_URL`, `CLOUDTV_1_USER`, `CLOUDTV_1_PASS`                              |
-| `source.yml`      | input `epg.sources[].url`                                                                                                                                                    | `CLOUDTV_1_EPG_URL`                                                              |
-| `source.yml`      | input `panel_api.api_key` (account management)                                                                                                                               | `PROVIDER_PANEL_API_KEY`                                                         |
-| `api-proxy.yml`   | output user `password` / `token` for every published user                                                                                                                    | `XTR_USER_LOCAL_PASS`, `XTR_USER_LOCAL_TOKEN`                                    |
-| `config.yml`      | `web_ui.auth.secret` (JWT signing, 64-hex)                                                                                                                                   | `TULIPROX_WEB_SECRET`                                                            |
-| `config.yml`      | plugin settings that hold a credential (a notifier's token or webhook URL), written as `${env:VAR}` in `plugins.plugins[].settings` | `TELEGRAM_BOT_TOKEN` |
-| `config.yml`      | `metadata_update.tmdb.api_key`                                                                                                                                               | `TULIPROX_TMDB_API_KEY`                                                          |
-| `config.yml`      | `reverse_proxy.rewrite_secret`                                                                                                                                               | `TULIPROX_PROXY_REWRITE_SECRET`                                                  |
-| `config/user.txt` | Web UI Argon2 password hashes (see below — not env-injectable)                                                                                                               | *file only*                                                                      |
+| File              | Field                                                                                                                               | Example env var                                     |
+| :---------------- | :---------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------- |
+| `source.yml`      | input `url`, `username`, `password`                                                                                                 | `CLOUDTV_1_URL`, `CLOUDTV_1_USER`, `CLOUDTV_1_PASS` |
+| `source.yml`      | input `epg.sources[].url`                                                                                                           | `CLOUDTV_1_EPG_URL`                                 |
+| `source.yml`      | input `panel_api.api_key` (account management)                                                                                      | `PROVIDER_PANEL_API_KEY`                            |
+| `api-proxy.yml`   | output user `password` / `token` for every published user                                                                           | `XTR_USER_LOCAL_PASS`, `XTR_USER_LOCAL_TOKEN`       |
+| `config.yml`      | `web_ui.auth.secret` (JWT signing, 64-hex)                                                                                          | `TULIPROX_WEB_SECRET`                               |
+| `config.yml`      | plugin settings that hold a credential (a notifier's token or webhook URL), written as `${env:VAR}` in `plugins.plugins[].settings` | `TELEGRAM_BOT_TOKEN`                                |
+| `config.yml`      | `metadata_update.tmdb.api_key`                                                                                                      | `TULIPROX_TMDB_API_KEY`                             |
+| `config.yml`      | `reverse_proxy.rewrite_secret`                                                                                                      | `TULIPROX_PROXY_REWRITE_SECRET`                     |
+| `config/user.txt` | Web UI Argon2 password hashes (see below — not env-injectable)                                                                      | *file only*                                         |
 
 Anything a provider, a player, a notification bot, or a browser authenticates with is a secret and must not be in git.
 

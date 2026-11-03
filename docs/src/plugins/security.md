@@ -46,13 +46,13 @@ source you trust, and run tuliprox as an unprivileged user. The host cannot tell
 
 What the host does limit, in `backend/plugins/src/process.rs`:
 
-* The program is started directly, never through a shell, so a plugin's arguments are never parsed as shell syntax.
-* The program's environment is empty except `PATH` and the variables the plugin passes. The host process's own environment
+- The program is started directly, never through a shell, so a plugin's arguments are never parsed as shell syntax.
+- The program's environment is empty except `PATH` and the variables the plugin passes. The host process's own environment
   (which can hold resolved secrets) never reaches a child.
-* At most 256 arguments and 1 MiB of input; stdout and stderr are each cut to their first 64 KiB.
-* The wait is 1 to 300 seconds; after that the child is killed and the call fails. A call the host drops (a plugin call
+- At most 256 arguments and 1 MiB of input; stdout and stderr are each cut to their first 64 KiB.
+- The wait is 1 to 300 seconds; after that the child is killed and the call fails. A call the host drops (a plugin call
   has a 30 s deadline) kills its child too.
-* Every run is logged as `plugin <id> runs the program <program>`, by program name and never by arguments, which may carry
+- Every run is logged as `plugin <id> runs the program <program>`, by program name and never by arguments, which may carry
   a credential.
 
 Without the capability the call fails and nothing starts.

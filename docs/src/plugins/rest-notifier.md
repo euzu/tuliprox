@@ -29,15 +29,15 @@ apply exactly as for the built-in channels (see *Per-Channel Routing* in the con
 
 ## Settings
 
-| Setting          | Default | Description                                                                                          |
-|------------------|---------|------------------------------------------------------------------------------------------------------|
-| `url`            | -       | The endpoint that receives each notification (`http://` or `https://`).                              |
-| `method`         | `POST`  | `POST`, `PUT` or `PATCH`.                                                                            |
-| `body`           | `event` | `event`: the whole event as JSON. `text`: the plain-text body only.                                  |
-| `headers`        | -       | Extra headers, one `Name: value` per entry. A `Content-Type` here replaces the default.              |
+| Setting          | Default | Description                                                                                                                                                |
+| ---------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `url`            | -       | The endpoint that receives each notification (`http://` or `https://`).                                                                                    |
+| `method`         | `POST`  | `POST`, `PUT` or `PATCH`.                                                                                                                                  |
+| `body`           | `event` | `event`: the whole event as JSON. `text`: the plain-text body only.                                                                                        |
+| `headers`        | -       | Extra headers, one `Name: value` per entry. A `Content-Type` here replaces the default.                                                                    |
 | `secret_headers` | -       | Headers whose value is a credential, for example `Authorization: Bearer ...` or `X-Api-Key: ...`. The whole entry is write-only and masked when read back. |
-| `signing_secret` | -       | Optional. Adds a signature header (see Signing). Write-only and masked when read back.               |
-| `routing`        | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                      |
+| `signing_secret` | -       | Optional. Adds a signature header (see Signing). Write-only and masked when read back.                                                                     |
+| `routing`        | -       | The per-channel routing block, applied by tuliprox before the plugin is called.                                                                            |
 
 Use `${env:VAR}` inside any of them to keep a credential out of the config file.
 
@@ -80,14 +80,14 @@ name in the settings is ignored while signing is on, so the receiver never sees 
 
 ## Delivery
 
-| The endpoint answers                     | Result                                                |
-|------------------------------------------|-------------------------------------------------------|
-| 2xx                                      | delivered                                             |
-| 429, 408                                 | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
-| 5xx except 501 and 505                   | retried with backoff                                  |
-| 501, 505, 3xx and every other 4xx        | dead-lettered                                         |
-| no answer within 25 s                    | retried with backoff                                  |
-| `url` missing or not http(s), a malformed header entry, a body over 1 MiB, more than 64 headers | dead-lettered, nothing is sent |
+| The endpoint answers                                                                            | Result                                                           |
+| ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| 2xx                                                                                             | delivered                                                        |
+| 429, 408                                                                                        | retried after `Retry-After` (seconds or HTTP date, at most 24 h) |
+| 5xx except 501 and 505                                                                          | retried with backoff                                             |
+| 501, 505, 3xx and every other 4xx                                                               | dead-lettered                                                    |
+| no answer within 25 s                                                                           | retried with backoff                                             |
+| `url` missing or not http(s), a malformed header entry, a body over 1 MiB, more than 64 headers | dead-lettered, nothing is sent                                   |
 
 The built-in channel guarded the endpoint with its own circuit breaker, rate limit and concurrency cap. A plugin's HTTP is under
 the host's per-plugin limits instead (a circuit breaker that opens after 5 failures for 30 seconds, 8 requests at a time, 20 per
