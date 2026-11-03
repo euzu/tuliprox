@@ -87,6 +87,39 @@ pub fn is_kebab_id(value: &str, len: std::ops::RangeInclusive<usize>) -> bool {
 #[must_use]
 pub fn is_valid_plugin_id(value: &str) -> bool { is_kebab_id(value, PLUGIN_ID_LEN) }
 
+/// The length of a plugin category id.
+pub const PLUGIN_CATEGORY_LEN: std::ops::RangeInclusive<usize> = 2..=32;
+
+/// The categories the Web UI knows by name (a translated label each). Any other valid category id is
+/// shown as written, so a publisher is not held back by this list.
+pub const KNOWN_PLUGIN_CATEGORIES: [&str; 9] =
+    ["notifier", "playlist", "epg", "metadata", "input", "output", "stream", "automation", "monitoring"];
+
+/// `true` for a plugin category id: `^[a-z][a-z0-9-]{1,31}$`.
+#[must_use]
+pub fn is_valid_plugin_category(value: &str) -> bool { is_kebab_id(value, PLUGIN_CATEGORY_LEN) }
+
+/// A category as a catalog or a query wrote it, as the id it means: trimmed, lower case, and every run of
+/// spaces, underscores and other separators one `-`. `EPG` and `epg` are one category, and `Live TV` is
+/// `live-tv`. `None` when nothing valid is left (empty, starts with a digit, too long).
+#[must_use]
+pub fn normalize_plugin_category(raw: &str) -> Option<String> {
+    let mut id = String::new();
+    let mut pending_separator = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_separator && !id.is_empty() {
+                id.push('-');
+            }
+            pending_separator = false;
+            id.push(ch.to_ascii_lowercase());
+        } else {
+            pending_separator = true;
+        }
+    }
+    is_valid_plugin_category(&id).then_some(id)
+}
+
 /// How a marketplace-installed plugin may move to a newer release.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -562,5 +595,46 @@ mod tests {
         }
         assert!(is_kebab_id("ab", 2..=41));
         assert!(!is_kebab_id("a", 2..=41));
+    }
+
+    #[test]
+    fn a_category_id_is_a_short_kebab_id() {
+        for ok in ["ab", "epg", "notifier", "live-tv", "a1", &format!("a{}", "b".repeat(31))] {
+            assert!(is_valid_plugin_category(ok), "{ok}");
+        }
+        for bad in ["", "a", "1ab", "-ab", "Epg", "live_tv", "live tv", &format!("a{}", "b".repeat(32))] {
+            assert!(!is_valid_plugin_category(bad), "{bad:?}");
+        }
+        // The names the Web UI translates are all valid ids.
+        assert!(KNOWN_PLUGIN_CATEGORIES.iter().all(|category| is_valid_plugin_category(category)));
+    }
+
+    #[test]
+    fn a_category_written_loosely_is_normalised_to_its_id() {
+        for (raw, want) in [
+            ("epg", "epg"),
+            ("EPG", "epg"),
+            ("  Epg  ", "epg"),
+            ("Live TV", "live-tv"),
+            ("live_tv", "live-tv"),
+            ("live--tv", "live-tv"),
+            ("live - tv", "live-tv"),
+            ("Live/TV", "live-tv"),
+            ("-notifier-", "notifier"),
+            ("Home Automation 2", "home-automation-2"),
+        ] {
+            assert_eq!(normalize_plugin_category(raw).as_deref(), Some(want), "{raw:?}");
+        }
+        // Nothing valid left: empty, a single character, starts with a digit, or too long.
+        for bad in ["", "   ", "---", "a", "1pass", "9", &"x".repeat(33)] {
+            assert_eq!(normalize_plugin_category(bad), None, "{bad:?}");
+        }
+        // The result is always a valid id, and normalising twice changes nothing.
+        for raw in ["EPG", "Live TV", "a b c", "Ünïcode Cat"] {
+            if let Some(id) = normalize_plugin_category(raw) {
+                assert!(is_valid_plugin_category(&id), "{raw:?} -> {id:?}");
+                assert_eq!(normalize_plugin_category(&id).as_deref(), Some(id.as_str()));
+            }
+        }
     }
 }

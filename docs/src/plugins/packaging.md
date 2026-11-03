@@ -115,6 +115,10 @@ removed by the next update of that plugin.
   placeholders. `bin/new-plugin.sh` fills in the `id` only.
 - The `version` is a semver version of your plugin, and `api_version` is `1`, the host's ABI major version. The manifest
   can also set `min_tuliprox_version`.
+- The manifest's `category` says what kind of plugin it is (`notifier`, `playlist`, `epg`, `metadata`, `input`, `output`,
+  `stream`, `automation`, `monitoring`, or an id of your own: 2 to 32 lowercase letters, digits and `-`). The Marketplace
+  filters and searches by it and the Plugin Manager shows it as a badge. See
+  [Publishing a Marketplace](./marketplace-publishing.md#categories).
 - No secret is stored as a literal default. Every secret in `config-schema.json` has `writeOnly` or `format: password`,
   and no `default`. A secret is read from an environment reference, `${env:VAR}`, in `config.yml`. The upload is
   refused if a secret has a default.

@@ -2,6 +2,7 @@ id: hf-epg-matcher
 name: HF EPG Matcher
 version: 0.1.0
 api_version: 1
+category: epg
 author: tuliprox
 description: >
   Matches playlist channels that the built-in EPG matcher left without a guide

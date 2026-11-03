@@ -68,6 +68,10 @@ shapes the examples use (flow lists such as `locales: [en, ru]`, scalar paths) o
 host would accept. Unknown top-level keys are ignored by the host, so a typo is silent: copy key names exactly.
 
 - `id`, `name`, `version` (semver, the plugin's own), `api_version: 1`, `author`, `description` are all your own values.
+- `category:` says what kind of plugin it is, so the Marketplace can filter and search by it and the Plugin Manager can badge it:
+  one lowercase id of 2 to 32 letters, digits and `-`. Use one of `notifier`, `playlist`, `epg`, `metadata`, `input`, `output`,
+  `stream`, `automation`, `monitoring` (each has a translated name in the Web UI) unless none fits. A notification plugin is
+  `notifier`. A value that is not an id makes the manifest invalid.
 - `capabilities:` only what is used: `network`, `storage`, `epg_write`, `image_cache`, `notifications`, `stream_headers`.
 - `hooks:` must match the component's exports exactly, in both directions. A mismatch makes the plugin **invalid**, and an
   invalid plugin fails open (it is skipped, the pipeline carries on, and the output looks like the baseline).

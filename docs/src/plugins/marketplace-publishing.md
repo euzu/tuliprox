@@ -51,7 +51,8 @@ Each plugin:
 | --- | --- | --- |
 | `id` | yes | The plugin id: `^[a-z][a-z0-9-]{2,40}$`, the same as the manifest `id`. Unique in the file. `staging`, `metrics`, `repositories` and `marketplace` are reserved |
 | `name` | yes | Display name |
-| `description`, `author`, `license`, `category`, `homepage` | no | Shown in the browser. `category` drives the category filter. `homepage` must be an `http(s)` URL |
+| `description`, `author`, `license`, `homepage` | no | Shown in the browser. `homepage` must be an `http(s)` URL |
+| `category` | no | What kind of plugin it is. It drives the category filter and is searchable. See [Categories](#categories) |
 | `releases` | yes | At least one valid release |
 
 Each release:

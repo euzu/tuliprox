@@ -24,6 +24,7 @@ pub(super) struct RawManifest {
     pub author: Option<String>,
     pub homepage: Option<String>,
     pub description: Option<String>,
+    pub category: Option<String>,
     pub min_tuliprox_version: Option<String>,
     #[serde(default, deserialize_with = "null_default")]
     pub capabilities: Capabilities,

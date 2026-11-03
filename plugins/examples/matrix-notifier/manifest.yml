@@ -2,6 +2,7 @@ id: matrix-notifier
 name: Matrix Notifier
 version: 0.1.0
 api_version: 1
+category: notifier
 author: tuliprox
 description: >
   Delivers tuliprox notifications to a Matrix room through the client-server

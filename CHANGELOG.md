@@ -227,6 +227,18 @@
 
 ## 🌟 New Features
 
+- **Plugin categories: filter and search the Marketplace by what a plugin does.** A plugin declares its kind in its
+  manifest (`category: notifier`; one lowercase id, optional), the Plugin Manager shows it as a badge, and the Marketplace
+  replaces the category dropdown with chips: `All` and every category of the current search with its count (`Notifiers (6)`).
+  Choosing a category keeps the other chips, and the counts follow the search and the source. The ids the Web UI knows are
+  `notifier`, `playlist`, `epg`, `metadata`, `input`, `output`, `stream`, `automation` and `monitoring`, each with a name in
+  English, Russian, Spanish and Arabic; any other valid id is shown with its words capitalised. Catalog categories are now
+  normalised (lower case, separators become `-`), so `EPG`, `epg` and `Live TV` / `live_tv` are one filter each instead of
+  separate entries. The search now takes several words, all of which must start a word in the id, name, description, author or
+  category, in any order (`live` finds the category `live-tv`, not "delivers"), and it applies a moment after the last keystroke. The in-repository plugins and examples declare
+  their category. API: `GET /api/v1/plugins/marketplace` returns `categories` as `[{id, count}]` and a `total` (it was a list of
+  names), and `GET /api/v1/plugins` rows carry `category`. See [Publishing a Marketplace](docs/src/plugins/marketplace-publishing.md#categories).
+
 - **Notification events carry their detail as neutral `sections`.** A playlist update lists its sources, targets and
   errors, and a watch change its groups, as blocks of plain-text lines (`heading`, `lines`) built once by the host. They
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin

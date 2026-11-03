@@ -2,6 +2,7 @@ id: rest-notifier
 name: REST Notifier
 version: 1.0.0
 api_version: 1
+category: notifier
 author: tuliprox
 description: >
   Delivers tuliprox notifications to any HTTP endpoint (a webhook): the event as

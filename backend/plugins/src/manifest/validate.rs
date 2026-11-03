@@ -9,7 +9,7 @@ use super::{
 use regex::Regex;
 use semver::Version;
 use serde_json::Value;
-use shared::model::{is_kebab_id, is_valid_plugin_id, EventKindMask, PlaylistItemType};
+use shared::model::{is_kebab_id, is_valid_plugin_category, is_valid_plugin_id, EventKindMask, PlaylistItemType};
 use std::{
     collections::HashSet,
     path::{Component, Path},
@@ -36,6 +36,7 @@ pub(super) fn build(raw: RawManifest, dir_name: &str) -> Result<Manifest, Vec<St
     let api_version = check_api_version(raw.api_version, &mut errors);
     let min_tuliprox_version = check_version("min_tuliprox_version", raw.min_tuliprox_version, false, &mut errors);
 
+    let category = check_category(raw.category, &mut errors);
     let hooks = check_hooks(&raw.hooks, &mut errors);
     let (events, event_names) = check_events(raw.events, &mut errors);
     let tasks = check_tasks(raw.tasks, &mut errors);
@@ -52,6 +53,7 @@ pub(super) fn build(raw: RawManifest, dir_name: &str) -> Result<Manifest, Vec<St
         author: non_blank(raw.author),
         homepage: non_blank(raw.homepage),
         description: non_blank(raw.description),
+        category,
         min_tuliprox_version,
         capabilities: raw.capabilities,
         hooks,
@@ -76,6 +78,19 @@ pub(super) fn build(raw: RawManifest, dir_name: &str) -> Result<Manifest, Vec<St
 
 fn non_blank(value: Option<String>) -> Option<String> {
     value.map(|text| text.trim().to_string()).filter(|text| !text.is_empty())
+}
+
+/// `category:` is one lowercase id (`notifier`, `epg`, ...). It is not normalised here: a manifest is
+/// written once by the author, and the id it declares is the id a catalog and the UI will show.
+fn check_category(value: Option<String>, errors: &mut Errors) -> Option<String> {
+    let category = non_blank(value)?;
+    if !is_valid_plugin_category(&category) {
+        errors.push(format!(
+            "`category` `{category}` is invalid; use 2 to 32 lowercase letters, digits and `-`, starting with a letter"
+        ));
+        return None;
+    }
+    Some(category)
 }
 
 fn required_text(field: &str, value: Option<String>, errors: &mut Errors) -> Option<String> {

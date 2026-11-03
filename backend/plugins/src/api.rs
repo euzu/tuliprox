@@ -348,6 +348,7 @@ fn summary(record: &PluginRecord, config: Option<&PluginsConfig>, settings_revie
         name: manifest.map_or_else(|| record.id.to_string(), |manifest| manifest.name.clone()),
         version: manifest.map(|manifest| manifest.version.to_string()),
         description: manifest.and_then(|manifest| manifest.description.as_deref()).map(|text| sanitize_text(text, 512)),
+        category: manifest.and_then(|manifest| manifest.category.clone()),
         state: state_dto(record.state()),
         failure: record.failure(),
         enabled: config.and_then(|config| config.entry(&record.id)).is_some_and(|entry| entry.enabled),

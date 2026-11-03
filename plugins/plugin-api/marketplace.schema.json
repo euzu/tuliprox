@@ -24,7 +24,7 @@
         "description": { "type": "string", "maxLength": 512 },
         "author": { "type": "string", "maxLength": 80 },
         "license": { "type": "string", "maxLength": 64 },
-        "category": { "type": "string", "maxLength": 40 },
+        "category": { "type": "string", "maxLength": 40, "description": "What kind of plugin it is. Normalised by the host: lower case, every run of spaces, underscores and other separators one `-` (`Live TV` is `live-tv`), and a value that leaves no valid id (2 to 32 characters, starting with a letter) counts as none. The ids the Web UI names: notifier, playlist, epg, metadata, input, output, stream, automation, monitoring." },
         "homepage": { "type": "string", "format": "uri", "pattern": "^https?://" },
         "releases": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/release" } }
       }

@@ -68,8 +68,11 @@ entries still appear.
 
 The Marketplace lists plugins from all enabled sources. You can filter them by:
 
-- Search text.
-- Category.
+- Search text. Every word has to start a word in the plugin's id, name, description, author or category, in any order, so
+  `slack notifier` and `notifier slack` find the same plugin, `live tv` finds the category `live-tv`, and `live` does not
+  find a plugin that merely says "delivers". A prefix is enough (`deliv`); the middle of a word does not match.
+- Category. The chips under the search list `All` and every category of the current search with its count, for example
+  `Notifiers (6)`. Choosing a category does not remove the other chips, and the counts follow the search and the source.
 - Source.
 
 Each release has a compatibility state:
@@ -241,5 +244,5 @@ The Marketplace is available through the management API under `/api/v1`. Reads n
 | `PUT /plugins/repositories/{id}` | Replace a source. The id in the body must match the path. |
 | `DELETE /plugins/repositories/{id}` | Remove a source and its cache. Installed plugins are not removed. |
 | `POST /plugins/repositories/{id}/sync` | Sync a source now. Returns `502` with the error when the sync fails. |
-| `GET /plugins/marketplace?q=&category=&source=` | List plugins from enabled sources, with the filters applied. |
+| `GET /plugins/marketplace?q=&category=&source=` | List plugins from enabled sources, with the filters applied. The answer also carries `categories` (`[{id, count}]`, ordered by id) and `total`, both for the search and the source without the category filter. `category` may be written loosely (`EPG`); it is normalised. |
 | `POST /plugins/marketplace/install` | Install one release from one named source. Returns the same review as an upload. |

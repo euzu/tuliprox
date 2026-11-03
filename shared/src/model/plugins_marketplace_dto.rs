@@ -46,9 +46,11 @@ pub struct PluginRepositoryInfoDto {
 /// combine with AND.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketplaceQueryDto {
-    /// Case-insensitive substring of id, name, description or author.
+    /// Words to search for: every word has to start a word (case-insensitive) in the id, name, description,
+    /// author or category of the plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
+    /// A category id. Written the way a catalog may write it (`EPG`, `Live TV`): it is normalised first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     /// A source id.
@@ -106,6 +108,7 @@ pub struct MarketplacePluginDto {
     pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// The normalised category id (`notifier`, `epg`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,14 +121,27 @@ pub struct MarketplacePluginDto {
     pub also_in: Vec<String>,
 }
 
+/// One category of the marketplace and how many of the listed plugins are in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketplaceCategoryDto {
+    /// The normalised category id.
+    pub id: String,
+    /// The plugins of the current search and source in this category, whichever category is selected.
+    pub count: usize,
+}
+
 /// `GET /api/v1/plugins/marketplace`: the filtered plugins of every enabled
-/// source, the source list with its sync state, and every category seen.
+/// source, the source list with its sync state, and the categories to filter by.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceDto {
     pub plugins: Vec<MarketplacePluginDto>,
     pub sources: Vec<PluginRepositoryInfoDto>,
-    pub categories: Vec<String>,
+    /// The categories of the plugins that match the search and the source, with counts, ordered by id. The
+    /// counts ignore the category filter, so choosing a category does not make the others disappear.
+    pub categories: Vec<MarketplaceCategoryDto>,
+    /// How many plugins match the search and the source, whichever category is selected.
+    pub total: usize,
 }
 
 /// Body of `POST /api/v1/plugins/marketplace/install`. Answered with the

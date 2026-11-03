@@ -36,6 +36,9 @@ pub struct PluginSummaryDto {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The manifest `category`, when it declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     pub state: PluginStateDto,
     /// Why the plugin is `invalid`, `pending_approval` or `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -607,6 +610,7 @@ mod tests {
             name: "Demo".to_string(),
             version: Some("1.2.3".to_string()),
             description: None,
+            category: Some("notifier".to_string()),
             state: PluginStateDto::PendingApproval,
             failure: Some("not approved yet".to_string()),
             enabled: false,
@@ -624,6 +628,7 @@ mod tests {
         let value = serde_json::to_value(&summary).unwrap();
         assert_eq!(value["updatePolicy"], "pinned");
         assert_eq!(value["state"], "pending_approval");
+        assert_eq!(value["category"], "notifier");
         assert_eq!(value["wasmSha256"], "ab".repeat(32));
         assert!(value.get("description").is_none());
         assert_eq!(serde_json::from_value::<PluginSummaryDto>(value).unwrap(), summary);

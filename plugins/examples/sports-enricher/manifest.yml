@@ -4,6 +4,7 @@ id: sports-enricher
 name: Sports Enricher
 version: 1.0.0
 api_version: 1
+category: metadata
 author: tuliprox contributors
 homepage: https://github.com/tuliprox/tuliprox
 description: Groups sport channels by sport, orders them by fixtures, adds logos, synthetic programmes and documentary metadata.

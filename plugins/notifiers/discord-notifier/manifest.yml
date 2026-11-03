@@ -2,6 +2,7 @@ id: discord-notifier
 name: Discord Notifier
 version: 1.0.0
 api_version: 1
+category: notifier
 author: tuliprox
 description: >
   Delivers tuliprox notifications to a Discord webhook as an embed or plain

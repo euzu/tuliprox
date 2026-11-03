@@ -2,6 +2,7 @@ id: ntfy-notifier
 name: ntfy Notifier
 version: 1.0.0
 api_version: 1
+category: notifier
 author: tuliprox
 description: >
   Delivers tuliprox notifications to an ntfy topic as push messages, as plain

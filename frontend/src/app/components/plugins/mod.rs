@@ -1,5 +1,6 @@
 mod marketplace_sources;
 mod marketplace_view;
+mod plugin_category;
 mod plugin_frame;
 mod plugin_i18n;
 mod plugin_logs;

@@ -8,7 +8,7 @@ use crate::install::{is_installable_id, sanitize_text};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shared::model::{MarketplaceInstalledDto, MarketplacePluginDto, MarketplaceReleaseDto};
+use shared::model::{normalize_plugin_category, MarketplaceInstalledDto, MarketplacePluginDto, MarketplaceReleaseDto};
 use std::collections::HashSet;
 
 /// The only catalog format this host reads.
@@ -153,7 +153,7 @@ pub(crate) fn parse(bytes: &[u8], allow_http: bool) -> Result<(Catalog, Vec<Stri
             description: text(raw.description, 512),
             author: text(raw.author, 80),
             license: text(raw.license, 64),
-            category: text(raw.category, 40),
+            category: raw.category.as_deref().and_then(normalize_plugin_category),
             homepage: text(raw.homepage, 512).filter(|url| url.starts_with("https://") || url.starts_with("http://")),
             releases,
         });
@@ -304,7 +304,7 @@ pub(crate) fn plugin_dto(
         description: plugin.description.clone(),
         author: plugin.author.clone(),
         license: plugin.license.clone(),
-        category: plugin.category.clone(),
+        category: plugin.category.as_deref().and_then(normalize_plugin_category),
         homepage: plugin.homepage.clone(),
         releases: release_dtos(&plugin.releases, host_version, abi_major),
         installed: installed.cloned(),

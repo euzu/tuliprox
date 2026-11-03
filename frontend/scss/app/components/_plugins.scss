@@ -355,14 +355,47 @@
   flex-shrink: 0;
 }
 
-.tp__plugins__market-results {
+// The category chips under the search: `All` and every category of the current search with its count.
+.tp__plugins__market-categories {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  gap: var(--margin-micro);
+  flex-shrink: 0;
+}
+
+// The catalog uses the same compact grid as the installed plugins: three cards to a row, two on a narrow
+// screen, one on a phone.
+.tp__plugins__market-results {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--margin-small);
+  align-items: start;
+
+  @media (max-width: size.$dashboard-mobile-breakpoint) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: size.$mobile-breakpoint) {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .tp__plugins__market-card {
   flex-shrink: 0;
+
+  // The title, the id, the category and the installed state run along one wrapping row instead of
+  // stretching to the width of the card.
+  .tp__plugins__header {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--margin-micro) var(--margin-mini);
+
+    h3 {
+      margin: 0;
+      flex-basis: 100%;
+    }
+  }
 }
 
 .tp__plugins__also-in {

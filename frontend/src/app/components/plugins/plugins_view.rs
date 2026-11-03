@@ -2,6 +2,7 @@ use crate::{
     app::components::{
         plugins::{
             marketplace_view::MarketplaceView,
+            plugin_category::category_label,
             plugin_logs::PluginLogs,
             plugin_settings::PluginSettings,
             plugin_slot::use_plugin_ui,
@@ -284,6 +285,9 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
                     <span class={classes!("tp__task-status", state_modifier(summary.state))}>
                         { translate.t(state_label_key(summary.state)) }
                     </span>
+                    if let Some(category) = summary.category.as_ref() {
+                        <span class="tp__plugin-badge">{ category_label(translate, category) }</span>
+                    }
                     if let Some(origin) = summary.origin.as_ref() {
                         <span class="tp__plugins__origin">
                             { format!("{} {} @ {}", translate.t("LABEL.PLUGIN_MARKETPLACE_INSTALLED_FROM"), origin.source, origin.version) }

@@ -11,10 +11,11 @@ use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use shared::model::{
-    is_valid_plugin_id, MarketplaceDto, MarketplaceInstalledDto, MarketplaceQueryDto, PluginRepositoryInfoDto,
+    is_valid_plugin_id, normalize_plugin_category, MarketplaceCategoryDto, MarketplaceDto, MarketplaceInstalledDto,
+    MarketplaceQueryDto, PluginRepositoryInfoDto,
 };
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -209,18 +210,49 @@ pub async fn remove_cache(data_dir: &Path, source_id: &str) {
 
 fn host(host_version: &str) -> Version { Version::parse(host_version).unwrap_or_else(|_| Version::new(0, 0, 0)) }
 
-fn matches(plugin: &super::format::Plugin, query: &MarketplaceQueryDto) -> bool {
-    if let Some(category) = query.category.as_deref().filter(|category| !category.is_empty()) {
-        if !plugin.category.as_deref().is_some_and(|own| own.eq_ignore_ascii_case(category)) {
-            return false;
-        }
+/// The category id of a catalog plugin. Normalised on every read: a cache written before categories were
+/// normalised still holds them as the catalog spelled them.
+fn category_of(plugin: &super::format::Plugin) -> Option<String> {
+    plugin.category.as_deref().and_then(normalize_plugin_category)
+}
+
+/// The words of a search, lower case. Every one has to match.
+fn search_words(query: &MarketplaceQueryDto) -> Vec<String> {
+    query.q.as_deref().unwrap_or_default().split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether `word` occurs in `field` where a word starts: at the beginning, or after anything that is not a letter
+/// or a digit. `live` matches `live-tv` and `Live TV`, not `delivers`; `discord-notifier` matches as typed.
+fn starts_a_word(field: &str, word: &str) -> bool {
+    field
+        .match_indices(word)
+        .any(|(at, _)| at == 0 || !field[..at].chars().next_back().is_some_and(char::is_alphanumeric))
+}
+
+/// Whether every word of the search starts a word in the id, name, description, author or category of
+/// `plugin`. The words are matched one by one, so `slack notifier` finds a plugin that says Slack in its name
+/// and notifier in its category, and `live tv` finds the category `live-tv`.
+fn matches_text(plugin: &super::format::Plugin, words: &[String]) -> bool {
+    if words.is_empty() {
+        return true;
     }
-    let Some(needle) = query.q.as_deref().map(str::trim).filter(|needle| !needle.is_empty()) else { return true };
-    let needle = needle.to_lowercase();
-    [Some(&plugin.id), Some(&plugin.name), plugin.description.as_ref(), plugin.author.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(|field| field.to_lowercase().contains(&needle))
+    let category = category_of(plugin);
+    let fields: Vec<String> =
+        [Some(&plugin.id), Some(&plugin.name), plugin.description.as_ref(), plugin.author.as_ref(), category.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|field| field.to_lowercase())
+            .collect();
+    words.iter().all(|word| fields.iter().any(|field| starts_a_word(field, word)))
+}
+
+/// The category filter of a query, normalised. `Err` for a filter that names no valid category: it matches
+/// nothing, which is what an unknown category should show.
+fn wanted_category(query: &MarketplaceQueryDto) -> Result<Option<String>, ()> {
+    match query.category.as_deref().map(str::trim).filter(|category| !category.is_empty()) {
+        None => Ok(None),
+        Some(raw) => normalize_plugin_category(raw).map(Some).ok_or(()),
+    }
 }
 
 /// The marketplace view: the plugins of every enabled source's cache, filtered
@@ -241,47 +273,66 @@ pub async fn browse(
     }
 
     let mut offered: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut categories = BTreeSet::new();
     for (source, cache) in &caches {
         for plugin in cache.catalog.iter().flat_map(|catalog| &catalog.plugins) {
             offered.entry(plugin.id.as_str()).or_default().push(source.id.as_str());
-            categories.extend(plugin.category.clone());
         }
     }
 
+    let words = search_words(query);
+    let wanted = wanted_category(query);
+    // The facet counts the plugins of the search and the source before the category filter, so choosing a
+    // category does not make the other categories vanish.
+    let mut facets: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total = 0;
     let mut plugins = Vec::new();
     for (source, cache) in &caches {
         if query.source.as_deref().is_some_and(|wanted| !wanted.is_empty() && wanted != source.id) {
             continue;
         }
-        let mut rows: Vec<_> = cache
-            .catalog
-            .iter()
-            .flat_map(|catalog| &catalog.plugins)
-            .filter(|plugin| matches(plugin, query))
-            .map(|plugin| {
-                let also_in = offered
-                    .get(plugin.id.as_str())
-                    .map(|ids| ids.iter().filter(|id| **id != source.id).map(ToString::to_string).collect())
-                    .unwrap_or_default();
-                plugin_dto(
-                    plugin,
-                    (&source.id, &source.name),
-                    &host_version,
-                    ABI_MAJOR,
-                    installed.get(&plugin.id),
-                    also_in,
-                )
-            })
-            .collect();
+        let mut rows: Vec<_> = Vec::new();
+        for plugin in
+            cache.catalog.iter().flat_map(|catalog| &catalog.plugins).filter(|plugin| matches_text(plugin, &words))
+        {
+            total += 1;
+            let category = category_of(plugin);
+            if let Some(category) = &category {
+                *facets.entry(category.clone()).or_default() += 1;
+            }
+            let in_category = match &wanted {
+                Ok(None) => true,
+                Ok(Some(wanted)) => category.as_ref() == Some(wanted),
+                Err(()) => false,
+            };
+            if !in_category {
+                continue;
+            }
+            let also_in = offered
+                .get(plugin.id.as_str())
+                .map(|ids| ids.iter().filter(|id| **id != source.id).map(ToString::to_string).collect())
+                .unwrap_or_default();
+            rows.push(plugin_dto(
+                plugin,
+                (&source.id, &source.name),
+                &host_version,
+                ABI_MAJOR,
+                installed.get(&plugin.id),
+                also_in,
+            ));
+        }
         rows.sort_by_key(|row| row.name.to_lowercase());
         plugins.extend(rows);
+    }
+    // The selected category stays in the list even when the search leaves nothing in it, so it can be unselected.
+    if let Ok(Some(wanted)) = wanted {
+        facets.entry(wanted).or_default();
     }
 
     MarketplaceDto {
         plugins,
         sources: caches.iter().map(|(source, cache)| info(source, cache)).collect(),
-        categories: categories.into_iter().collect(),
+        categories: facets.into_iter().map(|(id, count)| MarketplaceCategoryDto { id, count }).collect(),
+        total,
     }
 }
 

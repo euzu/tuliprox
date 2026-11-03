@@ -617,3 +617,20 @@ fn pipeline_hooks_is_the_subset_the_host_can_run() {
         0
     );
 }
+
+#[test]
+fn a_manifest_may_declare_its_category() {
+    assert_eq!(parse(MINIMAL).unwrap().category, None, "the category is optional");
+    assert_eq!(parse(&with("category: notifier\n")).unwrap().category.as_deref(), Some("notifier"));
+    assert_eq!(parse(&with("category: live-tv\n")).unwrap().category.as_deref(), Some("live-tv"));
+    // A blank category is the same as none.
+    assert_eq!(parse(&with("category: \"  \"\n")).unwrap().category, None);
+}
+
+#[test]
+fn a_category_that_is_not_an_id_is_refused_and_not_silently_rewritten() {
+    for bad in ["Notifier", "live tv", "live_tv", "9lives", "x", &"y".repeat(33)] {
+        assert_problem(&with(&format!("category: \"{bad}\"\n")), "`category`");
+    }
+    assert_problem(&with("category: Notifier\n"), "use 2 to 32 lowercase letters, digits and `-`");
+}

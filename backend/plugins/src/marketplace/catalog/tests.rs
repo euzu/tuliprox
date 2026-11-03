@@ -125,6 +125,10 @@ async fn removing_a_source_deletes_only_its_cache() {
     assert!(!dir.path().join("marketplace/main.json").exists());
 }
 
+fn category(id: &str, count: usize) -> MarketplaceCategoryDto { MarketplaceCategoryDto { id: id.to_string(), count } }
+
+fn ids(view: &MarketplaceDto) -> Vec<&str> { view.plugins.iter().map(|plugin| plugin.id.as_str()).collect() }
+
 fn seeded(dir: &Path, id: &str, url: &str, plugins: &str) {
     let (catalog, _) = parse(body(plugins).as_bytes(), true).unwrap();
     let cache = CacheFile { url: url.to_string(), catalog: Some(catalog), ..CacheFile::default() };
@@ -151,7 +155,8 @@ async fn browse_filters_marks_installed_and_names_other_sources() {
     )]);
     let all = browse(dir.path(), &[a.clone(), b.clone()], &installed, &MarketplaceQueryDto::default(), "3.3.175").await;
     assert_eq!(all.plugins.len(), 3);
-    assert_eq!(all.categories, ["epg", "misc"]);
+    assert_eq!(all.categories, [category("epg", 2), category("misc", 1)]);
+    assert_eq!(all.total, 3);
     assert_eq!(all.sources.len(), 2);
     let sports_a = all.plugins.iter().find(|plugin| plugin.id == "sports" && plugin.source == "alpha").unwrap();
     assert_eq!(sports_a.also_in, ["beta"]);
@@ -189,4 +194,136 @@ async fn an_install_resolves_the_exact_release_and_reports_incompatibility() {
         resolve_release(dir.path(), &a, "future", "2.0.0", "3.3.175").await,
         ReleaseLookup::Incompatible(reason) if reason.contains("9.0.0")
     ));
+}
+
+/// A catalog of five plugins in three spellings of two categories, to search and filter.
+fn categorised() -> (tempfile::TempDir, PluginRepository) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = source("alpha", "http://a.invalid/c.json");
+    seeded(
+        dir.path(),
+        "alpha",
+        &a.url,
+        &[
+            entry("guide-one", "EPG", "1.0.0", "3.0.0", 1),
+            entry("guide-two", "epg", "1.0.0", "3.0.0", 1),
+            entry("channel-tv", "Live TV", "1.0.0", "3.0.0", 1),
+            entry("channel-radio", "live_tv", "1.0.0", "3.0.0", 1),
+            entry("nothing", "", "1.0.0", "3.0.0", 1),
+        ]
+        .join(","),
+    );
+    (dir, a)
+}
+
+async fn view(dir: &Path, a: &PluginRepository, query: MarketplaceQueryDto) -> MarketplaceDto {
+    browse(dir, std::slice::from_ref(a), &HashMap::new(), &query, "3.3.175").await
+}
+
+#[tokio::test]
+async fn categories_are_normalised_so_spellings_of_one_category_are_one_filter() {
+    let (dir, a) = categorised();
+    let all = view(dir.path(), &a, MarketplaceQueryDto::default()).await;
+    assert_eq!(all.categories, [category("epg", 2), category("live-tv", 2)], "a plugin without one is in none");
+    assert_eq!(all.total, 5);
+    assert!(all.plugins.iter().all(|plugin| plugin.category.as_deref().is_none_or(|own| own == own.to_lowercase())));
+    // The filter is normalised too: any spelling selects the category.
+    for spelling in ["epg", "EPG", " Epg "] {
+        let query = MarketplaceQueryDto { category: Some(spelling.into()), ..Default::default() };
+        assert_eq!(ids(&view(dir.path(), &a, query).await), ["guide-one", "guide-two"], "{spelling:?}");
+    }
+    for spelling in ["live-tv", "Live TV", "live_tv"] {
+        let query = MarketplaceQueryDto { category: Some(spelling.into()), ..Default::default() };
+        assert_eq!(ids(&view(dir.path(), &a, query).await), ["channel-radio", "channel-tv"], "{spelling:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_cache_written_before_categories_were_normalised_is_still_read_as_one_category() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = source("alpha", "http://a.invalid/c.json");
+    let (mut catalog, _) = parse(
+        body(&[entry("one", "x", "1.0.0", "3.0.0", 1), entry("two", "x", "1.0.0", "3.0.0", 1)].join(",")).as_bytes(),
+        true,
+    )
+    .unwrap();
+    catalog.plugins[0].category = Some("EPG".into());
+    catalog.plugins[1].category = Some("epg".into());
+    write_cache(
+        &cache_path(dir.path(), "alpha").unwrap(),
+        &CacheFile { url: a.url.clone(), catalog: Some(catalog), ..CacheFile::default() },
+    )
+    .unwrap();
+    let all = view(dir.path(), &a, MarketplaceQueryDto::default()).await;
+    assert_eq!(all.categories, [category("epg", 2)]);
+    assert!(all.plugins.iter().all(|plugin| plugin.category.as_deref() == Some("epg")));
+}
+
+#[tokio::test]
+async fn the_search_matches_every_word_against_id_name_author_and_category() {
+    let (dir, a) = categorised();
+    let search = |q: &str| MarketplaceQueryDto { q: Some(q.into()), ..Default::default() };
+    // The category is searchable: `live` is in no id or name of the radio plugin, but it is in `live-tv`.
+    assert_eq!(ids(&view(dir.path(), &a, search("live")).await), ["channel-radio", "channel-tv"]);
+    // Words match one by one and in any order; one field need not hold them all.
+    assert_eq!(ids(&view(dir.path(), &a, search("ann radio")).await), ["channel-radio"]);
+    assert_eq!(ids(&view(dir.path(), &a, search("radio ann")).await), ["channel-radio"]);
+    assert_eq!(ids(&view(dir.path(), &a, search("live tv radio")).await), ["channel-radio"]);
+    assert_eq!(ids(&view(dir.path(), &a, search("guide epg")).await), ["guide-one", "guide-two"]);
+    // Every word has to match somewhere.
+    assert_eq!(ids(&view(dir.path(), &a, search("radio zebra")).await), Vec::<&str>::new());
+    // Case, surrounding space and a blank search change nothing.
+    assert_eq!(ids(&view(dir.path(), &a, search("  GUIDE  ")).await), ["guide-one", "guide-two"]);
+    assert_eq!(view(dir.path(), &a, search("   ")).await.plugins.len(), 5);
+}
+
+#[tokio::test]
+async fn the_category_counts_follow_the_search_and_ignore_the_selected_category() {
+    let (dir, a) = categorised();
+    // Searching narrows the counts...
+    let guide = view(dir.path(), &a, MarketplaceQueryDto { q: Some("guide".into()), ..Default::default() }).await;
+    assert_eq!(guide.categories, [category("epg", 2)]);
+    assert_eq!(guide.total, 2);
+    // ...but selecting a category does not: the other categories stay choosable and `total` stays the search's.
+    let selected = MarketplaceQueryDto { category: Some("epg".into()), ..Default::default() };
+    let epg = view(dir.path(), &a, selected).await;
+    assert_eq!(ids(&epg), ["guide-one", "guide-two"]);
+    assert_eq!(epg.categories, [category("epg", 2), category("live-tv", 2)]);
+    assert_eq!(epg.total, 5);
+    // A selected category the search leaves empty is kept, with a count of 0, so it can be unselected.
+    let empty = MarketplaceQueryDto { q: Some("radio".into()), category: Some("epg".into()), ..Default::default() };
+    let none = view(dir.path(), &a, empty).await;
+    assert_eq!(ids(&none), Vec::<&str>::new());
+    assert_eq!(none.categories, [category("epg", 0), category("live-tv", 1)]);
+    // A category that is no valid id matches nothing, and is not offered.
+    let invalid = MarketplaceQueryDto { category: Some("123".into()), ..Default::default() };
+    let nothing = view(dir.path(), &a, invalid).await;
+    assert_eq!(ids(&nothing), Vec::<&str>::new());
+    assert_eq!(nothing.categories, [category("epg", 2), category("live-tv", 2)]);
+}
+
+#[tokio::test]
+async fn a_search_word_matches_where_a_word_starts_not_in_the_middle_of_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = source("alpha", "http://a.invalid/c.json");
+    let courier = r#"{"id":"courier","name":"Courier","description":"Delivers things, even the unusual","releases":[{"version":"1.0.0","package_url":"http://127.0.0.1/p.tlpx","plugin_api":1}]}"#;
+    seeded(
+        dir.path(),
+        "alpha",
+        &a.url,
+        &[courier.to_string(), entry("tv-guide", "Live TV", "1.0.0", "3.0.0", 1)].join(","),
+    );
+    let search = |q: &str| MarketplaceQueryDto { q: Some(q.into()), ..Default::default() };
+    // `live` is inside `delivers`, but that does not start a word; the category `live-tv` does.
+    assert_eq!(ids(&view(dir.path(), &a, search("live")).await), ["tv-guide"]);
+    // A word still matches by its start: a prefix of a word, in any field.
+    assert_eq!(ids(&view(dir.path(), &a, search("deliv")).await), ["courier"]);
+    assert_eq!(ids(&view(dir.path(), &a, search("cour")).await), ["courier"]);
+    // After a separator counts as a start, so ids and categories can be typed as they are written.
+    assert_eq!(ids(&view(dir.path(), &a, search("guide")).await), ["tv-guide"]);
+    assert_eq!(ids(&view(dir.path(), &a, search("tv-guide")).await), ["tv-guide"]);
+    assert_eq!(ids(&view(dir.path(), &a, search("live-tv")).await), ["tv-guide"]);
+    // The middle of a word does not.
+    assert_eq!(ids(&view(dir.path(), &a, search("uide")).await), Vec::<&str>::new());
+    assert_eq!(ids(&view(dir.path(), &a, search("ivers")).await), Vec::<&str>::new());
 }

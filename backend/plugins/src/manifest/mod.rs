@@ -280,6 +280,8 @@ pub(crate) struct Manifest {
     pub author: Option<String>,
     pub homepage: Option<String>,
     pub description: Option<String>,
+    /// What kind of plugin this is, for the marketplace and plugin lists to filter by.
+    pub category: Option<String>,
     pub min_tuliprox_version: Option<Version>,
     pub capabilities: Capabilities,
     /// Declared hook ids, in manifest order, without duplicates.

@@ -4,22 +4,30 @@
 use crate::{
     app::components::{
         input::Input,
-        plugins::{marketplace_sources::MarketplaceSources, plugin_upload::PluginUpload},
-        Card, Chip, DropDownOption, DropDownSelection, LoadingIndicator, NoContent, Select, TextButton,
+        plugins::{
+            marketplace_sources::MarketplaceSources, plugin_category::category_label, plugin_upload::PluginUpload,
+        },
+        Card, Chip, DropDownOption, DropDownSelection, LoadingIndicator, NoContent, RadioButtonGroup, Select,
+        TextButton,
     },
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
     services::PluginActionError,
 };
+use gloo_timers::future::TimeoutFuture;
 use shared::model::{
     MarketplaceDto, MarketplaceInstallDto, MarketplacePluginDto, MarketplaceQueryDto, MarketplaceReleaseDto,
     PluginRepositoryInfoDto, PluginUploadReviewDto,
 };
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 use web_sys::KeyboardEvent;
 use yew::{
-    classes, component, html, platform::spawn_local, use_effect_with, use_state, Callback, Event, Html, Properties,
+    classes, component, html, platform::spawn_local, use_effect_with, use_mut_ref, use_state, Callback, Event, Html,
+    Properties,
 };
+
+/// How long the search waits after the last keystroke before it asks the server.
+const SEARCH_DEBOUNCE_MS: u32 = 300;
 
 /// The release a card shows: the chosen one while it is still installable, else the newest
 /// compatible one (releases arrive newest first, compatible before incompatible).
@@ -118,7 +126,7 @@ fn MarketplacePluginCard(props: &PluginCardProps) -> Html {
                 <h3>{ plugin.name.clone() }</h3>
                 <code>{ plugin.id.clone() }</code>
                 if let Some(category) = plugin.category.as_ref() {
-                    <span class="tp__plugin-badge">{ category.clone() }</span>
+                    <span class="tp__plugin-badge">{ category_label(&translate, category) }</span>
                 }
                 if let Some(installed) = plugin.installed.as_ref() {
                     <span class="tp__task-status tp__task-status--done">
@@ -274,6 +282,31 @@ pub fn MarketplaceView(props: &MarketplaceViewProps) -> Html {
         );
     }
 
+    // The search applies a moment after the last keystroke; Enter and the search button apply it at once.
+    let search_ticket = use_mut_ref(|| 0_u32);
+    {
+        let search = search.clone();
+        let search_ticket = Rc::clone(&search_ticket);
+        use_effect_with((*search_draft).clone(), move |draft| {
+            let ticket = {
+                let mut current = search_ticket.borrow_mut();
+                *current = current.wrapping_add(1);
+                *current
+            };
+            let text = draft.trim().to_owned();
+            let search = search.clone();
+            let search_ticket: Rc<RefCell<u32>> = Rc::clone(&search_ticket);
+            spawn_local(async move {
+                TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
+                let wanted = (!text.is_empty()).then_some(text);
+                if *search_ticket.borrow() == ticket && *search != wanted {
+                    search.set(wanted);
+                }
+            });
+            || ()
+        });
+    }
+
     let on_refresh = {
         let reload = reload.clone();
         Callback::from(move |_: String| reload.set(*reload + 1))
@@ -313,7 +346,10 @@ pub fn MarketplaceView(props: &MarketplaceViewProps) -> Html {
     };
     let on_category = {
         let category = category.clone();
-        Callback::from(move |(_, selection): (String, DropDownSelection)| category.set(filter_value(&selection)))
+        // The first chip, `All`, has the empty id; choosing it clears the filter.
+        Callback::from(move |selection: Rc<Vec<String>>| {
+            category.set(selection.first().filter(|id| !id.is_empty()).cloned());
+        })
     };
     let on_source = {
         let source = source.clone();
@@ -382,14 +418,22 @@ pub fn MarketplaceView(props: &MarketplaceViewProps) -> Html {
         Callback::from(move |_: String| installed.set(None))
     };
 
-    let category_options = filter_options(
-        &translate.t("LABEL.PLUGIN_MARKETPLACE_ALL_CATEGORIES"),
-        marketplace
-            .as_ref()
-            .map(|data| data.categories.iter().map(|name| (name.clone(), name.clone())).collect())
-            .unwrap_or_default(),
-        category.as_deref(),
-    );
+    // The chips: `All`, then every category of the current search with its count. The ids are the
+    // categories; the labels are their names in the active language with the count.
+    let (category_ids, category_labels, category_selected) = {
+        let mut ids = vec![String::new()];
+        let mut labels = vec![format!(
+            "{} ({})",
+            translate.t("LABEL.PLUGIN_MARKETPLACE_ALL_CATEGORIES"),
+            marketplace.as_ref().map_or(0, |data| data.total)
+        )];
+        for entry in marketplace.iter().flat_map(|data| data.categories.iter()) {
+            ids.push(entry.id.clone());
+            labels.push(format!("{} ({})", category_label(&translate, &entry.id), entry.count));
+        }
+        let selected = vec![category.as_deref().unwrap_or_default().to_owned()];
+        (Rc::new(ids), Rc::new(labels), Rc::new(selected))
+    };
     let source_options = filter_options(
         &translate.t("LABEL.PLUGIN_MARKETPLACE_ALL_SOURCES"),
         sources.iter().filter(|info| info.enabled).map(|info| (info.id.clone(), info.name.clone())).collect(),
@@ -442,11 +486,14 @@ pub fn MarketplaceView(props: &MarketplaceViewProps) -> Html {
                 <Input name="marketplace_search" value={(*search_draft).clone()} on_change={on_draft}
                     onkeydown={Some(on_search_key)} icon={Some("Search".to_owned())}
                     placeholder={Some(translate.t("LABEL.SEARCH"))} />
-                <Select name="marketplace_category" options={category_options} on_select={on_category} />
                 <Select name="marketplace_source" options={source_options} on_select={on_source} />
                 <TextButton name="search" icon="Search" title={translate.t("LABEL.SEARCH")} onclick={on_search_click} />
                 <TextButton name="market-refresh" icon="Refresh" title={translate.t("LABEL.REFRESH")}
                     disabled={*loading} onclick={on_refresh} />
+            </div>
+            <div class="tp__plugins__market-categories" role="group" aria-label={translate.t("LABEL.PLUGIN_MARKETPLACE_CATEGORY_FILTER")}>
+                <RadioButtonGroup options={category_ids} labels={Some(category_labels)} selected={category_selected}
+                    on_select={on_category} wrap={true} />
             </div>
             <LoadingIndicator loading={*loading || *installing} />
             if let Some((_, name)) = (*installed).clone().filter(|_| props.can_write) {

@@ -3,6 +3,7 @@ id: typescript-rename
 name: TypeScript rename example
 version: 0.1.0
 api_version: 1
+category: playlist
 author: Your Name <you@example.com>
 description: >
   Renames the group named by rename_from to rename_to. Written in TypeScript and built with ComponentizeJS.

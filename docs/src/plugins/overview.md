@@ -38,6 +38,7 @@ id: "{{project-name}}"        # ^[a-z][a-z0-9-]{2,40}$, unique on the host
 name: My plugin
 version: 0.1.0               # semver, the plugin's own version
 api_version: 1               # host ABI major version
+category: playlist           # what kind of plugin it is: notifier, playlist, epg, ... (optional)
 author: Your Name <you@example.com>
 description: >
   Renames one playlist group in the after-filter stage. Replace this text.
