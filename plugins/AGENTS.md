@@ -15,8 +15,8 @@ says what an agent has to do, and in what order, so the result is complete the f
 | `plugins/<id>/` | A plugin that belongs to this repository and is built from source (for example `plugins/discord-notifier`) |
 
 A plugin is a WebAssembly component (`wasm32-wasip2`) plus a manifest, an optional settings schema, optional UI and
-translations, zipped as a `.tlpx`. Plugin crates are **not** workspace members: each one has its own `[workspace]`
-table and is listed in the root `Cargo.toml` `exclude`.
+translations, zipped as a `.tlpx`. Plugin crates are **not** workspace members: each one has its own empty `[workspace]`
+table, which is all it takes. Do not list a plugin in the root `Cargo.toml` (neither in `members` nor in `exclude`).
 
 ## Rules that are never negotiable
 
@@ -35,7 +35,7 @@ table and is listed in the root `Cargo.toml` `exclude`.
 
 ```text
 plugins/<id>/
-  Cargo.toml          own [workspace] table, crate-type cdylib, path dependency on ../plugin-sdk
+  Cargo.toml          own empty [workspace] table (keep it), crate-type cdylib, path dependency on ../plugin-sdk
   Cargo.lock          committed (the package script builds with --locked when it exists)
   manifest.yml        identity, capabilities, hooks, resources, ui
   config-schema.json  the settings form (when the plugin has settings)
@@ -50,7 +50,6 @@ Start from `bin/new-plugin.sh <id> <dest-dir>` (renders `plugins/examples/templa
 
 Wiring a new in-repository plugin into the repository is part of the task, not an afterthought:
 
-- [ ] root `Cargo.toml`: add `plugins/<id>` to `exclude`
 - [ ] `Makefile`: a `plugin-<id>` target that runs `./bin/package-plugin.sh plugins/<id> --out target/plugin-<id>/<id>.tlpx`
       (copy `plugin-discord-notifier`)
 - [ ] `docs/src/plugins/<id>.md` and a link in `docs/src/SUMMARY.md`
@@ -183,10 +182,13 @@ mod plugin {
 
 ### Notification plugins (a message channel)
 
+- Start from `plugins/discord-notifier` (embeds) or `plugins/slack-notifier` (Block Kit): same shape, two services.
+  Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a
+  `DeliveryError`) and `notify::iso8601` (times).
 - Hook `notifications.send`, capability `notifications` (plus `network` to call a service). The channel appears as
   `plugin.<id>`. The host applies routing, quiet hours, suppression and the retrying outbox; the plugin only formats and
   sends, then answers with a `DeliveryError`: `Transient` (retry with backoff), `RetryAfter(secs)` (a `u32` in seconds,
-  cap it at 24 h), `Permanent` (dead-letter). Map HTTP statuses like this: 2xx delivered; 408 and 429 retry (honour
+  cap it at 24 h), `Permanent` (dead-letter). `notify::delivery_for_status` maps HTTP statuses like this: 2xx delivered; 408 and 429 retry (honour
   `Retry-After`, seconds or HTTP date); 5xx except 501 and 505 transient; everything else permanent.
 - The `Notification` has `title`, `body` (the complete plain-text fallback), `severity` (`critical` arrives as `error`) and
   `payload`, the event as JSON: `id`, `severity`, `timestamp` (Unix seconds), `instance`, `fields` (the typed payload) and

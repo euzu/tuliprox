@@ -94,7 +94,7 @@ instead of your mount point.
 | `web_ui`          | Web Dashboard, RBAC, and Authentication.                                          | [See section](#2-web-ui--administration-web_ui) |
 | `log`             | Console output verbosity and sanitization.                                        | [See section](#3-logging-log)                   |
 | `schedules`       | Automated background tasks (Cronjobs).                                            | [See section](#4-schedules-schedules)           |
-| `messaging`       | Webhooks & Push-Notifications (Telegram, ntfy, etc.; Discord via a plugin).     | [See section](#5-messaging-messaging)           |
+| `messaging`       | Webhooks & Push-Notifications (Telegram, ntfy, etc.; Discord and Slack via plugins). | [See section](#5-messaging-messaging)           |
 | `video`           | Extension mapping and Web UI download behavior.                                   | [See section](#6-video--web-search-video)       |
 | `proxy`           | SOCKS5/HTTP proxy settings for outgoing requests.                                 | [See section](#7-outgoing-proxy-proxy)          |
 | `ipcheck`         | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#8-ip-check-ipcheck)              |
@@ -854,10 +854,6 @@ messaging:
     url: "https://gotify.local"
     token: "<APP_TOKEN>"
 
-  # Slack incoming webhook
-  slack:
-    url: "<WEBHOOK_URL>"
-
   # REST: Generic webhook/API support
   rest:
     url: "https://my-api.local/alert"
@@ -950,9 +946,9 @@ asked for this one explicitly.
 
 ### 5.2 Templating (Handlebars)
 
-**Every** channel supports templates - Telegram, REST, Pushover, ntfy, Gotify, Slack and `command`.
+**Every** channel supports templates - Telegram, REST, Pushover, ntfy, Gotify and `command`.
 Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies, which allows rich, structured
-notifications (e.g. Slack blocks or Markdown tables).
+notifications (e.g. JSON payloads or Markdown tables).
 
 Templates are keyed by event id:
 

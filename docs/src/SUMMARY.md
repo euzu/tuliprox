@@ -42,6 +42,7 @@
   - [Events, Notifications, Inputs, Outputs & MCP](./plugins/events-notifications-inputs.md)
   - [Packaging & Publishing](./plugins/packaging.md)
   - [Discord Notifier](./plugins/discord-notifier.md)
+  - [Slack Notifier](./plugins/slack-notifier.md)
   - [Plugin Marketplace](./plugins/marketplace.md)
   - [Publishing a Marketplace](./plugins/marketplace-publishing.md)
   - [Security Model](./plugins/security.md)

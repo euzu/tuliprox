@@ -3,8 +3,7 @@ use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
     ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, GotifyMessagingConfigDto, MessagingConfigDto,
-    NtfyMessagingConfigDto, PushoverMessagingConfigDto, RestMessagingConfigDto, SlackMessagingConfigDto,
-    TelegramMessagingConfigDto,
+    NtfyMessagingConfigDto, PushoverMessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -321,38 +320,6 @@ impl From<&GotifyMessagingConfig> for GotifyMessagingConfigDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct SlackMessagingConfig {
-    pub url: String,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl SlackMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("slack", &mut self.templates, templates_dir); }
-}
-
-macros::from_impl!(SlackMessagingConfig);
-impl From<&SlackMessagingConfigDto> for SlackMessagingConfig {
-    fn from(dto: &SlackMessagingConfigDto) -> Self {
-        Self {
-            url: dto.url.clone(),
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&SlackMessagingConfig> for SlackMessagingConfigDto {
-    fn from(instance: &SlackMessagingConfig) -> Self {
-        Self {
-            url: instance.url.clone(),
-            templates: template_keys_to_wire(&instance.templates),
-            routing: Some(ChannelRoutingDto::from(&instance.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandMessagingConfig {
     pub program: String,
     pub args: Vec<String>,
@@ -402,7 +369,6 @@ pub struct MessagingConfig {
     pub pushover: Option<PushoverMessagingConfig>,
     pub ntfy: Option<NtfyMessagingConfig>,
     pub gotify: Option<GotifyMessagingConfig>,
-    pub slack: Option<SlackMessagingConfig>,
     pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
@@ -433,9 +399,6 @@ impl MessagingConfig {
         if let Some(g) = &mut self.gotify {
             g.prepare(&templates_dir);
         }
-        if let Some(sl) = &mut self.slack {
-            sl.prepare(&templates_dir);
-        }
         if let Some(c) = &mut self.command {
             c.prepare(&templates_dir);
         }
@@ -453,7 +416,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             pushover: dto.pushover.as_ref().map(Into::into),
             ntfy: dto.ntfy.as_ref().map(Into::into),
             gotify: dto.gotify.as_ref().map(Into::into),
-            slack: dto.slack.as_ref().map(Into::into),
             command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
@@ -469,7 +431,6 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             pushover: instance.pushover.as_ref().map(Into::into),
             ntfy: instance.ntfy.as_ref().map(Into::into),
             gotify: instance.gotify.as_ref().map(Into::into),
-            slack: instance.slack.as_ref().map(Into::into),
             command: instance.command.as_ref().map(Into::into),
             disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }

@@ -15,7 +15,6 @@ pub mod ntfy;
 pub mod plugin;
 pub mod pushover;
 pub mod rest;
-pub mod slack;
 pub mod telegram;
 
 use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
@@ -43,7 +42,6 @@ pub enum Channel {
     Pushover(pushover::PushoverChannel),
     Ntfy(ntfy::NtfyChannel),
     Gotify(gotify::GotifyChannel),
-    Slack(slack::SlackChannel),
     Command(command::CommandChannel),
     /// A wasm plugin that exports `send-notification`; reached through the
     /// registered [`PluginNotifier`].
@@ -59,7 +57,6 @@ macro_rules! delegate {
             Channel::Pushover($inner) => $call,
             Channel::Ntfy($inner) => $call,
             Channel::Gotify($inner) => $call,
-            Channel::Slack($inner) => $call,
             Channel::Command($inner) => $call,
             Channel::Plugin($inner) => $call,
         }
@@ -94,7 +91,6 @@ impl Channel {
             Channel::Pushover(c) => c.send(msg).await,
             Channel::Ntfy(c) => c.send(msg).await,
             Channel::Gotify(c) => c.send(msg).await,
-            Channel::Slack(c) => c.send(msg).await,
             Channel::Command(c) => c.send(msg).await,
             Channel::Plugin(c) => c.send(msg).await,
         }
@@ -193,10 +189,7 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
         channels.push(Channel::Ntfy(ntfy::NtfyChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.gotify.as_ref() {
-        channels.push(Channel::Gotify(gotify::GotifyChannel::new(cfg.clone(), client.clone())));
-    }
-    if let Some(cfg) = messaging.slack.as_ref() {
-        channels.push(Channel::Slack(slack::SlackChannel::new(cfg.clone(), client)));
+        channels.push(Channel::Gotify(gotify::GotifyChannel::new(cfg.clone(), client)));
     }
     if let Some(cfg) = messaging.command.as_ref() {
         // No HTTP client: this one shells out.

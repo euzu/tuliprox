@@ -90,6 +90,7 @@ pub mod log;
 pub mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mock;
+pub mod notify;
 pub mod rpc;
 pub mod settings;
 mod sys;
@@ -125,7 +126,7 @@ pub mod prelude {
         events::{EventExt, TypedEvent},
         hooks::*,
         http::{self, Client as HttpClient},
-        images, info, kv, log, metrics, rpc,
+        images, info, kv, log, metrics, notify, rpc,
         settings::{Migrations, PluginSettings, Secret},
         tasks, trace, warn,
         wit::{

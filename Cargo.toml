@@ -1,6 +1,6 @@
 [workspace]
 members = ["backend/*", "frontend", "plugins/plugin-api", "plugins/plugin-sdk", "plugins/plugin-sdk-macros", "shared", "tools/tuliprox-testkit"]
-exclude = ["vendor/reqwest", "plugins/examples", "plugins/discord-notifier"]
+exclude = ["vendor/reqwest", "plugins/examples"]
 resolver = "2"
 
 [patch.crates-io]

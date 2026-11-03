@@ -251,6 +251,13 @@ plugin-discord-notifier: ## Build + package the discord-notifier plugin (wasm32-
 	@./bin/package-plugin.sh plugins/discord-notifier --out target/plugin-discord-notifier/discord-notifier.tlpx
 	@echo "✅ discord-notifier written to target/plugin-discord-notifier/discord-notifier.tlpx"
 
+.PHONY: plugin-slack-notifier
+plugin-slack-notifier: ## Build + package the slack-notifier plugin (wasm32-wasip2) into target/plugin-slack-notifier
+	@echo "==> Building slack-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-slack-notifier
+	@./bin/package-plugin.sh plugins/slack-notifier --out target/plugin-slack-notifier/slack-notifier.tlpx
+	@echo "✅ slack-notifier written to target/plugin-slack-notifier/slack-notifier.tlpx"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"

@@ -153,6 +153,10 @@ a config reload. `enabled` defaults to `true`. Removing a source leaves the plug
   [Events, Notifications and Providers](./events-notifications-inputs.md).
 - `tasks::Router` dispatches a `tasks.run` call on the task id.
 - `rpc::Router` dispatches a `rpc.call` on the method name.
+- `notify::delivery_for_status(status, retry_after)` turns an HTTP status and a `Retry-After` header into the `DeliveryError`
+  of a notification plugin (2xx delivered, 408 and 429 retried, 5xx except 501 and 505 transient, the rest permanent).
+  `notify::parse_retry_after` reads the header in seconds or as an HTTP date (at most 24 h) and `notify::iso8601` writes a
+  Unix time as `YYYY-MM-DDTHH:MM:SSZ`.
 - `Secret<T>` wraps a secret value. Its `Debug` and `Display` print `********`, and it does not implement `Serialize`.
   `expose()` gives the plain value.
 

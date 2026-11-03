@@ -135,24 +135,6 @@ impl GotifyMessagingConfigDto {
     pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.token.trim().is_empty() }
 }
 
-/// Slack incoming webhook.
-///
-/// Slack Block Kit differs from other webhook payload shapes, so it has its own
-/// channel rather than reusing a generic one.
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SlackMessagingConfigDto {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<ChannelRoutingDto>,
-}
-
-impl SlackMessagingConfigDto {
-    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() }
-}
-
 /// Run a local program, with the event JSON on stdin.
 ///
 /// The escape hatch that means nobody has to wait for a channel to be

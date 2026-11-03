@@ -3,7 +3,7 @@
 //! Notification volume was low enough that none of this mattered: six
 //! emitters, none of them chatty. Bridging the internal event bus and
 //! adding provider/stream events raises that by an order of magnitude, and
-//! the providers have hard limits - Slack webhooks allow about 1 request
+//! the providers have hard limits - a webhook host allows about one request
 //! per second, Telegram 20 messages per chat per minute. Shaping traffic before
 //! the `429` beats discovering it afterwards.
 //!

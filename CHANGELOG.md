@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.slack` is removed.** The built-in Slack channel is gone; the config key is no longer accepted, so a
+  config that still contains it fails to load with `unknown field`. Install and configure the `slack-notifier` plugin
+  instead (`plugins.plugins`, id `slack-notifier`, setting `url`).
+
 - **`messaging.discord` is removed.** The built-in Discord channel (and its `discord_*.templ` templates and the Web UI
   form) is gone; the config key is no longer accepted, so a config that still contains it fails to load with
   `unknown field`. Install and configure the `discord-notifier` plugin instead (`plugins.plugins`, id
@@ -208,6 +212,13 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **Slack notifications are a plugin.** The `slack-notifier` plugin (`plugins/slack-notifier`,
+  `make plugin-slack-notifier`) delivers notifications to a Slack incoming webhook as Block Kit blocks (a header, the
+  event's sections, a footer with the event id, instance and time) or as plain text. `&`, `<` and `>` are escaped, so event
+  text cannot become a mention or a link. Its settings form ships its own translations (English, Russian, Spanish,
+  Arabic). See [Slack Notifier](docs/src/plugins/slack-notifier.md). The SDK gained `tuliprox_plugin_sdk::notify`
+  (HTTP status to `DeliveryError`, `Retry-After`, ISO 8601 times) for notification plugins, which the Discord plugin now uses too.
 
 - **Discord notifications are a plugin.** The `discord-notifier` plugin (`plugins/discord-notifier`,
   `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
