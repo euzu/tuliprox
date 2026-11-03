@@ -2,8 +2,8 @@ use crate::model::macros;
 use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
-    RestMessagingConfigDto, TelegramMessagingConfigDto,
+    ChannelRoutingDto, CommandMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, RestMessagingConfigDto,
+    TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -202,49 +202,6 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
 }
 
 #[derive(Debug, Clone)]
-pub struct PushoverMessagingConfig {
-    pub url: String,
-    pub token: String,
-    pub user: String,
-    pub templates: std::collections::HashMap<EventId, String>,
-    pub routing: ChannelRouting,
-}
-
-impl PushoverMessagingConfig {
-    pub fn prepare(&mut self, templates_dir: &Path) {
-        discover_templates("pushover", &mut self.templates, templates_dir);
-    }
-}
-
-macros::from_impl!(PushoverMessagingConfig);
-impl From<&PushoverMessagingConfigDto> for PushoverMessagingConfig {
-    fn from(dto: &PushoverMessagingConfigDto) -> Self {
-        Self {
-            url: dto
-                .url
-                .as_ref()
-                .map_or_else(|| String::from("https://api.pushover.net/1/messages.json"), ToString::to_string),
-            token: dto.token.clone(),
-            user: dto.user.clone(),
-            templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<&PushoverMessagingConfig> for PushoverMessagingConfigDto {
-    fn from(instance: &PushoverMessagingConfig) -> Self {
-        Self {
-            url: Some(instance.url.clone()),
-            token: instance.token.clone(),
-            user: instance.user.clone(),
-            templates: template_keys_to_wire(&instance.templates),
-            routing: Some(ChannelRoutingDto::from(&instance.routing)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandMessagingConfig {
     pub program: String,
     pub args: Vec<String>,
@@ -291,7 +248,6 @@ pub struct MessagingConfig {
     pub notify_on: Vec<String>,
     pub telegram: Option<TelegramMessagingConfig>,
     pub rest: Option<RestMessagingConfig>,
-    pub pushover: Option<PushoverMessagingConfig>,
     pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
@@ -313,9 +269,6 @@ impl MessagingConfig {
         if let Some(r) = &mut self.rest {
             r.prepare(&templates_dir);
         }
-        if let Some(p) = &mut self.pushover {
-            p.prepare(&templates_dir);
-        }
         if let Some(c) = &mut self.command {
             c.prepare(&templates_dir);
         }
@@ -330,7 +283,6 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             subscription: EventSubscription::parse(dto.notify_on.iter()),
             telegram: dto.telegram.as_ref().map(Into::into),
             rest: dto.rest.as_ref().map(Into::into),
-            pushover: dto.pushover.as_ref().map(Into::into),
             command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
@@ -343,7 +295,6 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             notify_on: instance.notify_on.clone(),
             telegram: instance.telegram.as_ref().map(Into::into),
             rest: instance.rest.as_ref().map(Into::into),
-            pushover: instance.pushover.as_ref().map(Into::into),
             command: instance.command.as_ref().map(Into::into),
             disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }

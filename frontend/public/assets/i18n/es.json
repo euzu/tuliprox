@@ -652,11 +652,6 @@
       "KEEP_VHOST": "Si está habilitado, mantiene el nombre de host original en la cabecera Host al conectar mediante IP resuelta.",
       "REFRESH_SECS": "Intervalo de actualización DNS en segundos para los nombres de host del proveedor (el valor mínimo efectivo es 10)."
     },
-    "PUSHOVER_MESSAGING_CONFIG": {
-      "TOKEN": "Token de API de la aplicación Pushover.",
-      "URL": "URL de API de Pushover personalizada opcional. Déjela vacía para usar la predeterminada.",
-      "USER": "Clave de usuario de Pushover que identifica al destinatario de la notificación."
-    },
     "PROVIDER_FORM": {
       "URL_SELECTION_POLICY": "Controla cómo cada nueva solicitud elige su URL de proveedor inicial. `resume_last_working` comienza con la última URL exitosa. `restart_from_first` siempre comienza de nuevo en la primera URL configurada y solo conmuta si esa solicitud encuentra un error.",
       "URLS": "Lista de URL base para este proveedor. Se utilizan en orden y rotan cuando se activa la conmutación por error.",
@@ -1534,7 +1529,6 @@
     "PROVIDER_URLS": "URL del proveedor",
     "PROXY": "Proxy",
     "PROXY_CONFIG": "Proxy",
-    "PUSHOVER": "Pushover",
     "QOS_AGGREGATION": "Agregación de QoS",
     "QOS_AGGREGATION_ENABLED": "Habilitar agregación de QoS",
     "RATE_LIMIT": "Límite de tasa",

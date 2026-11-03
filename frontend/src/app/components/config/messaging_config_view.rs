@@ -15,23 +15,17 @@ use crate::{
     edit_field_number_f64, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
-use shared::model::{
-    DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto, RestMessagingConfigDto,
-    TelegramMessagingConfigDto,
-};
+use shared::model::{DiskAlertConfigDto, MessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto};
 use std::rc::Rc;
 use yew::prelude::*;
 
 const LABEL_NOTIFY_ON: &str = "LABEL.NOTIFY_ON";
 const LABEL_TELEGRAM: &str = "LABEL.TELEGRAM";
-const LABEL_PUSHOVER: &str = "LABEL.PUSHOVER";
 const LABEL_REST: &str = "LABEL.REST";
 const LABEL_BOT_TOKEN: &str = "LABEL.BOT_TOKEN";
 const LABEL_CHAT_IDS: &str = "LABEL.CHAT_IDS";
 const LABEL_MARKDOWN: &str = "LABEL.MARKDOWN";
 const LABEL_URL: &str = "LABEL.URL";
-const LABEL_TOKEN: &str = "LABEL.TOKEN";
-const LABEL_USER: &str = "LABEL.USER";
 const LABEL_METHOD: &str = "LABEL.METHOD";
 const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_ADD_HEADER: &str = "LABEL.ADD_HEADER";
@@ -59,16 +53,6 @@ generate_form_reducer!(
         Method => method: Option<String>,
         Headers => headers: Vec<String>,
         Templates => templates: std::collections::HashMap<String, String>,
-    }
-);
-
-generate_form_reducer!(
-    state: PushoverMessagingConfigFormState { form: PushoverMessagingConfigDto },
-    action_name: PushoverMessagingConfigFormAction,
-    fields {
-        Url => url: Option<String>,
-        Token => token: String,
-        User => user: String,
     }
 );
 
@@ -110,11 +94,6 @@ pub fn MessagingConfigView() -> Html {
     let rest_state =
         use_reducer(|| RestMessagingConfigFormState { form: RestMessagingConfigDto::default(), modified: false });
 
-    let pushover_state = use_reducer(|| PushoverMessagingConfigFormState {
-        form: PushoverMessagingConfigDto::default(),
-        modified: false,
-    });
-
     let disk_alert_state =
         use_reducer(|| DiskAlertConfigFormState { form: DiskAlertConfigDto::default(), modified: false });
 
@@ -141,42 +120,34 @@ pub fn MessagingConfigView() -> Html {
             messaging_state.form.clone(),
             telegram_state.form.clone(),
             rest_state.form.clone(),
-            pushover_state.form.clone(),
             disk_alert_state.form.clone(),
             messaging_state.modified,
             telegram_state.modified,
             rest_state.modified,
-            pushover_state.modified,
             disk_alert_state.modified,
         );
-        use_emit_mapped(
-            dependencies,
-            config_view_ctx.on_form_change.clone(),
-            |(m, t, r, p, da, mm, tm, rm, pm, dam)| {
-                let mut form = m;
-                form.telegram = Some(t);
-                form.rest = Some(r);
-                form.pushover = Some(p);
-                // The `DiskAlert` entry in `notify_on` is the on/off switch
-                // for disk alerts: the runtime only fires alerts when
-                // `notify_on` contains `DiskAlert` AND a `disk_alert` block
-                // exists. Keep both in sync so checking the chip enables
-                // alerts (default thresholds when untouched) and unchecking
-                // removes the block.
-                let subscribed = shared::model::notification::EventSubscription::parse(form.notify_on.iter())
-                    .matches(shared::model::notification::registry::SYSTEM_DISK_ALERT);
-                form.disk_alert = if subscribed { Some(da) } else { None };
+        use_emit_mapped(dependencies, config_view_ctx.on_form_change.clone(), |(m, t, r, da, mm, tm, rm, dam)| {
+            let mut form = m;
+            form.telegram = Some(t);
+            form.rest = Some(r);
+            // The `DiskAlert` entry in `notify_on` is the on/off switch
+            // for disk alerts: the runtime only fires alerts when
+            // `notify_on` contains `DiskAlert` AND a `disk_alert` block
+            // exists. Keep both in sync so checking the chip enables
+            // alerts (default thresholds when untouched) and unchecking
+            // removes the block.
+            let subscribed = shared::model::notification::EventSubscription::parse(form.notify_on.iter())
+                .matches(shared::model::notification::registry::SYSTEM_DISK_ALERT);
+            form.disk_alert = if subscribed { Some(da) } else { None };
 
-                let modified = mm || tm || rm || pm || dam;
-                ConfigForm::Messaging(modified, form)
-            },
-        );
+            let modified = mm || tm || rm || dam;
+            ConfigForm::Messaging(modified, form)
+        });
     }
 
     {
         let msg_state = messaging_state.clone();
         let t_state = telegram_state.clone();
-        let p_state = pushover_state.clone();
         let r_state = rest_state.clone();
 
         let msg_config: MessagingConfigDto = config_ctx
@@ -195,13 +166,6 @@ pub fn MessagingConfigView() -> Html {
         let rest_cfg = msg_config.rest.as_ref().map_or_else(RestMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((rest_cfg, *config_view_ctx.edit_mode), move |(rest_cfg, _mode)| {
             r_state.dispatch(RestMessagingConfigFormAction::SetAll(rest_cfg.clone()));
-            || ()
-        });
-
-        let pushover_cfg =
-            msg_config.pushover.as_ref().map_or_else(PushoverMessagingConfigDto::default, std::clone::Clone::clone);
-        use_effect_with((pushover_cfg, *config_view_ctx.edit_mode), move |(pushover_cfg, _mode)| {
-            p_state.dispatch(PushoverMessagingConfigFormAction::SetAll(pushover_cfg.clone()));
             || ()
         });
 
@@ -274,25 +238,6 @@ pub fn MessagingConfigView() -> Html {
         },
     };
 
-    let render_pushover = |pushover: Option<&PushoverMessagingConfigDto>| match pushover {
-        Some(entry) => html! {
-        <Card class="tp__config-view__card">
-            <h1>{translate.t(LABEL_PUSHOVER)}</h1>
-            { config_field_optional!(entry, translate.t(LABEL_URL), url) }
-            { config_field_hide!(entry, translate.t(LABEL_TOKEN), token) }
-            { config_field!(entry, translate.t(LABEL_USER), user) }
-        </Card>
-        },
-        None => html! {
-          <Card class="tp__config-view__card">
-              <h1>{translate.t(LABEL_PUSHOVER)}</h1>
-              { config_field_empty!(translate.t(LABEL_URL), "PUSHOVER_MESSAGING_CONFIG.URL") }
-              { config_field_empty!(translate.t(LABEL_TOKEN), "PUSHOVER_MESSAGING_CONFIG.TOKEN") }
-              { config_field_empty!(translate.t(LABEL_USER), "PUSHOVER_MESSAGING_CONFIG.USER") }
-          </Card>
-        },
-    };
-
     let render_disk_alert = |disk_alert: Option<&DiskAlertConfigDto>| match disk_alert {
         Some(disk_alert) => html! {
             <Card class="tp__config-view__card">
@@ -329,7 +274,6 @@ pub fn MessagingConfigView() -> Html {
         <div class="tp__messaging-config-view__body tp__config-view-page__body">
           {render_telegram(msg_state.form.telegram.as_ref())}
           {render_rest(msg_state.form.rest.as_ref())}
-          {render_pushover(msg_state.form.pushover.as_ref())}
           {render_disk_alert(msg_state.form.disk_alert.as_ref())}
         </div>
         </>
@@ -429,13 +373,6 @@ pub fn MessagingConfigView() -> Html {
                         <h3>{translate.t("LABEL.TEMPLATES")}</h3>
                         { rest_template_fields }
                     </div>
-                </Card>
-
-                <Card class="tp__config-view__card">
-                    <h1>{translate.t(LABEL_PUSHOVER)}</h1>
-                    { edit_field_text_option!(pushover_state, translate.t(LABEL_URL), url, PushoverMessagingConfigFormAction::Url) }
-                    { edit_field_text!(pushover_state, translate.t(LABEL_TOKEN), token, PushoverMessagingConfigFormAction::Token, true) }
-                    { edit_field_text!(pushover_state, translate.t(LABEL_USER), user, PushoverMessagingConfigFormAction::User) }
                 </Card>
 
                 <Card class="tp__config-view__card">

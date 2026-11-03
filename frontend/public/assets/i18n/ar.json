@@ -652,11 +652,6 @@
       "KEEP_VHOST": "إذا تم التفعيل، يحتفظ باسم المضيف الأصلي في رأس المضيف أثناء الاتصال عبر IP المُحَل.",
       "REFRESH_SECS": "فاصل تحديث DNS بالثواني لأسماء مضيف المزود (الحد الأدنى للقيمة الفعالة هو 10)."
     },
-    "PUSHOVER_MESSAGING_CONFIG": {
-      "TOKEN": "رمز API لتطبيق Pushover.",
-      "URL": "عنوان URL اختياري مخصص لـ Pushover API. اتركه فارغًا لاستخدام الافتراضي.",
-      "USER": "مفتاح مستخدم Pushover الذي يحدد متلقي الإشعار."
-    },
     "PROVIDER_FORM": {
       "URL_SELECTION_POLICY": "يتحكم في كيفية اختيار كل طلب جديد لـ URL البدء للمزود. `resume_last_working` يبدأ من آخر URL ناجح. `restart_from_first` يبدأ دائمًا من أول URL مُكوّن مرة أخرى ولا يتجاوز الفشل إلا إذا واجه هذا الطلب خطأ.",
       "URLS": "قائمة عناوين URL الأساسية لهذا المزود. تُستخدم بالترتيب ويُدور بها عند تفعيل تجاوز الفشل.",
@@ -1534,7 +1529,6 @@
     "PROVIDER_URLS": "عناوين URL للمزود",
     "PROXY": "وكيل",
     "PROXY_CONFIG": "وكيل",
-    "PUSHOVER": "Pushover",
     "QOS_AGGREGATION": "تجميع QoS",
     "QOS_AGGREGATION_ENABLED": "تفعيل تجميع QoS",
     "RATE_LIMIT": "تحديد المعدل",

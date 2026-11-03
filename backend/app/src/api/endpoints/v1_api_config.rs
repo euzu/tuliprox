@@ -278,8 +278,8 @@ fn sanitize_target_identity_only(target: &ConfigTargetDto) -> ConfigTargetDto {
 
 fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: Option<PermissionSet>) {
     // Unconditional: `config.yml` goes out in full to anyone with
-    // `ConfigRead`, which included the Telegram bot token, the Pushover
-    // credentials and any `Authorization` header on the REST channel.
+    // `ConfigRead`, which included the Telegram bot token and any
+    // `Authorization` header on the REST channel.
     // `save_config_main` puts a returned mask back, so the round-trip is
     // lossless.
     if let Some(messaging) = app_config.config.messaging.as_mut() {
@@ -1079,7 +1079,7 @@ pub struct MessagingTestRequest {
     /// Event id to simulate. Defaults to `system.info`.
     #[serde(default)]
     pub event: Option<String>,
-    /// Restrict to one channel by its stable id (`telegram`, `pushover`, ...).
+    /// Restrict to one channel by its stable id (`telegram`, `rest`, ...).
     /// Absent means every configured channel.
     #[serde(default)]
     pub channel: Option<String>,

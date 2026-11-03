@@ -1186,12 +1186,6 @@ pub async fn persist_messaging_templates(
                 *template = persist_single_template("rest", Some(kind.as_str()), template, &templates_dir).await?;
             }
         }
-        // Pushover
-        if let Some(pushover) = &mut messaging.pushover {
-            for (kind, template) in &mut pushover.templates {
-                *template = persist_single_template("pushover", Some(kind.as_str()), template, &templates_dir).await?;
-            }
-        }
     }
     Ok(())
 }

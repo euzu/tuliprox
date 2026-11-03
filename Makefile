@@ -245,7 +245,7 @@ plugin-examples: ## Build + package the example plugins and the rendered templat
 	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
 
 # The notification plugins that live in this repository, under plugins/notifiers/<id>.
-NOTIFIER_PLUGINS := discord-notifier slack-notifier gotify-notifier ntfy-notifier
+NOTIFIER_PLUGINS := discord-notifier slack-notifier gotify-notifier ntfy-notifier pushover-notifier
 
 .PHONY: plugin-notifiers
 plugin-notifiers: ## Build + package every notifier plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
@@ -283,6 +283,13 @@ plugin-ntfy-notifier: ## Build + package the ntfy-notifier plugin (wasm32-wasip2
 	@mkdir -p target/plugin-ntfy-notifier
 	@./bin/package-plugin.sh plugins/notifiers/ntfy-notifier --out target/plugin-ntfy-notifier/ntfy-notifier.tlpx
 	@echo "✅ ntfy-notifier written to target/plugin-ntfy-notifier/ntfy-notifier.tlpx"
+
+.PHONY: plugin-pushover-notifier
+plugin-pushover-notifier: ## Build + package the pushover-notifier plugin (wasm32-wasip2) into target/plugin-pushover-notifier
+	@echo "==> Building pushover-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-pushover-notifier
+	@./bin/package-plugin.sh plugins/notifiers/pushover-notifier --out target/plugin-pushover-notifier/pushover-notifier.tlpx
+	@echo "✅ pushover-notifier written to target/plugin-pushover-notifier/pushover-notifier.tlpx"
 
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count

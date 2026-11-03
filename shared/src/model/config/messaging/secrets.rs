@@ -23,16 +23,11 @@ impl MessagingConfigDto {
     /// Replace channel secrets with [`REDACTED_SECRET`].
     ///
     /// The config GET returns `config.yml` in full to any client with
-    /// `ConfigRead`, which included the Telegram bot token, the Pushover
-    /// token and user key, and any `Authorization` header configured on the
-    /// REST channel.
+    /// `ConfigRead`, which included the Telegram bot token and any
+    /// `Authorization` header configured on the REST channel.
     pub fn redact_secrets(&mut self) {
         if let Some(telegram) = self.telegram.as_mut() {
             redact(&mut telegram.bot_token);
-        }
-        if let Some(pushover) = self.pushover.as_mut() {
-            redact(&mut pushover.token);
-            redact(&mut pushover.user);
         }
         if let Some(rest) = self.rest.as_mut() {
             if let Some(secret) = rest.signing_secret.as_mut() {
@@ -56,10 +51,6 @@ impl MessagingConfigDto {
     pub fn restore_redacted_secrets(&mut self, current: &Self) {
         if let (Some(incoming), Some(stored)) = (self.telegram.as_mut(), current.telegram.as_ref()) {
             restore(&mut incoming.bot_token, &stored.bot_token);
-        }
-        if let (Some(incoming), Some(stored)) = (self.pushover.as_mut(), current.pushover.as_ref()) {
-            restore(&mut incoming.token, &stored.token);
-            restore(&mut incoming.user, &stored.user);
         }
         if let (Some(incoming), Some(stored)) = (self.rest.as_mut(), current.rest.as_ref()) {
             if let (Some(secret), Some(original)) = (incoming.signing_secret.as_mut(), stored.signing_secret.as_ref()) {

@@ -11,7 +11,6 @@
 
 pub mod command;
 pub mod plugin;
-pub mod pushover;
 pub mod rest;
 pub mod telegram;
 
@@ -37,7 +36,6 @@ use tuliprox_core::{
 pub enum Channel {
     Telegram(telegram::TelegramChannel),
     Rest(rest::RestChannel),
-    Pushover(pushover::PushoverChannel),
     Command(command::CommandChannel),
     /// A wasm plugin that exports `send-notification`; reached through the
     /// registered [`PluginNotifier`].
@@ -50,7 +48,6 @@ macro_rules! delegate {
         match $self {
             Channel::Telegram($inner) => $call,
             Channel::Rest($inner) => $call,
-            Channel::Pushover($inner) => $call,
             Channel::Command($inner) => $call,
             Channel::Plugin($inner) => $call,
         }
@@ -82,7 +79,6 @@ impl Channel {
         match self {
             Channel::Telegram(c) => c.send(msg).await,
             Channel::Rest(c) => c.send(msg).await,
-            Channel::Pushover(c) => c.send(msg).await,
             Channel::Command(c) => c.send(msg).await,
             Channel::Plugin(c) => c.send(msg).await,
         }
@@ -172,10 +168,7 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
         )));
     }
     if let Some(cfg) = messaging.rest.as_ref() {
-        channels.push(Channel::Rest(rest::RestChannel::new(cfg.clone(), client.clone())));
-    }
-    if let Some(cfg) = messaging.pushover.as_ref() {
-        channels.push(Channel::Pushover(pushover::PushoverChannel::new(cfg.clone(), client)));
+        channels.push(Channel::Rest(rest::RestChannel::new(cfg.clone(), client)));
     }
     if let Some(cfg) = messaging.command.as_ref() {
         // No HTTP client: this one shells out.

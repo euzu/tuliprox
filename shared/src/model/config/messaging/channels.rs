@@ -68,34 +68,6 @@ impl RestMessagingConfigDto {
     }
 }
 
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct PushoverMessagingConfigDto {
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    pub url: Option<String>,
-    pub token: String,
-    pub user: String,
-    /// Template per event, keyed by event id wire name.
-    ///
-    /// Pushover previously had no template support at all, so every
-    /// notification took the built-in text - which for watch changes and
-    /// playlist stats was a raw `serde_json` dump pushed to a phone.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<String, String>,
-    /// Per-channel routing. Inherits the global `notify_on` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<ChannelRoutingDto>,
-}
-
-impl PushoverMessagingConfigDto {
-    pub fn is_empty(&self) -> bool {
-        is_blank_optional_str(self.url.as_deref())
-            && self.token.trim().is_empty()
-            && self.user.trim().is_empty()
-            && self.templates.is_empty()
-    }
-}
-
 /// Run a local program, with the event JSON on stdin.
 ///
 /// The escape hatch that means nobody has to wait for a channel to be

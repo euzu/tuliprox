@@ -12,8 +12,8 @@
 //! dead-lettered after `max_attempts`.
 //!
 //! Per-channel retry is what makes delivery at-most-once *per channel*: a
-//! message that reached Telegram but not Pushover is retried only against
-//! Pushover, so a retry can never duplicate a delivered message.
+//! message that reached Telegram but not REST is retried only against
+//! REST, so a retry can never duplicate a delivered message.
 
 use crate::{channel::Delivery, configured_channels, send_event_to_channel};
 use log::{debug, error, info};

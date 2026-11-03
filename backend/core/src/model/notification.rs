@@ -37,9 +37,9 @@ pub struct EventSection {
 
 /// One thing that happened, in the shape every channel can render.
 ///
-/// `title` and `body` are always populated, which is what lets Pushover, a
-/// syslog channel or an email subject line render an event correctly
-/// without a per-kind match - the gap that made Pushover emit raw JSON to
+/// `title` and `body` are always populated, which is what lets a phone push
+/// channel, a syslog channel or an email subject line render an event correctly
+/// without a per-kind match - the gap that once made a push channel emit raw JSON to
 /// phones.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NotificationEvent {
@@ -446,7 +446,7 @@ fn fields_for(content: &MessageContent) -> serde_json::Value {
     value.unwrap_or(serde_json::Value::Null)
 }
 
-/// Telegram and Pushover both truncate hard; a title longer than this is
+/// Telegram and the push services both truncate hard; a title longer than this is
 /// never useful and pushes the body out of the preview.
 const MAX_TITLE_CHARS: usize = 120;
 
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn watch_text_lists_groups_then_channels_instead_of_dumping_json() {
         // Regression: the legacy default text for a watch change was a raw
-        // `serde_json` dump, which is what Pushover received.
+        // `serde_json` dump, which is what a push channel received.
         let content = MessageContent::Watch(WatchChanges::new(
             "sports".to_string(),
             vec![

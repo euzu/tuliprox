@@ -188,7 +188,8 @@ mod plugin {
 ### Notification plugins (a message channel)
 
 - Start from the closest plugin in `plugins/notifiers/`: `discord-notifier` (embeds), `slack-notifier` (Block Kit),
-  `gotify-notifier` and `ntfy-notifier` (push messages, plain text or markdown): same shape, different services.
+  `gotify-notifier`, `ntfy-notifier` and `pushover-notifier` (push messages, plain text, markdown or HTML): same
+  shape, different services.
   Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a
   `DeliveryError`) and `notify::iso8601` (times), `notify::sections_of` (the event's sections) and, for a service that renders markdown,
   `notify::markdown` (escaping, hard line breaks, sections as bold headings).

@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **`messaging.pushover` is removed.** The built-in Pushover channel is gone, together with its form in the Web UI: the
+  config key is no longer accepted, so a config that still contains it fails to load with `unknown field`. Install and
+  configure the `pushover-notifier` plugin instead (`plugins.plugins`, id `pushover-notifier`, settings `token` and `user`).
+
 - **`messaging.ntfy` is removed.** The built-in ntfy channel is gone; the config key is no longer accepted, so a config
   that still contains it fails to load with `unknown field`. Install and configure the `ntfy-notifier` plugin instead
   (`plugins.plugins`, id `ntfy-notifier`, settings `url`, `topic` and optionally `token`).
@@ -220,6 +224,14 @@
   are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
+
+- **Pushover notifications are a plugin.** The `pushover-notifier` plugin (`plugins/notifiers/pushover-notifier`,
+  `make plugin-pushover-notifier`) sends notifications to Pushover. The message carries the event's own time as the
+  Pushover timestamp, so one delivered late through the outbox still shows when it happened. With `style: html` the event's
+  sections are sent as bold headings with their lines below; the message is assembled from whole lines, so the
+  1024-character limit can never cut a tag or an entity in half. The token and the user key stay in the request body, never in a
+  URL, and in no error or log line. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [Pushover Notifier](docs/src/plugins/pushover-notifier.md).
 
 - **ntfy notifications are a plugin.** The `ntfy-notifier` plugin (`plugins/notifiers/ntfy-notifier`,
   `make plugin-ntfy-notifier`) publishes to an ntfy topic through ntfy's JSON API, so a title or a message can carry any

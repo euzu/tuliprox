@@ -113,7 +113,7 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::ti
 pub struct ChannelCapabilities {
     /// The channel renders operator-supplied templates. When `false` the
     /// dispatcher hands over [`NotificationEvent::body`] and does not look
-    /// for a template - which is what Pushover needed and never had.
+    /// for a template.
     pub supports_templates: bool,
     /// Hard body limit in bytes; `None` for unlimited. The dispatcher
     /// truncates on a character boundary before calling `send`.

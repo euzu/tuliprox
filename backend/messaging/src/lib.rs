@@ -93,8 +93,8 @@ async fn render_for<'a>(
 /// Send `event` to exactly one channel, by its stable id.
 ///
 /// This is the entry point the outbox worker drives: it retries per
-/// channel, so a message that reached Telegram but not Pushover is re-sent
-/// only to Pushover.
+/// channel, so a message that reached Telegram but not REST is re-sent
+/// only to REST.
 pub async fn send_event_to_channel(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,

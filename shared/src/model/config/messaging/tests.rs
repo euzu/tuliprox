@@ -20,13 +20,11 @@ fn clean_strips_empty_subconfigs() {
     let mut messaging = MessagingConfigDto {
         telegram: Some(TelegramMessagingConfigDto::default()),
         rest: Some(RestMessagingConfigDto::default()),
-        pushover: Some(PushoverMessagingConfigDto::default()),
         ..Default::default()
     };
     messaging.clean();
     assert!(messaging.telegram.is_none());
     assert!(messaging.rest.is_none());
-    assert!(messaging.pushover.is_none());
 }
 
 #[test]
@@ -53,11 +51,6 @@ fn prepare_leaves_glob_patterns_untouched() {
 fn redaction_masks_every_channel_secret() {
     let mut messaging = MessagingConfigDto {
         telegram: Some(TelegramMessagingConfigDto { bot_token: "real-token".to_string(), ..Default::default() }),
-        pushover: Some(PushoverMessagingConfigDto {
-            token: "real-app".to_string(),
-            user: "real-user".to_string(),
-            ..Default::default()
-        }),
         rest: Some(RestMessagingConfigDto {
             url: "https://example.test".to_string(),
             headers: vec!["Authorization: Bearer secret".to_string(), "X-Trace: keep-me".to_string()],
@@ -67,8 +60,6 @@ fn redaction_masks_every_channel_secret() {
     };
     messaging.redact_secrets();
     assert_eq!(messaging.telegram.as_ref().expect("telegram").bot_token, REDACTED_SECRET);
-    assert_eq!(messaging.pushover.as_ref().expect("pushover").token, REDACTED_SECRET);
-    assert_eq!(messaging.pushover.as_ref().expect("pushover").user, REDACTED_SECRET);
     let headers = &messaging.rest.as_ref().expect("rest").headers;
     assert!(headers.contains(&format!("Authorization: {REDACTED_SECRET}")), "auth header not masked: {headers:?}");
     // A non-credential header keeps its value; masking everything would
