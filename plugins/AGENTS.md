@@ -12,7 +12,12 @@ says what an agent has to do, and in what order, so the result is complete the f
 | `plugins/plugin-api/` | The WIT contract (`wit/tuliprox-plugin.wit`, package `tuliprox:plugin@1.0.0`). Frozen: never change it for one plugin |
 | `plugins/plugin-sdk/`, `plugin-sdk-macros/` | The Rust SDK a plugin is written against (`tuliprox_plugin_sdk::prelude::*`) |
 | `plugins/examples/` | Teaching examples and the template (`template`). Not shipped, not maintained as products |
-| `plugins/<id>/` | A plugin that belongs to this repository and is built from source (for example `plugins/discord-notifier`) |
+| `plugins/notifiers/<id>/` | A notification plugin (a message channel) that belongs to this repository and is built from source, for example `plugins/notifiers/discord-notifier` |
+
+Plugins are grouped by kind, `plugins/<group>/<id>`. Today the only group is `notifiers` (every plugin that is a message
+channel; ids end in `-notifier`). A plugin of another kind gets its own group folder, named with a plural noun, the day
+the first one exists, and not before. Keep the SDK dependency as `../../plugin-sdk` so every plugin sits two levels
+below `plugins/`.
 
 A plugin is a WebAssembly component (`wasm32-wasip2`) plus a manifest, an optional settings schema, optional UI and
 translations, zipped as a `.tlpx`. Plugin crates are **not** workspace members: each one has its own empty `[workspace]`
@@ -34,8 +39,8 @@ table, which is all it takes. Do not list a plugin in the root `Cargo.toml` (nei
 ## Layout of a plugin that lives in this repository
 
 ```text
-plugins/<id>/
-  Cargo.toml          own empty [workspace] table (keep it), crate-type cdylib, path dependency on ../plugin-sdk
+plugins/notifiers/<id>/
+  Cargo.toml          own empty [workspace] table (keep it), crate-type cdylib, path dependency on ../../plugin-sdk
   Cargo.lock          committed (the package script builds with --locked when it exists)
   manifest.yml        identity, capabilities, hooks, resources, ui
   config-schema.json  the settings form (when the plugin has settings)
@@ -46,15 +51,15 @@ plugins/<id>/
 ```
 
 Start from `bin/new-plugin.sh <id> <dest-dir>` (renders `plugins/examples/template`) or copy a finished plugin such as
-`plugins/discord-notifier`. The id must match `^[a-z][a-z0-9-]{2,40}$`; `metrics`, `staging` and `plugins-prev` are reserved.
+`plugins/notifiers/discord-notifier`. The id must match `^[a-z][a-z0-9-]{2,40}$`; `metrics`, `staging` and `plugins-prev` are reserved.
 
 Wiring a new in-repository plugin into the repository is part of the task, not an afterthought:
 
-- [ ] `Makefile`: a `plugin-<id>` target that runs `./bin/package-plugin.sh plugins/<id> --out target/plugin-<id>/<id>.tlpx`
-      (copy `plugin-discord-notifier`)
+- [ ] `Makefile`: add the id to `NOTIFIER_PLUGINS` (so `make plugin-notifiers` builds it) and a `plugin-<id>` target that runs
+      `./bin/package-plugin.sh plugins/notifiers/<id> --out target/plugin-<id>/<id>.tlpx` (copy `plugin-discord-notifier`)
 - [ ] `docs/src/plugins/<id>.md` and a link in `docs/src/SUMMARY.md`
 - [ ] `CHANGELOG.md`: an entry under `## Unreleased`, in the right section (a removed or renamed config key is a breaking change)
-- [ ] `plugins/<id>/Cargo.lock` committed
+- [ ] `plugins/notifiers/<id>/Cargo.lock` committed
 
 ## The manifest
 
@@ -113,7 +118,7 @@ Rules:
 Check before you finish (run from the repository root, with the plugin directory as the argument):
 
 ```sh
-python3 -I - plugins/<id> <<'PY'
+python3 -I - plugins/notifiers/<id> <<'PY'
 import json, sys, pathlib
 root = pathlib.Path(sys.argv[1])
 schema = json.loads((root / "config-schema.json").read_text())
@@ -182,7 +187,7 @@ mod plugin {
 
 ### Notification plugins (a message channel)
 
-- Start from `plugins/discord-notifier` (embeds) or `plugins/slack-notifier` (Block Kit): same shape, two services.
+- Start from `plugins/notifiers/discord-notifier` (embeds) or `plugins/notifiers/slack-notifier` (Block Kit): same shape, two services.
   Use the SDK's `notify` module instead of writing your own: `notify::delivery_for_status` (status and `Retry-After` to a
   `DeliveryError`) and `notify::iso8601` (times).
 - Hook `notifications.send`, capability `notifications` (plus `network` to call a service). The channel appears as
@@ -202,7 +207,7 @@ mod plugin {
 
 ```sh
 make plugin-<id>                          # builds plugin.wasm and writes target/plugin-<id>/<id>.tlpx
-bin/package-plugin.sh plugins/<id>        # the same without the make target (output: target/plugin-examples/<id>.tlpx)
+bin/package-plugin.sh plugins/notifiers/<id>   # the same without the make target (output: target/plugin-examples/<id>.tlpx)
 ```
 
 - Needs `rustup target add wasm32-wasip2` and `python3` (3.8 or later).

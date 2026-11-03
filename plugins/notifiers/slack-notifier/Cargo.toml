@@ -1,12 +1,12 @@
 [package]
-name = "discord-notifier"
+name = "slack-notifier"
 version = "1.0.0"
 edition = "2021"
 publish = false
-description = "tuliprox plugin: deliver notifications to a Discord webhook"
+description = "tuliprox plugin: deliver notifications to a Slack incoming webhook"
 
 # Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
-# by `bin/package-plugin.sh plugins/discord-notifier`. No .wasm or
+# by `bin/package-plugin.sh plugins/notifiers/slack-notifier`. No .wasm or
 # .tlpx is ever committed.
 [workspace]
 
@@ -14,7 +14,7 @@ description = "tuliprox plugin: deliver notifications to a Discord webhook"
 crate-type = ["cdylib"]
 
 [dependencies]
-tuliprox-plugin-sdk = { path = "../plugin-sdk" }
+tuliprox-plugin-sdk = { path = "../../plugin-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

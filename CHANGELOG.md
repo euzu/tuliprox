@@ -213,14 +213,14 @@
   can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
   `sections` key.
 
-- **Slack notifications are a plugin.** The `slack-notifier` plugin (`plugins/slack-notifier`,
+- **Slack notifications are a plugin.** The `slack-notifier` plugin (`plugins/notifiers/slack-notifier`,
   `make plugin-slack-notifier`) delivers notifications to a Slack incoming webhook as Block Kit blocks (a header, the
   event's sections, a footer with the event id, instance and time) or as plain text. `&`, `<` and `>` are escaped, so event
   text cannot become a mention or a link. Its settings form ships its own translations (English, Russian, Spanish,
   Arabic). See [Slack Notifier](docs/src/plugins/slack-notifier.md). The SDK gained `tuliprox_plugin_sdk::notify`
   (HTTP status to `DeliveryError`, `Retry-After`, ISO 8601 times) for notification plugins, which the Discord plugin now uses too.
 
-- **Discord notifications are a plugin.** The `discord-notifier` plugin (`plugins/discord-notifier`,
+- **Discord notifications are a plugin.** The `discord-notifier` plugin (`plugins/notifiers/discord-notifier`,
   `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
   instance name as footer, the event's detail as fields) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
   suppression and the retrying outbox apply as for every channel. Its settings form ships its own translations

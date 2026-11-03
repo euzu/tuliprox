@@ -244,18 +244,30 @@ plugin-examples: ## Build + package the example plugins and the rendered templat
 	@./bin/package-plugin.sh target/plugin-examples/template/my-plugin
 	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
 
+# The notification plugins that live in this repository, under plugins/notifiers/<id>.
+NOTIFIER_PLUGINS := discord-notifier slack-notifier
+
+.PHONY: plugin-notifiers
+plugin-notifiers: ## Build + package every notifier plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
+	@echo "==> Building the notifier plugins (wasm32-wasip2): $(NOTIFIER_PLUGINS)"
+	@for id in $(NOTIFIER_PLUGINS); do \
+		mkdir -p target/plugin-$$id; \
+		./bin/package-plugin.sh plugins/notifiers/$$id --out target/plugin-$$id/$$id.tlpx || exit 1; \
+	done
+	@echo "✅ Notifier plugins written to target/plugin-<id>/<id>.tlpx"
+
 .PHONY: plugin-discord-notifier
 plugin-discord-notifier: ## Build + package the discord-notifier plugin (wasm32-wasip2) into target/plugin-discord-notifier
 	@echo "==> Building discord-notifier (wasm32-wasip2)"
 	@mkdir -p target/plugin-discord-notifier
-	@./bin/package-plugin.sh plugins/discord-notifier --out target/plugin-discord-notifier/discord-notifier.tlpx
+	@./bin/package-plugin.sh plugins/notifiers/discord-notifier --out target/plugin-discord-notifier/discord-notifier.tlpx
 	@echo "✅ discord-notifier written to target/plugin-discord-notifier/discord-notifier.tlpx"
 
 .PHONY: plugin-slack-notifier
 plugin-slack-notifier: ## Build + package the slack-notifier plugin (wasm32-wasip2) into target/plugin-slack-notifier
 	@echo "==> Building slack-notifier (wasm32-wasip2)"
 	@mkdir -p target/plugin-slack-notifier
-	@./bin/package-plugin.sh plugins/slack-notifier --out target/plugin-slack-notifier/slack-notifier.tlpx
+	@./bin/package-plugin.sh plugins/notifiers/slack-notifier --out target/plugin-slack-notifier/slack-notifier.tlpx
 	@echo "✅ slack-notifier written to target/plugin-slack-notifier/slack-notifier.tlpx"
 
 .PHONY: build

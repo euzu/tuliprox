@@ -258,4 +258,4 @@ ship one flat file per language in `ui/locales/<lang>.json` (the file format and
 { "properties": { "url": { "title": "settings.url.title", "description": "settings.url.description" } } }
 ```
 
-`plugins/discord-notifier` is a complete example: every schema text is a key, in `en`, `ru`, `es` and `ar`.
+`plugins/notifiers/discord-notifier` is a complete example: every schema text is a key, in `en`, `ru`, `es` and `ar`.
