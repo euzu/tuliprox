@@ -12,7 +12,7 @@ use crate::{
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 create_bitset!(
     u8,
@@ -34,6 +34,12 @@ pub struct XtreamMappingOptions {
     pub web_ui_request: bool,
     pub encrypt_secret: [u8; 16],
     pub resource_host_policies: Arc<DashMap<String, ResourceOutputPolicy>>,
+    /// Per-input `options.default_container_extension`, keyed by input name.
+    ///
+    /// Fills the `container_extension` of movies and series episodes whose provider value is empty.
+    /// The map is built per request from the live configuration, so a config change takes effect on
+    /// the next response and nothing has to be persisted into a playlist item.
+    pub default_container_extensions: Arc<HashMap<Arc<str>, Arc<str>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +50,12 @@ pub enum ResourceOutputPolicy {
 }
 
 impl XtreamMappingOptions {
+    /// Configured container extension for the input that owns an item, if any.
+    #[inline]
+    pub fn default_container_extension(&self, input_name: &Arc<str>) -> Option<&Arc<str>> {
+        self.default_container_extensions.get(input_name)
+    }
+
     #[inline]
     pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { self.reverse_item_types.is_set(item_type) }
 
@@ -396,6 +408,8 @@ impl PlaylistEntry for XtreamPlaylistItem {
                     self.get_item_type(),
                     self.get_virtual_id(),
                     self.get_category_id().unwrap_or(0),
+                    &self.url,
+                    options.default_container_extension(&self.input_name),
                 )
             })
         } else {

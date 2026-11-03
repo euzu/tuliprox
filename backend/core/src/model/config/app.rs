@@ -299,6 +299,16 @@ impl AppConfig {
         None
     }
 
+    /// Resolves a member name — an input name or one of its alias names — to the owning input.
+    ///
+    /// A playlist item carries the name of the account that fetched it, so an item fetched through an
+    /// alias names the alias. Only the owning input holds the configuration the item inherits.
+    pub fn get_input_by_member_name(&self, member_name: &Arc<str>) -> Option<Arc<ConfigInput>> {
+        let sources = self.sources.load();
+        let owner = sources.group_lookup.get(member_name).unwrap_or(member_name);
+        sources.inputs.iter().find(|input| &input.name == owner).map(Arc::clone)
+    }
+
     pub fn get_input_options_by_name(&self, input_name: &Arc<str>) -> Option<ConfigInputOptions> {
         let sources = self.sources.load();
         for input in &sources.inputs {
@@ -591,6 +601,7 @@ mod tests {
     use shared::{
         foundation::{Filter, MapperScript},
         model::{ConfigPaths, ProcessingOrder},
+        utils::Internable,
     };
 
     fn empty_paths() -> ConfigPaths {
@@ -625,6 +636,48 @@ mod tests {
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
         }
+    }
+
+    #[test]
+    fn member_name_resolution_finds_the_owning_input_for_an_alias() {
+        let alias = crate::model::ConfigInputAlias {
+            id: 2,
+            name: "portal-alias".intern(),
+            url: "http://portal-alias.example/".to_string(),
+            username: None,
+            password: None,
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        };
+        let input = ConfigInput {
+            id: 1,
+            name: "portal".intern(),
+            url: "http://portal.example/".to_string(),
+            enabled: true,
+            aliases: Some(vec![alias]),
+            ..ConfigInput::default()
+        };
+        let group_lookup = shared::model::provider_saturation::build_group_lookup(std::slice::from_ref(&input));
+        let mut app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        app_config.sources = Arc::new(ArcSwap::from_pointee(SourcesConfig {
+            inputs: vec![Arc::new(input)],
+            group_lookup,
+            ..SourcesConfig::default()
+        }));
+
+        // An item fetched by an alias names the alias; only the owning input holds the configuration.
+        assert_eq!(
+            app_config.get_input_by_member_name(&"portal-alias".intern()).map(|input| input.name.to_string()),
+            Some("portal".to_string())
+        );
+        assert_eq!(
+            app_config.get_input_by_member_name(&"portal".intern()).map(|input| input.name.to_string()),
+            Some("portal".to_string())
+        );
+        assert!(app_config.get_input_by_member_name(&"unknown".intern()).is_none());
     }
 
     fn target_with_mapping_id(mapping_id: &str) -> Arc<ConfigTarget> {

@@ -28,6 +28,15 @@ use std::{collections::HashSet, sync::Arc};
 
 fn intern_optional(s: Option<String>) -> Option<Arc<str>> { s.filter(|v| !v.is_empty()).map(Internable::intern) }
 
+/// Canonicalises a portal-supplied `container_extension`.
+///
+/// Portals send `mp4`, `.MP4`, ` ~ ` and `null` for the same field. A nullish placeholder is worse
+/// than an empty value: clients append the token to the stream URL and end up requesting `.null`.
+/// Both the movie and the episode path go through this rule so they cannot drift apart.
+fn normalize_extension(value: Option<&str>) -> Option<Arc<str>> {
+    value.and_then(shared::utils::normalize_container_extension).map(|extension| extension.as_ref().intern())
+}
+
 fn intern_optional_value(s: Option<&String>) -> Option<Arc<str>> {
     s.filter(|v| !v.is_empty()).map(|v| Internable::intern(v.clone()))
 }
@@ -114,7 +123,7 @@ pub fn map_stalker_to_playlist_item(
         stream_url: Internable::intern(String::new()),
         stream_kind,
         cmd: Internable::intern(cmd),
-        container_extension: intern_optional(raw.container_extension.clone()),
+        container_extension: normalize_extension(raw.container_extension.as_deref()),
         plot: extract_info_text(info.as_ref(), |i| i.plot.clone()),
         cast: extract_info_text(info.as_ref(), |i| i.cast.clone()),
         director: extract_info_text(info.as_ref(), |i| i.director.clone()),
@@ -293,7 +302,7 @@ fn map_stalker_episode(
     let season_number = episode.season_number.or(season.number).unwrap_or(0);
     let cmd = episode.cmd.clone().unwrap_or_default();
     let info = episode.info.clone();
-    let container_extension = episode.container_extension.clone().filter(|s| !shared::utils::is_nullish(s.as_str()));
+    let container_extension = normalize_extension(episode.container_extension.as_deref());
     let logo = info.as_ref().and_then(|i| i.movie_image.clone()).filter(|s| !s.is_empty());
 
     let descriptor = if cmd.is_empty() {
@@ -341,7 +350,7 @@ fn map_stalker_episode(
         stream_url: Internable::intern(String::new()),
         stream_kind: StalkerStreamKind::Episode,
         cmd: Internable::intern(cmd),
-        container_extension: container_extension.map(Internable::intern),
+        container_extension,
         plot: extract_info_text(info.as_ref(), |i| i.plot.clone()),
         cast: extract_info_text(info.as_ref(), |i| i.cast.clone()),
         director: extract_info_text(info.as_ref(), |i| i.director.clone()),
@@ -570,6 +579,48 @@ mod tests {
         let mut used_again = HashSet::new();
         assert_eq!(collision_free_episode_storage_id(1, 1, "10", 1, &mut used_again), first);
         assert_eq!(collision_free_episode_storage_id(1, 1, "10", 1, &mut used_again), second);
+    }
+
+    #[test]
+    fn movie_container_extension_is_normalized() {
+        for (raw, expected) in [
+            ("mp4", Some("mp4")),
+            (".MKV", Some("mkv")),
+            (" mkv ", Some("mkv")),
+            ("null", None),
+            ("~", None),
+            ("", None),
+        ] {
+            let mut item = raw_with_id("42", "Movie");
+            item.container_extension = Some(raw.to_string());
+            let mapped = map_stalker_to_playlist_item(&item, None, StalkerStreamKind::Movie, 0);
+            assert_eq!(
+                mapped.container_extension.as_deref(),
+                expected,
+                "portal value {raw:?} must map to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn episode_container_extension_is_normalized() {
+        let season = StalkerRawSeriesSeason { number: Some(1), ..Default::default() };
+        let parent = map_stalker_series_root(
+            &StalkerRawSeriesItem { id: Some("1".to_string()), name: Some("Show".to_string()), ..Default::default() },
+            None,
+            0,
+        );
+        for (raw, expected) in [("mp4", Some("mp4")), (".MKV", Some("mkv")), ("null", None), ("~", None)] {
+            let episode = StalkerRawSeriesEpisode {
+                id: Some("10".to_string()),
+                number: Some(1),
+                name: Some("Pilot".to_string()),
+                container_extension: Some(raw.to_string()),
+                ..Default::default()
+            };
+            let item = map_stalker_episode(&episode, &season, 1, &parent, 0, &mut HashSet::new());
+            assert_eq!(item.container_extension.as_deref(), expected, "portal value {raw:?} must map to {expected:?}");
+        }
     }
 
     #[test]

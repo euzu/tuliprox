@@ -35,6 +35,7 @@ pub(super) fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
+            default_container_extension: None,
         }),
         ..Default::default()
     }
@@ -59,6 +60,7 @@ pub(super) fn create_config_input_for_xtream(username: &str, password: &str, hos
             probe_filter: None,
             flussonic_hls_catchup: shared::model::FlussonicHlsCatchup::Native,
             flussonic_hls_catchup_max_duration_secs: shared::model::default_flussonic_hls_catchup_max_duration_secs(),
+            default_container_extension: None,
         }),
         ..Default::default()
     }

@@ -101,6 +101,7 @@ const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_PROBE_LIVE: &str = "LABEL.PROBE_LIVE";
 const LABEL_PROBE_VOD: &str = "LABEL.PROBE_VOD";
 const LABEL_PROBE_SERIES: &str = "LABEL.PROBE_SERIES";
+const LABEL_CONTAINER_EXTENSION: &str = "LABEL.CONTAINER_EXTENSION";
 const LABEL_RESOLVE_VOD: &str = "LABEL.RESOLVE_VOD";
 const LABEL_RESOLVE_SERIES: &str = "LABEL.RESOLVE_SERIES";
 const LABEL_METADATA: &str = "LABEL.METADATA";
@@ -385,6 +386,7 @@ generate_form_reducer!(
       ResolveFilter => resolve_filter: Option<String>,
       ProbeFilter => probe_filter: Option<String>,
       StalkerBulkEpg => stalker_bulk_epg: bool,
+      DefaultContainerExtension => default_container_extension: Option<String>,
     }
 );
 

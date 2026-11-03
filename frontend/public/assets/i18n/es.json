@@ -359,6 +359,7 @@
       "URLS": "Lista ordenada de URL base del proveedor. Tuliprox rota entre ellas ante un fallo."
     },
     "CONFIG_INPUT_OPTIONS": {
+      "DEFAULT_CONTAINER_EXTENSION": "Extensión publicada para películas y episodios de series cuando ni el proveedor ni la URL del stream indican ninguna. Por defecto es mp4; un valor configurado sustituye el valor por defecto y nunca sobrescribe el del proveedor. Se aplica al servir la lista y no se almacena.",
       "PROBE_DELAY": "Retraso en segundos entre solicitudes de sondeo (por defecto 2) para reducir la presión sobre el proveedor.",
       "PROBE_LIVE": "Habilita el análisis técnico en segundo plano para canales en directo para detectar códecs y resolución.",
       "PROBE_LIVE_INTERVAL_HOURS": "Intervalo en horas entre nuevos sondeos de canales en directo (por defecto: 120).",
@@ -1861,6 +1862,7 @@
     "STREAM_HISTORY_REASON": "Motivo",
     "STREAM_HISTORY_CONFIDENCE": "Confianza",
     "CONTAINER": "Contenedor",
+    "CONTAINER_EXTENSION": "Extensión de contenedor",
     "STREAM_HISTORY_TIME": "Hora",
     "STREAM_HISTORY_TO": "Hasta",
     "STREAM_HISTORY_ENABLED": "Habilitar historial de streams",

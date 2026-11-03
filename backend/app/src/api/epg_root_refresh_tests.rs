@@ -55,7 +55,12 @@ impl RecordingServer {
                     .find(|(key, _)| key == "username")
                     .map_or_else(|| "explicit".into(), |(_, value)| value.into_owned());
                 received.lock().unwrap().push(target);
-                let body = format!("<?xml version=\"1.0\"?><tv><channel id=\"{username}\"><display-name>{username}</display-name></channel><programme channel=\"{username}\" start=\"20261101000000 +0000\" stop=\"20261101010000 +0000\"><title>{username}</title></programme></tv>");
+                // The Web-UI XMLTV parser drops programmes that ended before yesterday midnight and then
+                // drops channels left without programmes, so the fixture must stay inside that window.
+                let now = chrono::Utc::now();
+                let start = (now - chrono::Duration::hours(1)).format("%Y%m%d%H%M%S +0000");
+                let stop = (now + chrono::Duration::hours(1)).format("%Y%m%d%H%M%S +0000");
+                let body = format!("<?xml version=\"1.0\"?><tv><channel id=\"{username}\"><display-name>{username}</display-name></channel><programme channel=\"{username}\" start=\"{start}\" stop=\"{stop}\"><title>{username}</title></programme></tv>");
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(response.as_bytes()).await.unwrap();
             }

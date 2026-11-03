@@ -64,6 +64,54 @@ pub fn extract_extension_from_url(input: &str) -> Option<&str> {
     Some(&input[extension_start - 1..end])
 }
 
+/// Upper bound for a container extension. Real containers are `mkv`, `mp4`, `m3u8`, `webm`; anything
+/// longer is not an extension and must not reach a client that appends it to a stream URL.
+const MAX_CONTAINER_EXTENSION_LEN: usize = 8;
+
+/// Canonical container extension: lowercase, without the leading dot.
+///
+/// Providers report the value in different shapes (`mp4`, `.MP4`, ` mp4 `) and some send a nullish
+/// placeholder (`null`, `~`). Clients build their playback URL as `<stream_id>.<extension>`, so a
+/// placeholder or a malformed token is worse than no value at all. Returns `None` for those.
+///
+/// The return value borrows from `raw` when it is already canonical, so resolving an extension for a
+/// large VOD catalogue does not allocate a temporary `String` per item.
+pub fn normalize_container_extension(raw: &str) -> Option<Cow<'_, str>> {
+    let trimmed = raw.trim();
+    let without_dot = trimmed.strip_prefix('.').unwrap_or(trimmed);
+    if without_dot.is_empty()
+        || without_dot.len() > MAX_CONTAINER_EXTENSION_LEN
+        || super::is_nullish(without_dot)
+        || !without_dot.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    if without_dot.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Some(Cow::Owned(without_dot.to_ascii_lowercase()))
+    } else {
+        Some(Cow::Borrowed(without_dot))
+    }
+}
+
+/// Resolve the container extension published for one item.
+///
+/// Order: the value the provider reported, then the extension carried by the item URL, then the
+/// input's configured default, and finally [`DEFAULT_CONTAINER_EXTENSION`]. The last two steps are
+/// assumptions, so they never override a value the provider or the URL already states. The result is
+/// always canonical and never empty: clients build `<stream_id>.<container_extension>` and drop items
+/// without one, while a nullish placeholder would make them request `.null`.
+pub fn resolve_container_extension<'a>(stored: &'a str, url: &'a str, configured: Option<&'a str>) -> Cow<'a, str> {
+    if let Some(extension) = normalize_container_extension(stored) {
+        return extension;
+    }
+    if let Some(extension) = extract_extension_from_url(url).and_then(normalize_container_extension) {
+        return extension;
+    }
+    configured
+        .and_then(normalize_container_extension)
+        .unwrap_or(Cow::Borrowed(crate::defaults::DEFAULT_CONTAINER_EXTENSION))
+}
+
 pub fn is_hls_url(url: &str) -> bool {
     let lc_url = url.to_lowercase();
     lc_url.ends_with(HLS_EXT) || lc_url.contains(HLS_EXT_QUERY) || lc_url.contains(HLS_EXT_FRAGMENT)
@@ -175,7 +223,61 @@ pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str),
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_extension_from_url, sanitize_sensitive_info, set_sanitize_sensitive_info};
+    use super::{
+        extract_extension_from_url, normalize_container_extension, resolve_container_extension,
+        sanitize_sensitive_info, set_sanitize_sensitive_info,
+    };
+    use crate::defaults::DEFAULT_CONTAINER_EXTENSION;
+
+    #[test]
+    fn normalize_container_extension_accepts_canonical_forms() {
+        assert_eq!(normalize_container_extension("mp4").as_deref(), Some("mp4"));
+        assert_eq!(normalize_container_extension(".MKV").as_deref(), Some("mkv"));
+        assert_eq!(normalize_container_extension("  mkv ").as_deref(), Some("mkv"));
+        assert_eq!(normalize_container_extension("m3u8").as_deref(), Some("m3u8"));
+    }
+
+    #[test]
+    fn normalize_container_extension_rejects_placeholders_and_noise() {
+        for rejected in ["", "   ", ".", "~", "null", "NULL", "tar.gz", "mp 4", "mkv?token=x", "abcdefghi"] {
+            assert!(normalize_container_extension(rejected).is_none(), "{rejected} must be rejected");
+        }
+    }
+
+    #[test]
+    fn resolve_container_extension_prefers_the_stored_value() {
+        assert_eq!(
+            resolve_container_extension("avi", "http://provider.example/movie/1.mkv", Some("mkv")).as_ref(),
+            "avi"
+        );
+        // Surrounding whitespace and case are not part of the token.
+        assert_eq!(resolve_container_extension(" AVI ", "", None).as_ref(), "avi");
+    }
+
+    #[test]
+    fn resolve_container_extension_ignores_a_stored_placeholder() {
+        let url = "http://provider.example/movie/1.mkv";
+        assert_eq!(resolve_container_extension("null", url, Some("avi")).as_ref(), "mkv");
+        assert_eq!(resolve_container_extension("~", "", Some("avi")).as_ref(), "avi");
+    }
+
+    #[test]
+    fn resolve_container_extension_falls_back_to_the_url_then_the_configured_default() {
+        assert_eq!(resolve_container_extension("", "http://provider.example/movie/1.mkv", Some("avi")).as_ref(), "mkv");
+        assert_eq!(resolve_container_extension("", "http://provider.example/movie/1", Some("avi")).as_ref(), "avi");
+    }
+
+    #[test]
+    fn resolve_container_extension_ends_at_the_builtin_default() {
+        assert_eq!(resolve_container_extension("", "", None).as_ref(), DEFAULT_CONTAINER_EXTENSION);
+        // A configured placeholder is not a value either, so the built-in default answers.
+        assert_eq!(resolve_container_extension("", "", Some("null")).as_ref(), DEFAULT_CONTAINER_EXTENSION);
+    }
+
+    #[test]
+    fn resolve_container_extension_normalizes_the_configured_default() {
+        assert_eq!(resolve_container_extension("", "", Some(".MKV")).as_ref(), "mkv");
+    }
 
     #[test]
     fn extract_extension_from_url_ignores_query_and_fragment() {

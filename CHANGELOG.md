@@ -1924,6 +1924,14 @@
 
 ## ⚙️ New Settings
 
+- **`container_extension` is no longer served empty; input option `default_container_extension`.** Movies and series
+  episodes whose provider reports none and whose stream URL carries none now publish `mp4`. Stalker portals reveal the
+  container only on playback, so their Xtream output carried `"container_extension": ""` and clients such as
+  BouquetMakerXtream dropped those items. The input option replaces that default per input (any short alphanumeric
+  token such as `mkv`). The value is applied when the playlist is served, so a config change takes effect on the next
+  response without a playlist refresh, and it never overrides a provider value or a URL extension. Applies to every
+  input type; available in the Web UI input options and validated at config load.
+
 - **api-proxy.yml (`credential_generation`)**: `username`, `password` and `token` each take `length` (default `6`),
   `chars` (default `A-Z0-9`, token `A-Za-z0-9`) and `exclude` (default empty), or an ordered `segments` list of the
   same keys.

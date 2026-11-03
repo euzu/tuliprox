@@ -11,7 +11,7 @@ use shared::{
         XtreamLoginInfo, XtreamPlaylistItem, XtreamSeriesInfo, XtreamVideoInfo, XtreamVideoInfoDoc,
     },
     utils::{
-        extract_extension_from_url, get_i64_from_serde_value, get_string_from_serde_value, sanitize_sensitive_info,
+        get_i64_from_serde_value, get_string_from_serde_value, resolve_container_extension, sanitize_sensitive_info,
         Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
@@ -956,17 +956,18 @@ fn check_alias_user_state<E: EventSink>(events: &E, input: &ConfigInput) {
     // });
 }
 
-pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
+/// Build the `get_vod_info` document for one item.
+///
+/// `configured_extension` is the input's `options.default_container_extension`. It answers after the
+/// provider value and the item URL and never overrides either; when it is unset too, the built-in
+/// default applies.
+pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem, configured_extension: Option<&str>) -> String {
     let category_id = pli.category_id;
     let added = pli.additional_properties.as_ref().and_then(StreamProperties::get_last_modified).unwrap_or(0);
     let name = &pli.name;
-    let extension: String = pli
-        .get_container_extension()
-        .filter(|ce| !ce.is_empty())
-        .map(|s| s.to_string())
-        // `extract_extension_from_url` keeps the leading dot; `container_extension` must not.
-        .or_else(|| extract_extension_from_url(&pli.url).map(|ext| ext.trim_start_matches('.').to_string()))
-        .unwrap_or_default();
+    let stored_extension = pli.get_container_extension();
+    let extension =
+        resolve_container_extension(stored_extension.as_deref().unwrap_or(""), &pli.url, configured_extension);
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);
@@ -975,7 +976,7 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
     doc.movie_data.added = added.intern();
     doc.movie_data.category_id = category_id.intern();
     doc.movie_data.category_ids.push(category_id);
-    doc.movie_data.container_extension = extension.intern();
+    doc.movie_data.container_extension = extension.as_ref().intern();
     doc.movie_data.custom_sid = None;
 
     serde_json::to_string(&doc).unwrap_or(String::new())
@@ -1578,10 +1579,54 @@ mod tests {
         assert_eq!(user.proxy, proxy);
         let pli = test_vod_item();
 
-        let content = create_vod_info_from_item(&pli);
+        let content = create_vod_info_from_item(&pli, None);
         let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
 
         assert_eq!(doc["movie_data"]["stream_id"], 176_141);
+    }
+
+    #[test]
+    fn create_vod_info_fills_a_blank_extension_from_the_configured_default() {
+        let mut pli = test_vod_item();
+        pli.url = "".intern();
+
+        let content = create_vod_info_from_item(&pli, Some("mp4"));
+        let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
+        assert_eq!(doc["movie_data"]["container_extension"], "mp4");
+    }
+
+    #[test]
+    fn create_vod_info_publishes_the_builtin_default_for_an_unresolved_extension() {
+        // Stalker shape: no provider value and no URL until playback.
+        let mut pli = test_vod_item();
+        pli.url = "".intern();
+
+        let content = create_vod_info_from_item(&pli, None);
+        let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
+        assert_eq!(doc["movie_data"]["container_extension"], shared::defaults::DEFAULT_CONTAINER_EXTENSION);
+    }
+
+    #[test]
+    fn create_vod_info_keeps_the_provider_extension_over_the_configured_default() {
+        let mut pli = test_vod_item();
+        pli.additional_properties =
+            Some(shared::model::StreamProperties::Video(Box::new(shared::model::VideoStreamProperties {
+                container_extension: "mkv".intern(),
+                ..Default::default()
+            })));
+
+        let content = create_vod_info_from_item(&pli, Some("mp4"));
+        let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
+        assert_eq!(doc["movie_data"]["container_extension"], "mkv");
+    }
+
+    #[test]
+    fn create_vod_info_keeps_the_url_extension_over_the_configured_default() {
+        let pli = test_vod_item();
+
+        let content = create_vod_info_from_item(&pli, Some("mp4"));
+        let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
+        assert_eq!(doc["movie_data"]["container_extension"], "mp4");
     }
 
     #[test]
