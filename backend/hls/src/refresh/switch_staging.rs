@@ -399,7 +399,7 @@ pub(super) async fn stage_alternative_manifest_switch(
     Ok(staged_switch)
 }
 
-fn alternative_switch_fetch_context(
+pub(super) fn alternative_switch_fetch_context(
     request: &OriginRefreshRequest,
     fetched: &FetchedOriginManifest,
 ) -> SegmentFetchContext {
@@ -597,7 +597,7 @@ pub(super) async fn verify_staged_content_anchor(
         .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
     let candidate_identity =
         HlsMediaResourceIdentity::from_url(&candidate.resolved_origin_url, candidate.origin_byte_range);
-    let (candidate_key, committed_key, committed_read_pin) = {
+    let (candidate_key, committed_key, committed_origin_digest, committed_read_pin) = {
         let session = request.session.read().await;
         if !switch_staging_generation_matches(&session, &staged.generation)
             || !matches!(session.mode, HlsSessionMode::NormalCacheTimeline)
@@ -611,7 +611,7 @@ pub(super) async fn verify_staged_content_anchor(
             .filter(|segment| segment.map_ref.is_none() && segment.proxy_file_ext.eq_ignore_ascii_case("ts"))
             .map(|segment| segment.cache_key.clone())
             .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
-        let (committed_key, committed_access) = session
+        let (committed_key, committed_access, committed_origin_digest) = session
             .segments
             .values()
             .rev()
@@ -623,16 +623,30 @@ pub(super) async fn verify_staged_content_anchor(
             })
             .find_map(|entry| {
                 let fetch_ref = entry.origin_fetch_ref.as_ref()?;
-                HlsMediaResourceIdentity::from_url(&fetch_ref.resolved_origin_url, fetch_ref.byte_range)
-                    .matches(candidate_identity)
-                    .then(|| (entry.cache_key.clone(), Arc::clone(&entry.access)))
+                let identity = HlsMediaResourceIdentity::from_url(&fetch_ref.resolved_origin_url, fetch_ref.byte_range);
+                if !identity.same_path_and_range(candidate_identity) {
+                    return None;
+                }
+                let origin_digest = if identity.matches(candidate_identity) {
+                    None
+                } else {
+                    if entry.encryption.is_some() || candidate.encryption.is_some() {
+                        return None;
+                    }
+                    Some(session.origin_content.digest(entry, session.activity.origin_work_generation)?)
+                };
+                Some((entry.cache_key.clone(), Arc::clone(&entry.access), origin_digest))
             })
             .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
         let committed_read_pin = HlsCommittedAcceptanceReadPin::acquire(committed_access, current_time_millis());
-        (candidate_key, committed_key, committed_read_pin)
+        (candidate_key, committed_key, committed_origin_digest, committed_read_pin)
     };
     let candidate_fingerprint = Box::pin(sha256_cache_object(&request.segment_cache, &candidate_key)).await?;
-    let committed_fingerprint = Box::pin(sha256_cache_object(&request.segment_cache, &committed_key)).await?;
+    let committed_fingerprint = if let Some(digest) = committed_origin_digest {
+        digest
+    } else {
+        Box::pin(sha256_cache_object(&request.segment_cache, &committed_key)).await?
+    };
     if candidate_fingerprint != committed_fingerprint {
         return Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable));
     }

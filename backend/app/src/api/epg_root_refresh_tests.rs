@@ -34,6 +34,9 @@ impl RecordingServer {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let received = Arc::clone(&requests);
+        let now = chrono::Utc::now();
+        let start = (now - chrono::Duration::hours(1)).format("%Y%m%d%H%M%S %z").to_string();
+        let stop = (now + chrono::Duration::hours(1)).format("%Y%m%d%H%M%S %z").to_string();
         let task = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();

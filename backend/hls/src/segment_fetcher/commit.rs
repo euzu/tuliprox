@@ -6,6 +6,40 @@ use log::{debug, warn};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+/// Counts manifest content probes against the same slots as ordinary media I/O.
+pub(crate) struct HlsOriginProbePermit {
+    session: crate::HlsSessionHandle,
+    _global: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for HlsOriginProbePermit {
+    fn drop(&mut self) {
+        let session = Arc::clone(&self.session);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut session = session.write().await;
+                session.active_segment_fetches = session.active_segment_fetches.saturating_sub(1);
+            });
+        }
+    }
+}
+
+impl HlsSegmentWorkerPool {
+    pub(crate) async fn try_reserve_origin_probe(
+        &self,
+        session: &crate::HlsSessionHandle,
+    ) -> Option<HlsOriginProbePermit> {
+        let runtime = self.runtime.load_full();
+        let global = Arc::clone(&runtime.global_semaphore).try_acquire_owned().ok()?;
+        let mut state = session.write().await;
+        if state.active_segment_fetches >= runtime.policy.max_session_segment_fetches {
+            return None;
+        }
+        state.active_segment_fetches += 1;
+        Some(HlsOriginProbePermit { session: Arc::clone(session), _global: global })
+    }
+}
+
 pub(super) struct SegmentFetchCompletion {
     pub(super) generation_valid: bool,
     pub(super) stale_commit_cleanup_reserved: bool,
@@ -16,6 +50,7 @@ pub(super) struct SegmentFetchCompletion {
 }
 
 pub(super) struct SegmentFetchCommit {
+    pub(super) origin_digest: Option<[u8; 32]>,
     pub(super) content_length: u64,
     pub(super) generation_valid: bool,
 }
@@ -131,6 +166,9 @@ impl HlsSegmentWorkerPool {
         let content_length = commit.content_length;
         if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
             entry.status = SegmentCacheStatus::Ready { content_length, ready_at_ms: finished_at_ms };
+            if let Some(digest) = commit.origin_digest {
+                session.origin_content.record(entry, snapshot.origin_work_generation, digest);
+            }
             session.advance_media_readiness_generation();
         }
         recompute_unpublished_live_head(session);

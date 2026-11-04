@@ -5,7 +5,7 @@ use super::{
     HlsAccessLeaseId, HlsSession, HlsSessionKey, ProxySessionId,
 };
 use sha2::{Digest, Sha256};
-use shared::utils::sanitize_sensitive_info;
+use shared::utils::sanitize_hls_origin_for_logging;
 use std::{
     fmt,
     sync::{
@@ -261,9 +261,9 @@ impl fmt::Debug for HlsLogIdentity {
     }
 }
 
-/// Applies the process-wide logging policy without adding HLS-specific
-/// hashing, truncation, parsing, or forced redaction.
-pub fn hls_origin_log_value(value: impl AsRef<str>) -> String { sanitize_sensitive_info(value.as_ref()).into_owned() }
+/// Limits HLS diagnostics to origin metadata, then applies the existing sanitizer.
+/// Complete fetch references, including credentials, paths and queries, stay in transport state.
+pub fn hls_origin_log_value(value: impl AsRef<str>) -> String { sanitize_hls_origin_for_logging(value.as_ref()) }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsRecoveryTriggerSource {
@@ -444,26 +444,31 @@ mod tests {
     }
 
     #[test]
-    fn hls_origin_diagnostics_follow_global_sanitization_for_all_supported_value_shapes() {
+    fn hls_origin_diagnostics_minimize_urls_before_existing_sanitization() {
         let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let values = [
-            "http://user:password@example.com/live/user/password/123.ts?token=secret",
-            "origin.example.com:8443",
-            "http://192.0.2.10/live/user/password/123.ts",
-            "http://[2001:db8::1]/live/user/password/123.ts",
-            "provider://demo/live/user/password/123.m3u8",
-            "not a valid URL user:password",
+            ("http://user:password@example.com/live/user/password/123.ts?token=secret", "http://example.com/"),
+            ("origin.example.com:8443", "origin.example.com:8443"),
+            ("http://192.0.2.10/live/user/password/123.ts", "http://192.0.2.10/"),
+            ("http://[2001:db8::1]/live/user/password/123.ts", "http://[2001:db8::1]/"),
+            ("provider://demo/live/user/password/123.m3u8", "provider://demo/"),
+            ("not a valid URL user:password", "<redacted-origin>"),
+            ("file:///local/auth-path/segment.ts?opaque=secret", "file:"),
+            ("https://origin.example/session/synthetic-auth-path/0.ts?sig=synthetic-signature&opaque=synthetic-opaque#secret", "https://origin.example/"),
+            ("https://bad host/session/synthetic-auth-path/0.ts?opaque=synthetic-opaque", "<redacted-origin>"),
+            ("/session/synthetic-auth-path/0.ts?opaque=synthetic-opaque", "<redacted-origin>"),
         ];
 
         let _guard = SanitizationSettingGuard::set(false);
-        for value in values {
-            assert_eq!(hls_origin_log_value(value), value);
+        for (value, metadata) in values {
+            assert_eq!(hls_origin_log_value(value), metadata);
         }
 
         set_sanitize_sensitive_info(true);
-        for value in values {
+        for (value, metadata) in values {
             let logged = hls_origin_log_value(value);
-            assert_eq!(logged, sanitize_sensitive_info(value));
+            assert_eq!(logged, sanitize_sensitive_info(metadata));
+            assert!(!logged.contains("synthetic-"));
             assert!(!logged.starts_with("origin#"));
         }
     }

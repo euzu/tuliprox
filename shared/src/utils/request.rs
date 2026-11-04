@@ -41,6 +41,35 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+/// Restricts HLS log fields to origin metadata before using the existing sanitizer.
+/// This does not change the process-wide sanitization policy or any fetch URL.
+pub fn sanitize_hls_origin_for_logging(value: &str) -> String {
+    let metadata = hls_origin_log_metadata(value);
+    sanitize_sensitive_info(&metadata).into_owned()
+}
+
+fn hls_origin_log_metadata(value: &str) -> String {
+    if let Ok(url) = url::Url::parse(value) {
+        if let Some(host) = url.host() {
+            let port = url.port().map_or_else(String::new, |port| format!(":{port}"));
+            return format!("{}://{host}{port}/", url.scheme());
+        }
+        if url.scheme() == "file" {
+            return "file:".to_string();
+        }
+    }
+    // Selection diagnostics also accept a bare host, optionally with a port.
+    // Reject strings that could instead contain URL payload or unstructured errors.
+    if !value.is_empty()
+        && !value.contains(['/', '\\', '?', '#', '@', '='])
+        && !value.chars().any(char::is_whitespace)
+        && url::Url::parse(&format!("http://{value}/")).is_ok_and(|url| url.host().is_some())
+    {
+        return value.to_string();
+    }
+    "<redacted-origin>".to_string()
+}
+
 /// Extracts the file extension from a URL path (query and fragment stripped).
 /// Returns the extension **prefixed with a dot** (e.g., ".m3u8").
 pub fn extract_extension_from_url(input: &str) -> Option<&str> {

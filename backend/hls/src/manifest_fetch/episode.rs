@@ -7,7 +7,7 @@
 
 use super::{
     current_time_millis,
-    fingerprint::{build_manifest_timeline_fingerprint, HlsManifestCandidateFingerprint},
+    fingerprint::{build_manifest_timeline_fingerprint, is_same_host_reset_candidate, HlsManifestCandidateFingerprint},
     recovery::{
         acceptance_attempt_may_start, HlsManifestRecoveryAttemptPlan, HlsManifestRecoveryCandidate,
         HlsManifestRequalificationWindow,
@@ -361,13 +361,27 @@ pub(super) fn manifest_candidate_observation(
         emergency_evidence,
         target_duration_secs,
     } = build_manifest_timeline_fingerprint(&candidate.fetched.body, &candidate.fetched.final_manifest_url);
-    let resource_timeline_evidence =
+    let mut resource_timeline_evidence =
         candidate_resource_timeline_evidence(&timeline_fingerprint, published_resource_identities);
+    if is_same_host_reset_candidate(&candidate.report.quality)
+        && matches!(
+            resource_timeline_evidence,
+            HlsResourceTimelineEvidence::ReplayOnly | HlsResourceTimelineEvidence::ContradictoryOrder
+        )
+        && has_switch_segment
+    {
+        // A permitted re-entry must reach content staging even when the origin
+        // reused every URI. Only the subsequent fresh byte probe can distinguish
+        // a restart from old media; this is no media-progress evidence itself.
+        resource_timeline_evidence = HlsResourceTimelineEvidence::Eligible;
+    }
     let committed_content_anchor = timeline_fingerprint
         .segment_samples
         .first()
         .and_then(|segment| segment.normalized_resource_identity)
-        .filter(|identity| committed_resource_identities.iter().any(|committed| committed.matches(*identity)))
+        .filter(|identity| {
+            committed_resource_identities.iter().any(|committed| committed.same_path_and_range(*identity))
+        })
         .filter(|_| {
             emergency_evidence.live_handoff == HlsEmergencyLiveHandoffCompatibility::RequiresStagedTrackVerification
         })

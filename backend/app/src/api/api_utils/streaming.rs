@@ -49,6 +49,9 @@ use tuliprox_session::{ProviderSessionHeaders, SessionProviderHeaders};
 use url::Url;
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+    if shared::utils::is_hls_url(stream_url) {
+        return Cow::Owned(shared::utils::sanitize_hls_origin_for_logging(stream_url));
+    }
     if !is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(stream_url);
     }

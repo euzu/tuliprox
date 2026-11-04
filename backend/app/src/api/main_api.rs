@@ -904,7 +904,12 @@ async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse 
 
     let safe_ip = client_ip.as_deref().map_or_else(|| sanitize_sensitive_info("<unknown>"), sanitize_sensitive_info);
     let uri_string = uri.to_string();
-    let safe_uri = sanitize_sensitive_info(&uri_string);
+    let log_uri = if shared::utils::is_hls_url(uri.path()) || uri.path().contains("/hls/") {
+        "<hls-request>"
+    } else {
+        uri_string.as_str()
+    };
+    let safe_uri = sanitize_sensitive_info(log_uri);
 
     debug!("Client request [{method}] -> {safe_uri} from {safe_ip}");
     next.run(req).await

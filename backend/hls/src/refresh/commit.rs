@@ -133,6 +133,27 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
     acceptance_mode: HlsManifestCommitAcceptanceMode,
     staged_switch: Option<&HlsStagedSwitchCommit>,
 ) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
+    commit_fetched_manifest_with_origin_update(
+        session,
+        fetched,
+        request,
+        fetch_finished_at_ms,
+        acceptance_mode,
+        staged_switch,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn commit_fetched_manifest_with_origin_update(
+    session: &mut crate::HlsSession,
+    fetched: &FetchedOriginManifest,
+    request: &OriginRefreshRequest,
+    fetch_finished_at_ms: u64,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+    staged_switch: Option<&HlsStagedSwitchCommit>,
+    origin_update: Option<&super::origin_probe::PreparedOriginUpdate>,
+) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
     ensure_refresh_origin_work_generation_is_current(session, request)?;
     let minimum_commit_generation = session
         .next_manifest_commit_identity(fetch_finished_at_ms)
@@ -164,6 +185,7 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
             acceptance_mode,
             staged_switch,
             &manifest,
+            origin_update,
         ),
         (Some(reason), _) => commit_transient_fetched_manifest(
             session,
@@ -234,7 +256,8 @@ fn qualify_live_entry_revalidation(
     };
     if request.attempt.as_ref().and_then(|attempt| attempt.revalidation_generation) != Some(generation)
         || !qualified
-        || session.origin_seq_highwater == session.live_entry_revalidation.origin_highwater
+        || (session.origin_seq_highwater == session.live_entry_revalidation.origin_highwater
+            && session.origin_epoch <= session.live_entry_revalidation.origin_epoch)
     {
         return;
     }
@@ -279,6 +302,10 @@ pub(super) fn record_committed_manifest_media_progress(
     origin_control.record_media_progress(committed_at_ms, target_duration_ms);
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Carries both existing switch staging and optional same-host content evidence through one commit."
+)]
 fn commit_normal_fetched_manifest(
     session: &mut crate::HlsSession,
     fetched: &FetchedOriginManifest,
@@ -287,7 +314,15 @@ fn commit_normal_fetched_manifest(
     acceptance_mode: HlsManifestCommitAcceptanceMode,
     staged_switch: Option<&HlsStagedSwitchCommit>,
     manifest: &ParsedOriginManifest,
+    origin_update: Option<&super::origin_probe::PreparedOriginUpdate>,
 ) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
+    let acceptance_mode = if origin_update.is_some_and(super::origin_probe::PreparedOriginUpdate::is_restart)
+        && matches!(acceptance_mode, HlsManifestCommitAcceptanceMode::StrictPinnedHost)
+    {
+        HlsManifestCommitAcceptanceMode::FreshPinnedRevalidation
+    } else {
+        acceptance_mode
+    };
     let quality = evaluate_manifest_acceptance_for_commit(
         session,
         fetched,
@@ -316,6 +351,7 @@ fn commit_normal_fetched_manifest(
             sequence_relation: quality.sequence_relation,
             effective_host_id,
             staged_switch,
+            origin_update,
         },
     )?;
     update_origin_provider_session_headers(session, fetched);
@@ -913,6 +949,7 @@ struct HlsNormalManifestCommitInput<'a> {
     sequence_relation: HlsManifestSequenceRelation,
     effective_host_id: u64,
     staged_switch: Option<&'a HlsStagedSwitchCommit>,
+    origin_update: Option<&'a super::origin_probe::PreparedOriginUpdate>,
 }
 
 fn commit_normal_manifest(
@@ -938,7 +975,9 @@ fn commit_normal_manifest(
         && session.segments.values().any(is_hls_provisioning_segment);
     let segment_durations = manifest.segments.iter().map(|segment| segment.duration_ms).collect::<Vec<_>>();
     let initial_prefetch_gap_segments = initial_hls_strip_segments_for_durations(&request.strip, &segment_durations);
-    if let Some(staged_switch) = staged_switch {
+    if let Some(origin_update) = input.origin_update {
+        origin_update.apply(session, manifest)?;
+    } else if let Some(staged_switch) = staged_switch {
         if staged_switch.effective_host_id != effective_host_id
             || !switch_staging_generation_matches(session, &staged_switch.generation)
         {
@@ -989,7 +1028,9 @@ fn commit_normal_manifest(
     }
     let last_segment_duration_ms = manifest.segments.last().map(|segment| segment.duration_ms);
     let target_duration_ms = manifest.target_duration.map(|duration| u64::from(duration) * 1_000);
-    let progress = if staged_switch.is_some() {
+    let progress = if staged_switch.is_some()
+        || input.origin_update.is_some_and(super::origin_probe::PreparedOriginUpdate::is_restart)
+    {
         HlsManifestProgress::Advanced
     } else {
         manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater, sequence_relation)

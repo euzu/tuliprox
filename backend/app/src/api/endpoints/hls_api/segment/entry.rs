@@ -106,8 +106,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
         if normalized_hls_url != hls_url {
             debug_if_enabled!(
                 "Normalized xtream hls url from {} to {}",
-                sanitize_sensitive_info(hls_url),
-                sanitize_sensitive_info(&normalized_hls_url)
+                shared::utils::sanitize_hls_origin_for_logging(hls_url),
+                shared::utils::sanitize_hls_origin_for_logging(&normalized_hls_url)
             );
         }
         ensure_hls_manifest_extension(&normalized_hls_url)
@@ -328,7 +328,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
             sanitize_sensitive_info(&user.username),
             reservation.selected_provider_config.as_ref().map_or("<unknown>", |provider| provider.name.as_ref()),
-            sanitize_sensitive_info(&reservation.request_url)
+            shared::utils::sanitize_hls_origin_for_logging(&reservation.request_url)
         );
             let provider_binding_tag = reservation.provider_handle.as_ref().and_then(|handle| handle.binding_tag);
             (

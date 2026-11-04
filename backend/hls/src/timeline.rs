@@ -471,6 +471,48 @@ impl HlsSession {
         handoff_preview_from_draft(&draft, result)
     }
 
+    pub(crate) fn preview_verified_restart(
+        &self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+    ) -> Result<HlsOriginHandoffPreview, HlsOriginHandoffPreviewError> {
+        let mut draft = TimelineDraft::from(self);
+        let result = draft.apply_verified_restart(manifest, effective_host_id)?;
+        handoff_preview_from_draft(&draft, result)
+    }
+
+    pub(crate) fn apply_verified_restart(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+        expected: &HlsOriginHandoffPreview,
+    ) -> Result<(), HlsOriginHandoffPreviewError> {
+        let mut draft = TimelineDraft::from(&*self);
+        let result = draft.apply_verified_restart(manifest, effective_host_id)?;
+        if handoff_preview_from_draft(&draft, result)? != *expected {
+            return Err(HlsOriginHandoffPreviewError::PreviewInconsistent);
+        }
+        self.commit_timeline_draft(draft);
+        Ok(())
+    }
+
+    pub(crate) fn apply_verified_query_manifest(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+        updates: &[(u64, OriginSegmentFetchRef)],
+    ) -> Result<(), TimelineMapError> {
+        let mut draft = TimelineDraft::from(&*self);
+        for (seq, fetch_ref) in updates {
+            if let Some(entry) = draft.segments.get_mut(seq) {
+                entry.origin_fetch_ref = Some(fetch_ref.clone());
+            }
+        }
+        draft.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)?;
+        self.commit_timeline_draft(draft);
+        Ok(())
+    }
+
     /// Commits an explicit handoff only if a freshly built draft still exactly matches the previously staged preview.
     ///
     /// The orchestration layer must call this while holding the session write lock and after checking its acceptance
@@ -606,6 +648,20 @@ fn handoff_preview_from_draft(
 }
 
 impl TimelineDraft {
+    fn apply_verified_restart(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        effective_host_id: u64,
+    ) -> Result<TimelineApplyResult, TimelineMapError> {
+        self.start_new_origin_epoch(manifest.origin_manifest_sequence, OriginEpochTransitionReason::Handoff)?;
+        self.published_resource_history.begin_verified_restart(self.proxy_next_seq.unwrap_or_default());
+        self.pending_handoff_discontinuity_sequence = Some(0);
+        self.pending_origin_epoch_handoff = false;
+        self.publishable_origin_head_proxy_seq = None;
+        self.publishable_origin_tail_proxy_seq = None;
+        self.apply_manifest(manifest, effective_host_id, TimelineApplyMode::CurrentOrigin)
+    }
+
     fn can_continue_origin_manifest(&self, manifest: &ParsedOriginManifest, effective_host_id: u64) -> bool {
         let Some(highwater) = self.origin_seq_highwater else { return false };
         if self.origin_epoch_effective_host_id != Some(effective_host_id)
@@ -828,6 +884,7 @@ impl TimelineDraft {
     fn proxy_seq_for_resource(&self, identity: HlsMediaResourceIdentity) -> Option<u64> {
         self.segments
             .values()
+            .filter(|segment| segment.proxy_seq >= self.published_resource_history.restart_proxy_floor())
             .find_map(|segment| {
                 segment
                     .media_resource_identity()
@@ -1033,7 +1090,9 @@ impl TimelineDraft {
     }
 }
 
-fn map_segment_encryption(parsed: &ParsedOriginSegment) -> Result<Option<HlsSegmentEncryption>, TimelineMapError> {
+pub(crate) fn map_segment_encryption(
+    parsed: &ParsedOriginSegment,
+) -> Result<Option<HlsSegmentEncryption>, TimelineMapError> {
     parsed
         .encryption
         .as_ref()
@@ -1179,8 +1238,7 @@ mod tests {
             publish_ready_manifest(&mut state, 1);
             let epoch = state.origin_epoch;
             let cached = [state.segments[&2].clone(), state.segments[&3].clone()];
-            let next =
-                rebase_overlap_manifest(39, &["gamma.ts?token=new", "delta.ts?token=new", "epsilon.ts", "zeta.ts"]);
+            let next = rebase_overlap_manifest(39, &["gamma.ts", "delta.ts", "epsilon.ts", "zeta.ts"]);
 
             state
                 .apply_origin_rebase_manifest(
@@ -1200,7 +1258,7 @@ mod tests {
                 assert_eq!(current.origin_key, previous.origin_key);
                 assert_eq!(current.status, previous.status);
                 assert!(std::sync::Arc::ptr_eq(&current.access, &previous.access));
-                assert!(current.origin_fetch_ref.as_ref().unwrap().resolved_origin_url.ends_with("?token=new"));
+                assert_eq!(current.origin_fetch_ref, previous.origin_fetch_ref);
             }
             assert!(!state.segments[&4].discontinuity_before);
 
