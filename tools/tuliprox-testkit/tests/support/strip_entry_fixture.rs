@@ -35,6 +35,7 @@ pub fn client(identity: &str) -> reqwest::Client {
 
 pub struct Origin {
     pub head: AtomicU64,
+    pub window_count: AtomicU64,
     pub media_requests: AtomicUsize,
     requests: Mutex<Vec<String>>,
     address: std::net::SocketAddr,
@@ -42,7 +43,8 @@ pub struct Origin {
 
 async fn serve_origin(State(state): State<Arc<Origin>>, uri: Uri) -> Response {
     let head = state.head.load(Ordering::Acquire);
-    state.requests.lock().unwrap().push(format!("head={head} {uri}"));
+    let count = state.window_count.load(Ordering::Acquire);
+    state.requests.lock().unwrap().push(format!("head={head} count={count} {uri}"));
     if uri.path() == "/catalog/input.m3u" {
         return format!(
             "#EXTM3U\n#EXTINF:-1 tvg-id=\"test-17\" group-title=\"Test\",Test 17\nhttp://{}/hls/17/index.m3u8\n",
@@ -52,7 +54,7 @@ async fn serve_origin(State(state): State<Arc<Origin>>, uri: Uri) -> Response {
     }
     if uri.path().ends_with("index.m3u8") {
         let mut body = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{head}\n");
-        for sequence in head..head + 6 {
+        for sequence in head..head + count {
             writeln!(body, "#EXTINF:2.0,\n/hls/17/{sequence}.ts").unwrap();
         }
         return ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")], body).into_response();
@@ -92,13 +94,25 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    pub async fn start(mode: StartupMode) -> Result<Self, TestkitError> {
+    pub async fn start(mode: StartupMode) -> Result<Self, TestkitError> { Self::start_configured(mode, 3, 6, 0).await }
+
+    pub async fn start_strip_two(mode: StartupMode) -> Result<Self, TestkitError> {
+        Self::start_configured(mode, 2, 5, 6).await
+    }
+
+    async fn start_configured(
+        mode: StartupMode,
+        strip: u64,
+        count: u64,
+        prefetch: usize,
+    ) -> Result<Self, TestkitError> {
         let binary = std::env::var("TULIPROX_TESTKIT_SUT_BINARY")
             .map_err(|_| TestkitError::Configuration("set TULIPROX_TESTKIT_SUT_BINARY to the built proxy".into()))?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let origin = Arc::new(Origin {
             head: AtomicU64::new(0),
+            window_count: AtomicU64::new(count),
             media_requests: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
             address,
@@ -119,14 +133,14 @@ impl Fixture {
             &HashMap::from([("strip".into(), Channel { origin_marker: 17, protocol: "hls".into() })]),
             &FixtureStreamOptions {
                 hls_startup_mode: Some(mode),
-                hls_startup_strip_segments: Some(3),
+                hls_startup_strip_segments: Some(strip),
                 ..Default::default()
             },
             false,
             &FixtureInputPlan { input_type: FixtureInputType::M3u, stalker: &FixtureStalker::default() },
         )?;
         let config = std::fs::read_to_string(&paths.config_file)?;
-        std::fs::write(&paths.config_file, format!("config_hot_reload: true\n{config}    origin_manifest_timeout_ms: 1000\n    initial_manifest_wait_timeout_secs: 8\n    max_segments_prefetch: 0\n    segment_repair:\n      max_level: off\n"))?;
+        std::fs::write(&paths.config_file, format!("config_hot_reload: true\n{config}    origin_manifest_timeout_ms: 1000\n    initial_manifest_wait_timeout_secs: 8\n    max_segments_prefetch: {prefetch}\n    segment_repair:\n      max_level: off\n"))?;
         let log = paths.root.join("sut.log");
         let output = std::fs::File::create(&log)?;
         let mut command = tokio::process::Command::new(binary);

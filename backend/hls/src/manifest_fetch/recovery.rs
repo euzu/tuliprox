@@ -22,7 +22,7 @@ use super::{
     fetch_hls_origin_manifest_request,
     fingerprint::{
         deterministic_conflict_proven_by_full_burst, deterministic_timeline_conflict_for_candidate,
-        record_deterministic_conflict_receipt,
+        is_same_host_reset_candidate, record_deterministic_conflict_receipt,
     },
     http::ManifestRecoveryAttemptLogContext,
     next_retry_delay_ms,
@@ -683,7 +683,7 @@ async fn evaluate_manifest_recovery_burst(
         .await;
         return HlsManifestRecoveryBurstEvaluationOutcome::Exhausted;
     }
-    let acceptance_plan = episode_snapshot.as_ref().map_or(HlsManifestCommitPlan::RejectAll, |episode| {
+    let mut acceptance_plan = episode_snapshot.as_ref().map_or(HlsManifestCommitPlan::RejectAll, |episode| {
         evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
             preferred_min_target_duration_secs: minimum_target_duration,
             excluded_candidates: &[],
@@ -694,6 +694,11 @@ async fn evaluate_manifest_recovery_burst(
             observations: &observations,
         })
     });
+    if matches!(acceptance_plan, HlsManifestCommitPlan::RejectAll)
+        && restart_probe_allowed(context, episode_snapshot.as_ref()).await
+    {
+        acceptance_plan = same_host_restart_probe_plan(fetched_candidates, &observations);
+    }
     let held_alternative = episode_snapshot.as_ref().and_then(|episode| {
         held_alternative_after_burst(&observations, episode.held_alternative.as_ref(), plan.current_burst_is_full_plan)
     });
@@ -708,6 +713,38 @@ async fn evaluate_manifest_recovery_burst(
         held_alternative,
         next_retry_at_ms,
     }))
+}
+
+async fn restart_probe_allowed(
+    context: &HlsOriginManifestFetchContext,
+    episode: Option<&super::episode::HlsManifestAcceptanceEpisodeSnapshot>,
+) -> bool {
+    episode.is_some_and(|episode| episode.full_burst_completed && episode.trigger.recovery_required())
+        && !context.session.read().await.origin_qualification_awaits_publication()
+}
+
+fn same_host_restart_probe_plan(
+    candidates: &[HlsManifestRecoveryCandidate],
+    observations: &[HlsManifestCandidateObservation],
+) -> HlsManifestCommitPlan {
+    // A same-host sequence reset cannot prove progress from its metadata.
+    // Let the existing commit callback stage and compare fresh raw media;
+    // unchanged bytes remain a rejected recovery, within this same budget.
+    candidates.iter().find(|candidate| {
+        is_same_host_reset_candidate(&candidate.report.quality)
+            && observations.iter().any(|observation| {
+                observation.candidate_index == candidate.candidate_index
+                    && observation.resource_timeline_evidence
+                        == crate::manifest_acceptance::HlsResourceTimelineEvidence::Eligible
+                    && observation.switch_segment_readiness
+                        == crate::manifest_acceptance::HlsSwitchSegmentReadiness::RequiresStaging
+                    && observation.emergency_evidence.live_handoff
+                        == crate::manifest_acceptance::HlsEmergencyLiveHandoffCompatibility::RequiresStagedTrackVerification
+            })
+    }).map_or(HlsManifestCommitPlan::RejectAll, |candidate| HlsManifestCommitPlan::Commit {
+        candidate_index: candidate.candidate_index,
+        kind: HlsManifestCommitKind::Pinned,
+    })
 }
 
 enum HlsSelectedManifestRecoveryCommit<T> {

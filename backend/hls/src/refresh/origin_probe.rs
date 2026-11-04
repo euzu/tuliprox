@@ -292,12 +292,16 @@ fn restart_authorized(
     ) || request.manifest_commit_requirement.fresh_reason()
         == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
         || session.origin_control.acceptance_episode.as_ref().is_some_and(|episode| {
+            // A short observed outage can recover before reserve pressure or
+            // terminal publication. Its completed burst still needs the same
+            // fresh byte proof; a healthy Observe episode authorizes nothing.
             episode.full_burst_completed
-                && matches!(
+                && (matches!(
                     episode.trigger(),
                     crate::manifest_acceptance::HlsManifestAcceptanceTrigger::RecoveryRequired
                         | crate::manifest_acceptance::HlsManifestAcceptanceTrigger::Critical
-                )
+                ) || (episode.trigger() == crate::manifest_acceptance::HlsManifestAcceptanceTrigger::Observe
+                    && session.origin_refresh.consecutive_failures > 0))
         })
 }
 
@@ -515,6 +519,11 @@ async fn prepare(
         // Replayed HTTP 200 windows must consume the remaining existing budget.
         let session = request.session.read().await;
         if session.live_entry_revalidation.required
+            || session
+                .origin_control
+                .acceptance_episode
+                .as_ref()
+                .is_some_and(|episode| episode.trigger().recovery_required())
             || manifest.segments.last().map(|last| last.origin_seq) < session.origin_seq_highwater
         {
             log::debug!("HLS origin media verification: decision=unchanged-media");

@@ -34,6 +34,11 @@ async fn manifest(
     assert!(!body.contains("#EXT-X-ENDLIST"));
     let urls = resources(url, &body);
     assert_eq!(sequences(&urls), expected);
+    let media_sequence = body.lines().find_map(|line| line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:")).unwrap();
+    assert_eq!(media_sequence.parse::<u64>().unwrap(), expected[0]);
+    for (uri, seq) in urls.iter().zip(expected) {
+        assert_eq!(uri.path().rsplit('/').next().unwrap(), format!("{seq:06}.ts"));
+    }
     observations.push(body);
     Ok(urls)
 }
@@ -66,6 +71,17 @@ async fn warm_active(
     }
 }
 fn entry_log(fixture: &Fixture, generation: u64, first: u64, last: u64, configured: u64) -> String {
+    entry_log_window(fixture, generation, first, last, configured, 3)
+}
+
+fn entry_log_window(
+    fixture: &Fixture,
+    generation: u64,
+    first: u64,
+    last: u64,
+    configured: u64,
+    count: usize,
+) -> String {
     let logs = fixture.logs();
     let line = logs.lines().rev().find(|line| line.contains("HLS initial strip applied:")).unwrap();
     for field in [
@@ -73,7 +89,7 @@ fn entry_log(fixture: &Fixture, generation: u64, first: u64, last: u64, configur
         format!("first={first}"),
         format!("last={last}"),
         format!("configured={configured}"),
-        "visible_segments=3".into(),
+        format!("visible_segments={count}"),
         "strip_mode=segments".into(),
         "exception=none".into(),
     ] {
@@ -253,6 +269,109 @@ async fn client_pending_and_idle_entries_follow_the_same_strip_contract() -> Res
 async fn regressive_entry_deadline_is_bounded_without_affecting_other_leases() -> Result<(), TestkitError> {
     for mode in [StartupMode::FirstReady, StartupMode::Progressive, StartupMode::Optimistic] {
         run(mode, Scenario::RegressiveTimeout).await?;
+    }
+    Ok(())
+}
+
+async fn warm_window(
+    player: &reqwest::Client,
+    url: &Url,
+    expected: &[u64],
+    observations: &mut Vec<String>,
+) -> Result<Vec<Url>, TestkitError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let response = player.get(url.clone()).send().await?;
+        if response.status() == StatusCode::NOT_FOUND && observations.is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "cold manifest must become ready");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        let body = response.error_for_status()?.text().await?;
+        assert!(!body.contains("#EXT-X-ENDLIST"), "warmup requires live media");
+        let urls = resources(url, &body);
+        let actual = sequences(&urls);
+        assert!(expected.starts_with(&actual), "bounded warmup prefix: {actual:?}, expected {expected:?}");
+        observations.push(body);
+        media(player, &urls).await?;
+        if actual == expected {
+            return Ok(urls);
+        }
+        assert!(tokio::time::Instant::now() < deadline, "warmup did not reach {expected:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn strip_two_run(mode: StartupMode) -> Result<(), TestkitError> {
+    let fixture = Fixture::start_strip_two(mode).await?;
+    let mut observed = Vec::new();
+    let a_player = client("strip-two-a");
+    let a = variant(&fixture, &a_player).await?;
+    warm_window(&a_player, &a, &[0, 1, 2, 3, 4], &mut observed).await?;
+    fixture.origin.window_count.store(6, Ordering::Release);
+    let a_warm = warm_window(&a_player, &a, &[0, 1, 2, 3, 4, 5], &mut observed).await?;
+    let warm_count = fixture.origin.media_requests.load(Ordering::Acquire);
+    assert_eq!(warm_count, 6);
+    let b_player = client("strip-two-b");
+    let b = variant(&fixture, &b_player).await?;
+    assert_ne!(a, b);
+    assert_eq!(a.path_segments().unwrap().nth(3), b.path_segments().unwrap().nth(3));
+    let (pending, active, reentry): (&[u64], &[u64], &[u64]) = if matches!(mode, StartupMode::Conservative) {
+        (&[0, 1, 2, 3], &[0, 1, 2, 3, 4, 5], &[1, 2, 3, 4])
+    } else {
+        (&[1, 2, 3], &[1, 2, 3, 4, 5], &[2, 3, 4])
+    };
+    let mut b_pending = Vec::new();
+    for _ in 0..3 {
+        let current = manifest(&b_player, &b, pending, &mut observed).await?;
+        if b_pending.is_empty() {
+            b_pending = current;
+        } else {
+            assert_eq!(current, b_pending);
+        }
+    }
+    let safe_b = entry_log_window(&fixture, 1, pending[0], *pending.last().unwrap(), 2, pending.len());
+    assert_eq!(manifest(&a_player, &a, &[0, 1, 2, 3, 4, 5], &mut observed).await?, a_warm);
+    media(&a_player, &a_warm).await?;
+    media(&b_player, &b_pending).await?;
+    assert_eq!(fixture.origin.media_requests.load(Ordering::Acquire), warm_count);
+    let b_active = manifest(&b_player, &b, active, &mut observed).await?;
+    assert_eq!(manifest(&a_player, &a, &[0, 1, 2, 3, 4, 5], &mut observed).await?, a_warm);
+    media(&a_player, &a_warm).await?;
+    idle(&fixture, &a_player, &a, &safe_b, &mut observed).await?;
+    let a_slid = manifest(&a_player, &a, &[1, 2, 3, 4, 5, 6], &mut observed).await?;
+    media(&a_player, &a_slid).await?;
+    let after_progress = fixture.origin.media_requests.load(Ordering::Acquire);
+    assert_eq!(after_progress, warm_count + 1, "only origin occurrence 6 is new");
+    media(&b_player, &b_active).await?;
+    let mut b_idle = Vec::new();
+    for _ in 0..3 {
+        let current = manifest(&b_player, &b, reentry, &mut observed).await?;
+        if b_idle.is_empty() {
+            b_idle = current;
+        } else {
+            assert_eq!(current, b_idle);
+        }
+    }
+    assert_eq!(entry_log_window(&fixture, 2, reentry[0], *reentry.last().unwrap(), 2, reentry.len()), safe_b);
+    assert!(b_idle.iter().all(|uri| uri.path_segments().unwrap().nth(4) == b.path_segments().unwrap().nth(4)));
+    assert_eq!(manifest(&a_player, &a, &[1, 2, 3, 4, 5, 6], &mut observed).await?, a_slid);
+    media(&a_player, &a_slid).await?;
+    media(&b_player, &b_idle).await?;
+    let reactivated: Vec<_> = (*reentry.first().unwrap()..=6).collect();
+    manifest(&b_player, &b, &reactivated, &mut observed).await?;
+    assert_eq!(fixture.origin.media_requests.load(Ordering::Acquire), after_progress);
+    observed.push(format!("mode={mode} pending={pending:?} active={active:?} idle={reentry:?} warm_origin_media={warm_count} after_progress_origin_media={after_progress} polls_per_entry=3 same_session=true same_lease=true exact_bytes=true"));
+    println!("case=strip-two mode={mode} pending={pending:?} active={active:?} idle={reentry:?} warm_origin_media={warm_count} progress_origin_media={} exact_proxy_uris_media_sequences_and_bytes=true", after_progress - warm_count);
+    fixture.stop(&format!("strip-two-{mode}"), &observed).await
+}
+
+#[tokio::test]
+#[ignore = "requires built proxy selected by TULIPROX_TESTKIT_SUT_BINARY"]
+async fn strip_two_warm_session_and_real_idle_in_all_modes() -> Result<(), TestkitError> {
+    for mode in [StartupMode::Conservative, StartupMode::FirstReady, StartupMode::Progressive, StartupMode::Optimistic]
+    {
+        strip_two_run(mode).await?;
     }
     Ok(())
 }

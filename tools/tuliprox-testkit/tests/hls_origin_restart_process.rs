@@ -250,3 +250,266 @@ async fn provider_hls_diagnostics_protect_transport_values_under_both_sanitizati
     }
     Ok(())
 }
+
+struct LiveView {
+    urls: Vec<Url>,
+    sequences: Vec<u64>,
+    discontinuities: Vec<u64>,
+    saved: Vec<bytes::Bytes>,
+}
+
+fn proxy_sequences(urls: &[Url]) -> Vec<u64> {
+    urls.iter()
+        .map(|url| url.path().rsplit('/').next().unwrap().strip_suffix(".ts").unwrap().parse().unwrap())
+        .collect()
+}
+
+fn discontinuities(body: &str) -> Vec<u64> {
+    let mut current = body
+        .lines()
+        .find_map(|line| line.strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:"))
+        .map_or(0, |value| value.parse::<u64>().unwrap());
+    let mut result = Vec::new();
+    for line in body.lines() {
+        if line == "#EXT-X-DISCONTINUITY" {
+            current += 1;
+        }
+        if !line.is_empty() && !line.starts_with('#') {
+            result.push(current);
+        }
+    }
+    result
+}
+
+async fn live_window(
+    player: &reqwest::Client,
+    url: &Url,
+    generation: u8,
+    base: u64,
+    last: u64,
+    observed: &mut Vec<String>,
+) -> Result<LiveView, TestkitError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(18);
+    loop {
+        let response = player.get(url.clone()).send().await?;
+        let status = response.status();
+        let retry_after = response.headers().contains_key(reqwest::header::RETRY_AFTER);
+        let body = response.text().await?;
+        observed.push(format!("generation={generation} base={base} expected_last={last} status={status}\n{body}"));
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert!(retry_after && body.is_empty(), "only the existing typed transient response may be retried");
+        } else {
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("#EXT-X-ENDLIST"), "CVR is not new live media: generation {generation}");
+            let urls = resources(url, &body);
+            assert!(!urls.is_empty(), "live media must contain resources");
+            let selected = proxy_sequences(&urls);
+            assert_eq!(sequence(&body), selected[0]);
+            assert!(selected.windows(2).all(|pair| pair[1] == pair[0] + 1));
+            if selected[0] >= base {
+                assert!(*selected.last().unwrap() <= last, "unexpected publication highwater");
+                let mut saved = Vec::new();
+                for (uri, proxy) in urls.iter().zip(&selected) {
+                    assert_eq!(uri.path().rsplit('/').next().unwrap(), format!("{proxy:06}.ts"));
+                    let payload = player.get(uri.clone()).send().await?.error_for_status()?.bytes().await?;
+                    assert_eq!(
+                        payload.as_ref(),
+                        bytes(generation, proxy - base),
+                        "occurrence {generation}/{}",
+                        proxy - base
+                    );
+                    saved.push(payload);
+                }
+                if selected.last() == Some(&last) {
+                    let discontinuities = discontinuities(&body);
+                    assert_eq!(discontinuities.len(), urls.len());
+                    return Ok(LiveView { urls, sequences: selected, discontinuities, saved });
+                }
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "generation {generation} must publish and progress to {last}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn observed_pause(
+    fixture: &Fixture,
+    player: &reqwest::Client,
+    manifest: &Url,
+    index: usize,
+    observed: &mut Vec<String>,
+) -> Result<(), TestkitError> {
+    let phase = if index == 0 { 1 } else { 4 };
+    fixture.origin.phase.store(phase, Ordering::Release);
+    let request_player = player.clone();
+    let request_url = manifest.clone();
+    let origin = std::sync::Arc::clone(&fixture.origin);
+    let request = tokio::spawn(async move {
+        let mut statuses = Vec::new();
+        while origin.phase.load(Ordering::Acquire) == phase {
+            let response = request_player.get(request_url.clone()).send().await?;
+            statuses.push(response.status().as_u16());
+            let _ = response.bytes().await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<_, reqwest::Error>(statuses)
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let first = loop {
+        if let Some(first) = fixture.origin.pause_observed(index) {
+            break first;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "SUT must observe pause {} through an origin request",
+            index + 1
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    tokio::time::sleep_until(first + Duration::from_secs(2)).await;
+    let duration = first.elapsed();
+    fixture.origin.phase.store(phase + 1, Ordering::Release);
+    assert!((Duration::from_secs(2)..Duration::from_millis(2_500)).contains(&duration));
+    let statuses =
+        tokio::time::timeout(Duration::from_secs(20), request).await.expect("bounded pause client request").unwrap()?;
+    observed.push(format!(
+        "pause={} first_observed_407=true duration_ms={} triggering_client_statuses={statuses:?}",
+        index + 1,
+        duration.as_millis()
+    ));
+    Ok(())
+}
+
+async fn retained_media(player: &reqwest::Client, view: &LiveView) -> Result<(), TestkitError> {
+    for (url, saved) in view.urls.iter().zip(&view.saved) {
+        assert_eq!(
+            &player.get(url.clone()).send().await?.error_for_status()?.bytes().await?,
+            saved,
+            "a previously published URI must retain its exact bytes: {url}"
+        );
+    }
+    Ok(())
+}
+
+fn restart_commits(fixture: &Fixture) -> usize {
+    std::fs::read_to_string(&fixture.log)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("decision=restart-committed"))
+        .count()
+}
+
+async fn repeated_origin_reload(
+    fixture: &Fixture,
+    player: &reqwest::Client,
+    url: &Url,
+    generation: u8,
+    base: u64,
+    observed: &mut Vec<String>,
+) -> Result<LiveView, TestkitError> {
+    let phase = if generation == 1 { 3 } else { 6 };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut polls = 0;
+    loop {
+        let view = live_window(player, url, generation, base, base + 6, observed).await?;
+        polls += 1;
+        let reloads = fixture
+            .origin
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with(&format!("phase={phase} ")) && request.ends_with("/index.m3u8"))
+            .count();
+        assert_eq!(restart_commits(fixture), usize::from(generation));
+        if polls >= 3 && reloads >= 2 {
+            observed.push(format!(
+                "phase={phase} client_polls={polls} observed_origin_manifest_reloads={reloads} no_extra_restart=true"
+            ));
+            return Ok(view);
+        }
+        assert!(tokio::time::Instant::now() < deadline, "same-generation origin reload must be observed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn double_restart_run(mode: StartupMode) -> Result<(), TestkitError> {
+    let fixture = Fixture::start_double_restart(mode).await?;
+    let mut observed = Vec::new();
+    let a_player = client("double-restart-a");
+    let a = variant(&fixture, &a_player).await?;
+    let a_view = live_window(&a_player, &a, 0, 0, 5, &mut observed).await?;
+    let a_high = *a_view.sequences.last().unwrap();
+    let a_disc = *a_view.discontinuities.last().unwrap();
+    assert!(a_view.discontinuities.iter().all(|value| *value == a_disc));
+    observed_pause(&fixture, &a_player, &a, 0, &mut observed).await?;
+    let b_player = client("double-restart-b");
+    let b = variant(&fixture, &b_player).await?;
+    assert_ne!(a, b, "new public access lease");
+    assert_eq!(a.path_segments().unwrap().nth(3), b.path_segments().unwrap().nth(3), "same proxy session");
+    let b_base = a_high + 1;
+    let b_view = live_window(&b_player, &b, 1, b_base, b_base + 5, &mut observed).await?;
+    assert!(b_view.sequences.iter().all(|value| *value > a_high));
+    assert!(b_view.discontinuities.iter().all(|value| *value == a_disc + 1), "exactly one restart discontinuity");
+    assert_eq!(restart_commits(&fixture), 1);
+    fixture.origin.phase.store(3, Ordering::Release);
+    let b_progress = live_window(&b_player, &b, 1, b_base, b_base + 6, &mut observed).await?;
+    assert!(b_progress.discontinuities.iter().all(|value| *value == a_disc + 1));
+    let reload = repeated_origin_reload(&fixture, &b_player, &b, 1, b_base, &mut observed).await?;
+    assert_eq!(reload.urls, b_progress.urls);
+    assert_eq!(restart_commits(&fixture), 1, "reloads of B do not restart the stream");
+    observed_pause(&fixture, &b_player, &b, 1, &mut observed).await?;
+    let b_high = *b_progress.sequences.last().unwrap();
+    let c_player = client("double-restart-c");
+    let c = variant(&fixture, &c_player).await?;
+    assert_ne!(b, c);
+    assert_eq!(a.path_segments().unwrap().nth(3), c.path_segments().unwrap().nth(3));
+    let c_base = b_high + 1;
+    let c_view = live_window(&c_player, &c, 2, c_base, c_base + 5, &mut observed).await?;
+    assert!(c_view.sequences.iter().all(|value| *value > b_high));
+    assert!(c_view.discontinuities.iter().all(|value| *value == a_disc + 2), "exactly two restart discontinuities");
+    assert_eq!(restart_commits(&fixture), 2);
+    fixture.origin.phase.store(6, Ordering::Release);
+    let c_progress = live_window(&c_player, &c, 2, c_base, c_base + 6, &mut observed).await?;
+    assert!(c_progress.discontinuities.iter().all(|value| *value == a_disc + 2));
+    let reload = repeated_origin_reload(&fixture, &c_player, &c, 2, c_base, &mut observed).await?;
+    assert_eq!(reload.urls, c_progress.urls);
+    retained_media(&a_player, &a_view).await?;
+    retained_media(&b_player, &b_view).await?;
+    retained_media(&b_player, &b_progress).await?;
+    let logs = std::fs::read_to_string(&fixture.log)?;
+    assert_eq!(restart_commits(&fixture), 2, "reloads of C do not restart the stream");
+    assert_eq!(logs.lines().filter(|line| line.contains("HLS session created:")).count(), 1, "same session lifetime");
+    for epoch in [1, 2] {
+        assert!(logs.lines().any(|line| line.contains(&format!("decision=restart-committed origin_epoch={epoch} "))));
+    }
+    let requests = fixture.origin.requests.lock().unwrap().clone();
+    assert!(requests.len() < 250, "bounded real origin work");
+    for phase in [0, 1, 2, 3, 4, 5, 6] {
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.starts_with(&format!("phase={phase} ")) && request.ends_with("/index.m3u8")),
+            "observed manifest phase {phase}"
+        );
+    }
+    for namespace in ["a", "b", "c"] {
+        assert!(
+            requests.iter().any(|request| request.contains(&format!("/hls/17/{namespace}/"))),
+            "fetched generation {namespace}"
+        );
+    }
+    observed.push(format!("mode={mode} a={:?} b={:?} b_progress={:?} c={:?} c_progress={:?} origin_requests={} restart_commits=2 session_creations=1 retained_a_b_exact_bytes=true", a_view.sequences, b_view.sequences, b_progress.sequences, c_view.sequences, c_progress.sequences, requests.len()));
+    println!("case=double-restart mode={mode} a={:?} b={:?} b_progress={:?} c={:?} c_progress={:?} origin_requests={} restart_commits=2 session_creations=1 exact_bytes_and_discontinuities=true retained_a_b=true", a_view.sequences, b_view.sequences, b_progress.sequences, c_view.sequences, c_progress.sequences, requests.len());
+    fixture.stop_with_observations(&format!("double-restart-{mode}"), &observed).await
+}
+
+#[tokio::test]
+#[ignore = "requires built proxy selected by TULIPROX_TESTKIT_SUT_BINARY"]
+async fn two_origin_restarts_keep_one_session_in_all_modes() -> Result<(), TestkitError> {
+    for mode in [StartupMode::Conservative, StartupMode::FirstReady, StartupMode::Progressive, StartupMode::Optimistic]
+    {
+        double_restart_run(mode).await?;
+    }
+    Ok(())
+}

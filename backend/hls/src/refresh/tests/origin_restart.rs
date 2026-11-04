@@ -1,7 +1,7 @@
 use super::*;
 use crate::{HlsFreshManifestRequiredReason, HlsProxyManager};
 use axum::{body::Body, extract::State, http::Uri, response::Response, routing::any, Router};
-use shared::model::HlsStartupMode;
+use shared::model::{HlsManifestRecoveryBurstLevel, HlsStartupMode};
 use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 #[derive(Clone)]
@@ -196,6 +196,83 @@ async fn restart_with_new_paths_accepts_lower_and_equal_highwater() {
             request.attempt = None;
             assert!(candidate(&request, fetched).await.is_ok());
             assert_eq!(request.session.read().await.origin_epoch, epoch + 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn short_outage_restart_requires_failure_and_a_completed_burst() {
+    for mode in [
+        HlsStartupMode::Conservative,
+        HlsStartupMode::FirstReady,
+        HlsStartupMode::Progressive,
+        HlsStartupMode::Optimistic,
+    ] {
+        let origin = Origin::start().await;
+        let mut request = warm(&origin, mode).await;
+        request.manifest_commit_requirement = HlsManifestCommitRequirement::CommittedManifestAllowed;
+        let fetched = playlist(&origin.base, "fedcba9876543210", 5, "?token=new");
+        *origin.state.bytes.write().await = media(2);
+        {
+            let mut session = request.session.write().await;
+            let plan = HlsManifestRecoveryBurstLevel::Friendly.plan();
+            session.origin_control.begin_acceptance_episode(
+                100,
+                plan,
+                HlsManifestAcceptanceTrigger::Observe,
+                &test_acceptance_episode_timing(100, plan),
+            );
+            session.origin_control.acceptance_episode.as_mut().unwrap().record_full_burst();
+        }
+        assert!(candidate(&request, fetched.clone()).await.is_err(), "healthy Observe cannot authorize reset");
+        {
+            let mut session = request.session.write().await;
+            session.origin_refresh.mark_failure(200);
+            session.origin_control.acceptance_episode.as_mut().unwrap().full_burst_completed = false;
+        }
+        assert!(candidate(&request, fetched.clone()).await.is_err(), "failure alone cannot skip the burst");
+        request.session.write().await.origin_control.acceptance_episode.as_mut().unwrap().record_full_burst();
+        assert!(candidate(&request, fetched).await.is_ok(), "observed short outage may verify new bytes: {mode:?}");
+        assert_eq!(request.session.read().await.origin_epoch, 1);
+    }
+}
+
+#[tokio::test]
+async fn recovery_burst_verifies_same_host_resets_and_rejects_replayed_bytes() {
+    for mode in [
+        HlsStartupMode::Conservative,
+        HlsStartupMode::FirstReady,
+        HlsStartupMode::Progressive,
+        HlsStartupMode::Optimistic,
+    ] {
+        for fresh in [false, true] {
+            let origin = Origin::start().await;
+            let mut request = warm(&origin, mode).await;
+            request.manifest_commit_requirement = HlsManifestCommitRequirement::CommittedManifestAllowed;
+            {
+                let mut session = request.session.write().await;
+                session.origin_refresh.mark_failure(200);
+                session.last_effective_manifest_host = Some("127.0.0.1".into());
+                session.mark_authorized_media_access(super::super::current_time_millis());
+            }
+            let fetched = playlist(&origin.base, "fedcba9876543210", 5, "?token=new");
+            *origin.state.fallback_manifest.write().await = Some(fetched.body);
+            *origin.state.new_namespace_bytes.write().await = Some(media(if fresh { 2 } else { 1 }));
+            let context = manifest_fetch_context(&request, Some(4));
+            let binding =
+                HlsManifestOriginBinding::new(format!("{}/index.m3u8", origin.base).parse().unwrap(), None).unwrap();
+            let result = retry_hls_origin_manifest_recovery_chain(
+                &context,
+                binding,
+                None,
+                None,
+                HlsManifestAcceptanceTrigger::RecoveryRequired,
+                HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+                |fetched, mode| super::super::commit_manifest_recovery_candidate(&request, fetched, mode),
+            )
+            .await;
+            assert_eq!(result.is_ok(), fresh, "{mode:?}: only fresh raw bytes prove restart: {:?}", result.err());
+            assert_eq!(request.session.read().await.origin_epoch, u64::from(fresh));
         }
     }
 }

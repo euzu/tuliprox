@@ -39,6 +39,11 @@ pub enum ProviderCase {
     Redirect,
 }
 
+enum RestartScenario {
+    Single,
+    Double,
+}
+
 pub struct Origin {
     pub phase: AtomicU8,
     pub unchanged_first: bool,
@@ -48,6 +53,14 @@ pub struct Origin {
     diagnostic_markers: bool,
     provider: Option<ProviderCase>,
     address: std::net::SocketAddr,
+    scenario: RestartScenario,
+    started: tokio::time::Instant,
+    pauses: [Mutex<Option<tokio::time::Instant>>; 2],
+    protocol: Mutex<Vec<serde_json::Value>>,
+}
+
+impl Origin {
+    pub fn pause_observed(&self, index: usize) -> Option<tokio::time::Instant> { *self.pauses[index].lock().unwrap() }
 }
 
 fn source_media() -> &'static [u8] {
@@ -101,6 +114,9 @@ async fn origin(State(state): State<Arc<Origin>>, uri: Uri) -> Response {
             || !uri.query().is_some_and(|query| query.contains(DIAGNOSTIC_QUERY) && query.contains(DIAGNOSTIC_TOKEN)))
     {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if matches!(state.scenario, RestartScenario::Double) {
+        return double_restart_response(&state, &uri, phase);
     }
     if path.starts_with("/unavailable/") {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -157,6 +173,58 @@ async fn origin(State(state): State<Arc<Origin>>, uri: Uri) -> Response {
         .unwrap()
 }
 
+fn double_restart_response(state: &Origin, uri: &Uri, phase: u8) -> Response {
+    let path = uri.path();
+    let response = if path == "/hls/17/index.m3u8" {
+        if phase == 1 || phase == 4 {
+            let index = usize::from(phase == 4);
+            state.pauses[index].lock().unwrap().get_or_insert_with(tokio::time::Instant::now);
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED.into_response()
+        } else {
+            let namespace = match phase {
+                0 => "a",
+                2 | 3 => "b",
+                5 | 6 => "c",
+                _ => panic!("invalid double restart phase"),
+            };
+            let head = u64::from(phase == 3 || phase == 6);
+            let mut body =
+                format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{head}\n");
+            for sequence in head..head + 6 {
+                writeln!(body, "#EXTINF:2.0,\n/hls/17/{namespace}/{sequence}.ts?synthetic=1").unwrap();
+            }
+            ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")], body).into_response()
+        }
+    } else {
+        let occurrence = path.strip_prefix("/hls/17/").and_then(|tail| tail.split_once('/')).and_then(|(ns, file)| {
+            let generation = match ns {
+                "a" => 0,
+                "b" => 1,
+                "c" => 2,
+                _ => return None,
+            };
+            file.strip_suffix(".ts").and_then(|seq| seq.parse::<u64>().ok()).map(|seq| (generation, seq))
+        });
+        if let Some((generation, sequence)) =
+            occurrence.filter(|(_, seq)| *seq <= 6 && uri.query() == Some("synthetic=1"))
+        {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "video/mp2t")
+                .body(Body::from(bytes(generation, sequence)))
+                .unwrap()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        }
+    };
+    state.protocol.lock().unwrap().push(serde_json::json!({
+        "elapsed_ms": state.started.elapsed().as_millis(), "phase": phase,
+        "uri": uri.to_string(), "status": response.status().as_u16(),
+        "origin_media_sequence": (path == "/hls/17/index.m3u8" && response.status().is_success())
+            .then_some(u64::from(phase == 3 || phase == 6)),
+    }));
+    response
+}
+
 fn configure_provider(
     paths: &FixturePaths,
     address: std::net::SocketAddr,
@@ -205,7 +273,15 @@ impl Drop for Fixture {
         if self.process.is_some() {
             if let Some(directory) = std::env::var_os("TULIPROX_TESTKIT_ARTIFACT_DIR") {
                 let _ = std::fs::create_dir_all(&directory);
-                let _ = std::fs::copy(&self.log, PathBuf::from(directory).join("last-failure.log"));
+                let directory = PathBuf::from(directory);
+                let _ = std::fs::copy(&self.log, directory.join("last-failure.log"));
+                let _ = std::fs::write(
+                    directory.join("last-failure-origin-requests.txt"),
+                    self.origin.requests.lock().unwrap().join("\n"),
+                );
+                if let Ok(protocol) = serde_json::to_vec_pretty(&*self.origin.protocol.lock().unwrap()) {
+                    let _ = std::fs::write(directory.join("last-failure-origin.json"), protocol);
+                }
             }
             for line in std::fs::read_to_string(&self.log)
                 .unwrap_or_default()
@@ -229,15 +305,19 @@ impl Drop for Fixture {
 
 impl Fixture {
     pub async fn start(mode: StartupMode, unchanged_first: bool) -> Result<Self, TestkitError> {
-        Self::start_with_replay(mode, unchanged_first, false, None).await
+        Self::start_with_replay(mode, unchanged_first, false, None, false).await
     }
 
     pub async fn start_replay(mode: StartupMode) -> Result<Self, TestkitError> {
-        Self::start_with_replay(mode, true, true, None).await
+        Self::start_with_replay(mode, true, true, None, false).await
     }
 
     pub async fn start_provider(sanitize: bool, case: ProviderCase) -> Result<Self, TestkitError> {
-        Self::start_with_replay(StartupMode::FirstReady, false, false, Some((sanitize, case))).await
+        Self::start_with_replay(StartupMode::FirstReady, false, false, Some((sanitize, case)), false).await
+    }
+
+    pub async fn start_double_restart(mode: StartupMode) -> Result<Self, TestkitError> {
+        Self::start_with_replay(mode, false, false, None, true).await
     }
 
     async fn start_with_replay(
@@ -245,6 +325,7 @@ impl Fixture {
         unchanged_first: bool,
         replay_only: bool,
         provider: Option<(bool, ProviderCase)>,
+        double_restart: bool,
     ) -> Result<Self, TestkitError> {
         let binary = std::env::var("TULIPROX_TESTKIT_SUT_BINARY")
             .map_err(|_| TestkitError::Configuration("set TULIPROX_TESTKIT_SUT_BINARY to the built proxy".into()))?;
@@ -259,6 +340,10 @@ impl Fixture {
             diagnostic_markers: provider.is_some() || std::env::var_os("TULIPROX_TESTKIT_DIAGNOSTIC_MARKERS").is_some(),
             provider: provider.map(|(_, case)| case),
             address,
+            scenario: if double_restart { RestartScenario::Double } else { RestartScenario::Single },
+            started: tokio::time::Instant::now(),
+            pauses: [Mutex::new(None), Mutex::new(None)],
+            protocol: Mutex::new(Vec::new()),
         });
         let app = Router::new().fallback(origin).with_state(Arc::clone(&state));
         let task = tokio::spawn(async move {
@@ -334,6 +419,19 @@ impl Fixture {
 
     pub fn log_contains(&self, value: &str) -> bool {
         std::fs::read_to_string(&self.log).unwrap_or_default().contains(value)
+    }
+
+    pub async fn stop_with_observations(self, label: &str, observations: &[String]) -> Result<(), TestkitError> {
+        if let Some(directory) = std::env::var_os("TULIPROX_TESTKIT_ARTIFACT_DIR") {
+            let directory = PathBuf::from(directory);
+            std::fs::create_dir_all(&directory)?;
+            std::fs::write(directory.join(format!("{label}-client.txt")), observations.join("\n"))?;
+            std::fs::write(
+                directory.join(format!("{label}-origin.json")),
+                serde_json::to_vec_pretty(&*self.origin.protocol.lock().unwrap()).map_err(std::io::Error::other)?,
+            )?;
+        }
+        self.stop(label).await
     }
 
     pub async fn stop(mut self, label: &str) -> Result<(), TestkitError> {
