@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use shared::model::{PluginFieldErrorDto, PluginSettingsErrorDto, DEFAULT_PLUGIN_SETTINGS_VERSION, REDACTED_SECRET};
 
 /// Deepest schema nesting followed, a guard against pathological packages.
-const MAX_DEPTH: usize = 32;
+const MAX_DEPTH: usize = shared::utils::PLUGIN_SCHEMA_MAX_DEPTH;
 
 /// Schema keywords the validator does not implement. A schema that uses one is
 /// refused: a constraint that is silently skipped would let bad settings in.
@@ -324,6 +324,7 @@ pub(crate) fn restore_references(value: &mut Value, pairs: &[(String, String)]) 
 pub(crate) fn unsupported_constructs(schema: &Value) -> Vec<String> {
     let mut found = Vec::new();
     scan(schema, "", 0, &mut found);
+    found.extend(shared::utils::plugin_schema_pattern_problems(schema));
     found
 }
 
@@ -363,141 +364,11 @@ fn scan(node: &Value, path: &str, depth: usize, found: &mut Vec<String>) {
     }
 }
 
-fn is_integer(value: &Value) -> bool {
-    value.is_i64()
-        || value.is_u64()
-        || value.as_f64().is_some_and(|number| number.is_finite() && (number - number.round()).abs() < f64::EPSILON)
-}
-
-fn type_matches(name: &str, value: &Value) -> bool {
-    match name {
-        "string" => value.is_string(),
-        "number" => value.is_number(),
-        "integer" => is_integer(value),
-        "boolean" => value.is_boolean(),
-        "null" => value.is_null(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        _ => false,
-    }
-}
-
-fn article(name: &str) -> String {
-    match name {
-        "object" | "integer" | "array" => format!("an {name}"),
-        "null" => "null".to_string(),
-        other => format!("a {other}"),
-    }
-}
-
-struct Violations(Vec<PluginFieldErrorDto>);
-
-impl Violations {
-    fn add(&mut self, path: &str, message: impl Into<String>) {
-        self.0.push(PluginFieldErrorDto { path: shown(path).to_string(), message: message.into() });
-    }
-}
-
-/// Check the type, `enum` and `minimum`/`maximum` of one value.
-fn check_scalar(schema: &Map<String, Value>, value: &Value, path: &str, out: &mut Violations) {
-    let declared: Vec<&str> = match schema.get("type") {
-        Some(Value::String(name)) => vec![name.as_str()],
-        Some(Value::Array(names)) => names.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    };
-    if !declared.is_empty() && !declared.iter().any(|name| type_matches(name, value)) {
-        let names: Vec<String> = declared.iter().map(|name| article(name)).collect();
-        out.add(path, format!("must be {}", names.join(" or ")));
-        return;
-    }
-    if let Some(Value::Array(allowed)) = schema.get("enum") {
-        if !allowed.contains(value) {
-            let list: Vec<String> = allowed.iter().map(Value::to_string).collect();
-            out.add(path, format!("must be one of {}", list.join(", ")));
-            return;
-        }
-    }
-    if let Some(number) = value.as_f64() {
-        if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
-            if number < minimum {
-                out.add(path, format!("must be at least {minimum}"));
-            }
-        }
-        if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
-            if number > maximum {
-                out.add(path, format!("must be at most {maximum}"));
-            }
-        }
-    }
-}
-
-fn validate_node(schema: &Value, value: &Value, path: &str, depth: usize, out: &mut Violations) {
-    let object = match schema {
-        Value::Bool(false) => {
-            out.add(path, "is not allowed");
-            return;
-        }
-        Value::Object(object) if depth <= MAX_DEPTH => object,
-        _ => return,
-    };
-    let before = out.0.len();
-    check_scalar(object, value, path, out);
-    if out.0.len() != before {
-        return;
-    }
-    match value {
-        Value::Object(map) => validate_object(object, map, path, depth, out),
-        Value::Array(items) => {
-            if let Some(item_schema) = object.get("items").filter(|items| items.is_object()) {
-                let element_path = items_of(path);
-                for (index, item) in items.iter().enumerate() {
-                    let mut inner = Violations(Vec::new());
-                    validate_node(item_schema, item, &element_path, depth + 1, &mut inner);
-                    for mut violation in inner.0 {
-                        violation.message = format!("element {index}: {}", violation.message);
-                        out.0.push(violation);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn validate_object(
-    schema: &Map<String, Value>,
-    map: &Map<String, Value>,
-    path: &str,
-    depth: usize,
-    out: &mut Violations,
-) {
-    let properties = schema.get("properties").and_then(Value::as_object);
-    if let Some(Value::Array(required)) = schema.get("required") {
-        for key in required.iter().filter_map(Value::as_str).filter(|key| !map.contains_key(*key)) {
-            out.add(&child(path, key), "is required");
-        }
-    }
-    for (key, value) in map {
-        let key_path = child(path, key);
-        if let Some(property) = properties.and_then(|properties| properties.get(key)) {
-            validate_node(property, value, &key_path, depth + 1, out);
-            continue;
-        }
-        match schema.get("additionalProperties") {
-            Some(Value::Bool(false)) => out.add(&key_path, "is not a known setting"),
-            Some(extra @ Value::Object(_)) => validate_node(extra, value, &child(path, "*"), depth + 1, out),
-            _ => {}
-        }
-    }
-}
-
 /// Every schema violation of `settings`, with paths in the secret-path
 /// grammar. The schema must be inside the subset (see
 /// [`unsupported_constructs`]); constructs outside it are not checked.
 pub(crate) fn validate(schema: &Value, settings: &Value) -> Vec<PluginFieldErrorDto> {
-    let mut out = Violations(Vec::new());
-    validate_node(schema, settings, "", 0, &mut out);
-    out.0
+    shared::utils::validate_plugin_schema(schema, settings)
 }
 
 /// Accept or reject `settings` against the plugin's `schema`.
@@ -778,6 +649,27 @@ mod tests {
         let schema = json!({"type": "object", "properties": {"a": {"type": "date"}}});
         let error = check_settings(Some(&schema), &json!({})).unwrap_err();
         assert!(error.error.contains("`type: date` at `a`"), "{}", error.error);
+    }
+
+    #[test]
+    fn a_pattern_that_does_not_compile_is_refused() {
+        let schema = json!({"type": "object", "properties": {"a": {"type": "string", "pattern": "(open"}}});
+        let error = check_settings(Some(&schema), &json!({})).unwrap_err();
+        assert!(error.error.contains("`pattern` at `a`"), "{}", error.error);
+    }
+
+    #[test]
+    fn string_list_and_number_keywords_are_enforced_on_save() {
+        let schema = json!({"type": "object", "properties": {
+            "name": {"type": "string", "maxLength": 3, "format": "hostname"},
+            "tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "maxItems": 2},
+            "ratio": {"type": "number", "exclusiveMaximum": 1}
+        }});
+        assert!(check_settings(Some(&schema), &json!({"name": "abc", "tags": ["a"], "ratio": 0.5})).is_ok());
+        assert_eq!(
+            paths_of(&schema, &json!({"name": "abcd", "tags": ["a", "a"], "ratio": 1})),
+            ["name", "ratio", "tags"]
+        );
     }
 
     #[test]

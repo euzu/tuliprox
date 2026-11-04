@@ -571,9 +571,50 @@ pub struct PluginFormSectionDto {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_key: Option<String>,
+    /// Name of an icon of the web UI's icon set for the panel's sidebar entry.
+    /// Never a URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Shown at the top of the section. Sanitized: control characters
+    /// stripped, at most 512 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_key: Option<String>,
     /// The section's schema, read from the package. Its properties are top-level
     /// keys of the input's / output's `plugin_config`.
     pub schema: Value,
+    /// Buttons under the section's fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<PluginFormActionDto>,
+}
+
+/// A button of a form section: it calls the plugin's rpc export `rpc` with
+/// [`PluginFormActionRequestDto`] and shows what comes back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFormActionDto {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_key: Option<String>,
+    /// The name of an entry of `rpc_exports`.
+    pub rpc: String,
+}
+
+/// The payload a form action sends to its rpc export: the form's current,
+/// unsaved values, and which form and button they come from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFormActionRequestDto {
+    /// `input` or `output`.
+    pub form: String,
+    /// The section id.
+    pub section: String,
+    /// The action id.
+    pub action: String,
+    /// The `plugin_config` as the form holds it now.
+    pub config: Value,
 }
 
 /// The source editor tile of an input or output provider: `ui.input_tile` /

@@ -97,8 +97,22 @@ pub fn title_or_key(strings: &PluginLocaleMap, title: &str, title_key: Option<&s
     title_key.and_then(|key| strings.get(key)).cloned().unwrap_or_else(|| title.to_owned())
 }
 
-/// The schema with every `title` and `description` that is a key of the
-/// plugin's strings replaced by its translation, for `SchemaForm`.
+/// The schema with every `title`, `description`, `x-placeholder`,
+/// `x-pattern-message` and `x-enum-labels` entry that is a key of the plugin's
+/// strings replaced by its translation, for `SchemaForm`.
+/// `x-enum-labels`, a list or a value-to-label object, with each label translated.
+fn translate_labels(labels: &Value, strings: &PluginLocaleMap) -> Value {
+    let translate = |label: &Value| match label {
+        Value::String(text) => Value::String(resolve_text(strings, text)),
+        other => other.clone(),
+    };
+    match labels {
+        Value::Array(items) => Value::Array(items.iter().map(translate).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(key, label)| (key.clone(), translate(label))).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn translate_schema(schema: &Value, strings: &PluginLocaleMap) -> Value {
     if strings.is_empty() {
         return schema.clone();
@@ -108,7 +122,10 @@ pub fn translate_schema(schema: &Value, strings: &PluginLocaleMap) -> Value {
             map.iter()
                 .map(|(key, value)| {
                     let translated = match (key.as_str(), value) {
-                        ("title" | "description", Value::String(text)) => Value::String(resolve_text(strings, text)),
+                        ("title" | "description" | "x-placeholder" | "x-pattern-message", Value::String(text)) => {
+                            Value::String(resolve_text(strings, text))
+                        }
+                        ("x-enum-labels", labels) => translate_labels(labels, strings),
                         _ => translate_schema(value, strings),
                     };
                     (key.clone(), translated)
@@ -184,5 +201,19 @@ mod tests {
         assert_eq!(translated["properties"]["host"]["default"], "f.host");
         assert_eq!(translated["properties"]["title"]["description"], "plain text");
         assert_eq!(translate_schema(&schema, &PluginLocaleMap::new()), schema);
+    }
+
+    #[test]
+    fn ui_hints_are_translated_too() {
+        let map = strings(&[("f.mode.live", "Nur live"), ("f.hint", "z. B. abc"), ("f.bad", "Nur Buchstaben")]);
+        let schema = json!({"type": "object", "properties": {
+            "mode": {"enum": ["live", "all"], "x-enum-labels": ["f.mode.live", "All"]},
+            "pick": {"type": "array", "items": {"enum": [1], "x-enum-labels": {"1": "f.mode.live"}}},
+            "name": {"type": "string", "x-placeholder": "f.hint", "x-pattern-message": "f.bad"}}});
+        let translated = translate_schema(&schema, &map);
+        assert_eq!(translated["properties"]["mode"]["x-enum-labels"], json!(["Nur live", "All"]));
+        assert_eq!(translated["properties"]["pick"]["items"]["x-enum-labels"], json!({"1": "Nur live"}));
+        assert_eq!(translated["properties"]["name"]["x-placeholder"], "z. B. abc");
+        assert_eq!(translated["properties"]["name"]["x-pattern-message"], "Nur Buchstaben");
     }
 }

@@ -3,11 +3,12 @@
 use super::{
     hook::{HookId, Requirement},
     raw::{
-        RawConfigExtension, RawConfigTab, RawContribution, RawFormSection, RawManifest, RawRpcExport, RawSourceTile,
-        RawTask, RawUi,
+        RawConfigExtension, RawConfigTab, RawContribution, RawFormAction, RawFormSection, RawManifest, RawRpcExport,
+        RawSourceTile, RawTask, RawUi,
     },
-    Concurrency, ConfigExtension, ConfigSection, ConfigTab, ConfigTabSource, Contribution, FailMode, FormSection,
-    Manifest, Provides, Resources, RpcExport, RpcKind, Scope, Slot, SourceTile, Task, Ui, HOST_API_VERSION,
+    Concurrency, ConfigExtension, ConfigSection, ConfigTab, ConfigTabSource, Contribution, FailMode, FormAction,
+    FormSection, Manifest, Provides, Resources, RpcExport, RpcKind, Scope, Slot, SourceTile, Task, Ui,
+    HOST_API_VERSION,
 };
 use regex::Regex;
 use semver::Version;
@@ -305,7 +306,7 @@ fn check_ui(raw: RawUi, errors: &mut Errors) -> Ui {
     let output_form = check_form_sections(raw.output_form, "ui.output_form", errors);
     let input_tile = raw.input_tile.map(|tile| check_source_tile(tile, "ui.input_tile", errors));
     let output_tile = raw.output_tile.map(|tile| check_source_tile(tile, "ui.output_tile", errors));
-    Ui {
+    let ui = Ui {
         config_section,
         config_extensions,
         config_tab,
@@ -316,7 +317,9 @@ fn check_ui(raw: RawUi, errors: &mut Errors) -> Ui {
         output_form,
         input_tile,
         output_tile,
-    }
+    };
+    check_form_action_rpcs(&ui, errors);
+    ui
 }
 
 /// `ui.input_tile` / `ui.output_tile`: every field is optional, a title must
@@ -368,9 +371,72 @@ fn check_form_sections(raw: Vec<RawFormSection>, field: &str, errors: &mut Error
         if !check_path(&format!("{field} `{id}` schema"), &schema, errors) {
             continue;
         }
-        sections.push(FormSection { id, title, title_key, schema });
+        let actions = check_form_actions(section.actions, &format!("{field} `{id}`"), errors);
+        sections.push(FormSection {
+            id,
+            title,
+            title_key,
+            icon: non_blank(section.icon),
+            description: non_blank(section.description),
+            description_key: non_blank(section.description_key),
+            schema,
+            actions,
+        });
     }
     sections
+}
+
+/// The `actions` of one form section: an id unique in the section, a title that
+/// fits on a button and the rpc export it calls. Whether that export exists is
+/// checked by [`check_form_action_rpcs`], once every export is known.
+fn check_form_actions(raw: Vec<RawFormAction>, field: &str, errors: &mut Errors) -> Vec<FormAction> {
+    let mut actions: Vec<FormAction> = Vec::with_capacity(raw.len());
+    for (index, action) in raw.into_iter().enumerate() {
+        let Some(id) = non_blank(action.id) else {
+            errors.push(format!("{field} actions[{index}]: `id` is required"));
+            continue;
+        };
+        if !is_kebab_id(&id.replace('_', "-"), NAME_LEN) {
+            errors.push(format!("{field} actions[{index}]: id `{id}` is not an action id"));
+            continue;
+        }
+        if actions.iter().any(|existing| existing.id == id) {
+            errors.push(format!("{field} actions[{index}]: id `{id}` is declared twice"));
+            continue;
+        }
+        let Some(title) = non_blank(action.title) else {
+            errors.push(format!("{field} action `{id}`: `title` is required"));
+            continue;
+        };
+        if title.chars().any(char::is_control) || title.chars().count() > TILE_TITLE_CHARS {
+            errors.push(format!(
+                "{field} action `{id}`: `title` must be at most {TILE_TITLE_CHARS} characters without control characters"
+            ));
+            continue;
+        }
+        let Some(rpc) = non_blank(action.rpc) else {
+            errors.push(format!("{field} action `{id}`: `rpc` is required"));
+            continue;
+        };
+        actions.push(FormAction { id, title, title_key: non_blank(action.title_key), rpc });
+    }
+    actions
+}
+
+/// Every form action names an entry of `ui.rpc_exports`.
+fn check_form_action_rpcs(ui: &Ui, errors: &mut Errors) {
+    for (field, sections) in [("ui.input_form", &ui.input_form), ("ui.output_form", &ui.output_form)] {
+        for section in sections {
+            for action in &section.actions {
+                if !ui.rpc_exports.iter().any(|export| export.name == action.rpc) {
+                    errors.push(format!(
+                        "{field} `{}` action `{}`: rpc `{}` is not declared in ui.rpc_exports",
+                        section.id, action.id, action.rpc
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn check_config_extensions(raw: Vec<RawConfigExtension>, errors: &mut Errors) -> Vec<ConfigExtension> {
@@ -597,6 +663,18 @@ fn check_title_keys(manifest: &Manifest, errors: &mut Errors) {
     let slot_keys = manifest.ui.contributions.iter().filter_map(|contribution| contribution.title_key.as_deref());
     for key in tab_key.chain(slot_keys) {
         errors.push(format!("title_key `{key}` needs `ui.locales` to resolve in"));
+    }
+    for (field, sections) in [("ui.input_form", &manifest.ui.input_form), ("ui.output_form", &manifest.ui.output_form)]
+    {
+        for section in sections {
+            let action_keys = section.actions.iter().map(|action| ("action title_key", &action.title_key));
+            let keys = [("title_key", &section.title_key), ("description_key", &section.description_key)];
+            for (name, key) in keys.into_iter().chain(action_keys) {
+                if let Some(key) = key {
+                    errors.push(format!("{field} `{}` {name} `{key}` needs `ui.locales` to resolve in", section.id));
+                }
+            }
+        }
     }
     for (field, tile) in [("ui.input_tile", &manifest.ui.input_tile), ("ui.output_tile", &manifest.ui.output_tile)] {
         let Some(tile) = tile else { continue };

@@ -14,8 +14,8 @@ use crate::{
 use http::{header, HeaderName, HeaderValue};
 use serde_json::Value;
 use shared::model::{
-    PluginConfigExtensionDto, PluginConfigTabDto, PluginContributionDto, PluginFormSectionDto, PluginRpcExportDto,
-    PluginRpcKindDto, PluginSlotDto, PluginSourceTileDto, PluginStateDto, PluginUiDto,
+    PluginConfigExtensionDto, PluginConfigTabDto, PluginContributionDto, PluginFormActionDto, PluginFormSectionDto,
+    PluginRpcExportDto, PluginRpcKindDto, PluginSlotDto, PluginSourceTileDto, PluginStateDto, PluginUiDto,
 };
 use std::{
     fs,
@@ -284,7 +284,24 @@ fn form_sections(dir: &std::path::Path, sections: &[crate::manifest::FormSection
                 id: section.id.clone(),
                 title: section.title.clone(),
                 title_key: section.title_key.clone(),
+                icon: section.icon.clone(),
+                description: section
+                    .description
+                    .as_deref()
+                    .map(|text| sanitize_text(text, MAX_DESCRIPTION_CHARS))
+                    .filter(|text| !text.trim().is_empty()),
+                description_key: section.description_key.clone(),
                 schema,
+                actions: section
+                    .actions
+                    .iter()
+                    .map(|action| PluginFormActionDto {
+                        id: action.id.clone(),
+                        title: action.title.clone(),
+                        title_key: action.title_key.clone(),
+                        rpc: action.rpc.clone(),
+                    })
+                    .collect(),
             })
         })
         .collect()

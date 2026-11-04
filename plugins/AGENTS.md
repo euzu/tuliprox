@@ -81,12 +81,16 @@ host would accept. Unknown top-level keys are ignored by the host, so a typo is 
 
 ## Settings schema (`config-schema.json`)
 
-- Supported: `type` (`string`, `number`, `integer`, `boolean`, `object`, `array`), `enum`, `minimum`, `maximum`,
-  `required`, `properties`, `items`, `additionalProperties`, `title`, `description`, `default`, `writeOnly`, and a
-  top-level integer `version`. **Not supported** (the package is refused): `oneOf`, `anyOf`, `allOf`, `$ref`, `if`, `then`,
-  `else`, `not`, `dependentSchemas`, `patternProperties`.
-- The form renders objects only one level deep, lists of scalars, enums and secrets. Keep the schema flat. The host
-  orders form fields by key (alphabetical), so do not rely on the order you wrote.
+- Supported: `type` (`string`, `number`, `integer`, `boolean`, `object`, `array`, or one of them plus `null`), `enum`,
+  `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`,
+  `pattern` (Rust `regex` syntax), `format` (`email`, `uri`, `hostname`, `date-time`, `date`, `time`, `duration`),
+  `required`, `properties`, `items`, `minItems`, `maxItems`, `uniqueItems`, `additionalProperties`, `title`,
+  `description`, `default`, `writeOnly`, and a top-level integer `version`. **Not supported** (the package is refused):
+  `oneOf`, `anyOf`, `allOf`, `$ref`, `if`, `then`, `else`, `not`, `dependentSchemas`, `patternProperties`, and a
+  `pattern` that does not compile.
+- The form renders nested objects, lists of scalars, multi-selects (`items.enum`), enums and secrets, in the order the
+  schema lists them. UI hints (`x-widget`, `x-enum-labels`, `x-placeholder`, `x-help-url`, `x-columns`, `x-row`,
+  `x-collapsed`, `x-pattern-message`) are described in `docs/src/plugins/settings.md`; they never change what is valid.
 - A secret has `"writeOnly": true`, **no `default`**, and is read in Rust as `Secret<String>` (`.expose()` for the value).
   Tell users to store it as `${env:VAR}`. A `routing` object (`notify_on`, `min_severity`, `quiet_hours`, `max_per_hour`,
   `dedup_window_secs`) is read by the host for a notification channel; mirror it in the schema so it is editable, but do

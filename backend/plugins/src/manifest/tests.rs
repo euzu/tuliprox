@@ -533,7 +533,7 @@ fn form_sections_need_an_id_and_a_schema() {
 #[test]
 fn form_sections_parse_with_their_titles() {
     let manifest = parse(&with(
-        "ui:\n  input_form:\n    - { id: main, schema: forms/input.json }\n  output_form:\n    - { id: columns, title: Columns, title_key: form.columns, schema: forms/out.json }\n",
+        "ui:\n  locales: [en]\n  input_form:\n    - { id: main, schema: forms/input.json }\n  output_form:\n    - { id: columns, title: Columns, title_key: form.columns, schema: forms/out.json }\n",
     ))
     .unwrap();
 
@@ -543,6 +543,53 @@ fn form_sections_parse_with_their_titles() {
     assert_eq!(output.id, "columns");
     assert_eq!(output.title.as_deref(), Some("Columns"));
     assert_eq!(output.title_key.as_deref(), Some("form.columns"));
+}
+
+#[test]
+fn form_sections_parse_their_icon_description_and_actions() {
+    let manifest = parse(&with(
+        "hooks: [rpc.call]\nui:\n  locales: [en]\n  rpc_exports: [{ name: check-channel, kind: read }]\n  input_form:\n    - id: channels\n      schema: forms/channels.json\n      icon: PlayCircle\n      description: Pick the channels.\n      description_key: form.channels.description\n      actions:\n        - { id: check, title: Check, title_key: form.check, rpc: check-channel }\n",
+    ))
+    .unwrap();
+    let section = &manifest.ui.input_form[0];
+    assert_eq!(section.icon.as_deref(), Some("PlayCircle"));
+    assert_eq!(section.description.as_deref(), Some("Pick the channels."));
+    assert_eq!(section.description_key.as_deref(), Some("form.channels.description"));
+    assert_eq!(
+        section.actions,
+        vec![super::FormAction {
+            id: "check".to_string(),
+            title: "Check".to_string(),
+            title_key: Some("form.check".to_string()),
+            rpc: "check-channel".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn form_actions_need_an_id_a_title_and_a_declared_rpc() {
+    let section = |actions: &str| {
+        with(&format!(
+            "hooks: [rpc.call]\nui:\n  rpc_exports: [{{ name: check-channel, kind: read }}]\n  input_form:\n    - {{ id: main, schema: forms/a.json, actions: [{actions}] }}\n"
+        ))
+    };
+    assert_problem(&section("{ title: Check, rpc: check-channel }"), "`id` is required");
+    assert_problem(&section("{ id: check, rpc: check-channel }"), "`title` is required");
+    assert_problem(&section("{ id: check, title: Check }"), "`rpc` is required");
+    assert_problem(&section("{ id: check, title: Check, rpc: nope }"), "rpc `nope` is not declared in ui.rpc_exports");
+    assert_problem(
+        &section("{ id: check, title: Check, rpc: check-channel }, { id: check, title: Again, rpc: check-channel }"),
+        "declared twice",
+    );
+    assert_problem(
+        &section(&format!("{{ id: check, title: {}, rpc: check-channel }}", "x".repeat(41))),
+        "at most 40 characters",
+    );
+    assert_problem(
+        &section("{ id: check, title: Check, title_key: form.check, rpc: check-channel }"),
+        "needs `ui.locales` to resolve in",
+    );
+    assert!(parse(&section("{ id: check, title: Check, rpc: check-channel }")).is_ok());
 }
 
 /// `MINIMAL` as an input provider and an output renderer.

@@ -15,7 +15,8 @@ yew = "0.23.0"
 yew-router = "0.20.0"
 yew-hooks = "0.6.4"
 i18nrs = "0.1.9"
-serde_json.workspace = true
+# Field order of plugin schemas is the order the plugin wrote them in.
+serde_json = { workspace = true, features = ["preserve_order"] }
 serde.workspace = true
 wasm-bindgen = {version = "0.2.127", features = ["serde-serialize"]}
 #anyhow = "1.0.102"

@@ -260,8 +260,27 @@ pub(crate) struct FormSection {
     pub id: String,
     pub title: Option<String>,
     pub title_key: Option<String>,
+    /// Name of an icon of the web UI's icon set, for the panel's sidebar entry.
+    pub icon: Option<String>,
+    /// Shown at the top of the section.
+    pub description: Option<String>,
+    pub description_key: Option<String>,
     /// Package-relative path of the section's JSON Schema.
     pub schema: String,
+    /// Buttons under the section's fields; each calls one of `ui.rpc_exports`.
+    pub actions: Vec<FormAction>,
+}
+
+/// A button of a form section. Clicking it calls the rpc export `rpc` with the
+/// form's current, unsaved `plugin_config` and shows what comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FormAction {
+    /// Unique in its section.
+    pub id: String,
+    pub title: String,
+    pub title_key: Option<String>,
+    /// The name of an entry of `ui.rpc_exports`.
+    pub rpc: String,
 }
 
 /// `ui.input_tile` / `ui.output_tile`: the provider's tile in the source

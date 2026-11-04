@@ -44,11 +44,21 @@ This is the schema of the template, `plugins/examples/template/config-schema.jso
 
 ## Supported schema subset
 
-The validator in `backend/plugins/src/settings.rs` accepts a subset of JSON Schema.
+The validator in `shared/src/utils/plugin_schema.rs` accepts a subset of JSON Schema. The server checks settings and
+rpc payloads with it, and the source editor checks the `plugin_config` of an input or output with the same code
+before it applies the form, so both report the same violations.
 
-- Types: `string`, `number`, `integer`, `boolean`, `null`, `object`, `array`.
-- Keywords: `enum`, `minimum`, `maximum`, `required`, `properties`, `items`, `additionalProperties`, plus annotations
-  such as `title`, `description` and `default`.
+- Types: `string`, `number`, `integer`, `boolean`, `null`, `object`, `array`. A list of one type and `null`
+  (`"type": ["string", "null"]`) is a field that may also be `null`.
+- Keywords: `enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+  `minLength`, `maxLength`, `pattern`, `format`, `required`, `properties`, `items`, `minItems`, `maxItems`,
+  `uniqueItems`, `additionalProperties`, plus annotations such as `title`, `description` and `default`.
+- `pattern` is a regular expression in the syntax of the Rust `regex` crate (no look-around, no back-references) and,
+  as in JSON Schema, matches anywhere in the text unless it is anchored with `^…$`. A pattern that does not compile is
+  refused when the package is checked. `x-pattern-message` replaces the default "must match the pattern" message.
+- `format` is checked for `email`, `uri` (a scheme and a rest, like `https://…`), `hostname`, `date-time`
+  (RFC 3339, like `2026-01-31T18:00:00Z`), `date`, `time` and `duration` (ISO 8601, like `PT30M`). Any other
+  format is an annotation.
 - Not supported. A schema that uses these is refused: `oneOf`, `anyOf`, `allOf`, `$ref`, `if`, `then`, `else`, `not`,
   `dependentSchemas` and `patternProperties`.
 - Nesting depth is limited to 32 levels.
@@ -57,6 +67,46 @@ The validator in `backend/plugins/src/settings.rs` accepts a subset of JSON Sche
 A schema that uses an unsupported keyword is refused when the package is uploaded, and again when it is loaded.
 Use `properties` for every field. Keep one flat object or a small nested one, as the SDK's
 `#[tuliprox_plugin_settings]` struct expects.
+
+### How the form renders a schema
+
+`SchemaForm` (`frontend/src/app/components/plugins/schema_form.rs`) renders the plugin's settings and its input and
+output forms. Fields appear in the order the schema lists them. A string is a text box (`format: email`, `uri` and
+`date` use the browser's matching input), an integer or number a number box, a boolean a switch, an `enum` a select,
+an array of scalars a tag list, an array whose `items` is an `enum` a multi-select, and an object a collapsible group,
+which may hold further groups. An array of objects or of arrays is not rendered.
+
+A schema can add UI hints. They start with `x-`, so the validator ignores them, and they never change what is valid:
+
+| Hint | On | Effect |
+| --- | --- | --- |
+| `x-widget: textarea` / `code` | string | A multi-line box; `code` uses a monospace font. Both take a row of their own. |
+| `x-widget: color` | string | A colour picker storing `#rrggbb`. |
+| `x-widget: slider` | integer, number with `minimum` and `maximum` | A slider over the range, stepping by `multipleOf`. |
+| `x-widget: radio` | `enum` | Radio buttons instead of a select. |
+| `x-widget: duration` | integer, string | An amount and a unit (seconds to days). An integer stores seconds, a string `30m`, or `PT30M` with `format: duration`. |
+| `x-enum-labels` | `enum`, or an array with `items.enum` | Labels for the values: a list in the order of `enum`, or an object from value to label. |
+| `x-placeholder` | any field | The text shown while the field is empty. |
+| `x-help-url` | any field | An `http(s)` link next to the label; any other URL is dropped. |
+| `x-columns: 1`–`4` | the root object, a group | Lays its fields out in that many columns (one on narrow screens). |
+| `x-row: true` | any field | The field takes a row of its own in a multi-column layout. |
+| `x-collapsed: true` | a group | The group starts collapsed. |
+| `x-pattern-message` | string with `pattern` | The error shown when the pattern does not match. |
+
+A widget that does not fit the field's type is ignored, and so is a slider without both bounds.
+
+```json
+{
+  "type": "object",
+  "x-columns": 2,
+  "properties": {
+    "mode": { "enum": ["live_only", "all"], "x-enum-labels": ["Live streams only", "Everything"], "x-widget": "radio" },
+    "refresh": { "type": "integer", "minimum": 60, "default": 3600, "x-widget": "duration" },
+    "notes": { "type": "string", "x-widget": "textarea", "x-placeholder": "Anything the next admin should know" },
+    "slug": { "type": "string", "pattern": "^[a-z0-9-]+$", "x-pattern-message": "lowercase letters, digits and dashes" }
+  }
+}
+```
 
 ## Saving and validation
 
@@ -259,9 +309,16 @@ ui:
 
 - Each entry has an `id`, a package-relative `schema`, and optionally a `title` or `title_key`. Ids are kebab case and
   unique per form.
+- `icon` names an icon of the web UI's icon set for the panel's sidebar entry (the default is `Options`; the Main
+  panel keeps the host's icon). `description` or `description_key` is shown above the section's fields.
+- `actions` adds buttons under the section's fields, see [Form actions](#form-actions).
 - The schema is the same draft 2020-12 subset `SchemaForm` renders and the settings schemas use: an object schema,
-  no `oneOf`/`anyOf`/`allOf`/`$ref`/conditional keywords, and a `title`/`description` that is a locale key is
-  translated.
+  no `oneOf`/`anyOf`/`allOf`/`$ref`/conditional keywords, the UI hints of
+  [How the form renders a schema](#how-the-form-renders-a-schema), and a `title`/`description` that is a locale key
+  is translated.
+- When the user applies the form, every value they left alone that has a `default` is filled in, and the whole
+  `plugin_config` is checked against all of the form's sections together. A violation keeps the form open, switches
+  to the panel of the first one and shows each message under its field; the messages then follow the user's edits.
 - `main` and `options` extend the host's own panels. The host always shows the fields every input or output has:
   for an input the plugin, name, enabled, sequential group, max connections, priority, cache duration, url and playback
   provider; for an output the plugin, file name and filter. Any other id adds a panel after them.
@@ -354,10 +411,40 @@ canvas, shared by every contributing plugin, and is not an input or output.
 - With `element` the tab is a sandboxed frame, which counts as custom UI. The upload review then sets `customUi` to
   `true`. See [Custom UI](./custom-ui.md).
 
+### Form actions
+
+A section can carry buttons that call one of the plugin's [rpc exports](./custom-ui.md#rpc_exports) with the values the form holds
+now, before they are saved, for example to test a connection or to preview what an input would fetch.
+
+```yaml
+hooks: [input.fetch, rpc.call]
+ui:
+  rpc_exports:
+    - { name: check-channel, kind: read }
+  input_form:
+    - id: main
+      schema: forms/input.json
+      actions:
+        - id: check
+          title: Check channel
+          title_key: form.check
+          rpc: check-channel
+```
+
+- `id` is kebab case and unique in the section, `title` (at most 40 characters) is required, `title_key` translates it,
+  and `rpc` must name an entry of `ui.rpc_exports`.
+- The payload is `{"form": "input" | "output", "section": "<section id>", "action": "<action id>", "config": {…}}`,
+  with `config` the unsaved `plugin_config`. An export with an `input_schema` must accept that shape.
+- The answer is shown under the buttons: a string as text, `{"message": "…", "ok": false}` as its message (an error
+  when `ok` is `false`), `null` as "Done.", anything else as formatted JSON. A failed call shows its error. Up to
+  4,000 characters are shown.
+- A `kind: write` export needs write access: its button is disabled for a user who may only read.
+
 ## Localisation of the form
 
-A `title` or `description` in the schema that is a key of the plugin's locale files is shown translated; any other
-value is shown as written, so a plugin without locale files keeps plain text. List the languages in `ui.locales` and
+A `title` or `description` in the schema that is a key of the plugin's locale files is shown translated, and so are
+`x-placeholder`, `x-pattern-message` and the entries of `x-enum-labels`; any other value is shown as written, so a
+plugin without locale files keeps plain text. List the languages in `ui.locales` and
 ship one flat file per language in `ui/locales/<lang>.json` (the file format and the `en` fallback are described in
 [Custom UI](./custom-ui.md#localisation)). A key missing from a language falls back to `en`.
 

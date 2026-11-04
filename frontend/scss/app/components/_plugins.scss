@@ -518,3 +518,125 @@
   margin: 0;
   padding-left: var(--margin-normal);
 }
+
+// `SchemaForm`: the fields of a plugin's settings and of its input/output forms.
+.tp__schema-form {
+  &__grid {
+    display: grid;
+    grid-template-columns: repeat(var(--tp-schema-form-columns, 1), minmax(0, 1fr));
+    gap: 0 var(--margin-default);
+
+    @media (max-width: size.$mobile-breakpoint) {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  &__cell {
+    min-width: 0;
+
+    &--row {
+      grid-column: 1 / -1;
+    }
+  }
+
+  &__code textarea {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: var(--font-size-sm);
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  &__color input[type='color'] {
+    min-width: 4em;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  &__slider {
+    display: flex;
+    align-items: center;
+    gap: var(--margin-small);
+
+    input[type='range'] {
+      flex: 1;
+      accent-color: var(--theme-brand-primary);
+    }
+  }
+
+  &__slider-value {
+    min-width: 3em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__duration {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(8em, auto);
+    gap: var(--margin-small);
+    align-items: start;
+  }
+
+  &__doc-link {
+    display: inline-flex;
+    align-items: center;
+    color: inherit;
+  }
+}
+
+// A plugin's input/output form: section texts, actions and the refused-apply notice.
+.tp__plugin-form {
+  &__section-description {
+    margin: 0 0 var(--margin-small);
+    color: var(--theme-brand-text-muted);
+    font-size: var(--font-size-sm);
+  }
+
+  &__actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--margin-small);
+    margin-top: var(--margin-default);
+  }
+
+  &__action-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--margin-small);
+  }
+
+  &__action-result {
+    display: flex;
+    flex-direction: column;
+    gap: var(--margin-micro);
+    padding: var(--margin-mini) var(--margin-small);
+    border-left: 3px solid var(--theme-brand-info);
+    border-radius: var(--border-radius-small);
+    background: var(--theme-brand-surface-soft);
+    overflow-wrap: anywhere;
+
+    &--error {
+      border-left-color: var(--theme-brand-danger);
+    }
+
+    pre {
+      margin: 0;
+      max-height: 20em;
+      overflow: auto;
+      font-size: var(--font-size-sm);
+      white-space: pre-wrap;
+    }
+  }
+
+  &__action-result-title {
+    font-weight: 600;
+  }
+
+  &__invalid {
+    margin-bottom: var(--margin-small);
+    padding: var(--margin-mini) var(--margin-small);
+    border-left: 3px solid var(--theme-brand-danger);
+    border-radius: var(--border-radius-small);
+    background: var(--theme-brand-surface-soft);
+    color: var(--theme-brand-danger);
+  }
+}

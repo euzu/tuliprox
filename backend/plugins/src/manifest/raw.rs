@@ -106,7 +106,21 @@ pub(super) struct RawFormSection {
     pub id: Option<String>,
     pub title: Option<String>,
     pub title_key: Option<String>,
+    pub icon: Option<String>,
+    pub description: Option<String>,
+    pub description_key: Option<String>,
     pub schema: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<RawFormAction>,
+}
+
+/// One entry of a form section's `actions`: a button that calls an rpc export.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct RawFormAction {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub title_key: Option<String>,
+    pub rpc: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

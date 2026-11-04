@@ -15,8 +15,8 @@ use crate::{
         config::HasFormData,
         needs_plugin_picker,
         source_editor::plugin_form::{
-            has_options_section, host_section_title, plugin_sections, replaces_plugin, PluginFormKind, SECTION_MAIN,
-            SECTION_OPTIONS,
+            first_panel_with_errors, host_section_title, plugin_sections, prefill_sections, replaces_plugin,
+            validate_sections, PluginFormKind, SECTION_MAIN, SECTION_OPTIONS,
         },
         use_plugin_ui, BlockId, BlockInstance, Card, EditMode, FilterInput, IconButton, Panel, PluginPicker,
         PluginSection, PluginSectionCard, SourceEditorContext, TextButton, OUTPUT_RENDER_HOOK,
@@ -70,6 +70,8 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     let state: UseReducerHandle<PluginTargetOutputFormState> =
         use_reducer(|| PluginTargetOutputFormState { form: PluginTargetOutputDto::default(), modified: false });
     let active_panel = use_state(|| Arc::<str>::from(SECTION_MAIN));
+    // Set by a refused apply: from then on the form shows its violations as the user fixes them.
+    let show_errors = use_state(|| false);
 
     {
         let state = state.clone();
@@ -87,6 +89,11 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     let host_title = |id: &str| host_section_title(id, &translate);
     let sections: Vec<PluginSection> = plugin_sections(ui.as_ref(), &plugin_id, PluginFormKind::Output, &host_title);
     let config_value = Value::Object(form.plugin_config.clone());
+    let errors = if *show_errors {
+        validate_sections(&sections, &prefill_sections(&sections, &form.plugin_config))
+    } else {
+        Vec::new()
+    };
 
     let on_config_change = {
         let state = state.clone();
@@ -102,6 +109,7 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     let on_plugin_select = {
         let state = state.clone();
         let active_panel = active_panel.clone();
+        let show_errors = show_errors.clone();
         Callback::from(move |id: Option<String>| {
             // The list emits on every click, the selected one included: re-picking the same plugin
             // must keep its values and its format.
@@ -114,6 +122,7 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
             state.dispatch(PluginTargetOutputFormAction::Format(None));
             state.dispatch(PluginTargetOutputFormAction::Plugin(id));
             active_panel.set(Arc::from(SECTION_MAIN));
+            show_errors.set(false);
         })
     };
 
@@ -131,7 +140,8 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
                 html! {
                     <PluginSectionCard key={section.id.clone()} section={section.clone()}
                         value={config_value.clone()} allow_write={props.allow_write}
-                        on_change={on_config_change.clone()} />
+                        on_change={on_config_change.clone()} errors={errors.clone()}
+                        plugin_id={plugin_id.clone()} form={PluginFormKind::Output} />
                 }
             })
             .collect::<Html>()
@@ -164,13 +174,15 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     };
 
     let panels = {
-        let mut panels = vec![(SECTION_MAIN.to_string(), translate.t("LABEL.MAIN"))];
-        if has_options_section(&sections) {
-            panels.push((SECTION_OPTIONS.to_string(), translate.t("LABEL.OPTIONS")));
+        let mut panels = vec![(SECTION_MAIN.to_string(), translate.t("LABEL.MAIN"), "Settings".to_string())];
+        // Without an `options` section an Options panel would be empty: the built-in options belong to the
+        // built-in inputs and outputs.
+        if let Some(options) = sections.iter().find(|section| section.id == SECTION_OPTIONS) {
+            panels.push((SECTION_OPTIONS.to_string(), translate.t("LABEL.OPTIONS"), options.panel_icon().to_string()));
         }
         for section in &sections {
             if section.id != SECTION_MAIN && section.id != SECTION_OPTIONS {
-                panels.push((section.id.clone(), section.title.clone()));
+                panels.push((section.id.clone(), section.title.clone(), section.panel_icon().to_string()));
             }
         }
         panels
@@ -180,7 +192,7 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     // panel beats an empty body with no highlighted entry.
     {
         let active_panel = active_panel.clone();
-        let available = panels.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(",");
+        let available = panels.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>().join(",");
         use_effect_with(available, move |available| {
             if !available.split(',').any(|id| id == active_panel.as_ref()) {
                 active_panel.set(Arc::from(SECTION_MAIN));
@@ -193,8 +205,19 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
         let state = state.clone();
         let ctx = source_editor_ctx.clone();
         let block_id = props.block_id;
+        let sections = sections.clone();
+        let show_errors = show_errors.clone();
+        let active_panel = active_panel.clone();
         Callback::from(move |_| {
-            let output = state.data().clone();
+            let mut output = state.data().clone();
+            // What the user left alone takes the schema default, so the plugin gets what the form showed.
+            output.plugin_config = prefill_sections(&sections, &output.plugin_config);
+            let errors = validate_sections(&sections, &output.plugin_config);
+            if let Some(panel) = first_panel_with_errors(&sections, &errors) {
+                show_errors.set(true);
+                active_panel.set(Arc::from(panel.as_str()));
+                return;
+            }
             ctx.on_form_change.emit((block_id, BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(output)))));
             ctx.edit_mode.set(EditMode::Inactive);
         })
@@ -226,15 +249,18 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
             </div>
             <div class="tp__source-editor-form__content">
                 <div class="tp__source-editor-form__sidebar">
-                    { for panels.iter().map(|(id, title)| html! {
+                    { for panels.iter().map(|(id, title, icon)| html! {
                         <IconButton class={format!("tp__app-sidebar-menu--{id}{}", if active_panel.as_ref() == id.as_str() { " active" } else { "" })}
-                            icon={if id == SECTION_MAIN { "Settings" } else { "Options" }}
+                            icon={icon.clone()}
                             hint={title.clone()} name={id.clone()} onclick={on_panel_click.clone()}></IconButton>
                     }) }
                 </div>
                 <div class="tp__source-editor-form__body">
+                    if !errors.is_empty() {
+                        <div class="tp__plugin-form__invalid" role="alert">{ translate.t("MESSAGES.PLUGIN_FORM_INVALID") }</div>
+                    }
                     <div class="tp__source-editor-form__body__pages">
-                        { for panels.iter().map(|(id, _)| html! {
+                        { for panels.iter().map(|(id, _, _)| html! {
                             <Panel value={Arc::from(id.as_str())} active={(*active_panel).clone()}>
                                 if id == SECTION_MAIN {
                                     { main_panel.clone() }
