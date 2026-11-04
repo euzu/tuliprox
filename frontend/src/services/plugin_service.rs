@@ -8,10 +8,11 @@ use serde::de::DeserializeOwned;
 use shared::{
     model::{
         MarketplaceDto, MarketplaceInstallDto, MarketplaceQueryDto, PluginApproveDto, PluginBootReportDto,
-        PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginRepositoryAddDto, PluginRepositoryDto,
-        PluginRepositoryInfoDto, PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto, PluginStatsDto,
-        PluginSummaryDto, PluginTaskDto, PluginUpdatePolicy, PluginUpdatePolicyDto, PluginUpdateRequestDto,
-        PluginUpdateResultDto, PluginUpdateSettingsDto, PluginUpdatesDto, PluginUploadErrorDto, PluginUploadReviewDto,
+        PluginLogEntryDto, PluginLogLevelDto, PluginLogQueryDto, PluginReferenceDto, PluginRepositoryAddDto,
+        PluginRepositoryDto, PluginRepositoryInfoDto, PluginSettingsDto, PluginSettingsErrorDto, PluginSettingsSaveDto,
+        PluginStatsDto, PluginSummaryDto, PluginTaskDto, PluginUpdatePolicy, PluginUpdatePolicyDto,
+        PluginUpdateRequestDto, PluginUpdateResultDto, PluginUpdateSettingsDto, PluginUpdatesDto, PluginUploadErrorDto,
+        PluginUploadReviewDto,
     },
     utils::{concat_path, concat_path_leading_slash},
 };
@@ -188,6 +189,14 @@ impl PluginService {
         let url = concat_path(&self.plugins_path, &format!("{}/{action}", encode_path_segment(id)));
         let response = request_raw(Request::put(&url), None).await.map_err(|err| PluginActionError::transport(&err))?;
         decode_action(&response)
+    }
+
+    /// `GET /api/v1/plugins/{id}/usage`: the inputs, targets and schedules that name the plugin.
+    pub async fn references(&self, id: &str) -> Result<Vec<PluginReferenceDto>, Error> {
+        let id = encode_path_segment(id);
+        request_get(&concat_path(&self.plugins_path, &format!("{id}/usage")), None, None)
+            .await
+            .map(Option::unwrap_or_default)
     }
 
     /// `DELETE /api/v1/plugins/{id}`, with the KV store when `purge_kv`.

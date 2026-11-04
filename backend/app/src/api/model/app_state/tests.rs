@@ -272,6 +272,59 @@ async fn source_reload_prunes_removed_inputs_from_maintenance() {
     assert_eq!(pruned.len(), 1);
 }
 
+/// A plugin was deleted while `source.yml` still names it. An unrelated reload must still apply, and a reload
+/// that adds another missing reference must be rejected without touching any state.
+#[tokio::test]
+async fn source_reload_survives_a_deleted_plugin_and_rejects_new_missing_ones_untouched() {
+    use crate::{
+        api::model::update_app_state_sources,
+        model::{ConfigInput, SourcesConfig},
+    };
+    use std::sync::Arc;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = Config { storage_dir: dir.path().to_string_lossy().to_string(), ..Config::default() };
+    // The test state has no plugin system, so no plugin is installed.
+    let app_state = super::create_test_app_state(config);
+    let input = |name: &str, plugin: Option<&str>| {
+        Arc::new(ConfigInput {
+            name: Arc::from(name),
+            input_type: if plugin.is_some() { shared::model::InputType::Plugin } else { shared::model::InputType::M3u },
+            plugin: plugin.map(Arc::from),
+            url: "http://localhost/playlist.m3u".to_string(),
+            enabled: true,
+            ..ConfigInput::default()
+        })
+    };
+    let sources = |inputs: Vec<Arc<ConfigInput>>| SourcesConfig { inputs, ..SourcesConfig::default() };
+    app_state.app_config.sources.store(Arc::new(sources(vec![input("youtbepl", Some("youtube-input"))])));
+
+    update_app_state_sources(
+        &app_state,
+        sources(vec![input("youtbepl", Some("youtube-input")), input("provider_a", None)]),
+        None,
+    )
+    .await
+    .expect("an unrelated edit applies despite the deleted plugin");
+    assert_eq!(app_state.app_config.sources.load().inputs.len(), 2);
+
+    let forced_before = app_state.playlist_updates.forced_targets.load_full();
+    let err = update_app_state_sources(
+        &app_state,
+        sources(vec![input("youtbepl", Some("youtube-input")), input("other", Some("not-installed"))]),
+        None,
+    )
+    .await
+    .expect_err("a new missing plugin is rejected");
+    assert!(err.to_string().contains("not-installed"), "{err}");
+    assert!(
+        Arc::ptr_eq(&forced_before, &app_state.playlist_updates.forced_targets.load_full()),
+        "a rejected reload leaves the forced targets alone"
+    );
+    let names: Vec<String> = app_state.app_config.sources.load().inputs.iter().map(|i| i.name.to_string()).collect();
+    assert_eq!(names, ["youtbepl", "provider_a"], "a rejected reload leaves the sources alone");
+}
+
 #[tokio::test]
 async fn contactable_input_hides_inputs_in_maintenance() {
     use crate::model::{ConfigInput, SourcesConfig};

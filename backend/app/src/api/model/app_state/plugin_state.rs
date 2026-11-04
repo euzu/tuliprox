@@ -284,9 +284,10 @@ pub async fn reload_plugins(_plugins: &AppPlugins, _app_config: &AppConfig) {}
 /// not installed yet while a `source.yml` entry still names it, and that must not
 /// keep the server down: the reference is logged and then ignored, and it fails on
 /// its own at the point of use (the input's fetch, the output's render, the
-/// scheduled task's run), so everything else keeps working. An explicit config
-/// save still rejects such a reference — `AppState::set_sources` — because that is
-/// an operator action with immediate feedback and a file left unmodified.
+/// scheduled task's run), so everything else keeps working. A `source.yml` reload
+/// rejects only a reference it *introduces* ([`validate_new_plugin_refs`]): one
+/// that was already unsatisfied is logged again and carried over, so a deleted
+/// plugin never blocks an unrelated edit.
 pub async fn load_validated_plugins(
     app_config: &AppConfig,
     resource_cache: Option<&ResourceCacheHandle>,
@@ -376,6 +377,49 @@ pub fn validate_plugin_refs<P: shared::model::PluginHost>(
     plugins: &P,
     sources: &tuliprox_core::model::SourcesConfig,
 ) -> Result<(), shared::error::TuliproxError> {
+    invalid_plugin_refs_error(&plugin_ref_problems(plugins, sources))
+}
+
+/// The `source.yml` reload check: `next` may keep every plugin reference that the
+/// running `current` sources already could not satisfy — a plugin that was
+/// uninstalled or disabled must not block an unrelated edit — but may not add one.
+/// The carried-over references are logged; they fail on their own at the point of
+/// use, exactly as at startup ([`load_validated_plugins`]).
+///
+/// Both sides are checked against the same loaded plugins, so a reference counts
+/// as carried over only when the same input or target names the same plugin in
+/// the same way; renaming such an input or target makes it a new reference.
+pub fn validate_new_plugin_refs<P: shared::model::PluginHost>(
+    plugins: &P,
+    current: &tuliprox_core::model::SourcesConfig,
+    next: &tuliprox_core::model::SourcesConfig,
+) -> Result<(), shared::error::TuliproxError> {
+    let existing: std::collections::HashSet<String> = plugin_ref_problems(plugins, current).into_iter().collect();
+    let (carried, introduced): (Vec<String>, Vec<String>) =
+        plugin_ref_problems(plugins, next).into_iter().partition(|problem| existing.contains(problem));
+    if !carried.is_empty() {
+        log::warn!(
+            "still unsatisfied plugin references (inactive until the plugin is installed and enabled, or the \
+             reference is removed): {}",
+            carried.join("; ")
+        );
+    }
+    invalid_plugin_refs_error(&introduced)
+}
+
+fn invalid_plugin_refs_error(problems: &[String]) -> Result<(), shared::error::TuliproxError> {
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(shared::error::TuliproxError::ConfigSource(format!("invalid plugin references: {}", problems.join("; "))))
+    }
+}
+
+/// One line per plugin reference in `sources` that the loaded `plugins` cannot satisfy.
+fn plugin_ref_problems<P: shared::model::PluginHost>(
+    plugins: &P,
+    sources: &tuliprox_core::model::SourcesConfig,
+) -> Vec<String> {
     use shared::model::PluginHook;
     let mut problems = Vec::new();
     // `type: plugin` inputs: with plugins off nothing provides
@@ -426,11 +470,54 @@ pub fn validate_plugin_refs<P: shared::model::PluginHost>(
             }
         }
     }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(shared::error::TuliproxError::ConfigSource(format!("invalid plugin references: {}", problems.join("; "))))
+    problems
+}
+
+/// Everything in `sources` and `schedules` that names plugin `id`, for the
+/// uninstall confirmation (`GET /api/v1/plugins/{id}/usage`). Disabled inputs are
+/// listed too: they would fail once enabled again.
+pub fn plugin_references(
+    id: &str,
+    sources: &tuliprox_core::model::SourcesConfig,
+    schedules: &[tuliprox_core::model::ScheduleConfig],
+) -> Vec<shared::model::PluginReferenceDto> {
+    use shared::model::{PluginHook, PluginReferenceDto, PluginReferenceKind, ScheduleTaskType};
+    let mut usage: Vec<PluginReferenceDto> = Vec::new();
+    let mut push = |kind: PluginReferenceKind, name: String| {
+        let entry = PluginReferenceDto { kind, name };
+        if !usage.contains(&entry) {
+            usage.push(entry);
+        }
+    };
+    for input in &sources.inputs {
+        if input.input_type.is_plugin() && input.plugin.as_deref() == Some(id) {
+            push(PluginReferenceKind::Input, input.name.to_string());
+        }
     }
+    for target in sources.sources.iter().flat_map(|source| source.targets.iter()) {
+        for (hook, plugin) in target.plugin_refs() {
+            if plugin == id {
+                let kind = if hook == PluginHook::RenderOutput {
+                    PluginReferenceKind::TargetOutput
+                } else {
+                    PluginReferenceKind::TargetStrategy
+                };
+                push(kind, target.name.clone());
+            }
+        }
+        if let Some(filter) = target.filter.processing.as_ref() {
+            if filter.plugin_calls().any(|call| call.plugin == id) {
+                push(PluginReferenceKind::TargetFilter, target.name.clone());
+            }
+        }
+    }
+    for schedule in schedules {
+        if schedule.task_type == ScheduleTaskType::PluginTask && schedule.plugin.as_deref() == Some(id) {
+            let task = schedule.task.as_deref().unwrap_or_default();
+            push(PluginReferenceKind::Schedule, format!("{task} ({})", schedule.schedule));
+        }
+    }
+    usage
 }
 
 #[cfg(test)]
@@ -520,6 +607,63 @@ mod tests {
 
         // And reported without failing: the boot path calls exactly this and returns the plugins.
         report_unsatisfied_plugin_refs(&plugins, &sources, &schedules);
+    }
+
+    fn plugin_input(name: &str, plugin: &str) -> std::sync::Arc<tuliprox_core::model::ConfigInput> {
+        std::sync::Arc::new(tuliprox_core::model::ConfigInput {
+            name: name.into(),
+            input_type: shared::model::InputType::Plugin,
+            plugin: Some(plugin.into()),
+            enabled: true,
+            ..tuliprox_core::model::ConfigInput::default()
+        })
+    }
+
+    /// A reload keeps a reference a deleted plugin already broke (so an unrelated edit still applies),
+    /// but a reference it adds is rejected — and the error names only the new one.
+    #[test]
+    fn a_reload_rejects_only_the_plugin_references_it_introduces() {
+        let plugins = AppPlugins::default();
+        let current =
+            SourcesConfig { inputs: vec![plugin_input("youtbepl", "youtube-input")], ..SourcesConfig::default() };
+
+        validate_new_plugin_refs(&plugins, &current, &current.clone()).expect("a carried-over reference is kept");
+
+        let next = SourcesConfig {
+            inputs: vec![plugin_input("youtbepl", "youtube-input"), plugin_input("other", "not-installed")],
+            ..SourcesConfig::default()
+        };
+        let message = validate_new_plugin_refs(&plugins, &current, &next).expect_err("a new one is not").to_string();
+        assert!(message.contains("input other: no loaded plugin not-installed"), "{message}");
+        assert!(!message.contains("youtbepl"), "the carried-over reference is not blamed: {message}");
+    }
+
+    #[test]
+    fn plugin_references_lists_inputs_outputs_filters_and_schedules_naming_the_plugin() {
+        use shared::model::{PluginReferenceDto, PluginReferenceKind};
+        let mut sources = sources_with_output(None);
+        let disabled =
+            tuliprox_core::model::ConfigInput { enabled: false, ..(*plugin_input("off", "custom-out")).clone() };
+        sources.inputs =
+            vec![plugin_input("on", "custom-out"), std::sync::Arc::new(disabled), plugin_input("unrelated", "other")];
+        let schedule = tuliprox_core::model::ScheduleConfig {
+            plugin: Some("custom-out".to_string()),
+            ..plugin_task_schedule("0 0 4 * * * *")
+        };
+
+        let found = plugin_references("custom-out", &sources, &[schedule, plugin_task_schedule("0 0 5 * * * *")]);
+
+        let entry = |kind, name: &str| PluginReferenceDto { kind, name: name.to_string() };
+        assert_eq!(
+            found,
+            [
+                entry(PluginReferenceKind::Input, "on"),
+                entry(PluginReferenceKind::Input, "off"),
+                entry(PluginReferenceKind::TargetOutput, "t1"),
+                entry(PluginReferenceKind::Schedule, "refresh (0 0 4 * * * *)"),
+            ]
+        );
+        assert_eq!(plugin_references("nobody", &sources, &[]), []);
     }
 
     #[test]

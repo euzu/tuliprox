@@ -72,6 +72,9 @@ pub async fn update_app_state_sources(
     sources: SourcesConfig,
     prevalidated_targets: Option<Arc<ProcessTargets>>,
 ) -> Result<(), TuliproxError> {
+    // Before any state changes, so a rejected reload leaves everything as it was. Only references this
+    // reload introduces are rejected; one a deleted or disabled plugin already broke is carried over.
+    crate::api::model::validate_new_plugin_refs(&app_state.plugins, &app_state.app_config.sources.load(), &sources)?;
     let targets = if let Some(prevalidated) = prevalidated_targets {
         prevalidated
     } else {
@@ -300,8 +303,7 @@ impl AppState {
                 }
             }
         }
-        // A reference to a plugin that is not loaded rejects the reload.
-        crate::api::model::validate_plugin_refs(&self.plugins, &sources)?;
+        // Plugin references were checked by `update_app_state_sources` before anything was stored.
         self.app_config.set_sources(sources)?;
         self.active_provider.update_config(&self.app_config);
 

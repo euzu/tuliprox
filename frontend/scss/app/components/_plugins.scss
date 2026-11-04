@@ -162,6 +162,23 @@
   display: flex;
   flex-direction: column;
   gap: var(--margin-small);
+
+  // What still names the plugin and goes inactive once it is gone.
+  &__in-use {
+    padding: var(--margin-mini) var(--margin-small);
+    border-radius: var(--border-radius-small);
+    border-left: 3px solid var(--theme-brand-warning);
+    background: var(--theme-brand-surface-soft);
+
+    p,
+    ul {
+      margin: 0;
+    }
+
+    ul {
+      padding-left: 1.25em;
+    }
+  }
 }
 
 // Notices on a plugin row (a staged update, settings that need a look).

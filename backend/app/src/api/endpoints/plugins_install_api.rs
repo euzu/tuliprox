@@ -1,5 +1,6 @@
 //! `POST /api/v1/plugins`, `PUT …/approve`, `…/enable`, `…/disable` and
-//! `DELETE /api/v1/plugins/{id}`, and `POST …/rollback`.
+//! `DELETE /api/v1/plugins/{id}`, `POST …/rollback`, and `GET …/usage` (what the
+//! uninstall confirmation lists).
 //!
 //! All of them need `SystemWrite` (the layer is `plugins_api`'s). Each one takes
 //! the plugin system's install mutex before it touches anything, then the config
@@ -42,6 +43,7 @@ pub(super) fn install_routes() -> Router<Arc<AppState>> {
         .route("/plugins/{id}/enable", put(put_plugin_enable))
         .route("/plugins/{id}/disable", put(put_plugin_disable))
         .route("/plugins/{id}", delete(delete_plugin))
+        .route("/plugins/{id}/usage", get(get_plugin_usage))
 }
 
 #[cfg(feature = "plugins")]
@@ -302,6 +304,23 @@ async fn delete_plugin(
         Err(rejection) => (rejection.status, Json(rejection.body)).into_response(),
     }
 }
+
+/// `GET /api/v1/plugins/{id}/usage`: every input, target and schedule that names the
+/// plugin, so the uninstall confirmation can say what goes inactive. Uninstalling
+/// is still allowed; a server with a missing plugin starts and runs everything else.
+#[cfg(feature = "plugins")]
+async fn get_plugin_usage(State(app_state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    if app_state.plugins.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let sources = app_state.app_config.sources.load();
+    let config = app_state.app_config.config.load();
+    let schedules = config.schedules.as_deref().unwrap_or_default();
+    Json(crate::api::model::plugin_references(&id, &sources, schedules)).into_response()
+}
+
+#[cfg(not(feature = "plugins"))]
+async fn get_plugin_usage(Path(_id): Path<String>) -> Response { StatusCode::NOT_FOUND.into_response() }
 
 #[cfg(not(feature = "plugins"))]
 async fn post_plugin_upload() -> Response { StatusCode::NOT_FOUND.into_response() }

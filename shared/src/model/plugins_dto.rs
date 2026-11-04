@@ -505,6 +505,32 @@ pub struct PluginUninstallQueryDto {
     pub purge_kv: bool,
 }
 
+/// What a [`PluginReferenceDto`] entry is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginReferenceKind {
+    /// A `type: plugin` input.
+    Input,
+    /// A target's `type: plugin` output.
+    TargetOutput,
+    /// A target strategy such as `sort: {strategy: plugin:<id>}`.
+    TargetStrategy,
+    /// A `plugin.<id>.<fn>(…)` term in a target's processing filter.
+    TargetFilter,
+    /// A `type: plugin_task` schedule.
+    Schedule,
+}
+
+/// One item of `GET /api/v1/plugins/{id}/usage`: something in the config that names
+/// the plugin and goes inactive without it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginReferenceDto {
+    pub kind: PluginReferenceKind,
+    /// The input or target name; for a schedule `<task> (<cron expression>)`.
+    pub name: String,
+}
+
 /// `ui.config_extensions[]`: fields shown inside a built-in config section,
 /// stored in the plugin's settings under `ext.<section>.<field>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

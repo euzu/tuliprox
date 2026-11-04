@@ -21,9 +21,9 @@ use crate::{
     services::PluginService,
 };
 use shared::model::{
-    Permission, PluginHookStats, PluginStateDto, PluginStatsDto, PluginSummaryDto, PluginTaskDto,
-    PluginUpdateCandidateDto, PluginUpdateDto, PluginUpdatePolicy, PluginUpdateRequestDto, PluginUpdateResultKindDto,
-    PluginUpdatesDto, PluginUploadReviewDto,
+    Permission, PluginHookStats, PluginReferenceDto, PluginReferenceKind, PluginStateDto, PluginStatsDto,
+    PluginSummaryDto, PluginTaskDto, PluginUpdateCandidateDto, PluginUpdateDto, PluginUpdatePolicy,
+    PluginUpdateRequestDto, PluginUpdateResultKindDto, PluginUpdatesDto, PluginUploadReviewDto,
 };
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
@@ -408,19 +408,47 @@ fn render_entry(translate: &YewI18n, entry: &PluginEntry, actions: &RowActions<'
     }
 }
 
+/// The i18n key of what a plugin reference is.
+fn reference_kind_key(kind: PluginReferenceKind) -> &'static str {
+    match kind {
+        PluginReferenceKind::Input => "LABEL.PLUGIN_REFERENCE_INPUT",
+        PluginReferenceKind::TargetOutput => "LABEL.PLUGIN_REFERENCE_TARGET_OUTPUT",
+        PluginReferenceKind::TargetStrategy => "LABEL.PLUGIN_REFERENCE_TARGET_STRATEGY",
+        PluginReferenceKind::TargetFilter => "LABEL.PLUGIN_REFERENCE_TARGET_FILTER",
+        PluginReferenceKind::Schedule => "LABEL.PLUGIN_REFERENCE_SCHEDULE",
+    }
+}
+
 #[derive(Properties, Clone, PartialEq)]
 struct PluginUninstallProps {
+    plugin_id: String,
     plugin_name: String,
     /// `true` when the stored data should be deleted too (`purge_kv`).
     on_confirm: Callback<bool>,
     on_cancel: Callback<()>,
 }
 
-/// The uninstall confirmation, with the "also delete stored data" choice off by default.
+/// The uninstall confirmation, with the "also delete stored data" choice off by default. It lists what
+/// still names the plugin; uninstalling stays allowed, those just go inactive.
 #[component]
 fn PluginUninstall(props: &PluginUninstallProps) -> Html {
     let translate = use_translation();
+    let services = use_service_context();
     let purge = use_state(|| false);
+    // Empty until loaded, and when the lookup fails: the warning is advice, never a blocker.
+    let references = use_state(Vec::<PluginReferenceDto>::new);
+    {
+        let references = references.clone();
+        let services = services.clone();
+        use_effect_with(props.plugin_id.clone(), move |id| {
+            let id = id.clone();
+            spawn_local(async move {
+                if let Ok(found) = services.plugins.references(&id).await {
+                    references.set(found);
+                }
+            });
+        });
+    }
     let on_purge = {
         let purge = purge.clone();
         Callback::from(move |event: Event| {
@@ -457,6 +485,16 @@ fn PluginUninstall(props: &PluginUninstallProps) -> Html {
         <div class="tp__plugin-uninstall">
             <h2>{ format!("{} - {}", translate.t("LABEL.PLUGIN_UNINSTALL"), props.plugin_name) }</h2>
             <p>{ translate.t("MESSAGES.PLUGIN_UNINSTALL_CONFIRM") }</p>
+            if !references.is_empty() {
+                <div class="tp__plugin-uninstall__in-use">
+                    <p>{ translate.t("MESSAGES.PLUGIN_UNINSTALL_IN_USE") }</p>
+                    <ul>
+                        { for references.iter().map(|reference| html! {
+                            <li>{ format!("{}: {}", translate.t(reference_kind_key(reference.kind)), reference.name) }</li>
+                        }) }
+                    </ul>
+                </div>
+            }
             <label class="tp__plugin-uninstall__purge">
                 <input type="checkbox" checked={*purge} onchange={on_purge} />
                 { " " }{ translate.t("LABEL.PLUGIN_PURGE_DATA") }
@@ -959,8 +997,9 @@ pub fn PluginsView() -> Html {
                     close_on_backdrop_click=false
                 />
             }
-            if let Some((_, plugin_name)) = (*uninstall_for).clone() {
-                <PluginUninstall plugin_name={plugin_name} on_confirm={on_confirm_uninstall}
+            if let Some((plugin_id, plugin_name)) = (*uninstall_for).clone() {
+                <PluginUninstall key={plugin_id.clone()} plugin_id={plugin_id.clone()} plugin_name={plugin_name}
+                    on_confirm={on_confirm_uninstall}
                     on_cancel={on_cancel_uninstall} />
             }
             if let Some((plugin_id, plugin_name)) = (*settings_for).clone() {
