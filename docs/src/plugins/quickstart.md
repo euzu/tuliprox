@@ -253,8 +253,11 @@ echo
 ```
 
 The answer is `200` with the plugin summary, in `state` `loaded` with `enabled` false. Approval does not enable the
-plugin. The server records the approval in `$TULIPROX_HOME/data/plugins/approvals.json`. A plugin that does ask for
-capabilities needs their names listed in `capabilities`; see [Security](./security.md).
+plugin — unless `config.yml` already has a `plugins.plugins[]` entry for this id: such an entry defaults to
+`enabled: true`, so the plugin comes back `enabled` at once, and the entry itself is an approval
+(``plugin `<id>` approved by its config entry``). The server records the approval in
+`$TULIPROX_HOME/data/plugins/approvals.json`. A plugin that does ask for capabilities needs their names listed in
+`capabilities`; see [Security](./security.md).
 
 ## 8. Set the settings
 

@@ -405,6 +405,9 @@ body {
   --theme-brand-brick-output-m3u: var(--theme-palette-graph-output-m3u);
   --theme-brand-brick-output-hdhomerun: var(--theme-palette-graph-output-hdhomerun);
   --theme-brand-brick-output-strm: var(--theme-palette-graph-output-strm);
+  /* One identity colour for every plugin brick, input and output alike, so a plugin is
+     recognisable as such and never shares a hue with a built-in source or output. */
+  --theme-brand-brick-plugin: var(--theme-palette-graph-plugin);
   --theme-brand-brick-port: var(--theme-palette-graph-port);
   --theme-brand-brick-port-border: var(--theme-palette-graph-port-border);
   --theme-brand-brick-port-hover: var(--theme-palette-graph-port-hover);
@@ -753,6 +756,9 @@ body {
   --brick-output-strm-border-color: color-mix(in srgb, var(--theme-brand-brick-output-strm) 80%, transparent);
   --brick-output-strm-background-color: color-mix(in srgb, var(--theme-brand-brick-output-strm) 53%, transparent);
   --brick-output-strm-shadow-color: color-mix(in srgb, var(--theme-brand-brick-output-strm) 50%, transparent);
+  --brick-plugin-border-color: color-mix(in srgb, var(--theme-brand-brick-plugin) 80%, transparent);
+  --brick-plugin-background-color: color-mix(in srgb, var(--theme-brand-brick-plugin) 53%, transparent);
+  --brick-plugin-shadow-color: color-mix(in srgb, var(--theme-brand-brick-plugin) 50%, transparent);
   --brick-port-background-color: var(--theme-brand-brick-port);
   --brick-port-border-color: var(--theme-brand-brick-port-border);
   --brick-port-valid-background-color: var(--theme-brand-positive);

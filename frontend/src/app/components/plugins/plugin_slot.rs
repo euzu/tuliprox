@@ -611,6 +611,8 @@ mod tests {
             config_section: false,
             config_extensions: Vec::new(),
             config_tab: None,
+            input_form: Vec::new(),
+            output_form: Vec::new(),
             contributions,
             rpc_exports: Vec::<PluginRpcExportDto>::new(),
         })

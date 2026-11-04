@@ -60,6 +60,31 @@ Tuliprox supports loading secrets from `.env` files for `${env:VAR}` interpolati
 > Changing a mounted `.env` file requires restarting the container (`docker compose restart`).
 > When using `env_file:`, recreate the container (`docker compose up -d --force-recreate`).
 
+### Plugins and Volumes
+
+Tuliprox ships official bundled plugins under `/app/plugins` inside the container image, while custom or downloaded plugins can be placed under `/app/user-plugins`:
+
+```yaml
+plugins:
+  enabled: true
+  directories:
+    - /app/plugins
+    - /app/user-plugins
+```
+
+- **Config Decoupling:** Mounting your configuration into `/app/config` does not affect or hide the bundled plugins.
+- **Custom Plugins:** Mount user-provided plugins to `/app/user-plugins` in your `docker-compose.yml`:
+
+  ```yaml
+  volumes:
+    - ./config:/app/config
+    - ./user-plugins:/app/user-plugins
+  ```
+
+- **Mounting over `/app/plugins`:** Mounting a host volume directly over `/app/plugins` is possible,
+  but will overlay the container directory and mask the bundled default plugins. If you wish to retain
+  bundled plugins alongside custom plugins, mount into `/app/user-plugins` instead.
+
 ## Docker Container Templates — Deployment Guide
 
 This repository contains ready-to-use Docker Compose templates for a secure reverse proxy stack with VPN egress and CrowdSec protection. It includes

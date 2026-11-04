@@ -2,9 +2,11 @@
 
 use super::{
     hook::{HookId, Requirement},
-    raw::{RawConfigExtension, RawConfigTab, RawContribution, RawManifest, RawRpcExport, RawTask, RawUi},
-    Concurrency, ConfigExtension, ConfigSection, ConfigTab, ConfigTabSource, Contribution, FailMode, Manifest,
-    Provides, Resources, RpcExport, RpcKind, Scope, Slot, Task, Ui, HOST_API_VERSION,
+    raw::{
+        RawConfigExtension, RawConfigTab, RawContribution, RawFormSection, RawManifest, RawRpcExport, RawTask, RawUi,
+    },
+    Concurrency, ConfigExtension, ConfigSection, ConfigTab, ConfigTabSource, Contribution, FailMode, FormSection,
+    Manifest, Provides, Resources, RpcExport, RpcKind, Scope, Slot, Task, Ui, HOST_API_VERSION,
 };
 use regex::Regex;
 use semver::Version;
@@ -295,7 +297,40 @@ fn check_ui(raw: RawUi, errors: &mut Errors) -> Ui {
     let contributions =
         raw.contributions.into_iter().enumerate().filter_map(|(i, c)| check_contribution(i, c, errors)).collect();
     let rpc_exports = check_rpc_exports(raw.rpc_exports, errors);
-    Ui { config_section, config_extensions, config_tab, locales, contributions, rpc_exports }
+    let input_form = check_form_sections(raw.input_form, "ui.input_form", errors);
+    let output_form = check_form_sections(raw.output_form, "ui.output_form", errors);
+    Ui { config_section, config_extensions, config_tab, locales, contributions, rpc_exports, input_form, output_form }
+}
+
+/// The sections of one form: an id (unique in the form), an optional title and a
+/// package-relative schema path.
+fn check_form_sections(raw: Vec<RawFormSection>, field: &str, errors: &mut Errors) -> Vec<FormSection> {
+    let mut sections: Vec<FormSection> = Vec::with_capacity(raw.len());
+    for (index, section) in raw.into_iter().enumerate() {
+        let Some(id) = non_blank(section.id) else {
+            errors.push(format!("{field}[{index}]: `id` is required"));
+            continue;
+        };
+        if !is_kebab_id(&id.replace('_', "-"), NAME_LEN) {
+            errors.push(format!("{field}[{index}]: id `{id}` is not a panel id"));
+            continue;
+        }
+        if sections.iter().any(|existing| existing.id == id) {
+            errors.push(format!("{field}[{index}]: id `{id}` is declared twice"));
+            continue;
+        }
+        let title = non_blank(section.title);
+        let title_key = non_blank(section.title_key);
+        let Some(schema) = non_blank(section.schema) else {
+            errors.push(format!("{field} `{id}`: `schema` is required"));
+            continue;
+        };
+        if !check_path(&format!("{field} `{id}` schema"), &schema, errors) {
+            continue;
+        }
+        sections.push(FormSection { id, title, title_key, schema });
+    }
+    sections
 }
 
 fn check_config_extensions(raw: Vec<RawConfigExtension>, errors: &mut Errors) -> Vec<ConfigExtension> {

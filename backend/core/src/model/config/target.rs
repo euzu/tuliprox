@@ -310,8 +310,9 @@ pub struct PluginTargetOutput {
     pub plugin: String,
     pub format: Option<String>,
     pub filename: Option<String>,
-    /// In key order, as `output-request.options` wants them.
-    pub options: Vec<(String, String)>,
+    /// The plugin's settings for this output, as configured. Handed to the
+    /// plugin as `output-request.options` (see [`shared::model::plugin_options`]).
+    pub plugin_config: serde_json::Map<String, serde_json::Value>,
     pub filter: Option<Filter>,
 }
 
@@ -328,7 +329,7 @@ impl From<&PluginTargetOutputDto> for PluginTargetOutput {
             plugin: dto.plugin.clone(),
             format: dto.format.clone(),
             filename: dto.filename.clone(),
-            options: dto.options.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+            plugin_config: dto.plugin_config.clone(),
             filter: dto.t_filter.clone(),
         }
     }
@@ -339,7 +340,7 @@ impl From<&PluginTargetOutput> for PluginTargetOutputDto {
             plugin: instance.plugin.clone(),
             format: instance.format.clone(),
             filename: instance.filename.clone(),
-            options: instance.options.iter().cloned().collect(),
+            plugin_config: instance.plugin_config.clone(),
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
         }
@@ -670,7 +671,7 @@ mod tests {
         let mut dto: ConfigTargetDto = serde_json::from_value(serde_json::json!({"name": "t1", "output": [
             {"type": "m3u"},
             {"type": "plugin", "plugin": "my-plugin", "format": "my-format", "filename": "out.txt",
-             "options": {"b": "2", "a": "1"}, "filter": "Group ~ \"News\""},
+             "plugin_config": {"b": "2", "a": 1, "on": true}, "filter": "Group ~ \"News\""},
         ]}))
         .unwrap();
         dto.prepare(1, None, None).unwrap();
@@ -679,7 +680,14 @@ mod tests {
         assert_eq!(target.output[1].target_type(), TargetType::Plugin);
         assert!(target.has_output(TargetType::Plugin));
         let output = target.plugin_outputs().next().unwrap();
-        assert_eq!(output.options, [("a".to_string(), "1".to_string()), ("b".to_string(), "2".to_string())]);
+        // `plugin_options` is the one place the typed values become the plugin's strings.
+        let mut options = shared::model::plugin_options(&output.plugin_config);
+        options.sort();
+        assert_eq!(
+            options,
+            [("a".to_string(), "1".to_string()), ("b".to_string(), "2".to_string()), ("on".to_string(), "true".into())],
+            "typed values reach the plugin as their JSON text; the order is the document's"
+        );
         assert_eq!(output.file_name(), "out.txt");
         assert!(target.output[1].filter().is_some(), "the output filter is the plugin output's");
         assert_eq!(TargetOutputDto::from(&target.output[1]), dto.output[1]);

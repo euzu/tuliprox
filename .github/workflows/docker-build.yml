@@ -44,7 +44,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown,wasm32-wasip2
 
       - name: Install wasm tools 128
         run: |
@@ -216,7 +216,7 @@ jobs:
               listing=$(tar -tzf "${artifact}")
               binary=tuliprox/tuliprox
             fi
-            for required_path in "$binary" tuliprox/web/ tuliprox/resources/; do
+            for required_path in "$binary" tuliprox/web/ tuliprox/resources/ tuliprox/plugins/; do
               grep -qx "${required_path}" <<< "${listing}"
             done
           done

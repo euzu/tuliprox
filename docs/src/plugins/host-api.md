@@ -112,6 +112,23 @@ requests. The network capability is described in [Security Model](./security.md)
 - At most `plugins.max_instances` instances of one plugin run at once (default 4). A manifest's
   `resources.max_instances` is clamped to that ceiling (`backend/plugins/src/runtime.rs`).
 
+## Plugin directories and search order
+
+The `plugins.directories` list specifies the search directories holding plugins. In Docker, this defaults
+automatically to `[/app/plugins, /app/user-plugins]`:
+
+```yaml
+plugins:
+  enabled: true
+  directories:
+    - /app/plugins       # Bundled official plugins
+    - /app/user-plugins  # Custom or user-mounted plugins
+```
+
+Directories are searched in the order listed. If multiple directories contain a plugin with the same ID, the later
+directory takes precedence (overrides earlier entries). The last entry in `directories` serves as the target directory
+for plugin installations and uploads via the Web UI.
+
 ## The `plugins:` limits
 
 The host limits above are set in the `plugins:` block of `config.yml` (`shared/src/model/config/plugins.rs`). A

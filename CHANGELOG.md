@@ -204,6 +204,11 @@
   a channel to be a plugin; nothing is removed or renamed. The plugin system and its SDK gained what these plugins needed
   (see the entries below), so a channel can move into a plugin later without further host work.
 
+- **`youtube-input` plugin: Ingest YouTube channels, playlists, and live streams as playlist channels.**
+  The `youtube-input` plugin (`plugins/inputs/youtube-input`) provides an input source (`type: plugin`) that discovers
+  YouTube videos via lightweight Atom feeds and resolves streams using standard Invidious REST endpoints with instance
+  failover, accurate live status extraction, and automatic stream URL caching in the plugin's KV store.
+
 - **Plugin categories: filter and search the Marketplace by what a plugin does.** A plugin declares its kind in its
   manifest (`category: notifier`; one lowercase id, optional), the Plugin Manager shows it as a badge, and the Marketplace
   replaces the category dropdown with chips: `All` and every category of the current search with its count (`Notifiers (6)`).
@@ -1408,6 +1413,14 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Removing a plugin no longer keeps the server down.** A `source.yml` that still named the plugin refused to start
+  (``Can't start server: config source error: invalid plugin references: input x: no loaded plugin y provides
+  fetch-input``), so uninstalling a plugin left an instance that could not boot. The start and a running server's hot
+  reload now report every unsatisfied plugin reference once and continue; only the entries that name the missing
+  plugin are inactive and keep their last playlist. A target whose processing filter calls `plugin.<id>.<fn>(…)` for a
+  missing plugin now fails as a target (``target 'x' is inactive: its filter calls plugin 'y' …``) instead of silently
+  dropping every item and reporting success. Saving `source.yml` through the API still rejects such a reference.
 
 - **Web UI posters and logos no longer fail with providers that only serve players.** The image proxy behind the
   Web UI forwarded the browser's User-Agent to the provider; providers that block browsers answered 403, so most VOD

@@ -135,16 +135,39 @@ inputs:
 The input type is `plugin`, from `InputType` in `shared/src/model/config/input/kind.rs` (`snake_case` serde). The
 `plugin:` field names the plugin id (`shared/src/model/config/input.rs`).
 
-The plugin references in `source.yml` are checked when tuliprox starts: an input or output that names a plugin that is
-not installed, approved and providing that input type or output format stops the start
-(``input <name>: no loaded plugin <id> provides fetch-input``). So install the plugin first: start with `source.yml` not yet naming
-it, upload and approve it in the Plugin Manager, then add the input or output and restart.
+The plugin references in `source.yml` are checked when tuliprox starts, and a reference to a plugin that is not
+installed, approved and providing that input type or output format is **reported and then ignored** — it never keeps
+the server down. Removing a plugin is therefore safe: the server starts, the log names what is inactive, and only the
+entries that name the missing plugin stop working.
+
+- The log line names every problem at once, for example
+  ``config source error: invalid plugin references: input my-feed: no loaded plugin my-plugin provides fetch-input``.
+- That input is then inactive: it is skipped before its fetch, keeps its last playlist, and logs
+  ``plugin input 'my-feed' is inactive: plugin 'my-plugin' is not installed or not enabled``. Other inputs and targets run.
+- A target whose *processing filter* calls `plugin.<id>.<fn>(…)` for a missing plugin fails as a target
+  (``target 'x' is inactive: its filter calls plugin 'my-plugin' …``) and keeps its previous output. Without that check
+  the term would answer `false` for every item and the target would drop its whole playlist while reporting success.
+- A `type: plugin_task` schedule naming a missing plugin or task is reported the same way and does not run.
+- A plugin output whose plugin is missing fails only that output; the target's other outputs are written.
+
+Saving `source.yml` through the API is stricter: `POST /api/v1/config/sources` rejects a reference to a plugin that is
+not loaded (`409`/`400` with the same message), because that is an operator action with immediate feedback and the file
+stays as it was. The boot path and a running server's hot reload only log.
+
+So the order no longer matters for starting: install and approve the plugin whenever you like; the input starts working
+once the plugin is enabled and the playlist is refreshed.
 
 - The plugin's `fetch_playlist` returns the channels. `fetch_epg` returns EPG channels and programmes, or an empty list.
 - For a plugin input, `url`, `username` and `password` are optional and passed to the plugin unchanged.
 - Each call runs in a fresh instance with a deadline of `plugins.max_exec` times 10, never more than `plugins.max_task_exec`
   (`backend/plugins/src/input_provider.rs`).
 - A failed call fails only the input that asked for it, the same as an unreachable provider.
+- The Web UI source editor builds the same entry: add the **Plugin** input and pick the plugin in its **Plugin** field.
+  The picker lists the installed plugins that export `input.fetch`. The editor shows only the fields every input has;
+  the plugin adds its own with `ui.input_form` and reads them from `input-request.options` (see
+  [Input and output forms](./settings.md#input-and-output-forms)).
+- `plugin_config` holds those per-input values. The host hands them over as `input-request.options`; an input without
+  one passes none.
 
 ## Output providers
 
@@ -162,8 +185,14 @@ output:
 - `plugin` is required. `format` is optional, and when set it must equal `provides.output_format`.
 - `filename` is a bare name in the target's storage directory. It must not start with `.` and must not contain a path
   separator. The default is `<plugin>.out`.
-- `options` is a map of strings passed to the plugin as `output-request.options`, in key order.
+- `plugin_config` is the plugin's own settings for this output, passed as `output-request.options` in key order. A
+  string keeps its text, any other value is its JSON text, a nested object is flattened with dotted keys.
 - `filter` selects the items the output receives.
+- The Web UI source editor builds the same entry: add the **Plugin** output and pick the plugin in its **Plugin** field.
+  The picker lists the installed plugins that export `output.render`. `format` is not asked for: it must equal the
+  plugin's `provides.output_format`, so the editor leaves it out and the host uses the plugin's own.
+- `plugin_config` holds the per-output values, handed over as `output-request.options`. The plugin declares the fields
+  with `ui.output_form`.
 
 The render runs in one fresh instance per output file, under the provider deadline. The bytes returned by the plugin are
 appended to a temporary file. The temporary file replaces the output only when `finish-output` succeeds. A failure removes

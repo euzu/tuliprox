@@ -622,6 +622,9 @@ pub struct ConfigInput {
     pub stalker: Option<StalkerInputConfig>,
     /// Id of the providing plugin; `Some` exactly for `InputType::Plugin`.
     pub plugin: Option<Arc<str>>,
+    /// The plugin's settings for this input, flattened to the `options` pairs of
+    /// `input-request`. Empty unless `InputType::Plugin`.
+    pub plugin_options: Vec<(String, String)>,
 }
 
 impl ConfigInput {
@@ -1037,6 +1040,7 @@ impl ConfigInput {
                 StalkerInputConfig { username, password, ..cfg }
             }),
             plugin: self.plugin.clone(),
+            plugin_options: self.plugin_options.clone(),
         }
     }
 
@@ -1149,6 +1153,7 @@ impl From<&ConfigInputDto> for ConfigInput {
                 .as_ref()
                 .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
             plugin: dto.plugin.clone(),
+            plugin_options: shared::model::plugin_options(&dto.plugin_config),
         }
     }
 }
@@ -1263,6 +1268,37 @@ mod tests {
         let built_in = ConfigInput { input_type: InputType::M3u, plugin: None, ..input };
         assert_eq!(built_in.plugin_ref(), None);
     }
+    #[test]
+    fn a_plugin_input_flattens_its_plugin_config_into_the_request_options() {
+        let mut dto = ConfigInputDto {
+            name: "from-plugin".intern(),
+            input_type: InputType::Plugin,
+            plugin: Some("youtube-input".intern()),
+            plugin_config: serde_json::Map::from_iter([
+                ("mode".to_string(), serde_json::json!("live_only")),
+                ("max_uploads".to_string(), serde_json::json!(5)),
+                ("flag".to_string(), serde_json::json!(true)),
+                ("nested".to_string(), serde_json::json!({"a": "b"})),
+            ]),
+            ..ConfigInputDto::default()
+        };
+        dto.prepare(0, false, &std::collections::HashSet::new(), None).unwrap();
+        let input = ConfigInput::from(&dto);
+
+        let mut options = input.plugin_options.clone();
+        options.sort();
+        assert_eq!(
+            options,
+            [
+                ("flag".to_string(), "true".to_string()),
+                ("max_uploads".to_string(), "5".to_string()),
+                ("mode".to_string(), "live_only".to_string()),
+                ("nested.a".to_string(), "b".to_string()),
+            ],
+            "a string keeps its text, anything else its JSON text, an object flattens with dots"
+        );
+    }
+
     use crate::model::ConfigProvider;
     use shared::model::{
         ConfigInputUpdateQualityDto, ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector,

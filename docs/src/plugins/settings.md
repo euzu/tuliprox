@@ -237,6 +237,71 @@ The DTO is `PluginConfigExtensionDto` in `shared/src/model/plugins_dto.rs`.
 <!-- UNVERIFIED: how the web UI renders an extension inside its section. The manifest side is checked in code and in
 unit tests. The rendering is frontend behaviour that this page did not exercise in a browser. -->
 
+## Input and output forms
+
+A plugin that provides a `type: plugin` input or output can describe the fields its own instances need with
+`ui.input_form` and `ui.output_form`.
+
+```yaml
+ui:
+  input_form:
+    - id: main            # shown inside the host's Main panel
+      schema: forms/input.json
+    - id: options         # shown inside the host's Options panel
+      schema: forms/options.json
+    - id: filters         # a panel of its own, titled by the plugin
+      title_key: form.filters
+      schema: forms/filters.json
+  output_form:
+    - id: main
+      schema: forms/output.json
+```
+
+- Each entry has an `id`, a package-relative `schema`, and optionally a `title` or `title_key`. Ids are kebab case and
+  unique per form.
+- The schema is the same draft 2020-12 subset `SchemaForm` renders and the settings schemas use: an object schema,
+  no `oneOf`/`anyOf`/`allOf`/`$ref`/conditional keywords, and a `title`/`description` that is a locale key is
+  translated.
+- `main` and `options` extend the host's own panels. The host always shows the fields every input or output has:
+  for an input the plugin, name, enabled, sequential group, max connections, priority, cache duration, url and playback
+  provider; for an output the plugin, file name and filter. Any other id adds a panel after them.
+- A form field must not be a secret (`writeOnly`/`format: password` is refused): the values are stored in `source.yml`,
+  which the host does not mask. Keep credentials in the plugin's settings.
+
+The values are stored per input or output, in `plugin_config`:
+
+```yaml
+inputs:
+  - name: youtube-news
+    type: plugin
+    plugin: youtube-input
+    url: "https://www.youtube.com/@tagesschau"
+    plugin_config:
+      mode: live_only
+      max_uploads: 5
+```
+
+The host hands them to the plugin as `input-request.options` / `output-request.options`, which the ABI already
+carries. A string value keeps its text, any other value is its JSON text (`true`, `10`, `["a"]`), and a nested object
+is flattened with dotted keys, so `auth.user` arrives as one option named `auth.user`. The plugin reads the keys it
+declares; unknown keys are the plugin's to ignore.
+
+A list therefore arrives as its JSON text, not as a repeated option: `["https://a","https://b"]` is one option named
+after the property. A plugin that declares an array field parses it (`serde_json::from_str::<Vec<String>>`), so it
+should accept a plain comma-separated string as well — hand-written YAML often uses one.
+
+The usual split: values that describe the deployment belong in the plugin's settings, values that describe one input or
+output in its form. A plugin whose whole configuration is per-instance declares no settings schema at all — then the
+Plugin Manager's settings dialog says so and points at the input form, and `GET …/settings` returns `schema: null`.
+`youtube-input` works this way: every field it needs is on each input.
+
+Declaring a field both as a setting and in the form is supported: the setting is the default, an empty field keeps it,
+and the plugin writes that fallback. Host-side settings are never plugin settings — the update policy and the boot
+update budget live in `plugins:`, not in a package.
+
+`plugin_config` is refused on any other input type, and a plugin input still rejects the built-in downloader fields
+(aliases, `media_server`, `panel_api`, `stalker`, provider failover definitions).
+
 ## Config tabs
 
 `ui.config_tab` adds a tab to the config page. The manifest fields are `title` or `title_key` (one is required),

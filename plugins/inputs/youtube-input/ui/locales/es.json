@@ -1,0 +1,14 @@
+{
+  "form.title": "Entrada de YouTube",
+  "form.description": "Qué obtiene esta entrada y cómo. Todo lo de aquí pertenece solo a esta entrada.",
+  "form.channels.title": "Canales y listas de YouTube",
+  "form.channels.description": "Destinos de esta entrada: @handle, id de canal UC..., id de lista PL..., o un vídeo. Se suman a la URL de arriba; los duplicados se descargan una vez.",
+  "form.invidious_instances.title": "Instancias de Invidious",
+  "form.invidious_instances.description": "Réplicas por las que esta entrada resuelve los streams, en orden de failover (al menos una).",
+  "form.mode.title": "Modo de ingesta",
+  "form.mode.description": "recent_uploads lee los vídeos más recientes, live_only conserva solo la emisión en directo actual.",
+  "form.max_uploads.title": "Máximo de subidas",
+  "form.max_uploads.description": "Cuántas subidas recientes tomar por canal (1 a 15).",
+  "form.cache_ttl_minutes.title": "TTL de la caché de streams (minutos)",
+  "form.cache_ttl_minutes.description": "Cuánto reutiliza esta entrada una URL de stream resuelta (10 a 360)."
+}

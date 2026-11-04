@@ -42,6 +42,15 @@ pub const DEFAULT_PLUGIN_SETTINGS_VERSION: u32 = 1;
 /// startup and on every fetch while it is set.
 pub const ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP: &str = "TULIPROX_PLUGIN_MARKETPLACE_ALLOW_HTTP";
 
+/// Environment variable providing plugin search directories (separated by `:` or `,`).
+pub const ENV_PLUGIN_DIRS: &str = "TULIPROX_PLUGINS_DIRS";
+
+/// Default system plugin directory shipped inside container images.
+pub const DEFAULT_SYSTEM_PLUGINS_DIR: &str = "/app/plugins";
+
+/// Default user plugin directory for custom plugins.
+pub const DEFAULT_USER_PLUGINS_DIR: &str = "/app/user-plugins";
+
 /// Shortest and longest plugin id, the `^[a-z][a-z0-9-]{2,40}$` of the manifest.
 pub const PLUGIN_ID_LEN: std::ops::RangeInclusive<usize> = 3..=41;
 
@@ -202,10 +211,15 @@ pub struct PluginsConfigDto {
     pub enabled: bool,
 
     /// Directory holding one `<id>/` folder per plugin, each with a
-    /// `manifest.yml` and a `plugin.wasm`. A relative path is resolved against
-    /// the config directory.
+    /// `manifest.yml` and a `plugin.wasm`. Kept for backwards compatibility.
     #[serde(default = "default_plugins_directory", skip_serializing_if = "is_default_plugins_directory")]
     pub directory: String,
+
+    /// Search directories holding plugins. Directories are searched in order;
+    /// plugins in later directories override plugins with the same ID in earlier directories.
+    /// The last directory serves as the target for plugin installations and uploads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directories: Vec<String>,
 
     /// Memory all plugin instances may hold together.
     #[serde(default = "default_max_total_memory", skip_serializing_if = "is_default_max_total_memory")]
@@ -263,6 +277,7 @@ impl Default for PluginsConfigDto {
         Self {
             enabled: false,
             directory: default_plugins_directory(),
+            directories: Vec::new(),
             max_total_memory: default_max_total_memory(),
             max_memory: default_max_memory(),
             max_exec: default_max_exec(),
@@ -316,6 +331,16 @@ impl Prepare for PluginsConfigDto {
     /// Normalise spelling and check every clamp, reporting all problems at once.
     fn prepare(&mut self, (): ()) -> Result<(), TuliproxError> {
         let mut errors = Vec::new();
+
+        clean_or_default(&mut self.directory, DEFAULT_PLUGINS_DIR);
+        self.directories.retain_mut(|dir| {
+            let trimmed = dir.trim();
+            *dir = trimmed.to_string();
+            !dir.is_empty()
+        });
+        if let Some(last) = self.directories.last() {
+            self.directory = last.clone();
+        }
 
         let total =
             check_size("max_total_memory", &mut self.max_total_memory, DEFAULT_PLUGINS_MAX_TOTAL_MEMORY, &mut errors);
@@ -427,6 +452,15 @@ mod tests {
     }
 
     #[test]
+    fn directories_prepare_cleans_and_syncs_directory() {
+        let mut dto: PluginsConfigDto =
+            serde_json::from_str(r#"{"directories": [" /app/plugins ", " ", "/app/user-plugins"]}"#).unwrap();
+        dto.prepare(()).unwrap();
+        assert_eq!(dto.directories, vec!["/app/plugins", "/app/user-plugins"]);
+        assert_eq!(dto.directory, "/app/user-plugins");
+    }
+
+    #[test]
     fn round_trips_non_default_values() {
         let mut entry = PluginEntryDto::new("sports-enricher");
         entry.enabled = false;
@@ -437,6 +471,7 @@ mod tests {
         let dto = PluginsConfigDto {
             enabled: true,
             directory: "/opt/tuliprox/plugins".to_string(),
+            directories: vec!["/usr/share/tuliprox/plugins".to_string(), "/opt/tuliprox/plugins".to_string()],
             max_total_memory: ByteSize::new("1GB"),
             max_memory: ByteSize::new("256MB"),
             max_exec: "250ms".to_string(),

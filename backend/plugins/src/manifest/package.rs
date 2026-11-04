@@ -61,6 +61,18 @@ pub(crate) fn settings_schema_paths(manifest: &Manifest) -> Vec<&str> {
     paths
 }
 
+/// The `ui.input_form` / `ui.output_form` schemas of a plugin, with the panel id
+/// they belong to.
+pub(crate) fn form_schema_paths(manifest: &Manifest) -> Vec<(&str, &str)> {
+    manifest
+        .ui
+        .input_form
+        .iter()
+        .chain(manifest.ui.output_form.iter())
+        .map(|section| (section.id.as_str(), section.schema.as_str()))
+        .collect()
+}
+
 /// The schema settings are saved against: the first of [`settings_schema_paths`].
 pub(crate) fn settings_schema_path(manifest: &Manifest) -> Option<&str> {
     settings_schema_paths(manifest).into_iter().next()
@@ -201,6 +213,27 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
     for extension in &manifest.ui.config_extensions {
         check_schema(&extension.schema, &format!("ui.config_extensions `{}` schema", extension.section), &mut problems);
     }
+
+    // Input/output form schemas. They describe values stored in `source.yml`, so a secret
+    // property is refused: a per-input secret belongs in the plugin's settings, where the
+    // host masks it.
+    for (id, relative) in form_schema_paths(manifest) {
+        let label = format!("form schema `{relative}` (`{id}`)");
+        match read_json(dir, relative, &label) {
+            Ok(schema) => {
+                check_schema(&schema, &label, &mut problems);
+                match secret_property_paths(&schema) {
+                    Ok(secrets) if secrets.is_empty() => {}
+                    Ok(secrets) => problems.push(format!(
+                        "{label}: a form field must not be a secret ({}); keep the secret in the plugin's settings",
+                        secrets.iter().map(|path| format!("`{path}`")).collect::<Vec<_>>().join(", ")
+                    )),
+                    Err(problem) => problems.push(format!("{label}: {problem}")),
+                }
+            }
+            Err(problem) => problems.push(problem),
+        }
+    }
     let secret_paths = match settings_secret_paths(&schemas, manifest) {
         Ok(paths) => paths,
         Err(problem) => {
@@ -220,7 +253,13 @@ pub(crate) fn check_package(dir: &Path, manifest: &Manifest) -> Result<Vec<Strin
     }
     let tab_key = manifest.ui.config_tab.iter().filter_map(|tab| tab.title_key.as_deref());
     let slot_keys = manifest.ui.contributions.iter().filter_map(|contribution| contribution.title_key.as_deref());
-    for key in tab_key.chain(slot_keys) {
+    let form_keys = manifest
+        .ui
+        .input_form
+        .iter()
+        .chain(manifest.ui.output_form.iter())
+        .filter_map(|section| section.title_key.as_deref());
+    for key in tab_key.chain(slot_keys).chain(form_keys) {
         if !manifest.ui.locales.iter().any(|locale| locale == FALLBACK_LOCALE) {
             problems.push(format!("title_key `{key}` needs the `{FALLBACK_LOCALE}` locale in `ui.locales`"));
         } else if fallback.as_ref().is_some_and(|strings| !strings.contains_key(key)) {
@@ -349,6 +388,40 @@ mod tests {
             ("ui/locales/fr.json", "{}"),
         ]);
         assert!(check_package(ok.path(), &manifest).is_ok());
+    }
+
+    #[test]
+    fn a_form_schema_must_exist_be_supported_and_hold_no_secret() {
+        let extra = "ui:\n  input_form:\n    - id: main\n      schema: forms/input.json\n";
+
+        let missing = package(&[]);
+        let problems = check_package(missing.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|problem| problem.contains("forms/input.json")), "{problems:?}");
+
+        let good = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"mode":{"type":"string","enum":["a","b"]}}}"#,
+        )]);
+        assert_eq!(check_package(good.path(), &manifest(extra)).unwrap(), Vec::<String>::new());
+
+        let nested = package(&[("forms/input.json", r#"{"type":"object","properties":{"a":{"oneOf":[]}}}"#)]);
+        let problems = check_package(nested.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|problem| problem.contains("oneOf")), "{problems:?}");
+
+        let secret = package(&[(
+            "forms/input.json",
+            r#"{"type":"object","properties":{"token":{"type":"string","writeOnly":true}}}"#,
+        )]);
+        let problems = check_package(secret.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|problem| problem.contains("must not be a secret")), "{problems:?}");
+    }
+
+    #[test]
+    fn a_form_title_key_resolves_like_a_contribution_title_key() {
+        let extra = "ui:\n  locales: [en]\n  output_form:\n    - id: columns\n      title_key: form.columns\n      schema: forms/out.json\n";
+        let dir = package(&[("forms/out.json", r#"{"type":"object"}"#), ("ui/locales/en.json", "{}")]);
+        let problems = check_package(dir.path(), &manifest(extra)).unwrap_err();
+        assert!(problems.iter().any(|problem| problem.contains("form.columns")), "{problems:?}");
     }
 
     #[test]

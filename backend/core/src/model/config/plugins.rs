@@ -10,7 +10,7 @@ use shared::{
     },
     utils::parse_duration_millis,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use url::Url;
 
 /// Runtime form of one `plugins.plugins[]` entry.
@@ -103,8 +103,12 @@ impl From<&PluginRepository> for PluginRepositoryDto {
 pub struct PluginsConfig {
     pub enabled: bool,
     /// Directory holding one `<id>/` folder per plugin. Absolute once
-    /// [`PluginsConfig::prepare`] has run.
+    /// [`PluginsConfig::prepare`] has run. Points to the primary mutable directory
+    /// (the last entry in [`PluginsConfig::directories`]).
     pub directory: String,
+    /// Search directories holding plugins. Absolute once
+    /// [`PluginsConfig::prepare`] has run.
+    pub directories: Vec<String>,
     /// Memory all plugin instances may hold together.
     pub max_total_memory: Bytes,
     /// Memory one plugin instance may hold.
@@ -144,11 +148,49 @@ impl PluginsConfig {
     /// Every marketplace source whose resolved url fails [`validate_repository`],
     /// one line each.
     pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
-        let configured = self.directory.trim();
-        let directory = if configured.is_empty() { DEFAULT_PLUGINS_DIR } else { configured };
-        let path = Path::new(directory);
-        let resolved: PathBuf = if path.is_absolute() { path.to_path_buf() } else { Path::new(config_path).join(path) };
-        self.directory = resolved.to_string_lossy().to_string();
+        // Environment variable override
+        if let Ok(env_dirs) = std::env::var(shared::model::ENV_PLUGIN_DIRS) {
+            let dirs: Vec<String> =
+                env_dirs.split([':', ',']).map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect();
+            if !dirs.is_empty() {
+                self.directories = dirs;
+            }
+        }
+
+        // Automatic container default: if directories is empty or contains only DEFAULT_PLUGINS_DIR,
+        // and /app/plugins exists, use [/app/plugins, /app/user-plugins]
+        let is_default_only = self.directories.is_empty()
+            || (self.directories.len() == 1
+                && (self.directories[0] == DEFAULT_PLUGINS_DIR || self.directories[0].trim().is_empty()));
+        if is_default_only && Path::new(shared::model::DEFAULT_SYSTEM_PLUGINS_DIR).is_dir() {
+            self.directories = vec![
+                shared::model::DEFAULT_SYSTEM_PLUGINS_DIR.to_string(),
+                shared::model::DEFAULT_USER_PLUGINS_DIR.to_string(),
+            ];
+        } else if self.directories.is_empty() {
+            let configured = self.directory.trim();
+            let dir = if configured.is_empty() { DEFAULT_PLUGINS_DIR } else { configured };
+            self.directories = vec![dir.to_string()];
+        }
+
+        let mut resolved_dirs = Vec::with_capacity(self.directories.len());
+        for dir in &self.directories {
+            let trimmed = dir.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let p = Path::new(trimmed);
+            let res = if p.is_absolute() { p.to_path_buf() } else { Path::new(config_path).join(p) };
+            let s = res.to_string_lossy().to_string();
+            if !resolved_dirs.contains(&s) {
+                resolved_dirs.push(s);
+            }
+        }
+        if resolved_dirs.is_empty() {
+            resolved_dirs.push(Path::new(config_path).join(DEFAULT_PLUGINS_DIR).to_string_lossy().to_string());
+        }
+        self.directory = resolved_dirs.last().cloned().unwrap_or_default();
+        self.directories = resolved_dirs;
 
         let allow_http = marketplace_allow_http();
         let errors: Vec<String> = self
@@ -265,9 +307,13 @@ impl From<&PluginEntry> for PluginEntryDto {
 
 impl From<&PluginsConfigDto> for PluginsConfig {
     fn from(dto: &PluginsConfigDto) -> Self {
+        let directories =
+            if dto.directories.is_empty() { vec![dto.directory.clone()] } else { dto.directories.clone() };
+        let directory = directories.last().cloned().unwrap_or_else(|| dto.directory.clone());
         Self {
             enabled: dto.enabled,
-            directory: dto.directory.clone(),
+            directory,
+            directories,
             max_total_memory: bytes_or(&dto.max_total_memory, DEFAULT_PLUGINS_MAX_TOTAL_MEMORY),
             max_memory: bytes_or(&dto.max_memory, DEFAULT_PLUGINS_MAX_MEMORY),
             max_exec: millis_or(&dto.max_exec, DEFAULT_PLUGINS_MAX_EXEC),
@@ -285,9 +331,15 @@ impl From<&PluginsConfigDto> for PluginsConfig {
 
 impl From<&PluginsConfig> for PluginsConfigDto {
     fn from(config: &PluginsConfig) -> Self {
+        let directories = if config.directories.as_slice() == [DEFAULT_PLUGINS_DIR] {
+            Vec::new()
+        } else {
+            config.directories.clone()
+        };
         Self {
             enabled: config.enabled,
             directory: config.directory.clone(),
+            directories,
             max_total_memory: format_bytes(config.max_total_memory),
             max_memory: format_bytes(config.max_memory),
             max_exec: format_millis(config.max_exec),
@@ -319,6 +371,7 @@ mod tests {
         let dto = PluginsConfigDto {
             enabled: true,
             directory: "/opt/plugins".to_string(),
+            directories: vec!["/app/plugins".to_string(), "/opt/plugins".to_string()],
             max_total_memory: ByteSize::new("1GB"),
             max_memory: ByteSize::new("256MB"),
             max_exec: "250ms".to_string(),
@@ -418,6 +471,22 @@ mod tests {
         let mut config = PluginsConfig::from(&dto_from(json!({"directory": "/opt/plugins"})));
         config.prepare("/etc/tuliprox/config").unwrap();
         assert_eq!(config.directory, "/opt/plugins");
+    }
+
+    #[test]
+    fn directories_resolve_relative_and_keep_absolute() {
+        let mut config = PluginsConfig::from(&dto_from(json!({
+            "directories": ["bundled", "/var/lib/plugins", "  "]
+        })));
+        config.prepare("/etc/tuliprox/config").unwrap();
+        assert_eq!(
+            config.directories,
+            vec![
+                Path::new("/etc/tuliprox/config/bundled").to_string_lossy().to_string(),
+                "/var/lib/plugins".to_string()
+            ]
+        );
+        assert_eq!(config.directory, "/var/lib/plugins");
     }
 
     fn config_with_settings(settings: &Value) -> PluginsConfig {

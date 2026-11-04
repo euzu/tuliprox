@@ -32,7 +32,7 @@ use shared::{
     error::TuliproxError,
     model::{
         PluginFingerprintStats, PluginHook, PluginHookStats, PluginScope, DEFAULT_PLUGINS_BATCH_SIZE,
-        DEFAULT_PLUGIN_PRIORITY, DEFAULT_PLUGIN_SETTINGS_VERSION,
+        DEFAULT_PLUGINS_DIR, DEFAULT_PLUGIN_PRIORITY, DEFAULT_PLUGIN_SETTINGS_VERSION,
     },
 };
 use std::{
@@ -947,24 +947,41 @@ struct Scan {
     kept: HashSet<String>,
 }
 
-/// Scan `config.directory`. `None` when the directory exists but cannot be
+/// Scan `config.directories`. `None` when a directory exists but cannot be
 /// read, so a reload keeps what it had instead of dropping every plugin.
 fn scan(config: &PluginsConfig, runtime: &Runtime, shared: &Shared) -> Option<Scan> {
     if !config.enabled {
         return Some(Scan { plugins: Vec::new(), kept: HashSet::new() });
     }
-    let directory = Path::new(&config.directory);
-    let candidates = match discover(directory) {
-        Ok(candidates) => candidates,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            log::warn!("plugins are enabled but the directory {} does not exist", directory.display());
-            Vec::new()
-        }
-        Err(err) => {
-            log::error!("cannot read the plugins directory {}: {err}", directory.display());
-            return None;
-        }
+    let dirs: Vec<&str> = if config.directories.is_empty()
+        || (config.directories.len() == 1
+            && config.directories[0] == DEFAULT_PLUGINS_DIR
+            && config.directory != DEFAULT_PLUGINS_DIR)
+    {
+        vec![config.directory.as_str()]
+    } else {
+        config.directories.iter().map(String::as_str).collect()
     };
+
+    let mut candidates_map = std::collections::BTreeMap::new();
+    for dir_str in dirs {
+        let directory = Path::new(dir_str);
+        match discover(directory) {
+            Ok(found) => {
+                for candidate in found {
+                    candidates_map.insert(candidate.id.clone(), candidate);
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                log::warn!("plugin directory {} does not exist", directory.display());
+            }
+            Err(err) => {
+                log::error!("cannot read the plugins directory {}: {err}", directory.display());
+                return None;
+            }
+        }
+    }
+    let candidates: Vec<Candidate> = candidates_map.into_values().collect();
 
     let approvals_file = approvals_path(&shared.data_dir);
     let loaded = load_approvals(&approvals_file);
@@ -1006,7 +1023,7 @@ fn scan(config: &PluginsConfig, runtime: &Runtime, shared: &Shared) -> Option<Sc
     }
 
     for entry in config.plugins.iter().filter(|entry| !candidates.iter().any(|candidate| candidate.id == entry.id)) {
-        log::warn!("plugins.plugins[] lists `{}`, but {} has no such plugin", entry.id, directory.display());
+        log::warn!("plugins.plugins[] lists `{}`, but configured plugin directories have no such plugin", entry.id);
     }
 
     let kept = records
@@ -1025,7 +1042,7 @@ fn scan(config: &PluginsConfig, runtime: &Runtime, shared: &Shared) -> Option<Sc
 /// A running directory watcher and what it watches.
 struct Watch {
     watcher: RecommendedWatcher,
-    dir: PathBuf,
+    dirs: Vec<PathBuf>,
 }
 
 pub(crate) struct Registry {
@@ -1183,7 +1200,7 @@ impl Registry {
         remembered.clone_from(config);
         self.rescan(&remembered);
         // Also when the directory did not change: a watch that failed earlier is retried here.
-        self.rewatch(&remembered.directory);
+        self.rewatch(&remembered);
     }
 
     /// Re-scan with the config of the last scan (the watcher's trigger).
@@ -1204,24 +1221,37 @@ impl Registry {
         self.generation.send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    /// Follow `directory` if the watcher is running and it is not the one
-    /// watched. A failed `watch` keeps the watcher, watching nothing (an empty
-    /// `dir`), so the next call tries again.
-    fn rewatch(&self, directory: &str) {
+    /// Follow `directories` if the watcher is running. Unwatches previous directories and watches
+    /// all existing directories in `directories`.
+    fn rewatch(&self, config: &PluginsConfig) {
         let mut guard = lock(&self.watch);
         let Some(active) = guard.as_mut() else {
             return;
         };
-        let target = PathBuf::from(directory);
-        if active.dir == target {
+        let target_dirs: Vec<PathBuf> = if config.directories.is_empty()
+            || (config.directories.len() == 1
+                && config.directories[0] == DEFAULT_PLUGINS_DIR
+                && config.directory != DEFAULT_PLUGINS_DIR)
+        {
+            vec![PathBuf::from(&config.directory)]
+        } else {
+            config.directories.iter().map(PathBuf::from).collect()
+        };
+        if active.dirs == target_dirs {
             return;
         }
-        let _ = active.watcher.unwatch(&active.dir);
-        match active.watcher.watch(&target, RecursiveMode::Recursive) {
-            Ok(()) => active.dir = target,
-            Err(err) => {
-                log::warn!("failed to watch plugin directory {}: {err}", target.display());
-                active.dir = PathBuf::new();
+        for dir in &active.dirs {
+            let _ = active.watcher.unwatch(dir);
+        }
+        active.dirs.clear();
+        for target in target_dirs {
+            if target.is_dir() {
+                match active.watcher.watch(&target, RecursiveMode::Recursive) {
+                    Ok(()) => active.dirs.push(target),
+                    Err(err) => {
+                        log::warn!("failed to watch plugin directory {}: {err}", target.display());
+                    }
+                }
             }
         }
     }
@@ -1234,9 +1264,19 @@ impl Registry {
     /// weakly, so dropping the registry drops the watcher, which ends the
     /// thread.
     pub(crate) fn watch(self: &Arc<Self>) -> Result<(), TuliproxError> {
-        let dir = PathBuf::from(&lock(&self.config).directory);
-        if !dir.is_dir() {
-            return Err(TuliproxError::Plugin(format!("the plugins directory {} does not exist", dir.display())));
+        let cfg = lock(&self.config);
+        let dirs: Vec<PathBuf> = if cfg.directories.is_empty()
+            || (cfg.directories.len() == 1
+                && cfg.directories[0] == DEFAULT_PLUGINS_DIR
+                && cfg.directory != DEFAULT_PLUGINS_DIR)
+        {
+            vec![PathBuf::from(&cfg.directory)]
+        } else {
+            cfg.directories.iter().map(PathBuf::from).collect()
+        };
+        let existing_dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| d.is_dir()).collect();
+        if existing_dirs.is_empty() {
+            return Err(TuliproxError::Plugin("none of the configured plugin directories exist".to_string()));
         }
         let (sender, events) = mpsc::channel::<()>();
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
@@ -1248,18 +1288,23 @@ impl Registry {
             Err(err) => log::warn!("plugins directory watcher: {err}"),
         })
         .map_err(|err| TuliproxError::Plugin(format!("cannot create the plugins directory watcher: {err}")))?;
-        watcher
-            .watch(&dir, RecursiveMode::Recursive)
-            .map_err(|err| TuliproxError::Plugin(format!("cannot watch {}: {err}", dir.display())))?;
+
+        let mut active_dirs = Vec::new();
+        for dir in &existing_dirs {
+            watcher
+                .watch(dir, RecursiveMode::Recursive)
+                .map_err(|err| TuliproxError::Plugin(format!("cannot watch {}: {err}", dir.display())))?;
+            log::info!("watching {} for plugin changes", dir.display());
+            active_dirs.push(dir.clone());
+        }
 
         let registry = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("plugin-watch".to_string())
             .spawn(move || watch_loop(&events, &registry))
             .map_err(|err| TuliproxError::Plugin(format!("cannot start the plugins watcher thread: {err}")))?;
-        log::info!("watching {} for plugin changes", dir.display());
         // Replacing an earlier watcher drops its sender, which ends its thread.
-        *lock(&self.watch) = Some(Watch { watcher, dir });
+        *lock(&self.watch) = Some(Watch { watcher, dirs: active_dirs });
         Ok(())
     }
 }
@@ -1287,7 +1332,8 @@ mod tests {
     }
 
     fn config(directory: &Path) -> PluginsConfig {
-        PluginsConfig { enabled: true, directory: directory.to_string_lossy().to_string(), ..PluginsConfig::default() }
+        let dir = directory.to_string_lossy().to_string();
+        PluginsConfig { enabled: true, directory: dir.clone(), directories: vec![dir], ..PluginsConfig::default() }
     }
 
     fn entry(id: &str, enabled: bool, priority: i32) -> PluginEntry {
@@ -1347,6 +1393,71 @@ mod tests {
         let registry = Arc::new(fixture.registry(&config(&missing)));
         assert!(registry.snapshot().plugins.is_empty());
         assert!(registry.watch().is_err());
+    }
+
+    #[test]
+    fn multi_directory_scanning_and_later_override_precedence() {
+        let fixture = Fixture::new();
+        let system_dir = tempfile::tempdir().unwrap();
+        let user_dir = tempfile::tempdir().unwrap();
+
+        // System directory has plugin-a (v0.1.0) and plugin-b (v0.1.0)
+        plugin_dir(
+            system_dir.path(),
+            "plugin-a",
+            "id: plugin-a\nname: A\nversion: 0.1.0\napi_version: 1\nhooks: [playlist.after-filter]\n",
+            Some(b"sys"),
+        );
+        plugin_dir(
+            system_dir.path(),
+            "plugin-b",
+            "id: plugin-b\nname: B\nversion: 0.1.0\napi_version: 1\nhooks: [playlist.after-filter]\n",
+            Some(b"sys"),
+        );
+
+        // User directory overrides plugin-a (v0.2.0) and adds plugin-c (v0.1.0)
+        plugin_dir(
+            user_dir.path(),
+            "plugin-a",
+            "id: plugin-a\nname: A Override\nversion: 0.2.0\napi_version: 1\nhooks: [playlist.after-filter]\n",
+            Some(b"usr"),
+        );
+        plugin_dir(
+            user_dir.path(),
+            "plugin-c",
+            "id: plugin-c\nname: C\nversion: 0.1.0\napi_version: 1\nhooks: [playlist.after-filter]\n",
+            Some(b"usr"),
+        );
+
+        let cfg = PluginsConfig {
+            enabled: true,
+            directory: user_dir.path().to_string_lossy().to_string(),
+            directories: vec![
+                system_dir.path().to_string_lossy().to_string(),
+                user_dir.path().to_string_lossy().to_string(),
+            ],
+            ..PluginsConfig::default()
+        };
+
+        let registry = fixture.registry(&cfg);
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.plugins.len(), 3);
+
+        let rec_a = record_of(&registry, "plugin-a");
+        let manifest_a = rec_a.manifest.as_ref().unwrap();
+        assert_eq!(manifest_a.version.to_string(), "0.2.0");
+        assert_eq!(manifest_a.name, "A Override");
+        assert_eq!(rec_a.dir, user_dir.path().join("plugin-a"));
+
+        let rec_b = record_of(&registry, "plugin-b");
+        let manifest_b = rec_b.manifest.as_ref().unwrap();
+        assert_eq!(manifest_b.version.to_string(), "0.1.0");
+        assert_eq!(rec_b.dir, system_dir.path().join("plugin-b"));
+
+        let rec_c = record_of(&registry, "plugin-c");
+        let manifest_c = rec_c.manifest.as_ref().unwrap();
+        assert_eq!(manifest_c.version.to_string(), "0.1.0");
+        assert_eq!(rec_c.dir, user_dir.path().join("plugin-c"));
     }
 
     #[test]
@@ -1941,6 +2052,6 @@ mod tests {
         // The same directory again, now present: the reload watches it.
         std::fs::create_dir(&later).unwrap();
         registry.reload(&missing);
-        assert_eq!(lock(&registry.watch).as_ref().map(|active| active.dir.clone()), Some(later));
+        assert_eq!(lock(&registry.watch).as_ref().map(|active| active.dirs.clone()), Some(vec![later]));
     }
 }

@@ -19,14 +19,16 @@ pub enum BlockType {
     InputPlex,
     InputStalker,
     InputStaged,
-    /// YAML-only until W6b: a `type: plugin` input, kept intact but not offered in the sidebar.
+    /// A `type: plugin` input: the id of the providing plugin lives in
+    /// `ConfigInputDto::plugin` and is picked in the source editor.
     InputPlugin,
     Target,
     OutputM3u,
     OutputXtream,
     OutputHdHomeRun,
     OutputStrm,
-    /// YAML-only until W6b: a `type: plugin` output, kept intact but not offered in the sidebar.
+    /// A `type: plugin` output: `TargetOutputDto::Plugin`, bound to an installed
+    /// plugin that renders it.
     OutputPlugin,
 }
 
@@ -150,32 +152,6 @@ impl fmt::Display for BlockType {
 }
 pub(crate) type BlockId = u16;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn media_server_input_types_keep_distinct_source_editor_blocks() {
-        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputEmby);
-        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputJellyfin);
-        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputPlex);
-    }
-
-    #[test]
-    fn media_server_source_editor_blocks_are_inputs() {
-        assert!(BlockType::InputEmby.is_input());
-        assert!(BlockType::InputJellyfin.is_input());
-        assert!(BlockType::InputPlex.is_input());
-    }
-
-    #[test]
-    fn stalker_input_types_share_source_editor_block() {
-        assert_eq!(BlockType::from(InputType::Stalker), BlockType::InputStalker);
-        assert_eq!(BlockType::from(InputType::StalkerBatch), BlockType::InputStalker);
-        assert!(BlockType::InputStalker.is_input());
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Block {
     pub id: BlockId,
@@ -257,4 +233,30 @@ pub struct SourceEditorContext {
 
 impl PartialEq for SourceEditorContext {
     fn eq(&self, _other: &Self) -> bool { false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_server_input_types_keep_distinct_source_editor_blocks() {
+        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputEmby);
+        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputJellyfin);
+        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputPlex);
+    }
+
+    #[test]
+    fn media_server_source_editor_blocks_are_inputs() {
+        assert!(BlockType::InputEmby.is_input());
+        assert!(BlockType::InputJellyfin.is_input());
+        assert!(BlockType::InputPlex.is_input());
+    }
+
+    #[test]
+    fn stalker_input_types_share_source_editor_block() {
+        assert_eq!(BlockType::from(InputType::Stalker), BlockType::InputStalker);
+        assert_eq!(BlockType::from(InputType::StalkerBatch), BlockType::InputStalker);
+        assert!(BlockType::InputStalker.is_input());
+    }
 }

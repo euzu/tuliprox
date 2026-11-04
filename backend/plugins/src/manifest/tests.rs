@@ -517,6 +517,35 @@ fn config_extensions_need_a_section_and_a_schema_object() {
 }
 
 #[test]
+fn form_sections_need_an_id_and_a_schema() {
+    assert_problem(&with("ui:\n  input_form: [{ schema: forms/a.json }]\n"), "`id` is required");
+    assert_problem(&with("ui:\n  input_form: [{ id: main }]\n"), "`schema` is required");
+    assert_problem(&with("ui:\n  input_form: [{ id: Main!, schema: forms/a.json }]\n"), "not a panel id");
+    assert_problem(
+        &with(
+            "ui:\n  input_form:\n    - { id: main, schema: forms/a.json }\n    - { id: main, schema: forms/b.json }\n",
+        ),
+        "declared twice",
+    );
+    assert_problem(&with("ui:\n  output_form: [{ id: main, schema: ../a.json }]\n"), "inside the package");
+}
+
+#[test]
+fn form_sections_parse_with_their_titles() {
+    let manifest = parse(&with(
+        "ui:\n  input_form:\n    - { id: main, schema: forms/input.json }\n  output_form:\n    - { id: columns, title: Columns, title_key: form.columns, schema: forms/out.json }\n",
+    ))
+    .unwrap();
+
+    let input = &manifest.ui.input_form[0];
+    assert_eq!((input.id.as_str(), input.schema.as_str(), input.title.as_deref()), ("main", "forms/input.json", None));
+    let output = &manifest.ui.output_form[0];
+    assert_eq!(output.id, "columns");
+    assert_eq!(output.title.as_deref(), Some("Columns"));
+    assert_eq!(output.title_key.as_deref(), Some("form.columns"));
+}
+
+#[test]
 fn unknown_config_sections_are_reported_against_the_hosts_list() {
     let manifest = parse(&with(
         "ui:\n  config_extensions:\n    - { section: webhooks, schema: { type: object } }\n    - { section: nonsense, schema: { type: object } }\n",

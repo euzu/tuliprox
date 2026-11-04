@@ -5,7 +5,7 @@ use crate::{
     model::{is_valid_plugin_id, PatternTemplate, Prepare, StrmExportStyle, TargetType, TraktConfigDto},
     utils::is_blank_optional_string,
 };
-use std::collections::BTreeMap;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -167,9 +167,11 @@ pub struct PluginTargetOutputDto {
     /// `<plugin>.out` when unset.
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filename: Option<String>,
-    /// Passed to the plugin's `output-request.options`, in key order.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub options: BTreeMap<String, String>,
+    /// The plugin's settings for this output only, as the plugin's
+    /// `ui.output_form` schemas describe them. Handed to the plugin as
+    /// `output-request.options` in key order.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub plugin_config: Map<String, Value>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
     #[serde(skip)]
@@ -203,9 +205,15 @@ impl Prepare for PluginTargetOutputDto {
                 )));
             }
         }
-        if self.options.keys().any(|key| key.trim().is_empty()) {
+        // A dot is the nesting separator of `plugin_options`, so a key holding one would be
+        // indistinguishable from a nested property.
+        if let Some(bad) = self
+            .plugin_config
+            .keys()
+            .find(|key| key.trim().is_empty() || key.trim() != key.as_str() || key.contains('.'))
+        {
             return Err(TuliproxError::ConfigTarget(format!(
-                "plugin output of {} has an empty option name",
+                "plugin output of {} has an invalid plugin_config key '{bad}': no dots, no surrounding spaces",
                 self.plugin
             )));
         }
@@ -260,11 +268,14 @@ mod plugin_output_tests {
     fn the_shape_round_trips_with_type_plugin() {
         let value = serde_json::json!({
             "type": "plugin", "plugin": "my-plugin", "format": "my-format", "filename": "out.txt",
-            "options": {"b": "2", "a": "1"}, "filter": "Group ~ \"News\""
+            "plugin_config": {"b": "2", "a": 1, "flag": true}, "filter": "Group ~ \"News\""
         });
         let dto = plugin_output(value.clone());
         assert_eq!(dto.plugin, "my-plugin");
-        assert_eq!(dto.options.keys().collect::<Vec<_>>(), ["a", "b"], "options keep key order");
+        assert_eq!(dto.plugin_config.len(), 3);
+        assert_eq!(dto.plugin_config["b"], serde_json::json!("2"));
+        assert_eq!(dto.plugin_config["flag"], serde_json::json!(true));
+        assert_eq!(dto.plugin_config["a"], serde_json::json!(1), "values keep their type");
 
         let json = serde_json::to_value(TargetOutputDto::Plugin(dto.clone())).unwrap();
         assert_eq!(json["type"], "plugin");

@@ -874,9 +874,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let options_input = !library_input && !media_server_input;
 
     let render_main = || match input_form_state.form.input_type {
-        // YAML-only until W6b: a plugin input shows the M3U fields (url, credentials), which is
-        // what its `PluginInputRequest` carries; the `plugin` id itself is kept as it is.
-        shared::model::InputType::M3u | shared::model::InputType::M3uBatch | shared::model::InputType::Plugin => {
+        // A plugin input has its own view (`PluginInputView`), chosen in `SourceEditorForm`; this
+        // form only renders the built-in downloaders.
+        shared::model::InputType::Plugin => html! {},
+        shared::model::InputType::M3u | shared::model::InputType::M3uBatch => {
             html! {
                 <M3uInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
             }

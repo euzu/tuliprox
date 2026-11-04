@@ -533,6 +533,23 @@ pub struct PluginConfigTabDto {
     pub element: Option<String>,
 }
 
+/// One `ui.input_form` / `ui.output_form` section: the panel id and the schema
+/// of the fields it adds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFormSectionDto {
+    /// The panel id: `main` and `options` extend the host's panels, any other
+    /// id adds a panel after them.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_key: Option<String>,
+    /// The section's schema, read from the package. Its properties are top-level
+    /// keys of the input's / output's `plugin_config`.
+    pub schema: Value,
+}
+
 /// One plugin in `GET /api/v1/plugins/ui`: everything the web UI renders for
 /// it. Listed for every plugin with a `ui:` part whose state is `enabled`,
 /// `disabled` or `failed`, so disabled and failed ones render greyed out.
@@ -552,6 +569,12 @@ pub struct PluginUiDto {
     pub config_extensions: Vec<PluginConfigExtensionDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_tab: Option<PluginConfigTabDto>,
+    /// `ui.input_form`: the fields this plugin adds to a `type: plugin` input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_form: Vec<PluginFormSectionDto>,
+    /// `ui.output_form`: the fields this plugin adds to a `type: plugin` output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_form: Vec<PluginFormSectionDto>,
     pub contributions: Vec<PluginContributionDto>,
     pub rpc_exports: Vec<PluginRpcExportDto>,
 }

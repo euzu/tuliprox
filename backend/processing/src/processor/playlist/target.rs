@@ -446,6 +446,26 @@ async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataU
     Ok(bouquet_filter)
 }
 
+/// A target's processing filter may call `plugin.<id>.<fn>(…)`. When the plugin is not installed or not
+/// enabled, nothing can answer that term: the host's default is `false` for every item, so the filter
+/// would drop the whole playlist and still report the target as successful. Fail the target instead —
+/// it keeps its previous output, and the log names the plugin and the fix.
+fn ensure_filter_plugins_available<P: PluginHost>(plugins: &P, target: &ConfigTarget) -> Result<(), TuliproxError> {
+    let Some(filter) = target.filter.processing.as_ref() else {
+        return Ok(());
+    };
+    for call in filter.plugin_calls() {
+        if !plugins.provides(PluginHook::FilterEval, call.plugin) {
+            return Err(TuliproxError::ConfigTarget(format!(
+                "target '{}' is inactive: its filter calls plugin '{}', which is not installed or not enabled; \
+                 the target keeps its previous playlist",
+                target.name, call.plugin
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn prepare_playlist_for_target<
@@ -482,6 +502,7 @@ pub(crate) async fn prepare_playlist_for_target<
 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
+    ensure_filter_plugins_available(&ctx.plugins, target).map_err(|err| vec![err])?;
     let bouquet_filter = load_target_bouquet_filter(ctx, &target.name).await.map_err(|err| vec![err])?;
     let target_input_names: Vec<&str> = playlists.iter().map(|p| p.input.name.as_ref()).collect();
     let target_overrides =
@@ -1812,4 +1833,38 @@ pub(crate) async fn process_watch<E: EventSink>(
     }
 
     true
+}
+
+#[cfg(test)]
+mod filter_plugin_tests {
+    use super::*;
+    use shared::model::NoPlugins;
+    use tuliprox_core::model::ConfigTarget;
+
+    fn target_with_filter(filter: &str) -> ConfigTarget {
+        let mut dto: shared::model::ConfigTargetDto =
+            serde_json::from_value(serde_json::json!({"name": "t1"})).expect("target fixture");
+        dto.filter.t_processing =
+            Some(shared::foundation::get_target_processing_filter(filter, None).expect("filter compiles"));
+        ConfigTarget::from(&dto)
+    }
+
+    /// A filter term whose plugin is gone must not empty the target behind a `success`: the target
+    /// fails, keeps its previous output, and the message names the plugin.
+    #[test]
+    fn a_filter_term_without_its_plugin_fails_the_target() {
+        let target = target_with_filter(r#"Group ~ ".*" and plugin.youtube-input.is_live("News")"#);
+
+        let err = ensure_filter_plugins_available(&NoPlugins, &target).expect_err("the target cannot run");
+
+        let message = err.to_string();
+        assert!(message.contains("target 't1' is inactive"), "{message}");
+        assert!(message.contains("youtube-input"), "{message}");
+    }
+
+    #[test]
+    fn a_filter_without_plugin_terms_runs() {
+        let target = target_with_filter(r#"Group ~ "News""#);
+        assert!(ensure_filter_plugins_available(&NoPlugins, &target).is_ok());
+    }
 }

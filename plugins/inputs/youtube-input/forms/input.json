@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "title": "form.title",
+  "description": "form.description",
+  "required": [
+    "invidious_instances"
+  ],
+  "properties": {
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "title": "form.channels.title",
+      "description": "form.channels.description"
+    },
+    "invidious_instances": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "title": "form.invidious_instances.title",
+      "description": "form.invidious_instances.description"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "recent_uploads",
+        "live_only"
+      ],
+      "title": "form.mode.title",
+      "description": "form.mode.description"
+    },
+    "max_uploads": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 15,
+      "title": "form.max_uploads.title",
+      "description": "form.max_uploads.description"
+    },
+    "cache_ttl_minutes": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 360,
+      "title": "form.cache_ttl_minutes.title",
+      "description": "form.cache_ttl_minutes.description"
+    }
+  }
+}

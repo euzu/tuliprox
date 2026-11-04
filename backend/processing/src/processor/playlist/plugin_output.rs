@@ -85,10 +85,11 @@ async fn render_one<P: PluginHost>(
         return Ok(());
     }
     let path = target_dir.join(output.file_name());
+    let options = shared::model::plugin_options(&output.plugin_config);
     let request = PluginOutputRequest {
         target: &target.name,
         format: output.format.as_deref().unwrap_or_default(),
-        options: &output.options,
+        options: &options,
         path: &path,
     };
     let ctx = HookCtx::new(&target.name).with_view("base");

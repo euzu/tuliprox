@@ -1,0 +1,23 @@
+id: youtube-input
+name: YouTube Input
+version: 0.1.0
+api_version: 1
+category: input
+author: tuliprox
+description: >
+  Ingests YouTube channels, playlists, and live streams as native playlist channels.
+capabilities:
+  network: true
+  storage: true
+provides:
+  input_type: true
+hooks:
+  - input.fetch
+# Everything an input needs is configured on the input itself (`ui.input_form`).
+# There is no settings schema: update policy and boot updates are host settings
+# (`plugins.plugins[].update_policy`).
+ui:
+  locales: [ar, en, es, ru]
+  input_form:
+    - id: main
+      schema: forms/input.json

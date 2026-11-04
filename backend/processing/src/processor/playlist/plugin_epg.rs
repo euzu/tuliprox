@@ -123,7 +123,7 @@ async fn fetch_to_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P:
         url: &input.url,
         username: input.username.as_deref(),
         password: input.password.as_deref(),
-        options: &[],
+        options: &input.plugin_options,
     };
     let channels = ctx.plugins.fetch_epg(plugin, &hook_ctx, &request).await?;
 

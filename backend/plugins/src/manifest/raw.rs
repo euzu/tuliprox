@@ -81,6 +81,19 @@ pub(super) struct RawUi {
     pub contributions: Vec<RawContribution>,
     #[serde(default, deserialize_with = "null_default")]
     pub rpc_exports: Vec<RawRpcExport>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub input_form: Vec<RawFormSection>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub output_form: Vec<RawFormSection>,
+}
+
+/// One entry of `ui.input_form` / `ui.output_form`.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct RawFormSection {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub title_key: Option<String>,
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

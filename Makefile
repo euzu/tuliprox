@@ -312,6 +312,40 @@ plugin-command-notifier: ## Build + package the command-notifier plugin (wasm32-
 	@./bin/package-plugin.sh plugins/notifiers/command-notifier --out target/plugin-command-notifier/command-notifier.tlpx
 	@echo "✅ command-notifier written to target/plugin-command-notifier/command-notifier.tlpx"
 
+# The input plugins that live in this repository, under plugins/inputs/<id>.
+INPUT_PLUGINS := youtube-input
+
+.PHONY: plugin-inputs
+plugin-inputs: ## Build + package every input plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
+	@echo "==> Building the input plugins (wasm32-wasip2): $(INPUT_PLUGINS)"
+	@for id in $(INPUT_PLUGINS); do \
+		mkdir -p target/plugin-$$id; \
+		./bin/package-plugin.sh plugins/inputs/$$id --out target/plugin-$$id/$$id.tlpx || exit 1; \
+	done
+	@echo "✅ Input plugins written to target/plugin-<id>/<id>.tlpx"
+
+.PHONY: plugin-youtube-input
+plugin-youtube-input: ## Build + package the youtube-input plugin (wasm32-wasip2) into target/plugin-youtube-input
+	@echo "==> Building youtube-input (wasm32-wasip2)"
+	@mkdir -p target/plugin-youtube-input
+	@./bin/package-plugin.sh plugins/inputs/youtube-input --out target/plugin-youtube-input/youtube-input.tlpx
+	@echo "✅ youtube-input written to target/plugin-youtube-input/youtube-input.tlpx"
+
+.PHONY: plugins
+plugins: plugin-notifiers plugin-inputs ## Build + stage every official plugin into target/staged-plugins/<id>/
+	@echo "==> Staging official plugins into target/staged-plugins"
+	@rm -rf target/staged-plugins
+	@mkdir -p target/staged-plugins
+	@for id in $(NOTIFIER_PLUGINS); do \
+		mkdir -p target/staged-plugins/$$id; \
+		unzip -qo target/plugin-$$id/$$id.tlpx -d target/staged-plugins/$$id || exit 1; \
+	done
+	@for id in $(INPUT_PLUGINS); do \
+		mkdir -p target/staged-plugins/$$id; \
+		unzip -qo target/plugin-$$id/$$id.tlpx -d target/staged-plugins/$$id || exit 1; \
+	done
+	@echo "✅ Official plugins staged into target/staged-plugins"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
@@ -371,13 +405,31 @@ lint-fix: ## Automatically fix clippy suggestions (Nightly)
 fmt: ## Format all code using nightly rules (Compact)
 	@echo "==> Formatting code (nightly)"
 	$(CARGO_NIGHTLY) fmt --all
+	@$(MAKE) --no-print-directory plugin-fmt
+
+.PHONY: plugin-fmt
+plugin-fmt: ## Format all plugin crates using nightly rules
+	@for d in plugins/inputs/* plugins/notifiers/*; do \
+		if [ -d "$$d" ] && [ -f "$$d/Cargo.toml" ]; then \
+			$(CARGO_NIGHTLY) fmt --manifest-path "$$d/Cargo.toml"; \
+		fi; \
+	done
 
 .PHONY: fmt-check
 fmt-check: ## Check if code follows formatting rules (Nightly)
 	@echo "==> Checking formatting (nightly)"
 	$(CARGO_NIGHTLY) fmt --all -- --check
+	@$(MAKE) --no-print-directory plugin-fmt-check
 	@echo "==> Checking git diff for whitespace errors"
 	git diff --check
+
+.PHONY: plugin-fmt-check
+plugin-fmt-check: ## Check formatting on all plugin crates
+	@for d in plugins/inputs/* plugins/notifiers/*; do \
+		if [ -d "$$d" ] && [ -f "$$d/Cargo.toml" ]; then \
+			$(CARGO_NIGHTLY) fmt --manifest-path "$$d/Cargo.toml" -- --check || exit 1; \
+		fi; \
+	done
 
 .PHONY: markdown-lint mdlint
 markdown-lint: ## Lint markdown files

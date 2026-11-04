@@ -697,6 +697,7 @@ pub(crate) async fn execute_pipeline_on_groups_with_filter_calls<P: PluginHost>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_pipe<'a, P: PluginHost>(
     target: &ConfigTarget,
     pipe: &ProcessingPipe,

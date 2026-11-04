@@ -1213,6 +1213,7 @@ mod tests {
             cache_duration_seconds: 0,
             stalker: None,
             plugin: None,
+            plugin_options: Vec::new(),
         }
     }
 

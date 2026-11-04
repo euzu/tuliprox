@@ -81,8 +81,23 @@ pub fn get_log_history() -> Vec<LogEntry> { get_log_buffer().read().iter().clone
 
 pub fn subscribe_logs() -> tokio::sync::broadcast::Receiver<LogEntry> { get_log_broadcaster().subscribe() }
 
-pub(crate) const LOG_ERROR_LEVEL_MOD: &[&str] =
-    &["reqwest", "hyper_util", "tungstenite", "rustls_platform_verifier", "tokio_tungstenite", "notify", "mio"];
+pub(crate) const LOG_ERROR_LEVEL_MOD: &[&str] = &[
+    "reqwest",
+    "hyper_util",
+    "tungstenite",
+    "rustls_platform_verifier",
+    "tokio_tungstenite",
+    "notify",
+    "mio",
+    "cranelift_codegen",
+    "cranelift_frontend",
+    "cranelift_native",
+    "wasmtime",
+    "wasmtime_internal_cranelift",
+    "wasmtime_wasi",
+    "wasmtime_wasi_http",
+    "wasmtime_wasi_io",
+];
 
 fn get_log_level(log_level: &str) -> LevelFilter {
     match log_level.to_lowercase().as_str() {

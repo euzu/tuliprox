@@ -221,6 +221,9 @@ jobs:
       - name: Build plugin fixtures
         run: make plugin-fixtures
 
+      - name: Build official plugins
+        run: make plugins
+
       - name: Run Tests (dev-slim)
         run: make test-slim
 

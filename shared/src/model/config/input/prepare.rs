@@ -189,6 +189,23 @@ impl ConfigInputDto {
                     )));
                 }
             }
+            // A dot is the nesting separator of `plugin_options`, so a key holding one would be
+            // indistinguishable from a nested property.
+            if let Some(bad) = self
+                .plugin_config
+                .keys()
+                .find(|key| key.trim().is_empty() || key.trim() != key.as_str() || key.contains('.'))
+            {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "plugin_config key '{bad}' must be a non-empty name without dots or surrounding spaces (input: {})",
+                    self.name
+                )));
+            }
+        } else if !self.plugin_config.is_empty() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "plugin_config is only allowed for input type plugin, not {} (input: {})",
+                self.input_type, self.name
+            )));
         }
         Ok(())
     }
@@ -527,6 +544,31 @@ mod plugin_input_tests {
             plugin: plugin.map(Internable::intern),
             ..ConfigInputDto::default()
         }
+    }
+
+    #[test]
+    fn plugin_config_belongs_to_plugin_inputs_and_has_plain_keys() {
+        let mut dto = ConfigInputDto {
+            plugin_config: serde_json::Map::from_iter([("mode".to_string(), serde_json::json!("live_only"))]),
+            ..plugin_input(Some("youtube-input"))
+        };
+        assert!(prepare(&mut dto).is_ok());
+
+        let mut dotted = ConfigInputDto {
+            plugin_config: serde_json::Map::from_iter([("a.b".to_string(), serde_json::json!(1))]),
+            ..plugin_input(Some("youtube-input"))
+        };
+        let err = prepare(&mut dotted).unwrap_err().to_string();
+        assert!(err.contains("without dots"), "{err}");
+
+        let mut built_in = ConfigInputDto {
+            name: "m3u".intern(),
+            url: "http://host/list.m3u".to_string(),
+            plugin_config: serde_json::Map::from_iter([("mode".to_string(), serde_json::json!("x"))]),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare(&mut built_in).unwrap_err().to_string();
+        assert!(err.contains("only allowed for input type plugin"), "{err}");
     }
 
     #[test]

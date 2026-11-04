@@ -204,8 +204,8 @@ pub fn PluginSettings(props: &PluginSettingsProps) -> Html {
             </div>
         }
     } else if let Some(settings) = loaded.as_ref() {
-        let form = match settings.schema.as_ref() {
-            Some(schema) => html! {
+        let form = if let Some(schema) = settings.schema.as_ref() {
+            html! {
                 <SchemaForm
                     key={generation.to_string()}
                     schema={translate_schema(schema, &strings)}
@@ -214,10 +214,20 @@ pub fn PluginSettings(props: &PluginSettingsProps) -> Html {
                     errors={(*field_errors).clone()}
                     on_change={on_change.clone()}
                 />
-            },
-            None => html! {
-                <p class="tp__plugin-settings__note">{ translate.t("MESSAGES.PLUGIN_SETTINGS_NO_SCHEMA") }</p>
-            },
+            }
+        } else {
+            // A plugin whose configuration lives on each input or output says so, instead of the
+            // generic read-only note that reads like a broken package.
+            let configures_form = plugin_ui
+                .as_ref()
+                .and_then(|ui| ui.plugin(&props.plugin_id))
+                .is_some_and(|plugin| !plugin.input_form.is_empty() || !plugin.output_form.is_empty());
+            let key = if configures_form {
+                "MESSAGES.PLUGIN_SETTINGS_NO_SCHEMA_USE_FORM"
+            } else {
+                "MESSAGES.PLUGIN_SETTINGS_NO_SCHEMA"
+            };
+            html! { <p class="tp__plugin-settings__note">{ translate.t(key) }</p> }
         };
         // Without a schema, or when the form cannot render it, the settings are shown as they are stored.
         let read_only = if can_save {

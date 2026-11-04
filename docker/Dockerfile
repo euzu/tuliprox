@@ -165,9 +165,21 @@ ENV TZ=${TZ}
 RUN apk add --no-cache tzdata \
   && mkdir -p /output/etc \
   && mkdir -p /output/usr/share \
+  && mkdir -p /output/app/user-plugins \
   && cp -r /usr/share/zoneinfo /output/usr/share/zoneinfo \
   && ln -sf /usr/share/zoneinfo/${TZ} /output/etc/localtime
 
+
+# -----------------------------------------------------------------
+# Stage 5: Build official plugins
+# -----------------------------------------------------------------
+FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS plugin-build
+
+WORKDIR /src
+COPY . .
+RUN apt-get update && apt-get install -y --no-install-recommends unzip make python3 && \
+    rustup target add wasm32-wasip2 && \
+    make plugins
 
 # =================================================================
 #
@@ -201,6 +213,7 @@ RUN rustup target add $RUST_TARGET
 WORKDIR /app
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
+COPY --from=plugin-build /src/target/staged-plugins ./plugins
 
 # Create a separate directory for the source code
 WORKDIR /usr/src/tuliprox
@@ -240,6 +253,8 @@ WORKDIR /app
 COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
+COPY --from=plugin-build /src/target/staged-plugins ./plugins
+COPY --from=tz-prep /output/app/user-plugins /app/user-plugins
 
 ENTRYPOINT ["/app/tuliprox"]
 CMD ["-s", "-p", "/app/config"]
@@ -270,6 +285,8 @@ WORKDIR /app
 COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
+COPY --from=plugin-build /src/target/staged-plugins ./plugins
+RUN mkdir -p /app/user-plugins
 
 ENTRYPOINT ["/sbin/tini", "--", "/app/tuliprox"]
 CMD ["-s", "-p", "/app/config"]

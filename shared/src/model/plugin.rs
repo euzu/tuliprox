@@ -161,6 +161,37 @@ pub struct PluginOutputRequest<'a> {
     pub path: &'a Path,
 }
 
+/// Flattens an input's or output's `plugin_config` into the `options` pairs of
+/// `input-request` / `output-request`: a JSON string keeps its text, anything
+/// else is its JSON text, and a nested object is flattened with dotted keys.
+/// The order is the map's.
+///
+/// A key never contains a dot, so a flattened `a.b` always means the nested
+/// `b` of `a` and never a literal `a.b`. An empty object contributes no pair.
+#[must_use]
+pub fn plugin_options(config: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> {
+    fn flatten(prefix: &str, value: &serde_json::Value, out: &mut Vec<(String, String)>) {
+        if let serde_json::Value::Object(map) = value {
+            for (key, child) in map {
+                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+                flatten(&path, child, out);
+            }
+            return;
+        }
+        let text = match value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        out.push((prefix.to_owned(), text));
+    }
+
+    let mut options = Vec::with_capacity(config.len());
+    for (key, value) in config {
+        flatten(key, value, &mut options);
+    }
+    options
+}
+
 /// `sort-key` result: one key per item, index-aligned.
 pub type PluginSortKeys = Vec<String>;
 /// `assign-channel-numbers` result: `(index into items, chno)` pairs.

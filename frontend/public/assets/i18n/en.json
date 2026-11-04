@@ -516,6 +516,10 @@
       "LIVE_SOURCE": "Source selector for the Live cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Optional file path used to persist or reuse the downloaded input playlist.",
       "PLAYBACK_PROVIDER": "Name of a global provider profile used to resolve provider:// playback URLs created by mappings, when the input and alias URLs are plain http(s) URLs. Enables CDN failover for independent playlists.",
+      "PLUGIN": "Installed input plugin that fetches this input. The fields below it are the plugin's own; a field left empty uses the plugin's setting, which you edit under Plugins → the gear icon (or the plugin's tab on the Config page). The url below is the target this input hands to it.",
+      "PLUGIN_NONE": "No plugin that provides inputs is installed. Install and enable one under Plugins first.",
+      "PLUGIN_REQUIRED": "Select the plugin that provides this input.",
+      "PLUGIN_URL": "The target this input hands to the plugin as `input-request.url`; for a provider such as youtube-input that is the channel, playlist or video. Leave it empty when the plugin's settings already name the targets.",
       "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference.",
       "SIMPLE_INPUT": {
         "URL": "Source URL for this input. Only `file://`, `http://`, and `https://` URLs are supported."
@@ -638,6 +642,13 @@
     },
     "OUTPUT_M3U_FORM": {
       "FILTER": "Filter expression used to specify which items should be included in the M3U output."
+    },
+    "OUTPUT_PLUGIN_FORM": {
+      "PLUGIN": "Installed plugin that renders this output. The view is filtered first, then streamed through the plugin's begin-output, render-batch and finish-output into one file in the target directory. The plugin's own settings are configured once in the plugins block.",
+      "PLUGIN_NONE": "No plugin that renders outputs is installed. Install and enable one under Plugins first.",
+      "PLUGIN_REQUIRED": "Select the plugin that renders this output.",
+      "FILENAME": "File name inside the target's directory. A plain name without a path; <plugin>.out when empty.",
+      "FILTER": "Filter expression selecting which items reach this output. It is applied before the plugin renders."
     },
     "OUTPUT_STRM_FORM": {
       "EXPORT_STYLE": "The naming convention used for generating .strm files (e.g. kodi, plex, jellyfin).",
@@ -2146,6 +2157,7 @@
     "SYSLOG_MAX_MESSAGE_LEN": "Max Message Length",
     "SYSLOG_PORT": "Syslog Port",
     "SYSLOG_QUEUE_CAPACITY": "Queue Capacity",
+    "PLUGIN": "Plugin",
     "PLUGINS": "Plugins",
     "PLUGIN_STATE_DISCOVERED": "Discovered",
     "PLUGIN_STATE_INVALID": "Invalid",
@@ -2605,6 +2617,7 @@
     "PLUGIN_SETTINGS_LOAD_FAILED": "Failed to load the plugin settings:",
     "PLUGIN_SETTINGS_SAVED": "Plugin settings saved.",
     "PLUGIN_SETTINGS_NO_SCHEMA": "This plugin ships no settings schema, so its settings are shown read-only.",
+    "PLUGIN_SETTINGS_NO_SCHEMA_USE_FORM": "This plugin has no global settings. Configure every input in its own plugin form; update policy and boot updates are host settings.",
     "PLUGIN_SCHEMA_UNSUPPORTED": "The settings schema uses a construct the form cannot render:",
     "PLUGIN_LOGS_LOAD_FAILED": "Could not load the plugin logs:",
     "PLUGIN_CUSTOM_UI_WARNING": "This plugin ships its own UI. It runs sandboxed, but can call its declared functions with your permissions and can open external pages from its frame.",
@@ -2723,10 +2736,12 @@
     "BRICK_InputM3u": "M3u",
     "BRICK_InputStaged": "Staged",
     "BRICK_InputPlex": "Plex",
+    "BRICK_InputPlugin": "Plugin",
     "BRICK_InputXtream": "Xtream",
     "BRICK_InputStalker": "Stalker",
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputM3u": "M3u",
+    "BRICK_OutputPlugin": "Plugin",
     "BRICK_OutputStrm": "STRM",
     "BRICK_OutputXtream": "Xtream",
     "BRICK_Target": "Target"

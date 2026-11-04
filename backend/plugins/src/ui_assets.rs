@@ -14,8 +14,8 @@ use crate::{
 use http::{header, HeaderName, HeaderValue};
 use serde_json::Value;
 use shared::model::{
-    PluginConfigExtensionDto, PluginConfigTabDto, PluginContributionDto, PluginRpcExportDto, PluginRpcKindDto,
-    PluginSlotDto, PluginStateDto, PluginUiDto,
+    PluginConfigExtensionDto, PluginConfigTabDto, PluginContributionDto, PluginFormSectionDto, PluginRpcExportDto,
+    PluginRpcKindDto, PluginSlotDto, PluginStateDto, PluginUiDto,
 };
 use std::{
     fs,
@@ -262,6 +262,27 @@ fn has_ui(manifest: &Manifest) -> bool {
         || ui.config_tab.is_some()
         || !ui.contributions.is_empty()
         || !ui.rpc_exports.is_empty()
+        || !ui.input_form.is_empty()
+        || !ui.output_form.is_empty()
+}
+
+/// The form sections of a `type: plugin` input or output, each with the schema
+/// file the manifest points at. A schema that cannot be read is left out: the
+/// package check refuses such a plugin, so an unreadable file means the plugin
+/// is on its way out, and an empty form is safer than a half-rendered one.
+fn form_sections(dir: &std::path::Path, sections: &[crate::manifest::FormSection]) -> Vec<PluginFormSectionDto> {
+    sections
+        .iter()
+        .filter_map(|section| {
+            let schema = read_package_json(dir, &section.schema)?;
+            Some(PluginFormSectionDto {
+                id: section.id.clone(),
+                title: section.title.clone(),
+                title_key: section.title_key.clone(),
+                schema,
+            })
+        })
+        .collect()
 }
 
 fn ui_entry(record: &PluginRecord) -> Option<PluginUiDto> {
@@ -289,6 +310,8 @@ fn ui_entry(record: &PluginRecord) -> Option<PluginUiDto> {
                 schema: extension.schema.clone(),
             })
             .collect(),
+        input_form: form_sections(&record.dir, &ui.input_form),
+        output_form: form_sections(&record.dir, &ui.output_form),
         config_tab: ui.config_tab.as_ref().map(|tab| {
             let (schema, element) = match &tab.source {
                 ConfigTabSource::Schema(path) => (read_package_json(&record.dir, path), None),

@@ -245,13 +245,27 @@ async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) 
             input.name
         )));
     };
+    // A plugin that was uninstalled or disabled leaves the input inactive: say so once, in the words of
+    // the operator's own fix, instead of failing on the provider's generic answer. The input keeps its
+    // last playlist (an empty result is never persisted) and every other input and target runs.
+    if !plugins.provides(PluginHook::FetchInput, plugin) {
+        warn!(
+            "plugin input '{}' is inactive: plugin '{plugin}' is not installed or not enabled. Install it under \
+             Plugins, or remove the input.",
+            input.name
+        );
+        return PlaylistFetch::failed(TuliproxError::ConfigInput(format!(
+            "plugin input '{}' is inactive: plugin '{plugin}' is not installed or not enabled",
+            input.name
+        )));
+    }
     let ctx = HookCtx::new("").with_input(&input.name);
     let request = PluginInputRequest {
         input_name: &input.name,
         url: &input.url,
         username: input.username.as_deref(),
         password: input.password.as_deref(),
-        options: &[],
+        options: &input.plugin_options,
     };
     match plugins.fetch_playlist(plugin, &ctx, &request).await {
         Ok(items) => PlaylistFetch::groups(group_mapped_items(items)),
@@ -705,4 +719,40 @@ async fn download_m3u_alias_playlists<E: EventSink + Clone + 'static, M: Metadat
     }
 
     errors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::NoPlugins;
+    use std::sync::Arc;
+
+    fn plugin_input(plugin: Option<&str>) -> ConfigInput {
+        ConfigInput {
+            name: Arc::from("youtbepl"),
+            input_type: InputType::Plugin,
+            plugin: plugin.map(Arc::from),
+            ..ConfigInput::default()
+        }
+    }
+
+    /// A plugin input whose plugin was uninstalled or disabled fails only itself, with a message that
+    /// says what to do. It never reaches the fetch, so it cannot disturb the other inputs.
+    #[tokio::test]
+    async fn a_plugin_input_without_its_plugin_reports_itself_inactive() {
+        let fetch = plugin_playlist_fetch(&NoPlugins, &plugin_input(Some("youtube-input"))).await;
+
+        assert!(fetch.groups.is_empty());
+        let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
+        assert!(message.contains("youtbepl"), "the input is named: {message}");
+        assert!(message.contains("youtube-input"), "the plugin is named: {message}");
+        assert!(message.contains("is not installed or not enabled"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_input_must_name_a_plugin() {
+        let fetch = plugin_playlist_fetch(&NoPlugins, &plugin_input(None)).await;
+        let message = fetch.errors.first().map(ToString::to_string).unwrap_or_default();
+        assert!(message.contains("does not name a plugin"), "{message}");
+    }
 }

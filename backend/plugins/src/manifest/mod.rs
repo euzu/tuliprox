@@ -251,6 +251,19 @@ pub(crate) struct RpcExport {
     pub input_schema: Option<String>,
 }
 
+/// One `ui.input_form` / `ui.output_form` section: fields a plugin adds to a
+/// `type: plugin` input or output, in the panel `id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FormSection {
+    /// The panel id: `main` and `options` extend the host's panels, any other
+    /// id adds a panel after them.
+    pub id: String,
+    pub title: Option<String>,
+    pub title_key: Option<String>,
+    /// Package-relative path of the section's JSON Schema.
+    pub schema: String,
+}
+
 /// `ui:`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Ui {
@@ -260,6 +273,10 @@ pub(crate) struct Ui {
     pub locales: Vec<String>,
     pub contributions: Vec<Contribution>,
     pub rpc_exports: Vec<RpcExport>,
+    /// Fields a `type: plugin` input shows, from this plugin.
+    pub input_form: Vec<FormSection>,
+    /// Fields a `type: plugin` output shows, from this plugin.
+    pub output_form: Vec<FormSection>,
 }
 
 /// What happens to the target when a hook call fails.

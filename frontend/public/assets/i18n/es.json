@@ -516,6 +516,10 @@
       "LIVE_SOURCE": "Selector de fuente para el clúster en directo cuando la entrada por etapas está habilitada (`default`, `staged`, `input`, `skip`).",
       "PERSIST": "Ruta de archivo opcional utilizada para persistir o reutilizar la lista de reproducción de entrada descargada.",
       "PLAYBACK_PROVIDER": "Nombre de un perfil de proveedor global usado para resolver las URL provider:// de reproducción creadas por mapeos, cuando las URL de la entrada y los alias son URL http(s) normales. Habilita el failover de CDN para listas independientes.",
+      "PLUGIN": "Plugin de entrada instalado que obtiene esta entrada. Los campos situados debajo son del plugin; un campo vacío usa el ajuste del plugin, que se edita en Plugins → el icono de engranaje (o en la pestaña del plugin en Configuración). La URL de abajo es el destino que esta entrada le entrega.",
+      "PLUGIN_NONE": "No hay instalado ningún plugin que proporcione entradas. Instala y activa uno en Plugins primero.",
+      "PLUGIN_REQUIRED": "Selecciona el plugin que proporciona esta entrada.",
+      "PLUGIN_URL": "El destino que esta entrada entrega al plugin como `input-request.url`; para un proveedor como youtube-input es el canal, la lista de reproducción o el vídeo. Déjalo vacío si la configuración del plugin ya nombra los destinos.",
       "PROVIDERS": "Los perfiles de proveedor definen URL de origen reutilizables y el comportamiento DNS que puede referenciar esta entrada.",
       "SIMPLE_INPUT": {
         "URL": "URL de origen para esta entrada. Solo se admiten URL `file://`, `http://` y `https://`."
@@ -638,6 +642,13 @@
     },
     "OUTPUT_M3U_FORM": {
       "FILTER": "Expresión de filtro utilizada para especificar qué elementos deben incluirse en la salida M3U."
+    },
+    "OUTPUT_PLUGIN_FORM": {
+      "PLUGIN": "Plugin instalado que genera esta salida. La vista se filtra primero y luego se transmite mediante begin-output, render-batch y finish-output del plugin a un único archivo en el directorio del destino. La configuración propia del plugin se define una vez en el bloque de plugins.",
+      "PLUGIN_NONE": "No hay instalado ningún plugin que genere salidas. Instala y activa uno en Plugins primero.",
+      "PLUGIN_REQUIRED": "Selecciona el plugin que genera esta salida.",
+      "FILENAME": "Nombre de archivo dentro del directorio del destino. Un nombre simple sin ruta; <plugin>.out si está vacío.",
+      "FILTER": "Expresión de filtro que selecciona qué elementos llegan a esta salida. Se aplica antes de que el plugin genere el archivo."
     },
     "OUTPUT_STRM_FORM": {
       "EXPORT_STYLE": "La convención de nomenclatura utilizada para generar archivos .strm (p. ej. kodi, plex, jellyfin).",
@@ -2146,6 +2157,7 @@
     "SYSLOG_MAX_MESSAGE_LEN": "Longitud máxima del mensaje",
     "SYSLOG_PORT": "Puerto de Syslog",
     "SYSLOG_QUEUE_CAPACITY": "Capacidad de cola",
+    "PLUGIN": "Plugin",
     "PLUGINS": "Plugins",
     "PLUGIN_STATE_DISCOVERED": "Detectado",
     "PLUGIN_STATE_INVALID": "No válido",
@@ -2605,6 +2617,7 @@
     "PLUGIN_SETTINGS_LOAD_FAILED": "No se pudo cargar la configuración del plugin:",
     "PLUGIN_SETTINGS_SAVED": "Configuración del plugin guardada.",
     "PLUGIN_SETTINGS_NO_SCHEMA": "Este plugin no incluye un esquema de configuración, así que sus ajustes se muestran solo en modo lectura.",
+    "PLUGIN_SETTINGS_NO_SCHEMA_USE_FORM": "Este plugin no tiene ajustes globales. Configura cada entrada en su propio formulario; la política de actualización y las actualizaciones al arrancar son ajustes del host.",
     "PLUGIN_SCHEMA_UNSUPPORTED": "El esquema de configuración usa una construcción que el formulario no puede mostrar:",
     "PLUGIN_LOGS_LOAD_FAILED": "No se pudieron cargar los registros del plugin:",
     "PLUGIN_CUSTOM_UI_WARNING": "Este plugin incluye su propia interfaz. Se ejecuta aislado, pero puede llamar a sus funciones declaradas con tus permisos y abrir páginas externas desde su marco.",
@@ -2723,10 +2736,12 @@
     "BRICK_InputM3u": "M3u",
     "BRICK_InputStaged": "Por etapas",
     "BRICK_InputPlex": "Plex",
+    "BRICK_InputPlugin": "Plugin",
     "BRICK_InputXtream": "Xtream",
     "BRICK_InputStalker": "Stalker",
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputM3u": "M3u",
+    "BRICK_OutputPlugin": "Plugin",
     "BRICK_OutputStrm": "STRM",
     "BRICK_OutputXtream": "Xtream",
     "BRICK_Target": "Destino"

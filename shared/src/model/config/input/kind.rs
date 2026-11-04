@@ -38,8 +38,8 @@ pub enum InputType {
     ///
     /// A unit variant on purpose: `Copy`, `Default`, `EnumIter`, `EnumString`,
     /// `AsRefStr` and `Display` all survive, and the id lives in
-    /// `ConfigInputDto::plugin`. It is YAML-only until W6b, so the frontend
-    /// type pickers (hard-coded lists) do not offer it.
+    /// `ConfigInputDto::plugin`. The source editor offers it with a picker over
+    /// the installed plugins that export `input.fetch`.
     Plugin,
 }
 

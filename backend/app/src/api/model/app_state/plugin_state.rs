@@ -277,16 +277,44 @@ pub async fn reload_plugins(plugins: &AppPlugins, app_config: &AppConfig) {
 #[allow(clippy::unused_async, reason = "Same signature as the `plugins` build.")]
 pub async fn reload_plugins(_plugins: &AppPlugins, _app_config: &AppConfig) {}
 
-/// [`load_plugins`], then [`validate_plugin_refs`] against the loaded sources:
-/// at startup an unknown or disabled plugin reference is a config error.
+/// [`load_plugins`], then report every plugin reference the loaded plugins cannot
+/// satisfy.
+///
+/// Startup never fails for one. A plugin can be uninstalled, disabled or simply
+/// not installed yet while a `source.yml` entry still names it, and that must not
+/// keep the server down: the reference is logged and then ignored, and it fails on
+/// its own at the point of use (the input's fetch, the output's render, the
+/// scheduled task's run), so everything else keeps working. An explicit config
+/// save still rejects such a reference — `AppState::set_sources` — because that is
+/// an operator action with immediate feedback and a file left unmodified.
 pub async fn load_validated_plugins(
     app_config: &AppConfig,
     resource_cache: Option<&ResourceCacheHandle>,
-) -> Result<AppPlugins, shared::error::TuliproxError> {
+) -> AppPlugins {
     let plugins = load_plugins(app_config, resource_cache).await;
-    validate_plugin_refs(&plugins, &arc_swap::ArcSwapAny::load(app_config.sources.as_ref()))?;
-    validate_plugin_schedules(&plugins, app_config.config.load().schedules.as_deref().unwrap_or_default())?;
-    Ok(plugins)
+    report_unsatisfied_plugin_refs(
+        &plugins,
+        app_config.sources.load().as_ref(),
+        app_config.config.load().schedules.as_deref().unwrap_or_default(),
+    );
+    plugins
+}
+
+/// Logs every plugin reference the loaded plugins cannot satisfy, one line per set
+/// of problems. Never fails: see [`load_validated_plugins`].
+pub fn report_unsatisfied_plugin_refs(
+    plugins: &AppPlugins,
+    sources: &tuliprox_core::model::SourcesConfig,
+    schedules: &[tuliprox_core::model::ScheduleConfig],
+) {
+    if let Err(err) = validate_plugin_refs(plugins, sources) {
+        log::error!(
+            "{err}. Every input, target and output that names a missing plugin is inactive; everything else runs."
+        );
+    }
+    if let Err(err) = validate_plugin_schedules(plugins, schedules) {
+        log::error!("{err}. The affected plugin tasks do not run.");
+    }
 }
 
 /// Checks the `type: plugin_task` schedules: such an entry names both `plugin` and `task`, the fields appear on
@@ -437,7 +465,7 @@ mod tests {
             plugin: "custom-out".into(),
             format: format.map(String::from),
             filename: None,
-            options: vec![],
+            plugin_config: serde_json::Map::new(),
             filter: None,
         })];
         SourcesConfig {
@@ -465,6 +493,33 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("schedule `every day at noon`: invalid cron expression"), "{message}");
         validate_plugin_schedules(&plugins, &[plugin_task_schedule("0 0 4 * * * *")]).expect("a valid expression");
+    }
+
+    /// Starting must survive a reference to a plugin that is gone. The problems are still found —
+    /// `validate_plugin_refs` reports them — but the boot path only logs them, so the server comes up
+    /// and every other input and target keeps running.
+    #[test]
+    fn a_missing_plugin_never_keeps_the_server_down() {
+        let plugins = AppPlugins::default();
+        let sources = SourcesConfig {
+            inputs: vec![std::sync::Arc::new(tuliprox_core::model::ConfigInput {
+                name: "youtbepl".into(),
+                input_type: shared::model::InputType::Plugin,
+                plugin: Some("youtube-input".into()),
+                // A disabled input never runs, so it needs no plugin.
+                enabled: true,
+                ..tuliprox_core::model::ConfigInput::default()
+            })],
+            ..SourcesConfig::default()
+        };
+        let schedules = [plugin_task_schedule("0 0 4 * * * *")];
+
+        // Still detected, so the log names what is ignored. (The schedule check needs a loaded
+        // plugin system to know which tasks exist; without one it checks the shape only.)
+        assert!(validate_plugin_refs(&plugins, &sources).is_err());
+
+        // And reported without failing: the boot path calls exactly this and returns the plugins.
+        report_unsatisfied_plugin_refs(&plugins, &sources, &schedules);
     }
 
     #[test]

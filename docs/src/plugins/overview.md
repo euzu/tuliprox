@@ -104,8 +104,9 @@ The normal path is upload, approve, configure, enable:
 1. **Upload.** `POST /api/v1/plugins` with the `.tlpx` as multipart field `file`. The package is validated and staged.
    Nothing is installed. The answer is a review: capabilities, hooks, secrets, custom UI, MCP request.
 2. **Approve.** `PUT /api/v1/plugins/{id}/approve` pins the reviewed wasm hash and capability names, and installs the
-   package under `<config dir>/plugins/<id>/`. Approval does not enable the plugin. A body that differs from the
-   review is refused with `409`.
+   package under `<config dir>/plugins/<id>/`. Approval does not enable the plugin, except when `config.yml` already
+   holds a `plugins.plugins[]` entry for it — that entry defaults to `enabled: true` and is an approval of its own.
+   A body that differs from the review is refused with `409`.
 3. **Configure.** `PUT /api/v1/plugins/{id}/settings` saves the settings. They are checked against the schema first.
 4. **Enable.** `PUT /api/v1/plugins/{id}/enable` switches the plugin on. Enabling a plugin that is `pending_approval`
    or `invalid` is refused with `409`.
@@ -120,6 +121,11 @@ The demo configs of the example plugins use this path.
 
 Disable and uninstall are `PUT /api/v1/plugins/{id}/disable` and `DELETE /api/v1/plugins/{id}`. Uninstall can also
 delete the plugin's storage with `?purge_kv=true`.
+
+**Removing a plugin never stops the server.** A `source.yml` entry that still names it is reported once at startup
+(``invalid plugin references: input my-feed: no loaded plugin my-plugin provides fetch-input``) and then ignored: that
+input or target is inactive and keeps its last playlist, every other input and target runs. See
+[Input providers](./events-notifications-inputs.md#input-providers).
 
 The full route list is in [Quickstart](./quickstart.md) and [Packaging](./packaging.md).
 

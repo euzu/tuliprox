@@ -1,0 +1,14 @@
+{
+  "form.title": "YouTube input",
+  "form.description": "What this input fetches and how. Everything here belongs to this input alone.",
+  "form.channels.title": "YouTube Channels and Playlists",
+  "form.channels.description": "Targets for this input: @handle, channel id UC..., playlist id PL..., or a video. Added to the Url above; duplicates are fetched once.",
+  "form.invidious_instances.title": "Invidious Instances",
+  "form.invidious_instances.description": "Mirrors this input resolves streams through, in failover order (at least one).",
+  "form.mode.title": "Ingest Mode",
+  "form.mode.description": "recent_uploads reads the newest videos, live_only keeps only the current live stream.",
+  "form.max_uploads.title": "Max Uploads",
+  "form.max_uploads.description": "How many recent uploads to take per channel (1 to 15).",
+  "form.cache_ttl_minutes.title": "Stream Cache TTL (Minutes)",
+  "form.cache_ttl_minutes.description": "How long this input reuses a resolved stream URL (10 to 360)."
+}

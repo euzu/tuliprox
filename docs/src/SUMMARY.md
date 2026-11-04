@@ -50,6 +50,7 @@
   - [Pushover Notifier](./plugins/pushover-notifier.md)
   - [REST Notifier](./plugins/rest-notifier.md)
   - [Command Notifier](./plugins/command-notifier.md)
+  - [YouTube Input](./plugins/youtube-input.md)
   - [Plugin Marketplace](./plugins/marketplace.md)
   - [Publishing a Marketplace](./plugins/marketplace-publishing.md)
   - [Security Model](./plugins/security.md)

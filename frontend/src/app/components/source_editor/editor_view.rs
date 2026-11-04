@@ -2482,6 +2482,99 @@ mod tests {
     }
 
     #[test]
+    fn plugin_input_block_keeps_its_plugin_reference_on_save() {
+        let input = ConfigInputDto {
+            name: "youtube-news".into(),
+            url: "https://www.youtube.com/@tagesschau".to_string(),
+            plugin: Some("youtube-input".into()),
+            plugin_config: serde_json::Map::from_iter([(
+                "mode".to_string(),
+                serde_json::Value::String("live_only".to_string()),
+            )]),
+            ..ConfigInputDto::new_with_type(InputType::Plugin)
+        };
+        let mut state = EditorState::default();
+        state.blocks.push(create_block(1, BlockType::InputPlugin, BlockInstance::Input(Rc::new(input))));
+        state.blocks.push(create_block(
+            2,
+            BlockType::Target,
+            BlockInstance::Target(Rc::new(ConfigTargetDto {
+                name: "tivione".to_string(),
+                ..ConfigTargetDto::default()
+            })),
+        ));
+        state.connections.push(Connection { from: 1, to: 2 });
+
+        let saved = editor_state_to_sources_config(&SourcesConfigDto::default(), &state);
+
+        assert_eq!(saved.inputs.len(), 1);
+        assert_eq!(saved.inputs[0].input_type, InputType::Plugin);
+        assert_eq!(saved.inputs[0].plugin.as_deref(), Some("youtube-input"));
+        assert_eq!(
+            saved.inputs[0].plugin_config.get("mode"),
+            Some(&serde_json::Value::String("live_only".to_string())),
+            "the plugin's per-input settings survive the editor"
+        );
+        assert_eq!(saved.sources[0].inputs.len(), 1);
+    }
+
+    #[test]
+    fn plugin_block_normalization_keeps_plugin_type_on_batch_url() {
+        let mut input = ConfigInputDto {
+            input_type: InputType::M3u,
+            url: "batch://should-not-become-m3u-batch".to_string(),
+            ..ConfigInputDto::default()
+        };
+
+        normalize_input_type_by_url(&mut input, BlockType::InputPlugin);
+
+        assert_eq!(input.input_type, InputType::Plugin);
+    }
+
+    #[test]
+    fn plugin_output_becomes_a_plugin_output_block() {
+        let (instance, block_type) = create_output_instance(&TargetOutputDto::Plugin(PluginTargetOutputDto::default()));
+
+        assert_eq!(block_type, BlockType::OutputPlugin);
+        let BlockInstance::Output(output) = instance else { panic!("expected an output instance") };
+        assert!(matches!(&*output, TargetOutputDto::Plugin(_)));
+    }
+
+    #[test]
+    fn plugin_output_block_keeps_its_dto_on_save() {
+        let output = PluginTargetOutputDto {
+            plugin: "csv-writer".to_string(),
+            format: Some("csv".to_string()),
+            filename: Some("channels.csv".to_string()),
+            plugin_config: serde_json::Map::from_iter([(
+                "delimiter".to_string(),
+                serde_json::Value::String(";".to_string()),
+            )]),
+            filter: Some("Group ~ \".*\"".to_string()),
+            t_filter: None,
+        };
+        let mut state = EditorState::default();
+        state.blocks.push(create_block(
+            1,
+            BlockType::Target,
+            BlockInstance::Target(Rc::new(ConfigTargetDto { name: "csv".to_string(), ..ConfigTargetDto::default() })),
+        ));
+        state.blocks.push(create_block(
+            2,
+            BlockType::OutputPlugin,
+            BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(output.clone()))),
+        ));
+        state.connections.push(Connection { from: 1, to: 2 });
+
+        let saved = editor_state_to_sources_config(&SourcesConfigDto::default(), &state);
+
+        let TargetOutputDto::Plugin(saved_output) = &saved.sources[0].targets[0].output[0] else {
+            panic!("plugin output block was not saved as a plugin output")
+        };
+        assert_eq!(saved_output, &output);
+    }
+
+    #[test]
     fn media_server_block_normalization_preserves_input_type() {
         let cases = [
             (BlockType::InputEmby, InputType::Emby),

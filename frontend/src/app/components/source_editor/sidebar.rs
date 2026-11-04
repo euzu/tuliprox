@@ -4,7 +4,7 @@ use crate::{
 };
 use yew::prelude::*;
 
-pub const BLOCK_TYPES_INPUT: [BlockType; 8] = [
+pub const BLOCK_TYPES_INPUT: [BlockType; 9] = [
     BlockType::InputXtream,
     BlockType::InputM3u,
     BlockType::InputLibrary,
@@ -13,6 +13,7 @@ pub const BLOCK_TYPES_INPUT: [BlockType; 8] = [
     BlockType::InputJellyfin,
     BlockType::InputEmby,
     BlockType::InputPlex,
+    BlockType::InputPlugin,
 ];
 
 #[cfg(test)]
@@ -28,13 +29,25 @@ mod tests {
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputEmby));
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputJellyfin));
         assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputPlex));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputPlugin));
+    }
+
+    #[test]
+    fn sidebar_exposes_the_plugin_output() {
+        assert!(BLOCK_TYPES_OUTPUT.contains(&BlockType::OutputPlugin));
+        assert!(BlockType::OutputPlugin.is_output());
     }
 }
 
 pub const BLOCK_TYPES_TARGET: [BlockType; 1] = [BlockType::Target];
 
-pub const BLOCK_TYPES_OUTPUT: [BlockType; 4] =
-    [BlockType::OutputXtream, BlockType::OutputM3u, BlockType::OutputHdHomeRun, BlockType::OutputStrm];
+pub const BLOCK_TYPES_OUTPUT: [BlockType; 5] = [
+    BlockType::OutputXtream,
+    BlockType::OutputM3u,
+    BlockType::OutputHdHomeRun,
+    BlockType::OutputStrm,
+    BlockType::OutputPlugin,
+];
 
 fn create_brick(
     t: &BlockType,

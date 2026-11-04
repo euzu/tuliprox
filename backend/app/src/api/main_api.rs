@@ -51,7 +51,7 @@ use axum::{
     Router,
 };
 use dashmap::DashSet;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use shared::{
     defaults::default_cleanup_queue_capacity,
     error::TuliproxError,
@@ -295,6 +295,16 @@ pub(crate) async fn load_maintenance(app_config: &AppConfig) -> Arc<MaintenanceR
     Arc::new(MaintenanceRegistry::load(path, &known).await)
 }
 
+fn init_http_clients(app_config: &AppConfig) -> Result<Arc<HttpClients>, TuliproxError> {
+    Ok(Arc::new(HttpClients::new(
+        create_http_client(app_config)?,
+        create_http_client_no_redirect(app_config)?,
+        create_public_http_client_no_redirect(app_config)?,
+        create_resource_http_client_no_redirect(app_config)?,
+        create_resource_public_http_client_no_redirect(app_config)?,
+    )))
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -351,11 +361,7 @@ async fn create_shared_data(
         cleanup_capacity,
     ));
 
-    let client = create_http_client(app_config)?;
-    let client_no_redirect = create_http_client_no_redirect(app_config)?;
-    let public_client_no_redirect = create_public_http_client_no_redirect(app_config)?;
-    let resource_client_no_redirect = create_resource_http_client_no_redirect(app_config)?;
-    let resource_public_client_no_redirect = create_resource_public_http_client_no_redirect(app_config)?;
+    let http_clients = init_http_clients(app_config)?;
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -371,17 +377,11 @@ async fn create_shared_data(
     })?;
 
     let maintenance = load_maintenance(app_config).await;
-    let plugins = crate::api::model::load_validated_plugins(app_config, Some(&cache)).await?;
+    let plugins = crate::api::model::load_validated_plugins(app_config, Some(&cache)).await;
 
     let app_state = AppState {
         app_config: Arc::clone(app_config),
-        http_clients: Arc::new(HttpClients::new(
-            client,
-            client_no_redirect,
-            public_client_no_redirect,
-            resource_client_no_redirect,
-            resource_public_client_no_redirect,
-        )),
+        http_clients,
         cache,
         shared_stream_manager,
         hls: HlsState::new(hls_proxy),
@@ -902,7 +902,12 @@ fn add_rate_limiter(router: Router<Arc<AppState>>, rate_limit_cfg: &RateLimitCon
 }
 
 async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse {
-    if !log::log_enabled!(log::Level::Debug) {
+    let is_trace_path = matches!(req.uri().path(), "/api/v1/plugins/metrics" | "/healthcheck" | "/metrics" | "/ready");
+    if is_trace_path {
+        if !log::log_enabled!(log::Level::Trace) {
+            return next.run(req).await;
+        }
+    } else if !log::log_enabled!(log::Level::Debug) {
         return next.run(req).await;
     }
 
@@ -930,7 +935,11 @@ async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse 
     let uri_string = uri.to_string();
     let safe_uri = sanitize_sensitive_info(&uri_string);
 
-    debug!("Client request [{method}] -> {safe_uri} from {safe_ip}");
+    if is_trace_path {
+        trace!("Client request [{method}] -> {safe_uri} from {safe_ip}");
+    } else {
+        debug!("Client request [{method}] -> {safe_uri} from {safe_ip}");
+    }
     next.run(req).await
 }
 
