@@ -226,6 +226,10 @@ testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<n
 		$(if $(RUN_ID),--run-id $(RUN_ID),)
 	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
 
+.PHONY: plugin-locks
+plugin-locks: ## Refresh the Cargo.lock of every plugin crate after a workspace version bump
+	@./bin/refresh-plugin-locks.sh
+
 .PHONY: plugin-fixtures
 plugin-fixtures: ## Build the wasm plugin test fixtures (wasm32-wasip2) into target/plugin-fixtures
 	@echo "==> Building plugin test fixtures (wasm32-wasip2)"

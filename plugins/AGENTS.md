@@ -50,6 +50,10 @@ plugins/notifiers/<id>/
   ui/                 frames and scripts only when the plugin needs custom UI
 ```
 
+The lock records the version of the path crates (`tuliprox-plugin-api`, `-sdk`, `-sdk-macros`), which is the workspace
+version. After a version bump, `make plugin-locks` (`bin/refresh-plugin-locks.sh`) brings every plugin lock in line;
+the release job runs it with each bump, and `--check` only lists the stale ones.
+
 Start from `bin/new-plugin.sh <id> <dest-dir>` (renders `plugins/examples/template`) or copy a finished plugin such as
 `plugins/notifiers/discord-notifier`. The id must match `^[a-z][a-z0-9-]{2,40}$`; `metrics`, `staging` and `plugins-prev` are reserved.
 

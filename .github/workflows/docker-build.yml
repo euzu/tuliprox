@@ -110,6 +110,13 @@ jobs:
           echo "🛠️ Set version v$major.$minor.$patch (was v$current)"
           cargo set-version "$major.$minor.$patch"
 
+      - name: Refresh plugin lock files
+        # The plugin crates outside the workspace (plugins/examples, inputs, notifiers and the
+        # plugin-api fixtures) lock tuliprox-plugin-api/-sdk/-sdk-macros at the workspace version, so
+        # a bump breaks their `cargo build --locked` (make plugin-fixtures, make plugins) until the
+        # locks follow. Without a bump this finds nothing stale and changes nothing.
+        run: ./bin/refresh-plugin-locks.sh
+
       - name: Read project version
         id: version
         run: |
@@ -163,10 +170,13 @@ jobs:
           git config user.name "euzu"
           git config user.email "euzu@proton.me"
           echo "base_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          git add -- Cargo.toml Cargo.lock frontend/Cargo.toml
+          # The plugin locks refreshed above belong to the same bump.
+          mapfile -t plugin_locks < <(git ls-files -- ':(glob)plugins/**/Cargo.lock')
+          bump_files=(Cargo.toml Cargo.lock frontend/Cargo.toml "${plugin_locks[@]}")
+          git add -- "${bump_files[@]}"
           if ! git diff --cached --quiet; then
             VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml | head -n1)
-            git commit --only -m "ci: bump version v$VERSION" -- Cargo.toml Cargo.lock frontend/Cargo.toml
+            git commit --only -m "ci: bump version v$VERSION" -- "${bump_files[@]}"
           fi
 
       - name: Prepare release tag
