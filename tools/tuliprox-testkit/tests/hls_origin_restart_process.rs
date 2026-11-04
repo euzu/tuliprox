@@ -513,3 +513,96 @@ async fn two_origin_restarts_keep_one_session_in_all_modes() -> Result<(), Testk
     }
     Ok(())
 }
+
+fn save_rollover_media(label: &str, bytes: &[u8]) -> Result<(), TestkitError> {
+    if let Some(directory) = std::env::var_os("TULIPROX_TESTKIT_ARTIFACT_DIR") {
+        let directory = std::path::PathBuf::from(directory).join("redirect-rollover-media");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(directory.join(format!("{label}.ts")), bytes)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires built proxy selected by TULIPROX_TESTKIT_SUT_BINARY"]
+async fn healthy_redirect_host_rollover_proves_overlap_and_keeps_old_client_bytes() -> Result<(), TestkitError> {
+    let fixture = Fixture::start_redirect_rollover().await?;
+    let player = client("redirect-rollover-client");
+    let media = variant(&fixture, &player).await?;
+    assert!(media.path().starts_with("/hls/shared/live/"), "public shared HLS client route");
+    let original = player.get(media.clone()).send().await?.error_for_status()?.text().await?;
+    assert!(!original.contains("#EXT-X-ENDLIST"));
+    let old_sequence = sequence(&original);
+    let old_resources = resources(&media, &original);
+    assert_eq!(old_sequence + u64::try_from(old_resources.len()).unwrap(), 6);
+    let mut saved = Vec::new();
+    for (index, url) in old_resources.iter().enumerate() {
+        let body = player.get(url.clone()).send().await?.error_for_status()?.bytes().await?;
+        assert_eq!(body.as_ref(), bytes(0, 432 + old_sequence + u64::try_from(index).unwrap()));
+        save_rollover_media(&format!("warm-origin-{}", 432 + old_sequence + u64::try_from(index).unwrap()), &body)?;
+        saved.push(body);
+    }
+    fixture.origin.phase.store(1, Ordering::Release);
+    let mut observations = vec![format!("phase=warm first_proxy={old_sequence} last_proxy=5 origin_tail=437")];
+    let mut last_tail = 5;
+    for (phase, target_tail) in [(1, 7), (2, 9)] {
+        fixture.origin.phase.store(phase, Ordering::Release);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let body = player.get(media.clone()).send().await?.error_for_status()?.text().await?;
+            assert!(!body.contains("#EXT-X-ENDLIST"), "healthy local reserve must remain live");
+            let first = sequence(&body);
+            let urls = resources(&media, &body);
+            let tail = first + u64::try_from(urls.len()).unwrap() - 1;
+            assert!(tail >= last_tail, "proxy sequence must stay monotone");
+            observations.push(format!("phase={phase} first_proxy={first} last_proxy={tail} live=true"));
+            if tail >= target_tail {
+                for (index, url) in urls.iter().enumerate() {
+                    let proxy_seq = first + u64::try_from(index).unwrap();
+                    let delivered = player.get(url.clone()).send().await?.error_for_status()?.bytes().await?;
+                    assert_eq!(delivered.as_ref(), bytes(0, 432 + proxy_seq));
+                    save_rollover_media(&format!("phase-{phase}-origin-{}", 432 + proxy_seq), &delivered)?;
+                    observations.push(format!(
+                        "phase={phase} proxy_seq={proxy_seq} origin_seq={} raw_bytes_equal=true length={}",
+                        432 + proxy_seq,
+                        delivered.len()
+                    ));
+                }
+                last_tail = tail;
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "host rollover must produce new verified media");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    for (index, (url, expected)) in old_resources.iter().zip(&saved).enumerate() {
+        let retained = player.get(url.clone()).send().await?.error_for_status()?.bytes().await?;
+        assert_eq!(&retained, expected);
+        save_rollover_media(
+            &format!("retained-origin-{}", 432 + old_sequence + u64::try_from(index).unwrap()),
+            &retained,
+        )?;
+    }
+    let protocol = fixture.origin.protocol();
+    let alternate_media: Vec<_> = protocol
+        .iter()
+        .filter(|event| {
+            event["host"].as_str().is_some_and(|host| host.starts_with("localhost:"))
+                && event["uri"].as_str().is_some_and(|uri| uri.starts_with("/media/"))
+        })
+        .collect();
+    assert_eq!(
+        alternate_media.first().unwrap()["uri"],
+        "/media/437.ts?synthetic=1",
+        "the candidate's matching occurrence must be probed first"
+    );
+    assert!(alternate_media.iter().any(|event| event["uri"] == "/media/438.ts?synthetic=1"));
+    assert!(protocol.iter().any(|event| event["host"].as_str().is_some_and(|host| host.starts_with("127.0.0.1:"))
+        && event["uri"] == "/rollover/index.m3u8"));
+    assert!(!fixture.log_contains("outcome=terminal_committed"));
+    assert!(!fixture.log_contains("HLS autonomous terminal owner completed: outcome=committed"));
+    let requests = fixture.origin.requests.lock().unwrap().len();
+    assert!(requests < 100, "bounded process fixture work: {requests}");
+    println!("mode=conservative pinned_host=127.0.0.1 candidate_host=localhost anchor_origin=437 first_continuation=438 final_origin_tail=441 old_uris_equal=true live=true requests={requests}");
+    fixture.stop_with_observations("redirect-rollover", &observations).await
+}

@@ -520,7 +520,7 @@ async fn pinned_origin_recovery_during_staging_rejects_alternative_commit() {
 }
 
 #[tokio::test]
-async fn recovery_required_orchestrator_requalifies_changed_pinned_landscape_with_full_plan() {
+async fn recovery_required_orchestrator_accepts_pinned_progress_without_another_full_plan() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
     let entry_hits = Arc::new(AtomicUsize::new(0));
     let entry_hits_for_handler = Arc::clone(&entry_hits);
@@ -595,8 +595,8 @@ async fn recovery_required_orchestrator_requalifies_changed_pinned_landscape_wit
     .expect("pinned follow-up commits");
 
     assert_eq!(committed.fetched.redirect_host.as_deref(), Some("127.0.0.1"));
-    assert_eq!(entry_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_mul(2).saturating_add(1));
-    assert_eq!(pinned_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_add(1));
+    assert_eq!(entry_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_add(1));
+    assert_eq!(pinned_hits.load(Ordering::SeqCst), 1);
     let session = session.read().await;
     assert_eq!(session.origin_seq_highwater, Some(101));
     assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));

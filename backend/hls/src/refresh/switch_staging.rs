@@ -42,9 +42,7 @@ use crate::{
     TransientResourceRef,
 };
 use log::{debug, warn};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
 use tuliprox_core::model::CustomStreamResponse;
 use tuliprox_parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome};
 
@@ -57,6 +55,8 @@ pub(super) struct HlsSwitchStagingGeneration {
     pub(super) origin_epoch: u64,
     pub(super) origin_seq_highwater: Option<u64>,
     pub(super) proxy_next_seq: Option<u64>,
+    origin_work_generation: u64,
+    origin_account_generation: u64,
 }
 
 pub(super) struct HlsStagedSwitchCommit {
@@ -65,6 +65,8 @@ pub(super) struct HlsStagedSwitchCommit {
     pub(super) preview: HlsOriginHandoffPreview,
     pub(super) ready_segment_proxy_seq: u64,
     pub(super) ready_segment_content_length: u64,
+    pub(super) ready_segment_origin_digest: [u8; 32],
+    pub(super) content_anchor: Option<HlsVerifiedContentAnchor>,
     pub(super) ready_map: Option<(crate::ProxyMapId, u64)>,
     pub(super) segment_cleanup: crate::gc::HlsSwitchCacheCleanupReservation,
     pub(super) map_cleanup: Option<crate::gc::HlsSwitchCacheCleanupReservation>,
@@ -122,6 +124,8 @@ pub(super) fn switch_staging_generation(session: &crate::HlsSession) -> Option<H
         origin_epoch: session.origin_epoch,
         origin_seq_highwater: session.origin_seq_highwater,
         proxy_next_seq: session.proxy_next_seq,
+        origin_work_generation: session.activity.origin_work_generation,
+        origin_account_generation: session.transient.origin_account_generation(),
     })
 }
 
@@ -383,6 +387,8 @@ pub(super) async fn stage_alternative_manifest_switch(
         preview,
         ready_segment_proxy_seq: first_segment.proxy_seq,
         ready_segment_content_length: committed_media.ready_segment_content_length,
+        ready_segment_origin_digest: committed_media.origin_digest,
+        content_anchor: None,
         ready_map: committed_media.ready_map,
         segment_cleanup: committed_media.segment_cleanup,
         map_cleanup: committed_media.map_cleanup,
@@ -427,6 +433,7 @@ struct HlsStagedAlternativeSwitchMedia {
 }
 
 struct HlsCommittedAlternativeSwitchMedia {
+    origin_digest: [u8; 32],
     ready_segment_content_length: u64,
     ready_map: Option<(crate::ProxyMapId, u64)>,
     segment_cleanup: crate::gc::HlsSwitchCacheCleanupReservation,
@@ -490,6 +497,7 @@ async fn commit_alternative_switch_media(
     staged_media: HlsStagedAlternativeSwitchMedia,
 ) -> Result<HlsCommittedAlternativeSwitchMedia, HlsManifestCommitError> {
     let HlsStagedAlternativeSwitchMedia { segment: staged_segment, map: staged_map } = staged_media;
+    let origin_digest = super::origin_probe::sha256_file(&staged_segment.path).await?;
     if request.hls_proxy.segment_cache().cache_path() != request.segment_cache.cache_path()
         || request
             .hls_proxy
@@ -572,6 +580,7 @@ async fn commit_alternative_switch_media(
     };
 
     Ok(HlsCommittedAlternativeSwitchMedia {
+        origin_digest,
         ready_segment_content_length: segment_metadata.size,
         ready_map: map_metadata,
         segment_cleanup,
@@ -579,102 +588,198 @@ async fn commit_alternative_switch_media(
     })
 }
 
-pub(super) async fn verify_staged_content_anchor(
-    request: &OriginRefreshRequest,
-    fetched: &FetchedOriginManifest,
-    staged: &HlsStagedSwitchCommit,
-) -> Result<(), HlsManifestCommitError> {
-    let manifest = match parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url) {
-        OriginManifestParseOutcome::Normal(manifest) if manifest.maps.is_empty() => manifest,
-        OriginManifestParseOutcome::Normal(_) | OriginManifestParseOutcome::TransientPassthrough { .. } => {
-            return Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable));
-        }
-    };
-    let candidate = manifest
-        .segments
-        .first()
-        .filter(|segment| segment.map_ref.is_none())
-        .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
-    let candidate_identity =
-        HlsMediaResourceIdentity::from_url(&candidate.resolved_origin_url, candidate.origin_byte_range);
-    let (candidate_key, committed_key, committed_origin_digest, committed_read_pin) = {
-        let session = request.session.read().await;
-        if !switch_staging_generation_matches(&session, &staged.generation)
-            || !matches!(session.mode, HlsSessionMode::NormalCacheTimeline)
-        {
-            return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
-        }
-        let candidate_key = staged
-            .preview
-            .segments
-            .first()
-            .filter(|segment| segment.map_ref.is_none() && segment.proxy_file_ext.eq_ignore_ascii_case("ts"))
-            .map(|segment| segment.cache_key.clone())
-            .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
-        let (committed_key, committed_access, committed_origin_digest) = session
-            .segments
-            .values()
-            .rev()
-            .filter(|entry| entry.origin_key.origin_epoch == session.origin_epoch)
-            .filter(|entry| {
-                entry.map_ref.is_none()
-                    && entry.proxy_file_ext.eq_ignore_ascii_case("ts")
-                    && matches!(&entry.status, SegmentCacheStatus::Ready { .. })
-            })
-            .find_map(|entry| {
-                let fetch_ref = entry.origin_fetch_ref.as_ref()?;
-                let identity = HlsMediaResourceIdentity::from_url(&fetch_ref.resolved_origin_url, fetch_ref.byte_range);
-                if !identity.same_path_and_range(candidate_identity) {
-                    return None;
-                }
-                let origin_digest = if identity.matches(candidate_identity) {
-                    None
-                } else {
-                    if entry.encryption.is_some() || candidate.encryption.is_some() {
-                        return None;
-                    }
-                    Some(session.origin_content.digest(entry, session.activity.origin_work_generation)?)
-                };
-                Some((entry.cache_key.clone(), Arc::clone(&entry.access), origin_digest))
-            })
-            .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
-        let committed_read_pin = HlsCommittedAcceptanceReadPin::acquire(committed_access, current_time_millis());
-        (candidate_key, committed_key, committed_origin_digest, committed_read_pin)
-    };
-    let candidate_fingerprint = Box::pin(sha256_cache_object(&request.segment_cache, &candidate_key)).await?;
-    let committed_fingerprint = if let Some(digest) = committed_origin_digest {
-        digest
-    } else {
-        Box::pin(sha256_cache_object(&request.segment_cache, &committed_key)).await?
-    };
-    if candidate_fingerprint != committed_fingerprint {
-        return Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable));
-    }
-    drop(committed_read_pin);
-    Ok(())
+/// Pins outlive the probe and continuation staging, through atomic publication.
+pub(super) struct HlsVerifiedContentAnchor {
+    generation: HlsSwitchStagingGeneration,
+    anchor: super::origin_probe::HlsOriginContentAnchor,
+    _read_pin: HlsCommittedAcceptanceReadPin,
+    _file_pin: crate::HlsRevisionFilePin,
+    _revision: Option<crate::SegmentRevisionGuard>,
 }
 
-async fn sha256_cache_object(
-    cache: &HlsSegmentCache,
-    key: &SegmentCacheKey,
-) -> Result<[u8; 32], HlsManifestCommitError> {
-    let mut file = cache
-        .open_range(key, 0)
-        .await
-        .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
-    let mut hasher = Sha256::new();
-    let mut chunk = [0_u8; 16 * 1024];
-    loop {
-        let read = file
-            .read(&mut chunk)
-            .await
-            .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&chunk[..read]);
+impl HlsVerifiedContentAnchor {
+    pub(super) fn matches(&self, generation: &HlsSwitchStagingGeneration) -> bool { self.generation == *generation }
+
+    pub(super) fn is_current(&self, session: &crate::HlsSession, generation: &HlsSwitchStagingGeneration) -> bool {
+        self.matches(generation)
+            && switch_staging_generation_matches(session, generation)
+            && super::origin_probe::HlsOriginContentEvidence::latest_ready(session).as_ref() == Some(&self.anchor)
     }
-    Ok(hasher.finalize().into())
+}
+
+pub(super) async fn verify_content_anchor(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+) -> Result<HlsVerifiedContentAnchor, HlsManifestCommitError> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(request.origin_manifest_timeout_ms),
+        probe_content_anchor(request, fetched),
+    )
+    .await
+    .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?
+}
+
+async fn probe_content_anchor(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+) -> Result<HlsVerifiedContentAnchor, HlsManifestCommitError> {
+    let unavailable = || switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable);
+    let manifest = match parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url) {
+        OriginManifestParseOutcome::Normal(manifest) if manifest.maps.is_empty() => manifest,
+        _ => return Err(unavailable()),
+    };
+    let (proof, candidate_ref, cache_key, expected_digest, reference_path) = {
+        let session = request.session.read().await;
+        let generation = switch_staging_generation(&session)
+            .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?;
+        if !matches!(session.mode, HlsSessionMode::NormalCacheTimeline)
+            || !generation
+                .candidate_identity
+                .matches_candidate(fetched_effective_manifest_host(fetched).as_deref(), &fetched.body)
+        {
+            return Err(unavailable());
+        }
+        let anchor = super::origin_probe::HlsOriginContentEvidence::latest_ready(&session).ok_or_else(|| {
+            debug!("HLS content anchor probe: reason=missing-current-ready-anchor");
+            unavailable()
+        })?;
+        // Sequence identifies the same occurrence; neither a filename nor the
+        // overlap-trimmed handoff preview identifies the reference probe.
+        let candidate = manifest
+            .segments
+            .iter()
+            .find(|segment| segment.origin_seq == anchor.origin_key.host_local_sequence)
+            .ok_or_else(|| {
+                debug!(
+                    "HLS content anchor probe: reference_origin_seq={} reason=reference-missing",
+                    anchor.origin_key.host_local_sequence
+                );
+                unavailable()
+            })?;
+        if candidate.map_ref.is_some()
+            || candidate.encryption.is_some()
+            || !anchor.identity.same_path_and_range(HlsMediaResourceIdentity::from_url(
+                &candidate.resolved_origin_url,
+                candidate.origin_byte_range,
+            ))
+        {
+            return Err(unavailable());
+        }
+        debug!("HLS content anchor probe: reference_origin_seq={} reference_proxy_seq={} candidate_origin_seq={} candidate_index={} origin_epoch={} origin_generation={} remaining_attempts={} reason=current-ready-reference",
+            anchor.origin_key.host_local_sequence, anchor.proxy_seq, candidate.origin_seq,
+            manifest.segments.iter().position(|segment| segment.origin_seq == candidate.origin_seq).unwrap_or_default(),
+            session.origin_epoch, session.activity.origin_work_generation,
+            request.attempt.as_ref().map_or_else(|| "none".to_string(), |attempt| attempt.remaining_attempts().to_string()));
+        let entry = session.segments.get(&anchor.proxy_seq).ok_or_else(unavailable)?;
+        let (path, revision) = anchor_revision_path(&session, &anchor, &request.segment_cache);
+        let file_pin = request.segment_cache.pin_revision_file(&path).map_err(|_| unavailable())?;
+        let cache_key = anchor.cache_key.clone();
+        let expected_digest = anchor.digest;
+        let proof = HlsVerifiedContentAnchor {
+            generation,
+            anchor,
+            _read_pin: HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&entry.access), current_time_millis()),
+            _file_pin: file_pin,
+            _revision: revision,
+        };
+        (
+            proof,
+            crate::OriginSegmentFetchRef {
+                resolved_origin_url: candidate.resolved_origin_url.clone(),
+                byte_range: candidate.origin_byte_range,
+                valid_until_ms: None,
+            },
+            cache_key,
+            expected_digest,
+            path,
+        )
+    };
+    tokio::fs::metadata(&reference_path).await.map_err(|_| unavailable())?;
+    log_current_anchor_reserve(request, &proof.generation);
+    let _permit =
+        request.segment_worker_pool.try_reserve_origin_probe(&request.session).await.ok_or_else(unavailable)?;
+    let context = alternative_switch_fetch_context(request, fetched);
+    let policy = request.segment_worker_pool.policy();
+    let object = stage_hls_switch_resource(
+        &context,
+        &policy,
+        cache_key,
+        candidate_ref.resolved_origin_url,
+        candidate_ref.byte_range,
+        HlsSwitchResourceKind::Segment,
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    let digest = super::origin_probe::sha256_file(&object.path).await;
+    request.segment_cache.remove_staged(object).await.map_err(|_| unavailable())?;
+    if digest? != expected_digest {
+        debug!("HLS content anchor probe: reason=original-content-mismatch");
+        return Err(unavailable());
+    }
+    if !proof.is_current(&*request.session.read().await, &proof.generation) {
+        return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
+    }
+    Ok(proof)
+}
+
+/// Diagnostics use the existing lease/READY reserve calculation. Contended or
+/// missing evidence stays unknown; logging never waits for the playback locks.
+fn log_current_anchor_reserve(request: &OriginRefreshRequest, generation: &HlsSwitchStagingGeneration) {
+    if !log::log_enabled!(log::Level::Debug) {
+        return;
+    }
+    let now_ms = request.hls_proxy.now_ms();
+    let (Ok(mut leases), Ok(session)) = (request.hls_proxy.access_leases().try_write(), request.session.try_read())
+    else {
+        debug!("HLS content anchor reserve: guaranteed_reserve_ms=none transition_margin_ms=none reason=state-busy");
+        return;
+    };
+    if !switch_staging_generation_matches(&session, generation) {
+        return;
+    }
+    let Some(episode) = session.origin_control.acceptance_episode.as_ref() else { return };
+    let budget = episode.timing().trigger_budget;
+    let reserve = leases
+        .active_live_playback_snapshots_for_session(&session.proxy_session_id, now_ms)
+        .iter()
+        .filter_map(|lease| {
+            let manifest = lease.last_manifest_snapshot.as_ref()?;
+            let ready_timeline = session.ready_timeline_snapshot(
+                lease.playback_cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq),
+                now_ms,
+            );
+            Some(crate::evaluate_lease_reserve(crate::HlsLeaseReserveInput {
+                manifest,
+                cursor: &lease.playback_cursor,
+                ready_timeline: &ready_timeline,
+                now_ms,
+                recovery_trigger_budget: budget,
+                origin_path_degraded: session.origin_control.path_condition.is_degraded(),
+                recovery_committed: false,
+            }))
+        })
+        .min_by_key(|reserve| reserve.guaranteed_reserve_ms);
+    debug!("HLS content anchor reserve: guaranteed_reserve_ms={} transition_margin_ms={} episode_trigger_budget_ms={} remaining_attempts={} reason={}",
+        reserve.map_or_else(|| "none".to_string(), |reserve| reserve.guaranteed_reserve_ms.to_string()),
+        reserve.map_or_else(|| "none".to_string(), |reserve| reserve.transition_margin.as_millis().to_string()),
+        budget.as_millis(), request.attempt.as_ref().map_or_else(|| "none".to_string(), |attempt| attempt.remaining_attempts().to_string()),
+        if reserve.is_some() { "current-lease-ready-reserve" } else { "no-active-lease-evidence" });
+}
+
+fn anchor_revision_path(
+    session: &crate::HlsSession,
+    anchor: &super::origin_probe::HlsOriginContentAnchor,
+    cache: &HlsSegmentCache,
+) -> (std::path::PathBuf, Option<crate::SegmentRevisionGuard>) {
+    let revision = session.startup.as_ref().and_then(|startup| startup.revisions.get(&anchor.proxy_seq)).cloned();
+    let path = revision
+        .as_ref()
+        .and_then(|guard| match &*guard.revision().subscribe().borrow() {
+            crate::SegmentRevisionState::Complete(metadata) => Some(metadata.path.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| cache.object_path(&anchor.cache_key));
+    (path, revision)
 }
 
 pub(super) fn select_critical_handoff_lease(

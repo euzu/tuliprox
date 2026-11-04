@@ -486,7 +486,7 @@ async fn expired_manifest_requires_new_qualification_without_an_explicit_fresh_r
 }
 
 #[tokio::test]
-async fn recovered_origin_requalifies_after_expired_episode_under_shared_backoff() {
+async fn recovered_pinned_origin_commits_after_expired_episode_under_shared_backoff() {
     let phase = Arc::new(AtomicUsize::new(0));
     let origin_phase = Arc::clone(&phase);
     let server = spawn_test_origin(Arc::new(move |_| match origin_phase.load(Ordering::SeqCst) {
@@ -542,11 +542,11 @@ async fn recovered_origin_requalifies_after_expired_episode_under_shared_backoff
     assert_eq!(concurrent_refreshes(&request, 20).await, 1);
     let session = request.session.read().await;
     assert_eq!(session.origin_seq_highwater, Some(101));
-    assert_eq!(session.origin_control.acceptance_generation.0, failed_generation.0 + 1);
+    assert_eq!(session.origin_control.acceptance_generation, failed_generation);
     assert!(session.allows_short_origin_windows());
     assert_eq!(session.origin_refresh.consecutive_failures, 0);
     assert!(session.fresh_manifest_commit_required.is_none());
-    assert_eq!(server.requests.lock().await.len(), requests_before_retry + 4);
+    assert_eq!(server.requests.lock().await.len(), requests_before_retry + 2);
 }
 
 #[tokio::test]

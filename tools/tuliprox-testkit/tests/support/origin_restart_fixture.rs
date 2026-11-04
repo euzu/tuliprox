@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     Router,
 };
@@ -39,9 +39,11 @@ pub enum ProviderCase {
     Redirect,
 }
 
+#[derive(Clone, Copy)]
 enum RestartScenario {
     Single,
     Double,
+    RedirectRollover,
 }
 
 pub struct Origin {
@@ -60,6 +62,8 @@ pub struct Origin {
 }
 
 impl Origin {
+    pub fn protocol(&self) -> Vec<serde_json::Value> { self.protocol.lock().unwrap().clone() }
+
     pub fn pause_observed(&self, index: usize) -> Option<tokio::time::Instant> { *self.pauses[index].lock().unwrap() }
 }
 
@@ -89,7 +93,7 @@ pub fn bytes(generation: u8, sequence: u64) -> Vec<u8> {
     [source_media(), packet.as_slice()].concat()
 }
 
-async fn origin(State(state): State<Arc<Origin>>, uri: Uri) -> Response {
+async fn origin(State(state): State<Arc<Origin>>, headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path();
     let phase = state.phase.load(Ordering::Acquire);
     state.requests.lock().unwrap().push(format!("phase={phase} {uri}"));
@@ -108,6 +112,9 @@ async fn origin(State(state): State<Arc<Origin>>, uri: Uri) -> Response {
             if state.provider.is_some() { "provider://fixture".to_string() } else { format!("http://{authority}") };
         return format!("#EXTM3U\n#EXTINF:-1 tvg-id=\"test-17\" group-title=\"Test\",Test 17\n{origin}{manifest}\n")
             .into_response();
+    }
+    if matches!(state.scenario, RestartScenario::RedirectRollover) {
+        return redirect_rollover_response(&state, &headers, &uri, phase);
     }
     if state.diagnostic_markers
         && (!path.contains(DIAGNOSTIC_AUTH_PATH)
@@ -225,6 +232,41 @@ fn double_restart_response(state: &Origin, uri: &Uri, phase: u8) -> Response {
     response
 }
 
+fn redirect_rollover_response(state: &Origin, headers: &HeaderMap, uri: &Uri, phase: u8) -> Response {
+    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("missing");
+    let response = if uri.path() == "/hls/17/index.m3u8" {
+        let target = if phase == 0 { "127.0.0.1" } else { "localhost" };
+        (
+            StatusCode::FOUND,
+            [(header::LOCATION, format!("http://{target}:{}/rollover/index.m3u8", state.address.port()))],
+        )
+            .into_response()
+    } else if uri.path() == "/rollover/index.m3u8" {
+        let head = match phase {
+            0 => 432,
+            1 => 434,
+            _ => 436,
+        };
+        let mut body = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:8\n#EXT-X-MEDIA-SEQUENCE:{head}\n");
+        for sequence in head..head + 6 {
+            writeln!(body, "#EXTINF:8.0,\n/media/{sequence}.ts?synthetic=1").unwrap();
+        }
+        ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")], body).into_response()
+    } else if let Some(seq) = uri
+        .path()
+        .strip_prefix("/media/")
+        .and_then(|file| file.strip_suffix(".ts"))
+        .and_then(|seq| seq.parse::<u64>().ok())
+        .filter(|seq| (432..444).contains(seq))
+    {
+        ([(header::CONTENT_TYPE, "video/mp2t")], Body::from(bytes(0, seq))).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    };
+    state.protocol.lock().unwrap().push(serde_json::json!({"elapsed_ms": state.started.elapsed().as_millis(), "phase": phase, "host": host, "uri": uri.to_string(), "status": response.status().as_u16()}));
+    response
+}
+
 fn configure_provider(
     paths: &FixturePaths,
     address: std::net::SocketAddr,
@@ -305,19 +347,24 @@ impl Drop for Fixture {
 
 impl Fixture {
     pub async fn start(mode: StartupMode, unchanged_first: bool) -> Result<Self, TestkitError> {
-        Self::start_with_replay(mode, unchanged_first, false, None, false).await
+        Self::start_with_replay(mode, unchanged_first, false, None, RestartScenario::Single).await
     }
 
     pub async fn start_replay(mode: StartupMode) -> Result<Self, TestkitError> {
-        Self::start_with_replay(mode, true, true, None, false).await
+        Self::start_with_replay(mode, true, true, None, RestartScenario::Single).await
     }
 
     pub async fn start_provider(sanitize: bool, case: ProviderCase) -> Result<Self, TestkitError> {
-        Self::start_with_replay(StartupMode::FirstReady, false, false, Some((sanitize, case)), false).await
+        Self::start_with_replay(StartupMode::FirstReady, false, false, Some((sanitize, case)), RestartScenario::Single)
+            .await
     }
 
     pub async fn start_double_restart(mode: StartupMode) -> Result<Self, TestkitError> {
-        Self::start_with_replay(mode, false, false, None, true).await
+        Self::start_with_replay(mode, false, false, None, RestartScenario::Double).await
+    }
+
+    pub async fn start_redirect_rollover() -> Result<Self, TestkitError> {
+        Self::start_with_replay(StartupMode::Conservative, false, false, None, RestartScenario::RedirectRollover).await
     }
 
     async fn start_with_replay(
@@ -325,7 +372,7 @@ impl Fixture {
         unchanged_first: bool,
         replay_only: bool,
         provider: Option<(bool, ProviderCase)>,
-        double_restart: bool,
+        scenario: RestartScenario,
     ) -> Result<Self, TestkitError> {
         let binary = std::env::var("TULIPROX_TESTKIT_SUT_BINARY")
             .map_err(|_| TestkitError::Configuration("set TULIPROX_TESTKIT_SUT_BINARY to the built proxy".into()))?;
@@ -340,7 +387,7 @@ impl Fixture {
             diagnostic_markers: provider.is_some() || std::env::var_os("TULIPROX_TESTKIT_DIAGNOSTIC_MARKERS").is_some(),
             provider: provider.map(|(_, case)| case),
             address,
-            scenario: if double_restart { RestartScenario::Double } else { RestartScenario::Single },
+            scenario,
             started: tokio::time::Instant::now(),
             pauses: [Mutex::new(None), Mutex::new(None)],
             protocol: Mutex::new(Vec::new()),

@@ -980,6 +980,10 @@ fn commit_normal_manifest(
     } else if let Some(staged_switch) = staged_switch {
         if staged_switch.effective_host_id != effective_host_id
             || !switch_staging_generation_matches(session, &staged_switch.generation)
+            || staged_switch
+                .content_anchor
+                .as_ref()
+                .is_some_and(|proof| !proof.is_current(session, &staged_switch.generation))
         {
             return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
         }
@@ -997,6 +1001,11 @@ fn commit_normal_manifest(
             content_length: staged_switch.ready_segment_content_length,
             ready_at_ms: rendered_at_ms,
         };
+        session.origin_content.record(
+            segment,
+            session.activity.origin_work_generation,
+            staged_switch.ready_segment_origin_digest,
+        );
         if let Some((map_id, content_length)) = staged_switch.ready_map {
             let Some(map) = session.maps.get_mut(&map_id) else {
                 return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));

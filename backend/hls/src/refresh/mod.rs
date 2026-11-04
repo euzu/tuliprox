@@ -66,7 +66,7 @@ use self::{
     failure::{apply_manifest_fetch_failure_signal, refresh_failure_backoff_schedule},
     switch_staging::{
         critical_handoff_snapshot_is_current, prepare_critical_handoff, remove_uncommitted_staged_switch_files,
-        stage_alternative_manifest_switch, switch_staging_error, verify_staged_content_anchor,
+        stage_alternative_manifest_switch, switch_staging_error, verify_content_anchor,
         verify_staged_emergency_handoff, HlsStagedSwitchCommit,
     },
     timing::{
@@ -1374,6 +1374,12 @@ async fn commit_manifest_recovery_candidate(
         let session = request.session.read().await;
         ensure_refresh_origin_work_generation_is_current(&session, request)?;
     }
+    let content_anchor =
+        if acceptance_mode == HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate {
+            Some(Box::pin(verify_content_anchor(request, &fetched)).await?)
+        } else {
+            None
+        };
     let critical_handoff =
         if matches!(acceptance_mode, HlsManifestCommitAcceptanceMode::AllowVerifiedEmergencyHostSwitchCandidate) {
             Some(Box::pin(prepare_critical_handoff(request)).await?)
@@ -1390,13 +1396,20 @@ async fn commit_manifest_recovery_candidate(
     } else {
         None
     };
+    if let Some(staged) = staged_switch.as_mut() {
+        staged.content_anchor = content_anchor;
+    }
     if let (Some(staged), Some(preparation)) = (staged_switch.as_mut(), critical_handoff) {
         staged.critical_handoff = Some(preparation);
     }
     if let Some(staged) = staged_switch.as_mut() {
         let verification = match acceptance_mode {
             HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate => {
-                Box::pin(verify_staged_content_anchor(request, &fetched, &*staged)).await
+                if staged.content_anchor.as_ref().is_some_and(|proof| proof.matches(&staged.generation)) {
+                    Ok(())
+                } else {
+                    Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))
+                }
             }
             HlsManifestCommitAcceptanceMode::AllowVerifiedEmergencyHostSwitchCandidate => {
                 Box::pin(verify_staged_emergency_handoff(request, &fetched, &*staged)).await

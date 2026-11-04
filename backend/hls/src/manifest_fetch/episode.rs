@@ -13,7 +13,6 @@ use super::{
         HlsManifestRequalificationWindow,
     },
     HlsManifestOriginRelation, HlsManifestSequenceRelation, HlsOriginManifestFetchContext,
-    HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT,
 };
 use crate::{
     hls_origin_log_value,
@@ -346,7 +345,7 @@ pub(super) async fn record_manifest_acceptance_exhaustion(
 pub(super) fn manifest_candidate_observation(
     candidate: &HlsManifestRecoveryCandidate,
     burst_plan: HlsManifestRecoveryBurstPlan,
-    committed_resource_identities: &[HlsMediaResourceIdentity],
+    committed_anchor: Option<&crate::refresh::origin_probe::HlsOriginContentAnchor>,
     published_resource_identities: &[HlsMediaResourceIdentity],
 ) -> HlsManifestCandidateObservation {
     let host_relation = match candidate.report.quality.host_relation {
@@ -375,12 +374,28 @@ pub(super) fn manifest_candidate_observation(
         // a restart from old media; this is no media-progress evidence itself.
         resource_timeline_evidence = HlsResourceTimelineEvidence::Eligible;
     }
-    let committed_content_anchor = timeline_fingerprint
-        .segment_samples
-        .first()
-        .and_then(|segment| segment.normalized_resource_identity)
-        .filter(|identity| {
-            committed_resource_identities.iter().any(|committed| committed.same_path_and_range(*identity))
+    let committed_content_anchor = committed_anchor
+        .filter(|anchor| {
+            let tuliprox_parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(manifest) =
+                tuliprox_parser::hls::origin_manifest::parse_origin_media_manifest(
+                    &candidate.fetched.body,
+                    &candidate.fetched.final_manifest_url,
+                )
+            else {
+                return false;
+            };
+            manifest
+                .segments
+                .iter()
+                .find(|segment| segment.origin_seq == anchor.origin_key.host_local_sequence)
+                .is_some_and(|segment| {
+                    segment.map_ref.is_none()
+                        && segment.encryption.is_none()
+                        && anchor.identity.same_path_and_range(HlsMediaResourceIdentity::from_url(
+                            &segment.resolved_origin_url,
+                            segment.origin_byte_range,
+                        ))
+                })
         })
         .filter(|_| {
             emergency_evidence.live_handoff == HlsEmergencyLiveHandoffCompatibility::RequiresStagedTrackVerification
@@ -424,7 +439,7 @@ pub(super) fn manifest_candidate_observation(
 }
 
 pub(super) struct HlsCommittedResourceEvidence {
-    pub(super) ready_identities: Vec<HlsMediaResourceIdentity>,
+    pub(super) anchor: Option<crate::refresh::origin_probe::HlsOriginContentAnchor>,
     pub(super) published_identities: Vec<HlsMediaResourceIdentity>,
     pub(super) published_entries: Vec<(HlsMediaResourceIdentity, u64)>,
     pub(super) previous_proxy_tail: Option<u64>,
@@ -437,22 +452,11 @@ pub(super) async fn committed_resource_evidence(
     context: &HlsOriginManifestFetchContext,
 ) -> HlsCommittedResourceEvidence {
     let session = context.session.read().await;
-    let ready_identities = session
-        .segments
-        .values()
-        .rev()
-        .filter(|entry| entry.origin_key.origin_epoch == session.origin_epoch)
-        .filter(|entry| matches!(&entry.status, crate::SegmentCacheStatus::Ready { .. }))
-        .filter_map(|entry| {
-            let fetch_ref = entry.origin_fetch_ref.as_ref()?;
-            Some(HlsMediaResourceIdentity::from_url(&fetch_ref.resolved_origin_url, fetch_ref.byte_range))
-        })
-        .take(HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT)
-        .collect::<Vec<_>>();
+    let anchor = crate::refresh::origin_probe::HlsOriginContentEvidence::latest_ready(&session);
     let published_entries = session.published_resource_history.recent_entries(usize::MAX).collect::<Vec<_>>();
     let published_identities = published_entries.iter().map(|(identity, _)| *identity).collect();
     HlsCommittedResourceEvidence {
-        ready_identities,
+        anchor,
         published_identities,
         published_entries,
         previous_proxy_tail: session.proxy_next_seq.and_then(|next| next.checked_sub(1)),

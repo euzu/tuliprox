@@ -39,6 +39,26 @@ struct OriginContentRecord {
     identity: HlsMediaResourceIdentity,
     generation: u64,
     digest: [u8; 32],
+    ready_revision: Option<(u64, u64)>,
+}
+
+/// One successful READY commit, including its original, pre-processing bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HlsOriginContentAnchor {
+    pub(crate) proxy_seq: u64,
+    pub(crate) origin_key: OriginSegmentKey,
+    pub(crate) cache_key: SegmentCacheKey,
+    pub(crate) identity: HlsMediaResourceIdentity,
+    pub(crate) digest: [u8; 32],
+    generation: u64,
+    ready_revision: (u64, u64),
+}
+
+fn ready_revision(entry: &SegmentEntry) -> Option<(u64, u64)> {
+    match entry.status {
+        SegmentCacheStatus::Ready { content_length, ready_at_ms } => Some((content_length, ready_at_ms)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -55,11 +75,35 @@ impl HlsOriginContentEvidence {
                 identity,
                 generation,
                 digest,
+                ready_revision: ready_revision(entry),
             },
         );
         while self.0.len() > CONTENT_EVIDENCE_LIMIT {
             self.0.pop_first();
         }
+    }
+
+    /// Discovery, in-flight fetches and staged candidates cannot advance this reference.
+    /// If the newest READY medium has no usable raw proof, do not substitute an older one.
+    pub(crate) fn latest_ready(session: &HlsSession) -> Option<HlsOriginContentAnchor> {
+        let entry =
+            session.segments.values().rev().find(|entry| {
+                entry.origin_key.origin_epoch == session.origin_epoch && ready_revision(entry).is_some()
+            })?;
+        if entry.map_ref.is_some() || entry.encryption.is_some() || !entry.proxy_file_ext.eq_ignore_ascii_case("ts") {
+            return None;
+        }
+        let digest = session.origin_content.digest(entry, session.activity.origin_work_generation)?;
+        let record = session.origin_content.0.get(&entry.proxy_seq)?;
+        Some(HlsOriginContentAnchor {
+            proxy_seq: entry.proxy_seq,
+            origin_key: entry.origin_key,
+            cache_key: entry.cache_key.clone(),
+            identity: record.identity,
+            digest,
+            generation: record.generation,
+            ready_revision: ready_revision(entry)?,
+        })
     }
 
     pub(super) fn digest(&self, entry: &SegmentEntry, generation: u64) -> Option<[u8; 32]> {
@@ -70,6 +114,7 @@ impl HlsOriginContentEvidence {
                     && record.cache_key == entry.cache_key
                     && entry.media_resource_identity() == Some(record.identity)
                     && record.generation <= generation
+                    && record.ready_revision == ready_revision(entry)
             })
             .map(|record| record.digest)
     }
@@ -967,7 +1012,7 @@ async fn ensure_compatible_tracks(
     Ok(())
 }
 
-async fn sha256_file(path: &std::path::Path) -> Result<[u8; 32], HlsManifestCommitError> {
+pub(super) async fn sha256_file(path: &std::path::Path) -> Result<[u8; 32], HlsManifestCommitError> {
     let mut file = tokio::fs::File::open(path).await.map_err(|_| unavailable())?;
     let mut hasher = Sha256::new();
     let mut chunk = [0_u8; 16 * 1024];
