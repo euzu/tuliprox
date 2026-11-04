@@ -162,8 +162,10 @@ once the plugin is enabled and the playlist is refreshed.
 - Each call runs in a fresh instance with a deadline of `plugins.max_exec` times 10, never more than `plugins.max_task_exec`
   (`backend/plugins/src/input_provider.rs`).
 - A failed call fails only the input that asked for it, the same as an unreachable provider.
-- The Web UI source editor builds the same entry: add the **Plugin** input and pick the plugin in its **Plugin** field.
-  The picker lists the installed plugins that export `input.fetch`. The editor shows only the fields every input has;
+- The Web UI source editor builds the same entry: every enabled plugin that exports `input.fetch` has its own tile in
+  the sidebar, and the block it adds already names the plugin (see
+  [Source editor tiles](./settings.md#source-editor-tiles)). The plugin can be changed in the block's **Plugin**
+  field, which lists the installed plugins that export `input.fetch`. The editor shows only the fields every input has;
   the plugin adds its own with `ui.input_form` and reads them from `input-request.options` (see
   [Input and output forms](./settings.md#input-and-output-forms)).
 - `plugin_config` holds those per-input values. The host hands them over as `input-request.options`; an input without
@@ -188,8 +190,9 @@ output:
 - `plugin_config` is the plugin's own settings for this output, passed as `output-request.options` in key order. A
   string keeps its text, any other value is its JSON text, a nested object is flattened with dotted keys.
 - `filter` selects the items the output receives.
-- The Web UI source editor builds the same entry: add the **Plugin** output and pick the plugin in its **Plugin** field.
-  The picker lists the installed plugins that export `output.render`. `format` is not asked for: it must equal the
+- The Web UI source editor builds the same entry: every enabled plugin that exports `output.render` has its own tile in
+  the sidebar's **Output** group, and the block it adds already names the plugin. The block's **Plugin** field lists
+  the installed plugins that export `output.render`. `format` is not asked for: it must equal the
   plugin's `provides.output_format`, so the editor leaves it out and the host uses the plugin's own.
 - `plugin_config` holds the per-output values, handed over as `output-request.options`. The plugin declares the fields
   with `ui.output_form`.

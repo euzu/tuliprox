@@ -14,7 +14,7 @@ mod schema_form;
 pub use self::plugins_view::*;
 pub(crate) use self::{
     plugin_frame::PluginFrame,
-    plugin_i18n::{resolve_text, translate_schema},
+    plugin_i18n::{resolve_text, title_or_key, translate_schema},
     plugin_slot::*,
     plugin_updates::PluginUpdateSettings,
     schema_form::{prefill_defaults, SchemaForm},

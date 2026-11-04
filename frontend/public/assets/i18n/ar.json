@@ -2742,6 +2742,13 @@
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputM3u": "M3u",
     "BRICK_OutputPlugin": "إضافة",
+    "PLUGIN_ISSUE_MISSING": "الإضافة «{plugin}» غير مثبتة أو لم يتم تحميلها",
+    "PLUGIN_ISSUE_NOT_CHOSEN": "لم يتم اختيار أي إضافة",
+    "PLUGIN_ISSUE_NOT_INPUT_PROVIDER": "الإضافة «{plugin}» لا توفر مدخلات",
+    "PLUGIN_ISSUE_NOT_OUTPUT_PROVIDER": "الإضافة «{plugin}» لا تُنشئ مخرجات",
+    "PLUGIN_ISSUE_UNAVAILABLE": "الإضافة «{plugin}» غير متاحة: {reason}",
+    "PLUGIN_TILE_NONE_INPUT": "لا توجد إضافة مدخلات مثبتة. ثبّت واحدة من صفحة الإضافات.",
+    "PLUGIN_TILE_NONE_OUTPUT": "لا توجد إضافة مخرجات مثبتة. ثبّت واحدة من صفحة الإضافات.",
     "BRICK_OutputStrm": "STRM",
     "BRICK_OutputXtream": "Xtream",
     "BRICK_Target": "هدف"

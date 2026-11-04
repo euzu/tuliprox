@@ -766,6 +766,8 @@ body {
   --brick-port-hover-color: var(--theme-brand-brick-port-hover);
 
   --source-editor-delete-color: var(--theme-brand-danger-strong);
+  --source-editor-plugin-issue-color: var(--theme-brand-danger-strong);
+  --source-editor-plugin-issue-text-color: var(--theme-brand-text-inverse);
   --source-editor-line-color: color-mix(in srgb, var(--theme-brand-text) 48%, var(--theme-brand-primary-border) 52%);
   --source-editor-active-line-color: color-mix(in srgb, var(--theme-brand-text) 18%, var(--theme-brand-positive) 82%);
   --source-editor-pending-line-color: color-mix(in srgb, var(--theme-brand-text) 20%, var(--theme-brand-warning-strong) 80%);

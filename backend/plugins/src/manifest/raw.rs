@@ -85,6 +85,19 @@ pub(super) struct RawUi {
     pub input_form: Vec<RawFormSection>,
     #[serde(default, deserialize_with = "null_default")]
     pub output_form: Vec<RawFormSection>,
+    pub input_tile: Option<RawSourceTile>,
+    pub output_tile: Option<RawSourceTile>,
+}
+
+/// `ui.input_tile` / `ui.output_tile`: how the provider's tile looks in the
+/// source editor sidebar.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct RawSourceTile {
+    pub title: Option<String>,
+    pub title_key: Option<String>,
+    pub icon: Option<String>,
+    pub description: Option<String>,
+    pub description_key: Option<String>,
 }
 
 /// One entry of `ui.input_form` / `ui.output_form`.

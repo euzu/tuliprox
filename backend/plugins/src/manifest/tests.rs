@@ -545,6 +545,50 @@ fn form_sections_parse_with_their_titles() {
     assert_eq!(output.title_key.as_deref(), Some("form.columns"));
 }
 
+/// `MINIMAL` as an input provider and an output renderer.
+const PROVIDER: &str = "hooks: [input.fetch, output.render]\nprovides: { input_type: true, output_format: demo-out }\n";
+
+#[test]
+fn source_tiles_parse_with_every_field_optional() {
+    let manifest = parse(&with(&format!(
+        "{PROVIDER}ui:\n  locales: [en]\n  input_tile:\n    title: YouTube\n    title_key: tile.input\n    icon: Video\n    description: Channels and playlists\n    description_key: tile.input_hint\n  output_tile: {{}}\n"
+    )))
+    .unwrap();
+
+    let input = manifest.ui.input_tile.as_ref().unwrap();
+    assert_eq!(input.title.as_deref(), Some("YouTube"));
+    assert_eq!(input.title_key.as_deref(), Some("tile.input"));
+    assert_eq!(input.icon.as_deref(), Some("Video"));
+    assert_eq!(input.description.as_deref(), Some("Channels and playlists"));
+    assert_eq!(input.description_key.as_deref(), Some("tile.input_hint"));
+    assert_eq!(manifest.ui.output_tile, Some(SourceTile::default()), "an empty tile takes the host's defaults");
+
+    let without = parse(&with(PROVIDER)).unwrap();
+    assert_eq!((without.ui.input_tile, without.ui.output_tile), (None, None));
+}
+
+#[test]
+fn source_tiles_need_their_hook_a_short_title_and_locales_for_keys() {
+    assert_problem(&with("ui:\n  input_tile: { title: X }\n"), "`ui.input_tile` is declared but hook `input.fetch`");
+    assert_problem(
+        &with("ui:\n  output_tile: { title: X }\n"),
+        "`ui.output_tile` is declared but hook `output.render`",
+    );
+    assert_problem(
+        &with(&format!("{PROVIDER}ui:\n  input_tile: {{ title: \"{}\" }}\n", "x".repeat(41))),
+        "ui.input_tile.title is longer than 40 characters",
+    );
+    assert_problem(
+        &with(&format!("{PROVIDER}ui:\n  output_tile: {{ title: \"a\\tb\" }}\n")),
+        "ui.output_tile.title must not contain control characters",
+    );
+    assert_problem(
+        &with(&format!("{PROVIDER}ui:\n  input_tile: {{ description_key: tile.hint }}\n")),
+        "ui.input_tile.description_key `tile.hint` needs `ui.locales`",
+    );
+    assert!(parse(&with(&format!("{PROVIDER}ui:\n  input_tile: {{ title: \"{}\" }}\n", "x".repeat(40)))).is_ok());
+}
+
 #[test]
 fn unknown_config_sections_are_reported_against_the_hosts_list() {
     let manifest = parse(&with(

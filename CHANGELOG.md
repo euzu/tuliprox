@@ -204,6 +204,16 @@
   a channel to be a plugin; nothing is removed or renamed. The plugin system and its SDK gained what these plugins needed
   (see the entries below), so a channel can move into a plugin later without further host work.
 
+- **Source editor: one sidebar tile per input and output plugin.** Every enabled plugin that provides inputs
+  (`input.fetch`) or renders outputs (`output.render`) now has its own tile in the source editor sidebar, titled with
+  the plugin's name, in place of the single generic **Plugin** tile. Dropping it adds a block that already names the
+  plugin, so its form opens with the plugin's fields. A plugin block shows the plugin's name on the canvas, and a block
+  whose plugin is not chosen, not installed, disabled, failed or no longer a provider gets a red badge saying why.
+  Plugins can set the tile's title, icon and tooltip, translated or not, with the new optional manifest entries
+  `ui.input_tile` / `ui.output_tile` (see `docs/src/plugins/settings.md#source-editor-tiles`). `youtube-input` uses
+  it. `GET /api/v1/plugins/ui` now lists every provider, also one without a `ui:` part, with its resolved
+  `inputTile` / `outputTile`.
+
 - **`youtube-input` plugin: Ingest YouTube channels, playlists, and live streams as playlist channels.**
   The `youtube-input` plugin (`plugins/inputs/youtube-input`) provides an input source (`type: plugin`) that discovers
   YouTube videos via lightweight Atom feeds and resolves streams using standard Invidious REST endpoints with instance

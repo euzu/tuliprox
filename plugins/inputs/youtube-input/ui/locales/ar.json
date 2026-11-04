@@ -10,5 +10,7 @@
   "form.max_uploads.title": "الحد الأقصى للتحميلات",
   "form.max_uploads.description": "عدد التحميلات الحديثة المأخوذة لكل قناة (من 1 إلى 15).",
   "form.cache_ttl_minutes.title": "مدة كاش البث (دقائق)",
-  "form.cache_ttl_minutes.description": "مدة إعادة استخدام هذا الإدخال لعنوان بث مُستخرَج (من 10 إلى 360)."
+  "form.cache_ttl_minutes.description": "مدة إعادة استخدام هذا الإدخال لعنوان بث مُستخرَج (من 10 إلى 360).",
+  "tile.title": "يوتيوب",
+  "tile.description": "قنوات يوتيوب وقوائم التشغيل والبث المباشر كقنوات في قائمة التشغيل."
 }

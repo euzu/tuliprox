@@ -3,10 +3,11 @@
 use super::{
     hook::{HookId, Requirement},
     raw::{
-        RawConfigExtension, RawConfigTab, RawContribution, RawFormSection, RawManifest, RawRpcExport, RawTask, RawUi,
+        RawConfigExtension, RawConfigTab, RawContribution, RawFormSection, RawManifest, RawRpcExport, RawSourceTile,
+        RawTask, RawUi,
     },
     Concurrency, ConfigExtension, ConfigSection, ConfigTab, ConfigTabSource, Contribution, FailMode, FormSection,
-    Manifest, Provides, Resources, RpcExport, RpcKind, Scope, Slot, Task, Ui, HOST_API_VERSION,
+    Manifest, Provides, Resources, RpcExport, RpcKind, Scope, Slot, SourceTile, Task, Ui, HOST_API_VERSION,
 };
 use regex::Regex;
 use semver::Version;
@@ -21,6 +22,9 @@ use std::{
 const TASK_ID_LEN: std::ops::RangeInclusive<usize> = 2..=41;
 /// Output format ids and rpc names: kebab case, `^[a-z][a-z0-9-]{0,63}$`.
 const NAME_LEN: std::ops::RangeInclusive<usize> = 1..=64;
+/// The longest `ui.input_tile.title` / `ui.output_tile.title`, in chars: a
+/// sidebar tile has room for a short label only.
+const TILE_TITLE_CHARS: usize = 40;
 
 /// Collects violations and tells apart "absent" from "present but wrong".
 struct Errors(Vec<String>);
@@ -299,7 +303,43 @@ fn check_ui(raw: RawUi, errors: &mut Errors) -> Ui {
     let rpc_exports = check_rpc_exports(raw.rpc_exports, errors);
     let input_form = check_form_sections(raw.input_form, "ui.input_form", errors);
     let output_form = check_form_sections(raw.output_form, "ui.output_form", errors);
-    Ui { config_section, config_extensions, config_tab, locales, contributions, rpc_exports, input_form, output_form }
+    let input_tile = raw.input_tile.map(|tile| check_source_tile(tile, "ui.input_tile", errors));
+    let output_tile = raw.output_tile.map(|tile| check_source_tile(tile, "ui.output_tile", errors));
+    Ui {
+        config_section,
+        config_extensions,
+        config_tab,
+        locales,
+        contributions,
+        rpc_exports,
+        input_form,
+        output_form,
+        input_tile,
+        output_tile,
+    }
+}
+
+/// `ui.input_tile` / `ui.output_tile`: every field is optional, a title must
+/// fit on a sidebar tile and must not carry control characters.
+fn check_source_tile(raw: RawSourceTile, field: &str, errors: &mut Errors) -> SourceTile {
+    let title = non_blank(raw.title).filter(|title| {
+        if title.chars().any(char::is_control) {
+            errors.push(format!("{field}.title must not contain control characters"));
+            false
+        } else if title.chars().count() > TILE_TITLE_CHARS {
+            errors.push(format!("{field}.title is longer than {TILE_TITLE_CHARS} characters"));
+            false
+        } else {
+            true
+        }
+    });
+    SourceTile {
+        title,
+        title_key: non_blank(raw.title_key),
+        icon: non_blank(raw.icon),
+        description: non_blank(raw.description),
+        description_key: non_blank(raw.description_key),
+    }
 }
 
 /// The sections of one form: an id (unique in the form), an optional title and a
@@ -544,6 +584,8 @@ fn check_declarations_have_hooks(manifest: &Manifest, errors: &mut Errors) {
     orphan(!manifest.ui.rpc_exports.is_empty(), "`ui.rpc_exports`", HookId::RpcCall);
     orphan(manifest.provides.input_type, "`provides.input_type`", HookId::InputFetch);
     orphan(manifest.provides.output_format.is_some(), "`provides.output_format`", HookId::OutputRender);
+    orphan(manifest.ui.input_tile.is_some(), "`ui.input_tile`", HookId::InputFetch);
+    orphan(manifest.ui.output_tile.is_some(), "`ui.output_tile`", HookId::OutputRender);
 }
 
 /// `title_key`s resolve in `ui/locales`, so they need at least one locale.
@@ -555,5 +597,13 @@ fn check_title_keys(manifest: &Manifest, errors: &mut Errors) {
     let slot_keys = manifest.ui.contributions.iter().filter_map(|contribution| contribution.title_key.as_deref());
     for key in tab_key.chain(slot_keys) {
         errors.push(format!("title_key `{key}` needs `ui.locales` to resolve in"));
+    }
+    for (field, tile) in [("ui.input_tile", &manifest.ui.input_tile), ("ui.output_tile", &manifest.ui.output_tile)] {
+        let Some(tile) = tile else { continue };
+        for (name, key) in [("title_key", &tile.title_key), ("description_key", &tile.description_key)] {
+            if let Some(key) = key {
+                errors.push(format!("{field}.{name} `{key}` needs `ui.locales` to resolve in"));
+            }
+        }
     }
 }

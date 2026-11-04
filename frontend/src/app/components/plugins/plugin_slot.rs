@@ -126,6 +126,10 @@ pub struct PluginUiContext {
     pub service: Rc<PluginUiService>,
     /// Loads the list again. To be called after a plugin was installed, enabled, disabled or removed.
     pub refresh: Callback<()>,
+    /// The list was loaded at least once. Until then — and for good when the
+    /// user may not read the system, or the request failed — an empty list says
+    /// nothing about which plugins are installed.
+    pub loaded: bool,
 }
 
 impl PartialEq for PluginUiContext {
@@ -134,10 +138,23 @@ impl PartialEq for PluginUiContext {
             && Rc::ptr_eq(&self.strings, &other.strings)
             && Rc::ptr_eq(&self.service, &other.service)
             && self.refresh == other.refresh
+            && self.loaded == other.loaded
     }
 }
 
 impl PluginUiContext {
+    /// A context over a fixed list, for the tests of the components that read it.
+    #[cfg(test)]
+    pub fn for_tests(
+        plugins: Vec<Rc<PluginUiDto>>,
+        strings: HashMap<String, PluginStrings>,
+        service: Rc<PluginUiService>,
+        refresh: Callback<()>,
+        loaded: bool,
+    ) -> Self {
+        Self { plugins: Rc::new(plugins), strings: Rc::new(strings), service, refresh, loaded }
+    }
+
     /// The strings of a plugin for the active locale; empty when it has none.
     pub fn strings_for(&self, plugin_id: &str) -> PluginStrings {
         self.strings.get(plugin_id).cloned().unwrap_or_default()
@@ -241,6 +258,7 @@ pub fn PluginUiProvider(props: &PluginUiProviderProps) -> Html {
     let service = use_memo((), |()| Rc::new(PluginUiService::new()));
     let can_read = services.auth.has_permission(Permission::SystemRead);
     let plugins = use_state(|| Rc::new(Vec::<Rc<PluginUiDto>>::new()));
+    let loaded = use_state(|| false);
     let strings = use_state(|| Rc::new(HashMap::<String, PluginStrings>::new()));
     let refreshes = use_reducer(|| RefreshCount(0));
 
@@ -252,6 +270,7 @@ pub fn PluginUiProvider(props: &PluginUiProviderProps) -> Html {
     {
         let service = Rc::clone(&service);
         let plugins = plugins.clone();
+        let loaded = loaded.clone();
         use_effect_with((can_read, refreshes.0), move |(can_read, _)| {
             let cancelled = Rc::new(Cell::new(false));
             if *can_read {
@@ -264,6 +283,7 @@ pub fn PluginUiProvider(props: &PluginUiProviderProps) -> Html {
                             if !unchanged {
                                 plugins.set(Rc::new(list.into_iter().map(Rc::new).collect()));
                             }
+                            loaded.set(true);
                         }
                         Ok(_) => {}
                         Err(err) => log::warn!("plugin ui list not loaded: {err}"),
@@ -316,6 +336,7 @@ pub fn PluginUiProvider(props: &PluginUiProviderProps) -> Html {
         strings: (*strings).clone(),
         service: Rc::clone(&service),
         refresh,
+        loaded: *loaded,
     };
     html! {
         <yew::ContextProvider<PluginUiContext> context={context}>
@@ -613,6 +634,8 @@ mod tests {
             config_tab: None,
             input_form: Vec::new(),
             output_form: Vec::new(),
+            input_tile: None,
+            output_tile: None,
             contributions,
             rpc_exports: Vec::<PluginRpcExportDto>::new(),
         })
@@ -633,6 +656,7 @@ mod tests {
             ),
             service: Rc::new(PluginUiService::with_base("/".to_string())),
             refresh: Callback::noop(),
+            loaded: true,
         }
     }
 

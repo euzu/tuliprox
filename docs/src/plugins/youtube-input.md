@@ -26,9 +26,9 @@ The optional `url` property on an input specifies the target (or comma-separated
 entries of `settings.channels` are split the same way. When `url` is omitted, the input processes the targets
 configured globally under `settings.channels`. An input without any target fails instead of producing an empty playlist.
 
-The Web UI source editor builds the same entry: add the **Plugin** input, choose `youtube-input` in the plugin field,
-and enter the target in `Url`. The picker offers the installed plugins that export the `input.fetch` hook; the plugin's
-own settings stay under **Plugins**.
+The Web UI source editor builds the same entry: drag the **YouTube** tile from the **Inputs** group of the sidebar
+onto the canvas, open the block, and enter the target in `Url`. The block already names `youtube-input`. The tile is
+declared with `ui.input_tile` (see [Source editor tiles](./settings.md#source-editor-tiles)).
 
 ## Where the configuration lives
 

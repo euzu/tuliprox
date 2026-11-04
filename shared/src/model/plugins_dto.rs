@@ -550,9 +550,32 @@ pub struct PluginFormSectionDto {
     pub schema: Value,
 }
 
+/// The source editor tile of an input or output provider: `ui.input_tile` /
+/// `ui.output_tile`, with the host's defaults filled in. It is sent exactly for
+/// a plugin that declares the matching hook (`input.fetch` / `output.render`),
+/// whether or not the manifest has the `ui` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSourceTileDto {
+    /// Literal title; the manifest's `title`, else the plugin's `name`.
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_key: Option<String>,
+    /// Name of an icon of the web UI's icon set. Never a URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Tooltip text; the manifest's tile `description`, else the plugin's
+    /// `description`. Sanitized: control characters stripped, at most 512 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_key: Option<String>,
+}
+
 /// One plugin in `GET /api/v1/plugins/ui`: everything the web UI renders for
-/// it. Listed for every plugin with a `ui:` part whose state is `enabled`,
-/// `disabled` or `failed`, so disabled and failed ones render greyed out.
+/// it. Listed for every plugin with a `ui:` part, and for every input or output
+/// provider, whose state is `enabled`, `disabled` or `failed`, so disabled and
+/// failed ones render greyed out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginUiDto {
@@ -575,6 +598,14 @@ pub struct PluginUiDto {
     /// `ui.output_form`: the fields this plugin adds to a `type: plugin` output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_form: Vec<PluginFormSectionDto>,
+    /// Present iff the plugin provides inputs (`input.fetch`): its source
+    /// editor tile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tile: Option<PluginSourceTileDto>,
+    /// Present iff the plugin renders outputs (`output.render`): its source
+    /// editor tile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tile: Option<PluginSourceTileDto>,
     pub contributions: Vec<PluginContributionDto>,
     pub rpc_exports: Vec<PluginRpcExportDto>,
 }

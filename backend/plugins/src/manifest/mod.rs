@@ -264,6 +264,19 @@ pub(crate) struct FormSection {
     pub schema: String,
 }
 
+/// `ui.input_tile` / `ui.output_tile`: the provider's tile in the source
+/// editor sidebar. Every field is optional; the host falls back to the
+/// plugin's `name` and `description`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SourceTile {
+    pub title: Option<String>,
+    pub title_key: Option<String>,
+    /// Name of an icon of the web UI's icon set.
+    pub icon: Option<String>,
+    pub description: Option<String>,
+    pub description_key: Option<String>,
+}
+
 /// `ui:`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Ui {
@@ -277,6 +290,10 @@ pub(crate) struct Ui {
     pub input_form: Vec<FormSection>,
     /// Fields a `type: plugin` output shows, from this plugin.
     pub output_form: Vec<FormSection>,
+    /// The look of the input tile; needs `input.fetch`.
+    pub input_tile: Option<SourceTile>,
+    /// The look of the output tile; needs `output.render`.
+    pub output_tile: Option<SourceTile>,
 }
 
 /// What happens to the target when a hook call fails.

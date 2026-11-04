@@ -10,5 +10,7 @@
   "form.max_uploads.title": "Максимум загрузок",
   "form.max_uploads.description": "Сколько последних загрузок брать на канал (1–15).",
   "form.cache_ttl_minutes.title": "TTL кэша потоков (минуты)",
-  "form.cache_ttl_minutes.description": "Как долго этот ввод повторно использует найденный URL потока (10–360)."
+  "form.cache_ttl_minutes.description": "Как долго этот ввод повторно использует найденный URL потока (10–360).",
+  "tile.title": "YouTube",
+  "tile.description": "Каналы, плейлисты и прямые трансляции YouTube как каналы плейлиста."
 }

@@ -2742,6 +2742,13 @@
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputM3u": "M3u",
     "BRICK_OutputPlugin": "Плагин",
+    "PLUGIN_ISSUE_MISSING": "Плагин «{plugin}» не установлен или не загружен",
+    "PLUGIN_ISSUE_NOT_CHOSEN": "Плагин не выбран",
+    "PLUGIN_ISSUE_NOT_INPUT_PROVIDER": "Плагин «{plugin}» не предоставляет входы",
+    "PLUGIN_ISSUE_NOT_OUTPUT_PROVIDER": "Плагин «{plugin}» не формирует выходы",
+    "PLUGIN_ISSUE_UNAVAILABLE": "Плагин «{plugin}» недоступен: {reason}",
+    "PLUGIN_TILE_NONE_INPUT": "Не установлен ни один плагин ввода. Установите его на странице «Плагины».",
+    "PLUGIN_TILE_NONE_OUTPUT": "Не установлен ни один плагин вывода. Установите его на странице «Плагины».",
     "BRICK_OutputStrm": "STRM",
     "BRICK_OutputXtream": "Xtream",
     "BRICK_Target": "Цель"

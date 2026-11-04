@@ -114,6 +114,33 @@ $port-size: 10px;
   }
 
 
+  // A plugin block whose plugin cannot run.
+  &--plugin-issue {
+    .tp__source-editor__block-content {
+      border-color: var(--source-editor-plugin-issue-color);
+      border-style: dashed;
+    }
+  }
+
+  &-issue {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    font-size: 10px;
+    font-weight: bold;
+    line-height: 1;
+    color: var(--source-editor-plugin-issue-text-color);
+    background-color: var(--source-editor-plugin-issue-color);
+    cursor: help;
+  }
+
   &-delete {
     display: flex;
     justify-content: center;

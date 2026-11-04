@@ -2742,6 +2742,13 @@
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputM3u": "M3u",
     "BRICK_OutputPlugin": "Plugin",
+    "PLUGIN_ISSUE_MISSING": "El plugin «{plugin}» no está instalado o no se ha cargado",
+    "PLUGIN_ISSUE_NOT_CHOSEN": "No se ha elegido ningún plugin",
+    "PLUGIN_ISSUE_NOT_INPUT_PROVIDER": "El plugin «{plugin}» no proporciona entradas",
+    "PLUGIN_ISSUE_NOT_OUTPUT_PROVIDER": "El plugin «{plugin}» no genera salidas",
+    "PLUGIN_ISSUE_UNAVAILABLE": "El plugin «{plugin}» no está disponible: {reason}",
+    "PLUGIN_TILE_NONE_INPUT": "No hay ningún plugin de entrada instalado. Instala uno en la página Plugins.",
+    "PLUGIN_TILE_NONE_OUTPUT": "No hay ningún plugin de salida instalado. Instala uno en la página Plugins.",
     "BRICK_OutputStrm": "STRM",
     "BRICK_OutputXtream": "Xtream",
     "BRICK_Target": "Destino"

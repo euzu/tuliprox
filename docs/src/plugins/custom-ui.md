@@ -59,7 +59,7 @@ and the same names are used in the manifest:
 | `menu` | A page in the main menu |
 | `config-section` | The plugin's settings form |
 | `config-tab` | A tab on the config page. Each contribution is its own tab, next to the `ui.config_tab` tab if the plugin also has one |
-| `source-editor-tile` | A tile in the source editor |
+| `source-editor-tile` | A frame on the source editor canvas, shared by every contributing plugin. Not an input or output: a provider's sidebar tile is `ui.input_tile` / `ui.output_tile` ([Source editor tiles](./settings.md#source-editor-tiles)) |
 | `dashboard-card` | A card on the dashboard |
 | `playlist-explorer-action` | An action on the selected channels of the playlist explorer |
 | `channel-detail-panel` | A panel in the series view of the playlist explorer; for live and VOD channels, an entry in the channel's menu that opens the panel in a dialog |

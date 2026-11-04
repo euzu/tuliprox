@@ -76,6 +76,9 @@ impl BlockType {
 
     pub fn is_chainable_input(&self) -> bool { matches!(self, Self::InputM3u | Self::InputXtream) }
 
+    /// A `type: plugin` input or output: the block names the plugin it runs on.
+    pub fn is_plugin(&self) -> bool { matches!(self, Self::InputPlugin | Self::OutputPlugin) }
+
     /// Left port — block can receive a connection.
     pub fn has_input_port(&self) -> bool { self.is_target() || self.is_output() || self.is_chainable_input() }
 
@@ -151,6 +154,47 @@ impl fmt::Display for BlockType {
     }
 }
 pub(crate) type BlockId = u16;
+
+/// What a sidebar tile adds: a block type and, for a plugin tile, the plugin
+/// the new input or output runs on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockSpec {
+    pub block_type: BlockType,
+    /// Only for [`BlockType::is_plugin`] types; `None` adds a plugin block with
+    /// no plugin chosen yet.
+    pub plugin: Option<String>,
+}
+
+impl BlockSpec {
+    pub const fn of(block_type: BlockType) -> Self { Self { block_type, plugin: None } }
+
+    pub fn with_plugin(block_type: BlockType, plugin_id: &str) -> Self {
+        Self { block_type, plugin: block_type.is_plugin().then(|| plugin_id.to_string()) }
+    }
+
+    /// The `text/plain` payload of a sidebar drag: `InputXtream`, or
+    /// `InputPlugin:youtube-input` for a plugin tile. A plugin id never holds a
+    /// `:`, so the first one splits.
+    pub fn to_drag_data(&self) -> String {
+        match &self.plugin {
+            Some(plugin_id) => format!("{}:{plugin_id}", self.block_type),
+            None => self.block_type.to_string(),
+        }
+    }
+
+    /// The inverse of [`Self::to_drag_data`]. A plugin id on a block type that
+    /// takes none, or a blank one, is dropped.
+    pub fn from_drag_data(data: &str) -> Self {
+        let (block_type, plugin_id) = data.split_once(':').unwrap_or((data, ""));
+        let block_type = BlockType::from(block_type.trim());
+        let plugin_id = plugin_id.trim();
+        if plugin_id.is_empty() {
+            Self::of(block_type)
+        } else {
+            Self::with_plugin(block_type, plugin_id)
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Block {
@@ -238,6 +282,30 @@ impl PartialEq for SourceEditorContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_specs_round_trip_through_the_drag_payload() {
+        let plain = BlockSpec::of(BlockType::InputXtream);
+        assert_eq!(plain.to_drag_data(), "InputXtream");
+        assert_eq!(BlockSpec::from_drag_data("InputXtream"), plain);
+
+        let input = BlockSpec::with_plugin(BlockType::InputPlugin, "youtube-input");
+        assert_eq!(input.to_drag_data(), "InputPlugin:youtube-input");
+        assert_eq!(BlockSpec::from_drag_data("InputPlugin:youtube-input"), input);
+
+        let output = BlockSpec::with_plugin(BlockType::OutputPlugin, "csv-out");
+        assert_eq!(BlockSpec::from_drag_data(&output.to_drag_data()), output);
+    }
+
+    #[test]
+    fn a_plugin_id_only_sticks_to_plugin_blocks() {
+        assert_eq!(BlockSpec::with_plugin(BlockType::InputM3u, "x").plugin, None);
+        assert_eq!(BlockSpec::from_drag_data("InputM3u:x"), BlockSpec::of(BlockType::InputM3u));
+        assert_eq!(BlockSpec::from_drag_data("InputPlugin:  "), BlockSpec::of(BlockType::InputPlugin));
+        assert_eq!(BlockSpec::from_drag_data("InputPlugin"), BlockSpec::of(BlockType::InputPlugin));
+        assert!(BlockType::InputPlugin.is_plugin() && BlockType::OutputPlugin.is_plugin());
+        assert!(!BlockType::InputXtream.is_plugin() && !BlockType::Target.is_plugin());
+    }
 
     #[test]
     fn media_server_input_types_keep_distinct_source_editor_blocks() {

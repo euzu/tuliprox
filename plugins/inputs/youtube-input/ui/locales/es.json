@@ -10,5 +10,7 @@
   "form.max_uploads.title": "Máximo de subidas",
   "form.max_uploads.description": "Cuántas subidas recientes tomar por canal (1 a 15).",
   "form.cache_ttl_minutes.title": "TTL de la caché de streams (minutos)",
-  "form.cache_ttl_minutes.description": "Cuánto reutiliza esta entrada una URL de stream resuelta (10 a 360)."
+  "form.cache_ttl_minutes.description": "Cuánto reutiliza esta entrada una URL de stream resuelta (10 a 360).",
+  "tile.title": "YouTube",
+  "tile.description": "Canales, listas de reproducción y directos de YouTube como canales de la lista."
 }

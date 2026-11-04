@@ -7,7 +7,7 @@
 //! plugin directory; the route in `app` opens and streams the file.
 
 use crate::{
-    manifest::{ConfigTabSource, Manifest, RpcKind, Slot},
+    manifest::{hook::HookId, ConfigTabSource, Manifest, RpcKind, Slot, SourceTile},
     registry::{PluginRecord, PluginState},
     system::PluginSystem,
 };
@@ -15,7 +15,7 @@ use http::{header, HeaderName, HeaderValue};
 use serde_json::Value;
 use shared::model::{
     PluginConfigExtensionDto, PluginConfigTabDto, PluginContributionDto, PluginFormSectionDto, PluginRpcExportDto,
-    PluginRpcKindDto, PluginSlotDto, PluginStateDto, PluginUiDto,
+    PluginRpcKindDto, PluginSlotDto, PluginSourceTileDto, PluginStateDto, PluginUiDto,
 };
 use std::{
     fs,
@@ -38,7 +38,8 @@ pub(crate) const MAX_ASSET_BYTES: u64 = 16 * 1024 * 1024;
 /// host reads.
 const MAX_PACKAGE_JSON_BYTES: u64 = 256 * 1024;
 
-/// Longest `rpc_exports[].description` handed to the web UI, in chars.
+/// Longest `rpc_exports[].description` and source tile description handed to
+/// the web UI, in chars.
 const MAX_DESCRIPTION_CHARS: usize = 512;
 
 /// File extensions the frame route serves, with their `Content-Type`.
@@ -254,10 +255,14 @@ const fn rpc_kind_dto(kind: RpcKind) -> PluginRpcKindDto {
     }
 }
 
-/// Whether the manifest has anything the web UI would render.
+/// Whether the manifest has anything the web UI would render. An input or
+/// output provider always has: the source editor shows a tile for it, with or
+/// without a `ui:` part.
 fn has_ui(manifest: &Manifest) -> bool {
     let ui = &manifest.ui;
-    ui.config_section.is_some()
+    manifest.has_hook(HookId::InputFetch)
+        || manifest.has_hook(HookId::OutputRender)
+        || ui.config_section.is_some()
         || !ui.config_extensions.is_empty()
         || ui.config_tab.is_some()
         || !ui.contributions.is_empty()
@@ -283,6 +288,28 @@ fn form_sections(dir: &std::path::Path, sections: &[crate::manifest::FormSection
             })
         })
         .collect()
+}
+
+/// The source editor tile of a provider of `hook`: `None` unless the plugin
+/// declares the hook. What the manifest's `tile` leaves out falls back to the
+/// plugin's `name` and `description`.
+fn source_tile(manifest: &Manifest, hook: HookId, tile: Option<&SourceTile>) -> Option<PluginSourceTileDto> {
+    if !manifest.has_hook(hook) {
+        return None;
+    }
+    let tile = tile.cloned().unwrap_or_default();
+    let description = tile
+        .description
+        .or_else(|| manifest.description.clone())
+        .map(|text| sanitize_text(text.trim(), MAX_DESCRIPTION_CHARS))
+        .filter(|text| !text.is_empty());
+    Some(PluginSourceTileDto {
+        title: tile.title.unwrap_or_else(|| manifest.name.clone()),
+        title_key: tile.title_key,
+        icon: tile.icon,
+        description,
+        description_key: tile.description_key,
+    })
 }
 
 fn ui_entry(record: &PluginRecord) -> Option<PluginUiDto> {
@@ -312,6 +339,8 @@ fn ui_entry(record: &PluginRecord) -> Option<PluginUiDto> {
             .collect(),
         input_form: form_sections(&record.dir, &ui.input_form),
         output_form: form_sections(&record.dir, &ui.output_form),
+        input_tile: source_tile(manifest, HookId::InputFetch, ui.input_tile.as_ref()),
+        output_tile: source_tile(manifest, HookId::OutputRender, ui.output_tile.as_ref()),
         config_tab: ui.config_tab.as_ref().map(|tab| {
             let (schema, element) = match &tab.source {
                 ConfigTabSource::Schema(path) => (read_package_json(&record.dir, path), None),
@@ -354,6 +383,55 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn manifest(extra: &str) -> Manifest {
+        let text = format!("id: demo-plugin\nname: Demo Input\nversion: 0.1.0\napi_version: 1\n{extra}");
+        Manifest::parse(&text, "demo-plugin").expect("valid manifest")
+    }
+
+    const PROVIDER: &str =
+        "hooks: [input.fetch, output.render]\nprovides: { input_type: true, output_format: demo-out }\n";
+
+    #[test]
+    fn a_provider_without_a_ui_part_still_has_ui_and_both_tiles() {
+        let manifest = manifest(&format!("description: \"  Fetches\\u0007 things  \"\n{PROVIDER}"));
+        assert!(has_ui(&manifest));
+        let input = source_tile(&manifest, HookId::InputFetch, manifest.ui.input_tile.as_ref()).unwrap();
+        assert_eq!(input.title, "Demo Input", "the plugin name is the fallback title");
+        assert_eq!(input.description.as_deref(), Some("Fetches things"), "trimmed, control characters stripped");
+        assert_eq!((input.title_key, input.icon, input.description_key), (None, None, None));
+        assert!(source_tile(&manifest, HookId::OutputRender, manifest.ui.output_tile.as_ref()).is_some());
+    }
+
+    #[test]
+    fn the_manifest_tile_wins_over_the_fallbacks() {
+        let manifest = manifest(&format!(
+            "description: plugin text\n{PROVIDER}ui:\n  locales: [en]\n  input_tile: {{ title: YouTube, title_key: t.k, icon: Video, description: tile text, description_key: d.k }}\n"
+        ));
+        let tile = source_tile(&manifest, HookId::InputFetch, manifest.ui.input_tile.as_ref()).unwrap();
+        assert_eq!(
+            tile,
+            PluginSourceTileDto {
+                title: "YouTube".to_string(),
+                title_key: Some("t.k".to_string()),
+                icon: Some("Video".to_string()),
+                description: Some("tile text".to_string()),
+                description_key: Some("d.k".to_string()),
+            }
+        );
+        let mut with_long = manifest.clone();
+        with_long.ui.input_tile.as_mut().unwrap().description = Some("x".repeat(600));
+        let cut = source_tile(&with_long, HookId::InputFetch, with_long.ui.input_tile.as_ref()).unwrap();
+        assert_eq!(cut.description.unwrap().chars().count(), MAX_DESCRIPTION_CHARS);
+    }
+
+    #[test]
+    fn a_plugin_without_the_hook_has_no_tile() {
+        let manifest = manifest("hooks: [input.fetch]\nprovides: { input_type: true }\n");
+        assert!(source_tile(&manifest, HookId::OutputRender, None).is_none());
+        assert!(source_tile(&manifest, HookId::InputFetch, None).is_some());
+        assert!(!has_ui(&self::manifest("")), "a plugin with neither a ui part nor a provider hook");
+    }
 
     /// A plugin dir with `ui/` holding the given files (relative to `ui/`).
     fn plugin(files: &[(&str, &str)]) -> TempDir {

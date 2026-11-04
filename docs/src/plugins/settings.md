@@ -299,6 +299,48 @@ Declaring a field both as a setting and in the form is supported: the setting is
 and the plugin writes that fallback. Host-side settings are never plugin settings — the update policy and the boot
 update budget live in `plugins:`, not in a package.
 
+## Source editor tiles
+
+Every enabled input provider (`input.fetch`) gets its own tile in the **Inputs** group of the source editor sidebar,
+and every enabled output renderer (`output.render`) one in the **Output** group. Dropping the tile, or tapping it on a
+phone, adds a `type: plugin` input or output that already names the plugin, so its form opens with the plugin's
+fields. The plugin can still be changed in the form's **Plugin** field.
+
+The tile works without any manifest entry: it is titled with the plugin's `name` and its tooltip is the plugin's
+`description`. `ui.input_tile` and `ui.output_tile` change that:
+
+```yaml
+ui:
+  locales: [en, de]
+  input_tile:
+    title: YouTube              # at most 40 characters; default: the plugin's name
+    title_key: tile.title       # translated title, from ui/locales
+    icon: PlayCircle            # an icon name of the web UI's icon set
+    description: Channels, playlists and live streams   # tooltip; default: the plugin's description
+    description_key: tile.description
+```
+
+- Every field is optional. `title` must not contain control characters. The tooltip is cut at 512 characters.
+- `title_key` and `description_key` need `ui.locales`, like every other key.
+- `ui.input_tile` needs the hook `input.fetch` and `ui.output_tile` needs `output.render`; a manifest that declares one
+  without its hook is refused.
+- `icon` names an icon the web UI already has (for example `PlayCircle`, `Live`, `Movie`, `Playlist`, `Streams`). An
+  unknown name shows no icon; it is never loaded as an image.
+- A disabled or failed provider has no tile. When the list of plugins is loaded and no provider is installed, the
+  group shows a greyed-out **Plugin** tile with a note instead. Until the list is loaded, and for a user who may not
+  read the system, the generic **Plugin** tile stays, with the plugin chosen in the form.
+
+On the canvas a plugin block shows the plugin's tile title where other blocks show their type. A block whose plugin
+cannot run gets a red badge and a dashed border, and its tooltip says why: no plugin chosen, the plugin is not
+installed (or not loaded), it is disabled or failed, or it no longer provides inputs or outputs. The block is kept as
+it is, and saving still goes through the server's own check.
+
+`GET /api/v1/plugins/ui` lists every input and output provider, with or without a `ui:` part, and sends the resolved
+tile as `inputTile` / `outputTile` (`PluginSourceTileDto` in `shared/src/model/plugins_dto.rs`).
+
+This is not the `source-editor-tile` [contribution slot](./custom-ui.md#slots): that one is a sandboxed frame on the
+canvas, shared by every contributing plugin, and is not an input or output.
+
 `plugin_config` is refused on any other input type, and a plugin input still rejects the built-in downloader fields
 (aliases, `media_server`, `panel_api`, `stalker`, provider failover definitions).
 

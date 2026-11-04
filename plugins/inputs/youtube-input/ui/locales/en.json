@@ -10,5 +10,7 @@
   "form.max_uploads.title": "Max Uploads",
   "form.max_uploads.description": "How many recent uploads to take per channel (1 to 15).",
   "form.cache_ttl_minutes.title": "Stream Cache TTL (Minutes)",
-  "form.cache_ttl_minutes.description": "How long this input reuses a resolved stream URL (10 to 360)."
+  "form.cache_ttl_minutes.description": "How long this input reuses a resolved stream URL (10 to 360).",
+  "tile.title": "YouTube",
+  "tile.description": "YouTube channels, playlists and live streams as playlist channels."
 }

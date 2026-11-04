@@ -18,6 +18,13 @@ hooks:
 # (`plugins.plugins[].update_policy`).
 ui:
   locales: [ar, en, es, ru]
+  # The tile in the source editor sidebar; dropping it adds an input bound to this plugin.
+  input_tile:
+    title: YouTube
+    title_key: tile.title
+    icon: PlayCircle
+    description: YouTube channels, playlists and live streams as playlist channels.
+    description_key: tile.description
   input_form:
     - id: main
       schema: forms/input.json
