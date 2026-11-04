@@ -613,6 +613,8 @@
     border-radius: var(--border-radius-small);
     background: var(--theme-brand-surface-soft);
     overflow-wrap: anywhere;
+    // A text answer keeps its line breaks (a check that reports one line per item).
+    white-space: pre-line;
 
     &--error {
       border-left-color: var(--theme-brand-danger);

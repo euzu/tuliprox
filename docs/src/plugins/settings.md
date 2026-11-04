@@ -436,8 +436,8 @@ ui:
 - The payload is `{"form": "input" | "output", "section": "<section id>", "action": "<action id>", "config": {…}}`,
   with `config` the unsaved `plugin_config`. An export with an `input_schema` must accept that shape.
 - The answer is shown under the buttons: a string as text, `{"message": "…", "ok": false}` as its message (an error
-  when `ok` is `false`), `null` as "Done.", anything else as formatted JSON. A failed call shows its error. Up to
-  4,000 characters are shown.
+  when `ok` is `false`), `null` as "Done.", anything else as formatted JSON. Line breaks in a text answer are kept.
+  A failed call shows its error. Up to 4,000 characters are shown.
 - A `kind: write` export needs write access: its button is disabled for a user who may only read.
 
 ## Localisation of the form

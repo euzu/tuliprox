@@ -2,6 +2,7 @@ use std::time::Duration;
 use tuliprox_plugin_sdk::{clock, http, prelude::*};
 
 mod cache;
+mod check;
 mod discovery;
 mod resolver;
 
@@ -315,6 +316,13 @@ mod plugin {
         }
 
         fn fetch_epg(_req: &InputRequest) -> Result<Vec<(EpgChannel, Vec<EpgProgramme>)>, String> { Ok(Vec::new()) }
+    }
+
+    /// `rpc.call`: the input form's actions (`ui.input_form` `main` → `check-input`).
+    impl Rpc for YoutubeInputPlugin {
+        fn call(method: &str, payload: &str) -> Result<String, String> {
+            rpc::Router::new().route("check-input", super::check::check_input).dispatch(method, payload)
+        }
     }
 
     fn make_channel(
