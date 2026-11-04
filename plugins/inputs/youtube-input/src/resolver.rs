@@ -26,6 +26,17 @@ struct InvidiousFormatStream {
     url: String,
     quality_label: Option<String>,
     container: Option<String>,
+    #[serde(default, deserialize_with = "string_or_number")]
+    itag: Option<String>,
+}
+
+/// Invidious sends `itag` as a string; a number is accepted too.
+fn string_or_number<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Ok(match Option::<serde_json::Value>::deserialize(deserializer)? {
+        Some(serde_json::Value::String(text)) => Some(text),
+        Some(serde_json::Value::Number(number)) => Some(number.to_string()),
+        _ => None,
+    })
 }
 
 /// Resolves a playable stream for a video using a list of Invidious instances with automatic failover,
@@ -68,7 +79,7 @@ pub fn resolve_stream(
         let remaining_secs = (deadline_unix - now).max(1) as u64;
         let attempt_timeout = remaining_secs.clamp(2, 4);
 
-        match query_invidious_endpoint(&endpoint, clean_instance, attempt_timeout) {
+        match query_invidious_endpoint(&endpoint, clean_instance, video_id, attempt_timeout) {
             Ok(resolved) => {
                 // Update sticky cursor to the successful instance
                 *active_cursor = idx;
@@ -93,7 +104,12 @@ pub fn resolve_stream(
     Err(format!("all Invidious instances failed for video {video_id}. Last error: {last_error}"))
 }
 
-fn query_invidious_endpoint(endpoint: &str, instance_base: &str, timeout_secs: u64) -> Result<ResolvedStream, String> {
+fn query_invidious_endpoint(
+    endpoint: &str,
+    instance_base: &str,
+    video_id: &str,
+    timeout_secs: u64,
+) -> Result<ResolvedStream, String> {
     let resp = http::Request::get(endpoint)
         .header("User-Agent", BROWSER_UA)
         .header("Accept", "application/json")
@@ -140,6 +156,16 @@ fn query_invidious_endpoint(endpoint: &str, instance_base: &str, timeout_secs: u
             .or_else(|| streams.first());
 
         if let Some(stream) = preferred {
+            // The format URL is signed and expires after a few hours, which is shorter than a playlist lives.
+            // `latest_version` is the instance's stable redirect to the current signed URL of that format.
+            let itag =
+                stream.itag.as_deref().filter(|itag| !itag.is_empty() && itag.chars().all(|c| c.is_ascii_digit()));
+            if let Some(itag) = itag {
+                return Ok(ResolvedStream {
+                    url: format!("{instance_base}/latest_version?id={video_id}&itag={itag}&local=true"),
+                    is_live,
+                });
+            }
             let stream_url = if stream.url.starts_with("http://") || stream.url.starts_with("https://") {
                 stream.url.clone()
             } else {
@@ -192,6 +218,28 @@ mod tests {
         assert!(!res2.is_live);
         assert_eq!(res2.url, "https://good.test/video.mp4");
         assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn an_mp4_with_an_itag_resolves_to_the_stable_latest_version_url() {
+        mock::reset();
+        mock::set_now(1_000);
+
+        let instances = vec!["https://inv.test".to_string()];
+        let mut cursor = 0;
+        mock::http_respond(
+            Method::Get,
+            "https://inv.test/api/v1/videos/dQw4w9WgXcQ?local=true",
+            200,
+            r#"{"liveNow":false,"hlsUrl":"","formatStreams":[
+                {"url":"https://rr1.googlevideo.test/videoplayback?expire=1","container":"mp4","qualityLabel":"360p","itag":"18"},
+                {"url":"https://rr1.googlevideo.test/videoplayback?expire=2","container":"mp4","qualityLabel":"720p","itag":22}
+            ]}"#,
+        );
+
+        let res = resolve_stream("dQw4w9WgXcQ", &instances, &mut cursor, 120, 1_030).unwrap();
+        assert_eq!(res.url, "https://inv.test/latest_version?id=dQw4w9WgXcQ&itag=22&local=true");
+        assert!(!res.is_live);
     }
 
     #[test]

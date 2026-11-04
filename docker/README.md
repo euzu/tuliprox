@@ -62,18 +62,22 @@ Tuliprox supports loading secrets from `.env` files for `${env:VAR}` interpolati
 
 ### Plugins and Volumes
 
-Tuliprox ships official bundled plugins under `/app/plugins` inside the container image, while custom or downloaded plugins can be placed under `/app/user-plugins`:
-
-```yaml
-plugins:
-  enabled: true
-  directories:
-    - /app/plugins
-    - /app/user-plugins
-```
+Tuliprox ships official bundled plugins under `/app/plugins` inside the container image. With no
+`plugins.directories` configured, the container searches `/app/plugins` first and then `plugins.directory`
+(default `plugins`, resolved against the config dir, so `/app/config/plugins`). Plugins installed or uploaded
+through the Web UI land in that last directory, which is on the config volume and survives container recreation.
 
 - **Config Decoupling:** Mounting your configuration into `/app/config` does not affect or hide the bundled plugins.
-- **Custom Plugins:** Mount user-provided plugins to `/app/user-plugins` in your `docker-compose.yml`:
+- **Custom Plugins:** Put user-provided plugins in `./config/plugins` on the host (with `./config:/app/config`
+  mounted), or mount another directory and list it explicitly:
+
+  ```yaml
+  plugins:
+    enabled: true
+    directories:
+      - /app/plugins       # Bundled official plugins
+      - /app/user-plugins  # Mounted volume; installs and uploads go here
+  ```
 
   ```yaml
   volumes:
@@ -83,7 +87,8 @@ plugins:
 
 - **Mounting over `/app/plugins`:** Mounting a host volume directly over `/app/plugins` is possible,
   but will overlay the container directory and mask the bundled default plugins. If you wish to retain
-  bundled plugins alongside custom plugins, mount into `/app/user-plugins` instead.
+  bundled plugins alongside custom plugins, use `/app/config/plugins` or another mounted directory instead.
+- **Environment override:** `TULIPROX_PLUGINS_DIRS` (separated by `,` or `:`) replaces `plugins.directories`.
 
 ## Docker Container Templates — Deployment Guide
 

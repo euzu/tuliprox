@@ -167,7 +167,9 @@ pub struct PluginOutputRequest<'a> {
 /// The order is the map's.
 ///
 /// A key never contains a dot, so a flattened `a.b` always means the nested
-/// `b` of `a` and never a literal `a.b`. An empty object contributes no pair.
+/// `b` of `a` and never a literal `a.b`. An empty object contributes no pair,
+/// and neither does a `null` (a YAML key left blank), so the plugin sees the
+/// option as unset and applies its default rather than receiving `"null"`.
 #[must_use]
 pub fn plugin_options(config: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> {
     fn flatten(prefix: &str, value: &serde_json::Value, out: &mut Vec<(String, String)>) {
@@ -179,6 +181,7 @@ pub fn plugin_options(config: &serde_json::Map<String, serde_json::Value>) -> Ve
             return;
         }
         let text = match value {
+            serde_json::Value::Null => return,
             serde_json::Value::String(text) => text.clone(),
             other => other.to_string(),
         };
@@ -945,4 +948,29 @@ pub trait PluginNotifier: Send + Sync + 'static {
     /// Deliver through `plugin` under the call deadline. Never blocks the
     /// caller beyond that deadline; never panics.
     fn send_notification<'a>(&'a self, plugin: &'a str, message: PluginNotification<'a>) -> PluginDeliveryFuture<'a>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plugin_options;
+
+    #[test]
+    fn plugin_options_flatten_nested_values_and_skip_nulls() {
+        let config = serde_json::json!({
+            "mode": "live",
+            "limit": 5,
+            "unset": null,
+            "nested": {"a": true, "b": null, "empty": {}},
+        });
+        let mut options = plugin_options(config.as_object().unwrap());
+        options.sort();
+        assert_eq!(
+            options,
+            vec![
+                ("limit".to_string(), "5".to_string()),
+                ("mode".to_string(), "live".to_string()),
+                ("nested.a".to_string(), "true".to_string()),
+            ]
+        );
+    }
 }

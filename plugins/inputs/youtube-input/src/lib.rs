@@ -118,7 +118,8 @@ mod plugin {
             let mode = overrides.mode.as_deref().unwrap_or(settings.mode.as_str());
             if mode != "recent_uploads" && mode != "live_only" {
                 return Err(format!(
-                    "invalid mode '{mode}' in YouTube plugin settings; expected 'recent_uploads' or 'live_only'"
+                    "input '{}' has invalid mode '{mode}': set its Mode to 'recent_uploads' or 'live_only'",
+                    req.input_name
                 ));
             }
 
@@ -232,30 +233,6 @@ mod plugin {
                             }
                         }
                     }
-                    TargetKind::ChannelId(ref ucid) => {
-                        if mode == "live_only" {
-                            // In live_only mode, query channel /live directly (discovers active 24/7 streams)
-                            let live_url = format!("https://www.youtube.com/channel/{ucid}/live");
-                            if let Err(e) = discover_and_resolve_live(
-                                &live_url,
-                                &format!("Channel {ucid}"),
-                                &mut ctx,
-                                &mut channels,
-                            ) {
-                                warn!("live discovery error for channel {ucid}: {e}");
-                                had_hard_error = true;
-                            }
-                        } else if let Some(feed_url) = discovery::feed_url_for_target(&target) {
-                            fetch_and_append_feed(
-                                &feed_url,
-                                mode,
-                                max_uploads,
-                                &mut ctx,
-                                &mut channels,
-                                &mut had_hard_error,
-                            );
-                        }
-                    }
                     TargetKind::PlaylistId(_) => {
                         if let Some(feed_url) = discovery::feed_url_for_target(&target) {
                             fetch_and_append_feed(
@@ -268,38 +245,57 @@ mod plugin {
                             );
                         }
                     }
-                    TargetKind::Handle(ref handle) => {
-                        let encoded_handle = url_encode_handle(handle);
-                        if mode == "live_only" {
-                            // Query @handle/live directly (discovers ongoing 24/7 streams like @DWNews or @France24_en)
-                            let live_url = format!("https://www.youtube.com/{encoded_handle}/live");
-                            if let Err(e) = discover_and_resolve_live(&live_url, handle, &mut ctx, &mut channels) {
-                                warn!("live discovery error for {handle}: {e}");
+                    TargetKind::ChannelId(_)
+                    | TargetKind::Handle(_)
+                    | TargetKind::LegacyName(_)
+                    | TargetKind::Live(_) => {
+                        // A `…/live` target asks for the running broadcast whatever the mode.
+                        let (page, live_requested) = match target {
+                            TargetKind::Live(inner) => (*inner, true),
+                            other => (other, false),
+                        };
+                        let Some((path, label)) = channel_page(&page) else {
+                            warn!("skipping unsupported target '{target_str}'");
+                            had_hard_error = true;
+                            continue;
+                        };
+
+                        if live_requested || mode == "live_only" {
+                            // Query the channel's /live page directly (discovers ongoing 24/7 streams)
+                            let live_url = format!("https://www.youtube.com/{path}/live");
+                            if let Err(e) = discover_and_resolve_live(&live_url, &label, &mut ctx, &mut channels) {
+                                warn!("live discovery error for {label}: {e}");
                                 had_hard_error = true;
                             }
-                        } else {
-                            // In recent_uploads mode, resolve handle to channel ID and fetch RSS feed
-                            let resolved_channel_id = resolve_handle_via_youtube_html(&encoded_handle)
-                                .or_else(|| resolve_handle_via_invidious(&encoded_handle, ctx.instances));
+                            continue;
+                        }
 
-                            match resolved_channel_id {
-                                Some(channel_id) => {
-                                    let feed_target = TargetKind::ChannelId(channel_id);
-                                    if let Some(feed_url) = discovery::feed_url_for_target(&feed_target) {
-                                        fetch_and_append_feed(
-                                            &feed_url,
-                                            mode,
-                                            max_uploads,
-                                            &mut ctx,
-                                            &mut channels,
-                                            &mut had_hard_error,
-                                        );
-                                    }
+                        // In recent_uploads mode, resolve the channel ID and fetch its RSS feed
+                        let resolved_channel_id = match &page {
+                            TargetKind::ChannelId(id) => Some(id.clone()),
+                            TargetKind::Handle(_) => resolve_channel_via_youtube_html(&path, ctx.deadline)
+                                .or_else(|| resolve_handle_via_invidious(&path, ctx.instances, ctx.deadline)),
+                            _ => resolve_channel_via_youtube_html(&path, ctx.deadline)
+                                .or_else(|| resolve_url_via_invidious(&path, ctx.instances, ctx.deadline)),
+                        };
+
+                        match resolved_channel_id {
+                            Some(channel_id) => {
+                                let feed_target = TargetKind::ChannelId(channel_id);
+                                if let Some(feed_url) = discovery::feed_url_for_target(&feed_target) {
+                                    fetch_and_append_feed(
+                                        &feed_url,
+                                        mode,
+                                        max_uploads,
+                                        &mut ctx,
+                                        &mut channels,
+                                        &mut had_hard_error,
+                                    );
                                 }
-                                None => {
-                                    warn!("could not resolve channel ID for YouTube handle {handle}");
-                                    had_hard_error = true;
-                                }
+                            }
+                            None => {
+                                warn!("could not resolve channel ID for YouTube target {label}");
+                                had_hard_error = true;
                             }
                         }
                     }
@@ -355,26 +351,10 @@ mod plugin {
         ctx: &mut FetchCtx<'_>,
         channels: &mut Vec<Channel>,
     ) -> Result<(), String> {
-        let now = clock::now_unix();
-        if now >= ctx.deadline - 2 {
-            return Ok(());
-        }
-
         // The page request must leave room for the stream resolution that follows it.
-        let remaining_secs = (ctx.deadline - now).max(1) as u64;
-        let resp = http::Request::get(live_page_url)
-            .header("User-Agent", BROWSER_UA)
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .timeout(Duration::from_secs(remaining_secs.clamp(2, 4)))
-            .send()
-            .map_err(|e| format!("request error: {e}"))?;
-
-        if !resp.is_success() {
-            debug!("{live_page_url} returned status {}", resp.status());
+        let Some(html) = youtube_page(live_page_url, ctx.deadline)? else {
             return Ok(());
-        }
-
-        let html = resp.text().map_err(|e| format!("text error: {e}"))?;
+        };
         let Some((video_id, live_title_opt)) = extract_live_info_from_html(&html) else {
             debug!("no active live video ID found on {live_page_url}");
             return Ok(());
@@ -413,18 +393,12 @@ mod plugin {
         channels: &mut Vec<Channel>,
         had_hard_error: &mut bool,
     ) {
-        let now = clock::now_unix();
-        if now >= ctx.deadline - 2 {
+        let Some(timeout) = request_timeout(ctx.deadline) else {
             return;
-        }
+        };
 
         debug!("fetching YouTube feed from {feed_url}");
-        let remaining_secs = (ctx.deadline - now).max(1) as u64;
-        let resp = match http::Request::get(feed_url)
-            .header("User-Agent", BROWSER_UA)
-            .timeout(Duration::from_secs(remaining_secs.clamp(2, 4)))
-            .send()
-        {
+        let resp = match http::Request::get(feed_url).header("User-Agent", BROWSER_UA).timeout(timeout).send() {
             Ok(r) => r,
             Err(e) => {
                 warn!("HTTP error fetching feed {feed_url}: {e}");
@@ -500,61 +474,118 @@ mod plugin {
         }
     }
 
-    fn resolve_handle_via_youtube_html(encoded_handle: &str) -> Option<String> {
-        let url = format!("https://www.youtube.com/{encoded_handle}");
-
-        let resp = http::Request::get(&url)
-            .header("User-Agent", BROWSER_UA)
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .timeout(Duration::from_secs(4))
-            .send()
-            .ok()?;
-
-        if !resp.is_success() {
+    /// The timeout of a request started now, or `None` once the time budget leaves no room for one
+    /// (the last two seconds are kept for the host).
+    fn request_timeout(deadline: i64) -> Option<Duration> {
+        let now = clock::now_unix();
+        if now >= deadline - 2 {
             return None;
         }
+        let remaining_secs = u64::try_from(deadline - now).unwrap_or(1);
+        Some(Duration::from_secs(remaining_secs.clamp(2, 4)))
+    }
 
-        let html = resp.text().ok()?;
+    /// The HTML of a youtube.com page, or `None` when the budget is spent or the page is not served.
+    ///
+    /// The `SOCS` cookie declines the EU consent interstitial, which would otherwise replace the page (and its
+    /// canonical link) for requests from European addresses.
+    fn youtube_page(url: &str, deadline: i64) -> Result<Option<String>, String> {
+        let Some(timeout) = request_timeout(deadline) else {
+            return Ok(None);
+        };
+        let resp = http::Request::get(url)
+            .header("User-Agent", BROWSER_UA)
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Cookie", "SOCS=CAI")
+            .timeout(timeout)
+            .send()
+            .map_err(|e| format!("request error: {e}"))?;
+        if !resp.is_success() {
+            debug!("{url} returned status {}", resp.status());
+            return Ok(None);
+        }
+        resp.text().map(Some).map_err(|e| format!("text error: {e}"))
+    }
+
+    /// The youtube.com page path of a channel-like target (encoded for a URL) and the group label of its channels.
+    fn channel_page(target: &TargetKind) -> Option<(String, String)> {
+        match target {
+            TargetKind::ChannelId(id) => Some((format!("channel/{id}"), format!("Channel {id}"))),
+            TargetKind::Handle(handle) => Some((encode_path_segment(handle), handle.clone())),
+            TargetKind::LegacyName(path) => {
+                let (kind, name) = path.split_once('/')?;
+                Some((format!("{kind}/{}", encode_path_segment(name)), name.to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn resolve_channel_via_youtube_html(path: &str, deadline: i64) -> Option<String> {
+        let html = youtube_page(&format!("https://www.youtube.com/{path}"), deadline).ok().flatten()?;
         extract_channel_id_from_html(&html)
     }
 
-    fn resolve_handle_via_invidious(encoded_handle: &str, instances: &[String]) -> Option<String> {
+    /// The first `field` of a JSON answer from one of `instances`, asked in order while the budget lasts.
+    fn query_instances(instances: &[String], deadline: i64, api_path: &str, field: &str) -> Option<String> {
         for instance in instances {
-            let clean_instance = instance.trim_end_matches('/');
-            let endpoint = format!("{clean_instance}/api/v1/channels/{encoded_handle}");
+            let timeout = request_timeout(deadline)?;
+            let endpoint = format!("{}/api/v1/{api_path}", instance.trim_end_matches('/'));
 
-            let resp = match http::Request::get(&endpoint)
-                .header("User-Agent", BROWSER_UA)
-                .timeout(Duration::from_secs(3))
-                .send()
-            {
-                Ok(r) => r,
-                Err(_) => continue,
+            let Ok(resp) = http::Request::get(&endpoint).header("User-Agent", BROWSER_UA).timeout(timeout).send()
+            else {
+                continue;
             };
-
             if !resp.is_success() {
                 continue;
             }
-
             if let Ok(json_val) = resp.json::<serde_json::Value>() {
-                if let Some(author_id) = json_val.get("authorId").and_then(|v| v.as_str()) {
-                    return Some(author_id.to_string());
+                if let Some(value) = json_val.get(field).and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                    return Some(value.to_string());
                 }
             }
         }
         None
     }
 
-    fn url_encode_handle(handle: &str) -> String {
-        let mut encoded = String::with_capacity(handle.len() + 4);
-        for b in handle.bytes() {
+    pub(super) fn resolve_handle_via_invidious(
+        encoded_handle: &str,
+        instances: &[String],
+        deadline: i64,
+    ) -> Option<String> {
+        query_instances(instances, deadline, &format!("channels/{encoded_handle}"), "authorId")
+    }
+
+    /// Resolves a channel page path (`c/<name>`, `user/<name>`) through Invidious' `resolveurl`.
+    pub(super) fn resolve_url_via_invidious(path: &str, instances: &[String], deadline: i64) -> Option<String> {
+        let page_url = encode_query_value(&format!("https://www.youtube.com/{path}"));
+        query_instances(instances, deadline, &format!("resolveurl?url={page_url}"), "ucid")
+    }
+
+    /// Percent-encodes a path segment. An escape the segment already carries (`%E3%81%82` from a pasted URL)
+    /// is kept, so it is not encoded twice.
+    fn encode_path_segment(segment: &str) -> String {
+        let bytes = segment.as_bytes();
+        let mut encoded = String::with_capacity(segment.len() + 4);
+        for (idx, &b) in bytes.iter().enumerate() {
+            let is_escape = b == b'%'
+                && bytes.get(idx + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(idx + 2).is_some_and(u8::is_ascii_hexdigit);
             match b {
-                b'@' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                    encoded.push(b as char);
-                }
-                _ => {
-                    encoded.push_str(&format!("%{b:02X}"));
-                }
+                b'@' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => encoded.push(b as char),
+                b'%' if is_escape => encoded.push('%'),
+                _ => encoded.push_str(&format!("%{b:02X}")),
+            }
+        }
+        encoded
+    }
+
+    /// Percent-encodes a query parameter value; everything but the unreserved characters is escaped.
+    fn encode_query_value(value: &str) -> String {
+        let mut encoded = String::with_capacity(value.len() * 2);
+        for b in value.bytes() {
+            match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => encoded.push(b as char),
+                _ => encoded.push_str(&format!("%{b:02X}")),
             }
         }
         encoded
@@ -984,5 +1015,114 @@ mod tests {
         assert_eq!(ch.title, "Sky News Live");
         assert_eq!(ch.item_type, ItemType::Live);
         assert_eq!(ch.cluster, Cluster::Live);
+    }
+
+    fn one_video_feed(video: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+  <title>Kanal</title>
+  <entry><yt:videoId>{video}</yt:videoId><title>Folge</title></entry>
+</feed>"#
+        )
+    }
+
+    #[test]
+    fn a_legacy_custom_url_is_resolved_through_its_own_page_not_as_a_handle() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_now(1_000);
+        mock::set_config(r#"{"invidious_instances": ["https://inv.test"]}"#);
+        assert!(plugin::Settings::reload().is_ok());
+
+        // youtube.com serves no canonical channel link (e.g. a consent page); Invidious resolves the URL.
+        mock::http_respond(Method::Get, "https://www.youtube.com/c/tagesschau", 200, "<html>consent</html>");
+        mock::http_respond(
+            Method::Get,
+            "https://inv.test/api/v1/resolveurl?url=https%3A%2F%2Fwww.youtube.com%2Fc%2Ftagesschau",
+            200,
+            r#"{"ucid":"UC5NOEUbkLheQcaaRldYW5GA","pageType":"WEB_PAGE_TYPE_CHANNEL"}"#,
+        );
+        mock::http_respond(
+            Method::Get,
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UC5NOEUbkLheQcaaRldYW5GA",
+            200,
+            one_video_feed("dQw4w9WgXcQ"),
+        );
+        mock::http_respond(
+            Method::Get,
+            "https://inv.test/api/v1/videos/dQw4w9WgXcQ?local=true",
+            200,
+            r#"{"liveNow":false,"hlsUrl":"","formatStreams":[{"url":"https://inv.test/v.mp4","container":"mp4"}]}"#,
+        );
+
+        let mut req = request(&[]);
+        req.url = "https://www.youtube.com/c/tagesschau".to_string();
+        let channels = plugin::YoutubeInputPlugin::fetch_playlist(&req).expect("legacy name resolves");
+        assert_eq!(channels.len(), 1);
+        assert!(
+            !mock::http_requests().iter().any(|r| r.url().contains("@tagesschau")),
+            "the legacy name is never looked up as a handle"
+        );
+    }
+
+    #[test]
+    fn a_live_target_fetches_the_broadcast_in_recent_uploads_mode() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_now(1_000);
+        mock::set_config(r#"{"invidious_instances": ["https://inv.test"]}"#);
+        assert!(plugin::Settings::reload().is_ok());
+
+        let live_html = r#"<html><head><title>Sky News Live - YouTube</title><link rel="canonical" href="https://www.youtube.com/watch?v=LuKwFajn37U"></head></html>"#;
+        mock::http_respond(Method::Get, "https://www.youtube.com/@SkyNews/live", 200, live_html);
+        mock::http_respond(
+            Method::Get,
+            "https://inv.test/api/v1/videos/LuKwFajn37U?local=true",
+            200,
+            r#"{"liveNow":true,"hlsUrl":"/manifest/live.m3u8"}"#,
+        );
+
+        let mut req = request(&[]);
+        req.url = "https://www.youtube.com/@SkyNews/live".to_string();
+        let channels = plugin::YoutubeInputPlugin::fetch_playlist(&req).expect("live target fetch");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].title, "Sky News Live");
+        assert_eq!(channels[0].group, "@SkyNews");
+        assert_eq!(channels[0].item_type, ItemType::Live);
+
+        let page_request = mock::http_requests()
+            .into_iter()
+            .find(|r| r.url() == "https://www.youtube.com/@SkyNews/live")
+            .expect("the live page was requested");
+        assert!(
+            page_request.headers().iter().any(|(name, value)| name == "Cookie" && value.contains("SOCS=")),
+            "the consent interstitial is declined"
+        );
+    }
+
+    #[test]
+    fn channel_lookups_stop_once_the_budget_is_spent() {
+        mock::reset();
+        mock::set_now(1_000);
+        let instances = vec!["https://a.test".to_string(), "https://b.test".to_string()];
+
+        assert_eq!(plugin::resolve_channel_via_youtube_html("@x", 1_001), None);
+        assert_eq!(plugin::resolve_handle_via_invidious("@x", &instances, 1_001), None);
+        assert_eq!(plugin::resolve_url_via_invidious("c/x", &instances, 1_002), None);
+        assert!(mock::http_requests().is_empty(), "no request is started inside the last two seconds");
+    }
+
+    #[test]
+    fn an_invalid_mode_names_the_input() {
+        let _settings = lock_settings();
+        mock::reset();
+        mock::set_config(r#"{"invidious_instances": ["https://inv.test"]}"#);
+        assert!(plugin::Settings::reload().is_ok());
+
+        let mut req = request(&[("mode", "everything")]);
+        req.url = "@tagesschau".to_string();
+        let err = plugin::YoutubeInputPlugin::fetch_playlist(&req).unwrap_err();
+        assert!(err.contains("input 'feed'") && err.contains("Mode"), "{err}");
     }
 }

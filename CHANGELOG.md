@@ -2034,6 +2034,13 @@
 
 ## ⚙️ New Settings
 
+- **`plugins.directories` and `TULIPROX_PLUGINS_DIRS`: search plugins in several directories.** Directories are
+  searched in order; a plugin id found again in a later directory overrides the earlier one, and installs and uploads
+  go to the last directory. Relative entries resolve against the config dir. Unset, the list is `plugins.directory`
+  alone, preceded by `/app/plugins` when it exists: container images bundle the official plugins there, so Docker
+  searches `[/app/plugins, /app/config/plugins]` and Web UI installs persist on the config volume.
+  `TULIPROX_PLUGINS_DIRS` (separated by `,` or the platform path separator) replaces the configured list.
+
 - **`container_extension` is no longer served empty; input option `default_container_extension`.** Movies and series
   episodes whose provider reports none and whose stream URL carries none now publish `mp4`. Stalker portals reveal the
   container only on playback, so their Xtream output carried `"container_extension": ""` and clients such as

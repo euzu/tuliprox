@@ -13,52 +13,94 @@ pub struct DiscoveredVideo {
 pub enum TargetKind {
     ChannelId(String),
     PlaylistId(String),
+    /// `@name`.
     Handle(String),
+    /// A pre-handle custom URL, kept as its page path: `c/<name>` or `user/<name>`. The name is not a handle,
+    /// so it is resolved through its own page.
+    LegacyName(String),
+    /// A channel's `/live` page (`@name/live`, `channel/UC…/live`, `c/<name>/live`): its running broadcast is
+    /// fetched whatever the input's mode. Wraps a `ChannelId`, `Handle` or `LegacyName`.
+    Live(Box<TargetKind>),
     VideoId(String),
     Invalid(String),
+}
+
+fn is_id_char(c: char) -> bool { c.is_ascii_alphanumeric() || c == '-' || c == '_' }
+
+/// An 11-character video ID.
+fn is_video_id(id: &str) -> bool { id.len() == 11 && id.chars().all(is_id_char) }
+
+/// A 24-character channel ID `UC…`.
+fn is_channel_id(id: &str) -> bool { id.len() == 24 && id.starts_with("UC") && id.chars().all(is_id_char) }
+
+/// A playlist ID. Their lengths vary (`PL…`, `UU…`, `OLAK5uy_…`, `RD…`), so only the alphabet is checked.
+fn is_playlist_id(id: &str) -> bool { !id.is_empty() && id.len() <= 64 && id.chars().all(is_id_char) }
+
+fn video(id: &str) -> TargetKind {
+    if is_video_id(id) {
+        TargetKind::VideoId(id.to_string())
+    } else {
+        TargetKind::Invalid(format!("invalid video ID: {id}"))
+    }
+}
+
+fn channel(id: &str) -> TargetKind {
+    if is_channel_id(id) {
+        TargetKind::ChannelId(id.to_string())
+    } else {
+        TargetKind::Invalid(format!("invalid channel ID: {id}"))
+    }
+}
+
+fn playlist(id: &str) -> TargetKind {
+    if is_playlist_id(id) {
+        TargetKind::PlaylistId(id.to_string())
+    } else {
+        TargetKind::Invalid(format!("invalid playlist ID: {id}"))
+    }
+}
+
+/// `kind`, or its `/live` page when the path continues with `live`.
+fn with_live_suffix(kind: TargetKind, rest: &[&str]) -> TargetKind {
+    match kind {
+        TargetKind::Invalid(_) => kind,
+        _ if rest.first() == Some(&"live") => TargetKind::Live(Box::new(kind)),
+        _ => kind,
+    }
 }
 
 /// Parses a user-supplied string into a recognized YouTube target using structured URL decomposition.
 #[must_use]
 pub fn parse_target(raw: &str) -> TargetKind {
-    let input = raw.trim();
+    let trimmed = raw.trim();
+    let input = trimmed.split_once('#').map_or(trimmed, |(before, _)| before).trim();
 
     if input.is_empty() {
         return TargetKind::Invalid("empty target".to_string());
     }
 
     // 1. Bare IDs and handles
-    if input.starts_with("UC") && input.len() == 24 {
+    if is_channel_id(input) {
         return TargetKind::ChannelId(input.to_string());
     }
 
     // 11-char video ID check MUST precede playlist prefix check so IDs like `PLbA1cD2eFg` are parsed as VideoId
-    if input.len() == 11
-        && !input.contains('/')
-        && !input.contains('.')
-        && input.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if is_video_id(input) {
         return TargetKind::VideoId(input.to_string());
     }
 
     // Check known YouTube playlist prefixes (PL, UU, OLAK, RD, LL, FL)
-    if (input.starts_with("PL")
-        || input.starts_with("UU")
-        || input.starts_with("OLAK")
-        || input.starts_with("RD")
-        || input.starts_with("LL")
-        || input.starts_with("FL"))
-        && !input.contains('/')
-        && !input.contains('.')
-    {
+    if ["PL", "UU", "OLAK", "RD", "LL", "FL"].iter().any(|prefix| input.starts_with(prefix)) && is_playlist_id(input) {
         return TargetKind::PlaylistId(input.to_string());
     }
 
     // Bare handles: `@name` or `@name/live`
     if let Some(stripped) = input.strip_prefix('@') {
-        let handle = stripped.split('/').next().unwrap_or(stripped);
+        let mut parts = stripped.split('/');
+        let handle = parts.next().unwrap_or(stripped);
         if !handle.is_empty() && !handle.contains('.') {
-            return TargetKind::Handle(format!("@{handle}"));
+            let rest: Vec<&str> = parts.filter(|part| !part.is_empty()).collect();
+            return with_live_suffix(TargetKind::Handle(format!("@{handle}")), &rest);
         }
     }
 
@@ -104,77 +146,67 @@ pub fn parse_target(raw: &str) -> TargetKind {
         let seg = path.trim_start_matches('/');
         let id = seg.split('/').next().unwrap_or(seg);
         if !id.is_empty() {
-            return TargetKind::VideoId(id.to_string());
+            return video(id);
         }
     }
 
     // 5. youtube.com domains
     let segments: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
 
-    if !segments.is_empty() {
-        let first = segments[0];
-
+    if let Some((&first, rest)) = segments.split_first() {
         // /watch?v=... (check v parameter before playlist list parameter)
         if first == "watch" {
             if let Some(v) = get_query_param("v") {
-                return TargetKind::VideoId(v);
+                return video(&v);
             }
             if let Some(list) = get_query_param("list") {
-                return TargetKind::PlaylistId(list);
+                return playlist(&list);
             }
         }
 
         // /playlist?list=...
         if first == "playlist" {
             if let Some(list) = get_query_param("list") {
-                return TargetKind::PlaylistId(list);
+                return playlist(&list);
             }
         }
 
-        // /live/<id>
-        if first == "live" && segments.len() > 1 {
-            return TargetKind::VideoId(segments[1].to_string());
+        // /live/<id>, /shorts/<id>, /embed/<id>
+        if matches!(first, "live" | "shorts" | "embed") {
+            if let Some(id) = rest.first() {
+                return video(id);
+            }
         }
 
-        // /shorts/<id>
-        if first == "shorts" && segments.len() > 1 {
-            return TargetKind::VideoId(segments[1].to_string());
-        }
-
-        // /embed/<id>
-        if first == "embed" && segments.len() > 1 {
-            return TargetKind::VideoId(segments[1].to_string());
-        }
-
-        // /channel/<channel_id>
-        if first == "channel" && segments.len() > 1 {
-            return TargetKind::ChannelId(segments[1].to_string());
+        // /channel/<channel_id> or /channel/<channel_id>/live
+        if first == "channel" {
+            if let Some((id, after)) = rest.split_first() {
+                return with_live_suffix(channel(id), after);
+            }
         }
 
         // /@<handle> or /@<handle>/live
-        if first.starts_with('@') {
-            return TargetKind::Handle(first.to_string());
+        if first.len() > 1 && first.starts_with('@') {
+            return with_live_suffix(TargetKind::Handle(first.to_string()), rest);
         }
 
-        // /user/<name> or /c/<name>
-        if (first == "user" || first == "c") && segments.len() > 1 {
-            return TargetKind::Handle(format!("@{}", segments[1]));
+        // /user/<name> or /c/<name>, optionally followed by /live
+        if first == "user" || first == "c" {
+            if let Some((name, after)) = rest.split_first() {
+                return with_live_suffix(TargetKind::LegacyName(format!("{first}/{name}")), after);
+            }
         }
     }
 
     // Fallback query parameter checks
     if let Some(v) = get_query_param("v") {
-        return TargetKind::VideoId(v);
+        return video(&v);
     }
     if let Some(list) = get_query_param("list") {
-        return TargetKind::PlaylistId(list);
+        return playlist(&list);
     }
 
-    if input.starts_with('@') && !input.contains('/') {
-        TargetKind::Handle(input.to_string())
-    } else {
-        TargetKind::Invalid(format!("unrecognized YouTube target: {input}"))
-    }
+    TargetKind::Invalid(format!("unrecognized YouTube target: {input}"))
 }
 
 /// Builds the RSS feed URL for a given target.
@@ -183,7 +215,11 @@ pub fn feed_url_for_target(target: &TargetKind) -> Option<String> {
     match target {
         TargetKind::ChannelId(id) => Some(format!("https://www.youtube.com/feeds/videos.xml?channel_id={id}")),
         TargetKind::PlaylistId(id) => Some(format!("https://www.youtube.com/feeds/videos.xml?playlist_id={id}")),
-        TargetKind::Handle(_) | TargetKind::VideoId(_) | TargetKind::Invalid(_) => None,
+        TargetKind::Handle(_)
+        | TargetKind::LegacyName(_)
+        | TargetKind::Live(_)
+        | TargetKind::VideoId(_)
+        | TargetKind::Invalid(_) => None,
     }
 }
 
@@ -218,16 +254,22 @@ pub fn extract_channel_id_from_html(html: &str) -> Option<String> {
 }
 
 /// Extracts an active live stream video ID and the page title from a YouTube `/live` page.
+///
+/// Only the canonical link and `og:url` are read: on a channel that is live they name the running broadcast's watch
+/// page. A channel that is not live answers with its channel page, whose canonical URL is the channel and whose body
+/// links to *recommended* videos and other channels' streams; none of those is the answer, so `None` is returned.
 #[must_use]
 pub fn extract_live_info_from_html(html: &str) -> Option<(String, Option<String>)> {
-    // The canonical watch link is the stream the page is showing. In every sampled live page it is the
-    // first `watch?v=` occurrence and all occurrences agree, so the first one is used.
-    let pos = html.find("youtube.com/watch?v=")?;
-    let video_id: String = html.get(pos + 20..)?.chars().take(11).collect();
-    let is_id = video_id.len() == 11 && video_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !is_id {
-        return None;
-    }
+    const HEAD_MARKERS: [&str; 2] = [
+        r#"rel="canonical" href="https://www.youtube.com/watch?v="#,
+        r#"property="og:url" content="https://www.youtube.com/watch?v="#,
+    ];
+
+    let video_id = HEAD_MARKERS.iter().find_map(|marker| {
+        let pos = html.find(marker)?;
+        let candidate: String = html.get(pos + marker.len()..)?.chars().take(11).collect();
+        is_video_id(&candidate).then_some(candidate)
+    })?;
 
     // The page title names the running broadcast; it is HTML, not XML, so its entities are decoded here.
     let title = html.find("<title>").and_then(|start| {
@@ -421,11 +463,23 @@ mod tests {
                 "https://www.youtube.com/channel/UC1234567890123456789012",
                 TargetKind::ChannelId("UC1234567890123456789012".into()),
             ),
-            ("https://www.youtube.com/@SkyNews/live", TargetKind::Handle("@SkyNews".into())),
-            ("@tagesschau/live", TargetKind::Handle("@tagesschau".into())),
+            (
+                "https://www.youtube.com/channel/UC1234567890123456789012/live",
+                TargetKind::Live(Box::new(TargetKind::ChannelId("UC1234567890123456789012".into()))),
+            ),
+            (
+                "https://www.youtube.com/@SkyNews/live",
+                TargetKind::Live(Box::new(TargetKind::Handle("@SkyNews".into()))),
+            ),
+            ("@tagesschau/live", TargetKind::Live(Box::new(TargetKind::Handle("@tagesschau".into())))),
+            ("@tagesschau/videos", TargetKind::Handle("@tagesschau".into())),
             ("https://www.youtube.com/@tagesschau", TargetKind::Handle("@tagesschau".into())),
-            ("https://www.youtube.com/c/tagesschau", TargetKind::Handle("@tagesschau".into())),
-            ("https://www.youtube.com/user/tagesschau", TargetKind::Handle("@tagesschau".into())),
+            ("https://www.youtube.com/c/tagesschau", TargetKind::LegacyName("c/tagesschau".into())),
+            ("https://www.youtube.com/user/tagesschau", TargetKind::LegacyName("user/tagesschau".into())),
+            (
+                "https://www.youtube.com/c/tagesschau/live",
+                TargetKind::Live(Box::new(TargetKind::LegacyName("c/tagesschau".into()))),
+            ),
             ("@tagesschau", TargetKind::Handle("@tagesschau".into())),
             ("UC1234567890123456789012", TargetKind::ChannelId("UC1234567890123456789012".into())),
             ("dQw4w9WgXcQ", TargetKind::VideoId("dQw4w9WgXcQ".into())),
@@ -439,6 +493,16 @@ mod tests {
             ("tagesschau", TargetKind::Invalid("unrecognized YouTube target: tagesschau".into())),
             ("youtu.be/dQw4w9WgXcQ", TargetKind::VideoId("dQw4w9WgXcQ".into())),
             ("WWW.YOUTUBE.COM/watch?v=dQw4w9WgXcQ", TargetKind::VideoId("dQw4w9WgXcQ".into())),
+            ("https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=42", TargetKind::VideoId("dQw4w9WgXcQ".into())),
+            ("https://www.youtube.com/playlist?list=OLAK5uy_abc-123", TargetKind::PlaylistId("OLAK5uy_abc-123".into())),
+            // Malformed IDs are rejected instead of being sent to Invidious or the feed endpoint
+            ("https://www.youtube.com/watch?v=short", TargetKind::Invalid("invalid video ID: short".into())),
+            ("https://youtu.be/dQw4w9WgXcQ123", TargetKind::Invalid("invalid video ID: dQw4w9WgXcQ123".into())),
+            ("https://www.youtube.com/channel/UCshort", TargetKind::Invalid("invalid channel ID: UCshort".into())),
+            (
+                "https://www.youtube.com/playlist?list=PL%3Cscript%3E",
+                TargetKind::Invalid("invalid playlist ID: PL%3Cscript%3E".into()),
+            ),
         ];
 
         for (input, expected) in cases {
@@ -502,5 +566,18 @@ mod tests {
             Some(("LuKwFajn37U".to_string(), Some("Sky News Live".to_string())))
         );
         assert_eq!(extract_live_info_from_html("no live stream here"), None);
+    }
+
+    #[test]
+    fn extract_live_info_ignores_streams_linked_from_the_page_body() {
+        // A channel that is not live: its page links other channels' broadcasts, none of which is this channel's.
+        let not_live = r#"<html><head><title>Kanal - YouTube</title>
+<link rel="canonical" href="https://www.youtube.com/channel/UCoMdktPbSTixAyNGwb-UYkQ"></head>
+<body><a href="https://www.youtube.com/watch?v=zC5s9yaaAE0">Recommended live</a></body></html>"#;
+        assert_eq!(extract_live_info_from_html(not_live), None);
+
+        // og:url is accepted when the canonical link is missing.
+        let og_only = r#"<html><head><title>Live</title><meta property="og:url" content="https://www.youtube.com/watch?v=LuKwFajn37U"></head></html>"#;
+        assert_eq!(extract_live_info_from_html(og_only), Some(("LuKwFajn37U".to_string(), Some("Live".to_string()))));
     }
 }

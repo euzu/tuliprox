@@ -114,8 +114,10 @@ requests. The network capability is described in [Security Model](./security.md)
 
 ## Plugin directories and search order
 
-The `plugins.directories` list specifies the search directories holding plugins. In Docker, this defaults
-automatically to `[/app/plugins, /app/user-plugins]`:
+The `plugins.directories` list specifies the search directories holding plugins. Relative entries are resolved
+against the config directory. When the list is empty, tuliprox searches `plugins.directory` (default `plugins`)
+alone, preceded by `/app/plugins` when that directory exists (the bundled plugins of the container image). In
+Docker the default is therefore `[/app/plugins, /app/config/plugins]`, and installs land on the config volume.
 
 ```yaml
 plugins:
@@ -125,9 +127,12 @@ plugins:
     - /app/user-plugins  # Custom or user-mounted plugins
 ```
 
+The environment variable `TULIPROX_PLUGINS_DIRS` replaces the list. Separate entries with `,` or the platform's
+path separator (`:` on Unix, `;` on Windows).
+
 Directories are searched in the order listed. If multiple directories contain a plugin with the same ID, the later
 directory takes precedence (overrides earlier entries). The last entry in `directories` serves as the target directory
-for plugin installations and uploads via the Web UI.
+for plugin installations and uploads via the Web UI, so it must be writable and should be persisted.
 
 ## The `plugins:` limits
 

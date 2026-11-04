@@ -42,14 +42,13 @@ pub const DEFAULT_PLUGIN_SETTINGS_VERSION: u32 = 1;
 /// startup and on every fetch while it is set.
 pub const ENV_PLUGIN_MARKETPLACE_ALLOW_HTTP: &str = "TULIPROX_PLUGIN_MARKETPLACE_ALLOW_HTTP";
 
-/// Environment variable providing plugin search directories (separated by `:` or `,`).
+/// Environment variable providing plugin search directories, separated by `,` or the
+/// platform's path separator (`:` on Unix, `;` on Windows). Overrides `plugins.directories`.
 pub const ENV_PLUGIN_DIRS: &str = "TULIPROX_PLUGINS_DIRS";
 
-/// Default system plugin directory shipped inside container images.
+/// Plugin directory shipped inside container images. When it exists and no
+/// `directories` are configured, it is searched before `directory`.
 pub const DEFAULT_SYSTEM_PLUGINS_DIR: &str = "/app/plugins";
-
-/// Default user plugin directory for custom plugins.
-pub const DEFAULT_USER_PLUGINS_DIR: &str = "/app/user-plugins";
 
 /// Shortest and longest plugin id, the `^[a-z][a-z0-9-]{2,40}$` of the manifest.
 pub const PLUGIN_ID_LEN: std::ops::RangeInclusive<usize> = 3..=41;

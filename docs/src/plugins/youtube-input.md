@@ -92,17 +92,23 @@ that has neither a `url` nor its own `channels`.
 | Playlist ID | `PLkahZjV5wKe8w9GC_n2yyhx6Wj-NKzzeE`, `https://www.youtube.com/playlist?list=...` |
 | Single video | `dQw4w9WgXcQ`, `https://youtu.be/dQw4w9WgXcQ`, `https://www.youtube.com/live/<id>` |
 | Legacy names | `https://www.youtube.com/user/<name>`, `https://www.youtube.com/c/<name>` |
+| Live page | `@tagesschau/live`, `https://www.youtube.com/channel/UC.../live`, `https://www.youtube.com/c/<name>/live` |
 
-Anything else — an empty string, a foreign domain, a bare word — is rejected with a warning and counts as a hard
-error, so a typo surfaces instead of silently shrinking the playlist.
+A legacy name is not a handle: it is resolved to its channel ID through its own youtube.com page, then through the
+Invidious `resolveurl` endpoint. A live page target always fetches the channel's running broadcast, whatever `mode`
+says.
+
+Anything else — an empty string, a foreign domain, a bare word, a malformed video, channel or playlist ID — is
+rejected with a warning and counts as a hard error, so a typo surfaces instead of silently shrinking the playlist.
 
 ### How `mode` applies
 
 `recent_uploads` reads the channel's Atom feed (its 15 newest videos) and resolves each entry. A playlist target is
 read the same way.
 
-`live_only` asks each channel for its current live broadcast (`/@handle/live`, `/channel/<id>/live`) and keeps the
-stream only when Invidious reports `liveNow`. For a playlist target there is no live page, so the playlist's entries
+`live_only` asks each channel for its current live broadcast (`/@handle/live`, `/channel/<id>/live`, `/c/<name>/live`)
+and keeps the stream only when Invidious reports `liveNow`. Only the page's canonical link names the broadcast, so a
+channel that is not live is never confused with a stream it merely recommends. For a playlist target there is no live page, so the playlist's entries
 are resolved and everything that is not live is dropped. A channel that is simply not live is not an error; a
 channel whose live stream cannot be resolved is.
 
@@ -127,6 +133,10 @@ Values an input leaves empty keep the plugin's built-in default.
 * **Stream Proxying (`?local=true`):** Invidious stream URLs are queried with `?local=true` so stream delivery is
   proxied through the Invidious instance, preventing client players from encountering 403 Forbidden errors caused by
   IP-bound upstream signatures.
+* **Lifetime of the returned URLs:** an MP4 is returned as the instance's `latest_version?id=…&itag=…` link, which
+  stays valid because the instance redirects it to the current signed URL. A live HLS manifest URL is signed by
+  YouTube and expires after roughly six hours; refresh a `live_only` input more often than that (its cache entry
+  already lives only 10 minutes).
 * **Health of the returned URLs:** if every target fails (unreachable instances, unparsable feeds, unresolvable
   streams) the input fails and tuliprox keeps the previous playlist. An empty result is only returned when the
   targets were reached and simply had nothing to offer — no live stream right now, or an empty feed.

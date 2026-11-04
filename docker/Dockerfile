@@ -165,7 +165,6 @@ ENV TZ=${TZ}
 RUN apk add --no-cache tzdata \
   && mkdir -p /output/etc \
   && mkdir -p /output/usr/share \
-  && mkdir -p /output/app/user-plugins \
   && cp -r /usr/share/zoneinfo /output/usr/share/zoneinfo \
   && ln -sf /usr/share/zoneinfo/${TZ} /output/etc/localtime
 
@@ -254,7 +253,6 @@ COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
 COPY --from=plugin-build /src/target/staged-plugins ./plugins
-COPY --from=tz-prep /output/app/user-plugins /app/user-plugins
 
 ENTRYPOINT ["/app/tuliprox"]
 CMD ["-s", "-p", "/app/config"]
@@ -286,7 +284,6 @@ COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
 COPY --from=plugin-build /src/target/staged-plugins ./plugins
-RUN mkdir -p /app/user-plugins
 
 ENTRYPOINT ["/sbin/tini", "--", "/app/tuliprox"]
 CMD ["-s", "-p", "/app/config"]

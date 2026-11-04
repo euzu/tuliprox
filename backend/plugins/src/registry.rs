@@ -32,7 +32,7 @@ use shared::{
     error::TuliproxError,
     model::{
         PluginFingerprintStats, PluginHook, PluginHookStats, PluginScope, DEFAULT_PLUGINS_BATCH_SIZE,
-        DEFAULT_PLUGINS_DIR, DEFAULT_PLUGIN_PRIORITY, DEFAULT_PLUGIN_SETTINGS_VERSION,
+        DEFAULT_PLUGIN_PRIORITY, DEFAULT_PLUGIN_SETTINGS_VERSION,
     },
 };
 use std::{
@@ -953,18 +953,8 @@ fn scan(config: &PluginsConfig, runtime: &Runtime, shared: &Shared) -> Option<Sc
     if !config.enabled {
         return Some(Scan { plugins: Vec::new(), kept: HashSet::new() });
     }
-    let dirs: Vec<&str> = if config.directories.is_empty()
-        || (config.directories.len() == 1
-            && config.directories[0] == DEFAULT_PLUGINS_DIR
-            && config.directory != DEFAULT_PLUGINS_DIR)
-    {
-        vec![config.directory.as_str()]
-    } else {
-        config.directories.iter().map(String::as_str).collect()
-    };
-
     let mut candidates_map = std::collections::BTreeMap::new();
-    for dir_str in dirs {
+    for dir_str in config.search_directories() {
         let directory = Path::new(dir_str);
         match discover(directory) {
             Ok(found) => {
@@ -1228,15 +1218,7 @@ impl Registry {
         let Some(active) = guard.as_mut() else {
             return;
         };
-        let target_dirs: Vec<PathBuf> = if config.directories.is_empty()
-            || (config.directories.len() == 1
-                && config.directories[0] == DEFAULT_PLUGINS_DIR
-                && config.directory != DEFAULT_PLUGINS_DIR)
-        {
-            vec![PathBuf::from(&config.directory)]
-        } else {
-            config.directories.iter().map(PathBuf::from).collect()
-        };
+        let target_dirs: Vec<PathBuf> = config.search_directories().into_iter().map(PathBuf::from).collect();
         if active.dirs == target_dirs {
             return;
         }
@@ -1264,17 +1246,8 @@ impl Registry {
     /// weakly, so dropping the registry drops the watcher, which ends the
     /// thread.
     pub(crate) fn watch(self: &Arc<Self>) -> Result<(), TuliproxError> {
-        let cfg = lock(&self.config);
-        let dirs: Vec<PathBuf> = if cfg.directories.is_empty()
-            || (cfg.directories.len() == 1
-                && cfg.directories[0] == DEFAULT_PLUGINS_DIR
-                && cfg.directory != DEFAULT_PLUGINS_DIR)
-        {
-            vec![PathBuf::from(&cfg.directory)]
-        } else {
-            cfg.directories.iter().map(PathBuf::from).collect()
-        };
-        let existing_dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| d.is_dir()).collect();
+        let existing_dirs: Vec<PathBuf> =
+            lock(&self.config).search_directories().into_iter().map(PathBuf::from).filter(|dir| dir.is_dir()).collect();
         if existing_dirs.is_empty() {
             return Err(TuliproxError::Plugin("none of the configured plugin directories exist".to_string()));
         }
