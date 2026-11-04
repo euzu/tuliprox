@@ -13,6 +13,7 @@
 use crate::{
     app::components::{
         config::HasFormData,
+        needs_plugin_picker,
         source_editor::plugin_form::{
             has_options_section, host_section_title, plugin_sections, replaces_plugin, PluginFormKind, SECTION_MAIN,
             SECTION_OPTIONS,
@@ -81,6 +82,7 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     }
 
     let form = state.form.clone();
+    let picks_plugin = needs_plugin_picker(props.output.as_ref().map(|output| output.plugin.as_str()));
     let plugin_id = form.plugin.clone();
     let host_title = |id: &str| host_section_title(id, &translate);
     let sections: Vec<PluginSection> = plugin_sections(ui.as_ref(), &plugin_id, PluginFormKind::Output, &host_title);
@@ -139,14 +141,16 @@ pub fn PluginTargetOutputView(props: &PluginTargetOutputViewProps) -> Html {
     let main_panel = html! {
         <Card class="tp__config-view__card">
         <fieldset class="tp__plugin-ext__fields" disabled={!props.allow_write}>
-            <PluginPicker name="plugin" label={translate.t(LABEL_PLUGIN)} field_id="OUTPUT_PLUGIN_FORM.PLUGIN_ID"
-                hint_key={Some(HINT_PLUGIN.to_string())}
-                hook={OUTPUT_RENDER_HOOK.to_string()}
-                selected={(!plugin_id.is_empty()).then(|| plugin_id.clone())}
-                allow_write={props.allow_write}
-                required_error={Some(translate.t(HINT_PLUGIN_REQUIRED))}
-                empty_hint_key={Some(HINT_PLUGIN_NONE.to_string())}
-                on_select={on_plugin_select} />
+            if picks_plugin {
+                <PluginPicker name="plugin" label={translate.t(LABEL_PLUGIN)} field_id="OUTPUT_PLUGIN_FORM.PLUGIN_ID"
+                    hint_key={Some(HINT_PLUGIN.to_string())}
+                    hook={OUTPUT_RENDER_HOOK.to_string()}
+                    selected={(!plugin_id.is_empty()).then(|| plugin_id.clone())}
+                    allow_write={props.allow_write}
+                    required_error={Some(translate.t(HINT_PLUGIN_REQUIRED))}
+                    empty_hint_key={Some(HINT_PLUGIN_NONE.to_string())}
+                    on_select={on_plugin_select} />
+            }
             { edit_field_text_option!(state, translate.t(LABEL_FILENAME), filename, PluginTargetOutputFormAction::Filename, false, Some(HINT_FILENAME.to_string())) }
             { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_PLUGIN_FORM.FILTER",
                 Some(HINT_FILTER.to_string()), {

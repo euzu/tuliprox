@@ -20,6 +20,12 @@ pub const INPUT_FETCH_HOOK: &str = "input.fetch";
 /// The manifest hook an output provider declares (`hooks: [output.render]`).
 pub const OUTPUT_RENDER_HOOK: &str = "output.render";
 
+/// Whether a plugin input or output form shows the picker, given the plugin the
+/// block was opened with. A block from a plugin's own tile, or one already
+/// configured, names its plugin, so the form does not ask again; only the
+/// generic Plugin tile adds a block with no plugin chosen.
+pub fn needs_plugin_picker(opened_with: Option<&str>) -> bool { opened_with.is_none_or(str::is_empty) }
+
 /// A plugin that is enabled and runs now, so `validate_plugin_refs` accepts an
 /// input or output naming it.
 fn is_runnable(plugin: &PluginSummaryDto) -> bool { plugin.enabled && plugin.state == PluginStateDto::Enabled }
@@ -209,6 +215,13 @@ mod tests {
         assert_eq!(options.len(), 2);
         assert_eq!(options[1].id, "gone-input");
         assert!(options[1].selected);
+    }
+
+    #[test]
+    fn only_a_block_without_a_plugin_shows_the_picker() {
+        assert!(needs_plugin_picker(None), "the generic Plugin tile");
+        assert!(needs_plugin_picker(Some("")), "an empty id names no plugin");
+        assert!(!needs_plugin_picker(Some("youtube-input")), "a plugin's own tile or a configured block");
     }
 
     #[test]
