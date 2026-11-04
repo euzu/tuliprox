@@ -62,12 +62,15 @@ fn ready_revision(entry: &SegmentEntry) -> Option<(u64, u64)> {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct HlsOriginContentEvidence(BTreeMap<u64, OriginContentRecord>);
+pub(crate) struct HlsOriginContentEvidence {
+    records: BTreeMap<u64, OriginContentRecord>,
+    pub(super) probes: super::anchor_probe::HlsAnchorProbeEvidence,
+}
 
 impl HlsOriginContentEvidence {
     pub(crate) fn record(&mut self, entry: &SegmentEntry, generation: u64, digest: [u8; 32]) {
         let Some(identity) = entry.media_resource_identity() else { return };
-        self.0.insert(
+        self.records.insert(
             entry.proxy_seq,
             OriginContentRecord {
                 origin_key: entry.origin_key,
@@ -78,8 +81,8 @@ impl HlsOriginContentEvidence {
                 ready_revision: ready_revision(entry),
             },
         );
-        while self.0.len() > CONTENT_EVIDENCE_LIMIT {
-            self.0.pop_first();
+        while self.records.len() > CONTENT_EVIDENCE_LIMIT {
+            self.records.pop_first();
         }
     }
 
@@ -94,7 +97,7 @@ impl HlsOriginContentEvidence {
             return None;
         }
         let digest = session.origin_content.digest(entry, session.activity.origin_work_generation)?;
-        let record = session.origin_content.0.get(&entry.proxy_seq)?;
+        let record = session.origin_content.records.get(&entry.proxy_seq)?;
         Some(HlsOriginContentAnchor {
             proxy_seq: entry.proxy_seq,
             origin_key: entry.origin_key,
@@ -107,7 +110,7 @@ impl HlsOriginContentEvidence {
     }
 
     pub(super) fn digest(&self, entry: &SegmentEntry, generation: u64) -> Option<[u8; 32]> {
-        self.0
+        self.records
             .get(&entry.proxy_seq)
             .filter(|record| {
                 record.origin_key == entry.origin_key

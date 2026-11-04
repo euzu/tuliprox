@@ -554,3 +554,5 @@ async fn permanent_probe_failure_keeps_followups_reduced_and_bounded() {
 
 #[tokio::test]
 async fn generation_change_during_reference_probe_rejects_the_stale_switch() { invalidated_probe(437, false).await; }
+
+mod dedup;

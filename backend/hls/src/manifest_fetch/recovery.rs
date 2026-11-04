@@ -480,6 +480,11 @@ where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
+    let _probe_round = crate::refresh::anchor_probe::HlsAnchorProbeRoundGuard::install(
+        &context.session,
+        burst_plan.total_candidates(),
+    )
+    .await;
     let mut acceptance_plan = evaluation.acceptance_plan;
     let mut excluded_candidates = Vec::new();
     loop {
@@ -495,9 +500,7 @@ where
             commit,
         )
         .await;
-        if !matches!(outcome, HlsSelectedManifestRecoveryCommit::Rejected(_))
-            || evaluation.minimum_target_duration.is_none()
-        {
+        if !matches!(outcome, HlsSelectedManifestRecoveryCommit::Rejected(_)) {
             return outcome;
         }
         let Some((index, _)) = selected else { return outcome };
@@ -510,6 +513,13 @@ where
             &candidate.fetched.body,
         );
         let mut session = context.session.write().await;
+        let content_probe = matches!(selected, Some((_, HlsManifestCommitKind::ContentVerifiedAlternative)));
+        if evaluation.minimum_target_duration.is_none()
+            && !content_probe
+            && !crate::refresh::anchor_probe::candidate_has_final_mismatch(&session, identity)
+        {
+            return outcome;
+        }
         let Some(generation) = episode_generation else { return outcome };
         let Some(episode) = session.origin_control.acceptance_episode.as_mut() else { return outcome };
         if !episode.release_failed_candidate(generation, identity) {

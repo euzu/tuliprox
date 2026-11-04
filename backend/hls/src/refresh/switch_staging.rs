@@ -592,13 +592,17 @@ async fn commit_alternative_switch_media(
 pub(super) struct HlsVerifiedContentAnchor {
     generation: HlsSwitchStagingGeneration,
     anchor: super::origin_probe::HlsOriginContentAnchor,
+    round_lifetime: tokio_util::sync::CancellationToken,
+    _standalone_round: Option<super::anchor_probe::HlsAnchorProbeRoundGuard>,
     _read_pin: HlsCommittedAcceptanceReadPin,
-    _file_pin: crate::HlsRevisionFilePin,
+    _file_pin: Arc<crate::HlsRevisionFilePin>,
     _revision: Option<crate::SegmentRevisionGuard>,
 }
 
 impl HlsVerifiedContentAnchor {
-    pub(super) fn matches(&self, generation: &HlsSwitchStagingGeneration) -> bool { self.generation == *generation }
+    pub(super) fn matches(&self, generation: &HlsSwitchStagingGeneration) -> bool {
+        !self.round_lifetime.is_cancelled() && self.generation == *generation
+    }
 
     pub(super) fn is_current(&self, session: &crate::HlsSession, generation: &HlsSwitchStagingGeneration) -> bool {
         self.matches(generation)
@@ -619,16 +623,25 @@ pub(super) async fn verify_content_anchor(
     .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?
 }
 
-async fn probe_content_anchor(
+struct HlsContentAnchorProbe {
+    proof: HlsVerifiedContentAnchor,
+    candidate_ref: crate::OriginSegmentFetchRef,
+    reference_path: std::path::PathBuf,
+    identity: super::anchor_probe::ProbeIdentity,
+    round: Arc<super::anchor_probe::HlsAnchorProbeRound>,
+}
+
+async fn capture_content_anchor_probe(
     request: &OriginRefreshRequest,
     fetched: &FetchedOriginManifest,
-) -> Result<HlsVerifiedContentAnchor, HlsManifestCommitError> {
+) -> Result<HlsContentAnchorProbe, HlsManifestCommitError> {
     let unavailable = || switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable);
     let manifest = match parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url) {
         OriginManifestParseOutcome::Normal(manifest) if manifest.maps.is_empty() => manifest,
         _ => return Err(unavailable()),
     };
-    let (proof, candidate_ref, cache_key, expected_digest, reference_path) = {
+    let fetch_context = alternative_switch_fetch_context(request, fetched);
+    let (proof, candidate_ref, reference_path, identity, round) = {
         let session = request.session.read().await;
         let generation = switch_staging_generation(&session)
             .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?;
@@ -672,12 +685,36 @@ async fn probe_content_anchor(
             request.attempt.as_ref().map_or_else(|| "none".to_string(), |attempt| attempt.remaining_attempts().to_string()));
         let entry = session.segments.get(&anchor.proxy_seq).ok_or_else(unavailable)?;
         let (path, revision) = anchor_revision_path(&session, &anchor, &request.segment_cache);
-        let file_pin = request.segment_cache.pin_revision_file(&path).map_err(|_| unavailable())?;
-        let cache_key = anchor.cache_key.clone();
-        let expected_digest = anchor.digest;
+        let identity = super::anchor_probe::ProbeIdentity::new(
+            &session,
+            &anchor,
+            &fetch_context,
+            &candidate.resolved_origin_url,
+            candidate.origin_byte_range,
+        )
+        .map_err(|()| unavailable())?;
+        if session.origin_content.probes.rejects(&identity) {
+            session.origin_content.probes.mark_candidate(generation.candidate_identity);
+            debug!("HLS content anchor probe: reason=final-origin-content-mismatch");
+            return Err(unavailable());
+        }
+        let (round, standalone) = if let Some(round) = session
+            .origin_content
+            .probes
+            .round()
+            .map_err(|()| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?
+        {
+            (round, None)
+        } else {
+            let owner = super::anchor_probe::HlsAnchorProbeRoundGuard::standalone(1);
+            (Arc::clone(&owner.0), Some(owner))
+        };
+        let file_pin = round.pin_reference(&request.segment_cache, &path).map_err(|()| unavailable())?;
         let proof = HlsVerifiedContentAnchor {
             generation,
             anchor,
+            round_lifetime: round.cancelled.clone(),
+            _standalone_round: standalone,
             _read_pin: HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&entry.access), current_time_millis()),
             _file_pin: file_pin,
             _revision: revision,
@@ -689,37 +726,108 @@ async fn probe_content_anchor(
                 byte_range: candidate.origin_byte_range,
                 valid_until_ms: None,
             },
-            cache_key,
-            expected_digest,
             path,
+            identity,
+            round,
         )
     };
+    Ok(HlsContentAnchorProbe { proof, candidate_ref, reference_path, identity, round })
+}
+
+async fn probe_content_anchor(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+) -> Result<HlsVerifiedContentAnchor, HlsManifestCommitError> {
+    let unavailable = || switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable);
+    let HlsContentAnchorProbe { proof, candidate_ref, reference_path, identity, round } =
+        capture_content_anchor_probe(request, fetched).await?;
+    let fetch_context = alternative_switch_fetch_context(request, fetched);
     tokio::fs::metadata(&reference_path).await.map_err(|_| unavailable())?;
     log_current_anchor_reserve(request, &proof.generation);
-    let _permit =
-        request.segment_worker_pool.try_reserve_origin_probe(&request.session).await.ok_or_else(unavailable)?;
-    let context = alternative_switch_fetch_context(request, fetched);
-    let policy = request.segment_worker_pool.policy();
-    let object = stage_hls_switch_resource(
-        &context,
-        &policy,
-        cache_key,
-        candidate_ref.resolved_origin_url,
-        candidate_ref.byte_range,
-        HlsSwitchResourceKind::Segment,
-    )
-    .await
-    .map_err(|_| unavailable())?;
-    let digest = super::origin_probe::sha256_file(&object.path).await;
-    request.segment_cache.remove_staged(object).await.map_err(|_| unavailable())?;
-    if digest? != expected_digest {
-        debug!("HLS content anchor probe: reason=original-content-mismatch");
-        return Err(unavailable());
-    }
-    if !proof.is_current(&*request.session.read().await, &proof.generation) {
-        return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
+    let digest = round
+        .digest(
+            identity.clone(),
+            super::anchor_probe::fetch_digest(
+                request.clone(),
+                fetch_context,
+                proof.anchor.cache_key.clone(),
+                candidate_ref,
+            ),
+        )
+        .await
+        .map_err(|()| unavailable())?;
+    {
+        let mut session = request.session.write().await;
+        if !round.is_active() {
+            return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
+        }
+        if digest != proof.anchor.digest {
+            // The completed comparison belongs to this exact semantic binding,
+            // even when a newer technical episode superseded its commit permission.
+            session.origin_content.probes.reject(&identity);
+            round.mark_rejected(proof.generation.candidate_identity);
+            debug!("HLS content anchor probe: reason=original-content-mismatch-final");
+        }
+        if !proof.is_current(&session, &proof.generation) {
+            return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
+        }
+        // A concurrent round may have disproved this binding while this fetch
+        // was in flight. A later matching body cannot override that finding.
+        if session.origin_content.probes.rejects(&identity) {
+            return Err(unavailable());
+        }
     }
     Ok(proof)
+}
+
+pub(super) async fn reject_final_content_mismatch(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+    acceptance_mode: crate::manifest_fetch::HlsManifestCommitAcceptanceMode,
+) -> Result<(), HlsManifestCommitError> {
+    if !matches!(
+        acceptance_mode,
+        crate::manifest_fetch::HlsManifestCommitAcceptanceMode::AllowHeldHostSwitchCandidate
+            | crate::manifest_fetch::HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate
+            | crate::manifest_fetch::HlsManifestCommitAcceptanceMode::AllowVerifiedEmergencyHostSwitchCandidate
+    ) {
+        return Ok(());
+    }
+    let manifest = match parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url) {
+        OriginManifestParseOutcome::Normal(manifest) if manifest.maps.is_empty() => manifest,
+        _ => return Ok(()),
+    };
+    let context = alternative_switch_fetch_context(request, fetched);
+    let session = request.session.read().await;
+    let Some(anchor) = super::origin_probe::HlsOriginContentEvidence::latest_ready(&session) else { return Ok(()) };
+    let Some(candidate) =
+        manifest.segments.iter().find(|candidate| candidate.origin_seq == anchor.origin_key.host_local_sequence)
+    else {
+        return Ok(());
+    };
+    if candidate.map_ref.is_some() || candidate.encryption.is_some() {
+        return Ok(());
+    }
+    let identity = super::anchor_probe::ProbeIdentity::new(
+        &session,
+        &anchor,
+        &context,
+        &candidate.resolved_origin_url,
+        candidate.origin_byte_range,
+    )
+    .map_err(|()| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
+    if !session.origin_content.probes.rejects(&identity) {
+        return Ok(());
+    }
+    if let Some(generation) = switch_staging_generation(&session).filter(|generation| {
+        generation
+            .candidate_identity
+            .matches_candidate(fetched_effective_manifest_host(fetched).as_deref(), &fetched.body)
+    }) {
+        session.origin_content.probes.mark_candidate(generation.candidate_identity);
+    }
+    debug!("HLS content anchor probe: reason=final-origin-content-mismatch");
+    Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))
 }
 
 /// Diagnostics use the existing lease/READY reserve calculation. Contended or

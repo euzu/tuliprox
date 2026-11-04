@@ -47,6 +47,7 @@ use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, HlsManifestRecoveryBurstConfig, ReverseProxyDisabledHeaderConfig, StripConfig};
 
+pub(crate) mod anchor_probe;
 mod commit;
 pub(crate) mod failure;
 pub(crate) mod origin_probe;
@@ -1374,6 +1375,7 @@ async fn commit_manifest_recovery_candidate(
         let session = request.session.read().await;
         ensure_refresh_origin_work_generation_is_current(&session, request)?;
     }
+    switch_staging::reject_final_content_mismatch(request, &fetched, acceptance_mode).await?;
     let content_anchor =
         if acceptance_mode == HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate {
             Some(Box::pin(verify_content_anchor(request, &fetched)).await?)
