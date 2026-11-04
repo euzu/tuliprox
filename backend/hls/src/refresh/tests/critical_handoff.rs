@@ -343,7 +343,7 @@ pub(in crate::refresh::tests) async fn install_active_critical_test_lease(
         .await
         .is_activated());
     let publication_guard = hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, proxy_session_id, now_ms)
         .await
         .expect("critical test lease publication guard");
     assert!(hls_proxy
@@ -536,7 +536,7 @@ async fn critical_handoff_manifest_supersession_during_candidate_io_rolls_back_s
     assert!(base_access.active_readers() > 0, "lease base is pinned before candidate media completes");
     let publication_now_ms = super::super::current_time_millis();
     let publication_guard = hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, publication_now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, publication_now_ms)
         .await
         .expect("superseding manifest publication guard");
     let superseding_snapshot = live_lease.last_manifest_snapshot.clone().expect("superseding snapshot");

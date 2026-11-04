@@ -193,7 +193,7 @@ pub(super) async fn publish_terminal_pending_lease(
         .await;
     let publication = ctx
         .hls_proxy
-        .prepare_access_lease_manifest_publication(lease_id, proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(lease_id, proxy_session_id, now_ms)
         .await
         .expect("manifest publication guard");
     assert!(ctx

@@ -104,6 +104,7 @@ mod provider_admission_retry_reservation;
 mod provider_admission_startup_reservation;
 mod runtime_policy;
 mod segment_responses;
+mod strip_entry;
 mod support;
 mod terminal_resources;
 mod terminal_tail;

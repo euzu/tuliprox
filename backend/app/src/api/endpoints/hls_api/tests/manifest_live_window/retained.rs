@@ -106,8 +106,11 @@ impl Fixture {
     }
 
     async fn republish_at(&self, now_ms: u64, snapshot: HlsLeaseManifestSnapshot) -> Outcome {
-        let guard =
-            self.manager.prepare_access_lease_manifest_publication(&self.lease_id, &self.proxy, now_ms).await.unwrap();
+        let guard = self
+            .manager
+            .prepare_access_lease_manifest_publication_for_test(&self.lease_id, &self.proxy, now_ms)
+            .await
+            .unwrap();
         self.manager
             .republish_access_lease_live_window(
                 &self.session,
@@ -206,7 +209,7 @@ async fn live_window_retained_publication_revalidates_concurrent_state_changes()
         let now = current_time_millis();
         let guard = fixture
             .manager
-            .prepare_access_lease_manifest_publication(&fixture.lease_id, &fixture.proxy, now)
+            .prepare_access_lease_manifest_publication_for_test(&fixture.lease_id, &fixture.proxy, now)
             .await
             .unwrap();
         match change {

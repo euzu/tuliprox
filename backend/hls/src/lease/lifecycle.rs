@@ -251,6 +251,10 @@ impl HlsAccessLeaseStore {
         self.availability_evidence_can_advance()?;
         if let Some(lease) = self.by_lease_id.get_mut(lease_id) {
             lease.state = HlsAccessLeaseState::Idle;
+            if lease.playback_mode == HlsLeasePlaybackMode::Live {
+                lease.entry_generation = lease.entry_generation.and_then(|generation| generation.checked_add(1));
+                lease.entry_wait_deadline_ms = None;
+            }
         }
         self.advance_availability_evidence(&proxy_session_id)?;
         Ok(Some(release))
@@ -629,7 +633,8 @@ impl HlsAccessLeaseStore {
             return HlsAccessLeaseActivation::Expired;
         }
         if new_lease.playback_mode == HlsLeasePlaybackMode::Live
-            && new_lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+            && (new_lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+                || (new_lease.state == HlsAccessLeaseState::Idle && !new_lease.has_current_entry_manifest()))
         {
             return HlsAccessLeaseActivation::AvailabilityPending;
         }

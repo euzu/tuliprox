@@ -151,6 +151,12 @@ fn activated_lease_becomes_idle_after_active_window_but_remains_reactivatable() 
     assert!(store.has_usable_access_lease_for_session(&proxy_session_id, 8_000));
     assert!(store.access_lease(&lease_id, &proxy_session_id, 8_000).is_some());
 
+    assert_eq!(
+        store.activate_access_lease(&lease_id, &proxy_session_id, 8_000, timing(5_000, 30_000)),
+        HlsAccessLeaseActivation::AvailabilityPending
+    );
+    assert!(super::publish_manifest_snapshot(&mut store, &lease_id, &proxy_session_id, manifest_snapshot(1), 8_000)
+        .is_committed());
     assert!(store.activate_access_lease(&lease_id, &proxy_session_id, 8_000, timing(5_000, 30_000)).is_activated());
     assert_eq!(store.session_snapshot(&proxy_session_id, 8_000).active_count, 1);
 }

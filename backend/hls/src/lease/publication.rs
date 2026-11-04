@@ -7,22 +7,61 @@ use super::{
 };
 
 impl HlsAccessLease {
+    pub const fn entry_generation(&self) -> Option<u64> { self.entry_generation }
+
+    pub fn has_current_entry_manifest(&self) -> bool {
+        self.entry_generation.is_some() && self.admitted_entry_generation == self.entry_generation
+    }
+
+    pub fn uses_entry_view(&self) -> bool {
+        matches!(self.state, HlsAccessLeaseState::Pending | HlsAccessLeaseState::Idle)
+            || (self.state == HlsAccessLeaseState::Activated
+                && self.last_manifest_snapshot.is_some()
+                && !self.has_current_entry_manifest())
+    }
+
     pub fn published_transient_resource_ids(&self) -> &HlsPublishedTransientResourceIds {
         &self.published_transient_resource_ids
     }
 
     fn manifest_publication_guard(&self) -> Option<HlsLeaseManifestPublicationGuard> {
+        let entry_generation = self.entry_generation?;
         (lease_state_allows_use(self.state)
             && self.playback_mode == HlsLeasePlaybackMode::Live
             && !self.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()))
         .then_some(HlsLeaseManifestPublicationGuard {
             issued_at_ms: self.issued_at_ms,
             admission_generation: self.admission_generation,
+            state: self.state,
+            entry_generation,
+            strip_policy: None,
+            admits_live_entry: true,
+            source: None,
         })
     }
 }
 
 impl HlsAccessLeaseStore {
+    pub(crate) fn bound_entry_wait(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        entry_generation: u64,
+        requested_deadline_ms: u64,
+    ) -> Option<u64> {
+        let lease = self.by_lease_id.get_mut(lease_id)?;
+        if lease.proxy_session_id != *proxy_session_id
+            || lease.entry_generation != Some(entry_generation)
+            || !lease.uses_entry_view()
+        {
+            return None;
+        }
+        let deadline =
+            lease.entry_wait_deadline_ms.map_or(requested_deadline_ms, |current| current.min(requested_deadline_ms));
+        lease.entry_wait_deadline_ms = Some(deadline);
+        Some(deadline)
+    }
+
     pub fn availability_evidence_generation(
         &self,
         proxy_session_id: &ProxySessionId,
@@ -122,13 +161,16 @@ impl HlsAccessLeaseStore {
                 HlsLeaseManifestPublicationRejectReason::AdmissionGenerationChanged,
             );
         }
+        if lease.state != expected.state || lease.entry_generation != Some(expected.entry_generation) {
+            return HlsLeaseManifestPublicationOutcome::Rejected(HlsLeaseManifestPublicationRejectReason::EntryChanged);
+        }
         if lease.playback_mode != HlsLeasePlaybackMode::Live {
             return HlsLeaseManifestPublicationOutcome::Rejected(HlsLeaseManifestPublicationRejectReason::LeaseNotLive);
         }
         if lease
             .last_manifest_snapshot
             .as_ref()
-            .is_some_and(|current| manifest_source_is_regressive(current, &snapshot))
+            .is_some_and(|current| manifest_source_is_regressive(current, &snapshot, expected.strip_policy.is_some()))
         {
             return HlsLeaseManifestPublicationOutcome::Rejected(
                 HlsLeaseManifestPublicationRejectReason::SourceRegressive,
@@ -173,6 +215,9 @@ impl HlsAccessLeaseStore {
             lease.published_finalized_manifest_generations.insert(manifest_generation);
         }
         lease.startup_admission = HlsLeaseStartupAdmissionState::Admitted;
+        if expected.admits_live_entry {
+            lease.admitted_entry_generation = Some(expected.entry_generation);
+        }
         if self.advance_availability_evidence(proxy_session_id).is_err() {
             return HlsLeaseManifestPublicationOutcome::Rejected(
                 HlsLeaseManifestPublicationRejectReason::SnapshotGenerationExhausted,
@@ -201,8 +246,13 @@ impl HlsAccessLeaseStore {
     }
 }
 
-fn manifest_source_is_regressive(current: &HlsLeaseManifestSnapshot, candidate: &HlsLeaseManifestSnapshot) -> bool {
+fn manifest_source_is_regressive(
+    current: &HlsLeaseManifestSnapshot,
+    candidate: &HlsLeaseManifestSnapshot,
+    entry: bool,
+) -> bool {
     candidate.source_commit_identity.commit_generation() < current.source_commit_identity.commit_generation()
-        || (candidate.startup_revisions.as_ref().is_some_and(|publication| publication.window_plan.is_some())
+        || ((entry
+            || candidate.startup_revisions.as_ref().is_some_and(|publication| publication.window_plan.is_some()))
             && candidate.first_proxy_seq < current.first_proxy_seq)
 }

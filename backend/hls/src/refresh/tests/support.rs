@@ -945,7 +945,7 @@ pub(in crate::refresh::tests) async fn prepare_active_critical_handoff_lease(
         .await
         .is_activated());
     let publication_guard = hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, now_ms)
         .await
         .expect("active lease accepts authoritative manifest publication");
     assert!(hls_proxy

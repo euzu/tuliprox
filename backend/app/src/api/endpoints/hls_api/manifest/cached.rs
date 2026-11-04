@@ -136,7 +136,12 @@ fn published_live_window_response(
         .and_then(|publication| publication.window_plan.as_ref())
         .ok_or("previous_window_unavailable")?;
     Ok((
-        HlsMaterializedSharedManifest { body: published.body.to_string(), mode: "normal", initial_strip_outcome: None },
+        HlsMaterializedSharedManifest {
+            body: published.body.to_string(),
+            mode: "normal",
+            initial_strip_outcome: None,
+            initial_strip_exception: None,
+        },
         previous.clone(),
         HlsPublishedTransientResourceIds::default(),
         now_ms,
@@ -155,15 +160,11 @@ async fn prepare_live_window_response(
     fingerprint: Option<&crate::model::Fingerprint>,
     options: HlsCachedManifestOptions,
     started_at_ms: u64,
+    lease: tuliprox_hls::api::HlsAccessLease,
 ) -> HlsLiveWindowPreparation {
     use tuliprox_hls::api::{HlsManifestRenderer, RenderError};
 
     let now_ms = app_state.hls.proxy.now_ms();
-    let Some(lease) =
-        app_state.hls.proxy.access_lease_response_snapshot(view.access_lease_id, view.proxy_session_id, now_ms).await
-    else {
-        return HlsLiveWindowPreparation::Unavailable("lease_unavailable");
-    };
     if let Some(lease) = app_state
         .hls
         .proxy
@@ -174,7 +175,7 @@ async fn prepare_live_window_response(
     }
     let (prepared, queued) = {
         let mut state = session.write().await;
-        state.live_window_strip = app_state.hls.proxy.strip();
+        state.live_window_strip.clone_from(view.strip);
         if !tuliprox_hls::api::hls_live_window_origin_allowed_for_request(&state, options, started_at_ms, now_ms) {
             return HlsLiveWindowPreparation::Unavailable("origin_freshness_or_identity");
         }
@@ -189,6 +190,9 @@ async fn prepare_live_window_response(
             .as_ref()
             .filter(|previous| desired.visible.first().is_some_and(|first| *first < previous.first_proxy_seq))
         {
+            if lease.uses_entry_view() {
+                return HlsLiveWindowPreparation::Unavailable("regressive_entry_window");
+            }
             return match published_live_window_response(previous, now_ms) {
                 Ok(prepared) => HlsLiveWindowPreparation::Prepared(prepared),
                 Err(reason) => HlsLiveWindowPreparation::Unavailable(reason),
@@ -207,13 +211,24 @@ async fn prepare_live_window_response(
             Err(_) => HlsLiveWindowPreparation::Unavailable("render_invalid_state"),
             Ok(rendered) => {
                 let materialized = HlsMaterializedSharedManifest {
+                    initial_strip_exception: plan.is_startup_recovery().then_some("startup-recovery"),
                     body: super::materialize_hls_access_manifest(
                         &rendered.body,
                         view.access_lease_id,
                         view.server_path,
                     ),
                     mode: "normal",
-                    initial_strip_outcome: hls_access_manifest_uses_startup_view(lease.state).then_some(
+                    initial_strip_outcome: lease.uses_entry_view().then_some(if view.strip.value == 0 {
+                        tuliprox_hls::initial_strip::HlsInitialStripOutcome::Skipped {
+                            reason: tuliprox_hls::initial_strip::HlsInitialStripSkipReason::StripDisabled,
+                            visible_segments: plan.visible.len(),
+                        }
+                    } else if plan.effective_strip_segments == 0 && !plan.is_startup_recovery() {
+                        tuliprox_hls::initial_strip::HlsInitialStripOutcome::Skipped {
+                            reason: tuliprox_hls::initial_strip::HlsInitialStripSkipReason::NotEnoughSegments,
+                            visible_segments: plan.visible.len(),
+                        }
+                    } else {
                         tuliprox_hls::initial_strip::HlsInitialStripOutcome::Applied {
                             mode: match view.strip.mode {
                                 shared::model::HlsStripMode::Segments => "segments",
@@ -222,8 +237,8 @@ async fn prepare_live_window_response(
                             configured: view.strip.value,
                             effective: plan.effective_strip_segments,
                             visible_segments: plan.visible.len(),
-                        },
-                    ),
+                        }
+                    }),
                 };
                 match observe_hls_lease_manifest_snapshot_derivation(
                     app_state,
@@ -365,12 +380,22 @@ impl HlsCachedManifestViewContext<'_> {
         session: &HlsSessionHandle,
         materialized: HlsMaterializedSharedManifest,
         strip_diagnostic: HlsInitialStripPublicationDiagnostic,
+        snapshot: &HlsLeaseManifestSnapshot,
+        entry_generation: u64,
     ) -> axum::response::Response {
         touch_pending_manifest_follow_up_window(app_state, session, self.access_lease_id, self.access_lease_state)
             .await;
         drop(spawn_hls_runtime_bandwidth_persistence(app_state, session, self.bandwidth_learning));
         mark_successful_canonical_manifest_activity(app_state, session, app_state.hls.proxy.now_ms()).await;
-        log_hls_initial_strip_publication(self.proxy_session_id, self.access_lease_id, strip_diagnostic);
+        log_hls_initial_strip_publication(
+            self.proxy_session_id,
+            self.access_lease_id,
+            strip_diagnostic,
+            entry_generation,
+            self.strip,
+            snapshot,
+            materialized.initial_strip_exception,
+        );
         hls_response(materialized.body).into_response()
     }
 }
@@ -488,16 +513,16 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
     fingerprint: Option<&crate::model::Fingerprint>,
     session: &HlsSessionHandle,
     access_lease_id: &HlsAccessLeaseId,
-    access_lease_state: HlsAccessLeaseState,
-    strip: &crate::model::StripConfig,
+    _access_lease_state: HlsAccessLeaseState,
+    _strip: &crate::model::StripConfig,
     server_path: Option<&str>,
-    options: HlsCachedManifestOptions,
+    mut options: HlsCachedManifestOptions,
     bandwidth_learning: HlsRuntimeBandwidthLearningContext<'_>,
 ) -> Option<axum::response::Response> {
     let started_at = tokio::time::Instant::now();
     let started_at_ms = app_state.hls.proxy.now_ms();
     let proxy_session_id = session.read().await.proxy_session_id.clone();
-    let Some(publication_guard) = app_state
+    let Some(initial_publication_guard) = app_state
         .hls
         .proxy
         .prepare_access_lease_manifest_publication(access_lease_id, &proxy_session_id, started_at_ms)
@@ -529,22 +554,14 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         );
         return Some(hls_cached_manifest_temporarily_unavailable());
     };
-    let mut view = HlsCachedManifestViewContext::new(
-        &proxy_session_id,
-        access_lease_id,
-        access_lease_state,
-        strip,
-        server_path,
-        bandwidth_learning,
-    );
     let mut last_wait_reason = None;
+    let mut publication_retries = 0_u8;
     loop {
         let lease = app_state
             .hls
             .proxy
             .access_lease_response_snapshot(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
             .await?;
-        let access_lease_state = view.access_lease_state;
         if let Some(response) =
             super::hls_terminal_playback_response(app_state, &lease, &proxy_session_id, access_lease_id)
         {
@@ -556,6 +573,62 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         if lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()) {
             return None;
         }
+        let publication_guard = app_state
+            .hls
+            .proxy
+            .prepare_access_lease_manifest_publication(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
+            .await?;
+        if !publication_guard.same_lease_authorization(initial_publication_guard) {
+            return Some(hls_cached_manifest_temporarily_unavailable());
+        }
+        if !publication_guard.is_for_session(session) {
+            return Some(hls_cached_manifest_temporarily_unavailable());
+        }
+        if publication_guard.lease_state() != lease.state
+            || Some(publication_guard.entry_generation()) != lease.entry_generation()
+            || publication_guard.entry_strip_policy().is_some() != lease.uses_entry_view()
+        {
+            if publication_retries < 8 {
+                publication_retries += 1;
+                continue;
+            }
+            if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
+                continue;
+            }
+            return Some(hls_cached_manifest_temporarily_unavailable());
+        }
+        if publication_guard.entry_strip_policy().is_some() && !options.wait_timeout.is_zero() {
+            let requested = u64::try_from(options.wait_timeout.as_millis())
+                .unwrap_or(u64::MAX)
+                .min(app_state.hls.proxy.initial_manifest_wait_timeout_secs().saturating_mul(1_000));
+            let deadline = app_state
+                .hls
+                .proxy
+                .bound_access_lease_entry_wait(
+                    access_lease_id,
+                    &proxy_session_id,
+                    publication_guard.entry_generation(),
+                    started_at_ms.saturating_add(requested),
+                )
+                .await?;
+            options.wait_timeout =
+                options.wait_timeout.min(Duration::from_millis(deadline.saturating_sub(started_at_ms)));
+        }
+        let strip = publication_guard.entry_strip_policy().unwrap_or_else(|| app_state.hls.proxy.strip());
+        let access_lease_state = lease.state;
+        let strip_state = if lease.uses_entry_view() && lease.state == HlsAccessLeaseState::Activated {
+            HlsAccessLeaseState::Pending
+        } else {
+            lease.state
+        };
+        let view = HlsCachedManifestViewContext::new(
+            &proxy_session_id,
+            access_lease_id,
+            strip_state,
+            &strip,
+            server_path,
+            bandwidth_learning,
+        );
         let (entry_allowed, refresh_in_flight) = {
             let state = session.read().await;
             (state.live_entry_allowed_for_lease(&lease), state.origin_refresh.in_flight)
@@ -576,8 +649,16 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             let mut retained_plan = None;
             let mut retained_origin_generation = false;
             let prepared = if fast_start {
-                let preparation =
-                    prepare_live_window_response(app_state, session, &view, fingerprint, options, started_at_ms).await;
+                let preparation = prepare_live_window_response(
+                    app_state,
+                    session,
+                    &view,
+                    fingerprint,
+                    options,
+                    started_at_ms,
+                    lease.clone(),
+                )
+                .await;
                 let selection = match preparation {
                     HlsLiveWindowPreparation::Prepared(prepared) => Ok(prepared),
                     HlsLiveWindowPreparation::RetainedOriginGeneration { lease } => {
@@ -593,10 +674,12 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                 match selection {
                     Ok(prepared) => Some(prepared),
                     Err(reason) => {
+                        log_hls_manifest_wait_transition(&mut last_wait_reason, reason, session, access_lease_id).await;
                         if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
                             continue;
                         }
-                        if access_lease_state == HlsAccessLeaseState::Pending {
+                        if access_lease_state == HlsAccessLeaseState::Pending && lease.last_manifest_snapshot.is_none()
+                        {
                             return None;
                         }
                         debug!(
@@ -646,7 +729,33 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                 };
                 Some((materialized, snapshot, published_resource_ids, delivered_at_ms))
             } else if let Some(body) = cached.rendered_body {
-                let materialized = view.materialize(&body, "normal", HlsManifestWindowPolicy::ApplyLiveWindow);
+                let (preserve, provisioning) = {
+                    let state = session.read().await;
+                    let provisioning = state.last_rendered_manifest.as_ref().is_some_and(|rendered| {
+                        !rendered.segment_proxy_seqs.is_empty()
+                            && rendered.segment_proxy_seqs.iter().all(|seq| {
+                                state.segments.get(seq).is_some_and(tuliprox_hls::api::is_hls_provisioning_segment)
+                            })
+                    });
+                    (
+                        provisioning
+                            || state.key.archive_reference.is_some()
+                            || body
+                                .lines()
+                                .any(|line| line.starts_with("#EXT-X-PLAYLIST-TYPE:") || line == "#EXT-X-ENDLIST"),
+                        provisioning,
+                    )
+                };
+                let mut materialized = view.materialize(
+                    &body,
+                    "normal",
+                    if preserve {
+                        HlsManifestWindowPolicy::PreserveFullManifest
+                    } else {
+                        HlsManifestWindowPolicy::ApplyLiveWindow
+                    },
+                );
+                materialized.initial_strip_exception = provisioning.then_some("provisioning");
                 let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(&materialized.body);
                 let delivered_at_ms = app_state.hls.proxy.now_ms();
                 let snapshot = {
@@ -670,7 +779,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                     return Some(hls_cached_manifest_temporarily_unavailable());
                 };
                 let Some(snapshot) = snapshot else {
-                    if access_lease_state != HlsAccessLeaseState::Pending {
+                    if !lease.uses_entry_view() {
                         return None;
                     }
                     log_hls_manifest_wait_transition(
@@ -690,7 +799,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                 None
             };
             if let Some((materialized, snapshot, published_resource_ids, delivered_at_ms)) = prepared {
-                if access_lease_state == HlsAccessLeaseState::Pending
+                if lease.uses_entry_view()
                     && !hls_startup_admission_allows_snapshot(&app_state.hls_ctx(), session, &snapshot, delivered_at_ms)
                         .await
                 {
@@ -739,7 +848,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         )
                         .await
                 };
-                if fast_start && !outcome.is_committed() {
+                if !outcome.is_committed() {
                     let current = app_state
                         .hls
                         .proxy
@@ -759,14 +868,16 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                             return Some(response);
                         }
                     }
-                    if outcome
-                        == tuliprox_hls::api::HlsLeaseManifestPublicationOutcome::Rejected(
-                            tuliprox_hls::api::HlsLeaseManifestPublicationRejectReason::SnapshotChanged,
+                    if matches!(
+                        outcome,
+                        tuliprox_hls::api::HlsLeaseManifestPublicationOutcome::Rejected(
+                            tuliprox_hls::api::HlsLeaseManifestPublicationRejectReason::SnapshotChanged
+                                | tuliprox_hls::api::HlsLeaseManifestPublicationRejectReason::EntryChanged
+                                | tuliprox_hls::api::HlsLeaseManifestPublicationRejectReason::StripPolicyChanged
                         )
+                    ) && publication_retries < 8
                     {
-                        if let Some(current) = current {
-                            view.access_lease_state = current.state;
-                        }
+                        publication_retries += 1;
                         continue;
                     }
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
@@ -823,7 +934,18 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                 else {
                     return Some(hls_cached_manifest_temporarily_unavailable());
                 };
-                let response = view.finish(app_state, session, materialized, strip_diagnostic).await;
+                let mut committed_snapshot = startup_snapshot.clone();
+                committed_snapshot.snapshot_generation = outcome.snapshot_generation()?;
+                let response = view
+                    .finish(
+                        app_state,
+                        session,
+                        materialized,
+                        strip_diagnostic,
+                        &committed_snapshot,
+                        publication_guard.entry_generation(),
+                    )
+                    .await;
                 if fast_start {
                     let current_session =
                         app_state.hls.proxy.sessions().get_by_proxy_session_id(&proxy_session_id).await?;

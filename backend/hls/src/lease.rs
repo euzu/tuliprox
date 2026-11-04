@@ -145,6 +145,9 @@ pub struct HlsAccessLease {
     pub archive_origin_url: Option<String>,
     pub playback_mode: HlsLeasePlaybackMode,
     pub startup_admission: HlsLeaseStartupAdmissionState,
+    entry_generation: Option<u64>,
+    admitted_entry_generation: Option<u64>,
+    entry_wait_deadline_ms: Option<u64>,
     pub playback_cursor: HlsLeasePlaybackCursor,
     pub last_manifest_snapshot: Option<HlsLeaseManifestSnapshot>,
     pub(crate) published_media_sequence_highwater: Option<u64>,
@@ -167,6 +170,7 @@ pub struct HlsAccessLease {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct HlsMediaLeaseIdentity {
     issued_at_ms: u64,
+    entry_generation: Option<u64>,
     playback: HlsMediaLeasePlaybackIdentity,
 }
 
@@ -178,6 +182,20 @@ pub struct HlsMediaLeaseIdentity {
 pub struct HlsLeaseManifestPublicationGuard {
     issued_at_ms: u64,
     admission_generation: u64,
+    state: HlsAccessLeaseState,
+    entry_generation: u64,
+    strip_policy: Option<(shared::model::HlsStripMode, u64)>,
+    admits_live_entry: bool,
+    source: Option<HlsLeasePublicationSource>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct HlsLeasePublicationSource {
+    session_address: usize,
+    origin_epoch: u64,
+    origin_work_generation: u64,
+    origin_commits: u64,
+    media_readiness_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -188,6 +206,8 @@ pub enum HlsLeaseManifestPublicationRejectReason {
     LeaseUnavailable,
     LeaseIncarnationChanged,
     AdmissionGenerationChanged,
+    EntryChanged,
+    StripPolicyChanged,
     LeaseNotLive,
     SourceRegressive,
     ManifestGenerationUnavailable,

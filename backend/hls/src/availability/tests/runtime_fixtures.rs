@@ -226,7 +226,7 @@ pub(super) async fn add_active_post_refresh_lease(
     let publication = fixture
         .ctx
         .hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, &fixture.proxy_session_id, fixture.now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &fixture.proxy_session_id, fixture.now_ms)
         .await
         .expect("second lease publication guard");
     let mut manifest = pressure_manifest(12_000);

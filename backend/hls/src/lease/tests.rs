@@ -31,6 +31,7 @@ mod lifecycle;
 mod persistence;
 mod query;
 mod startup;
+mod strip_entry;
 mod support;
 mod terminal;
 

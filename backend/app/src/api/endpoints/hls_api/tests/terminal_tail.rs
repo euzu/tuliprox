@@ -1474,7 +1474,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn publish_test_manifest_and
     let publication_guard = app_state
         .hls
         .proxy
-        .prepare_access_lease_manifest_publication(lease_id, proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(lease_id, proxy_session_id, now_ms)
         .await
         .expect("live lease accepts publication preparation");
     assert!(app_state

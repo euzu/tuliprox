@@ -27,11 +27,23 @@ pub(in crate::api::endpoints::hls_api) fn log_hls_initial_strip_publication(
     proxy_session_id: &ProxySessionId,
     lease_id: &HlsAccessLeaseId,
     diagnostic: HlsInitialStripPublicationDiagnostic,
+    entry_generation: u64,
+    strip: &crate::model::StripConfig,
+    snapshot: &tuliprox_hls::api::HlsLeaseManifestSnapshot,
+    exception: Option<&'static str>,
 ) {
+    let snapshot_generation = snapshot.snapshot_generation;
+    let first = snapshot.first_proxy_seq;
+    let last = snapshot.last_proxy_seq;
+    let exception = exception.unwrap_or("none");
+    let configured_mode = match strip.mode {
+        shared::model::HlsStripMode::Segments => "segments",
+        shared::model::HlsStripMode::Seconds => "seconds",
+    };
     match diagnostic {
         HlsInitialStripPublicationDiagnostic::Applied { mode, strip_mode, configured, effective, visible_segments } => {
             debug!(
-                "HLS initial strip applied: mode={} lease={} proxy_session={} strip_mode={} configured={} effective={} visible_segments={}",
+                "HLS initial strip applied: mode={} lease={} proxy_session={} strip_mode={} configured={} effective={} visible_segments={} entry_generation={entry_generation} snapshot_generation={snapshot_generation} first={first} last={last} exception={exception}",
                 mode,
                 safe_hls_access_lease_id(lease_id),
                 safe_proxy_session_id(proxy_session_id),
@@ -43,17 +55,18 @@ pub(in crate::api::endpoints::hls_api) fn log_hls_initial_strip_publication(
         }
         HlsInitialStripPublicationDiagnostic::Skipped { mode, reason, visible_segments } => {
             debug!(
-                "HLS initial strip skipped: mode={} lease={} proxy_session={} reason={} visible_segments={}",
+                "HLS initial strip skipped: mode={} lease={} proxy_session={} reason={} visible_segments={} entry_generation={entry_generation} snapshot_generation={snapshot_generation} first={first} last={last} strip_mode={configured_mode} configured={} effective=0 exception={exception}",
                 mode,
                 safe_hls_access_lease_id(lease_id),
                 safe_proxy_session_id(proxy_session_id),
                 reason.as_log_reason(),
-                visible_segments
+                visible_segments,
+                strip.value
             );
         }
         HlsInitialStripPublicationDiagnostic::SkippedForLeaseState { mode, reason } => {
             debug!(
-                "HLS initial strip skipped: mode={} lease={} proxy_session={} reason={}",
+                "HLS initial strip skipped: mode={} lease={} proxy_session={} reason={} entry_generation={entry_generation} snapshot_generation={snapshot_generation} first={first} last={last}",
                 mode,
                 safe_hls_access_lease_id(lease_id),
                 safe_proxy_session_id(proxy_session_id),
@@ -213,7 +226,8 @@ pub(in crate::api::endpoints::hls_api) async fn hls_live_lease_identity_is_curre
     expected_identity: HlsMediaLeaseIdentity,
 ) -> bool {
     current_hls_resource_lease(app_state, access_context).await.is_some_and(|lease| {
-        lease.playback_mode == HlsLeasePlaybackMode::Live && lease.media_identity() == Some(expected_identity)
+        lease.playback_mode == HlsLeasePlaybackMode::Live
+            && lease.media_identity().is_some_and(|current| current.same_playback_authorization(expected_identity))
     })
 }
 
@@ -295,6 +309,19 @@ pub(in crate::api::endpoints::hls_api) async fn register_hls_cache_stream_for_su
     session: &HlsSessionHandle,
     response_context: &HlsCacheResponseContext,
 ) {
+    if app_state
+        .hls
+        .proxy
+        .access_lease_response_snapshot(
+            &access_context.lease_id,
+            &access_context.proxy_session_id,
+            app_state.hls.proxy.now_ms(),
+        )
+        .await
+        .is_some_and(|lease| lease.state == HlsAccessLeaseState::Idle && !lease.has_current_entry_manifest())
+    {
+        return;
+    }
     if ensure_hls_cache_stream_registered(app_state, fingerprint, headers, access_context, session).await.is_none() {
         debug!(
             "HLS media registration skipped: lease={} reason=session-or-connection-unavailable",
@@ -322,15 +349,17 @@ pub(in crate::api::endpoints::hls_api) async fn validate_hls_proxy_access_reques
         HlsAccessAdmissionMode::ResourceAccess,
     )
     .await?;
-    let startup_admission_pending = app_state
-        .hls
-        .proxy
-        .access_lease_response_snapshot(&context.lease_id, proxy_session_id, now_ms)
-        .await
-        .is_some_and(|lease| {
-            lease.state == HlsAccessLeaseState::Pending
-                && lease.startup_admission == HlsLeaseStartupAdmissionState::Pending
-        });
+    let lease = app_state.hls.proxy.access_lease_response_snapshot(&context.lease_id, proxy_session_id, now_ms).await;
+    if lease
+        .as_ref()
+        .is_some_and(|lease| lease.state == HlsAccessLeaseState::Idle && !lease.has_current_entry_manifest())
+    {
+        // Existing URI bindings remain readable, without activating this new entry.
+        return Ok(context);
+    }
+    let startup_admission_pending = lease.is_some_and(|lease| {
+        lease.state == HlsAccessLeaseState::Pending && lease.startup_admission == HlsLeaseStartupAdmissionState::Pending
+    });
     if startup_admission_pending {
         return Err(HlsAccessLeaseValidationError::AvailabilityPending);
     }

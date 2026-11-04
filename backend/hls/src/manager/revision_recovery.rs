@@ -289,12 +289,37 @@ impl HlsProxyManager {
         if snapshot.startup_revisions.as_ref().is_some_and(|publication| publication.window_plan.is_some()) {
             session.live_window_strip = self.strip();
         }
-        let retained = (retained_request.is_some()
-            || snapshot
-                .startup_revisions
-                .as_ref()
-                .and_then(|publication| publication.window_plan.as_ref())
-                .is_some_and(|window| window.plan.origin_work_generation == session.activity.origin_work_generation))
+        let expected = match self.validate_entry_manifest_publication(
+            expected,
+            &snapshot,
+            &session,
+            Arc::as_ptr(current.session()) as usize,
+        ) {
+            Ok(expected) => expected,
+            Err(reason) => return Outcome::Rejected(reason),
+        };
+        if retained_request.is_some() && expected.entry_strip_policy().is_none() {
+            if let Some(current) =
+                leases.response_snapshot(lease_id, session_id, now_ms).and_then(|lease| lease.last_manifest_snapshot)
+            {
+                let mut equivalent = snapshot.clone();
+                equivalent.snapshot_generation = current.snapshot_generation;
+                if equivalent == current {
+                    // Concurrent polls can advance only the publication counter.
+                    // They still select identical bytes, bindings and source metadata.
+                    snapshot = equivalent;
+                }
+            }
+        }
+        let retained = expected.entry_strip_policy().is_none()
+            && (retained_request.is_some()
+                || snapshot
+                    .startup_revisions
+                    .as_ref()
+                    .and_then(|publication| publication.window_plan.as_ref())
+                    .is_some_and(|window| {
+                        window.plan.origin_work_generation == session.activity.origin_work_generation
+                    }))
             && now_ms <= snapshot.delivered_at_ms.saturating_add(snapshot.playlist_duration_ms)
             && leases
                 .response_snapshot(lease_id, session_id, now_ms)

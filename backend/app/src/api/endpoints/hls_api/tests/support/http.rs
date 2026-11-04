@@ -43,22 +43,23 @@ pub(in crate::api::endpoints::hls_api::tests) async fn try_test_hls_cached_manif
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let now_ms = super::super::super::current_time_millis();
     if app_state.hls.proxy.access_lease_response_snapshot(access_lease_id, &proxy_session_id, now_ms).await.is_none() {
-        app_state
-            .hls
-            .proxy
-            .prepare_access_lease(HlsAccessLease::pending(
-                access_lease_id.clone(),
-                HlsPlaybackFamilyKey::new("test-user", "manifest-test-client"),
-                proxy_session_id,
-                "test-user".to_string(),
-                "manifest-test-session".to_string(),
-                1,
-                "12345".to_string(),
-                12345,
-                now_ms,
-                60_000,
-            ))
-            .await;
+        let mut lease = HlsAccessLease::pending(
+            access_lease_id.clone(),
+            HlsPlaybackFamilyKey::new("test-user", "manifest-test-client"),
+            proxy_session_id,
+            "test-user".to_string(),
+            "manifest-test-session".to_string(),
+            1,
+            "12345".to_string(),
+            12345,
+            now_ms,
+            60_000,
+        );
+        lease.state = access_lease_state;
+        if access_lease_state == HlsAccessLeaseState::Activated {
+            lease.active_until_ms = Some(now_ms + 60_000);
+        }
+        app_state.hls.proxy.prepare_access_lease(lease).await;
     }
     super::super::super::try_hls_cached_manifest_response(
         app_state,

@@ -348,7 +348,7 @@ async fn lease_reconciliation_cannot_overwrite_a_concurrent_manifest_publication
     };
     manager.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id)).await;
     let publication_guard = manager
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 1)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, 1)
         .await
         .expect("publication guard");
 
