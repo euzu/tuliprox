@@ -97,10 +97,10 @@ pub fn title_or_key(strings: &PluginLocaleMap, title: &str, title_key: Option<&s
     title_key.and_then(|key| strings.get(key)).cloned().unwrap_or_else(|| title.to_owned())
 }
 
-/// The schema with every `title`, `description`, `x-placeholder`,
-/// `x-pattern-message` and `x-enum-labels` entry that is a key of the plugin's
+/// The schema with every `title`, `description`, `placeholder`,
+/// `patternMessage` and `enumLabels` entry that is a key of the plugin's
 /// strings replaced by its translation, for `SchemaForm`.
-/// `x-enum-labels`, a list or a value-to-label object, with each label translated.
+/// `enumLabels`, a list or a value-to-label object, with each label translated.
 fn translate_labels(labels: &Value, strings: &PluginLocaleMap) -> Value {
     let translate = |label: &Value| match label {
         Value::String(text) => Value::String(resolve_text(strings, text)),
@@ -122,10 +122,10 @@ pub fn translate_schema(schema: &Value, strings: &PluginLocaleMap) -> Value {
             map.iter()
                 .map(|(key, value)| {
                     let translated = match (key.as_str(), value) {
-                        ("title" | "description" | "x-placeholder" | "x-pattern-message", Value::String(text)) => {
+                        ("title" | "description" | "placeholder" | "patternMessage", Value::String(text)) => {
                             Value::String(resolve_text(strings, text))
                         }
-                        ("x-enum-labels", labels) => translate_labels(labels, strings),
+                        ("enumLabels", labels) => translate_labels(labels, strings),
                         _ => translate_schema(value, strings),
                     };
                     (key.clone(), translated)
@@ -207,13 +207,13 @@ mod tests {
     fn ui_hints_are_translated_too() {
         let map = strings(&[("f.mode.live", "Nur live"), ("f.hint", "z. B. abc"), ("f.bad", "Nur Buchstaben")]);
         let schema = json!({"type": "object", "properties": {
-            "mode": {"enum": ["live", "all"], "x-enum-labels": ["f.mode.live", "All"]},
-            "pick": {"type": "array", "items": {"enum": [1], "x-enum-labels": {"1": "f.mode.live"}}},
-            "name": {"type": "string", "x-placeholder": "f.hint", "x-pattern-message": "f.bad"}}});
+            "mode": {"enum": ["live", "all"], "enumLabels": ["f.mode.live", "All"]},
+            "pick": {"type": "array", "items": {"enum": [1], "enumLabels": {"1": "f.mode.live"}}},
+            "name": {"type": "string", "placeholder": "f.hint", "patternMessage": "f.bad"}}});
         let translated = translate_schema(&schema, &map);
-        assert_eq!(translated["properties"]["mode"]["x-enum-labels"], json!(["Nur live", "All"]));
-        assert_eq!(translated["properties"]["pick"]["items"]["x-enum-labels"], json!({"1": "Nur live"}));
-        assert_eq!(translated["properties"]["name"]["x-placeholder"], "z. B. abc");
-        assert_eq!(translated["properties"]["name"]["x-pattern-message"], "Nur Buchstaben");
+        assert_eq!(translated["properties"]["mode"]["enumLabels"], json!(["Nur live", "All"]));
+        assert_eq!(translated["properties"]["pick"]["items"]["enumLabels"], json!({"1": "Nur live"}));
+        assert_eq!(translated["properties"]["name"]["placeholder"], "z. B. abc");
+        assert_eq!(translated["properties"]["name"]["patternMessage"], "Nur Buchstaben");
     }
 }

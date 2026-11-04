@@ -55,7 +55,7 @@ before it applies the form, so both report the same violations.
   `uniqueItems`, `additionalProperties`, plus annotations such as `title`, `description` and `default`.
 - `pattern` is a regular expression in the syntax of the Rust `regex` crate (no look-around, no back-references) and,
   as in JSON Schema, matches anywhere in the text unless it is anchored with `^…$`. A pattern that does not compile is
-  refused when the package is checked. `x-pattern-message` replaces the default "must match the pattern" message.
+  refused when the package is checked. `patternMessage` replaces the default "must match the pattern" message.
 - `format` is checked for `email`, `uri` (a scheme and a rest, like `https://…`), `hostname`, `date-time`
   (RFC 3339, like `2026-01-31T18:00:00Z`), `date`, `time` and `duration` (ISO 8601, like `PT30M`). Any other
   format is an annotation.
@@ -76,34 +76,34 @@ output forms. Fields appear in the order the schema lists them. A string is a te
 an array of scalars a tag list, an array whose `items` is an `enum` a multi-select, and an object a collapsible group,
 which may hold further groups. An array of objects or of arrays is not rendered.
 
-A schema can add UI hints. They start with `x-`, so the validator ignores them, and they never change what is valid:
+A schema can add UI hints. The validator ignores them, so they never change what is valid:
 
 | Hint | On | Effect |
 | --- | --- | --- |
-| `x-widget: textarea` / `code` | string | A multi-line box; `code` uses a monospace font. Both take a row of their own. |
-| `x-widget: color` | string | A colour picker storing `#rrggbb`. |
-| `x-widget: slider` | integer, number with `minimum` and `maximum` | A slider over the range, stepping by `multipleOf`. |
-| `x-widget: radio` | `enum` | Radio buttons instead of a select. |
-| `x-widget: duration` | integer, string | An amount and a unit (seconds to days). An integer stores seconds, a string `30m`, or `PT30M` with `format: duration`. |
-| `x-enum-labels` | `enum`, or an array with `items.enum` | Labels for the values: a list in the order of `enum`, or an object from value to label. |
-| `x-placeholder` | any field | The text shown while the field is empty. |
-| `x-help-url` | any field | An `http(s)` link next to the label; any other URL is dropped. |
-| `x-columns: 1`–`4` | the root object, a group | Lays its fields out in that many columns (one on narrow screens). |
-| `x-row: true` | any field | The field takes a row of its own in a multi-column layout. |
-| `x-collapsed: true` | a group | The group starts collapsed. |
-| `x-pattern-message` | string with `pattern` | The error shown when the pattern does not match. |
+| `widget: textarea` / `code` | string | A multi-line box; `code` uses a monospace font. Both take a row of their own. |
+| `widget: color` | string | A colour picker storing `#rrggbb`. |
+| `widget: slider` | integer, number with `minimum` and `maximum` | A slider over the range, stepping by `multipleOf`. |
+| `widget: radio` | `enum` | Radio buttons instead of a select. |
+| `widget: duration` | integer, string | An amount and a unit (seconds to days). An integer stores seconds, a string `30m`, or `PT30M` with `format: duration`. |
+| `enumLabels` | `enum`, or an array with `items.enum` | Labels for the values: a list in the order of `enum`, or an object from value to label. |
+| `placeholder` | any field | The text shown while the field is empty. |
+| `helpUrl` | any field | An `http(s)` link next to the label; any other URL is dropped. |
+| `columns: 1`–`4` | the root object, a group | Lays its fields out in that many columns (one on narrow screens). |
+| `row: true` | any field | The field takes a row of its own in a multi-column layout. |
+| `collapsed: true` | a group | The group starts collapsed. |
+| `patternMessage` | string with `pattern` | The error shown when the pattern does not match. |
 
 A widget that does not fit the field's type is ignored, and so is a slider without both bounds.
 
 ```json
 {
   "type": "object",
-  "x-columns": 2,
+  "columns": 2,
   "properties": {
-    "mode": { "enum": ["live_only", "all"], "x-enum-labels": ["Live streams only", "Everything"], "x-widget": "radio" },
-    "refresh": { "type": "integer", "minimum": 60, "default": 3600, "x-widget": "duration" },
-    "notes": { "type": "string", "x-widget": "textarea", "x-placeholder": "Anything the next admin should know" },
-    "slug": { "type": "string", "pattern": "^[a-z0-9-]+$", "x-pattern-message": "lowercase letters, digits and dashes" }
+    "mode": { "enum": ["live_only", "all"], "enumLabels": ["Live streams only", "Everything"], "widget": "radio" },
+    "refresh": { "type": "integer", "minimum": 60, "default": 3600, "widget": "duration" },
+    "notes": { "type": "string", "widget": "textarea", "placeholder": "Anything the next admin should know" },
+    "slug": { "type": "string", "pattern": "^[a-z0-9-]+$", "patternMessage": "lowercase letters, digits and dashes" }
   }
 }
 ```
@@ -443,7 +443,7 @@ ui:
 ## Localisation of the form
 
 A `title` or `description` in the schema that is a key of the plugin's locale files is shown translated, and so are
-`x-placeholder`, `x-pattern-message` and the entries of `x-enum-labels`; any other value is shown as written, so a
+`placeholder`, `patternMessage` and the entries of `enumLabels`; any other value is shown as written, so a
 plugin without locale files keeps plain text. List the languages in `ui.locales` and
 ship one flat file per language in `ui/locales/<lang>.json` (the file format and the `en` fallback are described in
 [Custom UI](./custom-ui.md#localisation)). A key missing from a language falls back to `en`.

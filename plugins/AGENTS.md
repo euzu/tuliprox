@@ -89,8 +89,8 @@ host would accept. Unknown top-level keys are ignored by the host, so a typo is 
   `oneOf`, `anyOf`, `allOf`, `$ref`, `if`, `then`, `else`, `not`, `dependentSchemas`, `patternProperties`, and a
   `pattern` that does not compile.
 - The form renders nested objects, lists of scalars, multi-selects (`items.enum`), enums and secrets, in the order the
-  schema lists them. UI hints (`x-widget`, `x-enum-labels`, `x-placeholder`, `x-help-url`, `x-columns`, `x-row`,
-  `x-collapsed`, `x-pattern-message`) are described in `docs/src/plugins/settings.md`; they never change what is valid.
+  schema lists them. UI hints (`widget`, `enumLabels`, `placeholder`, `helpUrl`, `columns`, `row`,
+  `collapsed`, `patternMessage`) are described in `docs/src/plugins/settings.md`; they never change what is valid.
 - A secret has `"writeOnly": true`, **no `default`**, and is read in Rust as `Secret<String>` (`.expose()` for the value).
   Tell users to store it as `${env:VAR}`. A `routing` object (`notify_on`, `min_severity`, `quiet_hours`, `max_per_hour`,
   `dedup_window_secs`) is read by the host for a notification channel; mirror it in the schema so it is editable, but do

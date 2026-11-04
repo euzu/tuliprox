@@ -15,9 +15,10 @@
 //! `minLength`, `maxLength`, `pattern`, `format` (`email`, `uri`, `hostname`,
 //! `date-time`, `date`, `time`, `duration`; other formats are annotations),
 //! `required`, `properties`, `additionalProperties`, `items`, `minItems`,
-//! `maxItems`, `uniqueItems`. Keywords starting with `x-` are UI hints and never
-//! change what is valid, except `x-pattern-message`, the text shown when
-//! `pattern` does not match.
+//! `maxItems`, `uniqueItems`. Any other keyword is ignored, which is how the
+//! form's UI hints (`widget`, `enumLabels`, `placeholder`, `helpUrl`,
+//! `columns`, `row`, `collapsed`) never change what is valid; `patternMessage`
+//! is only the text shown when `pattern` does not match.
 
 use crate::model::PluginFieldErrorDto;
 use regex::Regex;
@@ -277,7 +278,7 @@ fn check_string(schema: &Map<String, Value>, text: &str, path: &str, out: &mut V
         if let Ok(regex) = Regex::new(pattern) {
             if !regex.is_match(text) {
                 let message = schema
-                    .get("x-pattern-message")
+                    .get("patternMessage")
                     .and_then(Value::as_str)
                     .filter(|message| !message.trim().is_empty())
                     .map_or_else(|| format!("must match the pattern {pattern}"), str::to_string);
@@ -403,7 +404,7 @@ mod tests {
     fn string_lengths_patterns_and_custom_pattern_messages() {
         let schema = json!({"type": "object", "properties": {
             "code": {"type": "string", "minLength": 2, "maxLength": 3, "pattern": "^[A-Z]+$"},
-            "slug": {"type": "string", "pattern": "^[a-z-]+$", "x-pattern-message": "lowercase letters and dashes"}}});
+            "slug": {"type": "string", "pattern": "^[a-z-]+$", "patternMessage": "lowercase letters and dashes"}}});
         assert!(!rejected(&schema, &json!({"code": "AB"})));
         assert_eq!(
             messages(&schema, &json!({"code": "A"})),

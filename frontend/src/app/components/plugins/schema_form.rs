@@ -9,17 +9,17 @@
 //! Besides the validation keywords (checked by `shared::utils::validate_plugin_schema`),
 //! a schema may carry UI hints, which never change what is valid:
 //!
-//! * `x-widget` — `textarea`, `code` (strings), `color` (strings), `slider`
+//! * `widget` — `textarea`, `code` (strings), `color` (strings), `slider`
 //!   (integers and numbers with a `minimum` and a `maximum`), `radio` (enums),
 //!   `duration` (integers in seconds, strings as `30m` or, with
 //!   `format: duration`, as `PT30M`). A widget that does not fit the type is ignored.
-//! * `x-enum-labels` — labels for an `enum` (or an array's `items.enum`): a
+//! * `enumLabels` — labels for an `enum` (or an array's `items.enum`): a
 //!   list in the order of `enum`, or an object from value to label.
-//! * `x-placeholder` — the text shown in an empty field.
-//! * `x-help-url` — an `http(s)` link next to the field's label.
-//! * `x-columns` — on an object (the root or a group): lay its fields out in
-//!   1–4 columns. `x-row: true` on a property gives it a row of its own.
-//! * `x-collapsed` — on a group: start collapsed.
+//! * `placeholder` — the text shown in an empty field.
+//! * `helpUrl` — an `http(s)` link next to the field's label.
+//! * `columns` — on an object (the root or a group): lay its fields out in
+//!   1–4 columns. `row: true` on a property gives it a row of its own.
+//! * `collapsed` — on a group: start collapsed.
 
 use crate::{
     app::components::{
@@ -51,7 +51,7 @@ const UNSUPPORTED_KEYWORDS: [&str; 10] =
 /// The path used for errors about the settings object as a whole.
 pub const ROOT_PATH: &str = "(root)";
 
-/// The most columns `x-columns` lays fields out in.
+/// The most columns `columns` lays fields out in.
 const MAX_COLUMNS: u8 = 4;
 
 /// The type of one element of a list property.
@@ -76,7 +76,7 @@ impl ScalarKind {
     }
 }
 
-/// How a field is edited, from `x-widget`. [`Widget::Default`] is the control
+/// How a field is edited, from `widget`. [`Widget::Default`] is the control
 /// of the field's type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Widget {
@@ -166,7 +166,7 @@ impl FieldModel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormModel {
     pub fields: Vec<FieldModel>,
-    /// `x-columns` of the root.
+    /// `columns` of the root.
     pub columns: u8,
 }
 
@@ -307,10 +307,10 @@ fn declared_type<'a>(node: &'a Map<String, Value>, path: &str) -> Result<(Option
     }
 }
 
-/// The labels of `values`: `x-enum-labels` as a list in the order of `values`,
+/// The labels of `values`: `enumLabels` as a list in the order of `values`,
 /// or as an object from a value's text to its label; else the value's text.
 fn enum_labels(nodes: &[&Map<String, Value>], values: &[Value]) -> Vec<String> {
-    let given = nodes.iter().find_map(|node| node.get("x-enum-labels"));
+    let given = nodes.iter().find_map(|node| node.get("enumLabels"));
     values
         .iter()
         .enumerate()
@@ -362,18 +362,18 @@ fn build_list_kind(node: &Map<String, Value>, path: &str) -> Result<FieldKind, U
     })
 }
 
-/// `x-columns` of an object: 1 to [`MAX_COLUMNS`], 1 when absent or out of range.
+/// `columns` of an object: 1 to [`MAX_COLUMNS`], 1 when absent or out of range.
 fn columns_of(node: &Map<String, Value>) -> u8 {
-    node.get("x-columns")
+    node.get("columns")
         .and_then(Value::as_u64)
         .and_then(|columns| u8::try_from(columns).ok())
         .filter(|columns| (1..=MAX_COLUMNS).contains(columns))
         .unwrap_or(1)
 }
 
-/// `x-widget`, kept only where it fits the field's type.
+/// `widget`, kept only where it fits the field's type.
 fn widget_for(node: &Map<String, Value>, kind: &FieldKind) -> Widget {
-    match (node.get("x-widget").and_then(Value::as_str), kind) {
+    match (node.get("widget").and_then(Value::as_str), kind) {
         (Some("textarea"), FieldKind::Text { .. }) => Widget::Textarea,
         (Some("code"), FieldKind::Text { .. }) => Widget::Code,
         (Some("color"), FieldKind::Text { .. }) => Widget::Color,
@@ -388,10 +388,10 @@ fn widget_for(node: &Map<String, Value>, kind: &FieldKind) -> Widget {
     }
 }
 
-/// An `x-help-url` that is an `http(s)` URL; anything else (a `javascript:`
+/// An `helpUrl` that is an `http(s)` URL; anything else (a `javascript:`
 /// URL, a relative path) is dropped.
 fn help_url_of(node: &Map<String, Value>) -> Option<String> {
-    non_blank_str(node, "x-help-url")
+    non_blank_str(node, "helpUrl")
         .map(str::trim)
         .filter(|url| {
             let lower = url.to_ascii_lowercase();
@@ -446,7 +446,7 @@ fn build_field(
                 FieldKind::Group {
                     fields: build_properties(node, &keys, depth + 1)?,
                     columns: columns_of(node),
-                    collapsed: node.get("x-collapsed").and_then(Value::as_bool) == Some(true),
+                    collapsed: node.get("collapsed").and_then(Value::as_bool) == Some(true),
                 }
             }
             Some(other) => return Err(UnsupportedSchema::new(&format!("type {other}"), &path)),
@@ -459,7 +459,7 @@ fn build_field(
     }
 
     let widget = widget_for(node, &kind);
-    let full_row = node.get("x-row").and_then(Value::as_bool) == Some(true)
+    let full_row = node.get("row").and_then(Value::as_bool) == Some(true)
         || matches!(kind, FieldKind::Group { .. })
         || matches!(widget, Widget::Textarea | Widget::Code);
     Ok(FieldModel {
@@ -471,7 +471,7 @@ fn build_field(
         default: node.get("default").cloned(),
         required,
         nullable,
-        placeholder: non_blank_str(node, "x-placeholder").map(str::to_owned),
+        placeholder: non_blank_str(node, "placeholder").map(str::to_owned),
         help_url: help_url_of(node),
         widget,
         full_row,
@@ -788,7 +788,7 @@ fn input_type_for(format: Option<&str>) -> Option<String> {
     }
 }
 
-/// What an empty field shows: `x-placeholder`, else an example of its format.
+/// What an empty field shows: `placeholder`, else an example of its format.
 fn placeholder_for(field: &FieldModel) -> Option<String> {
     field.placeholder.clone().or_else(|| match &field.kind {
         FieldKind::Text { format: Some(format), .. } => match format.as_str() {
@@ -1576,14 +1576,14 @@ mod tests {
     #[test]
     fn widgets_are_kept_only_where_they_fit() {
         let schema = json!({"type": "object", "properties": {
-            "notes": {"type": "string", "x-widget": "textarea"},
-            "script": {"type": "string", "x-widget": "code"},
-            "tint": {"type": "string", "x-widget": "color"},
-            "level": {"type": "integer", "minimum": 0, "maximum": 10, "x-widget": "slider"},
-            "open": {"type": "integer", "x-widget": "slider"},
-            "mode": {"enum": ["a", "b"], "x-widget": "radio"},
-            "wait": {"type": "integer", "x-widget": "duration"},
-            "flag": {"type": "boolean", "x-widget": "textarea"}}});
+            "notes": {"type": "string", "widget": "textarea"},
+            "script": {"type": "string", "widget": "code"},
+            "tint": {"type": "string", "widget": "color"},
+            "level": {"type": "integer", "minimum": 0, "maximum": 10, "widget": "slider"},
+            "open": {"type": "integer", "widget": "slider"},
+            "mode": {"enum": ["a", "b"], "widget": "radio"},
+            "wait": {"type": "integer", "widget": "duration"},
+            "flag": {"type": "boolean", "widget": "textarea"}}});
         let model = analyze_schema(&schema).expect("supported");
         assert_eq!(field(&model, "notes").widget, Widget::Textarea);
         assert!(field(&model, "notes").full_row);
@@ -1599,9 +1599,9 @@ mod tests {
     #[test]
     fn enum_labels_come_from_a_list_or_a_map() {
         let schema = json!({"type": "object", "properties": {
-            "list": {"enum": ["live_only", "all"], "x-enum-labels": ["Live only"]},
-            "map": {"enum": [1, 2], "x-enum-labels": {"2": "Two"}},
-            "pick": {"type": "array", "items": {"enum": ["a", "b"], "x-enum-labels": ["A", "B"]}}}});
+            "list": {"enum": ["live_only", "all"], "enumLabels": ["Live only"]},
+            "map": {"enum": [1, 2], "enumLabels": {"2": "Two"}},
+            "pick": {"type": "array", "items": {"enum": ["a", "b"], "enumLabels": ["A", "B"]}}}});
         let model = analyze_schema(&schema).expect("supported");
         let FieldKind::Enum { labels, .. } = &field(&model, "list").kind else { panic!("enum") };
         assert_eq!(labels, &["Live only", "all"]);
@@ -1626,10 +1626,10 @@ mod tests {
 
     #[test]
     fn layout_hints_reach_the_model() {
-        let schema = json!({"type": "object", "x-columns": 2, "properties": {
-            "a": {"type": "string", "x-placeholder": "e.g. abc", "x-help-url": "https://docs.example/a"},
-            "b": {"type": "string", "x-row": true, "x-help-url": "javascript:alert(1)"},
-            "g": {"type": "object", "x-columns": 9, "x-collapsed": true, "properties": {"c": {"type": "string"}}}}});
+        let schema = json!({"type": "object", "columns": 2, "properties": {
+            "a": {"type": "string", "placeholder": "e.g. abc", "helpUrl": "https://docs.example/a"},
+            "b": {"type": "string", "row": true, "helpUrl": "javascript:alert(1)"},
+            "g": {"type": "object", "columns": 9, "collapsed": true, "properties": {"c": {"type": "string"}}}}});
         let model = analyze_schema(&schema).expect("supported");
         assert_eq!(model.columns, 2);
         let a = field(&model, "a");
