@@ -19,3 +19,5 @@ mod behavior_inspect_routes;
 mod behavior_manual_update;
 mod behavior_provider_resolution;
 mod behavior_recording_routes;
+
+mod cluster_status_evidence;

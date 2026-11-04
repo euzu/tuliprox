@@ -604,6 +604,7 @@ fn disk_cluster_quality_policy(
 }
 
 fn apply_disk_cluster_publish_result(fetch: &mut PlaylistFetch, mut result: XtreamClusterPublishBatchResult) {
+    fetch.completed_clusters.append(&mut result.completed_clusters);
     fetch.quality_acceptances.append(&mut result.quality_acceptances);
     fetch.quality_rejections.append(&mut result.quality_rejections);
     fetch.force_updates.append(&mut result.force_updates);
@@ -667,6 +668,7 @@ where
     match scope {
         XtreamDownloadScope::Direct => {
             fetch.groups.append(&mut candidate_groups);
+            fetch.completed_clusters.push(cluster);
             return Ok(());
         }
         XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Bypass } => {
@@ -676,6 +678,7 @@ where
                 input.options.as_ref().map_or(0, |options| options.update_quality.threshold(cluster));
             fetch.groups.append(&mut candidate_groups);
             fetch.force_updates.push(ClusterForceUpdate { cluster, candidate_count, configured_threshold });
+            fetch.completed_clusters.push(cluster);
             return Ok(());
         }
         XtreamDownloadScope::PlaylistUpdate { quality: UpdateQualityPolicy::Enforce } => {}
@@ -689,6 +692,7 @@ where
         load_baseline_count().await?
     };
     apply_cluster_update_quality(fetch, cluster, current_count, threshold, candidate_groups);
+    fetch.completed_clusters.push(cluster);
     Ok(())
 }
 
@@ -858,6 +862,7 @@ async fn download_xtream_playlist_with_scope<E: EventSink>(
         fetch.groups.append(&mut source_fetch.groups);
         fetch.errors.append(&mut source_fetch.errors);
         fetch.failed_clusters.append(&mut source_fetch.failed_clusters);
+        fetch.completed_clusters.append(&mut source_fetch.completed_clusters);
         fetch.quality_acceptances.append(&mut source_fetch.quality_acceptances);
         fetch.quality_rejections.append(&mut source_fetch.quality_rejections);
         fetch.force_updates.append(&mut source_fetch.force_updates);
@@ -980,6 +985,21 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem, configured_extension:
     doc.movie_data.custom_sid = None;
 
     serde_json::to_string(&doc).unwrap_or(String::new())
+}
+
+/// Build a provider result through the real repository/publication adapter.
+#[cfg(feature = "test-support")]
+pub async fn publication_fixture_fetch(
+    config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    requested: &[XtreamCluster],
+    failure: Option<XtreamCluster>,
+    policy: UpdateQualityPolicy,
+) -> PlaylistFetch {
+    let result = tuliprox_repository::publication_fixture::publish(config, input, requested, failure, policy).await;
+    let mut fetch = PlaylistFetch::default().persisted(true);
+    apply_disk_cluster_publish_result(&mut fetch, result);
+    fetch
 }
 
 #[cfg(test)]
@@ -1509,6 +1529,7 @@ mod tests {
             &mut fetch,
             XtreamClusterPublishBatchResult {
                 outcomes: vec![XtreamClusterPublishOutcome::QualityAccepted(acceptance)],
+                completed_clusters: vec![XtreamCluster::Live],
                 quality_acceptances: vec![acceptance],
                 quality_rejections: vec![rejection],
                 force_updates: vec![force_update],

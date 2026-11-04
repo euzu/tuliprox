@@ -158,6 +158,8 @@ dev tuliprox -> tuliprox-mpegts
 dev tuliprox -> tuliprox-processing
 dev tuliprox -> tuliprox-repository
 dev tuliprox-hls -> tuliprox-mpegts
+dev tuliprox-iptv -> tuliprox-repository
+dev tuliprox-processing -> tuliprox-iptv
 dev tuliprox-repository -> tuliprox-btree
 dev tuliprox-testkit -> tuliprox-mpegts
 ALLOWLIST

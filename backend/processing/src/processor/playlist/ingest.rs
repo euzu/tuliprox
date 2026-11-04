@@ -122,7 +122,7 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 impl PlaylistProcessingContext<shared::model::NoopSink> {
     /// Builds an isolated acquisition context for cross-crate EPG tests using real configuration.
     pub fn for_epg_test(config: Arc<AppConfig>, client: reqwest::Client) -> Self {
@@ -188,3 +188,8 @@ pub(crate) use telemetry::neutralize_overlaid_cluster_facts;
 pub(super) use telemetry::{cluster_is_configured, PIPELINE_TRANSPARENCY_CLUSTERS};
 #[cfg(test)]
 use telemetry::{confirm_published_cluster_counts, persisted_cluster_snapshot};
+
+#[cfg(any(test, feature = "test-support"))]
+mod publication_fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub use publication_fixture::{cache_fixture_status, publication_fixture_status};
