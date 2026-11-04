@@ -74,8 +74,10 @@ pub struct Constants {
     pub re_credentials: Regex,
     pub re_ipv4: Regex,
     pub re_ipv6: Regex,
-    pub re_stream_url: Regex,
+    pub re_stream_path: Regex,
+    pub re_hls_segment_path: Regex,
     pub re_url: Regex,
+    pub re_query_values: Regex,
     pub re_password: Regex,
     pub re_base_href_tag: Regex,
     pub re_base_href: Regex,
@@ -125,15 +127,19 @@ pub const EPISODE_PATTERN: &str = concat!(
 
 pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
     Constants {
-        re_credentials: Regex::new(r"((username|password|token|api_key)=)[^&]*").unwrap(),
+        re_credentials: Regex::new(r#"(?i)((?:username|password|token|api_key)=)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&<>"']*)"#).unwrap(),
         re_ipv4: Regex::new(r"\b((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\b").unwrap(),
         re_ipv6: Regex::new(r"\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|\b::([0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}\b|\b([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}\b|\b::ffff:(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap(),
-        re_stream_url: Regex::new(
-            r"(?i)^(?P<scheme>(?:https?|batch|provider)://)[^/]+/(?P<ctx>live|video|movie|series|m3u-stream|resource|timeshift|streaming|xtream|timeshift\.php)/[^/]+/[^/]+/"
-        )
-        .unwrap(),
-        re_url: Regex::new(r"(.*://).*?/(.*)").unwrap(),
-        re_password: Regex::new(r"password:\s*(\w+)").unwrap(),
+        re_stream_path: Regex::new(
+            r"(?i)^/(?P<context>live|video|movie|series|m3u-stream|resource|timeshift|streaming|xtream|timeshift\.php)/[^/]+/[^/]+/"
+        ).unwrap(),
+        re_hls_segment_path: Regex::new(r"(?i)^(/hls/)[0-9a-f]+(/[0-9]+_[0-9]+\.ts)$").unwrap(),
+        re_url: Regex::new(concat!(
+            r#"(?i)(?:(?P<absolute>[a-z][a-z0-9+.-]*://(?:[^\s<>"'=]|=(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s<>"']*))*)|"#,
+            r#"(?:^|[\s=:\(\[\{"'])(?P<relative>/(?:[^\s<>"'=]|=(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s<>"']*))*))"#,
+        )).unwrap(),
+        re_query_values: Regex::new(r#"([?&][^=&?#\s<>"']*=)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&#<>"']*)"#).unwrap(),
+        re_password: Regex::new(r#"(?i)(password:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s<>"']*)"#).unwrap(),
         re_base_href_tag: Regex::new(r"(?is)<base\b[^>]*>").unwrap(),
         re_base_href: Regex::new(r#"(href|src)="/([^"]*)""#).unwrap(),
         re_base_href_wasm: Regex::new("'(/frontend\\-)").unwrap(),

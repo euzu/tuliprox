@@ -180,8 +180,7 @@ async fn repeated_old_media_exhausts_reentry_without_publishing_a_restart() -> R
 
 #[tokio::test]
 #[ignore = "requires built proxy selected by TULIPROX_TESTKIT_SUT_BINARY"]
-async fn provider_hls_diagnostics_protect_transport_values_under_both_sanitization_settings() -> Result<(), TestkitError>
-{
+async fn provider_hls_diagnostics_follow_the_global_sanitization_setting() -> Result<(), TestkitError> {
     for sanitize in [true, false] {
         for case in [
             ProviderCase::Failover,
@@ -193,7 +192,9 @@ async fn provider_hls_diagnostics_protect_transport_values_under_both_sanitizati
         ] {
             let fixture = Fixture::start_provider(sanitize, case).await?;
             let player = client("provider-hls-diagnostics");
-            let manifest = variant(&fixture, &player).await?;
+            let mut manifest = variant(&fixture, &player).await?;
+            assert!(manifest.path().starts_with("/hls/shared/live/"));
+            manifest.set_query(Some("token=synthetic-client-token&opaque=synthetic-client-opaque"));
             let response = player.get(manifest.clone()).send().await?;
             let body = response.text().await?;
             if matches!(case, ProviderCase::Failover) {
@@ -225,7 +226,7 @@ async fn provider_hls_diagnostics_protect_transport_values_under_both_sanitizati
                 ProviderCase::Status => assert!(logs.contains("exhausted all") && logs.contains("status 503")),
                 ProviderCase::Connection => assert!(logs.contains("connection error while trying")),
                 ProviderCase::Timeout => {
-                    assert!(logs.contains("idle timeout while trying") || logs.contains("HLS timeout error"));
+                    assert!(logs.contains("idle timeout while trying") || logs.contains("Request timed out"));
                 }
                 ProviderCase::Redirect => assert!(
                     hls_requests.iter().any(|request| request.contains("opaque-target"))
@@ -235,20 +236,60 @@ async fn provider_hls_diagnostics_protect_transport_values_under_both_sanitizati
                 ProviderCase::Failover => {}
             }
             let label = format!("provider-{sanitize}-{case:?}").to_lowercase();
+            let client_query = if sanitize {
+                "token=***&opaque=***"
+            } else {
+                "token=synthetic-client-token&opaque=synthetic-client-opaque"
+            };
+            let client_reference = format!("{}?{client_query}", manifest.path());
+            assert!(
+                logs.lines().any(|line| line.contains("Client request") && line.contains(&client_reference)),
+                "client request log must preserve the HLS path and follow the global query policy: {label}"
+            );
             // Persist a failing case too, so the same fixture provides a red log.
             fixture.stop(&label).await?;
-            for marker in
-                ["synthetic-auth-path", "synthetic-opaque", "synthetic-token", "synthetic-user", "synthetic-password"]
-            {
-                assert!(!logs.contains(marker), "HLS diagnostic contains synthetic secret marker: {label} {marker}");
-            }
+            assert_provider_diagnostic_policy(&logs, sanitize, case, &label);
             println!(
-                "case={label} origin_requests={} full_transport_verified=true privacy_verified=true",
+                "case={label} origin_requests={} full_transport_verified=true sanitization_policy_verified=true",
                 hls_requests.len()
             );
         }
     }
     Ok(())
+}
+
+fn assert_provider_diagnostic_policy(logs: &str, sanitize: bool, case: ProviderCase, label: &str) {
+    if sanitize {
+        assert!(
+            logs.contains("/hls/17/synthetic-auth-path/index.m3u8?token=***&opaque=***"),
+            "HLS diagnostic must keep the URL structure and query names: {label}"
+        );
+        for marker in [
+            "synthetic-opaque",
+            "synthetic-token",
+            "synthetic-user",
+            "synthetic-password",
+            "synthetic-client-token",
+            "synthetic-client-opaque",
+        ] {
+            assert!(!logs.contains(marker), "HLS diagnostic contains synthetic secret marker: {label} {marker}");
+        }
+    } else {
+        let full_reference = format!(
+            "/hls/17/{}/index.m3u8?{}&{}",
+            fixture::DIAGNOSTIC_AUTH_PATH,
+            fixture::DIAGNOSTIC_TOKEN,
+            fixture::DIAGNOSTIC_QUERY
+        );
+        assert!(logs.contains(&full_reference), "HLS diagnostic must preserve the full reference: {label}");
+        if matches!(case, ProviderCase::Connection) {
+            assert!(
+                logs.lines()
+                    .any(|line| line.contains("error sending request for url (") && line.contains(&full_reference)),
+                "HLS diagnostic must preserve the transport error and its full reference: {label}"
+            );
+        }
+    }
 }
 
 struct LiveView {

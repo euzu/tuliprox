@@ -138,19 +138,13 @@ fn test_resolve_request_url_for_logging_respects_sanitization_setting() {
     shared::utils::set_sanitize_sensitive_info(true);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, transport_stream_url).as_ref(), transport_stream_url);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), "media-server://<redacted>");
-    assert_eq!(
-        resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(),
-        shared::utils::sanitize_sensitive_info("http://provider.example/")
-    );
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 
     // 2. When sanitization is disabled:
     shared::utils::set_sanitize_sensitive_info(false);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, transport_stream_url).as_ref(), transport_stream_url);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), media_ref);
-    assert_eq!(
-        resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(),
-        shared::utils::sanitize_sensitive_info("http://provider.example/")
-    );
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 }
 
 #[test]

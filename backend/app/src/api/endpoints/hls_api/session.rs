@@ -46,7 +46,7 @@ pub(super) fn resolve_hls_cache_origin_entry_url(input: &ConfigInput, url: &str)
         });
     }
 
-    warn!("HLS origin entry URL is not supported: url={}", shared::utils::sanitize_hls_origin_for_logging(url));
+    warn!("HLS origin entry URL is not supported: url={}", sanitize_sensitive_info(url));
     None
 }
 

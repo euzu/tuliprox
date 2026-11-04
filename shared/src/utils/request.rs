@@ -20,54 +20,214 @@ pub const HEADER_CONFIG_API_PROXY_REVISION: &str = "X-Tuliprox-ApiProxy-Revision
 
 pub fn set_sanitize_sensitive_info(value: bool) { CONSTANTS.sanitize.store(value, Ordering::Relaxed); }
 pub fn is_sanitize_sensitive_info_enabled() -> bool { CONSTANTS.sanitize.load(Ordering::Relaxed) }
-pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
-    // Local file URLs carry no host or credentials; masking would only mangle the path.
-    if !is_sanitize_sensitive_info_enabled() || query.starts_with(FILE_SCHEME_PREFIX) {
-        return Cow::Borrowed(query);
-    }
-
-    let mut result = query.to_owned();
-
-    for (re, replacement) in &[
-        (&CONSTANTS.re_credentials, "$1***"),
-        (&CONSTANTS.re_ipv4, "$1***"),
-        (&CONSTANTS.re_ipv6, "$1***"),
-        (&CONSTANTS.re_stream_url, "$1***/$2/***/"),
-        (&CONSTANTS.re_url, "$1***/$2"),
-        (&CONSTANTS.re_password, "$1***"),
-    ] {
-        result = re.replace_all(&result, *replacement).into_owned();
-    }
-    Cow::Owned(result)
-}
-
-/// Restricts HLS log fields to origin metadata before using the existing sanitizer.
-/// This does not change the process-wide sanitization policy or any fetch URL.
-pub fn sanitize_hls_origin_for_logging(value: &str) -> String {
-    let metadata = hls_origin_log_metadata(value);
-    sanitize_sensitive_info(&metadata).into_owned()
-}
-
-fn hls_origin_log_metadata(value: &str) -> String {
-    if let Ok(url) = url::Url::parse(value) {
-        if let Some(host) = url.host() {
-            let port = url.port().map_or_else(String::new, |port| format!(":{port}"));
-            return format!("{}://{host}{port}/", url.scheme());
-        }
-        if url.scheme() == "file" {
-            return "file:".to_string();
-        }
-    }
-    // Selection diagnostics also accept a bare host, optionally with a port.
-    // Reject strings that could instead contain URL payload or unstructured errors.
-    if !value.is_empty()
-        && !value.contains(['/', '\\', '?', '#', '@', '='])
-        && !value.chars().any(char::is_whitespace)
-        && url::Url::parse(&format!("http://{value}/")).is_ok_and(|url| url.host().is_some())
+/// Masks log values centrally while preserving URL components, parameter names, and separators.
+/// Disabled sanitization preserves the original input; standalone local file URLs are also preserved.
+pub fn sanitize_sensitive_info(value: &str) -> Cow<'_, str> {
+    if !is_sanitize_sensitive_info_enabled()
+        || value.get(..FILE_SCHEME_PREFIX.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(FILE_SCHEME_PREFIX))
     {
-        return value.to_string();
+        return Cow::Borrowed(value);
     }
-    "<redacted-origin>".to_string()
+
+    if let Some((scheme, rest)) = value.split_once("://") {
+        let is_scheme = scheme.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic() || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+        });
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let malformed_authority = authority_end < rest.len() && rest[..authority_end].chars().any(char::is_whitespace);
+        if !scheme.is_empty() && is_scheme && (!value.chars().any(char::is_whitespace) || malformed_authority) {
+            return Cow::Owned(mask_log_url(value));
+        }
+    }
+    if value.starts_with(['/', '?']) && !value.chars().any(char::is_whitespace) {
+        return Cow::Owned(mask_url_reference(value));
+    }
+    let bare_query = !value.contains("://")
+        && value.contains('&')
+        && value.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty() && !key.contains(['/', ':', '?', '#']) && !key.chars().any(char::is_whitespace)
+        });
+    if bare_query {
+        return Cow::Owned(mask_query_values(value));
+    }
+    Cow::Owned(mask_log_message(value))
+}
+
+fn mask_log_message(value: &str) -> String {
+    // A URL inside a password/token field is itself secret data, rather than a
+    // diagnostic URL whose components should remain visible.
+    let mut credentials = [&CONSTANTS.re_credentials, &CONSTANTS.re_password]
+        .into_iter()
+        .flat_map(|regex| regex.find_iter(value).map(|field| (field.start(), field.end())))
+        .collect::<Vec<_>>();
+    credentials.sort_unstable_by_key(|(start, _)| *start);
+    let mut credential_index = 0;
+    let mut result = String::with_capacity(value.len());
+    let mut previous_end = 0;
+    for captures in CONSTANTS.re_url.captures_iter(value) {
+        let matched = captures.name("absolute").or_else(|| captures.name("relative")).expect("URI capture");
+        if matched.start() < previous_end {
+            continue;
+        }
+        let mut credential_end = None;
+        while let Some(&(start, end)) = credentials.get(credential_index) {
+            if start >= matched.start() {
+                break;
+            }
+            credential_index += 1;
+            if start >= previous_end && end > matched.start() {
+                credential_end = Some(end);
+                break;
+            }
+        }
+        if let Some(end) = credential_end {
+            result.push_str(&mask_log_text(&value[previous_end..end]));
+            previous_end = end;
+            continue;
+        }
+        result.push_str(&mask_log_text(&value[previous_end..matched.start()]));
+        let wrapper = value[..matched.start()].chars().next_back();
+        let closing = match wrapper {
+            Some('(') => ")",
+            Some('[') => "]",
+            Some('{') => "}",
+            _ => "",
+        };
+        let (url, suffix) = if closing.is_empty() {
+            (matched.as_str(), "")
+        } else {
+            matched.as_str().strip_suffix(closing).map_or((matched.as_str(), ""), |url| (url, closing))
+        };
+        result.push_str(&mask_log_url(url));
+        result.push_str(suffix);
+        previous_end = matched.end();
+    }
+    result.push_str(&mask_log_text(&value[previous_end..]));
+    result
+}
+
+fn mask_log_text(value: &str) -> String {
+    let mut result = value.to_string();
+    for regex in [&CONSTANTS.re_query_values, &CONSTANTS.re_credentials, &CONSTANTS.re_password] {
+        result = regex
+            .replace_all(&result, |captures: &regex::Captures<'_>| {
+                let raw = &captures[2];
+                let value = raw.trim_end_matches([')', ']', '}', ',', ';']);
+                let suffix = &raw[value.len()..];
+                format!("{}{}{suffix}", &captures[1], masked_log_value(value))
+            })
+            .into_owned();
+    }
+    for regex in [&CONSTANTS.re_ipv4, &CONSTANTS.re_ipv6] {
+        result = regex.replace_all(&result, "$1***").into_owned();
+    }
+    result
+}
+
+fn masked_nonempty(value: &str) -> &str {
+    if value.is_empty() {
+        ""
+    } else {
+        "***"
+    }
+}
+
+fn masked_log_value(value: &str) -> String {
+    if value.len() >= 2 {
+        let quote = value.as_bytes()[0];
+        if matches!(quote, b'\'' | b'"') && value.as_bytes().last() == Some(&quote) {
+            let quote = char::from(quote);
+            return format!("{quote}{}{quote}", masked_nonempty(&value[1..value.len() - 1]));
+        }
+    }
+    masked_nonempty(value).to_string()
+}
+
+fn mask_query_values(query: &str) -> String {
+    query
+        .split('&')
+        .map(|parameter| {
+            parameter
+                .split_once('=')
+                .map_or_else(|| parameter.to_string(), |(name, value)| format!("{name}={}", masked_log_value(value)))
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn mask_log_url(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else { return mask_url_reference(value) };
+    if scheme.eq_ignore_ascii_case("file") {
+        return mask_log_text(value);
+    }
+    let boundary = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, reference) = rest.split_at(boundary);
+    format!("{scheme}://{}{}", mask_url_authority(authority), mask_url_reference(reference))
+}
+
+fn mask_url_authority(authority: &str) -> String {
+    let (userinfo, host_port) = authority.rsplit_once('@').map_or((None, authority), |(user, host)| (Some(user), host));
+    let mut result = String::new();
+    if let Some(userinfo) = userinfo {
+        if let Some((user, password)) = userinfo.split_once(':') {
+            result.push_str(masked_nonempty(user));
+            result.push(':');
+            result.push_str(masked_nonempty(password));
+        } else {
+            result.push_str(masked_nonempty(userinfo));
+        }
+        result.push('@');
+    }
+    if let Some(bracketed) = host_port.strip_prefix('[') {
+        if let Some((host, suffix)) = bracketed.split_once(']') {
+            result.push('[');
+            result.push_str(masked_nonempty(host));
+            result.push(']');
+            if let Some(port) = suffix.strip_prefix(':') {
+                result.push(':');
+                result.push_str(mask_port(port));
+            } else {
+                result.push_str(masked_nonempty(suffix));
+            }
+            return result;
+        }
+    }
+    if let Some((host, port)) = host_port.rsplit_once(':') {
+        result.push_str(masked_nonempty(host));
+        result.push(':');
+        result.push_str(mask_port(port));
+    } else {
+        result.push_str(masked_nonempty(host_port));
+    }
+    result
+}
+
+fn mask_port(port: &str) -> &str {
+    if port.bytes().all(|byte| byte.is_ascii_digit()) {
+        port
+    } else {
+        masked_nonempty(port)
+    }
+}
+
+fn mask_url_reference(reference: &str) -> String {
+    let (before_fragment, fragment) =
+        reference.split_once('#').map_or((reference, None), |(path, fragment)| (path, Some(fragment)));
+    let (path, query) =
+        before_fragment.split_once('?').map_or((before_fragment, None), |(path, query)| (path, Some(query)));
+    // Preserve ordinary paths and the established Xtream credential masking.
+    // Origin HLS segment paths carry their credential in the hex directory.
+    let stream_path = CONSTANTS.re_stream_path.replace(path, "/${context}/***/");
+    let mut result = CONSTANTS.re_hls_segment_path.replace(&stream_path, "$1***$2").into_owned();
+    if let Some(query) = query {
+        result.push('?');
+        result.push_str(&mask_query_values(query));
+    }
+    if let Some(fragment) = fragment {
+        result.push('#');
+        result.push_str(&masked_log_value(fragment));
+    }
+    result
 }
 
 /// Extracts the file extension from a URL path (query and fragment stripped).
@@ -257,6 +417,23 @@ mod tests {
         sanitize_sensitive_info, set_sanitize_sensitive_info,
     };
     use crate::defaults::DEFAULT_CONTAINER_EXTENSION;
+    use std::sync::Mutex;
+
+    static SANITIZATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct SanitizationSettingGuard(bool);
+
+    impl SanitizationSettingGuard {
+        fn set(enabled: bool) -> Self {
+            let previous = super::is_sanitize_sensitive_info_enabled();
+            set_sanitize_sensitive_info(enabled);
+            Self(previous)
+        }
+    }
+
+    impl Drop for SanitizationSettingGuard {
+        fn drop(&mut self) { set_sanitize_sensitive_info(self.0); }
+    }
 
     #[test]
     fn normalize_container_extension_accepts_canonical_forms() {
@@ -325,28 +502,20 @@ mod tests {
 
     #[test]
     fn sanitize_sensitive_info_masks_xtream_path_credentials_for_all_supported_schemes() {
-        let previous = super::is_sanitize_sensitive_info_enabled();
-        set_sanitize_sensitive_info(true);
-
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
         for scheme in ["http", "https", "provider", "batch"] {
             let input = format!("{scheme}://example/live/myuser/mypass/15373.ts");
             let expected = format!("{scheme}://***/live/***/15373.ts");
             assert_eq!(sanitize_sensitive_info(&input), expected);
         }
-
-        set_sanitize_sensitive_info(previous);
     }
 
     #[test]
-    fn sanitize_sensitive_info_masks_path_credentials_for_all_xtream_contexts() {
-        // Regression: only `live|video|movie|series|m3u-stream|resource` were originally
-        // listed in `re_stream_url`, so URLs like `/timeshift/{user}/{pass}/...` leaked
-        // the username and password into log lines. The regex was extended to also
-        // cover `timeshift`, `streaming`, `xtream`, and `timeshift.php`.
-        let previous = super::is_sanitize_sensitive_info_enabled();
-        set_sanitize_sensitive_info(true);
-
-        let cases: &[(&str, &str)] = &[
+    fn sanitize_sensitive_info_preserves_head_path_policy() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
+        let cases = [
             (
                 "http://example/timeshift/myuser/mypass/3/2026-06-17:14-00/449.ts",
                 "http://***/timeshift/***/3/2026-06-17:14-00/449.ts",
@@ -356,30 +525,149 @@ mod tests {
             ("http://example/timeshift.php/myuser/mypass/123.ts", "http://***/timeshift.php/***/123.ts"),
             ("https://provider.example/movie/myuser/mypass/456.ts", "https://***/movie/***/456.ts"),
             ("https://provider.example/series/myuser/mypass/789.ts", "https://***/series/***/789.ts"),
+            (
+                "http://example/player_api.php?username=foo&password=bar",
+                "http://***/player_api.php?username=***&password=***",
+            ),
+            ("https://example/hls/index.m3u8", "https://***/hls/index.m3u8"),
+            ("https://example/a//file.unknown/../archive.xml.gz", "https://***/a//file.unknown/../archive.xml.gz"),
         ];
-
         for (input, expected) in cases {
-            assert_eq!(sanitize_sensitive_info(input).as_ref(), *expected, "input: {input}");
+            assert_eq!(sanitize_sensitive_info(input), expected, "input: {input}");
         }
+    }
 
-        // Query-string credentials are masked by `re_credentials`, not by the
-        // stream-URL rewriter — the host is still masked by `re_url`.
-        assert_eq!(
-            sanitize_sensitive_info("http://example/player_api.php?username=foo&password=bar"),
-            "http://***/player_api.php?username=***&password=***"
-        );
-
-        set_sanitize_sensitive_info(previous);
+    #[test]
+    fn sanitize_sensitive_info_masks_only_hex_in_matching_hls_segment_paths() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
+        let cases = [
+            ("/hls/ab12cd34/1025126_978.ts", "/hls/***/1025126_978.ts"),
+            ("/hls/ABCDEF0123/42_0.TS?sig=secret&flag", "/hls/***/42_0.TS?sig=***&flag"),
+            ("https://origin.example/hls/ab12cd34/1025126_978.ts", "https://***/hls/***/1025126_978.ts"),
+            ("provider://profile/hls/ab12cd34/42_1.ts", "provider://***/hls/***/42_1.ts"),
+            ("GET /hls/ab12cd34/42_1.ts?token=secret status=200", "GET /hls/***/42_1.ts?token=*** status=200"),
+            ("/hls/not-hex/42_1.ts", "/hls/not-hex/42_1.ts"),
+            ("/hls/ab12cd34/index.m3u8", "/hls/ab12cd34/index.m3u8"),
+            ("/hls/ab12cd34/42.ts", "/hls/ab12cd34/42.ts"),
+            ("/hls/ab12cd34/channel_1.ts", "/hls/ab12cd34/channel_1.ts"),
+            ("/hls/ab12cd34/42_1.ts/extra", "/hls/ab12cd34/42_1.ts/extra"),
+            ("/other/ab12cd34/42_1.ts", "/other/ab12cd34/42_1.ts"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(sanitize_sensitive_info(input), expected, "input: {input}");
+            assert_eq!(sanitize_sensitive_info(expected), expected, "masking must be idempotent");
+        }
     }
 
     #[test]
     fn sanitize_sensitive_info_keeps_file_urls_untouched() {
-        let previous = super::is_sanitize_sensitive_info_enabled();
-        set_sanitize_sensitive_info(true);
-
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
         let input = "file:///home/user/projects/m3u-test/server/m3u-simple/data/epg.xml.gz";
         assert_eq!(sanitize_sensitive_info(input), input);
+        assert_eq!(sanitize_sensitive_info("FILE:///tmp/local.xml"), "FILE:///tmp/local.xml");
+    }
 
-        set_sanitize_sensitive_info(previous);
+    #[test]
+    fn sanitize_sensitive_info_masks_url_values_without_removing_components() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
+        let cases = [
+            (
+                "https://user:password@origin.example:8443/auth-path/0.ts?sig=secret&opaque=unknown#fragment",
+                "https://***:***@***:8443/auth-path/0.ts?sig=***&opaque=***#***",
+            ),
+            ("provider://profile/auth-path/index.m3u8?opaque=secret", "provider://***/auth-path/index.m3u8?opaque=***"),
+            ("batch://profile/auth-path/catalog?opaque=secret", "batch://***/auth-path/catalog?opaque=***"),
+            (
+                "https://origin.example/auth-path/opaque-target?unknown=secret",
+                "https://***/auth-path/opaque-target?unknown=***",
+            ),
+            (
+                "https://origin.example?opaque=one&opaque=two&encoded=%26token%3Dsecret",
+                "https://***?opaque=***&opaque=***&encoded=***",
+            ),
+            ("https://[2001:db8::1]:8443/auth-path?opaque=secret", "https://[***]:8443/auth-path?opaque=***"),
+            ("https://bad host/auth-path/0.ts?opaque=secret", "https://***/auth-path/0.ts?opaque=***"),
+            ("/auth-path/0.ts?opaque=secret", "/auth-path/0.ts?opaque=***"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(sanitize_sensitive_info(input), expected, "input: {input}");
+            assert_eq!(sanitize_sensitive_info(expected), expected, "masking must be idempotent");
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_preserves_query_names_order_empty_values_and_flags() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
+        let cases = [
+            (
+                "https://u:p@host:8443/a//b/../0.ts?flag&empty=&q=one&q=two&&%73ig=a%26b#frag",
+                "https://***:***@***:8443/a//b/../0.ts?flag&empty=&q=***&q=***&&%73ig=***#***",
+            ),
+            ("https://host/a?", "https://***/a?"),
+            ("https://host/#", "https://***/#"),
+            (r#"https://host/path?q=""&q='x y'&flag"#, r#"https://***/path?q=""&q='***'&flag"#),
+            ("/a//index.m3u8?flag&empty=&name=x&", "/a//index.m3u8?flag&empty=&name=***&"),
+            ("opaque=secret&safe=value&flag&empty=", "opaque=***&safe=***&flag&empty="),
+            ("https://:pass@host:8443/0.ts", "https://:***@***:8443/0.ts"),
+            (
+                "https://host/a?192.0.2.1=value&encoded%5Bkey%5D=secret",
+                "https://***/a?192.0.2.1=***&encoded%5Bkey%5D=***",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(sanitize_sensitive_info(input), expected, "input: {input}");
+            assert_eq!(input.matches('&').count(), expected.matches('&').count());
+            assert_eq!(input.matches('?').count(), expected.matches('?').count());
+            assert_eq!(input.matches('#').count(), expected.matches('#').count());
+            assert_eq!(sanitize_sensitive_info(expected), expected, "masking must be idempotent");
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_preserves_diagnostics_around_multiple_urls() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(true);
+        let cases = [
+            ("error sending request for url (https://origin.example/auth-path/opaque-target?unknown=secret)",
+             "error sending request for url (https://***/auth-path/opaque-target?unknown=***)"),
+            ("request_url=provider://profile/auth/index.m3u8?token=first&opaque=secret final_url=https://cdn.example/opaque?sig=secret status=407",
+             "request_url=provider://***/auth/index.m3u8?token=***&opaque=*** final_url=https://***/opaque?sig=*** status=407"),
+            ("URL 'https://cdn.example/auth?opaque=secret' failed", "URL 'https://***/auth?opaque=***' failed"),
+            ("url=<https://host/auth?opaque=secret>", "url=<https://***/auth?opaque=***>"),
+            ("épisode GET /épisode?token=sëcret&title=café après", "épisode GET /épisode?token=***&title=*** après"),
+            ("url=https://host/a?192.0.2.1=value status=407", "url=https://***/a?192.0.2.1=*** status=407"),
+            ("username=user&password=secret&token=secret&api_key=secret", "username=***&password=***&token=***&api_key=***"),
+            (r#"token="së\"cret" after"#, r#"token="***" after"#),
+            ("password: 'two words' remaining", "password: '***' remaining"),
+            ("password=secret://host/path#fragment", "password=***"),
+            ("password: https://host/path?token=x&other=y#fragment remaining", "password: *** remaining"),
+            ("password: 'https://host/path?token=x#fragment' remaining", "password: '***' remaining"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(sanitize_sensitive_info(input), expected, "input: {input}");
+            assert_eq!(sanitize_sensitive_info(expected), expected, "masking must be idempotent");
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_disabled_preserves_complete_original_values() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = SanitizationSettingGuard::set(false);
+        for input in [
+            "https://user:password@origin.example:8443/auth-path/0.ts?sig=secret&opaque=unknown#fragment",
+            "provider://profile/auth-path/index.m3u8?opaque=secret",
+            "https://bad host/auth-path/0.ts?opaque=secret",
+            "/auth-path/0.ts?opaque=secret",
+            "/hls/ab12cd34/1025126_978.ts?token=secret&opaque=value",
+            "/hls/17/session/index.m3u8?token=secret",
+            "error sending request for url (https://origin.example/auth-path/opaque-target?unknown=secret)",
+            "username=user&password=secret&token=secret&api_key=secret",
+        ] {
+            assert_eq!(sanitize_sensitive_info(input), input);
+        }
     }
 }

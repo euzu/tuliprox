@@ -194,16 +194,17 @@ mod tests {
         let redacted = redact_text("GET /load.php?token=abc123&title=News&mac=00:1A:79:DE:AD:BE failed");
         assert!(!redacted.contains("abc123"));
         assert!(!redacted.contains("00:1A:79:DE:AD:BE"));
-        assert!(redacted.contains("title=News"));
+        assert!(redacted.contains("title=***"));
         assert!(redacted.contains("failed"));
     }
 
     #[test]
     fn redact_text_does_not_corrupt_non_ascii() {
-        let redacted = redact_text("https://portal.example/épisode?token=sëcret&title=café");
+        let redacted = redact_text("épisode GET /épisode?token=sëcret&title=café après");
         assert!(!redacted.contains("sëcret"));
         assert!(redacted.contains("épisode"));
-        assert!(redacted.contains("title=café"));
+        assert!(redacted.contains("title=***"));
+        assert!(redacted.ends_with(" après"));
     }
 
     #[test]

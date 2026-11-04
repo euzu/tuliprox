@@ -14,10 +14,9 @@ use reqwest::{header::HeaderMap, StatusCode};
 use shared::{
     error::string_to_io_error,
     model::{OnConnectErrorPolicy, ProviderUrlSelectionPolicy},
-    utils::{is_hls_url, sanitize_hls_origin_for_logging, sanitize_sensitive_info},
+    utils::sanitize_sensitive_info,
 };
 use std::{
-    borrow::Cow,
     collections::HashSet,
     io::{Error, ErrorKind},
     net::IpAddr,
@@ -26,66 +25,6 @@ use std::{
 };
 use tokio::time::sleep;
 use url::Url;
-
-/// Keep the original HLS classification across provider rotation and redirects.
-/// Only diagnostic values are reduced; physical request targets remain complete.
-#[derive(Clone, Copy)]
-struct RequestLogContext {
-    hls: bool,
-}
-
-impl RequestLogContext {
-    fn new(url: &Url) -> Self { Self { hls: is_hls_url(url.as_str()) } }
-
-    fn url(self, value: &str) -> Cow<'_, str> {
-        if self.hls {
-            Cow::Owned(sanitize_hls_origin_for_logging(value))
-        } else {
-            sanitize_sensitive_info(value)
-        }
-    }
-
-    fn target(self, target: &AttemptTarget) -> String {
-        if self.hls {
-            let origin = self.url(target.request_url.as_str());
-            target.connect_ip.map_or_else(|| origin.to_string(), |ip| format!("{origin} (connect_ip={ip})"))
-        } else {
-            format_request_target_for_logging(target)
-        }
-    }
-
-    fn error(self, error: &reqwest::Error) -> String {
-        if !self.hls {
-            return sanitize_sensitive_info(&error.to_string()).into_owned();
-        }
-        // Reqwest's Display includes the failed URL, including redirect targets.
-        // Preserve the useful failure category without formatting that payload.
-        let category = if error.is_timeout() {
-            "timeout"
-        } else if error.is_connect() {
-            "connection"
-        } else if error.is_redirect() {
-            "redirect"
-        } else if error.is_builder() {
-            "request-build"
-        } else if error.is_body() {
-            "body"
-        } else if error.is_decode() {
-            "decode"
-        } else {
-            "request"
-        };
-        format!("HLS {category} error")
-    }
-
-    fn preparation_error(self, error: Error) -> Error {
-        if self.hls {
-            Error::new(error.kind(), format!("HLS request preparation failed: {:?}", error.kind()))
-        } else {
-            error
-        }
-    }
-}
 
 pub(super) fn provider_start_index(provider: Option<&Arc<ConfigProvider>>) -> usize {
     provider.map_or(0, |provider| match provider.provider_url_selection_policy() {
@@ -188,7 +127,6 @@ async fn send_with_provider_failover_only_with_options(
     options: RequestFetchOptions,
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<ProviderFailoverResponse, std::io::Error> {
-    let log_context = RequestLogContext::new(url);
     let failover_patterns = app_config.config.load().reverse_proxy.as_ref().map_or_else(
         || ResourceRetryConfig::default().failover_redirect_patterns,
         |rp| rp.resource_retry.failover_redirect_patterns.clone(),
@@ -207,7 +145,7 @@ async fn send_with_provider_failover_only_with_options(
             let attempt_target = resolve_attempt_target_at_provider_index(url, provider, provider_url_index);
             if log_enabled!(Level::Debug) {
                 if let Some(current_provider) = provider {
-                    let attempt_target_log = log_context.target(&attempt_target);
+                    let attempt_target_log = format_request_target_for_logging(&attempt_target);
                     debug!(
                         "Provider '{}' acquiring URL index {} of {}: {}",
                         current_provider.name,
@@ -220,8 +158,7 @@ async fn send_with_provider_failover_only_with_options(
 
             idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
             let (base_client, request) =
-                prepare_physical_request_attempt(send(&attempt_target.request_url), &attempt_target, options)
-                    .map_err(|error| log_context.preparation_error(error))?;
+                prepare_physical_request_attempt(send(&attempt_target.request_url), &attempt_target, options)?;
 
             tokio::select! {
                 () = &mut idle => {
@@ -231,7 +168,7 @@ async fn send_with_provider_failover_only_with_options(
 
                     let last_provider_failure = format!(
                         "idle timeout while trying {}",
-                        log_context.url(attempt_target.request_url.as_str())
+                        sanitize_sensitive_info(attempt_target.request_url.as_str())
                     );
                     if let Some(current_provider) = provider {
                         if rotate_to_next_provider_url(
@@ -252,7 +189,7 @@ async fn send_with_provider_failover_only_with_options(
 
                     return Err(Error::new(
                         ErrorKind::TimedOut,
-                        format!("Request timed out: {}", log_context.url(url.as_str())),
+                        format!("Request timed out: {}", sanitize_sensitive_info(url.as_str())),
                     ));
                 }
                 result = execute_attempt_request(app_config, base_client, request, &attempt_target) => match result {
@@ -287,7 +224,7 @@ async fn send_with_provider_failover_only_with_options(
                     let last_provider_failure = format!(
                         "status {} while trying {}",
                         format_http_status(status),
-                        log_context.url(attempt_target.request_url.as_str())
+                        sanitize_sensitive_info(attempt_target.request_url.as_str())
                     );
 
                     if let Some(current_provider) = provider {
@@ -322,8 +259,8 @@ async fn send_with_provider_failover_only_with_options(
 
                     let last_provider_failure = format!(
                         "connection error while trying {}: {}",
-                        log_context.url(attempt_target.request_url.as_str()),
-                        log_context.error(&err)
+                        sanitize_sensitive_info(attempt_target.request_url.as_str()),
+                        sanitize_sensitive_info(&err.to_string())
                     );
 
                     if err.is_timeout() || err.is_connect() {
@@ -345,7 +282,7 @@ async fn send_with_provider_failover_only_with_options(
                         }
                     }
 
-                    let message = format!("Request error: {}", log_context.error(&err));
+                    let message = format!("Request error: {}", sanitize_sensitive_info(&err.to_string()));
                     return Err(if err.is_timeout() {
                         Error::new(ErrorKind::TimedOut, message)
                     } else if err.is_connect() {
@@ -460,7 +397,6 @@ async fn send_with_retry_and_provider_policy_with_options_result(
     options: RequestFetchOptions,
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<ProviderFailoverResponse, std::io::Error> {
-    let log_context = RequestLogContext::new(url);
     if options.uses_provider_failover_only() {
         return send_with_provider_failover_only_with_options(
             app_config,
@@ -505,7 +441,7 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                 let attempt_target = resolve_attempt_target_at_provider_index(url, provider, provider_url_index);
                 if log_enabled!(Level::Debug) {
                     if let Some(current_provider) = provider {
-                        let attempt_target_log = log_context.target(&attempt_target);
+                        let attempt_target_log = format_request_target_for_logging(&attempt_target);
                         debug!(
                             "Provider '{}' attempting URL index {} of {}: {}",
                             current_provider.name,
@@ -519,15 +455,14 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                 idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
 
                 let (base_client, request) =
-                    prepare_physical_request_attempt(send(&attempt_target.request_url), &attempt_target, options)
-                        .map_err(|error| log_context.preparation_error(error))?;
+                    prepare_physical_request_attempt(send(&attempt_target.request_url), &attempt_target, options)?;
 
                 tokio::select! {
                     () = &mut idle => {
-                        warn!("Request idle for too long: {}", log_context.url(url.as_str()));
+                        warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
                         last_provider_failure = Some(format!(
                             "idle timeout while trying {}",
-                            log_context.url(attempt_target.request_url.as_str())
+                            sanitize_sensitive_info(attempt_target.request_url.as_str())
                         ));
                         // 1. Try Provider Failover first
                         let mut provider_failover_exhausted = false;
@@ -569,7 +504,7 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                             ErrorKind::TimedOut,
                             format!(
                                 "Request timed out and no retries left: {}",
-                                log_context.url(url.as_str())
+                                sanitize_sensitive_info(url.as_str())
                             ),
                         ));
                     }
@@ -604,7 +539,7 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                                 last_provider_failure = Some(format!(
                                     "status {} while trying {}",
                                     format_http_status(status),
-                                    log_context.url(attempt_target.request_url.as_str())
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str())
                                 ));
 
                                 // Failover check: Should we switch to the next provider URL?
@@ -655,7 +590,7 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                                 }
 
                                 return Err(string_to_io_error(format!("Request failed ({}): {}",
-                                    format_http_status(status), log_context.url(url.as_str()))));
+                                    format_http_status(status), sanitize_sensitive_info(url.as_str()))));
                             }
 
                             Err(err) => {
@@ -669,8 +604,8 @@ async fn send_with_retry_and_provider_policy_with_options_result(
 
                                 last_provider_failure = Some(format!(
                                     "connection error while trying {}: {}",
-                                    log_context.url(attempt_target.request_url.as_str()),
-                                    log_context.error(&err)
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str()),
+                                    sanitize_sensitive_info(&err.to_string())
                                 ));
 
                                 // Connection errors (Timeout/Connect) trigger failover if provider exists
@@ -712,7 +647,7 @@ async fn send_with_retry_and_provider_policy_with_options_result(
 
                                 let error_message = format!(
                                     "Request error: {}",
-                                    log_context.error(&err)
+                                    sanitize_sensitive_info(&err.to_string())
                                 );
                                 return Err(if err.is_timeout() {
                                     Error::new(ErrorKind::TimedOut, error_message)
@@ -799,7 +734,6 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
     max_redirects: usize,
     options: RequestFetchOptions,
 ) -> Result<ProviderFailoverResponse, Error> {
-    let log_context = RequestLogContext::new(url);
     let config = app_config.config.load();
     let (configured_max_attempts, backoff_ms, backoff_multiplier, failover_patterns) =
         config.reverse_proxy.as_ref().map_or_else(
@@ -838,7 +772,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                     resolve_attempt_target_at_provider_index(&current_url, provider, provider_url_index);
                 if log_enabled!(Level::Debug) {
                     if let Some(current_provider) = provider {
-                        let attempt_target_log = log_context.target(&attempt_target);
+                        let attempt_target_log = format_request_target_for_logging(&attempt_target);
                         debug!(
                             "Provider '{}' attempting URL index {} of {}: {}",
                             current_provider.name,
@@ -860,15 +794,14 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                     default_user_agent.as_deref(),
                 );
                 let (base_client, request) =
-                    prepare_physical_request_attempt(request_builder, &attempt_target, options)
-                        .map_err(|error| log_context.preparation_error(error))?;
+                    prepare_physical_request_attempt(request_builder, &attempt_target, options)?;
 
                 tokio::select! {
                     () = &mut idle => {
-                        warn!("Request idle for too long: {}", log_context.url(url.as_str()));
+                        warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
                         last_provider_failure = Some(format!(
                             "idle timeout while trying {}",
-                            log_context.url(attempt_target.request_url.as_str())
+                            sanitize_sensitive_info(attempt_target.request_url.as_str())
                         ));
                         if let Some(current_provider) = provider {
                             if rotate_to_next_provider_url(
@@ -900,7 +833,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                             ErrorKind::TimedOut,
                             format!(
                                 "Request timed out and no retries left: {}",
-                                log_context.url(url.as_str())
+                                sanitize_sensitive_info(url.as_str())
                             ),
                         ));
                     }
@@ -912,7 +845,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                     if remaining_redirects == 0 {
                                         return Err(string_to_io_error(format!(
                                             "Too many redirects while requesting {}",
-                                            log_context.url(url.as_str())
+                                            sanitize_sensitive_info(url.as_str())
                                         )));
                                     }
 
@@ -920,13 +853,13 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                     let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
                                         return Err(string_to_io_error(format!(
                                             "Redirect response missing location header for {}",
-                                            log_context.url(current_url.as_str())
+                                            sanitize_sensitive_info(current_url.as_str())
                                         )));
                                     };
                                     let Ok(location_str) = location.to_str() else {
                                         return Err(string_to_io_error(format!(
                                             "Redirect response contains invalid location header for {}",
-                                            log_context.url(current_url.as_str())
+                                            sanitize_sensitive_info(current_url.as_str())
                                         )));
                                     };
                                     let next_url = response_base_url
@@ -935,7 +868,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                         .map_err(|_| {
                                             string_to_io_error(format!(
                                                 "Redirect response contains invalid location URL for {}",
-                                                log_context.url(current_url.as_str())
+                                                sanitize_sensitive_info(current_url.as_str())
                                             ))
                                         })?;
 
@@ -965,7 +898,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                 last_provider_failure = Some(format!(
                                     "status {} while trying {}",
                                     format_http_status(status),
-                                    log_context.url(attempt_target.request_url.as_str())
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str())
                                 ));
 
                                 let provider_failover_exhausted = (is_failover || should_trigger_failover(status))
@@ -1016,7 +949,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                 return Err(string_to_io_error(format!(
                                     "Request failed ({}): {}",
                                     format_http_status(status),
-                                    log_context.url(url.as_str())
+                                    sanitize_sensitive_info(url.as_str())
                                 )));
                             }
                             Err(err) => {
@@ -1028,8 +961,8 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
 
                                 last_provider_failure = Some(format!(
                                     "connection error while trying {}: {}",
-                                    log_context.url(attempt_target.request_url.as_str()),
-                                    log_context.error(&err)
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str()),
+                                    sanitize_sensitive_info(&err.to_string())
                                 ));
 
                                 let provider_failover_exhausted = (err.is_timeout() || err.is_connect())
@@ -1068,7 +1001,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
 
                                 let error_message = format!(
                                     "Request error: {}",
-                                    log_context.error(&err)
+                                    sanitize_sensitive_info(&err.to_string())
                                 );
                                 return Err(if err.is_timeout() {
                                     Error::new(ErrorKind::TimedOut, error_message)
@@ -1199,43 +1132,4 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
     // - 429 Too Many Requests
     // - 408 Request Timeout
     // - 407 Proxy Authentication Required
-}
-
-#[cfg(test)]
-mod log_tests {
-    use super::{AttemptTarget, RequestLogContext};
-    use shared::utils::{sanitize_hls_origin_for_logging, sanitize_sensitive_info};
-    use std::io::{Error, ErrorKind};
-    use url::Url;
-
-    #[test]
-    fn hls_provider_log_context_survives_opaque_redirects_and_error_payloads() {
-        let original = Url::parse("provider://profile/auth-path/index.m3u8?opaque=secret").unwrap();
-        let context = RequestLogContext::new(&original);
-        let redirected = Url::parse("https://origin.example/auth-path/opaque-target?unknown=secret").unwrap();
-        assert_eq!(context.url(redirected.as_str()), sanitize_hls_origin_for_logging(redirected.as_str()));
-        let mut target = AttemptTarget::new(redirected.clone());
-        target.connect_ip = Some("192.0.2.1".parse().unwrap());
-        let diagnostic = context.target(&target);
-        assert!(!diagnostic.contains("auth-path") && !diagnostic.contains("secret"));
-        assert!(diagnostic.contains("connect_ip=192.0.2.1"));
-        let error = reqwest::Client::new().get(redirected).header("invalid\nheader", "value").build().unwrap_err();
-        assert_eq!(context.error(&error), "HLS request-build error");
-        let preparation = context.preparation_error(Error::new(ErrorKind::InvalidInput, "auth-path?unknown=secret"));
-        assert_eq!(preparation.kind(), ErrorKind::InvalidInput);
-        assert!(!preparation.to_string().contains("secret"));
-    }
-
-    #[test]
-    fn non_hls_provider_logs_keep_the_existing_sanitization_policy() {
-        let url = Url::parse("provider://profile/auth-path/stream.ts?opaque=secret").unwrap();
-        let context = RequestLogContext::new(&url);
-        assert_eq!(context.url(url.as_str()), sanitize_sensitive_info(url.as_str()));
-        let target = AttemptTarget::new(url.clone());
-        assert_eq!(context.target(&target), super::format_request_target_for_logging(&target));
-        let error = reqwest::Client::new().get(url).header("invalid\nheader", "value").build().unwrap_err();
-        assert_eq!(context.error(&error), sanitize_sensitive_info(&error.to_string()));
-        let preparation = context.preparation_error(Error::new(ErrorKind::InvalidInput, "auth-path?unknown=secret"));
-        assert_eq!(preparation.to_string(), "auth-path?unknown=secret");
-    }
 }

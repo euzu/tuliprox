@@ -57,13 +57,7 @@ impl ActiveUserManager {
         } = request;
         self.gc();
 
-        let stream_log_value = || {
-            if shared::utils::is_hls_url(stream_url) || session_token.contains("|hls|") {
-                shared::utils::sanitize_hls_origin_for_logging(stream_url)
-            } else {
-                sanitize_sensitive_info(stream_url).into_owned()
-            }
-        };
+        let stream_log_value = || sanitize_sensitive_info(stream_url);
         let username = user.username.clone();
         let mut user_connections = self.write_connections().await;
         let connection_data = user_connections.by_key.entry(username.clone()).or_insert_with(|| {
