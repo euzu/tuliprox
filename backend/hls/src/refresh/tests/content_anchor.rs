@@ -35,6 +35,9 @@ struct OriginState {
     pinned_after: AtomicUsize,
     head: AtomicU64,
     fail_probe: AtomicBool,
+    gap_a_438: AtomicBool,
+    gap_b_438: AtomicUsize,
+    gap_b_bad_anchor: AtomicBool,
     corrupt_probe: AtomicBool,
     pause_sequence: AtomicU64,
     entered: tokio::sync::Notify,
@@ -60,6 +63,9 @@ impl Origin {
             pinned_after: AtomicUsize::new(usize::MAX),
             head: AtomicU64::new(434),
             fail_probe: AtomicBool::new(false),
+            gap_a_438: AtomicBool::new(false),
+            gap_b_438: AtomicUsize::new(0),
+            gap_b_bad_anchor: AtomicBool::new(false),
             corrupt_probe: AtomicBool::new(false),
             pause_sequence: AtomicU64::new(0),
             entered: tokio::sync::Notify::new(),
@@ -97,7 +103,16 @@ fn playlist(state: &OriginState, pinned: bool, head: u64) -> String {
     let host = if pinned { "127.0.0.1" } else { "localhost" };
     let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:8\n#EXT-X-MEDIA-SEQUENCE:{head}\n");
     for seq in head..head + 6 {
-        writeln!(body, "#EXTINF:8,\nhttp://{host}:{}/media/{}?fixture=1", state.port, media_name(state, seq)).unwrap();
+        let mode = if !pinned && seq == 438 { state.gap_b_438.load(Ordering::Acquire) } else { 0 };
+        let query = if mode == 3 { 2 } else { 1 };
+        let duration = if mode == 5 { 7 } else { 8 };
+        writeln!(
+            body,
+            "#EXTINF:{duration},\nhttp://{host}:{}/media/{}?fixture={query}",
+            state.port,
+            media_name(state, seq)
+        )
+        .unwrap();
     }
     body
 }
@@ -120,6 +135,9 @@ async fn serve(State(state): State<Arc<OriginState>>, headers: HttpHeaders, uri:
         return HttpStatus::NOT_FOUND.into_response();
     };
     let alternative = host.starts_with("localhost:");
+    if !alternative && sequence == 438 && state.gap_a_438.load(Ordering::Acquire) {
+        return HttpStatus::NOT_FOUND.into_response();
+    }
     if alternative && state.pause_sequence.load(Ordering::Acquire) == sequence {
         state.entered.notify_one();
         state.release.acquire().await.unwrap().forget();
@@ -129,9 +147,33 @@ async fn serve(State(state): State<Arc<OriginState>>, headers: HttpHeaders, uri:
     }
     let payload = raw_media(if alternative && sequence == 437 && state.corrupt_probe.load(Ordering::Acquire) {
         999
+    } else if alternative && sequence == 439 && state.gap_b_bad_anchor.load(Ordering::Acquire) {
+        998
     } else {
         sequence
     });
+    if alternative && sequence == 438 {
+        match state.gap_b_438.load(Ordering::Acquire) {
+            1 => return HttpStatus::NOT_FOUND.into_response(),
+            2 => {
+                return Response::builder()
+                    .header(header::CONTENT_TYPE, "video/mp2t")
+                    .header(header::CONTENT_LENGTH, payload.len() + 188)
+                    .body(Body::from_stream(futures::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(
+                        payload,
+                    ))])))
+                    .unwrap();
+            }
+            4 => {
+                let mut payload = payload;
+                // Damage the final packet beyond the track-inspection prefix.
+                let final_packet = payload.len() - 188;
+                payload[final_packet] = 0;
+                return ([(header::CONTENT_TYPE, "video/mp2t")], Body::from(payload)).into_response();
+            }
+            _ => {}
+        }
+    }
     ([(header::CONTENT_TYPE, "video/mp2t")], Body::from(payload)).into_response()
 }
 
@@ -556,3 +598,5 @@ async fn permanent_probe_failure_keeps_followups_reduced_and_bounded() {
 async fn generation_change_during_reference_probe_rejects_the_stale_switch() { invalidated_probe(437, false).await; }
 
 mod dedup;
+
+mod gap_repair;

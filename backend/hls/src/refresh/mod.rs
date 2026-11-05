@@ -1436,17 +1436,14 @@ async fn commit_manifest_recovery_candidate(
             .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?;
         commit_verified_critical_handoff(request, &fetched, acceptance_mode, staged).await
     } else {
-        let mut session = request.session.write().await;
-        let commit_now_ms = request.hls_proxy.now_ms();
-        commit::commit_fetched_manifest_with_origin_update(
-            &mut session,
-            &fetched,
+        commit::commit_recovery_manifest(
             request,
-            commit_now_ms,
+            &fetched,
             acceptance_mode,
-            staged_switch.as_ref(),
+            staged_switch.as_mut(),
             origin_update.as_ref(),
         )
+        .await
     };
     cancel_superseded_terminal_work_after_media_progress(request, &commit_result).await;
     match commit_result {

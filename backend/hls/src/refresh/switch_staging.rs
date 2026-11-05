@@ -32,17 +32,26 @@ use crate::{
     resource_identity::HlsMediaResourceIdentity,
     safe_session_key,
     segment_fetcher::{stage_hls_switch_resource, HlsSwitchResourceKind, SegmentFetchPolicy},
+    sync_ext::MutexExt,
     terminal_tail::{
         pin_terminal_base_evidence, resolve_terminal_base_evidence, snapshot_terminal_media_asset,
         HlsTerminalBaseEvidence, HlsTerminalMediaAsset,
     },
-    timeline::{effective_origin_host_id, HlsOriginHandoffPreview, HlsOriginHandoffPreviewError},
+    timeline::{effective_origin_host_id, HlsOriginHandoffPreview, HlsOriginHandoffPreviewError, HlsRetainedGapRepair},
     HlsSegmentCache, HlsSessionMode, HlsTrackEvidenceResolution, MapCacheStatus, MapEntry, SegmentCacheKey,
     SegmentCacheStatus, SegmentEntry, SegmentFetchContext, StagedCacheObject, TransientResourceKind,
     TransientResourceRef,
 };
 use log::{debug, warn};
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    time::Instant,
+};
 use tuliprox_core::model::CustomStreamResponse;
 use tuliprox_parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome};
 
@@ -597,6 +606,7 @@ pub(super) struct HlsVerifiedContentAnchor {
     _read_pin: HlsCommittedAcceptanceReadPin,
     _file_pin: Arc<crate::HlsRevisionFilePin>,
     _revision: Option<crate::SegmentRevisionGuard>,
+    repair: Option<HlsPreparedGapRepair>,
 }
 
 impl HlsVerifiedContentAnchor {
@@ -609,18 +619,241 @@ impl HlsVerifiedContentAnchor {
             && switch_staging_generation_matches(session, generation)
             && super::origin_probe::HlsOriginContentEvidence::latest_ready(session).as_ref() == Some(&self.anchor)
     }
+
+    pub(super) fn has_gap_repair(&self) -> bool { self.repair.is_some() }
+
+    pub(super) fn revalidate_gap_repair(
+        &mut self,
+        leases: &crate::HlsAccessLeaseStore,
+        session: &crate::HlsSession,
+        now_ms: u64,
+    ) {
+        if self.repair.as_ref().is_some_and(|repair| {
+            leases.live_playback_lease(&repair.lease_id, &session.proxy_session_id, now_ms).is_none_or(|lease| {
+                lease.state != crate::HlsAccessLeaseState::Activated
+                    || lease.active_until_ms.is_none_or(|until| until <= now_ms)
+                    || session.first_playback_blocker(lease) != Some(&repair.plan.slot)
+            })
+        }) {
+            self.repair = None;
+        }
+    }
+
+    /// The caller has revalidated the lease and applied the exact handoff
+    /// draft with both locks held. The old slot is still fenced.
+    pub(super) fn publish_gap_repair(
+        &self,
+        session: &mut crate::HlsSession,
+        request: &OriginRefreshRequest,
+        now_ms: u64,
+    ) {
+        let Some(repair) = &self.repair else { return };
+        if now_ms >= repair.deadline_ms || request.segment_cache.object_path(&repair.key) != repair.metadata.path {
+            return;
+        }
+        let seq = repair.plan.slot.proxy_seq;
+        let Some(entry) = session.segments.get_mut(&seq).filter(|entry| **entry == repair.plan.slot) else { return };
+        entry.cache_key = repair.key.clone();
+        entry.origin_fetch_ref = Some(repair.plan.candidate.clone());
+        entry.retained_resource_identity = None;
+        entry.status = SegmentCacheStatus::Ready { content_length: repair.metadata.size, ready_at_ms: now_ms };
+        session.origin_content.record(entry, session.activity.origin_work_generation, repair.digest);
+        repair.cleanup.lock_unpoisoned().disarm();
+        if let Some(notifier) = session.segment_fetch_notifiers.remove(&seq) {
+            notifier.notify_waiters();
+        }
+        debug!("HLS retained gap repair published: proxy_seq={seq}");
+    }
 }
 
 pub(super) async fn verify_content_anchor(
     request: &OriginRefreshRequest,
     fetched: &FetchedOriginManifest,
 ) -> Result<HlsVerifiedContentAnchor, HlsManifestCommitError> {
-    tokio::time::timeout(
-        std::time::Duration::from_millis(request.origin_manifest_timeout_ms),
-        probe_content_anchor(request, fetched),
+    let deadline = Instant::now() + Duration::from_millis(request.origin_manifest_timeout_ms);
+    let mut proof = tokio::time::timeout_at(deadline, probe_content_anchor(request, fetched))
+        .await
+        .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))??;
+    // Use the remainder of the same probe budget. Failure leaves the slot
+    // unavailable and lets the existing handoff policy evaluate its candidate.
+    proof.repair = tokio::time::timeout_at(deadline, prepare_gap_repair(request, fetched, &proof)).await.ok().flatten();
+    if request.session.try_read().is_ok_and(|session| !proof.is_current(&session, &proof.generation)) {
+        return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
+    }
+    Ok(proof)
+}
+
+struct HlsPreparedGapRepair {
+    plan: HlsRetainedGapRepair,
+    lease_id: crate::HlsAccessLeaseId,
+    deadline_ms: u64,
+    key: SegmentCacheKey,
+    metadata: crate::CachedSegmentMetadata,
+    digest: [u8; 32],
+    cleanup: Mutex<crate::gc::HlsSwitchCacheCleanupReservation>,
+    _file_pin: crate::HlsRevisionFilePin,
+}
+
+async fn prepare_gap_repair(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+    proof: &HlsVerifiedContentAnchor,
+) -> Option<HlsPreparedGapRepair> {
+    let now_ms = request.hls_proxy.now_ms();
+    let proxy = request.session.read().await.proxy_session_id.clone();
+    let leases = request.hls_proxy.active_live_playback_snapshots_for_session(&proxy, now_ms).await;
+    if leases.is_empty() {
+        return None;
+    }
+    let OriginManifestParseOutcome::Normal(manifest) =
+        parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url)
+    else {
+        return None;
+    };
+    let (plan, lease_id, deadline_ms) = {
+        let session = request.session.read().await;
+        if !proof.is_current(&session, &proof.generation) {
+            return None;
+        }
+        let (plan, lease) = leases
+            .iter()
+            .filter_map(|lease| Some((session.retained_gap_repair(lease, &manifest, proof.anchor.proxy_seq)?, lease)))
+            .min_by(|(left, left_lease), (right, right_lease)| {
+                left.slot
+                    .proxy_seq
+                    .cmp(&right.slot.proxy_seq)
+                    .then_with(|| left_lease.lease_id.0.cmp(&right_lease.lease_id.0))
+            })?;
+        let deadline_ms = session
+            .origin_control
+            .acceptance_episode
+            .as_ref()?
+            .timing()
+            .acceptance_deadline
+            .as_millis_since_epoch()
+            .min(lease.active_until_ms?)
+            .min(lease.valid_until_ms);
+        (plan, lease.lease_id.clone(), deadline_ms)
+    };
+    let remaining = deadline_ms.checked_sub(request.hls_proxy.now_ms()).filter(|ms| *ms > 0)?;
+    let (key, metadata, digest, cleanup, file_pin) =
+        tokio::time::timeout(Duration::from_millis(remaining), download_gap_repair(request, fetched, proof, &plan))
+            .await
+            .ok()??;
+    Some(HlsPreparedGapRepair {
+        plan,
+        lease_id,
+        deadline_ms,
+        key,
+        metadata,
+        digest,
+        cleanup: Mutex::new(cleanup),
+        _file_pin: file_pin,
+    })
+}
+
+type StagedGapMedia = (
+    SegmentCacheKey,
+    crate::CachedSegmentMetadata,
+    [u8; 32],
+    crate::gc::HlsSwitchCacheCleanupReservation,
+    crate::HlsRevisionFilePin,
+);
+
+async fn download_gap_repair(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+    proof: &HlsVerifiedContentAnchor,
+    plan: &HlsRetainedGapRepair,
+) -> Option<StagedGapMedia> {
+    if request.hls_proxy.segment_cache().cache_path() != request.segment_cache.cache_path() {
+        return None;
+    }
+    let _permit = request.segment_worker_pool.try_reserve_origin_probe(&request.session).await?;
+    let context = alternative_switch_fetch_context(request, fetched);
+    // A private physical name for the same proxy slot prevents an in-flight
+    // repair or its cleanup from touching a concurrently published READY file.
+    let key = SegmentCacheKey::new(
+        plan.slot.cache_key.proxy_session_id().clone(),
+        plan.slot.proxy_seq,
+        format!("repair-{:032x}.ts", fastrand::u128(..)),
+    );
+    let staged = stage_hls_switch_resource(
+        &context,
+        &request.segment_worker_pool.policy(),
+        key.clone(),
+        plan.candidate.resolved_origin_url.clone(),
+        plan.candidate.byte_range,
+        HlsSwitchResourceKind::Segment,
     )
     .await
-    .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?
+    .ok()?;
+    let Some(digest) = validate_gap_media(request, proof, &staged).await else {
+        let _ = request.segment_cache.remove_staged(staged).await;
+        return None;
+    };
+    {
+        let session = request.session.read().await;
+        if !proof.is_current(&session, &proof.generation)
+            || session.segments.get(&plan.slot.proxy_seq) != Some(&plan.slot)
+        {
+            drop(session);
+            let _ = request.segment_cache.remove_staged(staged).await;
+            return None;
+        }
+    }
+    let cleanup = request.hls_proxy.reserve_switch_segment_cleanup(key.clone())?;
+    let (metadata, cleanup) = request.segment_cache.commit_staged_with_guard(&key, staged, cleanup).await.ok()?;
+    let file_pin = request.segment_cache.pin_revision_file(&metadata.path).ok()?;
+    Some((key, metadata, digest, cleanup, file_pin))
+}
+
+async fn validate_gap_media(
+    request: &OriginRefreshRequest,
+    proof: &HlsVerifiedContentAnchor,
+    staged: &StagedCacheObject,
+) -> Option<[u8; 32]> {
+    const PACKET: usize = 188;
+    if staged.size == 0 || !staged.size.is_multiple_of(PACKET as u64) {
+        return None;
+    }
+    let anchor_tracks = inspect_cache_object_tracks(&request.segment_cache, &proof.anchor.cache_key).await;
+    let mut file = tokio::fs::File::open(&staged.path).await.ok()?;
+    let tracks: HlsTrackEvidenceResolution =
+        crate::inspect_mpeg_ts_async(&mut file, crate::HlsTsProbeProtection::Clear, crate::HlsTsProbeBudget::default())
+            .await
+            .into();
+    if tracks.signature()? != anchor_tracks.signature()? {
+        return None;
+    }
+    file.rewind().await.ok()?;
+    let mut digest = Sha256::new();
+    let mut remaining = staged.size;
+    let mut buffer = [0_u8; PACKET * 64];
+    while remaining != 0 {
+        let length = usize::try_from(remaining.min(buffer.len() as u64)).ok()?;
+        let chunk = &mut buffer[..length];
+        file.read_exact(chunk).await.ok()?;
+        let (packets, rest) = chunk.as_chunks::<PACKET>();
+        if !rest.is_empty()
+            || packets.iter().any(|packet| {
+                if packet[0] != 0x47 || packet[1] & 0x80 != 0 || packet[3] & 0xc0 != 0 {
+                    return true;
+                }
+                match packet[3] & 0x30 {
+                    0x10 => false,
+                    0x20 => packet[4] != 183,
+                    0x30 => packet[4] > 182,
+                    _ => true,
+                }
+            })
+        {
+            return None;
+        }
+        digest.update(chunk);
+        remaining -= length as u64;
+    }
+    Some(digest.finalize().into())
 }
 
 struct HlsContentAnchorProbe {
@@ -718,6 +951,7 @@ async fn capture_content_anchor_probe(
             _read_pin: HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&entry.access), current_time_millis()),
             _file_pin: file_pin,
             _revision: revision,
+            repair: None,
         };
         (
             proof,

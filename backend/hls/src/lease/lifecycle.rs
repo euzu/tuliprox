@@ -410,6 +410,21 @@ impl HlsAccessLeaseStore {
         self.by_lease_id.get(lease_id).cloned()
     }
 
+    /// Reads current live playback evidence without mutating lease validity.
+    pub(crate) fn live_playback_lease(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Option<&HlsAccessLease> {
+        self.by_lease_id.get(lease_id).filter(|lease| {
+            lease.proxy_session_id == *proxy_session_id
+                && lease_state_allows_use(lease.state)
+                && lease.validity_due_at_ms() > now_ms
+                && lease.playback_mode == HlsLeasePlaybackMode::Live
+        })
+    }
+
     /// Returns immutable playback evidence for leases that are actively consuming this shared session.
     pub fn active_live_playback_snapshots_for_session(
         &mut self,

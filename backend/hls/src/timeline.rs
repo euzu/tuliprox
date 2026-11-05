@@ -193,6 +193,104 @@ pub struct SegmentEntry {
     pub access: Arc<CacheAccessState>,
 }
 
+#[derive(Clone)]
+pub(crate) struct HlsRetainedGapRepair {
+    pub(crate) slot: SegmentEntry,
+    pub(crate) candidate: OriginSegmentFetchRef,
+}
+
+impl SegmentEntry {
+    pub(crate) fn is_clear_ts_origin_404(&self) -> bool {
+        matches!(self.status, SegmentCacheStatus::FailedPermanent { status: Some(StatusCode::NOT_FOUND), .. })
+            && self.proxy_file_ext.eq_ignore_ascii_case("ts")
+            && self.map_ref.is_none()
+            && self.encryption.is_none()
+    }
+}
+
+impl HlsSession {
+    /// Locate the first held slot needed by this cursor, without falling back to
+    /// a later window or to a resource known only through publication history.
+    pub(crate) fn first_playback_blocker(&self, lease: &super::HlsAccessLease) -> Option<&SegmentEntry> {
+        use super::media_reserve::HlsManifestDeliveryMode;
+        if self.startup.is_some()
+            || !matches!(self.mode, super::HlsSessionMode::NormalCacheTimeline)
+            || lease.last_manifest_snapshot.as_ref()?.delivery_mode != HlsManifestDeliveryMode::NormalCacheTimeline
+        {
+            return None;
+        }
+        let cursor = &lease.playback_cursor;
+        cursor.first_segment_started_at_ms?;
+        let mut expected = match cursor.highest_contiguous_completed_proxy_seq {
+            Some(completed) => completed.checked_add(1)?,
+            None => cursor.first_requested_proxy_seq?,
+        };
+        for (&seq, entry) in self.segments.range(expected..) {
+            if seq != expected {
+                return None;
+            }
+            if !matches!(entry.status, SegmentCacheStatus::Ready { .. })
+                || entry.map_ref.is_some()
+                || entry.encryption.is_some()
+            {
+                return Some(entry);
+            }
+            expected = expected.checked_add(1)?;
+        }
+        None
+    }
+
+    pub(crate) fn has_retained_playback_gap(&self, lease: &super::HlsAccessLease) -> bool {
+        self.first_playback_blocker(lease)
+            .is_some_and(|slot| slot.origin_key.origin_epoch < self.origin_epoch && slot.is_clear_ts_origin_404())
+    }
+
+    /// Read the overlap from the complete candidate before the handoff trims
+    /// existing mappings. The repair keeps the old proxy slot and media clock.
+    pub(crate) fn retained_gap_repair(
+        &self,
+        lease: &super::HlsAccessLease,
+        manifest: &ParsedOriginManifest,
+        anchor_proxy_seq: u64,
+    ) -> Option<HlsRetainedGapRepair> {
+        let slot = self.first_playback_blocker(lease)?;
+        let anchor = self.segments.get(&anchor_proxy_seq)?;
+        if !slot.is_clear_ts_origin_404()
+            || slot.proxy_seq >= anchor_proxy_seq
+            || slot.origin_key.origin_epoch != anchor.origin_key.origin_epoch
+            || slot.origin_key.effective_host_id != anchor.origin_key.effective_host_id
+        {
+            return None;
+        }
+        let start = manifest.segments.iter().position(|seg| seg.origin_seq == slot.origin_key.host_local_sequence)?;
+        let end = manifest.segments.iter().position(|seg| seg.origin_seq == anchor.origin_key.host_local_sequence)?;
+        let candidate = &manifest.segments[start];
+        let elapsed =
+            manifest.segments.get(start..end)?.iter().try_fold(0_u64, |ms, seg| ms.checked_add(seg.duration_ms))?;
+        if candidate.map_ref.is_some()
+            || candidate.encryption.is_some()
+            || candidate.duration_ms != slot.duration_ms
+            || candidate.discontinuity_before != slot.discontinuity_before
+            || candidate.program_date_time != slot.program_date_time
+            || slot.media_start_ms.checked_add(elapsed)? != anchor.media_start_ms
+            || !slot.media_resource_identity()?.matches(HlsMediaResourceIdentity::from_url(
+                &candidate.resolved_origin_url,
+                candidate.origin_byte_range,
+            ))
+        {
+            return None;
+        }
+        Some(HlsRetainedGapRepair {
+            slot: slot.clone(),
+            candidate: OriginSegmentFetchRef {
+                resolved_origin_url: candidate.resolved_origin_url.clone(),
+                byte_range: candidate.origin_byte_range,
+                valid_until_ms: None,
+            },
+        })
+    }
+}
+
 impl fmt::Debug for SegmentEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SegmentEntry")

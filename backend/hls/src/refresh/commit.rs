@@ -144,6 +144,36 @@ pub(super) fn commit_fetched_manifest_with_acceptance_mode(
     )
 }
 
+pub(super) async fn commit_recovery_manifest(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+    mut staged_switch: Option<&mut HlsStagedSwitchCommit>,
+    origin_update: Option<&super::origin_probe::PreparedOriginUpdate>,
+) -> Result<(HlsManifestCommitProgressEvidence, bool, bool), HlsManifestCommitError> {
+    let gap_proof = staged_switch
+        .as_deref_mut()
+        .and_then(|staged| staged.content_anchor.as_mut())
+        .filter(|proof| proof.has_gap_repair());
+    // Freeze the lease before taking the session write lock. A reader may
+    // coexist with this commit and writers complete first.
+    let leases = if gap_proof.is_some() { Some(request.hls_proxy.access_leases().read().await) } else { None };
+    let mut session = request.session.write().await;
+    let commit_now_ms = request.hls_proxy.now_ms();
+    if let Some((proof, leases)) = gap_proof.zip(leases.as_deref()) {
+        proof.revalidate_gap_repair(leases, &session, commit_now_ms);
+    }
+    commit_fetched_manifest_with_origin_update(
+        &mut session,
+        fetched,
+        request,
+        commit_now_ms,
+        acceptance_mode,
+        staged_switch.as_deref(),
+        origin_update,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn commit_fetched_manifest_with_origin_update(
     session: &mut crate::HlsSession,
@@ -1011,6 +1041,9 @@ fn commit_normal_manifest(
                 return Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated));
             };
             map.status = MapCacheStatus::Ready { content_length, ready_at_ms: rendered_at_ms };
+        }
+        if let Some(proof) = &staged_switch.content_anchor {
+            proof.publish_gap_repair(session, request, rendered_at_ms);
         }
         session.advance_media_readiness_generation();
     } else {
