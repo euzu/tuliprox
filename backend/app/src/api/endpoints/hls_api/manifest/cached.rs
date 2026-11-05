@@ -13,7 +13,7 @@ use crate::{
     repository::{persist_input_live_bitrate_bps, LiveBitratePersistenceOutcome},
 };
 use axum::response::IntoResponse;
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use shared::utils::sanitize_sensitive_info;
 use std::{sync::Arc, time::Duration};
 use tuliprox_hls::api::{
@@ -641,10 +641,6 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         }
         let cached = read_hls_cached_manifest(session, options, started_at_ms, app_state.hls.proxy.now_ms()).await;
         let fast_start = session.read().await.uses_fast_start_live_window();
-        if cached.wait_for_initial_commit || (cached.rendered_body.is_none() && cached.transient_body.is_none()) {
-            log_hls_manifest_wait_transition(&mut last_wait_reason, "fresh_render_required", session, access_lease_id)
-                .await;
-        }
         if fast_start || !cached.wait_for_initial_commit {
             let mut retained_plan = None;
             let mut retained_origin_generation = false;
@@ -674,7 +670,15 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                 match selection {
                     Ok(prepared) => Some(prepared),
                     Err(reason) => {
-                        log_hls_manifest_wait_transition(&mut last_wait_reason, reason, session, access_lease_id).await;
+                        log_hls_manifest_wait_transition(
+                            &mut last_wait_reason,
+                            reason,
+                            session,
+                            access_lease_id,
+                            started_at,
+                            options.wait_timeout,
+                        )
+                        .await;
                         if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
                             continue;
                         }
@@ -787,6 +791,8 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         "missing_revision_or_head_readiness",
                         session,
                         access_lease_id,
+                        started_at,
+                        options.wait_timeout,
                     )
                     .await;
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
@@ -808,6 +814,8 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                         "admission_rejected",
                         session,
                         access_lease_id,
+                        started_at,
+                        options.wait_timeout,
                     )
                     .await;
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
@@ -985,6 +993,16 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         if options.wait_timeout.is_zero() || !cached.should_wait || started_at.elapsed() >= options.wait_timeout {
             return None;
         }
+        // Only the fallback wait uses this reason. Fast start logs its own blocker.
+        log_hls_manifest_wait_transition(
+            &mut last_wait_reason,
+            "fresh_render_required",
+            session,
+            access_lease_id,
+            started_at,
+            options.wait_timeout,
+        )
+        .await;
         let remaining = options.wait_timeout.saturating_sub(started_at.elapsed());
         tokio::time::sleep(remaining.min(HLS_MANIFEST_WAIT_POLL_INTERVAL)).await;
     }
@@ -1008,7 +1026,12 @@ async fn log_hls_manifest_wait_transition(
     reason: &'static str,
     session: &HlsSessionHandle,
     lease_id: &HlsAccessLeaseId,
+    started_at: tokio::time::Instant,
+    wait_timeout: Duration,
 ) {
+    if !log::log_enabled!(log::Level::Trace) || started_at.elapsed() >= wait_timeout {
+        return;
+    }
     let session = session.read().await;
     let degraded = session.origin_control.path_condition.is_degraded();
     let head = session.publishable_origin_head_proxy_seq.and_then(|seq| session.startup.as_ref()?.revisions.get(&seq));
@@ -1018,7 +1041,7 @@ async fn log_hls_manifest_wait_transition(
         return;
     }
     *previous = Some(state);
-    debug!(
+    trace!(
         "HLS playlist wait: lease={} proxy_session={} reason={reason} degraded={degraded} head_ready={head_ready} origin_generation={} readiness_generation={} head_revision={:?} head_prefix={}",
         safe_hls_access_lease_id(lease_id), safe_proxy_session_id(&session.proxy_session_id),
         session.activity.origin_work_generation, session.activity.media_readiness_generation,
