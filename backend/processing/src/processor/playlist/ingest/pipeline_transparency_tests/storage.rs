@@ -163,8 +163,12 @@ fn persisted_cluster_snapshot_keeps_policy_source_and_disabled_guard_independent
 #[tokio::test]
 async fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with_cache_without_history() {
     let temp = tempfile::tempdir().expect("temporary status directory");
-    let mut status = input_cache::InputStatus::default();
-    status.clusters.insert(
+    let mut pending = PendingInputStatusUpdate::new(
+        temp.path().to_path_buf(),
+        input_cache::InputStatus::default(),
+        ClusterStatusSource::PerCluster,
+    );
+    pending.status.clusters.insert(
         XtreamCluster::Live.as_ref().to_string(),
         input_cache::ClusterStatus { status: input_cache::ClusterState::Ok, timestamp: 17, last_update: None },
     );
@@ -186,12 +190,7 @@ async fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with
     };
     let mut provider_result = PlaylistDownloadResult::new(Vec::new(), Vec::new(), false, false)
         .with_input_telemetry(provider_telemetry)
-        .with_pending_status(PendingInputStatusUpdate {
-            storage_path: temp.path().to_path_buf(),
-            status,
-            status_changed: true,
-            cluster_status_source: ClusterStatusSource::PerCluster,
-        });
+        .with_pending_status(pending);
 
     persist_finalized_cluster_snapshots(&mut provider_result, Some(InputRefreshPolicy::REFRESH), None).await;
 
@@ -218,12 +217,11 @@ async fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with
     };
     let mut cache_result = PlaylistDownloadResult::new(Vec::new(), Vec::new(), true, false)
         .with_input_telemetry(cache_telemetry)
-        .with_pending_status(PendingInputStatusUpdate {
-            storage_path: temp.path().to_path_buf(),
-            status: provider_status,
-            status_changed: false,
-            cluster_status_source: ClusterStatusSource::PerCluster,
-        });
+        .with_pending_status(PendingInputStatusUpdate::new(
+            temp.path().to_path_buf(),
+            provider_status,
+            ClusterStatusSource::PerCluster,
+        ));
 
     persist_finalized_cluster_snapshots(&mut cache_result, Some(InputRefreshPolicy::NORMAL), None).await;
 
@@ -239,6 +237,48 @@ async fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with
     let encoded = std::fs::read_to_string(temp.path().join(input_cache::STATUS_FILE)).expect("persisted status JSON");
     assert_eq!(encoded.matches(r#""last_update""#).count(), 1);
     assert!(!encoded.contains("history"));
+}
+
+#[tokio::test]
+async fn persisted_cluster_snapshot_merges_only_uncontested_changes() {
+    use shared::model::{PersistedPlaylistUpdateInputResult, PlaylistUpdateState};
+
+    let temp = tempfile::tempdir().unwrap();
+    let cluster =
+        |timestamp| input_cache::ClusterStatus { status: input_cache::ClusterState::Ok, timestamp, last_update: None };
+    let original = input_cache::InputStatus {
+        clusters: [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series]
+            .into_iter()
+            .map(|key| (key.as_ref().to_string(), cluster(1)))
+            .collect(),
+        ..Default::default()
+    };
+    input_cache::save_input_status(temp.path(), &original);
+    let mut pending =
+        PendingInputStatusUpdate::new(temp.path().to_path_buf(), original, ClusterStatusSource::PerCluster);
+    pending.status.clusters.insert(XtreamCluster::Live.as_ref().into(), cluster(2));
+    pending.status.clusters.insert(XtreamCluster::Video.as_ref().into(), cluster(2));
+    pending.status.clusters.remove(XtreamCluster::Series.as_ref());
+    let mut result = PlaylistDownloadResult::new(Vec::new(), Vec::new(), false, false).with_pending_status(pending);
+
+    input_cache::update_input_status(temp.path(), move |status| {
+        status.clusters.insert(XtreamCluster::Video.as_ref().into(), cluster(3));
+        status.clusters.insert("default".into(), cluster(3));
+        status.last_input_update =
+            Some(PersistedPlaylistUpdateInputResult { state: PlaylistUpdateState::Success, timestamp: 3 });
+        input_cache::update_epg_source_success(status, 0, "guide".into(), 3);
+        true
+    })
+    .await;
+    persist_finalized_cluster_snapshots(&mut result, None, None).await;
+
+    let status = input_cache::load_input_status(temp.path());
+    assert_eq!(status.clusters[XtreamCluster::Live.as_ref()], cluster(2));
+    assert_eq!(status.clusters[XtreamCluster::Video.as_ref()], cluster(3));
+    assert_eq!(status.clusters["default"], cluster(3));
+    assert!(!status.clusters.contains_key(XtreamCluster::Series.as_ref()));
+    assert_eq!(status.last_input_update.unwrap().timestamp, 3);
+    assert_eq!(status.epg_sources[0].fetched_at, Some(3));
 }
 
 #[test]

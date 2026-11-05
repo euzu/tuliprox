@@ -4,6 +4,7 @@ use shared::model::{PersistedPlaylistUpdateClusterSnapshot, PersistedPlaylistUpd
 use std::{
     collections::HashMap,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 use tuliprox_repository::{build_input_storage_path, get_input_storage_path};
@@ -134,15 +135,34 @@ pub fn save_input_status(path: &Path, status: &InputStatus) {
     }
 }
 
-pub async fn save_input_status_async(path: &Path, status: &InputStatus) {
-    let status_path = path.join(STATUS_FILE);
-    match serde_json::to_vec_pretty(status) {
-        Ok(content) => {
-            if let Err(e) = tuliprox_core::utils::write_file_atomic(&status_path, &content).await {
-                error!("Failed to write input status file {}: {e}", status_path.display());
+pub(crate) async fn update_input_status(path: &Path, update: impl FnOnce(&mut InputStatus) -> bool + Send + 'static) {
+    let dir = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(&dir)?;
+        // Keep the lock on a stable sidecar inode across atomic replacements.
+        let lock = fs::File::options().create(true).truncate(false).write(true).open(dir.join(".status.json.lock"))?;
+        lock.lock()?;
+        let mut status = load_input_status(&dir);
+        if update(&mut status) {
+            let payload = serde_json::to_vec_pretty(&status).map_err(io::Error::other)?;
+            let mut builder = tempfile::Builder::new();
+            builder.prefix(".status.json.").suffix(".tmp");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                builder.permissions(fs::Permissions::from_mode(0o666));
             }
+            let mut temp = builder.tempfile_in(&dir)?;
+            temp.write_all(&payload)?;
+            temp.persist(dir.join(STATUS_FILE)).map_err(|err| err.error)?;
         }
-        Err(e) => error!("Failed to serialize input status: {e}"),
+        Ok(())
+    })
+    .await
+    .map_err(io::Error::other)
+    .and_then(|result| result);
+    if let Err(e) = result {
+        error!("Failed to update input status file {}: {e}", path.join(STATUS_FILE).display());
     }
 }
 

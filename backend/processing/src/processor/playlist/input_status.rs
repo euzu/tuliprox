@@ -1,5 +1,5 @@
 use super::{InputDownloadResult, InputJobResult, MetadataUpdateSink, PlaylistProcessingContext};
-use crate::input_cache::{load_input_status_async, resolve_input_storage_path, save_input_status_async};
+use crate::input_cache::{resolve_input_storage_path, update_input_status};
 use shared::model::{EventSink, PersistedPlaylistUpdateInputResult, PlaylistUpdateState};
 use std::{
     sync::Arc,
@@ -65,11 +65,12 @@ pub(super) async fn persist_input_completion<E: EventSink + Clone + 'static, M: 
         }
         completions.insert(input_id, state);
     }
-    let mut status = load_input_status_async(&path).await;
-    status.last_input_update = Some(PersistedPlaylistUpdateInputResult {
-        state,
-        timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-    });
-    // Do not touch the cache's cluster status/timestamp or its proven runtime facts.
-    save_input_status_async(&path, &status).await;
+    update_input_status(&path, move |status| {
+        status.last_input_update = Some(PersistedPlaylistUpdateInputResult {
+            state,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+        });
+        true
+    })
+    .await;
 }

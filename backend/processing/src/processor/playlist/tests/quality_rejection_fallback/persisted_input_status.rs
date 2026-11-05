@@ -24,6 +24,75 @@ fn local_epg_config(root: &Path, names: &[&str]) -> EpgConfig {
     EpgConfig { configured_sources: None, sources, smart_match: None }
 }
 
+const STATUS_WRITER_DIR: &str = "TULIPROX_TEST_STATUS_WRITER_DIR";
+
+#[tokio::test]
+async fn input_status_writer_child_process() {
+    let Some(dir) = std::env::var_os(STATUS_WRITER_DIR).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let markers = dir.clone();
+    input_cache::update_input_status(&dir, move |status| {
+        std::fs::write(markers.join("writer-ready"), b"").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !markers.join("release-writer").exists() {
+            assert!(std::time::Instant::now() < deadline, "parent did not release the status writer");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        input_cache::update_cluster_status(status, "live", input_cache::ClusterState::Ok);
+        status.last_input_update =
+            Some(PersistedPlaylistUpdateInputResult { state: PlaylistUpdateState::Success, timestamp: 123 });
+        true
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn playlist_update_status_epg_preserves_changes_from_another_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let ctx = processing_context(temp.path());
+    let input = ConfigInput {
+        name: "shared-input".intern(),
+        epg: Some(local_epg_config(temp.path(), &["guide.xml"])),
+        ..Default::default()
+    };
+    let path = input_storage_path(&ctx, &input).await;
+    let test_module = module_path!().split_once("::").unwrap().1;
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("{test_module}::input_status_writer_child_process")])
+        .env(STATUS_WRITER_DIR, &path)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !path.join("writer-ready").exists() {
+            assert!(child.try_wait().unwrap().is_none(), "status writer exited before acquiring the lock");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("other process holds the status lock");
+
+    let storage_dir = temp.path().to_string_lossy();
+    let guide_path =
+        crate::epg::get_input_raw_epg_file_path(&input.epg.as_ref().unwrap().sources[0], &input, &storage_dir)
+            .await
+            .unwrap();
+    let epg = crate::epg::get_xmltv(&ctx, &input, None, &storage_dir);
+    tokio::pin!(epg);
+    assert!(tokio::time::timeout(Duration::from_millis(250), epg.as_mut()).await.is_err());
+    assert!(guide_path.is_file(), "EPG has finished fetching while the other process still holds the status lock");
+    assert!(!path.join(input_cache::STATUS_FILE).exists());
+    std::fs::write(path.join("release-writer"), b"").unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(5), child.wait()).await.unwrap().unwrap().success());
+    let (guide, errors) = tokio::time::timeout(Duration::from_secs(5), epg).await.unwrap();
+    assert!(guide.is_some() && errors.is_empty(), "{errors:?}");
+    let status = input_cache::load_input_status(&path);
+    assert_eq!(status.clusters["live"].status, input_cache::ClusterState::Ok);
+    assert_eq!(status.last_input_update.unwrap().timestamp, 123);
+    assert_eq!(status.epg_sources[0].label, "guide.xml");
+}
+
 #[tokio::test]
 async fn playlist_update_status_epg_waits_for_input_writer_and_preserves_latest_fields() {
     let temp = tempfile::tempdir().unwrap();
