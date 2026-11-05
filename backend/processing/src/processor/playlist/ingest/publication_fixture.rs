@@ -60,7 +60,7 @@ pub async fn publication_fixture_status(
         },
     );
     telemetry::finalize_input_telemetry(&mut result, None);
-    telemetry::persist_finalized_cluster_snapshots(&mut result, Some(policy), None);
+    telemetry::persist_finalized_cluster_snapshots(&mut result, Some(policy), None).await;
     let ctx = PlaylistProcessingContext::for_epg_test(config.clone(), reqwest::Client::new());
     super::super::input_status::persist_input_completion(&ctx, input.id, &input.name, state).await;
     report_input_completion(&events, &run_id, order, input.id, &input.name, state, result.input_telemetry.as_ref());
@@ -108,7 +108,7 @@ pub async fn cache_fixture_status(
         },
     );
     telemetry::finalize_input_telemetry(&mut result, None);
-    telemetry::persist_finalized_cluster_snapshots(&mut result, None, None);
+    telemetry::persist_finalized_cluster_snapshots(&mut result, None, None).await;
     let events = Capture::default();
     report_input_completion(
         &events,

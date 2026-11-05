@@ -230,9 +230,7 @@ async fn playlist_download_from_input<E: EventSink>(
     )
 }
 
-/// `invalidate_input_cache_status` performs a non-atomic file I/O sequence
-/// (`input_cache::load_input_status` + `input_cache::save_input_status`).
-/// Call this only while holding the per-input lock from
+/// This read-modify-write operation requires holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
 pub(crate) async fn invalidate_input_cache_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
     ctx: &PlaylistProcessingContext<E, M>,
@@ -240,10 +238,10 @@ pub(crate) async fn invalidate_input_cache_status<E: EventSink + Clone + 'static
 ) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
     let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
-    let mut status = input_cache::load_input_status(&storage_path);
+    let mut status = input_cache::load_input_status_async(&storage_path).await;
     if !status.clusters.is_empty() {
         status.clusters.clear();
-        input_cache::save_input_status(&storage_path, &status);
+        input_cache::save_input_status_async(&storage_path, &status).await;
     }
 }
 
@@ -486,7 +484,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         .input_refresh
         .filter(|input_refresh| input_refresh.input_id == input.id)
         .map(|input_refresh| input_refresh.policy);
-    persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref());
+    persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref()).await;
 
     // Explicitly release per-input lock after load/persist/mark steps are completed.
     drop(input_lock);

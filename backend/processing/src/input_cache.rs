@@ -115,6 +115,7 @@ pub async fn load_input_status_async(path: &Path) -> InputStatus {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn save_input_status(path: &Path, status: &InputStatus) {
     let status_path = path.join(STATUS_FILE);
     if let Some(parent) = status_path.parent() {
@@ -135,15 +136,9 @@ pub fn save_input_status(path: &Path, status: &InputStatus) {
 
 pub async fn save_input_status_async(path: &Path, status: &InputStatus) {
     let status_path = path.join(STATUS_FILE);
-    if let Some(parent) = status_path.parent() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            error!("Failed to create input storage directory {}: {e}", parent.display());
-            return;
-        }
-    }
-    match serde_json::to_string_pretty(status) {
+    match serde_json::to_vec_pretty(status) {
         Ok(content) => {
-            if let Err(e) = tokio::fs::write(&status_path, content).await {
+            if let Err(e) = tuliprox_core::utils::write_file_atomic(&status_path, &content).await {
                 error!("Failed to write input status file {}: {e}", status_path.display());
             }
         }

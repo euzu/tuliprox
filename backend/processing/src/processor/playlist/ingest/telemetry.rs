@@ -261,7 +261,7 @@ pub(super) fn persisted_cluster_snapshot(
     }
 }
 
-pub(super) fn persist_finalized_cluster_snapshots(
+pub(super) async fn persist_finalized_cluster_snapshots(
     playlist_download_result: &mut PlaylistDownloadResult,
     request_policy: Option<InputRefreshPolicy>,
     storage_error: Option<&TuliproxError>,
@@ -315,6 +315,6 @@ pub(super) fn persist_finalized_cluster_snapshots(
         };
     }
     if changed {
-        input_cache::save_input_status(&pending_status.storage_path, &pending_status.status);
+        input_cache::save_input_status_async(&pending_status.storage_path, &pending_status.status).await;
     }
 }

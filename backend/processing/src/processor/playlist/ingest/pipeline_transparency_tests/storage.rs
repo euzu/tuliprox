@@ -160,8 +160,8 @@ fn persisted_cluster_snapshot_keeps_policy_source_and_disabled_guard_independent
     );
 }
 
-#[test]
-fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with_cache_without_history() {
+#[tokio::test]
+async fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with_cache_without_history() {
     let temp = tempfile::tempdir().expect("temporary status directory");
     let mut status = input_cache::InputStatus::default();
     status.clusters.insert(
@@ -193,7 +193,7 @@ fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with_cache
             cluster_status_source: ClusterStatusSource::PerCluster,
         });
 
-    persist_finalized_cluster_snapshots(&mut provider_result, Some(InputRefreshPolicy::REFRESH), None);
+    persist_finalized_cluster_snapshots(&mut provider_result, Some(InputRefreshPolicy::REFRESH), None).await;
 
     let provider_status = input_cache::load_input_status(temp.path());
     let provider_snapshot = provider_status.clusters["live"].last_update.expect("provider snapshot");
@@ -225,7 +225,7 @@ fn persisted_cluster_snapshot_final_status_boundary_replaces_provider_with_cache
             cluster_status_source: ClusterStatusSource::PerCluster,
         });
 
-    persist_finalized_cluster_snapshots(&mut cache_result, Some(InputRefreshPolicy::NORMAL), None);
+    persist_finalized_cluster_snapshots(&mut cache_result, Some(InputRefreshPolicy::NORMAL), None).await;
 
     let cached_status = input_cache::load_input_status(temp.path());
     assert_eq!(cached_status.clusters.len(), 1);

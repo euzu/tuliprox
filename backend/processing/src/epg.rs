@@ -263,6 +263,8 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
             }
 
             let input_storage = crate::input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
+            // Cluster acquisition and input completion also modify this status file.
+            let input_lock = ctx.get_input_lock(&input.name).await;
             let mut input_status = crate::input_cache::load_input_status_async(&input_storage).await;
             for outcome in fetch_outcomes {
                 match outcome {
@@ -284,6 +286,7 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
                 input_status.epg_sources.truncate(epg_config.sources.len());
             }
             crate::input_cache::save_input_status_async(&input_storage, &input_status).await;
+            drop(input_lock);
 
             for suffix in ["_epg.xml", "_epg.ics"] {
                 if let Err(err) = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, suffix).await {
