@@ -1,6 +1,206 @@
 use super::*;
 use crate::processor::playlist::input_status::{persist_input_completion, persist_input_job_result};
-use shared::model::PersistedPlaylistUpdateInputResult;
+use shared::model::{PersistedPlaylistUpdateInputResult, PersistedPlaylistUpdateTechnicalState};
+use tuliprox_core::model::{EpgConfig, EpgSource, EpgSourceType};
+
+fn local_epg_config(root: &Path, names: &[&str]) -> EpgConfig {
+    let sources = names
+        .iter()
+        .map(|name| {
+            let path = root.join(name);
+            std::fs::write(&path, "<tv></tv>").unwrap();
+            EpgSource {
+                source_type: EpgSourceType::Xmltv,
+                url: path.to_string_lossy().into_owned(),
+                priority: 0,
+                logo_override: false,
+                channel_id: None,
+                channel_title: None,
+                match_names: Vec::new(),
+                ics: None,
+            }
+        })
+        .collect();
+    EpgConfig { configured_sources: None, sources, smart_match: None }
+}
+
+const STATUS_WRITER_DIR: &str = "TULIPROX_TEST_STATUS_WRITER_DIR";
+
+#[tokio::test]
+async fn input_status_writer_child_process() {
+    let Some(dir) = std::env::var_os(STATUS_WRITER_DIR).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let markers = dir.clone();
+    input_cache::update_input_status(&dir, move |status| {
+        std::fs::write(markers.join("writer-ready"), b"").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !markers.join("release-writer").exists() {
+            assert!(std::time::Instant::now() < deadline, "parent did not release the status writer");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        input_cache::update_cluster_status(status, "live", input_cache::ClusterState::Ok);
+        status.last_input_update =
+            Some(PersistedPlaylistUpdateInputResult { state: PlaylistUpdateState::Success, timestamp: 123 });
+        true
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn playlist_update_status_epg_preserves_changes_from_another_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let ctx = processing_context(temp.path());
+    let input = ConfigInput {
+        name: "shared-input".intern(),
+        epg: Some(local_epg_config(temp.path(), &["guide.xml"])),
+        ..Default::default()
+    };
+    let path = input_storage_path(&ctx, &input).await;
+    let test_module = module_path!().split_once("::").unwrap().1;
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("{test_module}::input_status_writer_child_process")])
+        .env(STATUS_WRITER_DIR, &path)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !path.join("writer-ready").exists() {
+            assert!(child.try_wait().unwrap().is_none(), "status writer exited before acquiring the lock");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("other process holds the status lock");
+
+    let storage_dir = temp.path().to_string_lossy();
+    let guide_path =
+        crate::epg::get_input_raw_epg_file_path(&input.epg.as_ref().unwrap().sources[0], &input, &storage_dir)
+            .await
+            .unwrap();
+    let epg = crate::epg::get_xmltv(&ctx, &input, None, &storage_dir);
+    tokio::pin!(epg);
+    assert!(tokio::time::timeout(Duration::from_millis(250), epg.as_mut()).await.is_err());
+    assert!(guide_path.is_file(), "EPG has finished fetching while the other process still holds the status lock");
+    assert!(!path.join(input_cache::STATUS_FILE).exists());
+    std::fs::write(path.join("release-writer"), b"").unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(5), child.wait()).await.unwrap().unwrap().success());
+    let (guide, errors) = tokio::time::timeout(Duration::from_secs(5), epg).await.unwrap();
+    assert!(guide.is_some() && errors.is_empty(), "{errors:?}");
+    let status = input_cache::load_input_status(&path);
+    assert_eq!(status.clusters["live"].status, input_cache::ClusterState::Ok);
+    assert_eq!(status.last_input_update.unwrap().timestamp, 123);
+    assert_eq!(status.epg_sources[0].label, "guide.xml");
+}
+
+#[tokio::test]
+async fn playlist_update_status_epg_waits_for_input_writer_and_preserves_latest_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let ctx = processing_context(temp.path());
+    let input = ConfigInput {
+        id: 7,
+        name: "shared-input".intern(),
+        input_type: InputType::Xtream,
+        epg: Some(local_epg_config(temp.path(), &["guide.xml"])),
+        ..Default::default()
+    };
+    let storage_dir = temp.path().to_string_lossy();
+    let path = input_storage_path(&ctx, &input).await;
+    let input_writer = ctx.get_input_lock(&input.name).await;
+
+    let epg = crate::epg::get_xmltv(&ctx, &input, None, &storage_dir);
+    tokio::pin!(epg);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), epg.as_mut()).await.is_err(),
+        "EPG must wait to read and write status while another input writer holds the lock"
+    );
+
+    let mut latest = input_cache::InputStatus::default();
+    for cluster in XTREAM_CLUSTER {
+        input_cache::update_cluster_status(&mut latest, cluster.as_ref(), input_cache::ClusterState::Ok);
+        assert!(input_cache::replace_cluster_snapshot(
+            &mut latest,
+            cluster.as_ref(),
+            PersistedPlaylistUpdateClusterSnapshot {
+                source: Some(PlaylistUpdateDataSource::Provider),
+                quality_guard_threshold: Some(0),
+                active_count: Some(42),
+                technical_state: Some(PersistedPlaylistUpdateTechnicalState::Succeeded),
+                ..Default::default()
+            },
+        ));
+    }
+    latest.last_input_update =
+        Some(PersistedPlaylistUpdateInputResult { state: PlaylistUpdateState::Success, timestamp: 123 });
+    input_cache::save_input_status(&path, &latest);
+    drop(input_writer);
+
+    let (guide, errors) =
+        tokio::time::timeout(Duration::from_secs(5), epg).await.expect("EPG completes after input writer");
+    assert!(guide.is_some());
+    assert!(errors.is_empty(), "{errors:?}");
+    let persisted = input_cache::load_input_status(&path);
+    assert_eq!(persisted.clusters, latest.clusters);
+    assert_eq!(persisted.last_input_update, latest.last_input_update);
+    assert_eq!(persisted.epg_sources.len(), 1);
+    assert_eq!(persisted.epg_sources[0].label, "guide.xml");
+    assert!(persisted.epg_sources[0].fetched_at.is_some());
+    assert!(persisted.epg_sources[0].error.is_none());
+}
+
+#[tokio::test]
+async fn playlist_update_status_parallel_automatic_jobs_persist_clusters_completion_and_epg() {
+    let temp = tempfile::tempdir().unwrap();
+    let ctx = processing_context(temp.path());
+    let mut config = (**ctx.config.config.load()).clone();
+    config.disk_based_processing = true;
+    ctx.config.config.store(Arc::new(config));
+    let server = TestXtreamServer::start([2, 2, 2]);
+    let mut input = test_input(&server.base_url, ConfigInputUpdateQualityDto::default(), 0, &[]);
+    let guide_names = ["provider.xml", "secondary.xml", "sports.xml"];
+    Arc::get_mut(&mut input).unwrap().epg = Some(local_epg_config(temp.path(), &guide_names));
+
+    // Scheduled runs use the default policy and may process the same input in parallel sources.
+    let run_job = |index| {
+        let (ctx, input) = (&ctx, &input);
+        async move {
+            let result = process_input_job_inner(index, ctx, input).await;
+            persist_input_job_result(ctx, &result).await;
+            result
+        }
+    };
+    let started = shared::utils::current_time_secs();
+    let (first, second) = tokio::join!(run_job(0), run_job(1));
+    let run_time = started..=shared::utils::current_time_secs();
+    for result in [&first, &second] {
+        assert_eq!(result.update_state(), PlaylistUpdateState::Success, "{:?}", result.errors);
+    }
+    assert_eq!(usize::from(first.input_telemetry.is_some()) + usize::from(second.input_telemetry.is_some()), 1);
+    assert_eq!(server.finish().len(), 7, "one Xtream acquisition for both sources");
+
+    let persisted = input_cache::load_input_status(&input_storage_path(&ctx, &input).await);
+    assert_eq!(persisted.clusters.len(), 3);
+    for cluster in XTREAM_CLUSTER {
+        let status = &persisted.clusters[cluster.as_ref()];
+        assert_eq!(status.status, input_cache::ClusterState::Ok);
+        assert!(run_time.contains(&status.timestamp));
+        let snapshot = status.last_update.unwrap();
+        assert_eq!(snapshot.technical_state, Some(PersistedPlaylistUpdateTechnicalState::Succeeded));
+        assert_eq!(snapshot.source, Some(PlaylistUpdateDataSource::Provider));
+        assert_eq!(snapshot.quality_guard_threshold, Some(0));
+        assert_eq!(snapshot.policy, None);
+        assert_eq!(snapshot.quality, None);
+    }
+    let completion = persisted.last_input_update.unwrap();
+    assert_eq!(completion.state, PlaylistUpdateState::Success);
+    assert!(run_time.contains(&completion.timestamp));
+    assert_eq!(persisted.epg_sources.len(), guide_names.len());
+    for (status, name) in persisted.epg_sources.iter().zip(guide_names) {
+        assert_eq!(status.label, name);
+        assert!(run_time.contains(&status.fetched_at.unwrap()));
+        assert!(status.failed_at.is_none() && status.error.is_none());
+    }
+}
 
 fn acquired_result(state: PlaylistUpdateState) -> InputJobResult {
     let mut result = super::super::playlist_update_run_result(

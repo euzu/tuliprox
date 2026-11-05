@@ -30,7 +30,11 @@ pub async fn publication_fixture_status(
         assert_eq!(tuliprox_repository::count_input_xtream_cluster(config, input, *cluster).await.unwrap(), Some(100));
     }
     let path = input_cache::resolve_input_storage_path(&config.config.load().storage_dir, &input.name).await;
-    let mut status = input_cache::load_input_status(&path);
+    let mut pending_status = PendingInputStatusUpdate::new(
+        path.clone(),
+        input_cache::load_input_status(&path),
+        ClusterStatusSource::PerCluster,
+    );
     let events = Capture::default();
     let run_id = "publication-fixture-R2".into();
     let order = 42.into();
@@ -39,7 +43,7 @@ pub async fn publication_fixture_status(
         &run_id,
         order,
         input,
-        &mut status,
+        &mut pending_status.status,
         CacheStatusScope::RequestedClusters(requested),
         &fetch,
     );
@@ -51,16 +55,10 @@ pub async fn publication_fixture_status(
         Some(&fetch),
     );
     let state = if fetch.errors.is_empty() { PlaylistUpdateState::Success } else { PlaylistUpdateState::Failure };
-    let mut result = PlaylistDownloadResult::from(fetch).with_input_telemetry(telemetry).with_pending_status(
-        PendingInputStatusUpdate {
-            storage_path: path.clone(),
-            status,
-            status_changed: true,
-            cluster_status_source: ClusterStatusSource::PerCluster,
-        },
-    );
+    let mut result =
+        PlaylistDownloadResult::from(fetch).with_input_telemetry(telemetry).with_pending_status(pending_status);
     telemetry::finalize_input_telemetry(&mut result, None);
-    telemetry::persist_finalized_cluster_snapshots(&mut result, Some(policy), None);
+    telemetry::persist_finalized_cluster_snapshots(&mut result, Some(policy), None).await;
     let ctx = PlaylistProcessingContext::for_epg_test(config.clone(), reqwest::Client::new());
     super::super::input_status::persist_input_completion(&ctx, input.id, &input.name, state).await;
     report_input_completion(&events, &run_id, order, input.id, &input.name, state, result.input_telemetry.as_ref());
@@ -100,15 +98,10 @@ pub async fn cache_fixture_status(
     let mut loaded = tuliprox_repository::load_input_playlist(config, input, None).await.expect("real cache read");
     assert!(!loaded.is_empty());
     let mut result = status::cached_playlist_download_result(input, InputRefreshPolicy::NORMAL).with_pending_status(
-        PendingInputStatusUpdate {
-            storage_path: path.clone(),
-            status: previous.clone(),
-            status_changed: false,
-            cluster_status_source: ClusterStatusSource::PerCluster,
-        },
+        PendingInputStatusUpdate::new(path.clone(), previous.clone(), ClusterStatusSource::PerCluster),
     );
     telemetry::finalize_input_telemetry(&mut result, None);
-    telemetry::persist_finalized_cluster_snapshots(&mut result, None, None);
+    telemetry::persist_finalized_cluster_snapshots(&mut result, None, None).await;
     let events = Capture::default();
     report_input_completion(
         &events,
