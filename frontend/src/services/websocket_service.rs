@@ -20,9 +20,8 @@ use web_sys::{
     CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket,
 };
 
-const WS_RECONNECT_BASE_MS: u32 = 300;
-const WS_RECONNECT_MAX_MS: u32 = 2000;
-const WS_RECONNECT_MAX_ATTEMPTS: u16 = 20;
+const WS_HANDSHAKE_TIMEOUT_MS: u32 = 15_000;
+const WS_RECONNECT_DELAYS_MS: [u32; 7] = [500, 1000, 2000, 4000, 8000, 16_000, 30_000];
 const WS_MAX_PENDING_MESSAGES: usize = 256;
 
 /// Frontend-local identity of one concrete WebSocket connection lifecycle.
@@ -48,12 +47,20 @@ const fn next_socket_epoch(current: u64) -> u64 { current.saturating_add(1) }
 const fn socket_epoch_is_current(current: u64, candidate: u64) -> bool { current == candidate }
 
 fn reconnect_delay(attempt: u16) -> u32 {
-    if attempt < 6 {
-        let d = WS_RECONNECT_BASE_MS * (u32::from(attempt) + 1u32);
-        d.min(WS_RECONNECT_MAX_MS)
-    } else {
-        WS_RECONNECT_MAX_MS
-    }
+    WS_RECONNECT_DELAYS_MS[usize::from(attempt).min(WS_RECONNECT_DELAYS_MS.len() - 1)]
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn jittered_delay(nominal: u32) -> u32 {
+    let minimum = nominal * 4 / 5;
+    // Math.random() is in [0, 1), so the offset stays within the integer range.
+    minimum + (js_sys::Math::random() * f64::from(nominal - minimum + 1)) as u32
+}
+
+fn monotonic_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map_or_else(js_sys::Date::now, |performance| performance.now())
 }
 
 /// Requests whose repeated delivery carries no extra meaning; a queued copy is enough.
@@ -128,14 +135,26 @@ impl Drop for ActiveSocket {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SocketPhase {
+    Disconnected,
+    Opening,
+    Version,
+    Authorization,
+    Ready,
+}
+
 pub struct WebSocketInner {
     enabled: Cell<bool>,
-    connected: Cell<bool>,
+    phase: Cell<SocketPhase>,
     connection_epoch: Cell<u64>,
     attempt_counter: Cell<u16>,
     socket: RefCell<Option<ActiveSocket>>,
     reconnect_timer: RefCell<Option<Timeout>>,
+    handshake_deadline: Cell<Option<f64>>,
+    watchdog: RefCell<Option<Timeout>>,
     pending_messages: RefCell<VecDeque<Vec<u8>>>,
+    status_request_epoch: Cell<u64>,
     status_service: Rc<StatusService>,
     event_service: Rc<EventService>,
     ws_path: String,
@@ -156,23 +175,26 @@ impl WebSocketService {
         let base_href = get_base_href();
         Self(Rc::new(WebSocketInner {
             enabled: Cell::new(false),
-            connected: Cell::new(false),
+            phase: Cell::new(SocketPhase::Disconnected),
             connection_epoch: Cell::new(0),
             attempt_counter: Cell::new(0),
             socket: RefCell::new(None),
             reconnect_timer: RefCell::new(None),
+            handshake_deadline: Cell::new(None),
+            watchdog: RefCell::new(None),
             pending_messages: RefCell::new(VecDeque::new()),
+            status_request_epoch: Cell::new(0),
             status_service,
             event_service,
             ws_path: concat_path_leading_slash(&base_href, "ws"),
         }))
     }
 
-    pub fn is_connected(&self) -> bool { self.connected.get() }
+    pub fn is_connected(&self) -> bool { self.phase.get() == SocketPhase::Ready }
 
     #[must_use]
     pub fn connection_context(&self) -> WebSocketConnectionContext {
-        WebSocketConnectionContext::new(self.connection_epoch.get(), self.connected.get())
+        WebSocketConnectionContext::new(self.connection_epoch.get(), self.is_connected())
     }
 
     #[must_use]
@@ -181,52 +203,52 @@ impl WebSocketService {
     }
 
     pub fn connect_ws_with_backoff(&self) {
-        self.enabled.set(true);
-        self.connect_ws();
+        if !self.enabled.replace(true) {
+            self.invalidate_http_status();
+            self.connect_ws();
+        }
     }
 
     pub fn disconnect(&self) {
         if !self.enabled.replace(false) {
             return;
         }
-        self.connection_epoch.set(next_socket_epoch(self.connection_epoch.get()));
-        self.connected.set(false);
         self.attempt_counter.set(0);
         self.pending_messages.borrow_mut().clear();
-        self.close_socket();
+        self.invalidate_http_status();
+        self.end_attempt();
         self.event_service.broadcast(EventMessage::WebSocketStatus(false));
     }
 
-    fn close_socket(&self) {
-        let timer = self.reconnect_timer.borrow_mut().take();
-        drop(timer);
-        // Drop outside the borrow; this may free the handler that is currently running,
-        // which wasm-bindgen defers until that invocation returns.
-        let socket = self.socket.borrow_mut().take();
-        drop(socket);
+    fn clear_watchdog(&self) {
+        self.handshake_deadline.set(None);
+        drop(self.watchdog.take());
+    }
+
+    fn end_attempt(&self) {
+        self.connection_epoch.set(next_socket_epoch(self.connection_epoch.get()));
+        self.phase.set(SocketPhase::Disconnected);
+        self.clear_watchdog();
+        drop(self.reconnect_timer.take());
+        // Release the RefCell borrow before dropping a possibly executing handler.
+        drop(self.socket.take());
     }
 
     fn connect_ws(&self) {
-        if !self.enabled.get() {
-            return;
-        }
-        let has_active_socket = self.socket.borrow().as_ref().is_some_and(|socket| {
-            let state = socket.ws.ready_state();
-            state == WebSocket::CONNECTING || state == WebSocket::OPEN
-        });
-        if has_active_socket {
-            return;
-        }
-        self.close_socket();
+        let socket_epoch = next_socket_epoch(self.connection_epoch.get());
+        self.connection_epoch.set(socket_epoch);
+        self.phase.set(SocketPhase::Opening);
+        self.handshake_deadline.set(Some(monotonic_ms() + f64::from(WS_HANDSHAKE_TIMEOUT_MS)));
+        *self.watchdog.borrow_mut() = Some(self.timer(WS_HANDSHAKE_TIMEOUT_MS, Self::on_handshake_timeout));
+
         let ws = match WebSocket::new(&self.ws_path) {
             Ok(ws) => ws,
             Err(err) => {
                 error!("Failed to open websocket connection: {err:?}");
+                self.fail_attempt();
                 return;
             }
         };
-        let socket_epoch = next_socket_epoch(self.connection_epoch.get());
-        self.connection_epoch.set(socket_epoch);
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
         let socket = ActiveSocket::new(
@@ -239,8 +261,7 @@ impl WebSocketService {
         *self.socket.borrow_mut() = Some(socket);
     }
 
-    /// Wraps a handler so it only runs for the socket it was created for. The handler holds a
-    /// weak reference, so the socket's closures never keep the service alive.
+    /// Guards socket events and timers before they touch any connection state.
     fn socket_handler<E: 'static>(&self, socket_epoch: u64, handle: fn(&Self, E)) -> impl FnMut(E) + 'static {
         let service = Rc::downgrade(&self.0);
         move |event| {
@@ -253,65 +274,108 @@ impl WebSocketService {
         }
     }
 
+    fn timer(&self, delay: u32, handle: fn(&Self, ())) -> Timeout {
+        let mut handler = self.socket_handler(self.connection_epoch.get(), handle);
+        Timeout::new(delay, move || handler(()))
+    }
+
+    fn expire_handshake(&self) -> bool {
+        if self.handshake_deadline.get().is_some_and(|deadline| monotonic_ms() >= deadline) {
+            self.on_handshake_timeout(());
+            return true;
+        }
+        false
+    }
+
+    fn on_handshake_timeout(&self, (): ()) {
+        if self.handshake_deadline.get().is_some() {
+            warn!("WebSocket handshake timed out.");
+            self.fail_attempt();
+        }
+    }
+
+    fn send_handshake(&self, message: &ProtocolMessage) {
+        if !self.try_send_message(message) {
+            self.fail_attempt();
+        }
+    }
+
     fn on_open(&self, _event: Event) {
-        // on open starts the protocol handshake; application messages wait until authorization.
+        if self.expire_handshake() || self.phase.get() != SocketPhase::Opening {
+            return;
+        }
         trace!("WebSocket connection opened.");
-        self.connected.set(false);
-        self.try_send_message(&ProtocolMessage::Version(PROTOCOL_VERSION));
+        self.phase.set(SocketPhase::Version);
+        self.send_handshake(&ProtocolMessage::Version(PROTOCOL_VERSION));
     }
 
     fn on_message(&self, event: MessageEvent) {
-        trace!("WebSocket received message: {event:?}");
-        if let Some(response) = self.handle_protocol_msg(&event) {
-            self.try_send_message(&response);
+        if self.expire_handshake() {
+            return;
+        }
+        let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() else {
+            return;
+        };
+        let bytes = bytes::Bytes::from(Uint8Array::new(&buffer).to_vec());
+        let version_matches = bytes.as_ref() == [PROTOCOL_VERSION];
+        let message = match ProtocolMessage::from_bytes(bytes) {
+            Ok(message) => message,
+            Err(err) => {
+                error!("Failed to decode websocket message: {err}");
+                return;
+            }
+        };
+        if matches!(message, ProtocolMessage::Unauthorized) {
+            self.disconnect();
+            self.event_service.broadcast(EventMessage::Unauthorized);
+            return;
+        }
+
+        match self.phase.get() {
+            SocketPhase::Version if version_matches => {
+                if let Some(token) = get_token() {
+                    self.phase.set(SocketPhase::Authorization);
+                    self.send_handshake(&ProtocolMessage::Auth(token));
+                } else {
+                    self.mark_authorized();
+                }
+            }
+            SocketPhase::Authorization if matches!(message, ProtocolMessage::Authorized) => self.mark_authorized(),
+            SocketPhase::Ready => {
+                let context = self.connection_context();
+                if let Some(response) =
+                    self.handle_live_message(message).filter(|_| self.is_current_connection(context))
+                {
+                    self.try_send_message(&response);
+                }
+            }
+            _ => {}
         }
     }
 
     fn on_close(&self, event: CloseEvent) {
         trace!("WebSocket closed (Code {}, Reason: {}, Clean: {})", event.code(), event.reason(), event.was_clean());
-        let socket_epoch = self.connection_epoch.get();
-        self.close_socket();
-        self.connected.set(false);
-        self.event_service.broadcast(EventMessage::WebSocketStatus(false));
-        // A subscriber may log out or start another connection during the broadcast.
-        if socket_epoch_is_current(self.connection_epoch.get(), socket_epoch) {
-            self.schedule_reconnect();
-        }
+        self.fail_attempt();
     }
 
     fn on_error(&self, event: ErrorEvent) {
         error!("WebSocket error: {event:?}");
-        self.connected.set(false);
+        self.fail_attempt();
+    }
+
+    fn fail_attempt(&self) {
+        self.end_attempt();
+        let delay = jittered_delay(reconnect_delay(self.attempt_counter.get()));
+        let attempt = self.attempt_counter.get().saturating_add(1);
+        self.attempt_counter.set(attempt);
+        warn!("WebSocket reconnect attempt #{attempt} scheduled in {delay} ms");
+        *self.reconnect_timer.borrow_mut() = Some(self.timer(delay, Self::on_retry));
         self.event_service.broadcast(EventMessage::WebSocketStatus(false));
     }
 
-    fn schedule_reconnect(&self) {
-        if !self.enabled.get() || self.reconnect_timer.borrow().is_some() {
-            return;
-        }
-        let attempt = self.attempt_counter.get().saturating_add(1);
-        self.attempt_counter.set(attempt);
-
-        if attempt >= WS_RECONNECT_MAX_ATTEMPTS {
-            warn!("WebSocket reconnect attempts exceeded ({attempt}). Giving up.");
-            return;
-        }
-        let delay = reconnect_delay(attempt);
-
-        warn!("WebSocket reconnect attempt #{attempt} scheduled in {delay} ms");
-
-        let socket_epoch = self.connection_epoch.get();
-        let service = Rc::downgrade(&self.0);
-        *self.reconnect_timer.borrow_mut() = Some(Timeout::new(delay, move || {
-            let Some(service) = service.upgrade().map(Self) else {
-                return;
-            };
-            let timer = service.reconnect_timer.borrow_mut().take();
-            drop(timer);
-            if service.enabled.get() && socket_epoch_is_current(service.connection_epoch.get(), socket_epoch) {
-                service.connect_ws();
-            }
-        }));
+    fn on_retry(&self, (): ()) {
+        drop(self.reconnect_timer.take());
+        self.connect_ws();
     }
 
     fn try_send_message(&self, msg: &ProtocolMessage) -> bool {
@@ -352,7 +416,7 @@ impl WebSocketService {
         if !self.enabled.get() {
             return false;
         }
-        if self.connected.get() && self.try_send_message(&msg) {
+        if self.is_connected() && self.try_send_message(&msg) {
             return true;
         }
         if requires_live_connection(&msg) {
@@ -372,13 +436,26 @@ impl WebSocketService {
         }
     }
 
+    fn invalidate_http_status(&self) -> u64 {
+        let request_epoch = next_socket_epoch(self.status_request_epoch.get());
+        self.status_request_epoch.set(request_epoch);
+        request_epoch
+    }
+
     pub async fn get_server_status(&self) {
-        if self.connected.get() {
+        if self.is_connected() {
             if let Some(token) = get_token() {
                 self.send_message(ProtocolMessage::StatusRequest(token));
             }
         } else {
-            match self.status_service.get_server_status().await {
+            // Retries in one outage can overlap the HTTP fallback. Only a newer
+            // status request or a session/readiness change supersedes it.
+            let request_epoch = self.invalidate_http_status();
+            let response = self.status_service.get_server_status().await;
+            if self.status_request_epoch.get() != request_epoch {
+                return;
+            }
+            match response {
                 Ok(Some(status)) => {
                     self.event_service.broadcast(EventMessage::ServerStatus(status));
                 }
@@ -393,31 +470,20 @@ impl WebSocketService {
     }
 
     fn mark_authorized(&self) {
-        self.connected.set(true);
+        self.clear_watchdog();
+        self.phase.set(SocketPhase::Ready);
+        self.attempt_counter.set(0);
+        self.invalidate_http_status();
         self.flush_pending_messages();
         self.event_service.broadcast(EventMessage::WebSocketStatus(true));
     }
 
-    fn handle_protocol_msg(&self, event: &MessageEvent) -> Option<ProtocolMessage> {
-        let buf = event.data().dyn_into::<ArrayBuffer>().ok()?;
-        let bytes = bytes::Bytes::from(Uint8Array::new(&buf).to_vec());
-        let message = match ProtocolMessage::from_bytes(bytes) {
-            Ok(message) => message,
-            Err(err) => {
-                error!("Failed to decode websocket message: {err}");
-                return None;
-            }
-        };
+    fn handle_live_message(&self, message: ProtocolMessage) -> Option<ProtocolMessage> {
         let event_service = &self.event_service;
         match message {
-            ProtocolMessage::Unauthorized => {
-                self.disconnect();
-                event_service.broadcast(EventMessage::Unauthorized);
-            }
             ProtocolMessage::Error(err) => {
                 error!("{err}");
             }
-            ProtocolMessage::Authorized => self.mark_authorized(),
             ProtocolMessage::ActiveUserResponse(event) => {
                 event_service.broadcast(EventMessage::ActiveUser(event));
             }
@@ -451,20 +517,16 @@ impl WebSocketService {
             ProtocolMessage::LibraryScanProgressResponse(progress) => {
                 event_service.broadcast(EventMessage::LibraryScanProgress(progress));
             }
-            ProtocolMessage::Version(_version) => {
-                self.attempt_counter.set(0);
-                if let Some(token) = get_token() {
-                    return Some(ProtocolMessage::Auth(token));
-                }
-                self.mark_authorized();
-            }
             ProtocolMessage::UserActionResponse(_success) => {
                 // A successful kick shows up as an ActiveUser disconnect event; nothing to do here.
             }
             ProtocolMessage::StreamMeterBatchResponse(entries) => {
                 event_service.broadcast(EventMessage::StreamMeterBatch(entries.into()));
             }
-            ProtocolMessage::Auth(_)
+            ProtocolMessage::Version(_)
+            | ProtocolMessage::Authorized
+            | ProtocolMessage::Unauthorized
+            | ProtocolMessage::Auth(_)
             | ProtocolMessage::StreamMeterSubscribe
             | ProtocolMessage::StreamMeterUnsubscribe
             | ProtocolMessage::ActiveProviderCountRequest(_)
@@ -565,169 +627,4 @@ mod tests {
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
-mod browser_tests {
-    use super::{reconnect_delay, WebSocketService};
-    use crate::{
-        model::EventMessage,
-        services::{EventService, StatusService},
-    };
-    use shared::model::{ProtocolMessage, UserCommand, VirtualId};
-    use std::{cell::Cell, rc::Rc};
-    use wasm_bindgen::{JsCast, JsValue};
-    use wasm_bindgen_test::wasm_bindgen_test;
-    use web_sys::{js_sys::Uint8Array, CloseEvent, MessageEvent, MessageEventInit, WebSocket};
-
-    fn message_event(message: &ProtocolMessage) -> Result<MessageEvent, JsValue> {
-        let bytes = message.to_bytes().map_err(|err| JsValue::from_str(&err.to_string()))?;
-        let init = MessageEventInit::new();
-        init.set_data(&Uint8Array::from(bytes.as_ref()).buffer());
-        MessageEvent::new_with_event_init_dict("message", &init)
-    }
-
-    fn current_socket(service: &WebSocketService) -> Option<WebSocket> {
-        service.socket.borrow().as_ref().map(|socket| socket.ws.clone())
-    }
-
-    fn reconnect_wait_ms() -> u32 { reconnect_delay(1) + 100 }
-
-    #[wasm_bindgen_test]
-    fn unauthorized_callback_disconnects_and_allows_signing_in_again() -> Result<(), JsValue> {
-        let events = Rc::new(EventService::new());
-        let websocket = WebSocketService::new(Rc::new(StatusService::new()), Rc::clone(&events));
-        websocket.connect_ws_with_backoff();
-        let socket = current_socket(&websocket).ok_or_else(|| JsValue::from_str("missing websocket"))?;
-        let callback = socket.onmessage().ok_or_else(|| JsValue::from_str("missing callback"))?;
-        let context = websocket.connection_context();
-        assert!(websocket.send_message(ProtocolMessage::RecordingSnapshotRequest));
-        assert!(websocket.send_message(ProtocolMessage::RecordingSnapshotRequest));
-        assert_eq!(websocket.pending_messages.borrow().len(), 1);
-
-        let observed = Rc::new(Cell::new(false));
-        let disconnected = Rc::clone(&observed);
-        let listener = events.subscribe(move |msg| {
-            if msg == EventMessage::WebSocketStatus(false) {
-                disconnected.set(true);
-            }
-        });
-        let service = websocket.clone();
-        let event_service = Rc::clone(&events);
-        let id = Rc::new(Cell::new(0));
-        let subscription = Rc::clone(&id);
-        id.set(events.subscribe(move |msg| {
-            if msg == EventMessage::Unauthorized {
-                event_service.unsubscribe(subscription.get());
-                service.disconnect();
-            }
-        }));
-
-        // Invoke the JS handler so disconnect drops the currently executing WASM closure.
-        callback.call1(&socket, message_event(&ProtocolMessage::Unauthorized)?.as_ref())?;
-        assert!(observed.get());
-        assert!(!websocket.enabled.get());
-        assert!(websocket.socket.borrow().is_none());
-        assert!(socket.onmessage().is_none());
-        assert!(socket.onclose().is_none());
-        assert!(socket.onopen().is_none());
-        assert!(socket.onerror().is_none());
-        assert!(websocket.pending_messages.borrow().is_empty());
-        assert!(!websocket.is_current_connection(context));
-        assert!(!websocket.send_message(ProtocolMessage::RecordingSnapshotRequest));
-        assert!(websocket.pending_messages.borrow().is_empty());
-
-        websocket.connect_ws_with_backoff();
-        let socket = current_socket(&websocket).ok_or_else(|| JsValue::from_str("missing new websocket"))?;
-        socket.dispatch_event(message_event(&ProtocolMessage::Authorized)?.unchecked_ref())?;
-        assert!(websocket.is_connected());
-        assert!(websocket.is_current_connection(websocket.connection_context()));
-        websocket.disconnect();
-        events.unsubscribe(listener);
-        Ok(())
-    }
-
-    #[wasm_bindgen_test]
-    fn user_action_is_rejected_instead_of_queued_while_not_connected() {
-        let websocket = WebSocketService::new(Rc::new(StatusService::new()), Rc::new(EventService::new()));
-        websocket.connect_ws_with_backoff();
-        assert!(!websocket.is_connected());
-        let kick = UserCommand::Kick(([127, 0, 0, 1], 8080).into(), VirtualId::new(1), 30);
-
-        assert!(!websocket.send_message(ProtocolMessage::UserAction(kick)));
-        assert!(websocket.pending_messages.borrow().is_empty());
-        assert!(websocket.send_message(ProtocolMessage::RecordingSnapshotRequest));
-        assert_eq!(websocket.pending_messages.borrow().len(), 1);
-        websocket.disconnect();
-    }
-
-    #[wasm_bindgen_test]
-    async fn reconnect_timer_cannot_reopen_socket_after_logout() {
-        let websocket = WebSocketService::new(Rc::new(StatusService::new()), Rc::new(EventService::new()));
-        websocket.enabled.set(true);
-        websocket.schedule_reconnect();
-        assert_eq!(websocket.attempt_counter.get(), 1);
-        websocket.disconnect();
-        let epoch = websocket.connection_epoch.get();
-        gloo_timers::future::TimeoutFuture::new(reconnect_wait_ms()).await;
-        assert!(!websocket.enabled.get());
-        assert!(websocket.socket.borrow().is_none());
-        assert_eq!(websocket.connection_epoch.get(), epoch);
-        assert_eq!(websocket.attempt_counter.get(), 0);
-    }
-
-    #[wasm_bindgen_test]
-    async fn stale_reconnect_timer_cannot_open_a_second_socket() {
-        let websocket = WebSocketService::new(Rc::new(StatusService::new()), Rc::new(EventService::new()));
-        websocket.enabled.set(true);
-        websocket.schedule_reconnect();
-        // A newer connection supersedes the pending timer; it then goes away without its own onclose firing.
-        websocket.connect_ws_with_backoff();
-        assert!(websocket.socket.borrow().is_some());
-        websocket.close_socket();
-        let epoch = websocket.connection_epoch.get();
-        gloo_timers::future::TimeoutFuture::new(reconnect_wait_ms()).await;
-        assert!(websocket.enabled.get());
-        assert!(websocket.socket.borrow().is_none());
-        assert_eq!(websocket.connection_epoch.get(), epoch);
-        websocket.disconnect();
-    }
-
-    #[wasm_bindgen_test]
-    fn close_callback_cannot_schedule_reconnect_for_a_new_login() -> Result<(), JsValue> {
-        let events = Rc::new(EventService::new());
-        let websocket = WebSocketService::new(Rc::new(StatusService::new()), Rc::clone(&events));
-        websocket.connect_ws_with_backoff();
-        let socket = current_socket(&websocket).ok_or_else(|| JsValue::from_str("missing websocket"))?;
-        let callback = socket.onclose().ok_or_else(|| JsValue::from_str("missing close callback"))?;
-        let reconnected = Rc::new(Cell::new(false));
-        let observed = Rc::clone(&reconnected);
-        let service = websocket.clone();
-        let subscription = events.subscribe(move |msg| {
-            if msg == EventMessage::WebSocketStatus(false) && !observed.replace(true) {
-                service.disconnect();
-                service.connect_ws_with_backoff();
-            }
-        });
-
-        callback.call1(&socket, CloseEvent::new("close")?.as_ref())?;
-        assert!(reconnected.get());
-        assert!(websocket.socket.borrow().is_some());
-        assert!(websocket.reconnect_timer.borrow().is_none());
-        assert_eq!(websocket.attempt_counter.get(), 0);
-        assert!(socket.onclose().is_none());
-        events.unsubscribe(subscription);
-        websocket.disconnect();
-        Ok(())
-    }
-
-    #[wasm_bindgen_test]
-    fn reconnect_timer_is_unique_and_does_not_keep_service_alive() {
-        let websocket = WebSocketService::new(Rc::new(StatusService::new()), Rc::new(EventService::new()));
-        let weak = Rc::downgrade(&websocket.0);
-        websocket.enabled.set(true);
-        websocket.schedule_reconnect();
-        websocket.schedule_reconnect();
-        assert_eq!(websocket.attempt_counter.get(), 1);
-        assert!(websocket.reconnect_timer.borrow().is_some());
-        drop(websocket);
-        assert!(weak.upgrade().is_none());
-    }
-}
+mod browser_tests;

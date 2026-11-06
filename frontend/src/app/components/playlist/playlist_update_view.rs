@@ -228,6 +228,9 @@ pub fn PlaylistUpdateView() -> Html {
         use_effect_with((), move |()| {
             let services_for_cleanup = services.clone();
             let services_for_events = services.clone();
+            let current_connection_context = services.websocket.connection_context();
+            connection_context.set(current_connection_context);
+            card_statuses.dispatch(PlaylistUpdateCardStatusAction::ConnectionChanged(current_connection_context));
             let sub_id = services.event.subscribe(move |msg| {
                 let current_connection_context = services_for_events.websocket.connection_context();
                 if let Some(action) = playlist_update_card_status_action(&msg, current_connection_context) {
