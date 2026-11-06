@@ -39,6 +39,7 @@ struct OriginState {
     gap_b_438: AtomicUsize,
     gap_b_bad_anchor: AtomicBool,
     corrupt_probe: AtomicBool,
+    pause_pinned: AtomicBool,
     pause_sequence: AtomicU64,
     entered: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
@@ -67,6 +68,7 @@ impl Origin {
             gap_b_438: AtomicUsize::new(0),
             gap_b_bad_anchor: AtomicBool::new(false),
             corrupt_probe: AtomicBool::new(false),
+            pause_pinned: AtomicBool::new(false),
             pause_sequence: AtomicU64::new(0),
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
@@ -138,7 +140,9 @@ async fn serve(State(state): State<Arc<OriginState>>, headers: HttpHeaders, uri:
     if !alternative && sequence == 438 && state.gap_a_438.load(Ordering::Acquire) {
         return HttpStatus::NOT_FOUND.into_response();
     }
-    if alternative && state.pause_sequence.load(Ordering::Acquire) == sequence {
+    if (alternative || state.pause_pinned.load(Ordering::Acquire))
+        && state.pause_sequence.load(Ordering::Acquire) == sequence
+    {
         state.entered.notify_one();
         state.release.acquire().await.unwrap().forget();
     }
@@ -600,3 +604,4 @@ async fn generation_change_during_reference_probe_rejects_the_stale_switch() { i
 mod dedup;
 
 mod gap_repair;
+mod origin_updates;

@@ -23,20 +23,16 @@ pub fn is_sanitize_sensitive_info_enabled() -> bool { CONSTANTS.sanitize.load(Or
 /// Masks log values centrally while preserving URL components, parameter names, and separators.
 /// Disabled sanitization preserves the original input; standalone local file URLs are also preserved.
 pub fn sanitize_sensitive_info(value: &str) -> Cow<'_, str> {
-    if !is_sanitize_sensitive_info_enabled()
-        || value.get(..FILE_SCHEME_PREFIX.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(FILE_SCHEME_PREFIX))
-    {
+    if !is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(value);
     }
 
-    if let Some((scheme, rest)) = value.split_once("://") {
-        let is_scheme = scheme.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_alphabetic() || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
-        });
-        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let malformed_authority = authority_end < rest.len() && rest[..authority_end].chars().any(char::is_whitespace);
-        if !scheme.is_empty() && is_scheme && (!value.chars().any(char::is_whitespace) || malformed_authority) {
-            return Cow::Owned(mask_log_url(value));
+    if let Some((scheme, _)) = split_log_url(value) {
+        let file = scheme.eq_ignore_ascii_case("file");
+        let single =
+            !value.chars().any(char::is_whitespace) || (file && CONSTANTS.re_url.captures_iter(value).nth(1).is_none());
+        if single {
+            return if file { Cow::Borrowed(value) } else { Cow::Owned(mask_log_url(value)) };
         }
     }
     if value.starts_with(['/', '?']) && !value.chars().any(char::is_whitespace) {
@@ -58,30 +54,43 @@ fn mask_log_message(value: &str) -> String {
     // diagnostic URL whose components should remain visible.
     let mut credentials = [&CONSTANTS.re_credentials, &CONSTANTS.re_password]
         .into_iter()
-        .flat_map(|regex| regex.find_iter(value).map(|field| (field.start(), field.end())))
+        .flat_map(|regex| {
+            regex
+                .captures_iter(value)
+                .map(|field| (field.get(0).expect("credential field").start(), field.get(2).expect("credential value")))
+        })
         .collect::<Vec<_>>();
     credentials.sort_unstable_by_key(|(start, _)| *start);
     let mut credential_index = 0;
     let mut result = String::with_capacity(value.len());
     let mut previous_end = 0;
-    for captures in CONSTANTS.re_url.captures_iter(value) {
+    let mut spans = CONSTANTS.re_url.captures_iter(value).peekable();
+    while let Some(captures) = spans.next() {
         let matched = captures.name("absolute").or_else(|| captures.name("relative")).expect("URI capture");
         if matched.start() < previous_end {
             continue;
         }
-        let mut credential_end = None;
-        while let Some(&(start, end)) = credentials.get(credential_index) {
+        let next_start = spans.peek().map_or(value.len(), |next| {
+            next.name("absolute").or_else(|| next.name("relative")).expect("URI capture").start()
+        });
+        let url_end = log_url_end(value, matched, next_start);
+        let mut credential = None;
+        while let Some(&(start, raw)) = credentials.get(credential_index) {
             if start >= matched.start() {
                 break;
             }
             credential_index += 1;
-            if start >= previous_end && end > matched.start() {
-                credential_end = Some(end);
+            if start >= previous_end && raw.end() > matched.start() {
+                credential = Some(raw);
                 break;
             }
         }
-        if let Some(end) = credential_end {
-            result.push_str(&mask_log_text(&value[previous_end..end]));
+        if let Some(raw) = credential {
+            // Extend the secret only when authority recovery continues the
+            // credential's own value. Its explicit field boundary takes precedence.
+            let end = if raw.end() == matched.end() { url_end } else { raw.end() };
+            result.push_str(&mask_log_text(&value[previous_end..raw.start()]));
+            result.push_str(&mask_log_field_value(&value[raw.start()..end]));
             previous_end = end;
             continue;
         }
@@ -93,17 +102,70 @@ fn mask_log_message(value: &str) -> String {
             Some('{') => "}",
             _ => "",
         };
+        let span = &value[matched.start()..url_end];
         let (url, suffix) = if closing.is_empty() {
-            (matched.as_str(), "")
+            (span, "")
         } else {
-            matched.as_str().strip_suffix(closing).map_or((matched.as_str(), ""), |url| (url, closing))
+            span.strip_suffix(closing).map_or((span, ""), |url| (url, closing))
         };
         result.push_str(&mask_log_url(url));
         result.push_str(suffix);
-        previous_end = matched.end();
+        previous_end = url_end;
     }
     result.push_str(&mask_log_text(&value[previous_end..]));
     result
+}
+
+fn log_url_end(value: &str, matched: regex::Match<'_>, next_start: usize) -> usize {
+    let end = matched.end();
+    let Some((scheme, authority)) = split_log_url(matched.as_str()) else { return end };
+    if scheme.eq_ignore_ascii_case("file") || authority.contains(['/', '?', '#']) {
+        return end;
+    }
+    let suffix = &value[end..];
+    let Some(boundary) = suffix.find(['/', '?', '#']).filter(|offset| end + offset <= next_start) else { return end };
+    let tail = &suffix[..boundary];
+    if !tail.starts_with(char::is_whitespace)
+        || tail.ends_with(char::is_whitespace)
+        || tail.contains(['<', '>', '"', '\'', '\r', '\n'])
+    {
+        return end;
+    }
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let has_port = host_port
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()));
+    let explicit_end = has_port || authority.ends_with([')', ']', '}']);
+    if explicit_end && !tail.contains('@') {
+        return end;
+    }
+    // The final token can continue the authority as userinfo@host, even with
+    // '=' in the userinfo. Earlier fields and explicit URL endings retain precedence.
+    let (preceding, last) = tail.rsplit_once(char::is_whitespace).unwrap_or(("", tail));
+    let userinfo_continues =
+        last.rsplit_once('@').is_some_and(|(userinfo, host)| !userinfo.is_empty() && !host.is_empty());
+    let diagnostic_tail = if userinfo_continues && !explicit_end { preceding } else { tail };
+    if diagnostic_tail.split_whitespace().any(|part| {
+        part.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+    }) {
+        return end;
+    }
+    // Reuse the reference scanner so quoted queries and embedded URLs stay
+    // within the recovered span. A leading slash lets it scan a bare query or fragment.
+    let reference = &suffix[boundary..];
+    let (scan, prefix_len) = if reference.starts_with('/') {
+        (Cow::Borrowed(reference), 0)
+    } else {
+        (Cow::Owned(format!("/{reference}")), 1)
+    };
+    CONSTANTS
+        .re_url
+        .captures(&scan)
+        .and_then(|captures| captures.name("relative"))
+        .map_or(end, |reference| end + boundary + reference.end() - prefix_len)
 }
 
 fn mask_log_text(value: &str) -> String {
@@ -111,10 +173,7 @@ fn mask_log_text(value: &str) -> String {
     for regex in [&CONSTANTS.re_query_values, &CONSTANTS.re_credentials, &CONSTANTS.re_password] {
         result = regex
             .replace_all(&result, |captures: &regex::Captures<'_>| {
-                let raw = &captures[2];
-                let value = raw.trim_end_matches([')', ']', '}', ',', ';']);
-                let suffix = &raw[value.len()..];
-                format!("{}{}{suffix}", &captures[1], masked_log_value(value))
+                format!("{}{}", &captures[1], mask_log_field_value(&captures[2]))
             })
             .into_owned();
     }
@@ -122,6 +181,11 @@ fn mask_log_text(value: &str) -> String {
         result = regex.replace_all(&result, "$1***").into_owned();
     }
     result
+}
+
+fn mask_log_field_value(raw: &str) -> String {
+    let value = raw.trim_end_matches([')', ']', '}', ',', ';']);
+    format!("{}{}", masked_log_value(value), &raw[value.len()..])
 }
 
 fn masked_nonempty(value: &str) -> &str {
@@ -155,8 +219,16 @@ fn mask_query_values(query: &str) -> String {
         .join("&")
 }
 
+fn split_log_url(value: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = value.split_once("://")?;
+    let mut bytes = scheme.bytes();
+    (bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')))
+    .then_some((scheme, rest))
+}
+
 fn mask_log_url(value: &str) -> String {
-    let Some((scheme, rest)) = value.split_once("://") else { return mask_url_reference(value) };
+    let Some((scheme, rest)) = split_log_url(value) else { return mask_url_reference(value) };
     if scheme.eq_ignore_ascii_case("file") {
         return mask_log_text(value);
     }
@@ -651,6 +723,159 @@ mod tests {
             assert_eq!(sanitize_sensitive_info(input), expected, "input: {input}");
             assert_eq!(sanitize_sensitive_info(expected), expected, "masking must be idempotent");
         }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_masks_each_url_with_a_port_in_diagnostics() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let input = "http://a:8080 to http://b:8080";
+        let expected = "http://***:8080 to http://***:8080";
+        {
+            let _guard = SanitizationSettingGuard::set(true);
+            assert_eq!(sanitize_sensitive_info(input), expected);
+            assert_eq!(sanitize_sensitive_info(expected), expected);
+        }
+        let _guard = SanitizationSettingGuard::set(false);
+        assert_eq!(sanitize_sensitive_info(input), input);
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_masks_malformed_authorities_in_diagnostics() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cases = [
+            (
+                "http://bad user:example@internal.test/path to http://b:8080",
+                "http://***:***@***/path to http://***:8080",
+            ),
+            (
+                "request (http://bad host/path?sig=example) to http://b:8080/end",
+                "request (http://***/path?sig=***) to http://***:8080/end",
+            ),
+            (
+                "http://a:8080 to http://bad host/path?u=http://inner.test/a status=200",
+                "http://***:8080 to http://***/path?u=*** status=200",
+            ),
+        ];
+        {
+            let _guard = SanitizationSettingGuard::set(true);
+            for (input, expected) in cases {
+                assert_eq!(sanitize_sensitive_info(input), expected);
+                assert_eq!(sanitize_sensitive_info(expected), expected);
+            }
+        }
+        let _guard = SanitizationSettingGuard::set(false);
+        for (input, _) in cases {
+            assert_eq!(sanitize_sensitive_info(input), input);
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_masks_equals_in_malformed_url_userinfo() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cases = [
+            (
+                "http://bad user=demo:sample@internal.test/path to http://b:8080",
+                "http://***:***@***/path to http://***:8080",
+            ),
+            ("http://bad user=demo:sample@internal.test/path", "http://***:***@***/path"),
+            (
+                "request (http://bad user=demo:sample@internal.test/path) to http://b:8080",
+                "request (http://***:***@***/path) to http://***:8080",
+            ),
+            (
+                "password: http://bad user=demo:sample@internal.test/path status=502 to http://b:8080",
+                "password: *** status=502 to http://***:8080",
+            ),
+            ("http://bad user=demo@internal.test/path", "http://***@***/path"),
+            (
+                "http://a:8080 reason=cdn:down@edge/connect to http://b:8080",
+                "http://***:8080 reason=cdn:down@edge/connect to http://***:8080",
+            ),
+            (
+                "http://a status=502 reason=cdn:down@edge/connect to http://b:8080",
+                "http://*** status=502 reason=cdn:down@edge/connect to http://***:8080",
+            ),
+        ];
+        {
+            let _guard = SanitizationSettingGuard::set(true);
+            let actual = cases.map(|(input, _)| sanitize_sensitive_info(input).into_owned());
+            assert_eq!(actual, cases.map(|(_, expected)| expected.to_owned()));
+            for (_, expected) in cases {
+                assert_eq!(sanitize_sensitive_info(expected), expected);
+            }
+        }
+        let _guard = SanitizationSettingGuard::set(false);
+        for (input, _) in cases {
+            assert_eq!(sanitize_sensitive_info(input), input);
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_preserves_fields_after_a_url_authority() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cases = [
+            (
+                "http://a:8080 status=502 reason=cdn/connect to http://b:8080",
+                "http://***:8080 status=502 reason=cdn/connect to http://***:8080",
+            ),
+            ("http://a reason=cdn/connect", "http://*** reason=cdn/connect"),
+            ("http://a:8080 cdn/connect", "http://***:8080 cdn/connect"),
+        ];
+        {
+            let _guard = SanitizationSettingGuard::set(true);
+            for (input, expected) in cases {
+                assert_eq!(sanitize_sensitive_info(input), expected);
+                assert_eq!(sanitize_sensitive_info(expected), expected);
+            }
+        }
+        let _guard = SanitizationSettingGuard::set(false);
+        for (input, _) in cases {
+            assert_eq!(sanitize_sensitive_info(input), input);
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_preserves_fields_after_a_credential_url() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cases = [
+            (
+                "password: http://a:8080 status=502 reason=cdn/connect to http://b:8080",
+                "password: *** status=502 reason=cdn/connect to http://***:8080",
+            ),
+            (
+                "password: http://bad user:ex=ample@internal.test/path status=502 to http://b:8080",
+                "password: *** status=502 to http://***:8080",
+            ),
+            (
+                "password: http://bad user:example@internal.test/path, status=502 to http://b:8080",
+                "password: ***, status=502 to http://***:8080",
+            ),
+        ];
+        {
+            let _guard = SanitizationSettingGuard::set(true);
+            for (input, expected) in cases {
+                assert_eq!(sanitize_sensitive_info(input), expected);
+                assert_eq!(sanitize_sensitive_info(expected), expected);
+            }
+        }
+        let _guard = SanitizationSettingGuard::set(false);
+        for (input, _) in cases {
+            assert_eq!(sanitize_sensitive_info(input), input);
+        }
+    }
+
+    #[test]
+    fn sanitize_sensitive_info_masks_embedded_absolute_url_as_a_relative_query_value() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let input = "GET /get?sig=example&u=http://h/x status=200";
+        let expected = "GET /get?sig=***&u=*** status=200";
+        {
+            let _guard = SanitizationSettingGuard::set(true);
+            assert_eq!(sanitize_sensitive_info(input), expected);
+            assert_eq!(sanitize_sensitive_info(expected), expected);
+        }
+        let _guard = SanitizationSettingGuard::set(false);
+        assert_eq!(sanitize_sensitive_info(input), input);
     }
 
     #[test]

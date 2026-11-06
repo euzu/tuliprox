@@ -428,6 +428,7 @@ struct TimelineDraft {
     discontinuity_sequence: u64,
     pending_handoff_discontinuity_sequence: Option<u64>,
     pending_origin_epoch_handoff: bool,
+    new_proxy_only_discontinuity: Option<u64>,
     segments: BTreeMap<u64, SegmentEntry>,
     maps: BTreeMap<ProxyMapId, MapEntry>,
     origin_map_to_proxy: HashMap<OriginMapKey, ProxyMapId>,
@@ -477,6 +478,7 @@ impl From<&HlsSession> for TimelineDraft {
             discontinuity_sequence: session.discontinuity_sequence,
             pending_handoff_discontinuity_sequence: session.pending_handoff_discontinuity_sequence,
             pending_origin_epoch_handoff: session.pending_origin_epoch_handoff,
+            new_proxy_only_discontinuity: None,
             segments: session.segments.clone(),
             maps: session.maps.clone(),
             origin_map_to_proxy: session.origin_map_to_proxy.clone(),
@@ -650,6 +652,8 @@ impl HlsSession {
         self.pending_handoff_discontinuity_sequence = draft.pending_handoff_discontinuity_sequence;
         self.pending_origin_epoch_handoff = draft.pending_origin_epoch_handoff;
         self.segments = draft.segments;
+        self.origin_content.proxy_only_discontinuities.retain(|seq| self.segments.contains_key(seq));
+        self.origin_content.proxy_only_discontinuities.extend(draft.new_proxy_only_discontinuity);
         self.maps = draft.maps;
         self.origin_map_to_proxy = draft.origin_map_to_proxy;
         self.next_proxy_map_id = draft.next_proxy_map_id;
@@ -1144,6 +1148,9 @@ impl TimelineDraft {
             last_rendered_at_ms: None,
             access: Arc::new(CacheAccessState::new()),
         };
+        if handoff_discontinuity_before && !parsed.discontinuity_before {
+            self.new_proxy_only_discontinuity = Some(proxy_seq);
+        }
 
         self.next_media_start_ms = self.next_media_start_ms.saturating_add(parsed.duration_ms);
         self.origin_to_proxy.insert(origin_key, proxy_seq);

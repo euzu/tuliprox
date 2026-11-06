@@ -29,8 +29,18 @@ type HlsPreparedManifest =
     (HlsMaterializedSharedManifest, HlsLeaseManifestSnapshot, HlsPublishedTransientResourceIds, u64);
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::api::endpoints::hls_api) enum HlsManifestPublicationStage {
+    Guard,
+    EntryWait,
+    #[default]
+    Commit,
+}
+
+#[cfg(test)]
 #[derive(Default)]
 pub(in crate::api::endpoints::hls_api) struct HlsManifestPublicationBarrier {
+    pub stage: HlsManifestPublicationStage,
     pub prepared: tokio::sync::Notify,
     pub resume: tokio::sync::Notify,
 }
@@ -42,8 +52,15 @@ tokio::task_local! {
 }
 
 #[cfg(test)]
-async fn hls_manifest_publication_checkpoint() {
-    if let Ok(Some(barrier)) = HLS_MANIFEST_PUBLICATION_BARRIER.try_with(|slot| slot.borrow_mut().take()) {
+async fn hls_manifest_publication_checkpoint(stage: HlsManifestPublicationStage) {
+    if let Ok(Some(barrier)) = HLS_MANIFEST_PUBLICATION_BARRIER.try_with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|barrier| barrier.stage == stage) {
+            slot.take()
+        } else {
+            None
+        }
+    }) {
         barrier.prepared.notify_one();
         barrier.resume.notified().await;
     }
@@ -562,6 +579,9 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             .proxy
             .access_lease_response_snapshot(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
             .await?;
+        if lease.issued_at_ms != initial_publication_guard.lease_issued_at_ms() {
+            return Some(hls_cached_manifest_temporarily_unavailable());
+        }
         if let Some(response) =
             super::hls_terminal_playback_response(app_state, &lease, &proxy_session_id, access_lease_id)
         {
@@ -570,14 +590,28 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         if let Some(response) = hls_exhausted_startup_response(app_state, session, &lease).await {
             return Some(response);
         }
-        if lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed()) {
+        if lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+            || !matches!(
+                lease.state,
+                HlsAccessLeaseState::Pending | HlsAccessLeaseState::Activated | HlsAccessLeaseState::Idle
+            )
+            || !matches!(lease.playback_mode, tuliprox_hls::api::HlsLeasePlaybackMode::Live)
+        {
             return None;
         }
-        let publication_guard = app_state
+        #[cfg(test)]
+        hls_manifest_publication_checkpoint(HlsManifestPublicationStage::Guard).await;
+        let Some(publication_guard) = app_state
             .hls
             .proxy
             .prepare_access_lease_manifest_publication(access_lease_id, &proxy_session_id, app_state.hls.proxy.now_ms())
-            .await?;
+            .await
+        else {
+            if retry_hls_manifest_publication(&mut publication_retries, started_at, options.wait_timeout).await {
+                continue;
+            }
+            return Some(hls_cached_manifest_temporarily_unavailable());
+        };
         if !publication_guard.same_lease_authorization(initial_publication_guard) {
             return Some(hls_cached_manifest_temporarily_unavailable());
         }
@@ -588,11 +622,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             || Some(publication_guard.entry_generation()) != lease.entry_generation()
             || publication_guard.entry_strip_policy().is_some() != lease.uses_entry_view()
         {
-            if publication_retries < 8 {
-                publication_retries += 1;
-                continue;
-            }
-            if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
+            if retry_hls_manifest_publication(&mut publication_retries, started_at, options.wait_timeout).await {
                 continue;
             }
             return Some(hls_cached_manifest_temporarily_unavailable());
@@ -601,7 +631,9 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
             let requested = u64::try_from(options.wait_timeout.as_millis())
                 .unwrap_or(u64::MAX)
                 .min(app_state.hls.proxy.initial_manifest_wait_timeout_secs().saturating_mul(1_000));
-            let deadline = app_state
+            #[cfg(test)]
+            hls_manifest_publication_checkpoint(HlsManifestPublicationStage::EntryWait).await;
+            let Some(deadline) = app_state
                 .hls
                 .proxy
                 .bound_access_lease_entry_wait(
@@ -610,7 +642,13 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                     publication_guard.entry_generation(),
                     started_at_ms.saturating_add(requested),
                 )
-                .await?;
+                .await
+            else {
+                if retry_hls_manifest_publication(&mut publication_retries, started_at, options.wait_timeout).await {
+                    continue;
+                }
+                return Some(hls_cached_manifest_temporarily_unavailable());
+            };
             options.wait_timeout =
                 options.wait_timeout.min(Duration::from_millis(deadline.saturating_sub(started_at_ms)));
         }
@@ -825,7 +863,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
                 }
                 let startup_snapshot = snapshot.clone();
                 #[cfg(test)]
-                hls_manifest_publication_checkpoint().await;
+                hls_manifest_publication_checkpoint(HlsManifestPublicationStage::Commit).await;
                 let admission_at_ms = app_state.hls.proxy.now_ms();
                 let outcome = if retained_plan.is_some() || retained_origin_generation {
                     app_state
@@ -1006,6 +1044,18 @@ pub(in crate::api::endpoints::hls_api) async fn try_hls_cached_manifest_response
         let remaining = options.wait_timeout.saturating_sub(started_at.elapsed());
         tokio::time::sleep(remaining.min(HLS_MANIFEST_WAIT_POLL_INTERVAL)).await;
     }
+}
+
+async fn retry_hls_manifest_publication(
+    retries: &mut u8,
+    started_at: tokio::time::Instant,
+    wait_timeout: Duration,
+) -> bool {
+    if *retries < 8 {
+        *retries += 1;
+        return true;
+    }
+    wait_for_hls_startup_evidence(started_at, wait_timeout).await
 }
 
 pub(in crate::api::endpoints::hls_api) async fn wait_for_hls_startup_evidence(

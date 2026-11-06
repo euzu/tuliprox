@@ -17,7 +17,7 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -26,7 +26,7 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tuliprox_parser::hls::origin_manifest::{
-    parse_origin_media_manifest, OriginManifestParseOutcome, ParsedOriginManifest,
+    parse_origin_media_manifest, OriginManifestParseOutcome, ParsedOriginManifest, ParsedOriginSegment,
 };
 
 const CONTENT_EVIDENCE_LIMIT: usize = 1_024;
@@ -64,6 +64,8 @@ fn ready_revision(entry: &SegmentEntry) -> Option<(u64, u64)> {
 #[derive(Debug, Default)]
 pub(crate) struct HlsOriginContentEvidence {
     records: BTreeMap<u64, OriginContentRecord>,
+    /// Retained slots whose rendered discontinuity was inserted by the proxy.
+    pub(crate) proxy_only_discontinuities: BTreeSet<u64>,
     pub(super) probes: super::anchor_probe::HlsAnchorProbeEvidence,
 }
 
@@ -198,10 +200,42 @@ struct PreparedMedia {
     cleanup: crate::gc::HlsSwitchCacheCleanupReservation,
 }
 
+struct PreparedQuery {
+    entry: SegmentEntry,
+    fetch_ref: OriginSegmentFetchRef,
+    digest: Option<[u8; 32]>,
+}
+
+impl PreparedQuery {
+    fn new(entry: SegmentEntry, parsed: &ParsedOriginSegment, digest: Option<[u8; 32]>) -> Self {
+        Self {
+            entry,
+            fetch_ref: OriginSegmentFetchRef {
+                resolved_origin_url: parsed.resolved_origin_url.clone(),
+                byte_range: parsed.origin_byte_range,
+                valid_until_ms: None,
+            },
+            digest,
+        }
+    }
+
+    fn is_current(&self, session: &HlsSession) -> bool {
+        session.segments.get(&self.entry.proxy_seq).is_some_and(|current| {
+            current.origin_key == self.entry.origin_key
+                && current.cache_key == self.entry.cache_key
+                && current.status == self.entry.status
+                && current.origin_fetch_ref == self.entry.origin_fetch_ref
+                && current.retained_resource_identity == self.entry.retained_resource_identity
+                && current.map_ref == self.entry.map_ref
+                && current.encryption == self.entry.encryption
+        })
+    }
+}
+
 pub(super) struct PreparedOriginUpdate {
     basis: ProbeBasis,
     host: u64,
-    queries: Vec<(u64, OriginSegmentFetchRef, [u8; 32])>,
+    queries: Vec<PreparedQuery>,
     restart: Option<HlsOriginHandoffPreview>,
     media: Vec<PreparedMedia>,
     dependencies: Vec<BoundDependency>,
@@ -245,19 +279,34 @@ impl PreparedOriginUpdate {
                 self.media.len()
             );
         } else {
-            let updates = self.queries.iter().map(|(seq, fetch_ref, _)| (*seq, fetch_ref.clone())).collect::<Vec<_>>();
+            if !self.queries.iter().all(|query| query.is_current(session)) {
+                return Err(invalidated());
+            }
+            let updates =
+                self.queries.iter().map(|query| (query.entry.proxy_seq, query.fetch_ref.clone())).collect::<Vec<_>>();
             session
                 .apply_verified_query_manifest(manifest, self.host, &updates)
                 .map_err(|error| HlsManifestCommitError::TimelineRejected { reason: error.into() })?;
-            for (seq, _, digest) in &self.queries {
-                if let Some(entry) = session.segments.get(seq) {
-                    session.origin_content.record(entry, self.basis.generation, *digest);
+            let mut verified = 0;
+            for query in &self.queries {
+                let seq = query.entry.proxy_seq;
+                if let Some(entry) = session.segments.get_mut(&seq) {
+                    entry.retained_resource_identity = None;
+                    if let Some(digest) = query.digest {
+                        session.origin_content.record(entry, self.basis.generation, digest);
+                    }
                 }
-                if let Some(revision) = session.startup.as_ref().and_then(|startup| startup.revisions.get(seq)) {
-                    revision.revision().bind_origin(session);
+                if query.digest.is_some() {
+                    verified += 1;
+                    if let Some(revision) = session.startup.as_ref().and_then(|startup| startup.revisions.get(&seq)) {
+                        revision.revision().bind_origin(session);
+                    }
                 }
             }
-            log::debug!("HLS origin media verification: decision=query-content-equal segments={}", self.queries.len());
+            log::debug!(
+                "HLS origin media verification: decision=query-update verified={verified} rebound={}",
+                self.queries.len() - verified
+            );
         }
         Ok(())
     }
@@ -321,12 +370,17 @@ type StartupContext = Option<(Arc<crate::SegmentRevisionStore>, shared::model::H
 struct ProbeInputs {
     basis: ProbeBasis,
     references: Vec<(Option<SegmentEntry>, Option<[u8; 32]>)>,
-    restart_allowed: bool,
-    preview: Option<HlsOriginHandoffPreview>,
+    preview: HlsOriginHandoffPreview,
     startup: StartupContext,
     base: SegmentEntry,
     known_content: Vec<[u8; 32]>,
     _pins: Vec<super::commit::HlsCommittedAcceptanceReadPin>,
+}
+
+enum OriginProbePlan {
+    None,
+    QueryRotation(BoundQueryInputs),
+    Restart(Box<ProbeInputs>),
 }
 
 fn restart_authorized(
@@ -392,23 +446,100 @@ fn is_unpublished_bootstrap_repeat(
         })
 }
 
-async fn capture_probe_inputs(
+fn ordinary_stale_entry(
     request: &OriginRefreshRequest,
+    session: &HlsSession,
+    mode: HlsManifestCommitAcceptanceMode,
+) -> bool {
+    // Recent playback distinguishes an ordinary freshness check from re-entry
+    // after inactivity. Use the existing account overlap window for that test.
+    let now_ms = request.hls_proxy.now_ms();
+    let active_recovery = session.origin_control.acceptance_episode.as_ref().is_some_and(|episode| {
+        episode.state != crate::manifest_acceptance::HlsManifestAcceptanceState::Completed
+            && episode.trigger().recovery_required()
+    });
+    mode == HlsManifestCommitAcceptanceMode::StrictPinnedHost
+        && request.manifest_commit_requirement.fresh_reason()
+            == Some(crate::HlsFreshManifestRequiredReason::StaleEntryWindow)
+        && !request.acceptance_directive.trigger.recovery_required()
+        && !active_recovery
+        && session.origin_account_manifest_pending.is_none()
+        && !session.live_entry_revalidation.required
+        && !session.origin_control.path_is_degraded_at(now_ms)
+        && session.origin_refresh.consecutive_failures == 0
+        && !matches!(
+            crate::classify_account_binding_protection(
+                session.activity.last_authorized_media_at_ms,
+                now_ms,
+                &session.account_overlap_timing()
+            ),
+            crate::HlsAccountBindingProtection::Expired
+        )
+}
+
+fn identical_live_window(
+    session: &HlsSession,
+    manifest: &ParsedOriginManifest,
+    references: &[Option<SegmentEntry>],
+) -> bool {
+    let previous = session.live_origin_sequences();
+    manifest.segments.last().map(|last| last.origin_seq) == session.origin_seq_highwater
+        && previous.len() == manifest.segments.len()
+        && manifest.segments.iter().zip(references).zip(previous).all(|((parsed, reference), seq)| {
+            reference.as_ref().is_some_and(|entry| {
+                entry.proxy_seq == *seq
+                    && entry.origin_key.effective_host_id == session.origin_epoch_effective_host_id.unwrap_or_default()
+                    && entry.map_ref.is_none()
+                    && entry.encryption.is_none()
+                    && same_media_timing(session, entry, parsed)
+                    && entry.media_resource_identity()
+                        == Some(HlsMediaResourceIdentity::from_url(
+                            &parsed.resolved_origin_url,
+                            parsed.origin_byte_range,
+                        ))
+            })
+        })
+}
+
+fn same_media_timing(session: &HlsSession, entry: &SegmentEntry, parsed: &ParsedOriginSegment) -> bool {
+    let origin_discontinuity =
+        entry.discontinuity_before && !session.origin_content.proxy_only_discontinuities.contains(&entry.proxy_seq);
+    entry.duration_ms == parsed.duration_ms
+        && origin_discontinuity == parsed.discontinuity_before
+        && entry.program_date_time == parsed.program_date_time
+        && entry.daterange_tags_before == parsed.daterange_tags_before
+}
+
+fn latest_clear_ready(session: &HlsSession) -> Option<&SegmentEntry> {
+    session.segments.values().rev().find(|entry| {
+        entry.origin_key.origin_epoch == session.origin_epoch
+            && entry.map_ref.is_none()
+            && entry.encryption.is_none()
+            && matches!(entry.status, SegmentCacheStatus::Ready { .. })
+    })
+}
+
+fn capture_probe_inputs(
+    request: &OriginRefreshRequest,
+    session: &HlsSession,
     manifest: &mut ParsedOriginManifest,
     mode: HlsManifestCommitAcceptanceMode,
     host: u64,
-) -> Result<Option<ProbeInputs>, HlsManifestCommitError> {
-    let session = request.session.read().await;
-    super::commit::ensure_refresh_origin_work_generation_is_current(&session, request)?;
+) -> Result<OriginProbePlan, HlsManifestCommitError> {
+    if manifest.segments.iter().any(|segment| segment.map_ref.is_some() || segment.encryption.is_some()) {
+        return bound_query_inputs(request, session, manifest, host, false);
+    }
     if session.origin_seq_highwater.is_none()
         || session.segments.is_empty()
         || session.origin_epoch_effective_host_id != Some(host)
     {
-        return Ok(None);
+        return Ok(OriginProbePlan::None);
     }
-    let references = current_references(&session, manifest);
-    if is_unpublished_bootstrap_repeat(&session, manifest, &references) {
-        return Ok(None);
+    let references = current_references(session, manifest);
+    if is_unpublished_bootstrap_repeat(session, manifest, &references)
+        || (ordinary_stale_entry(request, session, mode) && identical_live_window(session, manifest, &references))
+    {
+        return Ok(OriginProbePlan::None);
     }
     let query_changed = manifest.segments.iter().zip(&references).any(|(parsed, reference)| {
         reference.as_ref().and_then(SegmentEntry::media_resource_identity).is_some_and(|old| {
@@ -416,7 +547,7 @@ async fn capture_probe_inputs(
             old.same_path_and_range(new) && !old.matches(new)
         })
     });
-    let restart_allowed = restart_authorized(&session, request, mode);
+    let restart_allowed = restart_authorized(session, request, mode);
     if !restart_allowed
         && session.published_live_origin_baseline.is_some()
         && manifest.segments.last().is_some_and(|last| Some(last.origin_seq) < session.origin_seq_highwater)
@@ -426,8 +557,12 @@ async fn capture_probe_inputs(
     let reset = restart_allowed
         && !session.origin_qualification_awaits_publication()
         && manifest.segments.last().is_some_and(|last| Some(last.origin_seq) <= session.origin_seq_highwater);
-    if !query_changed && !reset {
-        return Ok(None);
+    if !reset {
+        return if query_changed {
+            bound_query_inputs(request, session, manifest, host, true)
+        } else {
+            Ok(OriginProbePlan::None)
+        };
     }
     if manifest.segments.len() > PROBE_SEGMENT_LIMIT {
         return Err(unavailable());
@@ -444,18 +579,7 @@ async fn capture_probe_inputs(
     if manifest.segments.iter().any(|segment| segment.map_ref.is_some() || segment.encryption.is_some()) {
         return Err(unavailable());
     }
-    let base = session
-        .segments
-        .values()
-        .rev()
-        .find(|entry| {
-            entry.origin_key.origin_epoch == session.origin_epoch
-                && entry.map_ref.is_none()
-                && entry.encryption.is_none()
-                && matches!(entry.status, SegmentCacheStatus::Ready { .. })
-        })
-        .cloned()
-        .ok_or_else(unavailable)?;
+    let base = latest_clear_ready(session).cloned().ok_or_else(unavailable)?;
     let mut pins = references
         .iter()
         .flatten()
@@ -463,11 +587,8 @@ async fn capture_probe_inputs(
         .map(|entry| super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&entry.access), request.now_ms))
         .collect::<Vec<_>>();
     pins.push(super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&base.access), request.now_ms));
-    let preview = if reset {
-        Some(session.preview_verified_restart(manifest, host).map_err(super::switch_staging::handoff_preview_error)?)
-    } else {
-        None
-    };
+    let preview =
+        session.preview_verified_restart(manifest, host).map_err(super::switch_staging::handoff_preview_error)?;
     let references = references
         .into_iter()
         .map(|entry| {
@@ -484,16 +605,15 @@ async fn capture_probe_inputs(
         .filter(|entry| entry.origin_key.origin_epoch == session.origin_epoch)
         .filter_map(|entry| session.origin_content.digest(entry, session.activity.origin_work_generation))
         .collect();
-    Ok(Some(ProbeInputs {
-        basis: ProbeBasis::capture(&session),
+    Ok(OriginProbePlan::Restart(Box::new(ProbeInputs {
+        basis: ProbeBasis::capture(session),
         references,
-        restart_allowed: reset,
         preview,
         startup,
         base,
         known_content,
         _pins: pins,
-    }))
+    })))
 }
 
 async fn prepare(
@@ -507,11 +627,19 @@ async fn prepare(
         return Ok(None);
     };
     let host = fetched_effective_manifest_host(fetched).map_or(0, |host| effective_origin_host_id(&host));
-    if manifest.segments.iter().any(|segment| segment.map_ref.is_some() || segment.encryption.is_some()) {
-        return prepare_bound_queries(request, fetched, &mut manifest, host).await;
-    }
-    let Some(inputs) = capture_probe_inputs(request, &mut manifest, mode, host).await? else { return Ok(None) };
-    let ProbeInputs { basis, references, restart_allowed, preview, startup, base, known_content, _pins: pins } = inputs;
+    let plan = {
+        let session = request.session.read().await;
+        super::commit::ensure_refresh_origin_work_generation_is_current(&session, request)?;
+        capture_probe_inputs(request, &session, &mut manifest, mode, host)?
+    };
+    let inputs = match plan {
+        OriginProbePlan::None => return Ok(None),
+        OriginProbePlan::QueryRotation(inputs) => {
+            return prepare_bound_queries(request, fetched, host, inputs).await.map(Some);
+        }
+        OriginProbePlan::Restart(inputs) => inputs,
+    };
+    let ProbeInputs { basis, references, preview, startup, base, known_content, _pins: pins } = *inputs;
     let _permit =
         request.segment_worker_pool.try_reserve_origin_probe(&request.session).await.ok_or_else(unavailable)?;
     let base_tracks = super::switch_staging::inspect_cache_object_tracks(&request.segment_cache, &base.cache_key)
@@ -525,25 +653,11 @@ async fn prepare(
     let mut staged = Vec::new();
     let mut changed = false;
     log::debug!(
-        "HLS origin media verification: decision=probe-start restart_candidate={} segments={}",
-        restart_allowed,
+        "HLS origin media verification: decision=probe-start restart_candidate=true segments={}",
         manifest.segments.len()
     );
     for (index, (parsed, (reference, digest))) in manifest.segments.iter().zip(&references).enumerate() {
-        let identity = HlsMediaResourceIdentity::from_url(&parsed.resolved_origin_url, parsed.origin_byte_range);
-        let query_changed = reference
-            .as_ref()
-            .and_then(SegmentEntry::media_resource_identity)
-            .is_some_and(|old| old.same_path_and_range(identity) && !old.matches(identity));
-        if !restart_allowed && !query_changed {
-            continue;
-        }
-        let key = preview
-            .as_ref()
-            .and_then(|preview| preview.segments.get(index))
-            .map(|entry| entry.cache_key.clone())
-            .or_else(|| reference.as_ref().map(|entry| entry.cache_key.clone()))
-            .ok_or_else(unavailable)?;
+        let key = preview.segments.get(index).map(|entry| entry.cache_key.clone()).ok_or_else(unavailable)?;
         let object = stage_hls_switch_resource(
             &context,
             &policy,
@@ -556,14 +670,14 @@ async fn prepare(
         .map_err(|_| unavailable())?;
         let hash = sha256_file(&object.path).await?;
         ensure_compatible_tracks(&object.path, &base_tracks).await?;
-        let comparison = compare_probe(reference.as_ref(), *digest, parsed, hash, restart_allowed, &known_content)?;
+        let comparison = compare_probe(reference.as_ref(), *digest, parsed, hash, &known_content);
         if let Some(query) = comparison.query {
             queries.push(query);
         }
         changed |= comparison.new_media;
         staged.push((index, object, hash));
     }
-    if restart_allowed && !changed {
+    if !changed {
         // Replayed HTTP 200 windows must consume the remaining existing budget.
         let session = request.session.read().await;
         if session.live_entry_revalidation.required
@@ -591,7 +705,7 @@ async fn prepare(
         basis,
         host,
         queries,
-        restart: preview,
+        restart: Some(preview),
         media: Vec::new(),
         dependencies: Vec::new(),
         _reference_pins: pins,
@@ -603,18 +717,17 @@ async fn prepare(
 }
 
 struct ProbeComparison {
-    query: Option<(u64, OriginSegmentFetchRef, [u8; 32])>,
+    query: Option<PreparedQuery>,
     new_media: bool,
 }
 
 fn compare_probe(
     reference: Option<&SegmentEntry>,
     digest: Option<[u8; 32]>,
-    parsed: &tuliprox_parser::hls::origin_manifest::ParsedOriginSegment,
+    parsed: &ParsedOriginSegment,
     hash: [u8; 32],
-    restart_allowed: bool,
     known_content: &[[u8; 32]],
-) -> Result<ProbeComparison, HlsManifestCommitError> {
+) -> ProbeComparison {
     let identity = HlsMediaResourceIdentity::from_url(&parsed.resolved_origin_url, parsed.origin_byte_range);
     let query_changed = reference
         .and_then(SegmentEntry::media_resource_identity)
@@ -623,21 +736,9 @@ fn compare_probe(
         entry.map_ref.is_none() && entry.encryption.is_none() && entry.duration_ms == parsed.duration_ms
     }) && digest == Some(hash);
     if equal {
-        let query = reference.filter(|_| query_changed).map(|entry| {
-            (
-                entry.proxy_seq,
-                OriginSegmentFetchRef {
-                    resolved_origin_url: parsed.resolved_origin_url.clone(),
-                    byte_range: parsed.origin_byte_range,
-                    valid_until_ms: None,
-                },
-                hash,
-            )
-        });
-        return Ok(ProbeComparison { query, new_media: false });
-    }
-    if !restart_allowed {
-        return Err(unavailable());
+        let query =
+            reference.filter(|_| query_changed).map(|entry| PreparedQuery::new(entry.clone(), parsed, Some(hash)));
+        return ProbeComparison { query, new_media: false };
     }
     let unverified_reused_url = digest.is_none()
         && reference
@@ -646,7 +747,7 @@ fn compare_probe(
     // An uncached prefix contributes no restart proof. It can accompany a
     // restart proved by other media, because every candidate is freshly staged
     // under a distinct cache key; it never becomes an old-object cache hit.
-    Ok(ProbeComparison { query: None, new_media: !unverified_reused_url && !known_content.contains(&hash) })
+    ProbeComparison { query: None, new_media: !unverified_reused_url && !known_content.contains(&hash) }
 }
 
 async fn write_restart_media(
@@ -781,7 +882,8 @@ impl BoundDependency {
 
 struct BoundQueryInputs {
     basis: ProbeBasis,
-    queries: Vec<(SegmentEntry, OriginSegmentFetchRef, [u8; 32])>,
+    queries: Vec<PreparedQuery>,
+    clear_base: Option<SegmentCacheKey>,
     dependencies: Vec<BoundDependency>,
     pins: Vec<super::commit::HlsCommittedAcceptanceReadPin>,
 }
@@ -789,9 +891,10 @@ struct BoundQueryInputs {
 fn query_dependencies(
     session: &HlsSession,
     entry: &SegmentEntry,
-    parsed: &tuliprox_parser::hls::origin_manifest::ParsedOriginSegment,
+    parsed: &ParsedOriginSegment,
     manifest: &ParsedOriginManifest,
     now_ms: u64,
+    verify_cached: bool,
     pins: &mut Vec<super::commit::HlsCommittedAcceptanceReadPin>,
 ) -> Result<Vec<BoundDependency>, HlsManifestCommitError> {
     let mut dependencies = Vec::new();
@@ -802,12 +905,16 @@ fn query_dependencies(
             let candidate = manifest.maps.get(candidate).ok_or_else(unavailable)?;
             if map.origin_key.resolved_origin_uri != candidate.resolved_origin_uri
                 || map.byte_range != candidate.byte_range
-                || !matches!(map.status, crate::MapCacheStatus::Ready { .. })
             {
                 return Err(unavailable());
             }
-            pins.push(super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&map.access), now_ms));
-            dependencies.push(BoundDependency::Map(map.clone()));
+            if verify_cached {
+                if !matches!(map.status, crate::MapCacheStatus::Ready { .. }) {
+                    return Err(unavailable());
+                }
+                pins.push(super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&map.access), now_ms));
+                dependencies.push(BoundDependency::Map(map.clone()));
+            }
         }
         _ => return Err(unavailable()),
     }
@@ -821,9 +928,13 @@ fn query_dependencies(
             .resources
             .get(&encryption.resource_id)
             .filter(|resource| {
-                resource.resolved_origin_uri == candidate.resolved_origin_uri && resource.is_valid_at(now_ms)
+                resource.resolved_origin_uri == candidate.resolved_origin_uri
+                    && (!verify_cached || resource.is_valid_at(now_ms))
             })
             .ok_or_else(unavailable)?;
+        if !verify_cached {
+            return Ok(dependencies);
+        }
         if session
             .transient
             .ready_key_object_valid_until_ms(
@@ -853,14 +964,15 @@ fn query_dependencies(
     Ok(dependencies)
 }
 
-async fn bound_query_inputs(
+fn bound_query_inputs(
     request: &OriginRefreshRequest,
+    session: &HlsSession,
     manifest: &mut ParsedOriginManifest,
     host: u64,
-) -> Result<Option<BoundQueryInputs>, HlsManifestCommitError> {
-    let session = request.session.read().await;
+    clear_ts: bool,
+) -> Result<OriginProbePlan, HlsManifestCommitError> {
     if session.origin_seq_highwater.is_none() || session.origin_epoch_effective_host_id != Some(host) {
-        return Ok(None);
+        return Ok(OriginProbePlan::None);
     }
     if manifest.segments.last().map(|segment| segment.origin_seq) < session.origin_seq_highwater {
         return Err(unavailable());
@@ -873,14 +985,16 @@ async fn bound_query_inputs(
         session.transient.origin_account_generation(),
     );
     let mut inputs = BoundQueryInputs {
-        basis: ProbeBasis::capture(&session),
+        basis: ProbeBasis::capture(session),
         queries: Vec::new(),
+        clear_base: None,
         dependencies: Vec::new(),
         pins: Vec::new(),
     };
     for parsed in &manifest.segments {
         let Some(entry) = session.segments.values().rev().find(|entry| {
             entry.origin_key.origin_epoch == session.origin_epoch
+                && entry.origin_key.effective_host_id == host
                 && entry.origin_key.host_local_sequence == parsed.origin_seq
         }) else {
             continue;
@@ -891,67 +1005,103 @@ async fn bound_query_inputs(
             continue;
         }
         if !old.same_path_and_range(new)
-            || !matches!(entry.status, SegmentCacheStatus::Ready { .. })
-            || entry.duration_ms != parsed.duration_ms
+            || matches!(entry.status, SegmentCacheStatus::FailedPermanent { .. } | SegmentCacheStatus::Expired)
+            || !same_media_timing(session, entry, parsed)
         {
             log::debug!("HLS origin media verification: decision=unverified reason=resource-binding");
             return Err(unavailable());
         }
-        let digest =
-            session.origin_content.digest(entry, session.activity.origin_work_generation).ok_or_else(|| {
-                log::debug!("HLS origin media verification: decision=unverified reason=missing-origin-digest");
-                unavailable()
-            })?;
-        let dependencies = query_dependencies(&session, entry, parsed, manifest, request.now_ms, &mut inputs.pins)
-            .inspect_err(|_| {
-                log::debug!("HLS origin media verification: decision=unverified reason=media-dependency");
-            })?;
+        let verify_cached = matches!(entry.status, SegmentCacheStatus::Ready { .. });
+        let digest = if verify_cached {
+            let digest =
+                session.origin_content.digest(entry, session.activity.origin_work_generation).ok_or_else(|| {
+                    log::debug!("HLS origin media verification: decision=unverified reason=missing-origin-digest");
+                    unavailable()
+                })?;
+            inputs
+                .pins
+                .push(super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&entry.access), request.now_ms));
+            Some(digest)
+        } else {
+            None
+        };
+        let dependencies =
+            query_dependencies(session, entry, parsed, manifest, request.now_ms, verify_cached, &mut inputs.pins)
+                .inspect_err(|_| {
+                    log::debug!("HLS origin media verification: decision=unverified reason=media-dependency");
+                })?;
         for dependency in dependencies {
             if !inputs.dependencies.iter().any(|current| current.same_object(&dependency)) {
                 inputs.dependencies.push(dependency);
             }
         }
-        inputs
-            .pins
-            .push(super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&entry.access), request.now_ms));
-        inputs.queries.push((
-            entry.clone(),
-            OriginSegmentFetchRef {
-                resolved_origin_url: parsed.resolved_origin_url.clone(),
-                byte_range: parsed.origin_byte_range,
-                valid_until_ms: None,
-            },
-            digest,
-        ));
+        inputs.queries.push(PreparedQuery::new(entry.clone(), parsed, digest));
     }
-    if session.live_entry_revalidation.required || inputs.queries.len() > PROBE_SEGMENT_LIMIT {
+    let verified = inputs.queries.iter().filter(|query| query.digest.is_some()).count();
+    let probe_size = if clear_ts { manifest.segments.len() } else { verified };
+    if (!clear_ts && session.live_entry_revalidation.required) || (verified > 0 && probe_size > PROBE_SEGMENT_LIMIT) {
         log::debug!("HLS origin media verification: decision=unverified reason=revalidation-or-probe-limit");
         return Err(unavailable());
     }
-    Ok((!inputs.queries.is_empty()).then_some(inputs))
+    if clear_ts && verified > 0 {
+        let base = latest_clear_ready(session).ok_or_else(unavailable)?;
+        inputs
+            .pins
+            .push(super::commit::HlsCommittedAcceptanceReadPin::acquire(Arc::clone(&base.access), request.now_ms));
+        inputs.clear_base = Some(base.cache_key.clone());
+    }
+    Ok(if inputs.queries.is_empty() { OriginProbePlan::None } else { OriginProbePlan::QueryRotation(inputs) })
 }
 
 async fn prepare_bound_queries(
     request: &OriginRefreshRequest,
     fetched: &FetchedOriginManifest,
-    manifest: &mut ParsedOriginManifest,
     host: u64,
-) -> Result<Option<PreparedOriginUpdate>, HlsManifestCommitError> {
-    let Some(inputs) = bound_query_inputs(request, manifest, host).await? else { return Ok(None) };
+    inputs: BoundQueryInputs,
+) -> Result<PreparedOriginUpdate, HlsManifestCommitError> {
+    if inputs.queries.iter().any(|query| query.digest.is_some()) {
+        verify_bound_queries(request, fetched, &inputs).await?;
+    }
+    Ok(PreparedOriginUpdate {
+        basis: inputs.basis,
+        host,
+        queries: inputs.queries,
+        restart: None,
+        media: Vec::new(),
+        dependencies: inputs.dependencies,
+        _reference_pins: inputs.pins,
+    })
+}
+
+async fn verify_bound_queries(
+    request: &OriginRefreshRequest,
+    fetched: &FetchedOriginManifest,
+    inputs: &BoundQueryInputs,
+) -> Result<(), HlsManifestCommitError> {
     let _permit =
         request.segment_worker_pool.try_reserve_origin_probe(&request.session).await.ok_or_else(unavailable)?;
     let context = super::switch_staging::alternative_switch_fetch_context(request, fetched);
+    let base_tracks = if let Some(cache_key) = &inputs.clear_base {
+        Some(
+            super::switch_staging::inspect_cache_object_tracks(&request.segment_cache, cache_key)
+                .await
+                .signature()
+                .cloned()
+                .ok_or_else(unavailable)?,
+        )
+    } else {
+        None
+    };
     for dependency in &inputs.dependencies {
         dependency.verify(request, &context).await?;
     }
-    let mut queries = Vec::new();
-    for (entry, fetch_ref, digest) in inputs.queries {
+    for (query, digest) in inputs.queries.iter().filter_map(|query| Some((query, query.digest?))) {
         let object = stage_hls_switch_resource(
             &context,
             &request.segment_worker_pool.policy(),
-            entry.cache_key,
-            fetch_ref.resolved_origin_url.clone(),
-            fetch_ref.byte_range,
+            query.entry.cache_key.clone(),
+            query.fetch_ref.resolved_origin_url.clone(),
+            query.fetch_ref.byte_range,
             HlsSwitchResourceKind::Segment,
         )
         .await
@@ -959,19 +1109,11 @@ async fn prepare_bound_queries(
         if sha256_file(&object.path).await? != digest {
             return Err(unavailable());
         }
-        queries.push((entry.proxy_seq, fetch_ref, digest));
+        if let Some(tracks) = &base_tracks {
+            ensure_compatible_tracks(&object.path, tracks).await?;
+        }
     }
-    // Equal origin representations and equal freshly checked MAP/key objects
-    // preserve validity even when those media cannot be inspected as clear TS.
-    Ok(Some(PreparedOriginUpdate {
-        basis: inputs.basis,
-        host,
-        queries,
-        restart: None,
-        media: Vec::new(),
-        dependencies: inputs.dependencies,
-        _reference_pins: inputs.pins,
-    }))
+    Ok(())
 }
 
 async fn verify_dependency<K: crate::HlsCacheObjectKey + Clone + Send + Sync + 'static>(

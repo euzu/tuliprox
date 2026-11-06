@@ -3,6 +3,7 @@ use super::*;
 struct ProbeState {
     port: u16,
     two_hosts: bool,
+    preferred_manifest_host: Option<&'static str>,
     manifests: AtomicUsize,
     mode: AtomicUsize,
     pause: AtomicBool,
@@ -19,11 +20,14 @@ impl Drop for ProbeOrigin {
     fn drop(&mut self) { self.task.abort(); }
 }
 impl ProbeOrigin {
-    async fn start(two_hosts: bool) -> Self {
+    async fn start(two_hosts: bool) -> Self { Self::start_ranked(two_hosts, None).await }
+
+    async fn start_ranked(two_hosts: bool, preferred_manifest_host: Option<&'static str>) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let state = Arc::new(ProbeState {
             port: listener.local_addr().unwrap().port(),
             two_hosts,
+            preferred_manifest_host,
             manifests: AtomicUsize::new(0),
             mode: AtomicUsize::new(0),
             pause: AtomicBool::new(false),
@@ -77,7 +81,9 @@ async fn probe_origin(State(state): State<Arc<ProbeState>>, headers: HttpHeaders
             .into_response();
     }
     if std::path::Path::new(uri.path()).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("m3u8")) {
-        let mut body = "#EXTM3U\n#EXT-X-TARGETDURATION:8\n#EXT-X-MEDIA-SEQUENCE:434\n".to_string();
+        let duration =
+            if state.preferred_manifest_host.is_some_and(|preferred| host.starts_with(preferred)) { 9 } else { 8 };
+        let mut body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:{duration}\n#EXT-X-MEDIA-SEQUENCE:434\n");
         for seq in 434..440 {
             writeln!(body, "#EXTINF:8,\nhttp://{host}/media/{seq}.ts?fixture=1").unwrap();
         }
@@ -133,10 +139,11 @@ async fn probe_origin(State(state): State<Arc<ProbeState>>, headers: HttpHeaders
     HttpStatus::NOT_FOUND.into_response()
 }
 
-async fn probe_burst(two_hosts: bool, early_match: bool, qualification: bool) {
+async fn probe_burst(two_hosts: bool, preferred_host: Option<&'static str>, qualification: bool) {
     let baseline = Origin::start(false).await;
     let mut request = warm(&baseline).await;
-    let origin = ProbeOrigin::start(two_hosts).await;
+    let origin = ProbeOrigin::start_ranked(two_hosts, preferred_host).await;
+    let early_match = preferred_host.is_some();
     if early_match {
         origin.state.mode.store(4, Ordering::Release);
     }
@@ -156,8 +163,10 @@ async fn probe_burst(two_hosts: bool, early_match: bool, qualification: bool) {
     request.attempt = Some(attempt);
     if qualification {
         let mut session = request.session.write().await;
-        session.origin_control.target_duration_qualification =
-            Some(crate::short_manifest::HlsTargetDurationQualification::new(&session, shared::model::Secs::new(1)));
+        let minimum = if early_match { 9 } else { 1 };
+        session.origin_control.target_duration_qualification = Some(
+            crate::short_manifest::HlsTargetDurationQualification::new(&session, shared::model::Secs::new(minimum)),
+        );
     }
     let context = manifest_fetch_context(&request, Some(8));
     let result = retry_hls_origin_manifest_recovery_chain(
@@ -186,11 +195,17 @@ async fn probe_burst(two_hosts: bool, early_match: bool, qualification: bool) {
     );
     assert_eq!(origin.state.manifests.load(Ordering::Acquire), 12);
     if early_match {
-        assert_eq!((b, c), (2, 0), "one reference, one continuation, no speculative C probe");
-        assert!(requests[0].contains("/437.ts?"));
-        assert!(requests[1].contains("/438.ts?"));
+        println!("ap8_probe_order preferred={preferred_host:?} requests={requests:?}");
+        let expected = if preferred_host == Some("c.probe.test:") {
+            [("c.probe.test:", "/437.ts?"), ("b.probe.test:", "/437.ts?"), ("b.probe.test:", "/438.ts?")].as_slice()
+        } else {
+            [("b.probe.test:", "/437.ts?"), ("b.probe.test:", "/438.ts?")].as_slice()
+        };
+        assert_eq!(requests.len(), expected.len(), "no further probe after a successful switch");
+        for (request, (host, resource)) in requests.iter().zip(expected) {
+            assert!(request.starts_with(host) && request.contains(resource), "actual sequence: {requests:?}");
+        }
         assert_eq!(request.session.read().await.origin_epoch, 1);
-        println!("early_success=true manifest_candidates=12 anchor_gets=1 continuation_gets=1 unneeded_host_gets=0");
     } else {
         assert_eq!((b, c), if two_hosts { (1, 1) } else { (1, 0) }, "one GET per complete origin probe binding");
         let session = request.session.read().await;
@@ -200,15 +215,18 @@ async fn probe_burst(two_hosts: bool, early_match: bool, qualification: bool) {
 }
 
 #[tokio::test]
-async fn twelve_candidates_load_only_the_two_distinct_mismatching_resources() { probe_burst(true, false, true).await; }
+async fn twelve_candidates_load_only_the_two_distinct_mismatching_resources() { probe_burst(true, None, true).await; }
 #[tokio::test]
-async fn twelve_manifest_urls_share_the_same_origin_probe() { probe_burst(false, false, true).await; }
+async fn twelve_manifest_urls_share_the_same_origin_probe() { probe_burst(false, None, true).await; }
 
 #[tokio::test]
-async fn early_success_does_not_probe_the_other_resource() { probe_burst(true, true, true).await; }
+async fn early_success_does_not_probe_the_other_resource() { probe_burst(true, Some("b.probe.test:"), true).await; }
 
 #[tokio::test]
-async fn mismatching_candidates_continue_without_target_duration_preference() { probe_burst(true, false, false).await; }
+async fn ap8_c_first_attempts_b_only_until_success() { probe_burst(true, Some("c.probe.test:"), true).await; }
+
+#[tokio::test]
+async fn mismatching_candidates_continue_without_target_duration_preference() { probe_burst(true, None, false).await; }
 
 use crate::refresh::{
     anchor_probe::{HlsAnchorProbeRoundGuard, ProbeIdentity},
