@@ -245,6 +245,10 @@ impl HlsSession {
             .is_some_and(|slot| slot.origin_key.origin_epoch < self.origin_epoch && slot.is_clear_ts_origin_404())
     }
 
+    pub(crate) fn origin_discontinuity_before(&self, entry: &SegmentEntry) -> bool {
+        entry.discontinuity_before && !self.origin_content.proxy_only_discontinuities.contains(&entry.proxy_seq)
+    }
+
     /// Read the overlap from the complete candidate before the handoff trims
     /// existing mappings. The repair keeps the old proxy slot and media clock.
     pub(crate) fn retained_gap_repair(
@@ -270,7 +274,7 @@ impl HlsSession {
         if candidate.map_ref.is_some()
             || candidate.encryption.is_some()
             || candidate.duration_ms != slot.duration_ms
-            || candidate.discontinuity_before != slot.discontinuity_before
+            || candidate.discontinuity_before != self.origin_discontinuity_before(slot)
             || candidate.program_date_time != slot.program_date_time
             || slot.media_start_ms.checked_add(elapsed)? != anchor.media_start_ms
             || !slot.media_resource_identity()?.matches(HlsMediaResourceIdentity::from_url(

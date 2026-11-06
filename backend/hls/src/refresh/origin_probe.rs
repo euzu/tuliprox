@@ -502,10 +502,8 @@ fn identical_live_window(
 }
 
 fn same_media_timing(session: &HlsSession, entry: &SegmentEntry, parsed: &ParsedOriginSegment) -> bool {
-    let origin_discontinuity =
-        entry.discontinuity_before && !session.origin_content.proxy_only_discontinuities.contains(&entry.proxy_seq);
     entry.duration_ms == parsed.duration_ms
-        && origin_discontinuity == parsed.discontinuity_before
+        && session.origin_discontinuity_before(entry) == parsed.discontinuity_before
         && entry.program_date_time == parsed.program_date_time
         && entry.daterange_tags_before == parsed.daterange_tags_before
 }

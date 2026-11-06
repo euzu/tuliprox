@@ -81,7 +81,15 @@ async fn install_lease(
     id
 }
 
-async fn gap_case(missing: bool) -> GapCase {
+enum GapDiscontinuity {
+    None,
+    Proxy,
+    Origin,
+}
+
+async fn gap_case(missing: bool) -> GapCase { gap_case_with_discontinuity(missing, GapDiscontinuity::None).await }
+
+async fn gap_case_with_discontinuity(missing: bool, discontinuity: GapDiscontinuity) -> GapCase {
     let origin = Origin::start(false).await;
     let request = warm(&origin).await;
     origin.state.gap_a_438.store(missing, Ordering::Release);
@@ -89,7 +97,20 @@ async fn gap_case(missing: bool) -> GapCase {
     let (manifest, cursor) = {
         let mut state = request.session.write().await;
         state.render_and_store_manifest(current_time_millis()).unwrap();
-        commit_fetched_manifest(&mut state, &origin.fetched(true, 434), &request, current_time_millis()).unwrap();
+        let fetched = if matches!(discontinuity, GapDiscontinuity::None) {
+            origin.fetched(true, 434)
+        } else {
+            state.render_policy.max_not_ready_render_segments = 3;
+            state.mark_pending_handoff_discontinuity(0);
+            let mut fetched = origin.fetched(true, 438);
+            // Keep the three header lines and the first three segment pairs.
+            fetched.body = fetched.body.split_inclusive('\n').take(9).collect();
+            if matches!(discontinuity, GapDiscontinuity::Origin) {
+                fetched.body = fetched.body.replacen("#EXTINF:", "#EXT-X-DISCONTINUITY\n#EXTINF:", 1);
+            }
+            fetched
+        };
+        commit_fetched_manifest(&mut state, &fetched, &request, current_time_millis()).unwrap();
         let manifest = rendered_snapshot(&state, measured_at_ms - 10);
         assert!(manifest.visible_proxy_seqs().any(|seq| seq == 51), "438 has an existing client URI");
         let mut cursor = HlsLeasePlaybackCursor::default();
@@ -298,6 +319,33 @@ async fn assert_open_gap(case: &GapCase) {
     let state = case.request.session.read().await;
     assert_eq!(state.segments[&51], case.old_slot);
     assert_eq!(state.segments[&52].cache_key, case.anchor_slot.cache_key);
+}
+
+#[tokio::test]
+async fn retained_gap_repair_distinguishes_proxy_and_origin_discontinuities() {
+    for (discontinuity, should_repair) in [(GapDiscontinuity::Proxy, true), (GapDiscontinuity::Origin, false)] {
+        let mut case = gap_case_with_discontinuity(true, discontinuity).await;
+        assert!(case.old_slot.discontinuity_before);
+        assert_eq!(
+            case.request.session.read().await.origin_content.proxy_only_discontinuities.contains(&51),
+            should_repair
+        );
+        assert!(
+            recovery(&mut case, 436, HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate)
+                .await
+        );
+        assert_eq!(b_gets(&case.origin, 439), 1);
+        assert_eq!(b_gets(&case.origin, 438), usize::from(should_repair));
+        if should_repair {
+            assert_eq!(demand(&case.request, 51).await, SegmentDemandFetchOutcome::Ready);
+            let repaired = case.request.session.read().await.segments[&51].clone();
+            assert!(repaired.discontinuity_before);
+            assert_eq!(repaired.media_start_ms, case.old_slot.media_start_ms);
+            assert_eq!(cache_bytes(&case.request, &repaired.cache_key).await, raw_media(438));
+        } else {
+            assert_open_gap(&case).await;
+        }
+    }
 }
 
 #[tokio::test]
