@@ -169,6 +169,7 @@ pub(in crate::api::endpoints::hls_api) fn materialize_shared_hls_access_manifest
         body: materialize_hls_access_manifest(&response_body, lease_id, server_path),
         mode,
         initial_strip_outcome,
+        initial_strip_exception: None,
     }
 }
 
@@ -176,6 +177,7 @@ pub(in crate::api::endpoints::hls_api) struct HlsMaterializedSharedManifest {
     pub(in crate::api::endpoints::hls_api) body: String,
     pub(in crate::api::endpoints::hls_api) mode: &'static str,
     pub(in crate::api::endpoints::hls_api) initial_strip_outcome: Option<HlsInitialStripOutcome>,
+    pub(in crate::api::endpoints::hls_api) initial_strip_exception: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

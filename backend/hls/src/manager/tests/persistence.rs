@@ -30,7 +30,7 @@ async fn finalized_manifest_publication_blocks_session_replacement_until_binding
     };
     manager.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id)).await;
     let publication = manager
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 2_000)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, 2_000)
         .await
         .expect("publication guard");
     let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(&manifest_body);

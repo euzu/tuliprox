@@ -22,7 +22,7 @@ use super::{
     fetch_hls_origin_manifest_request,
     fingerprint::{
         deterministic_conflict_proven_by_full_burst, deterministic_timeline_conflict_for_candidate,
-        record_deterministic_conflict_receipt,
+        is_same_host_reset_candidate, record_deterministic_conflict_receipt,
     },
     http::ManifestRecoveryAttemptLogContext,
     next_retry_delay_ms,
@@ -480,6 +480,11 @@ where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
+    let _probe_round = crate::refresh::anchor_probe::HlsAnchorProbeRoundGuard::install(
+        &context.session,
+        burst_plan.total_candidates(),
+    )
+    .await;
     let mut acceptance_plan = evaluation.acceptance_plan;
     let mut excluded_candidates = Vec::new();
     loop {
@@ -495,9 +500,7 @@ where
             commit,
         )
         .await;
-        if !matches!(outcome, HlsSelectedManifestRecoveryCommit::Rejected(_))
-            || evaluation.minimum_target_duration.is_none()
-        {
+        if !matches!(outcome, HlsSelectedManifestRecoveryCommit::Rejected(_)) {
             return outcome;
         }
         let Some((index, _)) = selected else { return outcome };
@@ -510,6 +513,13 @@ where
             &candidate.fetched.body,
         );
         let mut session = context.session.write().await;
+        let content_probe = matches!(selected, Some((_, HlsManifestCommitKind::ContentVerifiedAlternative)));
+        if evaluation.minimum_target_duration.is_none()
+            && !content_probe
+            && !crate::refresh::anchor_probe::candidate_has_final_mismatch(&session, identity)
+        {
+            return outcome;
+        }
         let Some(generation) = episode_generation else { return outcome };
         let Some(episode) = session.origin_control.acceptance_episode.as_mut() else { return outcome };
         if !episode.release_failed_candidate(generation, identity) {
@@ -610,8 +620,8 @@ async fn evaluate_manifest_recovery_burst(
 ) -> HlsManifestRecoveryBurstEvaluationOutcome {
     // Candidate order is scheduler order only. In particular, a numerically
     // larger highwater from a different effective host is never a sort key.
-    // Pressure is the immutable pre-episode snapshot; `Recovering` itself is
-    // deliberately not reserve evidence.
+    // Pressure comes from the authorized snapshot (or guarded promotion);
+    // `Recovering` itself is deliberately not reserve evidence.
     let resource_evidence = committed_resource_evidence(context).await;
     let candidate_evaluations = fetched_candidates
         .iter()
@@ -619,7 +629,7 @@ async fn evaluate_manifest_recovery_burst(
             let observation = manifest_candidate_observation(
                 candidate,
                 burst_plan,
-                &resource_evidence.ready_identities,
+                resource_evidence.anchor.as_ref(),
                 &resource_evidence.published_identities,
             );
             let deterministic_conflict = deterministic_timeline_conflict_for_candidate(candidate, &resource_evidence);
@@ -642,18 +652,27 @@ async fn evaluate_manifest_recovery_burst(
             return HlsManifestRecoveryBurstEvaluationOutcome::DeterministicConflict(Box::new(conflict));
         }
     }
-    let episode_snapshot = manifest_acceptance_episode_snapshot(context, episode_generation).await;
-    if episode_snapshot.is_none() {
+    let Some(episode) = manifest_acceptance_episode_snapshot(context, episode_generation).await else {
         // An old response must not let the next attempt join a successor episode.
         return HlsManifestRecoveryBurstEvaluationOutcome::Superseded;
-    }
+    };
+    let mut acceptance_plan = evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+        preferred_min_target_duration_secs: minimum_target_duration,
+        excluded_candidates: &[],
+        full_burst_completed: episode.full_burst_completed,
+        current_burst_is_full_plan: plan.current_burst_is_full_plan,
+        trigger: episode.trigger,
+        previous_alternative: episode.held_alternative.as_ref(),
+        observations: &observations,
+    });
     let reduced_landscape_changed = !plan.current_burst_is_full_plan
-        && episode_snapshot
+        && episode
+            .observed_landscape
             .as_ref()
-            .and_then(|episode| episode.observed_landscape.as_ref())
             .map(|landscape| classify_reduced_retry_landscape(landscape, &observations))
             .is_some_and(HlsReducedRetryLandscapeChange::requires_full_requalification);
-    if reduced_landscape_changed {
+    let can_verify = followup_can_verify_without_landscape(context, plan, Some(&episode), acceptance_plan);
+    if reduced_landscape_changed && !can_verify {
         if plan.may_requalify {
             if let Some(generation) = begin_requalified_manifest_acceptance_episode(
                 context,
@@ -677,26 +696,19 @@ async fn evaluate_manifest_recovery_burst(
         hold_uncommitted_manifest_acceptance_episode(
             context,
             episode_generation,
-            episode_snapshot.and_then(|episode| episode.held_alternative),
+            episode.held_alternative,
             next_retry_at_ms,
         )
         .await;
         return HlsManifestRecoveryBurstEvaluationOutcome::Exhausted;
     }
-    let acceptance_plan = episode_snapshot.as_ref().map_or(HlsManifestCommitPlan::RejectAll, |episode| {
-        evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
-            preferred_min_target_duration_secs: minimum_target_duration,
-            excluded_candidates: &[],
-            full_burst_completed: episode.full_burst_completed,
-            current_burst_is_full_plan: plan.current_burst_is_full_plan,
-            trigger: episode.trigger,
-            previous_alternative: episode.held_alternative.as_ref(),
-            observations: &observations,
-        })
-    });
-    let held_alternative = episode_snapshot.as_ref().and_then(|episode| {
-        held_alternative_after_burst(&observations, episode.held_alternative.as_ref(), plan.current_burst_is_full_plan)
-    });
+    if matches!(acceptance_plan, HlsManifestCommitPlan::RejectAll)
+        && restart_probe_allowed(context, Some(&episode)).await
+    {
+        acceptance_plan = same_host_restart_probe_plan(fetched_candidates, &observations);
+    }
+    let held_alternative =
+        held_alternative_after_burst(&observations, episode.held_alternative.as_ref(), plan.current_burst_is_full_plan);
     let next_retry_at_ms =
         current_time_millis().saturating_add(next_retry_delay_ms(&context.retry_policy, plan.attempt_index, None, 0));
     let next_state = manifest_acceptance_state_for_plan(&acceptance_plan);
@@ -708,6 +720,61 @@ async fn evaluate_manifest_recovery_burst(
         held_alternative,
         next_retry_at_ms,
     }))
+}
+
+fn followup_can_verify_without_landscape(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+    episode: Option<&super::episode::HlsManifestAcceptanceEpisodeSnapshot>,
+    acceptance_plan: HlsManifestCommitPlan,
+) -> bool {
+    // A response from the pinned host already paid for by this logical slot
+    // needs no cross-host landscape proof. Its ordinary commit guards still run.
+    let pinned_progress =
+        matches!(acceptance_plan, HlsManifestCommitPlan::Commit { kind: HlsManifestCommitKind::Pinned, .. });
+    // A bound raw-content probe also proves its current candidate independently
+    // of landscape consensus; a failed probe remains held within the same budget.
+    let bound_content_probe = matches!(
+        acceptance_plan,
+        HlsManifestCommitPlan::StageAlternative { kind: HlsManifestCommitKind::ContentVerifiedAlternative, .. }
+    );
+    debug!("HLS manifest acceptance follow-up: full_plan={} completed_full_burst={} pinned_progress={} bound_content_probe={} remaining_attempts={} reason={}",
+        plan.current_burst_is_full_plan, episode.is_some_and(|episode| episode.full_burst_completed),
+        pinned_progress, bound_content_probe, context.attempt.as_ref().map_or_else(|| "none".to_string(), |attempt| attempt.remaining_attempts().to_string()),
+        if pinned_progress { "paid-pinned-progress" } else if bound_content_probe { "current-ready-reference-probe" } else { "landscape-evaluation" });
+    pinned_progress || bound_content_probe
+}
+
+async fn restart_probe_allowed(
+    context: &HlsOriginManifestFetchContext,
+    episode: Option<&super::episode::HlsManifestAcceptanceEpisodeSnapshot>,
+) -> bool {
+    episode.is_some_and(|episode| episode.full_burst_completed && episode.trigger.recovery_required())
+        && !context.session.read().await.origin_qualification_awaits_publication()
+}
+
+fn same_host_restart_probe_plan(
+    candidates: &[HlsManifestRecoveryCandidate],
+    observations: &[HlsManifestCandidateObservation],
+) -> HlsManifestCommitPlan {
+    // A same-host sequence reset cannot prove progress from its metadata.
+    // Let the existing commit callback stage and compare fresh raw media;
+    // unchanged bytes remain a rejected recovery, within this same budget.
+    candidates.iter().find(|candidate| {
+        is_same_host_reset_candidate(&candidate.report.quality)
+            && observations.iter().any(|observation| {
+                observation.candidate_index == candidate.candidate_index
+                    && observation.resource_timeline_evidence
+                        == crate::manifest_acceptance::HlsResourceTimelineEvidence::Eligible
+                    && observation.switch_segment_readiness
+                        == crate::manifest_acceptance::HlsSwitchSegmentReadiness::RequiresStaging
+                    && observation.emergency_evidence.live_handoff
+                        == crate::manifest_acceptance::HlsEmergencyLiveHandoffCompatibility::RequiresStagedTrackVerification
+            })
+    }).map_or(HlsManifestCommitPlan::RejectAll, |candidate| HlsManifestCommitPlan::Commit {
+        candidate_index: candidate.candidate_index,
+        kind: HlsManifestCommitKind::Pinned,
+    })
 }
 
 enum HlsSelectedManifestRecoveryCommit<T> {

@@ -153,7 +153,11 @@ mod tests {
         let request = client.request(Method::GET, "https://media.example.invalid/video?api_key=secret");
 
         assert!(!request.safe_url().contains("secret"));
-        assert!(request.safe_url().contains("api_key=***"));
+        assert_eq!(request.safe_url(), "https://***/video?api_key=***");
+        assert_eq!(
+            request.builder.build().expect("transport request").url().as_str(),
+            "https://media.example.invalid/video?api_key=secret"
+        );
     }
 
     #[test]
@@ -186,7 +190,7 @@ mod tests {
             .json(&serde_json::json!({"Username": "u"}));
 
         assert!(!request.safe_url().contains("secret"));
-        assert!(request.safe_url().contains("api_key=***"));
+        assert_eq!(request.safe_url(), "https://***/login?api_key=***");
     }
 
     #[tokio::test]

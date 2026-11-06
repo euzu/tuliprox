@@ -96,6 +96,7 @@ async fn hls_cache_pending_transient_manifest_applies_initial_strip_without_muta
     };
     let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    super::support::configure_test_hls_strip(&app_state, &strip).await;
     let stored_before = session.read().await.transient.last_manifest_body.clone().expect("transient manifest body");
 
     let response = try_test_hls_cached_manifest_response(
@@ -221,6 +222,7 @@ async fn hls_cache_no_media_yet_transient_manifest_is_served_for_initial_canonic
     };
     let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    super::support::configure_test_hls_strip(&app_state, &strip).await;
 
     let response = try_test_hls_cached_manifest_response(
         &app_state,
@@ -306,6 +308,7 @@ async fn hls_cache_no_media_yet_waits_for_first_transient_manifest_commit() {
     });
     let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    super::support::configure_test_hls_strip(&app_state, &strip).await;
 
     let response = try_test_hls_cached_manifest_response(
         &app_state,
@@ -357,6 +360,7 @@ async fn hls_cache_expired_transient_manifest_waits_for_revalidation_commit() {
     });
     let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    super::support::configure_test_hls_strip(&app_state, &strip).await;
 
     let response = try_test_hls_cached_manifest_response(
         &app_state,

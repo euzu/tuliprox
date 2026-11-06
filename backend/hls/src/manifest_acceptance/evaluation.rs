@@ -98,7 +98,7 @@ fn qualified_alternative_plan(
     }
 
     if let Some(candidate) = input
-        .current_burst_is_full_plan
+        .full_burst_completed
         .then(|| {
             input
                 .observations

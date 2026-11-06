@@ -57,10 +57,11 @@ impl ActiveUserManager {
         } = request;
         self.gc();
 
+        let stream_log_value = || sanitize_sensitive_info(stream_url);
         let username = user.username.clone();
         let mut user_connections = self.write_connections().await;
         let connection_data = user_connections.by_key.entry(username.clone()).or_insert_with(|| {
-            debug_if_enabled!("Creating first session for user {username} {}", sanitize_sensitive_info(stream_url));
+            debug_if_enabled!("Creating first session for user {username} {}", stream_log_value());
             let mut data = UserConnectionData::new(0, user.max_connections, user.soft_connections);
             let session = Self::new_user_session(&UserSessionParams {
                 change_wakes: &self.deferred_wakes,
@@ -121,21 +122,13 @@ impl ActiveUserManager {
                     }
                 }
                 Self::update_session_admission(session, connection_permission, connection_kind);
-                debug_if_enabled!(
-                    "Using session for user {} with url: {}",
-                    user.username,
-                    sanitize_sensitive_info(stream_url)
-                );
+                debug_if_enabled!("Using session for user {} with url: {}", user.username, stream_log_value());
                 return session.token.clone();
             }
         }
 
         // If no session exists, create one
-        debug_if_enabled!(
-            "Creating session for user {} with url: {}",
-            user.username,
-            sanitize_sensitive_info(stream_url)
-        );
+        debug_if_enabled!("Creating session for user {} with url: {}", user.username, stream_log_value());
         let session = Self::new_user_session(&UserSessionParams {
             change_wakes: &self.deferred_wakes,
             session_token,

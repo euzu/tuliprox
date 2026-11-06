@@ -165,7 +165,8 @@ pub(in crate::manager::tests) async fn publish_manifest_snapshot(
     for segment in Arc::make_mut(&mut snapshot.visible_segments) {
         segment.uri = format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq).into();
     }
-    let Some(guard) = manager.prepare_access_lease_manifest_publication(lease_id, proxy_session_id, now_ms).await
+    let Some(guard) =
+        manager.prepare_access_lease_manifest_publication_for_test(lease_id, proxy_session_id, now_ms).await
     else {
         return false;
     };

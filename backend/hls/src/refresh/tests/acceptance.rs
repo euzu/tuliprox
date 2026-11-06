@@ -109,7 +109,7 @@ pub(in crate::refresh::tests) async fn spawn_rotating_parent_origin() -> TestOri
 }
 
 #[tokio::test]
-async fn rotating_volatile_parent_proves_one_deterministic_conflict() {
+async fn different_hex_paths_do_not_manufacture_a_deterministic_replay_conflict() {
     let baseline_body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:480\n\
          #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745180_480.ts\n\
          #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745181_481.ts\n\
@@ -120,7 +120,6 @@ async fn rotating_volatile_parent_proves_one_deterministic_conflict() {
     let manifest_url = format!("{}/live/user/pass/12345.m3u8", server.base_url);
     request.origin_entry = LiveHlsOriginEntry::parse(&manifest_url).expect("local replay origin entry");
     request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
-    let plan = request.manifest_recovery_burst.level.plan();
     let mut baseline = fetched_manifest(baseline_body);
     baseline.final_manifest_url = manifest_url.clone();
     baseline.resolved_request_url = manifest_url;
@@ -135,76 +134,22 @@ async fn rotating_volatile_parent_proves_one_deterministic_conflict() {
         assert_eq!(session.published_resource_history.generation(), 3);
     }
 
-    let Err(first) = fetch_and_commit_manifest_with_policy(&mut request).await else {
-        panic!("one complete candidate landscape must prove the replay conflict");
-    };
-    let OriginManifestFetchError::DeterministicTimelineConflict(first_conflict) = first else {
-        panic!("deterministic replay conflict must not collapse to retry exhaustion");
-    };
-    assert_eq!(first_conflict.previous_proxy_tail, Some(2));
-    assert_eq!(first_conflict.existing_proxy_seq, 0);
-    assert_eq!(first_conflict.candidate_position, 1);
-    assert_eq!(first_conflict.candidate_origin_seq, 491);
-    assert_eq!(server.requests.lock().await.len(), plan.total_candidates().saturating_add(1));
-    {
-        let session = session.read().await;
-        let episode = session.origin_control.acceptance_episode.as_ref().expect("acceptance episode retained");
-        assert_eq!(episode.full_bursts_completed, 1);
-        assert_eq!(episode.completed_burst_candidates, plan.total_candidates());
-        assert!(episode.deterministic_conflict_receipt().is_some());
-        assert!(matches!(
-            super::super::super::manifest_acceptance::manifest_acceptance_episode_status(
-                Some(episode),
-                episode.generation,
-                request.now_ms,
-            ),
-            super::super::super::manifest_acceptance::HlsManifestAcceptanceEpisodeStatus::FullBurstExhausted {
-                reason: HlsManifestAcceptanceExhaustionReason::DeterministicTimelineConflict,
-                ..
-            }
-        ));
-        assert_eq!(session.proxy_next_seq, Some(3), "replayed content receives no proxy sequence");
-    }
-
-    let request_count_before_receipt_sample = server.requests.lock().await.len();
-    request.acceptance_directive.trigger = HlsManifestAcceptanceTrigger::Observe;
-    let Err(repeated) = fetch_and_commit_manifest_with_policy(&mut request).await else {
-        panic!("an unchanged ordinary sample must remain rejected");
-    };
-    assert!(matches!(
-        repeated,
-        OriginManifestFetchError::DeterministicTimelineConflict(ref conflict)
-            if conflict.as_ref() == first_conflict.as_ref()
-    ));
-    assert_eq!(
-        server.requests.lock().await.len(),
-        request_count_before_receipt_sample.saturating_add(1),
-        "an unchanged receipt permits one ordinary request but no second burst"
-    );
-
-    {
-        let mut session = session.write().await;
-        session.published_resource_history.record(
-            super::super::super::resource_identity::HlsMediaResourceIdentity::from_url(
-                "http://127.0.0.1/live/user/pass/unrelated-published.ts",
-                None,
-            ),
-            99,
-        );
-    }
-    let request_count_before_changed_landscape = server.requests.lock().await.len();
-    let Err(changed) = fetch_and_commit_manifest_with_policy(&mut request).await else {
-        panic!("changed published evidence must still reject the replay");
-    };
-    assert!(matches!(changed, OriginManifestFetchError::DeterministicTimelineConflict(_)));
-    assert_eq!(
-        server.requests.lock().await.len(),
-        request_count_before_changed_landscape.saturating_add(plan.total_candidates()),
-        "changed receipt evidence authorizes exactly one newly configured full burst"
-    );
+    let committed = fetch_and_commit_manifest_with_policy(&mut request)
+        .await
+        .expect("new full paths remain distinguishable even when basenames recur");
+    assert_eq!(committed.fetched.selection, HlsManifestFetchSelection::Initial);
+    assert_eq!(server.requests.lock().await.len(), 1);
     let session = session.read().await;
-    assert_eq!(session.proxy_next_seq, Some(3), "the replay stays blocked after reevaluation");
-    assert!(!session.segments.contains_key(&3));
+    assert_eq!(session.proxy_next_seq, Some(6));
+    assert_eq!(session.origin_epoch, 0, "ordinary forward continuity does not need a restart");
+    let old = session.segments[&0].media_resource_identity().unwrap();
+    let new = session.segments[&4].media_resource_identity().unwrap();
+    assert!(!old.matches(new), "same filename in a distinct full path is a distinct resource");
+    assert!(session
+        .origin_control
+        .acceptance_episode
+        .as_ref()
+        .is_none_or(|episode| episode.deterministic_conflict_receipt().is_none()));
 }
 
 #[tokio::test]
@@ -999,4 +944,119 @@ pub(in crate::refresh::tests) async fn assert_committed_content_anchor_is_gc_pin
 #[tokio::test]
 async fn committed_content_anchor_object_survives_gc_until_acceptance_read_pin_drop() {
     assert_committed_content_anchor_is_gc_pinned_until_read_pin_drop().await;
+}
+
+async fn exact_path_replay_origin() -> TestOriginServer {
+    spawn_test_origin(Arc::new(|_| {
+        (
+            200,
+            Vec::new(),
+            String::from(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:490\n\
+         #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745190_490.ts\n\
+         #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745180_480.ts\n\
+         #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745191_491.ts\n",
+            ),
+        )
+    }))
+    .await
+}
+
+#[tokio::test]
+async fn same_full_path_replay_proves_one_deterministic_conflict() {
+    let baseline_body = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:480\n\
+         #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745180_480.ts\n\
+         #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745181_481.ts\n\
+         #EXTINF:4,\n/stream/aaaaaaaaaaaaaaaa/1745182_482.ts\n";
+    let server = exact_path_replay_origin().await;
+    let session = test_session();
+    let mut request = test_origin_refresh_request(Arc::clone(&session));
+    let manifest_url = format!("{}/live/user/pass/12345.m3u8", server.base_url);
+    request.origin_entry = LiveHlsOriginEntry::parse(&manifest_url).expect("local replay origin entry");
+    request.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
+    let plan = request.manifest_recovery_burst.level.plan();
+    let mut baseline = fetched_manifest(baseline_body);
+    baseline.final_manifest_url = manifest_url.clone();
+    baseline.resolved_request_url = manifest_url;
+    baseline.redirect_host = Some("127.0.0.1".to_string());
+    {
+        let mut session = session.write().await;
+        commit_fetched_manifest(&mut session, &baseline, &request, 100).expect("baseline commits");
+        for segment in session.segments.values_mut() {
+            segment.status = SegmentCacheStatus::Ready { content_length: 1, ready_at_ms: 101 };
+        }
+        session.render_and_store_manifest(101).expect("baseline publishes");
+        assert_eq!(session.published_resource_history.generation(), 3);
+    }
+
+    let Err(first) = fetch_and_commit_manifest_with_policy(&mut request).await else {
+        panic!("one complete candidate landscape must prove the replay conflict");
+    };
+    let OriginManifestFetchError::DeterministicTimelineConflict(first_conflict) = first else {
+        panic!("deterministic replay conflict must not collapse to retry exhaustion");
+    };
+    assert_eq!(first_conflict.previous_proxy_tail, Some(2));
+    assert_eq!(first_conflict.existing_proxy_seq, 0);
+    assert_eq!(first_conflict.candidate_position, 1);
+    assert_eq!(first_conflict.candidate_origin_seq, 491);
+    assert_eq!(server.requests.lock().await.len(), plan.total_candidates().saturating_add(1));
+    {
+        let session = session.read().await;
+        let episode = session.origin_control.acceptance_episode.as_ref().expect("acceptance episode retained");
+        assert_eq!(episode.full_bursts_completed, 1);
+        assert_eq!(episode.completed_burst_candidates, plan.total_candidates());
+        assert!(episode.deterministic_conflict_receipt().is_some());
+        assert!(matches!(
+            super::super::super::manifest_acceptance::manifest_acceptance_episode_status(
+                Some(episode),
+                episode.generation,
+                request.now_ms,
+            ),
+            super::super::super::manifest_acceptance::HlsManifestAcceptanceEpisodeStatus::FullBurstExhausted {
+                reason: HlsManifestAcceptanceExhaustionReason::DeterministicTimelineConflict,
+                ..
+            }
+        ));
+        assert_eq!(session.proxy_next_seq, Some(3), "replayed content receives no proxy sequence");
+    }
+
+    let request_count_before_receipt_sample = server.requests.lock().await.len();
+    request.acceptance_directive.trigger = HlsManifestAcceptanceTrigger::Observe;
+    let Err(repeated) = fetch_and_commit_manifest_with_policy(&mut request).await else {
+        panic!("an unchanged ordinary sample must remain rejected");
+    };
+    assert!(matches!(
+        repeated,
+        OriginManifestFetchError::DeterministicTimelineConflict(ref conflict)
+            if conflict.as_ref() == first_conflict.as_ref()
+    ));
+    assert_eq!(
+        server.requests.lock().await.len(),
+        request_count_before_receipt_sample.saturating_add(1),
+        "an unchanged receipt permits one ordinary request but no second burst"
+    );
+
+    {
+        let mut session = session.write().await;
+        session.published_resource_history.record(
+            super::super::super::resource_identity::HlsMediaResourceIdentity::from_url(
+                "http://127.0.0.1/live/user/pass/unrelated-published.ts",
+                None,
+            ),
+            99,
+        );
+    }
+    let request_count_before_changed_landscape = server.requests.lock().await.len();
+    let Err(changed) = fetch_and_commit_manifest_with_policy(&mut request).await else {
+        panic!("changed published evidence must still reject the replay");
+    };
+    assert!(matches!(changed, OriginManifestFetchError::DeterministicTimelineConflict(_)));
+    assert_eq!(
+        server.requests.lock().await.len(),
+        request_count_before_changed_landscape.saturating_add(plan.total_candidates()),
+        "changed receipt evidence authorizes exactly one newly configured full burst"
+    );
+    let session = session.read().await;
+    assert_eq!(session.proxy_next_seq, Some(3), "the replay stays blocked after reevaluation");
+    assert!(!session.segments.contains_key(&3));
 }

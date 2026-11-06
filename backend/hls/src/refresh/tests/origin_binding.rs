@@ -387,7 +387,7 @@ async fn provider_failover_initial_success_commits_without_hls_host_retry_when_u
 }
 
 #[tokio::test]
-async fn fresh_pinned_revalidation_same_host_rebase_runs_complete_beast_plan() {
+async fn fresh_pinned_revalidation_rejects_reset_without_ready_media_evidence() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
     let origin = spawn_test_origin(Arc::new(|path| {
         if path_has_extension(&path, "m3u8") {
@@ -437,37 +437,17 @@ async fn fresh_pinned_revalidation_same_host_rebase_runs_complete_beast_plan() {
 
     let manifest_requests =
         origin.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-    assert_eq!(manifest_requests, plan.total_candidates());
-    let next_fetch_allowed_at_ms = {
-        let session = session.read().await;
-        assert_eq!(session.origin_epoch, baseline_epoch.saturating_add(1));
-        assert_eq!(session.origin_seq_highwater, Some(11));
-        assert_eq!(session.last_effective_manifest_host.as_deref(), Some(effective_host.as_str()));
-        assert_eq!(session.fresh_manifest_commit_required, None);
-        let rebased_head = session
-            .segments
-            .values()
-            .find(|segment| segment.origin_key.origin_epoch == session.origin_epoch)
-            .expect("same-host rebased timeline head");
-        assert!(rebased_head.discontinuity_before);
-        session.origin_refresh.next_fetch_allowed_at_ms
-    };
-
-    let mut follow_up = switch_test_request(Arc::clone(&session), cache, &origin.base_url);
-    follow_up.manifest_recovery_burst = HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Beast };
-    follow_up.manifest_commit_requirement = session
-        .read()
-        .await
-        .fresh_manifest_commit_required
-        .map_or(HlsManifestCommitRequirement::CommittedManifestAllowed, |reason| {
-            HlsManifestCommitRequirement::FreshCommitRequired { reason }
-        });
-    follow_up.now_ms = next_fetch_allowed_at_ms;
-
-    assert!(trigger_origin_refresh_sync(follow_up).await);
-    let manifest_requests_after_follow_up =
-        origin.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-    assert_eq!(manifest_requests_after_follow_up, plan.total_candidates().saturating_add(1));
+    assert_eq!(manifest_requests, plan.total_candidates() + no_delay_policy().attempt_count() - 1);
+    let session = session.read().await;
+    assert_eq!(session.origin_epoch, baseline_epoch);
+    assert_eq!(session.origin_seq_highwater, Some(1001));
+    assert_eq!(session.proxy_next_seq, Some(2));
+    assert_eq!(session.last_effective_manifest_host.as_deref(), Some(effective_host.as_str()));
+    assert_eq!(
+        session.fresh_manifest_commit_required,
+        Some(HlsFreshManifestRequiredReason::PreviousHardManifestFailure)
+    );
+    assert!(session.segments.values().all(|entry| entry.origin_key.origin_epoch == baseline_epoch));
 }
 
 pub(in crate::refresh::tests) async fn prepare_ready_content_anchor(
@@ -540,7 +520,7 @@ async fn pinned_origin_recovery_during_staging_rejects_alternative_commit() {
 }
 
 #[tokio::test]
-async fn recovery_required_orchestrator_requalifies_changed_pinned_landscape_with_full_plan() {
+async fn recovery_required_orchestrator_accepts_pinned_progress_without_another_full_plan() {
     let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
     let entry_hits = Arc::new(AtomicUsize::new(0));
     let entry_hits_for_handler = Arc::clone(&entry_hits);
@@ -615,8 +595,8 @@ async fn recovery_required_orchestrator_requalifies_changed_pinned_landscape_wit
     .expect("pinned follow-up commits");
 
     assert_eq!(committed.fetched.redirect_host.as_deref(), Some("127.0.0.1"));
-    assert_eq!(entry_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_mul(2).saturating_add(1));
-    assert_eq!(pinned_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_add(1));
+    assert_eq!(entry_hits.load(Ordering::SeqCst), plan.total_candidates().saturating_add(1));
+    assert_eq!(pinned_hits.load(Ordering::SeqCst), 1);
     let session = session.read().await;
     assert_eq!(session.origin_seq_highwater, Some(101));
     assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));

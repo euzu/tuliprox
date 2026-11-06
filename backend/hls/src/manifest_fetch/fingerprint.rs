@@ -36,6 +36,12 @@ pub(super) fn deterministic_timeline_conflict_for_candidate(
     candidate: &HlsManifestRecoveryCandidate,
     evidence: &HlsCommittedResourceEvidence,
 ) -> Option<HlsDeterministicTimelineConflict> {
+    if is_same_host_reset_candidate(&candidate.report.quality) {
+        // Across an authorized restart, URI repetition/order cannot decide
+        // whether the origin is serving old bytes. The staged content check owns
+        // that decision, before any old-epoch replay prefix is removed.
+        return None;
+    }
     let OriginManifestParseOutcome::Normal(manifest) =
         parse_origin_media_manifest(&candidate.fetched.body, &candidate.fetched.final_manifest_url)
     else {
@@ -66,6 +72,12 @@ pub(super) fn deterministic_timeline_conflict_for_candidate(
         }
     }
     None
+}
+
+pub(super) fn is_same_host_reset_candidate(quality: &super::HlsManifestOriginQuality) -> bool {
+    quality.host_relation == super::HlsManifestOriginRelation::SameRedirectHost
+        && quality.origin_highwater.is_some()
+        && quality.origin_highwater <= quality.previous_highwater
 }
 
 pub(super) fn deterministic_conflict_proven_by_full_burst(
@@ -264,7 +276,7 @@ fn fingerprint_parsed_manifest(
         discontinuity_hasher.update([u8::from(segment.discontinuity_before)]);
         let resource_identity =
             HlsMediaResourceIdentity::from_url(&segment.resolved_origin_url, segment.origin_byte_range);
-        resource_hasher.update(resource_identity.exact_path_hash());
+        resource_hasher.update(resource_identity.semantic_key().bytes());
         update_container_signature(&mut container_hasher, &segment.resolved_origin_url);
         let program_date_time_ms = parse_program_date_time_ms(segment.program_date_time.as_deref());
         first_program_date_time_ms = first_program_date_time_ms.or(program_date_time_ms);
@@ -372,7 +384,7 @@ fn fingerprint_transient_manifest(body: &str, final_manifest_url: &str) -> (HlsM
             let resource_identity = HlsMediaResourceIdentity::from_url(&resolved, None);
             duration_hasher.update(duration_ms.to_be_bytes());
             discontinuity_hasher.update([u8::from(pending_discontinuity)]);
-            resource_hasher.update(resource_identity.exact_path_hash());
+            resource_hasher.update(resource_identity.semantic_key().bytes());
             update_container_signature(&mut container_hasher, &resolved);
             first_program_date_time_ms = first_program_date_time_ms.or(pending_program_date_time_ms);
             if pending_program_date_time_ms.is_some() {
@@ -449,7 +461,9 @@ pub(super) fn map_and_encryption_hash(
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for map in maps {
-        hasher.update(HlsMediaResourceIdentity::from_url(&map.resolved_origin_uri, map.byte_range).exact_path_hash());
+        hasher.update(
+            HlsMediaResourceIdentity::from_url(&map.resolved_origin_uri, map.byte_range).semantic_key().bytes(),
+        );
     }
     for line in body
         .lines()

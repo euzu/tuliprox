@@ -41,7 +41,7 @@ fn resolve_provider_url_for_attempt(
             Url::parse(resolved.as_ref()).unwrap_or_else(|_| url.clone())
         }
         Err(err) => {
-            debug!("Failed to resolve provider URL: {err}");
+            debug!("Failed to resolve provider URL: {}", sanitize_sensitive_info(&err.to_string()));
             url.clone()
         }
     }
