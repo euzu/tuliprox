@@ -1,11 +1,11 @@
 use super::{
-    create_test_app_state_for_config, create_test_dual_provider_app_config, create_test_fingerprint,
-    create_test_provider_app_config, needs_initial_stalker_resolution, resolve_streaming_strategy,
-    should_refresh_stalker_playback, stalker_stream_kind, StreamingAcquireOptions,
+    accepts_requested_stream_url, create_test_app_state_for_config, create_test_dual_provider_app_config,
+    create_test_fingerprint, create_test_provider_app_config, needs_initial_stalker_resolution,
+    resolve_streaming_strategy, should_refresh_stalker_playback, stalker_stream_kind, StreamingAcquireOptions,
 };
 use crate::{
     api::model::{ProviderStreamCustomReason, ProviderStreamState},
-    model::SourcesConfig,
+    model::{ConfigInput, SourcesConfig},
 };
 use axum::http::StatusCode;
 use shared::{
@@ -20,6 +20,39 @@ fn stalker_playback_refreshes_invalid_or_rejected_urls() {
     assert!(should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::UNAUTHORIZED)));
     assert!(!should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::OK)));
     assert!(!should_refresh_stalker_playback(InputType::Xtream, false, None));
+}
+
+fn input_of_type(input_type: InputType) -> ConfigInput {
+    ConfigInput { name: "main".intern(), input_type, ..ConfigInput::default() }
+}
+
+#[test]
+fn stalker_url_is_accepted_only_for_the_account_that_owns_it() {
+    let input = input_of_type(InputType::Stalker);
+    let main = "main".intern();
+    let alias = "saray8".intern();
+
+    // Main account allocated without a forced provider keeps its URL.
+    assert!(accepts_requested_stream_url(&input, None, false, "main"));
+    // Alias allocated without a forced provider needs its own link.
+    assert!(!accepts_requested_stream_url(&input, None, false, "saray8"));
+    // Forced provider equals allocation.
+    assert!(accepts_requested_stream_url(&input, Some(&alias), false, "saray8"));
+    // Forced provider differs from allocation (fallback), including the main account.
+    assert!(!accepts_requested_stream_url(&input, Some(&alias), false, "main"));
+    assert!(!accepts_requested_stream_url(&input, Some(&main), false, "saray8"));
+}
+
+#[test]
+fn non_stalker_url_acceptance_follows_the_accept_flag_and_forced_provider() {
+    let input = input_of_type(InputType::Xtream);
+    let forced = "saray8".intern();
+
+    assert!(!accepts_requested_stream_url(&input, None, false, "main"));
+    assert!(accepts_requested_stream_url(&input, None, true, "main"));
+    assert!(accepts_requested_stream_url(&input, Some(&forced), true, "saray8"));
+    assert!(!accepts_requested_stream_url(&input, Some(&forced), true, "main"));
+    assert!(!accepts_requested_stream_url(&input, Some(&forced), false, "saray8"));
 }
 
 #[test]

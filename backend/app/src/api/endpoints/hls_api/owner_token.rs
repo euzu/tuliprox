@@ -21,6 +21,43 @@ impl HlsRequestStage<'_> {
     pub(in crate::api) const fn normalizes_url(self) -> bool { !matches!(self, Self::Variant { .. }) }
 }
 
+/// How a Stalker manifest fetch obtains its URL for the selected account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::api) enum StalkerManifestUrl {
+    /// Resolve a fresh link for the selected account.
+    Resolve,
+    /// The sealed URL already belongs to the selected account.
+    Accept,
+    /// The sealed URL belongs to another account.
+    Reject,
+}
+
+/// An entry refresh carries no account-bound URL; a sealed variant URL is only valid for its origin account. A legacy
+/// token does not say whether it holds the entry or a variant, so it is rejected and the player refetches its master.
+pub(in crate::api) fn stalker_manifest_url(stage: HlsRequestStage<'_>, selected_provider: &str) -> StalkerManifestUrl {
+    match stage {
+        HlsRequestStage::Entry => StalkerManifestUrl::Resolve,
+        HlsRequestStage::LegacyVariant => StalkerManifestUrl::Reject,
+        HlsRequestStage::Variant { origin_provider, .. } => {
+            if origin_provider == Some(selected_provider) {
+                StalkerManifestUrl::Accept
+            } else {
+                StalkerManifestUrl::Reject
+            }
+        }
+    }
+}
+
+/// Portal stream id and kind for a Stalker HLS entry; `None` when the stream ref is not a portal id.
+pub(in crate::api) fn stalker_hls_stream(
+    stream_ref: &str,
+    is_archive: bool,
+) -> Option<(u32, shared::model::StalkerStreamKind)> {
+    let kind =
+        if is_archive { shared::model::StalkerStreamKind::Archive } else { shared::model::StalkerStreamKind::Live };
+    stream_ref.parse::<u32>().ok().map(|provider_id| (provider_id, kind))
+}
+
 /// Appends the provider session cookie stored on the user session to a manifest request.
 pub(in crate::api) fn append_user_session_provider_headers(
     headers: &mut HeaderMap,

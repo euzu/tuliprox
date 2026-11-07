@@ -1445,6 +1445,12 @@
 
 ## 🐛 Fixes
 
+- **Stalker aliases now play with their own MAC and session.** An alias with its own MAC received the main
+  account's resolved URL, so playback ran on the main account's MAC instead of the allocated alias. Playback now
+  uses the alias's own `create_link` result, and a 4xx refresh re-resolves with the allocated account. The link
+  cache and resolve serialization are keyed per account. HLS playlist refreshes resolve a fresh link for the
+  pinned account instead of rewriting the stored URL.
+
 - **Removing a plugin no longer keeps the server down.** A `source.yml` that still named the plugin refused to start
   (``Can't start server: config source error: invalid plugin references: input x: no loaded plugin y provides
   fetch-input``), so uninstalling a plugin left an instance that could not boot. The start and a running server's hot

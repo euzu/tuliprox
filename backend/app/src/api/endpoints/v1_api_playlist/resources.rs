@@ -213,7 +213,7 @@ async fn stalker_resource_response(
         XtreamCluster::Series => StalkerStreamKind::Episode,
     };
     let client = app_state.http_clients.default.load().as_ref().clone();
-    match re_resolve_stalker_url(&app_state.app_config, &client, &input, provider_id, kind, false).await {
+    match re_resolve_stalker_url(&app_state.app_config, &client, &input, &input.name, provider_id, kind, false).await {
         Ok(Some(resolved_url)) => {
             let Ok(url) = Url::parse(&resolved_url) else {
                 return axum::http::StatusCode::BAD_GATEWAY.into_response();

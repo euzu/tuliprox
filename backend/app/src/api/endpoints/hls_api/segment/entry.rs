@@ -5,12 +5,16 @@ use super::{
     hls_custom_video_manifest_response, hls_entry_user_session_token, hls_media_playlist_wrap_enabled,
     hls_panel_provisioning_or_status_response, hls_playback_kind, hls_response, m3u_archive_epg_reference_ts,
     m3u_catchup_epg_reference_from_session_token, normalize_xtream_live_hls_url, release_prepared_hls_manifest_session,
-    terminate_failed_hls_manifest_session, try_reserve_hls_entry_origin_account_for_redirect, wrap_media_playlist,
-    HlsEntryStreamContext, HlsMediaPlaylistWrap, HlsOriginEntryUrl, HlsRequestStage,
+    stalker_hls_stream, stalker_manifest_url, terminate_failed_hls_manifest_session,
+    try_reserve_hls_entry_origin_account_for_redirect, wrap_media_playlist, HlsEntryStreamContext,
+    HlsMediaPlaylistWrap, HlsOriginEntryUrl, HlsRequestStage, StalkerManifestUrl,
 };
 use crate::{
     api::{
-        api_utils::{blocks_new_playback, get_hls_playback_ttl_secs, is_running_playback, select_provider_stream_url},
+        api_utils::{
+            blocks_new_playback, get_hls_playback_ttl_secs, is_running_playback, resolve_stalker_stream_for_account,
+            select_provider_stream_url,
+        },
         model::{AppState, CustomVideoStreamType, UserSession},
     },
     auth::Fingerprint,
@@ -206,31 +210,60 @@ pub(in crate::api) async fn handle_hls_stream_request(
             // URL acceptance follows the provider that produced the sealed URL, not the session:
             // entry URLs are re-resolved to the selected account on every fetch, child URLs
             // (often CDN URLs) are fetched as sealed and only from their origin provider.
-            let accept_requested_stream_url = match stage {
-                HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider } => {
-                    if origin_provider != Some(selected_provider_config.name.as_ref()) {
-                        // A stale child URI from an earlier account: reject only this request,
-                        // the playback itself stays valid after the player refetches its master.
-                        debug_if_enabled!(
-                            "HLS child manifest from provider {} rejected for selected provider {}",
-                            sanitize_sensitive_info(origin_provider.unwrap_or("<unknown>")),
-                            sanitize_sensitive_info(&selected_provider_config.name)
-                        );
-                        return StatusCode::NOT_FOUND.into_response();
+            // A Stalker URL is account-bound: refreshes resolve a fresh link, sealed variants stay with their account.
+            let stalker_url = input
+                .input_type
+                .is_stalker()
+                .then(|| stalker_manifest_url(stage, selected_provider_config.name.as_ref()));
+            if stalker_url == Some(StalkerManifestUrl::Reject) {
+                debug_if_enabled!(
+                    "HLS Stalker manifest token without matching origin rejected for selected provider {}",
+                    sanitize_sensitive_info(&selected_provider_config.name)
+                );
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            let accept_requested_stream_url = stalker_url == Some(StalkerManifestUrl::Accept)
+                || match stage {
+                    HlsRequestStage::Variant { source: HlsManifestSource::Child, origin_provider } => {
+                        if origin_provider != Some(selected_provider_config.name.as_ref()) {
+                            // A stale child URI from an earlier account: reject only this request,
+                            // the playback itself stays valid after the player refetches its master.
+                            debug_if_enabled!(
+                                "HLS child manifest from provider {} rejected for selected provider {}",
+                                sanitize_sensitive_info(origin_provider.unwrap_or("<unknown>")),
+                                sanitize_sensitive_info(&selected_provider_config.name)
+                            );
+                            return StatusCode::NOT_FOUND.into_response();
+                        }
+                        true
                     }
-                    true
+                    HlsRequestStage::Entry | HlsRequestStage::LegacyVariant | HlsRequestStage::Variant { .. } => false,
+                };
+            let selected_stream = if stalker_url == Some(StalkerManifestUrl::Resolve) {
+                match stalker_hls_stream(stream_context.stream_ref(), archive_reference.is_some()) {
+                    Some((provider_id, kind)) => {
+                        resolve_stalker_stream_for_account(
+                            app_state,
+                            input,
+                            &selected_provider_config.name,
+                            provider_id,
+                            kind,
+                        )
+                        .await
+                    }
+                    None => None,
                 }
-                HlsRequestStage::Entry | HlsRequestStage::LegacyVariant | HlsRequestStage::Variant { .. } => false,
+            } else {
+                select_provider_stream_url(
+                    &url,
+                    input,
+                    &selected_provider_config,
+                    accept_requested_stream_url,
+                    &app_state.app_config,
+                )
+                .await
             };
-            let Some((_provider_name, stream_url)) = select_provider_stream_url(
-                &url,
-                input,
-                &selected_provider_config,
-                accept_requested_stream_url,
-                &app_state.app_config,
-            )
-            .await
-            else {
+            let Some((_provider_name, stream_url)) = selected_stream else {
                 return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
             // A session that ended or switched accounts meanwhile must not be rebound.
@@ -310,6 +343,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 connection_permission,
                 fallback_connection_kind,
                 true,
+                stalker_hls_stream(stream_context.stream_ref(), archive_reference.is_some()),
             )
             .await
             else {

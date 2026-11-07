@@ -449,6 +449,7 @@ pub(super) async fn create_stream_response_details(
                         let resolve_result = re_resolve_stalker_url_singleflight(
                             app_state,
                             input,
+                            guard_provider_name.as_deref().unwrap_or(&input.name),
                             stream_channel.provider_id,
                             kind,
                             force_stalker_refresh,
