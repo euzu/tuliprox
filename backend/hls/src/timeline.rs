@@ -879,6 +879,7 @@ impl TimelineDraft {
                 || self.should_start_new_origin_epoch_for_rollover(manifest);
         let mut segments = Vec::with_capacity(manifest.segments.len());
         let mut trimmed_published_prefix = false;
+        let mut trimmed_prefix_highwater: Option<u64> = None;
         let mut has_new_resource = false;
         let mut overlaps_publishable_tail = false;
         let mut first_published_overlap = None;
@@ -896,7 +897,10 @@ impl TimelineDraft {
                 CandidateSegmentDisposition::CurrentMapping(proxy_seq) if !explicit_handoff => {
                     // A prior epoch's prefix may lead into current overlap. New
                     // media before that overlap would contradict proxy order.
-                    if trimmed_published_prefix && has_new_resource {
+                    if trimmed_published_prefix
+                        && (has_new_resource
+                            || trimmed_prefix_highwater.is_some_and(|highwater| proxy_seq <= highwater))
+                    {
                         return Err(TimelineMapError::PublishedResourceReplay {
                             previous_proxy_tail: self.proxy_next_seq.and_then(|next| next.checked_sub(1)),
                             existing_proxy_seq: proxy_seq,
@@ -921,6 +925,8 @@ impl TimelineDraft {
                         });
                     }
                     trimmed_published_prefix = true;
+                    trimmed_prefix_highwater =
+                        Some(trimmed_prefix_highwater.map_or(proxy_seq, |value| value.max(proxy_seq)));
                     first_published_overlap.get_or_insert((
                         proxy_seq,
                         candidate_position,
@@ -2441,5 +2447,49 @@ mod tests {
             vec![(3, 15_000), (4, 21_000)]
         );
         assert_eq!(session.next_media_start_ms, 24_000);
+    }
+
+    #[test]
+    fn sliding_refresh_after_handoff_keeps_current_mapping_after_old_published_prefix() {
+        let mut session = session();
+        let host_a = effective_origin_host_id("cdn-a.example.com");
+        let host_b = effective_origin_host_id("cdn-b.example.com");
+        session.apply_origin_manifest_for_host(&six_segment_manifest(0), host_a).unwrap();
+        publish_ready_manifest(&mut session, 1);
+        let handoff = six_segment_manifest(3);
+        let preview = session.preview_origin_handoff_manifest(&handoff, host_b, 0).unwrap();
+        session.apply_origin_handoff_manifest_if_preview_matches(&handoff, host_b, 0, &preview).unwrap();
+        publish_ready_manifest(&mut session, 2);
+        let epoch = session.origin_epoch;
+        session
+            .apply_origin_manifest_for_host(&six_segment_manifest(4), host_b)
+            .expect("old published prefix followed by newer current mappings must remain valid");
+        assert_eq!(session.origin_epoch, epoch);
+        assert_eq!(session.origin_seq_highwater, Some(9));
+        assert_eq!(session.proxy_next_seq, Some(10));
+    }
+
+    #[test]
+    fn sliding_refresh_after_handoff_rejects_current_mapping_behind_trimmed_prefix() {
+        let mut session = session();
+        let host_a = effective_origin_host_id("cdn-a.example.com");
+        let host_b = effective_origin_host_id("cdn-b.example.com");
+        session.apply_origin_manifest_for_host(&six_segment_manifest(0), host_a).unwrap();
+        publish_ready_manifest(&mut session, 1);
+        let handoff = six_segment_manifest(3);
+        let preview = session.preview_origin_handoff_manifest(&handoff, host_b, 0).unwrap();
+        session.apply_origin_handoff_manifest_if_preview_matches(&handoff, host_b, 0, &preview).unwrap();
+        publish_ready_manifest(&mut session, 2);
+        let contradictory = normal_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:5\n\
+             #EXTINF:4,\n8.ts\n#EXTINF:4,\n6.ts\n#EXTINF:4,\n7.ts\n#EXTINF:4,\n8.ts\n#EXTINF:4,\n9.ts\n",
+        );
+        assert!(matches!(
+            session.apply_origin_manifest_for_host(&contradictory, host_b),
+            Err(TimelineMapError::PublishedResourceReplay {
+                decision: crate::timeline::HlsResourceReplayDecision::RejectContradictoryOrder,
+                ..
+            })
+        ));
     }
 }

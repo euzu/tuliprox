@@ -64,6 +64,16 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppCon
     })
 }
 
+pub(in crate::api::endpoints::hls_api::tests) fn test_app_config_with_storage_dir(
+    storage_dir: &std::path::Path,
+) -> Arc<AppConfig> {
+    let app_config = test_app_config();
+    let mut config = (**app_config.config.load()).clone();
+    config.storage_dir = storage_dir.to_string_lossy().to_string();
+    app_config.config.store(Arc::new(config));
+    app_config
+}
+
 pub(in crate::api::endpoints::hls_api::tests) fn hls_custom_video_test_user() -> ProxyUserCredentials {
     let mut user = ProxyUserCredentials::default();
     user.username = "viewer".to_string();

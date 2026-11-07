@@ -7,6 +7,7 @@ use crate::{
 };
 use shared::{
     defaults::HLS_EXT,
+    error::TuliproxError,
     model::{InputType, PlaylistItemType, StreamChannel},
     utils::{
         extract_extension_from_url, get_credentials_from_url, is_account_query_key, m3u_flussonic_live_file_lookup_key,
@@ -478,6 +479,26 @@ pub(super) async fn resolve_m3u_alias_flussonic_archive_url(
     Some(alias_url.into())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum M3uStreamMatchSource {
+    Primary,
+    ArchiveSibling,
+}
+
+pub(crate) async fn lookup_account_m3u_stream_url(
+    app_config: &Arc<AppConfig>,
+    account_name: &Arc<str>,
+    candidate: &str,
+) -> Result<Option<(String, M3uStreamMatchSource)>, TuliproxError> {
+    match load_input_m3u_stream_url(app_config, account_name, candidate).await {
+        Ok(Some(url)) => Ok(Some((url.to_string(), M3uStreamMatchSource::Primary))),
+        Ok(None) => Ok(resolve_m3u_alias_flussonic_archive_url(app_config, account_name, candidate)
+            .await
+            .map(|url| (url, M3uStreamMatchSource::ArchiveSibling))),
+        Err(err) => Err(err),
+    }
+}
+
 pub(crate) async fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,
@@ -491,28 +512,22 @@ pub(crate) async fn select_provider_stream_url(
     }
 
     if provider_cfg.input_type.is_m3u() {
-        match load_input_m3u_stream_url(app_config, &provider_cfg.name, stream_url).await {
-            Ok(Some(provider_stream_url)) => {
+        match lookup_account_m3u_stream_url(app_config, &provider_cfg.name, stream_url).await {
+            Ok(Some((provider_stream_url, match_source))) => {
+                let index_match = match match_source {
+                    M3uStreamMatchSource::Primary => "true",
+                    M3uStreamMatchSource::ArchiveSibling => "archive_sibling",
+                };
                 debug_if_enabled!(
-                    "M3U alias URL lookup: provider={} requested_url={} index_match=true resolved_url={}",
+                    "M3U alias URL lookup: provider={} requested_url={} index_match={} resolved_url={}",
                     sanitize_sensitive_info(&provider_cfg.name),
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, stream_url).as_ref()),
+                    index_match,
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, &provider_stream_url).as_ref())
                 );
-                return Some((provider_cfg.name.clone(), provider_stream_url.to_string()));
+                return Some((provider_cfg.name.clone(), provider_stream_url));
             }
             Ok(None) => {
-                if let Some(provider_stream_url) =
-                    resolve_m3u_alias_flussonic_archive_url(app_config, &provider_cfg.name, stream_url).await
-                {
-                    debug_if_enabled!(
-                        "M3U alias URL lookup: provider={} requested_url={} index_match=archive_sibling resolved_url={}",
-                        sanitize_sensitive_info(&provider_cfg.name),
-                        sanitize_sensitive_info(resolve_request_url_for_logging(input, stream_url).as_ref()),
-                        sanitize_sensitive_info(resolve_request_url_for_logging(input, &provider_stream_url).as_ref())
-                    );
-                    return Some((provider_cfg.name.clone(), provider_stream_url));
-                }
                 debug_if_enabled!(
                     "M3U alias URL lookup: provider={} requested_url={} index_match=false",
                     sanitize_sensitive_info(&provider_cfg.name),

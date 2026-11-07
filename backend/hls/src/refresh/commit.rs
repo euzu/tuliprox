@@ -1045,6 +1045,14 @@ fn commit_normal_manifest(
         if let Some(proof) = &staged_switch.content_anchor {
             proof.publish_gap_repair(session, request, rendered_at_ms);
         }
+        if let Some(revision) = staged_switch.ready_segment_revision.as_ref() {
+            // The origin generation and the segment mapping are final only after
+            // the accepted timeline commit above. Preserve the current fence.
+            revision.revision().bind_origin(session);
+            if let Some(startup) = session.startup.as_mut() {
+                startup.revisions.insert(staged_switch.ready_segment_proxy_seq, revision.clone());
+            }
+        }
         session.advance_media_readiness_generation();
     } else {
         let apply_result = if sequence_relation == HlsManifestSequenceRelation::Rebase {

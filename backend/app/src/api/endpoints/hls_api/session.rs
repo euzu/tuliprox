@@ -1,7 +1,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
-use tuliprox_core::model::{AppConfig, ProviderBindingTag};
+use tuliprox_core::model::{resolve_provider_scheme_url_with_provider_index, AppConfig, ProviderBindingTag};
 
 #[derive(Clone, Debug)]
 pub(super) enum HlsOriginEntryUrl {
@@ -231,6 +231,17 @@ pub(super) async fn resolve_hls_origin_fetch_url(
         .into_iter()
         .any(|url| hls_url_failover_provider_for_origin_url(input, url).is_some())
     {
+        if input.input_type.is_m3u() && input.playback_provider.is_some() {
+            if let Some(account) = provider_config {
+                if let Some(entry) = [session_entry_url, raw_request_url].into_iter().find(|url| {
+                    input
+                        .get_resolve_provider(url)
+                        .is_some_and(|profile| input.playback_provider.as_deref() == Some(profile.name.as_ref()))
+                }) {
+                    return resolve_hls_m3u_profile_account_url(app_config, input, entry, account).await;
+                }
+            }
+        }
         return build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config);
     }
 
@@ -247,6 +258,41 @@ pub(super) async fn resolve_hls_origin_fetch_url(
     }
 
     build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config)
+}
+
+/// Keep the CDN profile while taking the token from the selected real M3U account's
+/// raw URL index. Probe only explicitly configured mirror origins, never arbitrary hosts.
+async fn resolve_hls_m3u_profile_account_url(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    entry: &str,
+    account: &Arc<RuntimeProviderConfig>,
+) -> Option<String> {
+    let profile = input.get_resolve_provider(entry)?;
+    for index in 0..profile.urls.len() {
+        let (_, candidate) =
+            resolve_provider_scheme_url_with_provider_index(entry, Some(Arc::clone(&profile)), index).ok()?;
+        let selected =
+            match crate::api::api_utils::lookup_account_m3u_stream_url(app_config, &account.name, &candidate).await {
+                Ok(Some((url, _))) => url,
+                Ok(None) => continue,
+                Err(error) => {
+                    debug_if_enabled!(
+                        "HLS M3U CDN profile account lookup failed: {}",
+                        sanitize_sensitive_info(&error.to_string())
+                    );
+                    return None;
+                }
+            };
+        let selected = Url::parse(&selected).ok()?;
+        let mut result = Url::parse(entry).ok()?;
+        result.set_path(selected.path());
+        result.set_query(selected.query());
+        // URL-failover authority and the selected account's exact encoded query are retained.
+        return Some(result.to_string());
+    }
+    // Never spend the root account's token under an alias reservation if its URL is missing.
+    (account.name == input.name).then(|| entry.to_string())
 }
 
 pub(super) fn rewrite_hls_provider_scheme_origin_account(

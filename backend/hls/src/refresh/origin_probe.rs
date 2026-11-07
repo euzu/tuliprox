@@ -2,7 +2,11 @@
 //! Probes use the existing resource runner and cache admission. No session lock
 //! is held during I/O; the captured basis is checked again at atomic commit.
 
-use super::{commit::materialize_normal_key_resources, OriginRefreshRequest};
+use super::{
+    commit::materialize_normal_key_resources,
+    startup_revision::{complete_startup_revision, startup_revision_kind},
+    OriginRefreshRequest,
+};
 use crate::{
     manifest_fetch::{
         fetched_effective_manifest_host, FetchedOriginManifest, HlsManifestCommitAcceptanceMode,
@@ -761,20 +765,14 @@ async fn write_restart_media(
             request.hls_proxy.reserve_switch_segment_cleanup(entry.cache_key.clone()).ok_or_else(unavailable)?;
         let deadline = tokio::time::Instant::now() + request.segment_repair.postprocess_timeout();
         let revision = if let Some((store, mode)) = startup {
-            let kind =
-                if mode.streams_raw_revisions() { SegmentRevisionKind::Raw } else { SegmentRevisionKind::Processed };
+            let kind = startup_revision_kind(*mode);
             let guard = store
                 .create(entry.cache_key.proxy_session_id().clone(), entry.proxy_seq, kind)
                 .map_err(|_| unavailable())?;
-            if mode.streams_raw_revisions() {
-                let metadata = request
-                    .segment_cache
-                    .publish_processed_revision(&guard.revision().key, &object.path, deadline)
+            if kind == SegmentRevisionKind::Raw {
+                complete_startup_revision(&request.segment_cache, &guard, &object.path, deadline)
                     .await
                     .map_err(|_| unavailable())?;
-                *guard.revision().file_pin.lock_unpoisoned() =
-                    Some(request.segment_cache.pin_revision_file(&metadata.path).map_err(|_| unavailable())?);
-                guard.revision().complete(metadata);
             }
             Some(guard)
         } else {
@@ -810,14 +808,9 @@ async fn write_restart_media(
             .map_err(|_| unavailable())?;
         if let Some(guard) = &revision {
             if !guard.revision().is_complete() {
-                let processed = request
-                    .segment_cache
-                    .publish_processed_revision(&guard.revision().key, &metadata.path, deadline)
+                complete_startup_revision(&request.segment_cache, guard, &metadata.path, deadline)
                     .await
                     .map_err(|_| unavailable())?;
-                *guard.revision().file_pin.lock_unpoisoned() =
-                    Some(request.segment_cache.pin_revision_file(&processed.path).map_err(|_| unavailable())?);
-                guard.revision().complete(processed);
             }
         }
         update.media.push(PreparedMedia { entry, metadata, digest, revision, cleanup });

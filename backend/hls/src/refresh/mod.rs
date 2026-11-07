@@ -54,6 +54,7 @@ pub(crate) mod origin_probe;
 mod provider;
 mod short_manifest;
 pub(crate) use short_manifest::observe_target_duration;
+mod startup_revision;
 mod switch_staging;
 mod timing;
 mod work_guard;
