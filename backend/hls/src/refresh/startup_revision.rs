@@ -10,6 +10,7 @@ use shared::model::HlsStartupMode;
 use std::{io, path::Path};
 use tokio::time::Instant;
 
+/// Maps the startup mode to the revision kind its fast-start store serves.
 pub(super) fn startup_revision_kind(mode: HlsStartupMode) -> SegmentRevisionKind {
     if mode.streams_raw_revisions() {
         SegmentRevisionKind::Raw

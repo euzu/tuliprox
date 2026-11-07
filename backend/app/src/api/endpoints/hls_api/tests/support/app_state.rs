@@ -64,6 +64,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppCon
     })
 }
 
+/// Returns the test app config with `storage_dir` set to the given path.
 pub(in crate::api::endpoints::hls_api::tests) fn test_app_config_with_storage_dir(
     storage_dir: &std::path::Path,
 ) -> Arc<AppConfig> {

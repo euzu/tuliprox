@@ -425,6 +425,10 @@ pub(super) async fn stage_alternative_manifest_switch(
     Ok(staged_switch)
 }
 
+/// Registers a complete startup revision for a committed switch segment.
+///
+/// Returns `Ok(None)` when the session has no startup store or the segment is
+/// not fast-start eligible.
 async fn prepare_switch_startup_revision(
     request: &OriginRefreshRequest,
     segment: &SegmentEntry,

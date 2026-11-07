@@ -13,6 +13,8 @@ use shared::{
 use std::sync::Arc;
 use tuliprox_repository::{get_input_m3u_playlist_file_path, get_input_storage_path, persist_input_m3u_playlist};
 
+/// Builds a temp storage dir with a root and an alias M3U account that share the
+/// `cdn` playback profile; the alias account indexes `alias_urls`.
 async fn cdn_alias_fixture(
     alias_urls: &[&str],
 ) -> (tempfile::TempDir, Arc<AppConfig>, ConfigInput, Arc<RuntimeProviderConfig>, Arc<RuntimeProviderConfig>) {

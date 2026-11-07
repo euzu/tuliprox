@@ -106,6 +106,11 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
     fetch_hls_origin_manifest_global_policy(context, context.retry_policy.attempt_count(), false).await
 }
 
+/// Returns `true` when a failed pinned recovery fetch may retry through the
+/// other URLs of the entry's `provider://` profile.
+///
+/// Requires the opt-in flag, a profile with more than one URL, and a failure
+/// class that triggers URL failover.
 pub(super) fn recovery_profile_failover_allowed(
     entry: &super::model::LiveHlsOriginEntry,
     error: &OriginManifestFetchError,
@@ -132,6 +137,11 @@ pub(super) fn recovery_profile_failover_allowed(
 }
 
 #[allow(clippy::too_many_lines, reason = "One loop owns the shared attempt budget and its original failure.")]
+/// Fetches the origin manifest with the global URL-failover policy across
+/// `attempts` attempts.
+///
+/// `reuse_recovery_attempt` skips the initial-attempt log when a recovery owner
+/// already started this logical attempt.
 async fn fetch_hls_origin_manifest_global_policy(
     context: &HlsOriginManifestFetchContext,
     attempts: usize,

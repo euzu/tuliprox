@@ -479,12 +479,19 @@ pub(super) async fn resolve_m3u_alias_flussonic_archive_url(
     Some(alias_url.into())
 }
 
+/// Which index entry produced an account M3U stream URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum M3uStreamMatchSource {
+    /// The candidate URL is present in the account's raw URL index.
     Primary,
+    /// The candidate is a Flussonic archive derived from an indexed alias URL.
     ArchiveSibling,
 }
 
+/// Looks up `candidate` in the raw M3U URL index of `account_name`.
+///
+/// Falls back to a Flussonic archive sibling of an indexed alias URL. Returns
+/// `Ok(None)` when neither matches and propagates index read errors.
 pub(crate) async fn lookup_account_m3u_stream_url(
     app_config: &Arc<AppConfig>,
     account_name: &Arc<str>,

@@ -683,6 +683,7 @@ async fn pinned_recovery_moves_to_alternative_provider_url_on_qualifying_failure
     ));
 }
 
+/// Runs the forward content anchor scenario with optional optimistic fast start.
 #[allow(clippy::too_many_lines)]
 async fn assert_forward_content_anchor_after_published_prefix(
     anchor_bytes: &'static str,
@@ -693,6 +694,8 @@ async fn assert_forward_content_anchor_after_published_prefix(
     assert_forward_content_anchor_with_mode(anchor_bytes, should_commit, mode).await;
 }
 
+/// Asserts that a refresh trimming the published prefix commits only when the
+/// overlap segment matches `anchor_bytes`, for the given startup mode.
 #[allow(clippy::too_many_lines)]
 async fn assert_forward_content_anchor_with_mode(
     anchor_bytes: &'static str,

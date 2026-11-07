@@ -104,12 +104,27 @@ async fn restarted_origin_case(mode: HlsStartupMode, reuse_urls: bool, next_coun
         .await
         .unwrap();
     let old_bytes = tokio::fs::read(&old_metadata.path).await.unwrap();
-    {
-        let mut session = session.write().await;
-        let expired = super::super::current_time_millis().saturating_sub(300_000);
-        session.activity.last_authorized_media_at_ms = Some(expired);
-        session.origin_refresh.last_success_at_ms = Some(expired);
+    // Segment completion activity is committed by spawned tasks. On a busy or
+    // single-core runtime they can land after the backdating write and reset
+    // the activity to "now", so repeat the write until it sticks.
+    let expired = super::super::current_time_millis().saturating_sub(300_000);
+    let mut backdated = false;
+    for _ in 0..50 {
+        {
+            let mut session = session.write().await;
+            session.activity.last_authorized_media_at_ms = Some(expired);
+            session.origin_refresh.last_success_at_ms = Some(expired);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let session = session.read().await;
+        if session.activity.last_authorized_media_at_ms == Some(expired)
+            && session.origin_refresh.last_success_at_ms == Some(expired)
+        {
+            backdated = true;
+            break;
+        }
     }
+    assert!(backdated, "session activity stays backdated");
     phase.store(1, Ordering::Release);
     let response = canonical_response_for_lease(&app, &input, &url, "restart").await;
     assert_eq!(response.status(), StatusCode::OK, "{mode:?}");
