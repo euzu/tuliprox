@@ -80,7 +80,8 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     let selected_stream = if input.input_type.is_stalker() {
         match stalker_stream {
             Some((provider_id, kind)) => {
-                resolve_stalker_stream_for_account(app_state, input, &provider_config.name, provider_id, kind).await
+                resolve_stalker_stream_for_account(app_state, input, &provider_config.name, provider_id, kind, false)
+                    .await
             }
             None => None,
         }

@@ -1,7 +1,6 @@
 use super::{
-    next_session_incarnation, remember_session_addr, url_host_key, ActiveUserManager, CreateUserSessionParams,
-    PlaybackLifecycle, SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData, UserSession,
-    UserSessionParams,
+    next_session_incarnation, remember_session_addr, ActiveUserManager, CreateUserSessionParams, PlaybackLifecycle,
+    SessionChangeSignal, SessionIdentity, SocketRegistration, UserConnectionData, UserSession, UserSessionParams,
 };
 use shared::{
     model::UserConnectionPermission,
@@ -85,18 +84,9 @@ impl ActiveUserManager {
                 session.socket_bound = socket_bound;
                 remember_session_addr(session, *addr);
                 Self::bump_session_transition_version(session);
-                let mut reset_provider_session_headers = false;
-                if &*session.stream_url != stream_url {
-                    // Provider cookies are host scoped: alternating child playlists on one host keep them.
-                    reset_provider_session_headers |= url_host_key(&session.stream_url) != url_host_key(stream_url);
-                    session.stream_url = stream_url.intern();
-                }
+                session.set_stream_url(stream_url);
                 if &*session.provider != provider {
                     session.switch_provider(provider.intern());
-                }
-                if reset_provider_session_headers {
-                    session.provider_session_headers.clear();
-                    session.provider_session_headers_host = None;
                 }
                 // Normalize stale lifecycle states on session refresh.
                 // Expired, PendingProvider, and Preserved sessions cannot stay in those states

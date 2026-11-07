@@ -240,6 +240,7 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
                                 &provider_cfg.name,
                                 channel.provider_id,
                                 stalker_stream_kind(channel.cluster, channel.item_type),
+                                false,
                             )
                             .await
                         }

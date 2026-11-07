@@ -53,15 +53,17 @@ pub(super) async fn re_resolve_stalker_url_singleflight(
     re_resolve_stalker_url(&app_state.app_config, &client, input, account_name, provider_id, kind, force_refresh).await
 }
 
-/// Resolves a fresh link for the named account; a failure is logged and yields `None`.
+/// Resolves a link for the named account; a failure is logged and yields `None`.
+/// `force_refresh` bypasses the cached link, for retrying after the provider rejected it.
 pub(crate) async fn resolve_stalker_stream_for_account(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     account_name: &Arc<str>,
     provider_id: u32,
     kind: StalkerStreamKind,
+    force_refresh: bool,
 ) -> Option<(Arc<str>, String)> {
-    match re_resolve_stalker_url_singleflight(app_state, input, account_name, provider_id, kind, false).await {
+    match re_resolve_stalker_url_singleflight(app_state, input, account_name, provider_id, kind, force_refresh).await {
         Ok(url) => url.map(|url| (Arc::clone(account_name), url.to_string())),
         Err(err) => {
             error!(

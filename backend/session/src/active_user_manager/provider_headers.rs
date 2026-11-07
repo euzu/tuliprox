@@ -85,6 +85,35 @@ impl ActiveUserManager {
         self.store_session_provider_response_headers(username, token, Some(identity), response, source_url).await
     }
 
+    /// Updates the stream URL of the session if its identity matches, clearing provider headers
+    /// when the URL host changes (same semantics as `create_user_session`).
+    pub async fn update_current_session_stream_url(
+        &self,
+        username: &str,
+        token: &str,
+        identity: SessionIdentity,
+        stream_url: &str,
+    ) -> bool {
+        let mut users = self.write_connections().await;
+        if users.is_token_ended(token) {
+            return false;
+        }
+        let Some(session) = users
+            .by_key
+            .get_mut(username)
+            .and_then(|data| data.sessions.iter_mut().find(|session| session.token == token))
+        else {
+            return false;
+        };
+        if session.identity() != identity || !session.is_live() {
+            return false;
+        }
+        session.set_stream_url(stream_url);
+        session.ts = current_time_secs();
+        Self::bump_session_transition_version(session);
+        true
+    }
+
     pub(super) async fn store_session_provider_response_headers(
         &self,
         username: &str,
