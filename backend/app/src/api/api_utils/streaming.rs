@@ -106,6 +106,8 @@ pub(crate) fn record_connect_failed_attempt(attempt: ConnectFailedAttempt<'_>) {
 
 pub(super) struct StreamingAcquireOptions<'a> {
     pub(super) force_provider: Option<&'a Arc<str>>,
+    /// Account that owns `stream_url` when it differs from the input, e.g. a session URL of an alias.
+    pub(super) stream_url_owner: Option<&'a Arc<str>>,
     pub(super) allow_forced_provider_fallback: bool,
     pub(super) allow_provider_grace: bool,
     pub(super) user_priority: i8,
@@ -189,6 +191,7 @@ pub(super) async fn create_stream_response_details(
     share_stream: bool,
     connection_permission: UserConnectionPermission,
     force_provider: Option<&Arc<str>>,
+    stream_url_owner: Option<&Arc<str>>,
     allow_forced_provider_fallback: bool,
     allow_provider_grace: bool,
     virtual_id: VirtualId,
@@ -210,6 +213,7 @@ pub(super) async fn create_stream_response_details(
         input,
         StreamingAcquireOptions {
             force_provider,
+            stream_url_owner,
             allow_forced_provider_fallback,
             allow_provider_grace,
             user_priority,
@@ -347,9 +351,9 @@ pub(super) async fn create_stream_response_details(
             } else {
                 false
             };
-            let is_fallback_provider = force_provider
-                .is_some_and(|forced| guard_provider_name.as_ref().is_some_and(|allocated| allocated != forced));
-            let session_headers = if is_fallback_provider { None } else { session_headers };
+            let is_foreign_allocation =
+                !session_headers_belong_to_allocation(guard_provider_name.as_ref(), force_provider, stream_url_owner);
+            let session_headers = if is_foreign_allocation { None } else { session_headers };
             let (stream, stream_info, provider_session_headers, reconnect_flag) =
                 if defer_provider_stream_until_grace_check {
                     debug_if_enabled!(
@@ -449,6 +453,7 @@ pub(super) async fn create_stream_response_details(
                         let resolve_result = re_resolve_stalker_url_singleflight(
                             app_state,
                             input,
+                            guard_provider_name.as_deref().unwrap_or(&input.name),
                             stream_channel.provider_id,
                             kind,
                             force_stalker_refresh,
@@ -526,7 +531,7 @@ pub(super) async fn create_stream_response_details(
                     (stream, stream_info, provider_session_headers, reconnect_flag)
                 };
 
-            if is_fallback_provider && stream.is_some() {
+            if is_foreign_allocation && stream.is_some() {
                 if let Some(token) = session_owner {
                     let _ =
                         app_state.active_users.update_session_provider_headers(username, token, &HashMap::new()).await;
@@ -623,6 +628,18 @@ where
         axum::body::Body::from_stream(stream)
     };
     body_stream
+}
+
+/// Returns `true` when session headers captured for the requested provider may be sent to the allocated provider.
+/// Headers are dropped when allocation fell back away from the forced provider or away from the account that owns
+/// the replayed stream URL, so one account's cookies never reach another account.
+pub(super) fn session_headers_belong_to_allocation(
+    allocated: Option<&Arc<str>>,
+    force_provider: Option<&Arc<str>>,
+    stream_url_owner: Option<&Arc<str>>,
+) -> bool {
+    let differs = |expected: &Arc<str>| allocated.is_some_and(|allocated| allocated != expected);
+    !force_provider.is_some_and(differs) && !stream_url_owner.is_some_and(differs)
 }
 
 pub(super) fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
@@ -796,6 +813,7 @@ pub(super) async fn force_stream_response(
         share_stream,
         connection_permission,
         preferred_provider,
+        Some(&user_session.provider).filter(|provider| !provider.is_empty()),
         allow_forced_provider_fallback,
         allow_provider_grace,
         VirtualId::new(stream_channel.virtual_id),

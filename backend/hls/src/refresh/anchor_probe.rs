@@ -125,21 +125,28 @@ pub(super) struct HlsAnchorProbeRound {
     pub(super) cancelled: CancellationToken,
 }
 impl HlsAnchorProbeRound {
+    /// Pins the reference file for this round. `guarded` means a retained
+    /// revision guard already pins `path`; the cache allows one active
+    /// registration per path, so a second pin would fail.
     pub(super) fn pin_reference(
         &self,
         cache: &crate::HlsSegmentCache,
         path: &std::path::Path,
-    ) -> Result<Arc<crate::HlsRevisionFilePin>, ()> {
+        guarded: bool,
+    ) -> Result<Option<Arc<crate::HlsRevisionFilePin>>, ()> {
         let mut pins = self.reference_pins.lock_unpoisoned();
         if let Some((_, pin)) = pins.iter().find(|(current, _)| current == path) {
-            return Ok(Arc::clone(pin));
+            return Ok(Some(Arc::clone(pin)));
+        }
+        if guarded {
+            return Ok(None);
         }
         if !self.is_active() || pins.len() >= self.capacity {
             return Err(());
         }
         let pin = Arc::new(cache.pin_revision_file(path).map_err(|_| ())?);
         pins.push((path.to_path_buf(), Arc::clone(&pin)));
-        Ok(pin)
+        Ok(Some(pin))
     }
     pub(super) fn is_active(&self) -> bool { !self.cancelled.is_cancelled() }
     pub(super) fn mark_rejected(&self, identity: HlsManifestRecoveryCandidateIdentity) {

@@ -606,6 +606,7 @@ async fn hls_entry_origin_reservation_requires_real_provider_handle() {
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
         false,
+        None,
     )
     .await;
 

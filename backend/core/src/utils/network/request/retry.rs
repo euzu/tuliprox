@@ -2,7 +2,7 @@ use super::{
     execute_attempt_request, format_http_status, format_request_target_for_logging, get_client_request,
     is_failover_redirect,
     jitter::{JitterSource, JitterStrategy},
-    prepare_input_request_headers, prepare_physical_request_attempt, reject_https_downgrade,
+    prepare_input_request_headers, prepare_physical_request_attempt, reject_https_downgrade, request_failed_message,
     resolve_attempt_target_at_provider_index, same_origin, strip_sensitive_headers_for_cross_origin_redirect,
     text_response_error_log_label, AttemptTarget, ProviderFailoverResponse, RequestFetchOptions,
     TextContentBodyOptions, TextContentRetryOwner,
@@ -606,8 +606,7 @@ async fn send_with_retry_and_provider_policy_with_options_result(
                                     });
                                 }
 
-                                return Err(string_to_io_error(format!("Request failed ({}): {}",
-                                    format_http_status(status), sanitize_sensitive_info(url.as_str()))));
+                                return Err(string_to_io_error(request_failed_message(status, url.as_str())));
                             }
 
                             Err(err) => {
@@ -964,11 +963,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                     });
                                 }
 
-                                return Err(string_to_io_error(format!(
-                                    "Request failed ({}): {}",
-                                    format_http_status(status),
-                                    sanitize_sensitive_info(url.as_str())
-                                )));
+                                return Err(string_to_io_error(request_failed_message(status, url.as_str())));
                             }
                             Err(err) => {
                                 if (err.is_timeout() || err.is_connect())

@@ -506,10 +506,21 @@ fn playback_candidates(item: &StalkerPlaylistItem) -> Vec<(&str, StalkerPlayback
     candidates
 }
 
+/// The input itself when `account_name` is its name, else the alias of that name with its effective config.
+fn stalker_account<'a>(input: &'a ConfigInput, account_name: &str) -> Option<Cow<'a, ConfigInput>> {
+    if input.name.as_ref() == account_name {
+        return Some(Cow::Borrowed(input));
+    }
+    input.alias_by_name(account_name).map(|alias| Cow::Owned(input.as_input(alias)))
+}
+
+/// Resolves a playable URL for `account_name` (the input itself or one of its aliases).
+/// The catalog is shared and always read through `input`; portal client and link cache use the account.
 pub async fn re_resolve_stalker_url(
     app_config: &Arc<AppConfig>,
     http_client: &reqwest::Client,
     input: &ConfigInput,
+    account_name: &str,
     provider_id: u32,
     kind: StalkerStreamKind,
     force_refresh: bool,
@@ -546,7 +557,20 @@ pub async fn re_resolve_stalker_url(
         );
         return Ok(None);
     };
-    let link_key = RuntimeLinkKey { fingerprint: identity_fingerprint, generation, provider_id, kind };
+    let Some(account) = stalker_account(input, account_name) else {
+        warn!("Stalker playback resolution for input '{}' found no account '{account_name}'", input.name);
+        return Ok(None);
+    };
+    let account_cfg = account.stalker.as_ref().ok_or_else(|| {
+        TuliproxError::ConfigInput(format!("Stalker account '{}' has no stalker configuration block", account.name))
+    })?;
+    let account_portal_url = resolve_stalker_portal_url(&account)?;
+    let link_key = RuntimeLinkKey {
+        fingerprint: account_cfg.identity_fingerprint(&account_portal_url),
+        generation,
+        provider_id,
+        kind,
+    };
     if let Some(url) = cached_resolved_link(link_key, force_refresh) {
         return Ok(Some(url));
     }
@@ -567,7 +591,7 @@ pub async fn re_resolve_stalker_url(
         );
         return Ok(None);
     }
-    let api_client = cached_runtime_stalker_client(http_client, portal_url, stalker_cfg)?;
+    let api_client = cached_runtime_stalker_client(http_client, account_portal_url, account_cfg)?;
     let series_number = (kind == StalkerStreamKind::Episode).then_some(item.number);
 
     let mut last_error: Option<String> = None;
@@ -624,6 +648,82 @@ mod tests {
             });
         }
         item
+    }
+
+    /// Stalker config whose device profile carries `mac`.
+    fn stalker_cfg_with_mac(mac: &str) -> StalkerInputConfig {
+        StalkerInputConfig {
+            device: Some(tuliprox_core::model::StalkerDeviceProfile {
+                mac_address: Some(mac.to_string()),
+                ..Default::default()
+            }),
+            ..StalkerInputConfig::default()
+        }
+    }
+
+    /// Stalker input `main` with one enabled alias `saray8`; each account has its own MAC.
+    fn input_with_alias() -> ConfigInput {
+        ConfigInput {
+            id: 1,
+            name: "main".into(),
+            url: "http://portal.example".to_string(),
+            stalker: Some(stalker_cfg_with_mac("00:1A:79:00:00:0A")),
+            aliases: Some(vec![tuliprox_core::model::ConfigInputAlias {
+                id: 2,
+                name: "saray8".into(),
+                url: "http://portal.example".to_string(),
+                username: None,
+                password: None,
+                priority: 0,
+                max_connections: 1,
+                exp_date: None,
+                stalker: Some(stalker_cfg_with_mac("00:1A:79:00:00:0B")),
+                enabled: true,
+            }]),
+            ..ConfigInput::default()
+        }
+    }
+
+    /// Portal identity fingerprint of an account, which keys its client and link cache.
+    fn account_fingerprint(account: &ConfigInput) -> u64 {
+        let url = resolve_stalker_portal_url(account).expect("portal url");
+        account.stalker.as_ref().expect("stalker cfg").identity_fingerprint(&url)
+    }
+
+    /// An alias resolves to its own MAC, id and portal identity.
+    #[test]
+    fn stalker_account_resolves_alias_with_its_own_mac() {
+        let input = input_with_alias();
+
+        let main = stalker_account(&input, "main").expect("main account");
+        let alias = stalker_account(&input, "saray8").expect("alias account");
+
+        let mac = |account: &ConfigInput| {
+            account.stalker.as_ref().and_then(|cfg| cfg.device.as_ref()).and_then(|d| d.mac_address.clone())
+        };
+        assert_eq!(mac(&main).as_deref(), Some("00:1A:79:00:00:0A"));
+        assert_eq!(mac(&alias).as_deref(), Some("00:1A:79:00:00:0B"));
+        assert_eq!(alias.id, 2);
+        assert_ne!(account_fingerprint(&main), account_fingerprint(&alias));
+    }
+
+    /// The input's own name borrows the input instead of building an alias view.
+    #[test]
+    fn stalker_account_returns_the_input_for_its_own_name() {
+        let input = input_with_alias();
+
+        let main = stalker_account(&input, "main").expect("main account");
+
+        assert!(matches!(main, Cow::Borrowed(_)));
+        assert_eq!(main.id, input.id);
+    }
+
+    /// An unknown account name yields no account.
+    #[test]
+    fn stalker_account_is_none_for_unknown_name() {
+        let input = input_with_alias();
+
+        assert!(stalker_account(&input, "missing").is_none());
     }
 
     #[test]

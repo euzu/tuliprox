@@ -15,7 +15,7 @@ use super::{
     },
     http::{
         fetch_origin_manifest_once, origin_manifest_content_coding_error, origin_manifest_fetch_error_from_io_error,
-        origin_manifest_fetch_error_from_request_error, request_failed_status_from_message,
+        origin_manifest_fetch_error_from_request_error,
     },
     recovery::{acceptance_attempt_may_start, attempt_limit_for_started_requalification, selected_manifest_candidate},
     selection_log::ManifestRetryLogKind,
@@ -396,7 +396,7 @@ fn test_clients() -> (Client, Client) {
 #[test]
 fn request_failed_status_is_extracted_from_global_provider_policy_error() {
     assert_eq!(
-        request_failed_status_from_message(
+        tuliprox_core::utils::request::request_failed_status(
             "Request failed (407 Proxy Authentication Required): provider://demo/live/u/p/1.m3u8",
         ),
         Some(StatusCode::PROXY_AUTHENTICATION_REQUIRED)

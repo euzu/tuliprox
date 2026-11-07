@@ -2,14 +2,15 @@ use super::{
     build_hls_origin_resolution, build_hls_origin_source, get_stream_channel, hls_cache_configured,
     hls_cache_enabled_for_user, hls_canonical_retry_after_response, hls_origin_account_reservation_ttl_secs_fallback,
     hls_origin_account_reservation_ttl_secs_for_session, hls_runtime_or_standalone_custom_tail_response,
-    resolve_hls_origin_playlist_url, try_hls_cached_manifest_response, HlsEntryStreamIdentity,
+    resolve_hls_origin_playlist_url, stalker_hls_stream, try_hls_cached_manifest_response, HlsEntryStreamIdentity,
     HlsRuntimeBandwidthLearningContext,
 };
 use crate::{
     api::{
         api_utils::{
             connection_priority_for_kind, create_playback_session_fingerprint, get_hls_session_ttl_secs,
-            resolve_playback_request_admission, select_provider_stream_url, EvictionReentryGuard,
+            resolve_playback_request_admission, resolve_stalker_stream_for_account, select_provider_stream_url,
+            EvictionReentryGuard,
         },
         model::{
             hls_custom_video_manifest_response_with_virtual_id, hls_provisioning_discontinuity_sequence,
@@ -25,7 +26,7 @@ use crate::{
 };
 use axum::{http::StatusCode, response::IntoResponse};
 use log::{debug, warn};
-use shared::model::{PlaylistItemType, UserConnectionPermission, VirtualId};
+use shared::model::{PlaylistItemType, StalkerStreamKind, UserConnectionPermission, VirtualId};
 use std::{sync::Arc, time::Duration};
 use tuliprox_core::utils::current_time_millis;
 use tuliprox_hls::api::{
@@ -43,6 +44,8 @@ pub(in crate::api::endpoints::hls_api) struct HlsEntryOriginAccountReservation {
     pub(in crate::api::endpoints::hls_api) selected_provider_config: Option<Arc<RuntimeProviderConfig>>,
 }
 
+/// Reserves a provider account for an HLS entry and selects its stream URL; a Stalker entry resolves a fresh link for
+/// the allocated account. Returns `None` and releases the slot when no account or URL is available.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_account_for_redirect(
     app_state: &Arc<AppState>,
@@ -58,6 +61,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
     create_user_session: bool,
+    stalker_stream: Option<(u32, StalkerStreamKind)>,
 ) -> Option<HlsEntryOriginAccountReservation> {
     let provider_handle = app_state.active_provider.acquire_connection_with_lease_for_session(
         &input.name,
@@ -72,9 +76,19 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return None;
     };
-    let Some((_provider_name, stream_url)) =
+    // A Stalker link is account-bound: resolve a fresh one for the allocated account.
+    let selected_stream = if input.input_type.is_stalker() {
+        match stalker_stream {
+            Some((provider_id, kind)) => {
+                resolve_stalker_stream_for_account(app_state, input, &provider_config.name, provider_id, kind, false)
+                    .await
+            }
+            None => None,
+        }
+    } else {
         select_provider_stream_url(request_url, input, &provider_config, false, &app_state.app_config).await
-    else {
+    };
+    let Some((_provider_name, stream_url)) = selected_stream else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle));
         return None;
     };
@@ -113,6 +127,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     })
 }
 
+/// Admits the virtual HLS entry and reserves its origin account; `false` when admission or reservation fails.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     app_state: &Arc<AppState>,
@@ -182,6 +197,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_or
         connection_admission.permission(),
         connection_kind,
         false,
+        stalker_hls_stream(stream_identity.stream_ref(), false),
     )
     .await
     else {

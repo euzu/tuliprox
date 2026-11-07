@@ -654,7 +654,8 @@ pub(super) struct HlsVerifiedContentAnchor {
     round_lifetime: tokio_util::sync::CancellationToken,
     _standalone_round: Option<super::anchor_probe::HlsAnchorProbeRoundGuard>,
     _read_pin: HlsCommittedAcceptanceReadPin,
-    _file_pin: Arc<crate::HlsRevisionFilePin>,
+    /// `None` when `_revision` already pins the reference file.
+    _file_pin: Option<Arc<crate::HlsRevisionFilePin>>,
     _revision: Option<crate::SegmentRevisionGuard>,
     repair: Option<HlsPreparedGapRepair>,
 }
@@ -967,7 +968,7 @@ async fn capture_content_anchor_probe(
             session.origin_epoch, session.activity.origin_work_generation,
             request.attempt.as_ref().map_or_else(|| "none".to_string(), |attempt| attempt.remaining_attempts().to_string()));
         let entry = session.segments.get(&anchor.proxy_seq).ok_or_else(unavailable)?;
-        let (path, revision) = anchor_revision_path(&session, &anchor, &request.segment_cache);
+        let (path, revision, guarded) = anchor_revision_path(&session, &anchor, &request.segment_cache);
         let identity = super::anchor_probe::ProbeIdentity::new(
             &session,
             &anchor,
@@ -992,7 +993,7 @@ async fn capture_content_anchor_probe(
             let owner = super::anchor_probe::HlsAnchorProbeRoundGuard::standalone(1);
             (Arc::clone(&owner.0), Some(owner))
         };
-        let file_pin = round.pin_reference(&request.segment_cache, &path).map_err(|()| unavailable())?;
+        let file_pin = round.pin_reference(&request.segment_cache, &path, guarded).map_err(|()| unavailable())?;
         let proof = HlsVerifiedContentAnchor {
             generation,
             anchor,
@@ -1158,20 +1159,26 @@ fn log_current_anchor_reserve(request: &OriginRefreshRequest, generation: &HlsSw
         if reserve.is_some() { "current-lease-ready-reserve" } else { "no-active-lease-evidence" });
 }
 
+/// Returns the reference file path, the retained revision guard, and whether
+/// that guard already pins the returned path.
 fn anchor_revision_path(
     session: &crate::HlsSession,
     anchor: &super::origin_probe::HlsOriginContentAnchor,
     cache: &HlsSegmentCache,
-) -> (std::path::PathBuf, Option<crate::SegmentRevisionGuard>) {
+) -> (std::path::PathBuf, Option<crate::SegmentRevisionGuard>, bool) {
     let revision = session.startup.as_ref().and_then(|startup| startup.revisions.get(&anchor.proxy_seq)).cloned();
-    let path = revision
-        .as_ref()
-        .and_then(|guard| match &*guard.revision().subscribe().borrow() {
-            crate::SegmentRevisionState::Complete(metadata) => Some(metadata.path.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| cache.object_path(&anchor.cache_key));
-    (path, revision)
+    let completed = revision.as_ref().and_then(|guard| match &*guard.revision().subscribe().borrow() {
+        crate::SegmentRevisionState::Complete(metadata) => {
+            let pinned =
+                guard.revision().file_pin.lock_unpoisoned().as_ref().is_some_and(|pin| pin.covers(&metadata.path));
+            Some((metadata.path.clone(), pinned))
+        }
+        _ => None,
+    });
+    match completed {
+        Some((path, pinned)) => (path, revision, pinned),
+        None => (cache.object_path(&anchor.cache_key), revision, false),
+    }
 }
 
 pub(super) fn select_critical_handoff_lease(

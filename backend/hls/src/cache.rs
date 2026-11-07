@@ -232,7 +232,7 @@ pub struct HlsRevisionDiskReservation {
 }
 
 pub struct HlsRevisionFilePin {
-    _registration: Arc<ActiveTempFileRegistration>,
+    registration: Arc<ActiveTempFileRegistration>,
 }
 
 #[cfg(test)]

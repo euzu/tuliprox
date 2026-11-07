@@ -214,6 +214,10 @@
 
 ## 🌟 New Features
 
+- **Playlist stats show the full EPG source URL.** Each row in the EPG coverage source list now shows the configured
+  source URL below its short label, so sources on the same host are distinguishable. The URL is masked according to
+  `sanitize_sensitive_info`. The **Plugins** sidebar entry moved into the **Settings** group.
+
 - **Notifier plugins, next to the built-in channels.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and
   local commands are all still built into the server and configured under `messaging`, exactly as before. Each also exists
   as an optional plugin under `plugins/notifiers/<id>` (`make plugin-notifiers` builds them all), for anyone who wants
@@ -1444,6 +1448,22 @@
   metadata alone: it takes no scan slot and no file lock and does not open the database.
 
 ## 🐛 Fixes
+
+- **Shared HLS sessions continue on a healthy mirror after the active origin fails.** When the active origin
+  failed during playback, the content check against the alternative mirror tried to pin the reference segment
+  file a second time. A completed startup segment already holds that pin, so the check failed with
+  `switch-resource-unavailable` and the session never switched, even though the mirror served matching media.
+  The check now reuses the existing pin of the completed segment. Content comparison is unchanged.
+
+- **Stalker aliases now play with their own MAC and session.** An alias with its own MAC received the main
+  account's resolved URL, so playback ran on the main account's MAC instead of the allocated alias. Playback now
+  uses the alias's own `create_link` result, and a 4xx refresh re-resolves with the allocated account. The link
+  cache and resolve serialization are keyed per account. HLS playlist refreshes resolve a fresh link for the
+  pinned account instead of rewriting the stored URL. When the portal rejects a cached link on a playlist refresh
+  (4xx or a body that is no playlist), tuliprox requests one fresh `create_link` for the same account, retries once
+  and binds the session to the new link. The retry sends the session cookie of the new link's host, not the old one.
+  Timeouts, 5xx, 408, 429 and 407 do not trigger an extra portal call. A replayed alias URL stays bound to its alias
+  when the account pin is cleared; another account resolves its own link.
 
 - **CDN playback failover and recovery preserve provider bindings across all streams.** For inputs configuring
   `playback_provider`, standard HLS, catchup, and archive streams retain their provider profiles and query parameters,

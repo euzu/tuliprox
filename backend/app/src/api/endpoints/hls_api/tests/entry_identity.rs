@@ -539,6 +539,7 @@ async fn hls_entry_origin_reservation_blocks_foreign_sessions_only_after_media_c
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
         false,
+        None,
     )
     .await
     .expect("provider reservation should be acquired before provisioning redirect");
@@ -678,6 +679,7 @@ async fn hls_entry_origin_reservation_uses_persisted_alias_manifest_url() {
         UserConnectionPermission::Allowed,
         ConnectionKind::Normal,
         false,
+        None,
     )
     .await
     .expect("alias provider reservation should succeed");

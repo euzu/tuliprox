@@ -1,14 +1,15 @@
 use super::{
-    activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
+    accepts_requested_stream_url, activate_session_before_stream_open, admission_failure_response, blocks_new_playback,
     cleanup_failed_detected_catchup_hls, connection_priority_for_kind, create_stream_response_details,
     detected_catchup_hls_response, get_session_reservation_ttl_secs, get_stream_options,
     is_socket_bound_playback_session, is_stream_share_enabled, mark_response_as_uncompressed,
     no_custom_video_fallback_status, prepare_body_stream, prepare_stream_metering, probe_catchup_payload,
     record_connect_failed_attempt, reentry_suppressed_response, resolve_request_url_for_logging,
-    resolve_xtream_vod_provider_url, select_provider_stream_url, should_pin_provider_for_session,
-    stream_admission_rejected_response, try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload,
-    ConnectFailedAttempt, DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass,
-    SessionActivationRequest, StreamResponseMode, StreamingAcquireOptions, LEASE_EXPIRY_RECHECK_FLOOR,
+    resolve_stalker_stream_for_account, resolve_xtream_vod_provider_url, select_provider_stream_url,
+    should_pin_provider_for_session, stalker_stream_kind, stream_admission_rejected_response,
+    try_shared_stream_response_if_any, try_unwrap_body, CatchupPayload, ConnectFailedAttempt,
+    DetectedCatchupHlsResponseParams, ExactProviderAcquire, PlaybackRequestClass, SessionActivationRequest,
+    StreamResponseMode, StreamingAcquireOptions, LEASE_EXPIRY_RECHECK_FLOOR,
 };
 use crate::{
     api::model::{
@@ -33,6 +34,7 @@ use shared::{
 use std::{borrow::Cow, sync::Arc, time::Duration};
 use tuliprox_session::ProviderSessionHeaders;
 
+/// Custom channel-unavailable response for a stream URL that maps to no account of the allocated provider.
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
         response: create_channel_unavailable_stream(app_config, &[], StatusCode::OK),
@@ -119,6 +121,8 @@ pub(super) async fn acquire_exact_stream_provider_handle(
     acquire_exact_provider_handle(app_state, &request, options.capacity_wait_timeout).await
 }
 
+/// Acquires a provider slot for a stream: the forced provider first, then lineup allocation when fallback is
+/// allowed. Without a forced provider the lineup decides.
 pub(super) async fn acquire_stream_provider_handle(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
@@ -175,6 +179,7 @@ pub(super) async fn acquire_stream_provider_handle(
     }
 }
 
+/// Returns `true` for VOD and series items, whose streams may fail over to another account of the provider pool.
 pub(super) fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool {
     matches!(
         item_type,
@@ -187,6 +192,8 @@ pub(super) fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool
     )
 }
 
+/// Allocates (or takes over) a provider connection and selects the stream URL for the allocated account. A Stalker
+/// URL owned by another account is replaced by a freshly resolved link for the allocated account.
 pub(super) async fn resolve_streaming_strategy_with_provider_handle(
     app_state: &Arc<AppState>,
     stream_url: &str,
@@ -221,23 +228,45 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
                 // it must be resolved or rewritten for the newly allocated provider account.
                 // Media-server stream refs of media-server inputs are accepted by `select_provider_stream_url`
                 // itself; native media-server URLs are no longer accepted unchecked and must match the provider.
-                let accept_requested_stream_url = (options.accept_requested_stream_url
-                    || input.input_type.is_stalker())
-                    && options.force_provider.is_none_or(|forced| forced.as_ref() == provider_cfg.name.as_ref());
-                // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
-                // alias URLs in persisted playlists until the next processing run.
-                let selected_stream = select_provider_stream_url(
-                    stream_url,
+                let accept_requested_stream_url = accepts_requested_stream_url(
                     input,
-                    provider_cfg,
-                    accept_requested_stream_url,
-                    &app_state.app_config,
-                )
-                .await
-                .or_else(|| {
-                    let url = resolve_xtream_vod_provider_url(stream_url, input, provider_cfg, stream_channel?)?;
-                    Some((Arc::clone(&provider_cfg.name), url))
-                });
+                    options.force_provider,
+                    options.stream_url_owner,
+                    options.accept_requested_stream_url,
+                    &provider_cfg.name,
+                );
+                let selected_stream = if input.input_type.is_stalker() && !accept_requested_stream_url {
+                    // A Stalker URL is account-bound (MAC/session): resolve a fresh link for the allocated account.
+                    match stream_channel {
+                        Some(channel) => {
+                            resolve_stalker_stream_for_account(
+                                app_state,
+                                input,
+                                &provider_cfg.name,
+                                channel.provider_id,
+                                stalker_stream_kind(channel.cluster, channel.item_type),
+                                false,
+                            )
+                            .await
+                        }
+                        None => None,
+                    }
+                } else {
+                    // Keep the URL only when it already targets the selected provider account. Hot reload can leave
+                    // old alias URLs in persisted playlists until the next processing run.
+                    select_provider_stream_url(
+                        stream_url,
+                        input,
+                        provider_cfg,
+                        accept_requested_stream_url,
+                        &app_state.app_config,
+                    )
+                    .await
+                    .or_else(|| {
+                        let url = resolve_xtream_vod_provider_url(stream_url, input, provider_cfg, stream_channel?)?;
+                        Some((Arc::clone(&provider_cfg.name), url))
+                    })
+                };
                 if let Some((selected_provider_name, url)) = selected_stream {
                     debug_if_enabled!(
                         "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
@@ -287,6 +316,8 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
     }
 }
 
+/// Admits the user session, allocates a provider connection and builds the client stream response.
+///
 /// # Panics
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn stream_response_with_provider_handle(
@@ -436,6 +467,11 @@ pub(crate) async fn stream_response_with_provider_handle(
 
     let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
     let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+    // A replayed session URL stays owned by the session account, even when the pin below is cleared.
+    let stream_url_owner = session_state
+        .as_ref()
+        .filter(|session| !session.provider.is_empty() && session.stream_url.as_ref() == stream_url)
+        .map(|session| Arc::clone(&session.provider));
     let pinned_provider = pinned_provider.filter(|provider| {
         item_type.is_live()
             || session_state
@@ -463,6 +499,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         share_stream,
         connection_permission,
         pinned_provider,
+        stream_url_owner.as_ref(),
         pinned_provider.is_none() || allows_provider_pool_failover(item_type),
         true,
         VirtualId::new(stream_channel.virtual_id),

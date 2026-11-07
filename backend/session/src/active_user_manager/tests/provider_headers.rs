@@ -1,6 +1,6 @@
 use super::{
     create_provider_header_session, provider_header_test_manager, session_identity, ActiveUserManager,
-    CreateUserSessionParams, SessionProviderHeaders,
+    CreateUserSessionParams, SessionIdentity, SessionProviderHeaders,
 };
 use crate::{active_provider_manager::ConnectionKind, EventManager};
 use arc_swap::ArcSwapOption;
@@ -335,4 +335,87 @@ pub(in crate::active_user_manager::tests) async fn store_cookie_header(
             .collect(),
     };
     manager.update_session_provider_response_headers_from(username, "tok-host", &response, source_url).await
+}
+
+#[tokio::test]
+async fn update_current_session_stream_url_updates_url_and_clears_headers_when_identity_matches() {
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-update-stream-url".to_string();
+    let initial_url = "http://origin.example/live.m3u8";
+    create_provider_header_session(&manager, &user, initial_url).await;
+
+    let identity = session_identity(&manager, &user.username, "tok-host").await.expect("session should exist");
+    let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
+    assert!(manager.update_session_provider_headers(&user.username, "tok-host", &headers).await);
+
+    let fresh_url = "http://fresh.example/live.m3u8";
+    assert!(manager.update_current_session_stream_url(&user.username, "tok-host", identity, fresh_url).await);
+
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session should exist");
+    assert_eq!(session.stream_url.as_ref(), fresh_url);
+    assert!(session.provider_session_headers.is_empty());
+    assert!(session.provider_session_headers_host.is_none());
+    assert_eq!(session.identity(), identity);
+
+    // Same-host URL update preserves provider headers (matching create_user_session semantics).
+    let same_host_url = "http://fresh.example/live-variant.m3u8";
+    let fresh_headers = HashMap::from([(String::from("cookie"), String::from("sid=fresh"))]);
+    assert!(manager.update_session_provider_headers(&user.username, "tok-host", &fresh_headers).await);
+    assert!(manager.update_current_session_stream_url(&user.username, "tok-host", identity, same_host_url).await);
+
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session should exist");
+    assert_eq!(session.stream_url.as_ref(), same_host_url);
+    assert_eq!(session.provider_session_headers, fresh_headers);
+}
+
+#[tokio::test]
+async fn update_current_session_stream_url_no_op_when_identity_differs() {
+    let manager = provider_header_test_manager();
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-update-stream-url-diff-id".to_string();
+    let initial_url = "http://origin.example/live.m3u8";
+    create_provider_header_session(&manager, &user, initial_url).await;
+
+    let identity = session_identity(&manager, &user.username, "tok-host").await.expect("session should exist");
+    let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
+    assert!(manager.update_session_provider_headers(&user.username, "tok-host", &headers).await);
+
+    let stale_identity = SessionIdentity {
+        incarnation: identity.incarnation,
+        binding_generation: identity.binding_generation.wrapping_add(1),
+    };
+    let fresh_url = "http://fresh.example/live.m3u8";
+    assert!(!manager.update_current_session_stream_url(&user.username, "tok-host", stale_identity, fresh_url).await);
+
+    let session = manager.get_and_update_user_session(&user.username, "tok-host").await.expect("session should exist");
+    assert_eq!(session.stream_url.as_ref(), initial_url);
+    assert_eq!(session.provider_session_headers, headers);
+    assert_eq!(session.identity(), identity);
+}
+
+#[tokio::test]
+async fn update_current_session_stream_url_returns_false_for_missing_session() {
+    let manager = provider_header_test_manager();
+    let dummy_identity = SessionIdentity { incarnation: 1, binding_generation: 0 };
+    let fresh_url = "http://fresh.example/live.m3u8";
+
+    // Non-existent user
+    assert!(
+        !manager.update_current_session_stream_url("nonexistent-user", "tok-host", dummy_identity, fresh_url).await
+    );
+
+    // Existing user, non-existent token
+    let mut user = ProxyUserCredentials::default();
+    user.username = "user-update-missing-tok".to_string();
+    create_provider_header_session(&manager, &user, "http://origin.example/live.m3u8").await;
+
+    assert!(
+        !manager.update_current_session_stream_url(&user.username, "nonexistent-tok", dummy_identity, fresh_url).await
+    );
+
+    // Ended session
+    let identity = session_identity(&manager, &user.username, "tok-host").await.expect("session should exist");
+    manager.mark_session_ended("tok-host").await;
+    assert!(!manager.update_current_session_stream_url(&user.username, "tok-host", identity, fresh_url).await);
 }

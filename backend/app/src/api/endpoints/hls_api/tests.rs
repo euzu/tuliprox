@@ -83,6 +83,7 @@ mod origin_restart;
 mod owner_token;
 mod reduced_retry;
 mod same_account_resume;
+mod stalker_manifest;
 
 mod archive;
 mod bandwidth;
