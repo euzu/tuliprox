@@ -37,6 +37,11 @@ pub struct InputProps {
     pub required: bool,
     #[prop_or_default]
     pub error: Option<String>,
+    /// The `type` of the input when it is not `hidden`, e.g. `email`, `url`, `color`; `text` when unset.
+    #[prop_or_default]
+    pub input_type: Option<String>,
+    #[prop_or_default]
+    pub max_length: Option<u32>,
 }
 
 #[component]
@@ -89,12 +94,14 @@ pub fn Input(props: &InputProps) -> Html {
             <input
                 id={resolved_field_id}
                 ref={local_ref.clone()}
-                type={if *hide_content { "password".to_string() } else { "text".to_string() }}
+                type={if *hide_content { "password".to_string() } else { props.input_type.clone().unwrap_or_else(|| "text".to_string()) }}
+                maxlength={props.max_length.map(|max| max.to_string())}
                 name={props.name.clone()}
                 autocomplete={if props.autocomplete { "on".to_string() } else { "off".to_string() }}
                 onkeydown={props.onkeydown.clone()}
                 oninput={handle_oninput}
                 placeholder={props.placeholder.clone()}
+                required={props.required}
                 aria-label={aria_label}
                 aria-required={props.required.then(|| "true".to_string())}
                 aria-invalid={props.error.as_ref().map(|_| "true".to_string())}

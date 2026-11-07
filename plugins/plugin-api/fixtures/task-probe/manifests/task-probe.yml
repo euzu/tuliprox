@@ -1,0 +1,24 @@
+# Three tasks of one `tasks.run` export. `ok` queues, `fail` and `slow` keep the
+# default concurrency (skip), so a test can tell the two policies apart.
+id: task-probe
+name: Task probe (ok, fail, slow)
+version: 0.1.0
+api_version: 1
+capabilities:
+  storage: true
+hooks:
+  - tasks.run
+tasks:
+  - id: ok
+    title: Counter
+    concurrency: queue
+  - id: fail
+    title: Always fails
+  - id: slow
+    title: Busy for about three seconds
+    max_exec_ms: 10000
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

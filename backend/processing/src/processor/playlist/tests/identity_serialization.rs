@@ -8,7 +8,7 @@ use shared::{
     foundation::{get_filter, MapperScript},
     model::{
         ClusterFlags, ConfigRenameDto, ConfigTargetDto, EventMessage, FieldSetAccessor, InputType, ItemField,
-        M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        M3uPlaylistItem, NoPlugins, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
         PlaylistUpdateRunId, PlaylistUpdateRunOrder, PlaylistUpdateState, XtreamCluster, XtreamPlaylistItem,
     },
     utils::Internable,
@@ -185,8 +185,8 @@ fn mapper_cannot_resurrect_missing_legacy_input_stream_id_from_target_id() {
     assert_eq!(materialized_xtream.get_input_stream_id(), None);
 }
 
-#[test]
-fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
+#[tokio::test]
+async fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let input = ConfigInput::default();
     let item = PlaylistItem { header: PlaylistItemHeader { id: "origin-alpha".intern(), ..Default::default() } };
     let source = MemoryPlaylistSource::new(vec![PlaylistGroup {
@@ -200,8 +200,10 @@ fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
     let mut duplicates = HashSet::new();
     let target = ConfigTarget::from(&ConfigTargetDto::default());
 
-    let (mut processed, _outcome) = execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None, None)
-        .expect("target processing should succeed");
+    let (mut processed, _outcome) =
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, None, &NoPlugins, None)
+            .await
+            .expect("target processing should succeed");
     let mut groups = processed.source.take_groups();
 
     assert_eq!(groups[0].channels[0].header.input_stream_id.as_ref(), "origin-alpha");

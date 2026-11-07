@@ -1,6 +1,6 @@
 use crate::app::components::{
-    BlockId, BlockType, EditMode, HdHomeRunTargetOutputView, M3uTargetOutputView, SourceEditorContext,
-    StrmTargetOutputView, XtreamTargetOutputView,
+    BlockId, BlockType, EditMode, HdHomeRunTargetOutputView, M3uTargetOutputView, PluginTargetOutputView,
+    SourceEditorContext, StrmTargetOutputView, XtreamTargetOutputView,
 };
 use shared::model::TargetOutputDto;
 use std::rc::Rc;
@@ -30,6 +30,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
             | BlockType::InputPlex
             | BlockType::InputStalker
             | BlockType::InputStaged
+            | BlockType::InputPlugin
             | BlockType::Target => html! {},
             BlockType::OutputM3u => {
                 let output = props.output.as_ref().and_then(|to| {
@@ -74,6 +75,17 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
                 });
 
                 html! { <StrmTargetOutputView block_id={block_id} output={output} allow_write={props.allow_write} /> }
+            }
+            BlockType::OutputPlugin => {
+                let output = props.output.as_ref().and_then(|to| {
+                    if let TargetOutputDto::Plugin(plugin) = &**to {
+                        Some(Rc::new(plugin.clone()))
+                    } else {
+                        None
+                    }
+                });
+
+                html! { <PluginTargetOutputView block_id={block_id} output={output} allow_write={props.allow_write} /> }
             }
         },
         EditMode::Inactive => html! {},

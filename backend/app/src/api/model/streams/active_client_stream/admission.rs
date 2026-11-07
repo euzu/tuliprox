@@ -1,8 +1,9 @@
 use super::{
-    create_deferred_provider_open_future, create_timed_stream_context, resolve_grace_period_provisioning,
-    should_use_direct_body_idle_timeout, stream_grace_period, wrap_timed_client_stream_if_needed, ActiveClientStream,
-    ActiveClientStreamParams, CustomVideoBuffers, DeferredProviderOpenState, DirectBodyIdleTimeout,
-    GraceProvisioningInfo, StreamAdmissionError, StreamMode, TimedStreamContext,
+    create_deferred_provider_open_future, create_timed_stream_context, deferred_open_plugin_headers,
+    resolve_grace_period_provisioning, should_use_direct_body_idle_timeout, stream_grace_period,
+    wrap_timed_client_stream_if_needed, ActiveClientStream, ActiveClientStreamParams, CustomVideoBuffers,
+    DeferredProviderOpenState, DirectBodyIdleTimeout, GraceProvisioningInfo, StreamAdmissionError, StreamMode,
+    TimedStreamContext,
 };
 use crate::{
     api::model::{
@@ -277,8 +278,16 @@ pub(crate) async fn create_active_client_stream(
     // Compute deferred-open metadata before taking the handle: the grace snapshot only
     // needs the provider identity, while the body owns the actual release.
     let has_deferred_open = stream_details.has_deferred_provider_open();
-    let deferred_provider_open =
-        create_deferred_provider_open_future(app_state, &stream_details, fingerprint, &stream_channel, req_headers);
+    let deferred_plugin_headers =
+        deferred_open_plugin_headers(app_state, &stream_details, &stream_channel, &user.username).await;
+    let deferred_provider_open = create_deferred_provider_open_future(
+        app_state,
+        &stream_details,
+        fingerprint,
+        &stream_channel,
+        req_headers,
+        deferred_plugin_headers.as_deref(),
+    );
     let timed_stream_context = deferred_provider_open
         .as_ref()
         .and_then(|_| create_timed_stream_context(app_state, VirtualId::new(virtual_id)));

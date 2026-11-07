@@ -76,6 +76,11 @@ pub const MAINTENANCE_CHANGED: EventId = EventId::new("maintenance.changed");
 // ---- scheduler -------------------------------------------------------
 pub const SCHEDULED_TASK_FAILED: EventId = EventId::new("scheduled_task.failed");
 
+// ---- plugins ---------------------------------------------------------
+pub const PLUGIN_UPDATE_AVAILABLE: EventId = EventId::new("plugin.update.available");
+pub const PLUGIN_UPDATE_APPLIED: EventId = EventId::new("plugin.update.applied");
+pub const PLUGIN_UPDATE_FAILED: EventId = EventId::new("plugin.update.failed");
+
 // ---- notification self-reporting ------------------------------------
 /// A notification was permanently lost. Must never route back through
 /// the channel that dropped it.
@@ -267,6 +272,21 @@ pub const ALL: &[EventDescriptor] = &[
             id: SCHEDULED_TASK_FAILED,
             severity: Severity::Error,
             description: "A scheduled task could not complete.",
+        },
+        EventDescriptor {
+            id: PLUGIN_UPDATE_AVAILABLE,
+            severity: Severity::Info,
+            description: "A plugin update is staged and waits for an admin.",
+        },
+        EventDescriptor {
+            id: PLUGIN_UPDATE_APPLIED,
+            severity: Severity::Info,
+            description: "A plugin was updated to a newer release.",
+        },
+        EventDescriptor {
+            id: PLUGIN_UPDATE_FAILED,
+            severity: Severity::Warn,
+            description: "A plugin update was rejected or rolled back; the previous version still runs.",
         },
         EventDescriptor {
             id: NOTIFICATION_DEAD_LETTERED,

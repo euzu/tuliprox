@@ -1,4 +1,7 @@
-use super::{apply_request_fetch_options, create_client, provider_start_index, RequestFetchOptions};
+use super::{
+    apply_request_fetch_options, create_client, enforce_request_transport_limits, provider_start_index,
+    RequestFetchOptions,
+};
 use crate::model::{resolve_provider_scheme_url_with_provider_index, AppConfig, ConfigProvider};
 use log::debug;
 use reqwest::header::{HeaderValue, HOST};
@@ -21,6 +24,7 @@ pub(super) fn prepare_physical_request_attempt(
     })?;
     apply_attempt_to_request(&mut request, target)?;
     apply_request_fetch_options(&mut request, options);
+    enforce_request_transport_limits(&request, options)?;
     Ok((base_client, request))
 }
 

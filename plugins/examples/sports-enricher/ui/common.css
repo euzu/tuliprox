@@ -1,0 +1,38 @@
+/* Shared by the three Sports Enricher frames. The frame CSP allows 'self' styles and images from 'self'
+   or data: only, so there are no web fonts and no remote logos: sports are shown as emoji. */
+:root {
+  --se-text: var(--theme-brand-text, #1f2933);
+  --se-muted: var(--theme-brand-text-muted, #637381);
+  --se-border: var(--theme-brand-border, #d5dbe1);
+  --se-accent: var(--theme-brand-primary, #2a6fdb);
+  --se-surface: var(--theme-brand-surface-soft, rgba(127, 127, 127, 0.1));
+  --se-positive: var(--theme-brand-positive, #1c8a4d);
+  --se-warning: var(--theme-brand-warning, #b7791f);
+  --se-radius: var(--border-radius, 6px);
+}
+html, body { margin: 0; padding: 0; background: transparent; }
+body {
+  padding: 10px 12px;
+  color: var(--se-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: var(--font-size-base, 14px);
+}
+h1 { margin: 0 0 8px; font-size: 1.25em; }
+h2 { margin: 12px 0 4px; font-size: 1em; }
+.muted { color: var(--se-muted); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+.notice { padding: 8px 10px; border: 1px solid var(--se-border); border-radius: var(--se-radius); background: var(--se-surface); }
+.notice.warn { border-color: var(--se-warning); }
+select, button {
+  font: inherit; color: inherit; padding: 4px 10px; border: 1px solid var(--se-border);
+  border-radius: var(--se-radius); background: transparent; cursor: pointer;
+}
+button.primary { border-color: var(--se-accent); color: var(--se-accent); }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 8px; text-align: start; border-bottom: 1px solid var(--se-border); vertical-align: top; }
+th { color: var(--se-muted); font-weight: 600; font-size: 0.85em; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.8em; border: 1px solid var(--se-border); }
+.pill.live { border-color: var(--se-positive); color: var(--se-positive); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 6px 0; }
+dt { color: var(--se-muted); }
+dd { margin: 0; }

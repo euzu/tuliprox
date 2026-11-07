@@ -1,0 +1,20 @@
+# The registry rejects a component whose exports are not all used by a hook,
+# so every scenario manifest declares all of them; the settings pick the
+# scenario, and a hook without its setting changes nothing.
+id: epg-probe-load
+name: EPG probe (on-epg-loaded rename)
+version: 0.1.0
+api_version: 1
+capabilities:
+  epg_write: true
+hooks:
+  - epg.loaded
+  - epg.transform-programmes
+  - epg.enrich-programmes
+  - epg.match-channel
+  - playlist.enrich-metadata
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

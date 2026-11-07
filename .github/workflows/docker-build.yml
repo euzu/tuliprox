@@ -36,7 +36,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
 
       - name: Install Rust Tools (Binaries)
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: cross,trunk,wasm-bindgen-cli,cargo-edit,mdbook
 
@@ -44,7 +44,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,wasm32-unknown-unknown,wasm32-wasip2
 
       - name: Install wasm tools 128
         run: |
@@ -108,7 +108,11 @@ jobs:
             *) echo "Unsupported release branch: $RELEASE_BRANCH" >&2; exit 1 ;;
           esac
           echo "🛠️ Set version v$major.$minor.$patch (was v$current)"
-          cargo set-version "$major.$minor.$patch"
+          # The plugin API, SDK and SDK macros carry their own version (the plugin contract), so a
+          # tuliprox release never changes them and the plugin crates' Cargo.lock files stay valid.
+          cargo set-version --workspace \
+            --exclude tuliprox-plugin-api --exclude tuliprox-plugin-sdk --exclude tuliprox-plugin-sdk-macros \
+            "$major.$minor.$patch"
 
       - name: Read project version
         id: version
@@ -216,7 +220,7 @@ jobs:
               listing=$(tar -tzf "${artifact}")
               binary=tuliprox/tuliprox
             fi
-            for required_path in "$binary" tuliprox/web/ tuliprox/resources/; do
+            for required_path in "$binary" tuliprox/web/ tuliprox/resources/ tuliprox/plugins/; do
               grep -qx "${required_path}" <<< "${listing}"
             done
           done

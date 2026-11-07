@@ -45,29 +45,29 @@ metadata_update:
 
 ### Global System & Storage Settings (Flat Keys)
 
-| Parameter                             | Type   | Required | Default                | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-|:--------------------------------------|:-------|:--------:|:-----------------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `process_parallel`                    | Bool   |    No    | `false`                | Enables dependency-aware parallel updates. Inputs from the same source and independent sources may download concurrently. A source's targets start as soon as all of its enabled inputs are ready; disjoint target outputs may then finalize concurrently. With `false`, inputs and targets keep configured sequential order. Use `inputs[].sequential_group` to serialize credentials that must never overlap.                                                                                                                                             |
-| `disk_based_processing`               | Bool   |    No    | `false`                | **Tradeoff Guidance:** Normally, Tuliprox loads playlists into RAM. With `true`, every chunk is manipulated directly on disk (using a B+Tree database). **Use this on low-end hardware (e.g., Raspberry Pi) or with massive playlists (>500k streams)** to prevent Out-Of-Memory crashes. It significantly increases Disk I/O load, so it is slower but much safer for tight memory footprints.                                                                                                                                                             |
-| `storage_dir`                         | String |    No    | `./data`               | Root directory for all runtime data (B+Tree databases, downloads, caches). Relative paths are resolved against the Tuliprox Home Directory. Be aware that different configurations (e.g. user bouquets) alongside the playlists are stored in this directory.                                                                                                                                                                                                                                                                                               |
-| `default_user_agent`                  | String |    No    | `Tuliprox/...`         | Fallback HTTP `User-Agent` used for upstream provider requests if the input definition or client request does not explicitly provide one.                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `backup_dir`                          | String |    No    | `{storage_dir}/backup` | Storage location for config backups (e.g., triggered via "Save Configuration" in the Web UI).                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `user_config_dir`                     | String |    No    | `{storage_dir}/user`   | Storage location for user-specific configurations (like favorites or custom bouquets created via the Web UI).                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `mapping_path`                        | String |    No    | `mapping.yml`          | Path to the mapping file. **Pro-Tip:** If you specify a folder path here (e.g., `./config/mappings/`), Tuliprox loads *all* `.yml` files in that folder in **alphanumeric** order and merges them. Note: This is a lexicographic sort, meaning `m_10.yml` comes before `m_2.yml`. Name files carefully (e.g., `m_01.yml`, `m_02.yml`).                                                                                                                                                                                                                      |
-| `template_path`                       | String |    No    | `template.yml`         | Path to the template macro file. Specifying a folder here is also possible and highly recommended (see above).                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `update_on_boot`                      | Bool   |    No    | `false`                | Forces Tuliprox to immediately query all providers and rebuild all playlists upon startup. If `false`, the proxy serves the local DB cache from the last run until the scheduler triggers the next update.                                                                                                                                                                                                                                                                                                                                                  |
-| `config_hot_reload`                   | Bool   |    No    | `false`                | Spawns a filesystem watcher for `mapping.yml` and `api-proxy.yml`. Upon saving, mappings and user credentials become active immediately *without* requiring a server restart. **(See Bind-Mount Note below)**                                                                                                                                                                                                                                                                                                                                               |
-| `accept_insecure_ssl_certificates`    | Bool   |    No    | `false`                | Set to `true` if your upstream provider uses expired, self-signed, or improperly configured HTTPS certificates. Otherwise, the HTTP client drops the connection securely.                                                                                                                                                                                                                                                                                                                                                                                   |
-| `sleep_timer_mins`                    | Int    |    No    | `null`                 | Automatic kill-switch for proxied streams. Forcibly terminates active stream connections after X minutes (Protects against users falling asleep with the TV on).                                                                                                                                                                                                                                                                                                                                                                                            |
-| `connect_timeout_secs`                | Int    |    No    | `10`                   | Maximum time (in seconds) Tuliprox waits to establish the initial TCP connection to a provider. `0` disables the timeout and the connection attempt continues until the provider closes it or a network timeout occurs (Warning: risk of hanging threads!).                                                                                                                                                                                                                                                                                                 |
-| `interner_gc_interval_secs`           | Int    |    No    | `180`                  | Interval in seconds between background string interner garbage-collection checks. Lower values reclaim unused interned strings sooner, but run the GC gate more often. Higher values reduce GC overhead, but can retain more memory for longer. Must be greater than `0`.                                                                                                                                                                                                                                                                                   |
-| `interner_gc_min_pool_size`           | Int    |    No    | `100`                  | Minimum number of interned strings required before the background interner GC runs. This avoids paying the interner write-lock cost when the pool is very small. Lower values favor aggressive cleanup; higher values favor throughput and lower lock contention at the cost of extra retained memory.                                                                                                                                                                                                                                                      |
-| `event_channel_capacity`              | Int    |    No    | `256`                  | Buffer depth of the in-process event broadcast channel, per subscriber. Every runtime event — playlist-update progress, config reloads, download deltas, recording changes — passes through it on the way to the Web UI websocket and the notification pipeline. A subscriber that falls this many events behind is told it lagged and resumes from the newest event, having missed the gap; the Web UI recovers by re-requesting a status snapshot. Raise it if the bus reports lag under load. `0` is clamped to `1`.                                     |
-| `user_access_control`                 | Bool   |    No    | `false`                | **Security:** If `true`, Tuliprox actively enforces `status` (Active/Banned), `exp_date`, and `max_connections` constraints for users defined in `api-proxy.yml`. If false, those fields are ignored.                                                                                                                                                                                                                                                                                                                                                       |
-| `custom_stream_response_path`         | String |    No    | `null`                 | Directory path where Tuliprox looks for custom fallback `.ts` files. See section [Custom Stream Response](#custom-stream-responses-fallback-videos) for exact filenames.                                                                                                                                                                                                                                                                                                                                                                                    |
-| `custom_stream_response_timeout_secs` | Int    |    No    | `0`                    | Hard timeout (in seconds) that forces the fallback video stream to terminate to prevent infinite bandwidth usage. `0` means endless loop.                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `custom_stream_response_enabled`      | Bool   |    No    | `true`                 | Enables configured custom MPEG-TS fallback videos for stream errors. When `false`, factories skip the video body and call sites return `custom_stream_response_error_status`; useful behind reverse proxies that intercept 4xx/5xx responses instead of keeping fallback sockets open.                                                                                                                                                                                                                                                                      |
-| `custom_stream_response_error_status` | Int    |    No    | `502`                  | HTTP status code returned when `custom_stream_response_enabled` is `false`. Must be a 4xx or 5xx code (the `prepare()` step rejects anything outside that range; `0` is silently clamped to `502`). Common choices: `404` (channel not found), `502` (bad gateway — upstream failed), `503` (service unavailable — overloaded).                                                                                                                                                                                                                             |
+| Parameter                             | Type   | Required | Default                | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| :------------------------------------ | :----- | :------: | :--------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `process_parallel`                    | Bool   | No       | `false`                | Enables dependency-aware parallel updates. Inputs from the same source and independent sources may download concurrently. A source's targets start as soon as all of its enabled inputs are ready; disjoint target outputs may then finalize concurrently. With `false`, inputs and targets keep configured sequential order. Use `inputs[].sequential_group` to serialize credentials that must never overlap.                                                                                                         |
+| `disk_based_processing`               | Bool   | No       | `false`                | **Tradeoff Guidance:** Normally, Tuliprox loads playlists into RAM. With `true`, every chunk is manipulated directly on disk (using a B+Tree database). **Use this on low-end hardware (e.g., Raspberry Pi) or with massive playlists (>500k streams)** to prevent Out-Of-Memory crashes. It significantly increases Disk I/O load, so it is slower but much safer for tight memory footprints.                                                                                                                         |
+| `storage_dir`                         | String | No       | `./data`               | Root directory for all runtime data (B+Tree databases, downloads, caches). Relative paths are resolved against the Tuliprox Home Directory. Be aware that different configurations (e.g. user bouquets) alongside the playlists are stored in this directory.                                                                                                                                                                                                                                                           |
+| `default_user_agent`                  | String | No       | `Tuliprox/...`         | Fallback HTTP `User-Agent` used for upstream provider requests if the input definition or client request does not explicitly provide one.                                                                                                                                                                                                                                                                                                                                                                               |
+| `backup_dir`                          | String | No       | `{storage_dir}/backup` | Storage location for config backups (e.g., triggered via "Save Configuration" in the Web UI).                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `user_config_dir`                     | String | No       | `{storage_dir}/user`   | Storage location for user-specific configurations (like favorites or custom bouquets created via the Web UI).                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `mapping_path`                        | String | No       | `mapping.yml`          | Path to the mapping file. **Pro-Tip:** If you specify a folder path here (e.g., `./config/mappings/`), Tuliprox loads *all* `.yml` files in that folder in **alphanumeric** order and merges them. Note: This is a lexicographic sort, meaning `m_10.yml` comes before `m_2.yml`. Name files carefully (e.g., `m_01.yml`, `m_02.yml`).                                                                                                                                                                                  |
+| `template_path`                       | String | No       | `template.yml`         | Path to the template macro file. Specifying a folder here is also possible and highly recommended (see above).                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `update_on_boot`                      | Bool   | No       | `false`                | Forces Tuliprox to immediately query all providers and rebuild all playlists upon startup. If `false`, the proxy serves the local DB cache from the last run until the scheduler triggers the next update.                                                                                                                                                                                                                                                                                                              |
+| `config_hot_reload`                   | Bool   | No       | `false`                | Spawns a filesystem watcher for `mapping.yml` and `api-proxy.yml`. Upon saving, mappings and user credentials become active immediately *without* requiring a server restart. **(See Bind-Mount Note below)**                                                                                                                                                                                                                                                                                                           |
+| `accept_insecure_ssl_certificates`    | Bool   | No       | `false`                | Set to `true` if your upstream provider uses expired, self-signed, or improperly configured HTTPS certificates. Otherwise, the HTTP client drops the connection securely.                                                                                                                                                                                                                                                                                                                                               |
+| `sleep_timer_mins`                    | Int    | No       | `null`                 | Automatic kill-switch for proxied streams. Forcibly terminates active stream connections after X minutes (Protects against users falling asleep with the TV on).                                                                                                                                                                                                                                                                                                                                                        |
+| `connect_timeout_secs`                | Int    | No       | `10`                   | Maximum time (in seconds) Tuliprox waits to establish the initial TCP connection to a provider. `0` disables the timeout and the connection attempt continues until the provider closes it or a network timeout occurs (Warning: risk of hanging threads!).                                                                                                                                                                                                                                                             |
+| `interner_gc_interval_secs`           | Int    | No       | `180`                  | Interval in seconds between background string interner garbage-collection checks. Lower values reclaim unused interned strings sooner, but run the GC gate more often. Higher values reduce GC overhead, but can retain more memory for longer. Must be greater than `0`.                                                                                                                                                                                                                                               |
+| `interner_gc_min_pool_size`           | Int    | No       | `100`                  | Minimum number of interned strings required before the background interner GC runs. This avoids paying the interner write-lock cost when the pool is very small. Lower values favor aggressive cleanup; higher values favor throughput and lower lock contention at the cost of extra retained memory.                                                                                                                                                                                                                  |
+| `event_channel_capacity`              | Int    | No       | `256`                  | Buffer depth of the in-process event broadcast channel, per subscriber. Every runtime event — playlist-update progress, config reloads, download deltas, recording changes — passes through it on the way to the Web UI websocket and the notification pipeline. A subscriber that falls this many events behind is told it lagged and resumes from the newest event, having missed the gap; the Web UI recovers by re-requesting a status snapshot. Raise it if the bus reports lag under load. `0` is clamped to `1`. |
+| `user_access_control`                 | Bool   | No       | `false`                | **Security:** If `true`, Tuliprox actively enforces `status` (Active/Banned), `exp_date`, and `max_connections` constraints for users defined in `api-proxy.yml`. If false, those fields are ignored.                                                                                                                                                                                                                                                                                                                   |
+| `custom_stream_response_path`         | String | No       | `null`                 | Directory path where Tuliprox looks for custom fallback `.ts` files. See section [Custom Stream Response](#custom-stream-responses-fallback-videos) for exact filenames.                                                                                                                                                                                                                                                                                                                                                |
+| `custom_stream_response_timeout_secs` | Int    | No       | `0`                    | Hard timeout (in seconds) that forces the fallback video stream to terminate to prevent infinite bandwidth usage. `0` means endless loop.                                                                                                                                                                                                                                                                                                                                                                               |
+| `custom_stream_response_enabled`      | Bool   | No       | `true`                 | Enables configured custom MPEG-TS fallback videos for stream errors. When `false`, factories skip the video body and call sites return `custom_stream_response_error_status`; useful behind reverse proxies that intercept 4xx/5xx responses instead of keeping fallback sockets open.                                                                                                                                                                                                                                  |
+| `custom_stream_response_error_status` | Int    | No       | `502`                  | HTTP status code returned when `custom_stream_response_enabled` is `false`. Must be a 4xx or 5xx code (the `prepare()` step rejects anything outside that range; `0` is silently clamped to `502`). Common choices: `404` (channel not found), `502` (bad gateway — upstream failed), `503` (service unavailable — overloaded).                                                                                                                                                                                         |
 
 **TMDB discovery exception:** [TMDB curation discovery](source.md#target-wide-curation-curation) always verifies TLS
 certificates and hostnames, even with `accept_insecure_ssl_certificates: true`. TLS-inspecting proxies require valid CA
@@ -122,10 +122,10 @@ api:
 ```
 
 | Parameter  | Type   | Required | Default   | Technical Impact & Background                                                                                                                                                |
-|:-----------|:-------|:--------:|:----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `host`     | String |    No    | `0.0.0.0` | Bind interface. `0.0.0.0` listens on all network cards. `127.0.0.1` restricts access to localhost (useful if you force traffic through a local Nginx/Traefik reverse proxy). |
-| `port`     | Int    |    No    | `8901`    | The listening port for proxy streams, the Web UI, and all REST APIs.                                                                                                         |
-| `web_root` | String |    No    | `./web`   | Physical path to the compiled Wasm/JS/CSS frontend assets of the Web UI.                                                                                                     |
+| :--------- | :----- | :------: | :-------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host`     | String | No       | `0.0.0.0` | Bind interface. `0.0.0.0` listens on all network cards. `127.0.0.1` restricts access to localhost (useful if you force traffic through a local Nginx/Traefik reverse proxy). |
+| `port`     | Int    | No       | `8901`    | The listening port for proxy streams, the Web UI, and all REST APIs.                                                                                                         |
+| `web_root` | String | No       | `./web`   | Physical path to the compiled Wasm/JS/CSS frontend assets of the Web UI.                                                                                                     |
 
 ---
 
@@ -171,7 +171,7 @@ web_ui:
 ### 2.1 Web UI Parameters
 
 | Parameter                     | Type   | Default     | Technical Impact & Background                                                                                                                                                                                                                                             |
-|:------------------------------|:-------|:------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| :---------------------------- | :----- | :---------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `enabled`                     | Bool   | `true`      | Completely toggles the Web Dashboard and its REST API endpoints on or off.                                                                                                                                                                                                |
 | `user_ui_enabled`             | Bool   | `true`      | Allows standard proxy users (not just admins) to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                              |
 | `path`                        | String | `""`        | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`.                                                                                                                                        |
@@ -193,18 +193,18 @@ web_ui:
     hide_epg: true
 ```
 
-| Parameter             | Type | Default | Technical Impact & Background                                                                                  |
-|:----------------------|:-----|:--------|:---------------------------------------------------------------------------------------------------------------|
-| `hide_group`          | Bool | `false` | Hides the stream group/category label.                                                                         |
-| `hide_ip`             | Bool | `false` | Hides the client IP shown for an active stream.                                                                |
-| `hide_country`        | Bool | `false` | Hides the detected client country flag/code.                                                                   |
-| `hide_shared`         | Bool | `false` | Hides the shared-stream indicator.                                                                             |
-| `hide_duration`       | Bool | `false` | Hides the running playback duration.                                                                           |
-| `hide_bandwidth`      | Bool | `false` | Hides the live bandwidth badge when metrics are available.                                                     |
-| `hide_transferred`    | Bool | `false` | Hides the transferred-bytes badge when metrics are available.                                                  |
-| `hide_player`         | Bool | `false` | Hides the player / user-agent field.                                                                           |
-| `hide_user_comment`   | Bool | `false` | Hides the user comment next to the active stream title.                                                        |
-| `hide_epg`            | Bool | `false` | Hides per-stream EPG information and skips the associated dashboard EPG fetch/update work for that display.    |
+| Parameter           | Type | Default | Technical Impact & Background                                                                               |
+| :------------------ | :--- | :------ | :---------------------------------------------------------------------------------------------------------- |
+| `hide_group`        | Bool | `false` | Hides the stream group/category label.                                                                      |
+| `hide_ip`           | Bool | `false` | Hides the client IP shown for an active stream.                                                             |
+| `hide_country`      | Bool | `false` | Hides the detected client country flag/code.                                                                |
+| `hide_shared`       | Bool | `false` | Hides the shared-stream indicator.                                                                          |
+| `hide_duration`     | Bool | `false` | Hides the running playback duration.                                                                        |
+| `hide_bandwidth`    | Bool | `false` | Hides the live bandwidth badge when metrics are available.                                                  |
+| `hide_transferred`  | Bool | `false` | Hides the transferred-bytes badge when metrics are available.                                               |
+| `hide_player`       | Bool | `false` | Hides the player / user-agent field.                                                                        |
+| `hide_user_comment` | Bool | `false` | Hides the user comment next to the active stream title.                                                     |
+| `hide_epg`          | Bool | `false` | Hides per-stream EPG information and skips the associated dashboard EPG fetch/update work for that display. |
 
 * If every `hide_*` flag is `false`, Tuliprox treats the whole `stream_info` block as empty/default.
 * This setting is global for the Web UI. It is not currently per-user.
@@ -224,12 +224,12 @@ This block enhances security by restricting which resources the browser is allow
 
 Tuliprox features a robust Role-Based Access Control (RBAC) system.
 
-| Parameter        |  Type  | Default      | Technical Impact & Background                                                                                                                                                                                                                                                          |
-|:-----------------|:------:|:-------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`        |  Bool  | `true`       | Master switch for UI authentication. Disabling this exposes the dashboard to anyone with network access.                                                                                                                                                                               |
+| Parameter        | Type   | Default      | Technical Impact & Background                                                                                                                                                                                                                                                          |
+| :--------------- | :----: | :----------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`        | Bool   | `true`       | Master switch for UI authentication. Disabling this exposes the dashboard to anyone with network access.                                                                                                                                                                               |
 | `issuer`         | String | `tuliprox`   | The identifier for the JWT "iss" field.                                                                                                                                                                                                                                                |
 | `secret`         | String | `(Random)`   | Critical for JWT encryption. Use a static 64-character hex string using Node.js ([see Secret Generation](#jwt-secret-generation)) to keep sessions valid across restarts. If omitted, Tuliprox generates one in-memory, but all active logins will invalidate on every server restart! |
-| `token_ttl_mins` |  Int   | `30`         | How long a login session remains valid. Setting this to `0` makes the token effectively valid for 100 years (Extreme Security Risk!).                                                                                                                                                  |
+| `token_ttl_mins` | Int    | `30`         | How long a login session remains valid. Setting this to `0` makes the token effectively valid for 100 years (Extreme Security Risk!).                                                                                                                                                  |
 | `userfile`       | String | `user.txt`   | The file storing Admins and Web Users.                                                                                                                                                                                                                                                 |
 | `groupfile`      | String | `groups.txt` | The RBAC (Role-Based Access Control) definition file.                                                                                                                                                                                                                                  |
 
@@ -342,7 +342,7 @@ log:
 ```
 
 | Parameter                       | Type   | Default | Technical Impact & Background                                                                                                                                                                                                          |
-|:--------------------------------|:-------|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| :------------------------------ | :----- | :------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `log_level`                     | String | `info`  | Verbosity. Possible values: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden per-module (e.g., `tuliprox=debug,hyper_util=warn`).                                                                                          |
 | `sanitize_sensitive_info`       | Bool   | `true`  | **Critical:** Masks passwords, provider URLs, and external client IPs in the logs with `***`. Highly recommended to keep `true` so you can safely share logs on GitHub/Discord for support without leaking credentials.                |
 | `log_active_user`               | Bool   | `false` | Periodically writes the current active client connection count as an INFO message to the log file.                                                                                                                                     |
@@ -367,18 +367,18 @@ Tuliprox can stream application log records directly and asynchronously to an ex
 rsyslog, syslog-ng, Logstash, Fluent Bit, Loki, Graylog, or Splunk) via UDP. Streaming and media paths (HLS, MPEG-TS,
 DVR) never block on log I/O.
 
-| Field             | Type   | Default      | Description                                                                                                                                                                                   |
-|:------------------|:-------|:-------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`         | Bool   | `false`      | Enables asynchronous UDP log shipping to an external collector. Opt-in; when `false`, no socket or worker thread is spawned.                                                                  |
-| `host`            | String | `""`         | Destination IP address or hostname. Required when `enabled` is `true`. IPv6 literals are specified without square brackets.                                                                   |
-| `port`            | Int    | `514`        | Destination UDP port (range `1..=65535`).                                                                                                                                                     |
-| `format`          | String | `rfc5424`    | Wire format for transmitted datagrams. Supported values: `rfc5424`, `rfc3164`, `json`.                                                                                                        |
-| `facility`        | String | `local0`     | Syslog facility: all 24 RFC 5424 values are accepted, but **only `local0`..`local7` make sense here** — see [Facility](#facility).                                                            |
-| `app_name`        | String | `"tuliprox"` | Application name header (`1..=48` ASCII characters without spaces, range `0x21..=0x7E`).                                                                                                      |
-| `hostname`        | String | `null`       | Optional hostname override (`1..=255` characters). If omitted, falls back to the system hostname, or NILVALUE (`-`) if undetectable.                                                          |
-| `log_level`       | String | `null`       | Optional independent remote log level: `debug`, `info`, `warn`, `error`. If omitted, follows the root logger filter (including module rules) but never ships `trace`; `trace` is rejected.    |
-| `queue_capacity`  | Int    | `4096`       | Capacity of the bounded in-memory datagram channel (range `1..=65536`). When full, new datagrams are dropped immediately without blocking the caller (`dropped_full`).                        |
-| `max_message_len` | Int    | `1024`       | Maximum datagram size in bytes (range `480..=65507`, minimum `1024` for `json`). Datagrams exceeding this size have their message payload truncated at a character boundary.                  |
+| Field             | Type   | Default      | Description                                                                                                                                                                                |
+| :---------------- | :----- | :----------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`         | Bool   | `false`      | Enables asynchronous UDP log shipping to an external collector. Opt-in; when `false`, no socket or worker thread is spawned.                                                               |
+| `host`            | String | `""`         | Destination IP address or hostname. Required when `enabled` is `true`. IPv6 literals are specified without square brackets.                                                                |
+| `port`            | Int    | `514`        | Destination UDP port (range `1..=65535`).                                                                                                                                                  |
+| `format`          | String | `rfc5424`    | Wire format for transmitted datagrams. Supported values: `rfc5424`, `rfc3164`, `json`.                                                                                                     |
+| `facility`        | String | `local0`     | Syslog facility: all 24 RFC 5424 values are accepted, but **only `local0`..`local7` make sense here** — see [Facility](#facility).                                                         |
+| `app_name`        | String | `"tuliprox"` | Application name header (`1..=48` ASCII characters without spaces, range `0x21..=0x7E`).                                                                                                   |
+| `hostname`        | String | `null`       | Optional hostname override (`1..=255` characters). If omitted, falls back to the system hostname, or NILVALUE (`-`) if undetectable.                                                       |
+| `log_level`       | String | `null`       | Optional independent remote log level: `debug`, `info`, `warn`, `error`. If omitted, follows the root logger filter (including module rules) but never ships `trace`; `trace` is rejected. |
+| `queue_capacity`  | Int    | `4096`       | Capacity of the bounded in-memory datagram channel (range `1..=65536`). When full, new datagrams are dropped immediately without blocking the caller (`dropped_full`).                     |
+| `max_message_len` | Int    | `1024`       | Maximum datagram size in bytes (range `480..=65507`, minimum `1024` for `json`). Datagrams exceeding this size have their message payload truncated at a character boundary.               |
 
 ### Facility
 
@@ -388,25 +388,25 @@ route by it.
 
 All 24 values of RFC 5424 §6.2.1 are accepted, so existing collector rules keep working:
 
-| Code | Value | Meaning |
-| :--- | :--- | :--- |
-| 0 | `kern` | Kernel messages |
-| 1 | `user` | Generic user-space application |
-| 2 | `mail` | Mail transport |
-| 3 | `daemon` | Long-running system service |
-| 4 | `auth` | Login/authentication (superseded by `authpriv`) |
-| 5 | `syslog` | The syslog daemon itself (reserved by RFC 5424) |
-| 6 | `lpr` | Line-printer subsystem |
-| 7 | `news` | Usenet |
-| 8 | `uucp` | UUCP |
-| 9 | `cron` | Cron daemon |
-| 10 | `authpriv` | Security/authorization log |
-| 11 | `ftp` | FTP daemon |
-| 12 | `ntp` | Time synchronization |
-| 13 | `audit` | Security audit log |
-| 14 | `alert` | Console alert |
-| 15 | `clock2` | Second clock daemon (legacy) |
-| 16–23 | `local0`..`local7` | Reserved for site-local use |
+| Code  | Value              | Meaning                                         |
+| :---- | :----------------- | :---------------------------------------------- |
+| 0     | `kern`             | Kernel messages                                 |
+| 1     | `user`             | Generic user-space application                  |
+| 2     | `mail`             | Mail transport                                  |
+| 3     | `daemon`           | Long-running system service                     |
+| 4     | `auth`             | Login/authentication (superseded by `authpriv`) |
+| 5     | `syslog`           | The syslog daemon itself (reserved by RFC 5424) |
+| 6     | `lpr`              | Line-printer subsystem                          |
+| 7     | `news`             | Usenet                                          |
+| 8     | `uucp`             | UUCP                                            |
+| 9     | `cron`             | Cron daemon                                     |
+| 10    | `authpriv`         | Security/authorization log                      |
+| 11    | `ftp`              | FTP daemon                                      |
+| 12    | `ntp`              | Time synchronization                            |
+| 13    | `audit`            | Security audit log                              |
+| 14    | `alert`            | Console alert                                   |
+| 15    | `clock2`           | Second clock daemon (legacy)                    |
+| 16–23 | `local0`..`local7` | Reserved for site-local use                     |
 
 **In practice only `local0`..`local7` make sense for Tuliprox, and `local0` is the default.** Two reasons:
 
@@ -718,7 +718,7 @@ schedules:
 ```
 
 | Parameter  | Type   | Default          | Description                                                                                                                        |
-|:-----------|:-------|:-----------------|:-----------------------------------------------------------------------------------------------------------------------------------|
+| :--------- | :----- | :--------------- | :--------------------------------------------------------------------------------------------------------------------------------- |
 | `schedule` | String | -                | Cron expression with 7 fields (Seconds included at the start).                                                                     |
 | `type`     | Enum   | `PlaylistUpdate` | The task to execute. See [Task Types](#task-types) below.                                                                          |
 | `targets`  | List   | -                | *(Optional, only for PlaylistUpdate)* List of target names to restrict the update to. If omitted, all enabled targets are updated. |
@@ -748,13 +748,13 @@ Messaging is strictly **opt-in**. Nothing is sent until `notify_on` asks for it.
 `notify_on` is a list of **glob patterns** over event ids. An event id is a
 dotted `domain.event` string:
 
-| Pattern                 | Matches                                    |
-|:------------------------|:-------------------------------------------|
-| `*`                     | every event                                |
-| `recording.*`           | every event in the `recording` domain      |
-| `recording.completed`   | that event only                            |
-| `provider.*.expired`    | one wildcard segment                       |
-| `!system.info`          | **excludes**, whatever else matched        |
+| Pattern               | Matches                               |
+| :-------------------- | :------------------------------------ |
+| `*`                   | every event                           |
+| `recording.*`         | every event in the `recording` domain |
+| `recording.completed` | that event only                       |
+| `provider.*.expired`  | one wildcard segment                  |
+| `!system.info`        | **excludes**, whatever else matched   |
 
 A subscription matches when at least one positive pattern matches and no
 negative pattern does, so `["*", "!system.info"]` reads the way it looks.
@@ -769,50 +769,53 @@ negative pattern does, so `["*", "!system.info"]` reads the way it looks.
 
 <!-- BEGIN GENERATED EVENT TABLE -->
 
-| Event id | Default severity | Description |
-| :------- | :--------------- | :---------- |
-| `system.info` | info | A general informational message. |
-| `system.error` | error | A general error message. |
-| `system.disk.alert` | warn | Disk usage crossed the warn or critical threshold. |
-| `system.started` | info | The server finished starting up. |
-| `system.shutdown` | info | The server is shutting down cleanly. |
-| `playlist.update.completed` | info | A playlist update finished; carries per-source statistics. |
-| `playlist.update.failed` | error | A playlist update failed. |
-| `playlist.watch.changed` | info | Channels or groups were added to or removed from a watched target. |
-| `playlist.watch.disabled` | warn | A target's watch configuration is set but not working. |
-| `playlist.watch.unmatched` | warn | Watch patterns matched no group in the refreshed playlist. |
-| `recording.started` | info | A recording started. |
-| `recording.completed` | info | A recording completed. |
-| `recording.failed` | error | A recording failed. |
-| `provider.account.status_changed` | warn | A provider reported a changed account status. |
-| `provider.account.expiring` | warn | A provider account is approaching its expiry date. |
-| `provider.account.expired` | error | A provider account has expired. |
-| `provider.fetch.failed` | error | An input's playlist could not be fetched. |
-| `provider.pool.exhausted` | warn | Every provider behind an input was at capacity. |
-| `provider.priority.fallback` | warn | An input started being served from a different provider priority group. |
-| `config.changed` | info | A configuration file was changed and reloaded. |
-| `config.reload_failed` | error | A configuration file changed but could not be reloaded. |
-| `library.scan.completed` | info | A local library scan finished. |
-| `library.scan.failed` | error | A local library scan could not complete. |
-| `metadata.update.started` | info | A metadata update started for an input. |
-| `metadata.update.completed` | info | A metadata update finished for an input. |
-| `metadata.update.failed` | error | A metadata update cycle ended with tasks it could not finish. |
-| `user.connection.changed` | info | A user connected or disconnected. High frequency - subscribe deliberately. |
-| `provider.connections.changed` | info | A provider's active connection count changed. High frequency - subscribe deliberately. |
-| `user.connection.denied` | warn | A user was refused a connection because their limits were full. |
-| `recording.queue.changed` | info | The recording queue changed. |
-| `recording.rules.changed` | info | The recording rule set changed. |
-| `maintenance.changed` | warn | An input was put into or taken out of maintenance mode. |
-| `scheduled_task.failed` | error | A scheduled task could not complete. |
-| `notification.dead_lettered` | error | A notification was permanently undeliverable and has been dropped. |
-| `user.created` | info | An API-proxy user account was created. |
-| `user.updated` | info | An API-proxy user account was changed. |
-| `user.deleted` | warn | An API-proxy user account was deleted. |
-| `auth.sign_in.succeeded` | info | A principal signed in and was issued a token. |
-| `auth.sign_in.failed` | warn | A sign-in was rejected. Deduplicated per principal and address, so a password-guessing run notifies once rather than per attempt. |
-| `auth.sign_in.throttled` | warn | A sign-in was refused without checking credentials because the caller is backing off after repeated failures. |
-| `auth.permission.denied` | warn | An authenticated principal asked for something its permissions do not cover. |
-| `stream.probe.failed` | warn | A stream probe returned no metadata; the stream may be dead. Deduplicated per input, so a provider outage notifies once rather than per channel. |
+| Event id                          | Default severity | Description                                                                                                                                      |
+| :-------------------------------- | :--------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `system.info`                     | info             | A general informational message.                                                                                                                 |
+| `system.error`                    | error            | A general error message.                                                                                                                         |
+| `system.disk.alert`               | warn             | Disk usage crossed the warn or critical threshold.                                                                                               |
+| `system.started`                  | info             | The server finished starting up.                                                                                                                 |
+| `system.shutdown`                 | info             | The server is shutting down cleanly.                                                                                                             |
+| `playlist.update.completed`       | info             | A playlist update finished; carries per-source statistics.                                                                                       |
+| `playlist.update.failed`          | error            | A playlist update failed.                                                                                                                        |
+| `playlist.watch.changed`          | info             | Channels or groups were added to or removed from a watched target.                                                                               |
+| `playlist.watch.disabled`         | warn             | A target's watch configuration is set but not working.                                                                                           |
+| `playlist.watch.unmatched`        | warn             | Watch patterns matched no group in the refreshed playlist.                                                                                       |
+| `recording.started`               | info             | A recording started.                                                                                                                             |
+| `recording.completed`             | info             | A recording completed.                                                                                                                           |
+| `recording.failed`                | error            | A recording failed.                                                                                                                              |
+| `provider.account.status_changed` | warn             | A provider reported a changed account status.                                                                                                    |
+| `provider.account.expiring`       | warn             | A provider account is approaching its expiry date.                                                                                               |
+| `provider.account.expired`        | error            | A provider account has expired.                                                                                                                  |
+| `provider.fetch.failed`           | error            | An input's playlist could not be fetched.                                                                                                        |
+| `provider.pool.exhausted`         | warn             | Every provider behind an input was at capacity.                                                                                                  |
+| `provider.priority.fallback`      | warn             | An input started being served from a different provider priority group.                                                                          |
+| `config.changed`                  | info             | A configuration file was changed and reloaded.                                                                                                   |
+| `config.reload_failed`            | error            | A configuration file changed but could not be reloaded.                                                                                          |
+| `library.scan.completed`          | info             | A local library scan finished.                                                                                                                   |
+| `library.scan.failed`             | error            | A local library scan could not complete.                                                                                                         |
+| `metadata.update.started`         | info             | A metadata update started for an input.                                                                                                          |
+| `metadata.update.completed`       | info             | A metadata update finished for an input.                                                                                                         |
+| `metadata.update.failed`          | error            | A metadata update cycle ended with tasks it could not finish.                                                                                    |
+| `user.connection.changed`         | info             | A user connected or disconnected. High frequency - subscribe deliberately.                                                                       |
+| `provider.connections.changed`    | info             | A provider's active connection count changed. High frequency - subscribe deliberately.                                                           |
+| `user.connection.denied`          | warn             | A user was refused a connection because their limits were full.                                                                                  |
+| `recording.queue.changed`         | info             | The recording queue changed.                                                                                                                     |
+| `recording.rules.changed`         | info             | The recording rule set changed.                                                                                                                  |
+| `maintenance.changed`             | warn             | An input was put into or taken out of maintenance mode.                                                                                          |
+| `scheduled_task.failed`           | error            | A scheduled task could not complete.                                                                                                             |
+| `plugin.update.available`         | info             | A plugin update is staged and waits for an admin.                                                                                                |
+| `plugin.update.applied`           | info             | A plugin was updated to a newer release.                                                                                                         |
+| `plugin.update.failed`            | warn             | A plugin update was rejected or rolled back; the previous version still runs.                                                                    |
+| `notification.dead_lettered`      | error            | A notification was permanently undeliverable and has been dropped.                                                                               |
+| `user.created`                    | info             | An API-proxy user account was created.                                                                                                           |
+| `user.updated`                    | info             | An API-proxy user account was changed.                                                                                                           |
+| `user.deleted`                    | warn             | An API-proxy user account was deleted.                                                                                                           |
+| `auth.sign_in.succeeded`          | info             | A principal signed in and was issued a token.                                                                                                    |
+| `auth.sign_in.failed`             | warn             | A sign-in was rejected. Deduplicated per principal and address, so a password-guessing run notifies once rather than per attempt.                |
+| `auth.sign_in.throttled`          | warn             | A sign-in was refused without checking credentials because the caller is backing off after repeated failures.                                    |
+| `auth.permission.denied`          | warn             | An authenticated principal asked for something its permissions do not cover.                                                                     |
+| `stream.probe.failed`             | warn             | A stream probe returned no metadata; the stream may be dead. Deduplicated per input, so a provider outage notifies once rather than per channel. |
 
 <!-- END GENERATED EVENT TABLE -->
 
@@ -902,13 +905,13 @@ messaging:
       dedup_window_secs: 3600       # suppress a repeated event
 ```
 
-| Field | Meaning |
-| :---- | :------ |
-| `notify_on` | Overrides the global subscription for this channel. Same glob grammar. |
-| `min_severity` | Drop anything below `info` \| `warn` \| `error` \| `critical`. |
-| `quiet_hours` | `HH:MM-HH:MM` local time. Wrapping windows (`23:00-07:00`) work. Notifications are **deferred until the window closes, never dropped** - an overnight outage must not be silently invisible. |
-| `max_per_hour` | Circuit breaker. On tripping, the channel emits one "further notifications suppressed" audit line and then goes quiet for the rest of the hour, so the silence is distinguishable from a broken notifier. |
-| `dedup_window_secs` | Suppress a repeated event with the same dedup key for this long. Generalizes what used to be `disk_alert.repeat_interval_secs`. |
+| Field               | Meaning                                                                                                                                                                                                   |
+| :------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `notify_on`         | Overrides the global subscription for this channel. Same glob grammar.                                                                                                                                    |
+| `min_severity`      | Drop anything below `info` \| `warn` \| `error` \| `critical`.                                                                                                                                            |
+| `quiet_hours`       | `HH:MM-HH:MM` local time. Wrapping windows (`23:00-07:00`) work. Notifications are **deferred until the window closes, never dropped** - an overnight outage must not be silently invisible.              |
+| `max_per_hour`      | Circuit breaker. On tripping, the channel emits one "further notifications suppressed" audit line and then goes quiet for the rest of the hour, so the silence is distinguishable from a broken notifier. |
+| `dedup_window_secs` | Suppress a repeated event with the same dedup key for this long. Generalizes what used to be `disk_alert.repeat_interval_secs`.                                                                           |
 
 ### 5.1.2 Delivery, Retry and the Outbox
 
@@ -995,6 +998,10 @@ Every template sees a uniform `event` object, plus the legacy top-level keys doc
 * `{{event.title}}`: One-line summary. Always present.
 * `{{event.body}}`: Plain-text body. Always present.
 * `{{event.fields}}`: The typed payload for this event.
+* `{{event.sections}}`: The event's detail as neutral blocks of plain-text lines, each with a `heading` and `lines`
+  (for a playlist update: `Sources`, `Targets` and `Errors`; for a watch change: one block per list). The same on
+  every channel and absent when an event has no detail beyond its body, so one loop renders it anywhere:
+  `{{#each event.sections}}{{heading}}{{#each lines}}\n{{this}}{{/each}}{{/each}}`.
 * `{{event.timestamp}}`: Unix seconds. Use `{{timestamp}}` for the RFC 3339 form.
 
 The legacy keys below continue to work exactly as before, so existing templates need no change:
@@ -1104,11 +1111,11 @@ sampling interval — see `SYSTEM_USAGE_INTERVAL` in that file, **not configurab
 current working directory's percent-used against two thresholds. The `DiskAlertMonitor` state machine
 (`backend/app/src/api/sys_usage.rs::DiskAlertMonitor`) decides when to emit a `DiskAlert`:
 
-| Level      | Default Trigger                         | Operator Action                                |
-|:-----------|:----------------------------------------|:-----------------------------------------------|
-| `Normal`   | < `warn_percent`                        | All good.                                      |
-| `Warn`     | ≥ `warn_percent` (default `80.0`)       | Plan a cleanup.                                |
-| `Critical` | ≥ `critical_percent` (default `95.0`)   | Cleanup is urgent; stream generation may fail. |
+| Level      | Default Trigger                       | Operator Action                                |
+| :--------- | :------------------------------------ | :--------------------------------------------- |
+| `Normal`   | < `warn_percent`                      | All good.                                      |
+| `Warn`     | ≥ `warn_percent` (default `80.0`)     | Plan a cleanup.                                |
+| `Critical` | ≥ `critical_percent` (default `95.0`) | Cleanup is urgent; stream generation may fail. |
 
 A `DiskAlert` is emitted whenever the level is non-Normal **and** either:
 
@@ -1306,14 +1313,14 @@ path only after ffmpeg exits successfully and the final path is still free.
 
 The filename template supports these placeholders (filename only — **never** the directory):
 
-| Placeholder         | Resolves to                                                       |
-|---------------------|-------------------------------------------------------------------|
-| `{channel}`         | Channel name                                                      |
-| `{program_title}`   | Programme title (sanitized)                                       |
-| `{start_time}`      | UTC `YYYY-MM-DDTHH-MM`                                            |
-| `{end_time}`        | UTC `YYYY-MM-DDTHH-MM`                                            |
-| `{episode}`         | Episode identifier extracted by `episode_pattern`                 |
-| `{owner}`           | The owner principal id (`user:<id>` or `legacy:admin`)            |
+| Placeholder       | Resolves to                                            |
+| ----------------- | ------------------------------------------------------ |
+| `{channel}`       | Channel name                                           |
+| `{program_title}` | Programme title (sanitized)                            |
+| `{start_time}`    | UTC `YYYY-MM-DDTHH-MM`                                 |
+| `{end_time}`      | UTC `YYYY-MM-DDTHH-MM`                                 |
+| `{episode}`       | Episode identifier extracted by `episode_pattern`      |
+| `{owner}`         | The owner principal id (`user:<id>` or `legacy:admin`) |
 
 > **Security:** `{owner}` is allowed **only** in the filename template, never in directory templates.
 > Directory templates are resolved against the caller's identity, so the directory part is intrinsically owner-scoped.
@@ -1323,10 +1330,10 @@ The filename template supports these placeholders (filename only — **never** t
 The DVR layer runs an additional authorization pass on top of `recording.read`, `recording.create`,
 `recording.manage` and `recording.delete`.
 
-| Visibility | Owner                  | Admin (`builtin:admin`) | Foreign user | Notes                                     |
-|------------|------------------------|-------------------------|--------------|-------------------------------------------|
-| `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                  |
-| `shared`   | —                      | read + write + delete   | read         | Only admins create shared recordings      |
+| Visibility | Owner                 | Admin (`builtin:admin`) | Foreign user | Notes                                |
+| ---------- | --------------------- | ----------------------- | ------------ | ------------------------------------ |
+| `private`  | read + write + delete | read + write + delete   | —            | Foreign reads return 404             |
+| `shared`   | —                     | read + write + delete   | read         | Only admins create shared recordings |
 
 #### 6.1.3 Identity bootstrap
 
@@ -1393,7 +1400,7 @@ ipcheck:
 ```
 
 | Parameter      | Type   | Technical Impact                                                                                                            |
-|:---------------|:-------|:----------------------------------------------------------------------------------------------------------------------------|
+| :------------- | :----- | :-------------------------------------------------------------------------------------------------------------------------- |
 | `url`          | String | A generic endpoint that may return both IPv4 and IPv6 in a single response (often JSON).                                    |
 | `url_ipv4`     | String | A dedicated URL to fetch only the public IPv4 address.                                                                      |
 | `url_ipv6`     | String | A dedicated URL to fetch only the public IPv6 address.                                                                      |
@@ -1437,7 +1444,7 @@ hdhomerun:
 ### Configuration Parameters
 
 | Parameter | Type | Default | Description                                                                                     |
-|:----------|:-----|:--------|:------------------------------------------------------------------------------------------------|
+| :-------- | :--- | :------ | :---------------------------------------------------------------------------------------------- |
 | `enabled` | Bool | `false` | Master switch for the entire emulation engine.                                                  |
 | `auth`    | Bool | `false` | Requires HTTP Basic Auth for the `/lineup.json` endpoint using the assigned user's credentials. |
 | `devices` | List | `[]`    | A list of virtual HDHomeRun devices to emulate.                                                 |
@@ -1445,7 +1452,7 @@ hdhomerun:
 ### 9.1. Device-Specific Fields
 
 | Parameter       | Type   | Default           | Technical Impact & Background                                                                                                          |
-|:----------------|:-------|:------------------|:---------------------------------------------------------------------------------------------------------------------------------------|
+| :-------------- | :----- | :---------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`          | String | **Required**      | Unique internal identifier. Must match the `device` field in your `source.yml` target mapping.                                         |
 | `tuner_count`   | Int    | `1`               | Number of virtual tuners reported to the client. Defines how many concurrent streams Plex/Emby thinks the "hardware" can handle.       |
 | `port`          | Int    | `API+1`           | TCP port for the HTTP API (`/device.xml`, `/lineup.json`). Each virtual device **must** have a unique port.                            |
@@ -1506,12 +1513,12 @@ mcp:
   max_response_bytes: 262144
 ```
 
-| Parameter            |      Type       | Default  | Technical Impact                                                                                                                                                                                                                                                                                           |
-|:---------------------|:---------------:|:---------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`            |      Bool       | `false`  | Mounts the MCP endpoint at `{web_ui_path}/mcp`. When `false`, or when the block is absent, no route exists.                                                                                                                                                                                                |
-| `read_only`          |      Bool       | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes.                                                                                                             |
+| Parameter            | Type            | Default  | Technical Impact                                                                                                                                                                                                                                                                                           |
+| :------------------- | :-------------: | :------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | Bool            | `false`  | Mounts the MCP endpoint at `{web_ui_path}/mcp`. When `false`, or when the block is absent, no route exists.                                                                                                                                                                                                |
+| `read_only`          | Bool            | `true`   | Hides and rejects tools that change state (`update_playlists`, `update_geoip`). Always forced to `true` when `web_ui.auth` is disabled, because no permission layer protects the write routes.                                                                                                             |
 | `allowed_origins`    | List of Strings | `[]`     | Extra `Origin` values accepted besides the request `Host` (DNS-rebinding protection). Needed when a reverse proxy rewrites `Host`. Each entry must be an origin (`scheme://host[:port]`, custom schemes allowed) without path, query or fragment. Requests without an `Origin` header are always accepted. |
-| `max_response_bytes` |       Int       | `262144` | Tool results larger than this are truncated with an explicit marker. Minimum `1024`.                                                                                                                                                                                                                       |
+| `max_response_bytes` | Int             | `262144` | Tool results larger than this are truncated with an explicit marker. Minimum `1024`.                                                                                                                                                                                                                       |
 
 ### Technical Background
 
@@ -1542,7 +1549,7 @@ custom_stream_response_timeout_secs: 20
 ```
 
 | Name                                  | Type   | Default   | Technical Impact & Background                                                                                                                                                              |
-|:--------------------------------------|:-------|:----------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| :------------------------------------ | :----- | :-------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `custom_stream_response_path`         | String | `(Empty)` | Directory path where Tuliprox looks for exactly named `.ts` files.                                                                                                                         |
 | `custom_stream_response_timeout_secs` | Int    | `0`       | Hard timeout (in seconds) that forces the fallback video stream to terminate to prevent infinite bandwidth usage. `0` means the fallback loops endlessly until the user switches channels. |
 

@@ -23,7 +23,7 @@ tuliprox-mpegts = { workspace = true }
 tuliprox-parser = { workspace = true }
 tuliprox-session = { workspace = true }
 arc-swap.workspace = true
-axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
+axum = { workspace = true, features = ["macros", "default", "ws"] }
 bytes.workspace = true
 chrono.workspace = true
 base64.workspace = true
@@ -32,28 +32,28 @@ fastrand.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
-rand = "0.9.5"
+rand.workspace = true
 futures.workspace = true
 log.workspace = true
-lru = "0.19.0"
-reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+lru.workspace = true
+reqwest = { workspace = true, features = ["default", "json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync"] }
-tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 url.workspace = true
-http-body-util = "0.1.5"
-hyper-util = { version = "=0.1.20", features = ["client-legacy"] }
+http-body-util.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy"] }
 
 [dev-dependencies]
-rand = "0.9.5"
-tempfile = "3.27.0"
+rand.workspace = true
+tempfile.workspace = true
 tuliprox-mpegts = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
-async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
-filetime = "0.2.29"
-flate2 = "1.1.9"
+async-compression = { workspace = true, features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
+filetime.workspace = true
+flate2.workspace = true
 brotli.workspace = true
 
-rcgen = "0.14.9"
-tokio-rustls = "0.26.6"
+rcgen.workspace = true
+tokio-rustls.workspace = true

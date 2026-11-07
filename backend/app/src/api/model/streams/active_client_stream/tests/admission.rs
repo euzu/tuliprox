@@ -95,6 +95,7 @@ pub(in crate::api::model::streams::active_client_stream::tests) fn create_test_a
         playlist_updates: crate::api::model::PlaylistUpdateControl::for_tests(),
         overrides: crate::api::model::OverrideState::default(),
         maintenance: crate::api::model::create_test_maintenance(""),
+        plugins: crate::api::model::AppPlugins::default(),
     })
 }
 

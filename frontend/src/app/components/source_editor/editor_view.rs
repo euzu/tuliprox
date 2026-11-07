@@ -1,10 +1,13 @@
 use crate::{
     app::{
         components::{
-            bouquet_editor::TargetBouquetView, can_connect, source_editor::layout::layout, Block, BlockId,
-            BlockInstance, BlockType, BlockView, Connection, EditMode, InputRow, PortStatus, SourceEditorContext,
-            SourceEditorForm, SourceEditorSidebar, TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT,
-            BLOCK_WIDTH,
+            block_plugin_id,
+            bouquet_editor::TargetBouquetView,
+            can_connect, plugin_block_label, plugin_issue_text, plugin_ref_issue,
+            source_editor::layout::{layout, plugin_tile_origin},
+            use_plugin_ui, Block, BlockId, BlockInstance, BlockSpec, BlockType, BlockView, Connection, EditMode,
+            InputRow, PluginTileKind, PluginTileView, PortStatus, SourceEditorContext, SourceEditorForm,
+            SourceEditorSidebar, TextButton, BLOCK_HEADER_HEIGHT, BLOCK_HEIGHT, BLOCK_PORT_HEIGHT, BLOCK_WIDTH,
         },
         ConfigContext, PlaylistContext,
     },
@@ -17,8 +20,8 @@ use gloo_timers::callback::Timeout;
 use shared::{
     model::{
         permission::Permission, ConfigInputDto, ConfigInputStagedDto, ConfigSourceDto, ConfigTargetDto,
-        HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto,
-        TargetOutputDto, XtreamTargetOutputDto,
+        HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, PluginSlotDto, PluginTargetOutputDto,
+        SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
     },
     utils::BATCH_SCHEME_PREFIX,
 };
@@ -26,6 +29,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
 };
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{
@@ -48,7 +52,7 @@ const LABEL_SAVE: &str = "LABEL.SAVE";
 
 type Position = (f32, f32);
 type MoveBlockParams = (f32, f32, Position, Vec<(BlockId, Position)>);
-type BlockCreatePosition = (BlockType, Position);
+type BlockCreatePosition = (BlockSpec, Position);
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct SourceEditorProps {
@@ -362,8 +366,10 @@ fn apply_zoom_at_screen_point(editor_state: &mut EditorState, next_zoom: f32, an
     true
 }
 
-fn create_instance(block_type: BlockType) -> BlockInstance {
-    match block_type {
+/// The instance a new block starts with. A plugin tile's block already names
+/// its plugin, so its form opens with the plugin's own fields.
+fn create_instance(spec: &BlockSpec) -> BlockInstance {
+    match spec.block_type {
         BlockType::InputXtream => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Xtream))),
         BlockType::InputM3u => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::M3u))),
         BlockType::InputLibrary => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Library))),
@@ -372,6 +378,11 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputPlex => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plex))),
         BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
         BlockType::InputStaged => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Staged))),
+        BlockType::InputPlugin => {
+            let mut input = ConfigInputDto::new_with_type(InputType::Plugin);
+            input.plugin = spec.plugin.as_deref().map(Arc::from);
+            BlockInstance::Input(Rc::new(input))
+        }
         BlockType::Target => {
             let dto = ConfigTargetDto { name: String::new(), ..ConfigTargetDto::default() };
             BlockInstance::Target(Rc::new(dto))
@@ -384,6 +395,10 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
             BlockInstance::Output(Rc::new(TargetOutputDto::HdHomeRun(HdHomeRunTargetOutputDto::default())))
         }
         BlockType::OutputStrm => BlockInstance::Output(Rc::new(TargetOutputDto::Strm(StrmTargetOutputDto::default()))),
+        BlockType::OutputPlugin => BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(PluginTargetOutputDto {
+            plugin: spec.plugin.clone().unwrap_or_default(),
+            ..PluginTargetOutputDto::default()
+        }))),
     }
 }
 
@@ -404,6 +419,9 @@ fn create_output_instance(output: &TargetOutputDto) -> (BlockInstance, BlockType
         }
         TargetOutputDto::HdHomeRun(dto) => {
             (BlockInstance::Output(Rc::new(TargetOutputDto::HdHomeRun(dto.clone()))), BlockType::OutputHdHomeRun)
+        }
+        TargetOutputDto::Plugin(dto) => {
+            (BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(dto.clone()))), BlockType::OutputPlugin)
         }
     }
 }
@@ -431,6 +449,9 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
         }
         BlockType::InputStaged => {
             input.input_type = InputType::Staged;
+        }
+        BlockType::InputPlugin => {
+            input.input_type = InputType::Plugin;
         }
         _ => {}
     }
@@ -639,6 +660,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let services = use_service_context();
     let can_write_sources = services.auth.has_permission(Permission::SourceWrite);
     let translate = use_translation();
+    let plugin_ui = use_plugin_ui();
 
     let force_update = use_state(|| 0);
     // ----------------- virtual canvas offset -----------------
@@ -1203,7 +1225,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
         let emit_sources_change = emit_sources_change.clone();
-        Callback::from(move |(block_type, position): BlockCreatePosition| {
+        Callback::from(move |(spec, position): BlockCreatePosition| {
             if !can_write_sources {
                 return;
             }
@@ -1212,9 +1234,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let next_id = editor_state.next_id;
             editor_state.blocks.push(Block {
                 id: next_id,
-                block_type,
+                block_type: spec.block_type,
                 position,
-                instance: create_instance(block_type),
+                instance: create_instance(&spec),
             });
             editor_state.next_id += 1;
             drop(editor_state);
@@ -1313,9 +1335,13 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             }
             editor_state_ref.borrow_mut().selection.reset_selection();
             if let Some(target) = e.target_dyn_into::<HtmlElement>() {
-                let block_type = target.get_attribute("data-block-type").unwrap_or_default();
+                let block_type = BlockType::from(target.get_attribute("data-block-type").unwrap_or_default());
+                let spec = match target.get_attribute("data-plugin") {
+                    Some(plugin_id) => BlockSpec::with_plugin(block_type, &plugin_id),
+                    None => BlockSpec::of(block_type),
+                };
                 if let Some(data_transfer) = e.data_transfer() {
-                    let _ = data_transfer.set_data("text/plain", &block_type);
+                    let _ = data_transfer.set_data("text/plain", &spec.to_drag_data());
                 }
                 // Store mouse offset inside the element
                 let rect = target.get_bounding_client_rect();
@@ -1352,9 +1378,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             (editor_state.canvas_offset, editor_state.drag.sidebar_drag_offset)
                         };
 
-                        let block_type = BlockType::from(data.as_str());
+                        let spec = BlockSpec::from_drag_data(&data);
                         add_block_at_position
-                            .emit((block_type, (mouse_x - offset_x - canvas_ox, mouse_y - offset_y - canvas_oy)));
+                            .emit((spec, (mouse_x - offset_x - canvas_ox, mouse_y - offset_y - canvas_oy)));
                     }
                 }
             }
@@ -1381,7 +1407,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let sidebar_collapsed = sidebar_collapsed.clone();
         let is_mobile = is_mobile.clone();
 
-        Callback::from(move |block_type: BlockType| {
+        Callback::from(move |spec: BlockSpec| {
             let position = if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
                 let rect = canvas.get_bounding_client_rect();
                 let (canvas_offset, zoom_factor) = {
@@ -1398,7 +1424,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 (0.0, 0.0)
             };
 
-            add_block_at_position.emit((block_type, position));
+            add_block_at_position.emit((spec, position));
             if *is_mobile {
                 sidebar_collapsed.set(true);
             }
@@ -2183,6 +2209,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let block_id = shifted_block.id;
         shifted_block.position = screen_from_world(b.position, (canvas_off_x, canvas_off_y), zoom_factor);
         let is_block_selected = editor_state.selection.selected_blocks.contains(&block_id);
+        let (plugin_label, plugin_issue) = match (PluginTileKind::of(b.block_type), block_plugin_id(b)) {
+            (Some(kind), Some(plugin_id)) => (
+                plugin_block_label(plugin_ui.as_ref(), kind, plugin_id),
+                plugin_ref_issue(plugin_ui.as_ref(), kind, plugin_id)
+                    .map(|issue| plugin_issue_text(&translate, kind, &issue)),
+            ),
+            _ => (None, None),
+        };
         html! {
             <BlockView
                 key={block_id}
@@ -2198,6 +2232,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 on_touch_start={handle_block_touch_start.clone()}
                 on_connection_drop={handle_connection_drop.clone()}
                 on_connection_start={handle_connection_start.clone()}
+                plugin_label={plugin_label}
+                plugin_issue={plugin_issue}
             />
         }
     };
@@ -2337,6 +2373,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 for b in editor_state.blocks.iter() {
                     { render_block(b) }
                 }
+
+                // The canvas block of the plugins that contribute a source editor tile.
+                if plugin_ui.as_ref().is_some_and(|ui| ui.has_contributions(PluginSlotDto::SourceEditorTile)) {
+                    <PluginTileView
+                        position={screen_from_world(plugin_tile_origin(&editor_state.blocks), (canvas_off_x, canvas_off_y), zoom_factor)}
+                        zoom_factor={zoom_factor}
+                    />
+                }
             </div>
             </div>
             <SourceEditorForm />
@@ -2432,7 +2476,11 @@ mod tests {
         ]}}})).unwrap();
         let mut state = EditorState::default();
         state.blocks.push(create_block(1, BlockType::Target, BlockInstance::Target(Rc::new(target.clone()))));
-        state.blocks.push(create_block(2, BlockType::OutputXtream, create_instance(BlockType::OutputXtream)));
+        state.blocks.push(create_block(
+            2,
+            BlockType::OutputXtream,
+            create_instance(&BlockSpec::of(BlockType::OutputXtream)),
+        ));
         state.connections.push(Connection { from: 1, to: 2 });
         assert!(output_has_target_curation(&state, 2), "disabled declarations still own policy");
         assert!(!output_has_target_curation(&state, 1));
@@ -2453,11 +2501,127 @@ mod tests {
         ];
 
         for (block_type, expected_input_type) in cases {
-            let BlockInstance::Input(input) = create_instance(block_type) else {
+            let BlockInstance::Input(input) = create_instance(&BlockSpec::of(block_type)) else {
                 panic!("media_server block should create an input instance");
             };
             assert_eq!(input.input_type, expected_input_type);
         }
+    }
+
+    #[test]
+    fn a_plugin_tile_creates_a_block_bound_to_its_plugin() {
+        let BlockInstance::Input(input) =
+            create_instance(&BlockSpec::with_plugin(BlockType::InputPlugin, "youtube-input"))
+        else {
+            panic!("an input plugin tile creates an input");
+        };
+        assert_eq!(input.input_type, InputType::Plugin);
+        assert_eq!(input.plugin.as_deref(), Some("youtube-input"));
+
+        let BlockInstance::Output(output) =
+            create_instance(&BlockSpec::with_plugin(BlockType::OutputPlugin, "csv-out"))
+        else {
+            panic!("an output plugin tile creates an output");
+        };
+        assert!(matches!(output.as_ref(), TargetOutputDto::Plugin(dto) if dto.plugin == "csv-out"));
+
+        let BlockInstance::Input(generic) = create_instance(&BlockSpec::of(BlockType::InputPlugin)) else {
+            panic!("the generic plugin tile creates an input");
+        };
+        assert_eq!(generic.plugin, None, "the generic tile leaves the choice to the form");
+    }
+
+    #[test]
+    fn plugin_input_block_keeps_its_plugin_reference_on_save() {
+        let input = ConfigInputDto {
+            name: "youtube-news".into(),
+            url: "https://www.youtube.com/@tagesschau".to_string(),
+            plugin: Some("youtube-input".into()),
+            plugin_config: serde_json::Map::from_iter([(
+                "mode".to_string(),
+                serde_json::Value::String("live_only".to_string()),
+            )]),
+            ..ConfigInputDto::new_with_type(InputType::Plugin)
+        };
+        let mut state = EditorState::default();
+        state.blocks.push(create_block(1, BlockType::InputPlugin, BlockInstance::Input(Rc::new(input))));
+        state.blocks.push(create_block(
+            2,
+            BlockType::Target,
+            BlockInstance::Target(Rc::new(ConfigTargetDto {
+                name: "tivione".to_string(),
+                ..ConfigTargetDto::default()
+            })),
+        ));
+        state.connections.push(Connection { from: 1, to: 2 });
+
+        let saved = editor_state_to_sources_config(&SourcesConfigDto::default(), &state);
+
+        assert_eq!(saved.inputs.len(), 1);
+        assert_eq!(saved.inputs[0].input_type, InputType::Plugin);
+        assert_eq!(saved.inputs[0].plugin.as_deref(), Some("youtube-input"));
+        assert_eq!(
+            saved.inputs[0].plugin_config.get("mode"),
+            Some(&serde_json::Value::String("live_only".to_string())),
+            "the plugin's per-input settings survive the editor"
+        );
+        assert_eq!(saved.sources[0].inputs.len(), 1);
+    }
+
+    #[test]
+    fn plugin_block_normalization_keeps_plugin_type_on_batch_url() {
+        let mut input = ConfigInputDto {
+            input_type: InputType::M3u,
+            url: "batch://should-not-become-m3u-batch".to_string(),
+            ..ConfigInputDto::default()
+        };
+
+        normalize_input_type_by_url(&mut input, BlockType::InputPlugin);
+
+        assert_eq!(input.input_type, InputType::Plugin);
+    }
+
+    #[test]
+    fn plugin_output_becomes_a_plugin_output_block() {
+        let (instance, block_type) = create_output_instance(&TargetOutputDto::Plugin(PluginTargetOutputDto::default()));
+
+        assert_eq!(block_type, BlockType::OutputPlugin);
+        let BlockInstance::Output(output) = instance else { panic!("expected an output instance") };
+        assert!(matches!(&*output, TargetOutputDto::Plugin(_)));
+    }
+
+    #[test]
+    fn plugin_output_block_keeps_its_dto_on_save() {
+        let output = PluginTargetOutputDto {
+            plugin: "csv-writer".to_string(),
+            format: Some("csv".to_string()),
+            filename: Some("channels.csv".to_string()),
+            plugin_config: serde_json::Map::from_iter([(
+                "delimiter".to_string(),
+                serde_json::Value::String(";".to_string()),
+            )]),
+            filter: Some("Group ~ \".*\"".to_string()),
+            t_filter: None,
+        };
+        let mut state = EditorState::default();
+        state.blocks.push(create_block(
+            1,
+            BlockType::Target,
+            BlockInstance::Target(Rc::new(ConfigTargetDto { name: "csv".to_string(), ..ConfigTargetDto::default() })),
+        ));
+        state.blocks.push(create_block(
+            2,
+            BlockType::OutputPlugin,
+            BlockInstance::Output(Rc::new(TargetOutputDto::Plugin(output.clone()))),
+        ));
+        state.connections.push(Connection { from: 1, to: 2 });
+
+        let saved = editor_state_to_sources_config(&SourcesConfigDto::default(), &state);
+
+        let TargetOutputDto::Plugin(saved_output) = &saved.sources[0].targets[0].output[0] else {
+            panic!("plugin output block was not saved as a plugin output")
+        };
+        assert_eq!(saved_output, &output);
     }
 
     #[test]
@@ -2494,13 +2658,13 @@ mod tests {
                     id: 1,
                     block_type: BlockType::InputM3u,
                     position: (10.0, 20.0),
-                    instance: create_instance(BlockType::InputM3u),
+                    instance: create_instance(&BlockSpec::of(BlockType::InputM3u)),
                 },
                 Block {
                     id: 2,
                     block_type: BlockType::InputM3u,
                     position: (30.0, 40.0),
-                    instance: create_instance(BlockType::InputM3u),
+                    instance: create_instance(&BlockSpec::of(BlockType::InputM3u)),
                 },
             ],
             ..EditorState::default()
@@ -2524,13 +2688,13 @@ mod tests {
                     id: 1,
                     block_type: BlockType::InputM3u,
                     position: (100.0, 100.0),
-                    instance: create_instance(BlockType::InputM3u),
+                    instance: create_instance(&BlockSpec::of(BlockType::InputM3u)),
                 },
                 Block {
                     id: 2,
                     block_type: BlockType::InputM3u,
                     position: (200.0, 200.0),
-                    instance: create_instance(BlockType::InputM3u),
+                    instance: create_instance(&BlockSpec::of(BlockType::InputM3u)),
                 },
             ],
             ..EditorState::default()
@@ -2557,13 +2721,13 @@ mod tests {
                     id: 1,
                     block_type: BlockType::InputM3u,
                     position: (100.0, 100.0),
-                    instance: create_instance(BlockType::InputM3u),
+                    instance: create_instance(&BlockSpec::of(BlockType::InputM3u)),
                 },
                 Block {
                     id: 2,
                     block_type: BlockType::InputM3u,
                     position: (200.0, 200.0),
-                    instance: create_instance(BlockType::InputM3u),
+                    instance: create_instance(&BlockSpec::of(BlockType::InputM3u)),
                 },
             ],
             ..EditorState::default()

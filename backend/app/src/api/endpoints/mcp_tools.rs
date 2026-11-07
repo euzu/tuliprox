@@ -1,4 +1,5 @@
-//! Static MCP tool catalog.
+//! MCP tool catalog: the static built-in table plus, when switched on, the
+//! plugin functions (plan §7 *Plugin functions as MCP tools*).
 //!
 //! Every tool is a thin adapter over one `/api/v1` REST route, so
 //! authentication, permissions and validation stay in the existing router.
@@ -374,3 +375,148 @@ pub(super) static MCP_TOOLS: &[McpTool] = &[
 ];
 
 pub(super) fn find_tool(name: &str) -> Option<&'static McpTool> { MCP_TOOLS.iter().find(|tool| tool.name == name) }
+
+/// The tools of one request: [`MCP_TOOLS`] plus the plugin tools. `tools/list`
+/// and `tools/call` both resolve names here, so a tool that is not listed can
+/// never be called.
+#[derive(Default)]
+pub(super) struct ToolView {
+    plugin: Vec<OwnedMcpTool>,
+}
+
+/// A plugin function as a tool: always `POST /plugins/{id}/rpc/{method}`, with
+/// the secrets of the result scrubbed.
+pub(super) struct OwnedMcpTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub method: McpToolMethod,
+    /// Route below `{web_ui_path}/api/v1`.
+    pub path: String,
+    pub kind: McpToolKind,
+    /// Always `true`: a plugin's answer reaches an AI model.
+    pub redact_secrets: bool,
+    pub plugin_id: String,
+}
+
+#[cfg(feature = "plugins")]
+impl From<&tuliprox_plugins::PluginMcpTool> for OwnedMcpTool {
+    fn from(tool: &tuliprox_plugins::PluginMcpTool) -> Self {
+        use tuliprox_plugins::PluginMcpToolKind;
+        Self {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+            method: McpToolMethod::Post,
+            path: format!(
+                "/plugins/{}/rpc/{}",
+                super::mcp_api::encode_path_segment(&tool.plugin_id),
+                super::mcp_api::encode_path_segment(&tool.method)
+            ),
+            kind: match tool.kind {
+                PluginMcpToolKind::Read => McpToolKind::Read,
+                PluginMcpToolKind::Write => McpToolKind::Write,
+            },
+            redact_secrets: true,
+            plugin_id: tool.plugin_id.clone(),
+        }
+    }
+}
+
+/// One tool of a [`ToolView`].
+#[derive(Clone, Copy)]
+pub(super) enum McpToolRef<'a> {
+    Builtin(&'static McpTool),
+    Plugin(&'a OwnedMcpTool),
+}
+
+impl McpToolRef<'_> {
+    pub(super) fn name(&self) -> &str {
+        match self {
+            Self::Builtin(tool) => tool.name,
+            Self::Plugin(tool) => &tool.name,
+        }
+    }
+
+    pub(super) fn description(&self) -> &str {
+        match self {
+            Self::Builtin(tool) => tool.description,
+            Self::Plugin(tool) => &tool.description,
+        }
+    }
+
+    pub(super) fn schema(&self) -> serde_json::Value {
+        match self {
+            Self::Builtin(tool) => tool.schema(),
+            Self::Plugin(tool) => tool.input_schema.clone(),
+        }
+    }
+
+    pub(super) const fn kind(&self) -> McpToolKind {
+        match self {
+            Self::Builtin(tool) => tool.kind,
+            Self::Plugin(tool) => tool.kind,
+        }
+    }
+
+    pub(super) const fn method(&self) -> McpToolMethod {
+        match self {
+            Self::Builtin(tool) => tool.method,
+            Self::Plugin(tool) => tool.method,
+        }
+    }
+
+    pub(super) const fn redact_secrets(&self) -> bool {
+        match self {
+            Self::Builtin(tool) => tool.redact_secrets,
+            Self::Plugin(tool) => tool.redact_secrets,
+        }
+    }
+}
+
+impl ToolView {
+    /// `plugin_tools_enabled` is the `mcp.plugin_tools` switch; `plugin_tools` is
+    /// not even asked for while it is off. A plugin tool named like a built-in is
+    /// dropped here too, whatever the plugin host did.
+    pub(super) fn new(plugin_tools_enabled: bool, plugin_tools: impl FnOnce() -> Vec<OwnedMcpTool>) -> Self {
+        if !plugin_tools_enabled {
+            return Self::default();
+        }
+        let mut plugin = plugin_tools();
+        plugin.retain(|tool| !MCP_TOOLS.iter().any(|builtin| builtin.name == tool.name));
+        Self { plugin }
+    }
+
+    /// Built-ins first; a plugin tool can never shadow one.
+    pub(super) fn find(&self, name: &str) -> Option<McpToolRef<'_>> {
+        find_tool(name)
+            .map(McpToolRef::Builtin)
+            .or_else(|| self.plugin.iter().find(|tool| tool.name == name).map(McpToolRef::Plugin))
+    }
+
+    /// What `tools/list` shows: write tools only when `read_only` is off.
+    pub(super) fn visible(&self, read_only: bool) -> impl Iterator<Item = McpToolRef<'_>> {
+        MCP_TOOLS
+            .iter()
+            .map(McpToolRef::Builtin)
+            .chain(self.plugin.iter().map(McpToolRef::Plugin))
+            .filter(move |tool| !read_only || tool.kind() == McpToolKind::Read)
+    }
+}
+
+/// The plugin tools the plugin host offers right now (its side of the switches:
+/// the plugin is enabled, the export says `mcp: true`, the admin approved it);
+/// none without a plugin host.
+#[cfg(feature = "plugins")]
+pub(super) fn plugin_tools(app_state: &crate::api::model::AppState) -> Vec<OwnedMcpTool> {
+    static BUILTIN_NAMES: std::sync::LazyLock<Vec<&'static str>> =
+        std::sync::LazyLock::new(|| MCP_TOOLS.iter().map(|tool| tool.name).collect());
+    app_state
+        .plugins
+        .as_ref()
+        .map(|plugins| plugins.mcp_tools(&BUILTIN_NAMES).iter().map(OwnedMcpTool::from).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(not(feature = "plugins"))]
+pub(super) fn plugin_tools(_app_state: &crate::api::model::AppState) -> Vec<OwnedMcpTool> { Vec::new() }

@@ -233,7 +233,9 @@ pub fn csv_read_inputs_from_reader(
         InputType::XtreamBatch | InputType::Xtream => InputType::XtreamBatch,
         InputType::Stalker | InputType::StalkerBatch => InputType::StalkerBatch,
         InputType::Library => InputType::Library,
-        InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Staged => batch_input_type,
+        InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Staged | InputType::Plugin => {
+            batch_input_type
+        }
     };
     let mut result = vec![];
     let mut default_columns = vec![];

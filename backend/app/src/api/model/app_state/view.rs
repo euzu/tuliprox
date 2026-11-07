@@ -108,7 +108,7 @@ app_state_views! {
     metadata_update_ctx => tuliprox_metadata::ctx::BoundMetadataUpdateCtx {
         app_config, active_provider, connection_manager, events <- event_manager, playlists,
         update_guard <- playlist_updates.update_guard, http_clients,
-        maintenance as std::sync::Arc<dyn tuliprox_core::model::MaintenanceGate>,
+        maintenance as std::sync::Arc<dyn tuliprox_core::model::MaintenanceGate>, plugins,
     }
 }
 

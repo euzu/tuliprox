@@ -139,6 +139,8 @@ mod identity_serialization;
 
 mod pipeline_transparency;
 
+mod plugin_hooks;
+
 mod probe_details;
 
 mod scheduling;

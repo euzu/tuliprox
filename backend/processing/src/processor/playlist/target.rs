@@ -89,8 +89,12 @@ pub(crate) fn reapply_to_fpl(fpl: &mut FetchedPlaylist<'_>, locked: &HashMap<UUI
     fpl.source = MemoryPlaylistSource::new(groups).into_source();
 }
 
-pub(crate) async fn record_target_overrides_status<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn record_target_overrides_status<
+    E: EventSink + Clone + 'static,
+    M: MetadataUpdateSink,
+    P: PluginHost,
+>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     target_name: &str,
     overrides: Option<&TargetOverrideSet>,
 ) {
@@ -146,7 +150,9 @@ pub(crate) fn target_mutated_resources(
                     resources.insert(path.clean());
                 }
             }
-            tuliprox_core::model::TargetOutput::Xtream(_) | tuliprox_core::model::TargetOutput::HdHomeRun(_) => {}
+            tuliprox_core::model::TargetOutput::Xtream(_)
+            | tuliprox_core::model::TargetOutput::HdHomeRun(_)
+            | tuliprox_core::model::TargetOutput::Plugin(_) => {}
         }
     }
     resources
@@ -193,14 +199,16 @@ pub(crate) async fn wait_for_target_finalizer_slot(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &Arc<PlaylistProcessingContext<E, M>>,
+#[allow(clippy::too_many_arguments, reason = "input_plugins joins the existing per-run inputs")]
+pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &Arc<PlaylistProcessingContext<E, M, P>>,
     playlists: &mut [FetchedPlaylist<'_>],
     targets: &[&Arc<ConfigTarget>],
     input_stats: &mut HashMap<Arc<str>, InputStats>,
     errors: &mut Vec<TuliproxError>,
     accepted_empty_clusters: ClusterFlags,
     process_parallel: bool,
+    input_plugins: &HashMap<Arc<str>, PluginRunReport>,
 ) -> Vec<TargetStats> {
     let mut analytics_info = collect_source_analytics_info(playlists);
     let storage_dir = {
@@ -231,15 +239,18 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                 errors,
                 accepted_empty_clusters,
                 consume_input_source,
+                input_plugins,
                 &analytics_info,
                 &shared_input_overrides,
             )
             .await;
             match result {
                 Ok(prepared) => {
-                    let processing = prepared.processing.clone();
+                    let mut processing = prepared.processing.clone();
                     let overrides = Arc::clone(&prepared.overrides);
-                    let (result, mut finalization_errors) = finalize_prepared_target(Arc::clone(ctx), prepared).await;
+                    let (result, mut finalization_errors, finalize_report) =
+                        finalize_prepared_target(Arc::clone(ctx), prepared).await;
+                    processing.plugins.merge(finalize_report);
                     errors.append(&mut finalization_errors);
                     match result {
                         Ok(()) => {
@@ -296,6 +307,7 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
             errors,
             accepted_empty_clusters,
             false,
+            input_plugins,
             &analytics_info,
             &shared_input_overrides,
         )
@@ -316,14 +328,18 @@ pub(crate) async fn process_targets<E: EventSink + Clone + 'static, M: MetadataU
                         std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
                     completion.send_replace(true);
                     match finalized {
-                        Ok((result, errors)) => TargetJobResult {
-                            index,
-                            name: target_name,
-                            result,
-                            errors,
-                            processing,
-                            overrides: Some(overrides),
-                        },
+                        Ok((result, errors, finalize_report)) => {
+                            let mut processing = processing;
+                            processing.plugins.merge(finalize_report);
+                            TargetJobResult {
+                                index,
+                                name: target_name,
+                                result,
+                                errors,
+                                processing,
+                                overrides: Some(overrides),
+                            }
+                        }
                         Err(_) => TargetJobResult {
                             index,
                             name: target_name.clone(),
@@ -416,8 +432,8 @@ pub(crate) struct PreparedTarget {
     pub(crate) overrides: Arc<TargetOverrideSet>,
 }
 
-async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     target_name: &str,
 ) -> Result<Option<tuliprox_core::model::TargetBouquetFilter>, TuliproxError> {
     let bouquet_file = tuliprox_repository::load_target_bouquet(&ctx.config, target_name).await?;
@@ -430,15 +446,41 @@ async fn load_target_bouquet_filter<E: EventSink + Clone + 'static, M: MetadataU
     Ok(bouquet_filter)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+/// A target's processing filter may call `plugin.<id>.<fn>(…)`. When the plugin is not installed or not
+/// enabled, nothing can answer that term: the host's default is `false` for every item, so the filter
+/// would drop the whole playlist and still report the target as successful. Fail the target instead —
+/// it keeps its previous output, and the log names the plugin and the fix.
+fn ensure_filter_plugins_available<P: PluginHost>(plugins: &P, target: &ConfigTarget) -> Result<(), TuliproxError> {
+    let Some(filter) = target.filter.processing.as_ref() else {
+        return Ok(());
+    };
+    for call in filter.plugin_calls() {
+        if !plugins.provides(PluginHook::FilterEval, call.plugin) {
+            return Err(TuliproxError::ConfigTarget(format!(
+                "target '{}' is inactive: its filter calls plugin '{}', which is not installed or not enabled; \
+                 the target keeps its previous playlist",
+                target.name, call.plugin
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn prepare_playlist_for_target<
+    E: EventSink + Clone + 'static,
+    M: MetadataUpdateSink,
+    P: PluginHost,
+>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     playlists: &mut [FetchedPlaylist<'_>],
     target: &ConfigTarget,
     stats: &mut HashMap<Arc<str>, InputStats>,
     errors: &mut Vec<TuliproxError>,
     accepted_empty_clusters: ClusterFlags,
     consume_input_source: bool,
+    input_plugins: &HashMap<Arc<str>, PluginRunReport>,
     analytics_info: &Arc<SourceAnalyticsInfo>,
     input_overrides: &Arc<InputOverrideSet>,
 ) -> Result<PreparedTarget, Vec<TuliproxError>> {
@@ -460,6 +502,7 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
 
     debug!("Executing processing pipes");
     let broadcast_step = create_broadcast_callback(&ctx.events, &ctx.run_id, ctx.execution_order);
+    ensure_filter_plugins_available(&ctx.plugins, target).map_err(|err| vec![err])?;
     let bouquet_filter = load_target_bouquet_filter(ctx, &target.name).await.map_err(|err| vec![err])?;
     let target_input_names: Vec<&str> = playlists.iter().map(|p| p.input.name.as_ref()).collect();
     let target_overrides =
@@ -472,6 +515,10 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         only_library_inputs &= provider_fpl.input.input_type == InputType::Library;
         non_library_inputs_populated &= provider_fpl.input.input_type == InputType::Library || !input_is_empty;
         has_empty_library |= provider_fpl.input.input_type == InputType::Library && input_is_empty;
+        // `on-playlist-loaded` ran once for the input; every target that consumes it reports it once.
+        if let Some(loaded) = input_plugins.get(&provider_fpl.input.name) {
+            aggregate_outcome.plugins.merge(loaded.clone());
+        }
         log_memory_snapshot(
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
@@ -483,8 +530,10 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
             &mut duplicates,
             consume_input_source,
             bouquet_filter.as_ref(),
+            &ctx.plugins,
             Some(&target_overrides),
         )
+        .await
         .map_err(|err| vec![err])?;
         debug!("Target '{}' input '{}' pipeline outcome: {input_outcome:?}", target.name, provider_fpl.input.name);
         aggregate_outcome.merge(input_outcome);
@@ -492,7 +541,8 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         processed_fpl.sort_by_provider_ordinal();
-        playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        let series_report = playlist_resolve(ctx, target, errors, &pipe, provider_fpl, &mut processed_fpl).await;
+        aggregate_outcome.plugins.merge(series_report);
         {
             let locked = target_overrides.target_locked();
             if !locked.is_empty() {
@@ -504,8 +554,22 @@ pub(crate) async fn prepare_playlist_for_target<E: EventSink + Clone + 'static, 
         );
         let clear_invalid_epg_ids = target.options.as_ref().is_some_and(ConfigTargetOptions::clear_invalid_epg_ids);
         let input_epg_start = new_epg.len();
-        let epg_assign_options = EpgAssignOptions::from_target_options(target.options.as_ref());
-        process_playlist_epg(&mut processed_fpl, &mut new_epg, epg_assign_options).await;
+        let epg_assign_options = EpgAssignOptions {
+            // An input in maintenance runs no plugin hook that could reach its provider's EPG.
+            plugin_hooks: !ctx.is_input_in_maintenance(&processed_fpl.input.name),
+            ..EpgAssignOptions::from_target_options(target.options.as_ref())
+        };
+        let epg_report = process_playlist_epg(&ctx.plugins, &mut processed_fpl, &mut new_epg, epg_assign_options).await;
+        aggregate_outcome.plugins.merge(epg_report);
+        if epg_assign_options.plugin_hooks {
+            enrich_playlist_programmes(
+                &ctx.plugins,
+                &HookCtx::new(&target.name).with_input(&processed_fpl.input.name),
+                &mut new_epg[input_epg_start..],
+                &mut aggregate_outcome.plugins,
+            )
+            .await;
+        }
         {
             let locked = target_overrides.target_locked();
             if !locked.is_empty() {
@@ -621,23 +685,100 @@ fn finalization_step_label(view: &str, stage: &str) -> String {
     }
 }
 
-pub(crate) fn prepare_eligible_catalog(
+/// The distinct group titles of `playlist`, in first-seen order.
+fn group_titles(playlist: &[PlaylistGroup]) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    playlist.iter().filter(|group| seen.insert(&group.title)).map(|group| group.title.to_string()).collect()
+}
+
+/// Apply a `merge-groups` decision: rename every member group (and its
+/// channels' `group`) to its canonical title, so `flatten_groups` merges them.
+/// Titles the playlist does not have are ignored, a member named under two
+/// canonical titles goes to the first one. Returns the number of renamed groups.
+pub(crate) fn apply_group_merge(playlist: &mut [PlaylistGroup], merge: &PluginGroupMerge) -> usize {
+    let mut canonical_of: HashMap<&str, &str> = HashMap::new();
+    for (canonical, members) in merge.iter().filter(|(canonical, _)| !canonical.trim().is_empty()) {
+        for member in members {
+            canonical_of.entry(member.as_str()).or_insert(canonical.as_str());
+        }
+    }
+    let mut renamed = 0;
+    for group in playlist {
+        let Some(canonical) = canonical_of.get(&*group.title).copied().filter(|canonical| **canonical != *group.title)
+        else {
+            continue;
+        };
+        let title = canonical.intern();
+        group.title = Arc::clone(&title);
+        for channel in &mut group.channels {
+            channel.header.group = Arc::clone(&title);
+        }
+        renamed += 1;
+    }
+    renamed
+}
+
+/// `resolve-duplicates` decision for the post-merge pass: one guest call per
+/// duplicate group, aligned with [`group_duplicates`] of `playlist`.
+async fn plugin_duplicate_keepers<P: PluginHost>(
+    plugins: &P,
+    plugin: &str,
+    ctx: &HookCtx<'_>,
+    dedup_config: &DeduplicateConfig,
+    playlist: &[PlaylistGroup],
+    report: &mut PluginRunReport,
+) -> Result<Option<PluginKeepers>, PluginAbort> {
+    let sets = group_duplicates(dedup_config, playlist);
+    if sets.is_empty() {
+        return Ok(None);
+    }
+    let groups = plugin_duplicate_groups(playlist, &sets);
+    plugins.resolve_duplicates(plugin, ctx, &groups, report).await
+}
+
+/// Flush the catalog into one merged, deduplicated playlist.
+///
+/// Async, with the two strategy hooks as prepare -> apply (plan §7
+/// pattern 2): `merge-groups` renames members before `flatten_groups`, and
+/// `resolve-duplicates` hands the keepers to the otherwise synchronous
+/// `deduplicate_playlist`.
+pub(crate) async fn prepare_eligible_catalog<P: PluginHost>(
+    plugins: &P,
     target: &ConfigTarget,
-    playlist: Vec<PlaylistGroup>,
+    mut playlist: Vec<PlaylistGroup>,
     step: &mut StepMeasure,
-) -> Vec<PlaylistGroup> {
+    report: &mut PluginRunReport,
+) -> Result<Vec<PlaylistGroup>, PluginAbort> {
+    let ctx = HookCtx::new(&target.name);
+    let strategies = &target.execution_plan.plugin_strategies;
+    if let Some(plugin) = &strategies.merge_groups {
+        let titles = group_titles(&playlist);
+        if !titles.is_empty() {
+            if let Some(merge) = plugins.merge_groups(plugin.id(), &ctx, &titles, report).await? {
+                let renamed = apply_group_merge(&mut playlist, &merge);
+                debug!("Target '{}': plugin {} merged {renamed} groups", target.name, plugin.id());
+            }
+        }
+    }
     let mut playlist = flatten_groups(playlist);
     step.tick("playlist merge");
     log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
     if let Some(dedup_config) = target.execution_plan.post_merge_content_dedup.as_ref() {
-        let removed = crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut playlist);
+        let keepers = match &strategies.resolve_duplicates {
+            Some(plugin) => {
+                plugin_duplicate_keepers(plugins, plugin.id(), &ctx, dedup_config, &playlist, report).await?
+            }
+            None => None,
+        };
+        let removed =
+            crate::processor::deduplicate::deduplicate_playlist(dedup_config, &mut playlist, keepers.as_ref());
         if removed > 0 {
             info!("Deduplicated {removed} eligible channels for target {}", target.name);
         }
         step.tick("playlist dedup");
         log_memory_snapshot(format!("target '{}' after_playlist_dedup", target.name).as_str());
     }
-    playlist
+    Ok(playlist)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -657,18 +798,153 @@ impl PlaylistViewKind {
     pub(crate) fn warns_duplicates(self) -> bool { matches!(self, Self::Base) }
 }
 
-fn finalize_playlist_view(
+/// Every channel of a view, in view order: what the finalize-side hooks index.
+fn flat_items(playlist: &[PlaylistGroup]) -> Vec<&PlaylistItem> {
+    playlist.iter().flat_map(|group| group.channels.iter()).collect()
+}
+
+/// `sort-key` decision for one view: one key per channel in `flat_items` order.
+async fn plugin_sort_keys<P: PluginHost>(
+    plugins: &P,
+    plugin: &str,
+    ctx: &HookCtx<'_>,
+    playlist: &[PlaylistGroup],
+    report: &mut PluginRunReport,
+) -> Result<Option<PluginSortKeys>, PluginAbort> {
+    let items = flat_items(playlist);
+    if items.is_empty() {
+        return Ok(None);
+    }
+    plugins.sort_keys(plugin, ctx, &items, report).await
+}
+
+/// Apply an `after-sort` order, a permutation of the view's flat channel
+/// indices (`order[k]` = the channel that comes `k`-th). Channels reorder
+/// within their group by rank and groups by their first channel's rank, so a
+/// plugin cannot move a channel into another group. An order that is not a
+/// permutation of `0..channels` changes nothing.
+pub(crate) fn apply_after_sort(playlist: &mut Vec<PlaylistGroup>, order: &[usize]) -> Result<(), String> {
+    let total: usize = playlist.iter().map(|group| group.channels.len()).sum();
+    if order.len() != total {
+        return Err(format!("{} indices for {total} channels", order.len()));
+    }
+    let mut rank = vec![usize::MAX; total];
+    for (position, &index) in order.iter().enumerate() {
+        match rank.get_mut(index) {
+            None => return Err(format!("index {index} is out of bounds")),
+            Some(slot) if *slot != usize::MAX => return Err(format!("duplicate index {index}")),
+            Some(slot) => *slot = position,
+        }
+    }
+
+    let mut offset = 0;
+    let mut keyed = Vec::with_capacity(playlist.len());
+    for mut group in std::mem::take(playlist) {
+        let len = group.channels.len();
+        let ranks = &rank[offset..offset + len];
+        offset += len;
+        let mut indices: Vec<usize> = (0..len).collect();
+        indices.sort_by_key(|index| ranks[*index]);
+        let first_rank = indices.first().map_or(usize::MAX, |index| ranks[*index]);
+        let mut channels: Vec<Option<PlaylistItem>> =
+            std::mem::take(&mut group.channels).into_iter().map(Some).collect();
+        group.channels = indices.iter().filter_map(|index| channels[*index].take()).collect();
+        keyed.push((first_rank, group));
+    }
+    keyed.sort_by_key(|(first_rank, _)| *first_rank);
+    *playlist = keyed.into_iter().map(|(_, group)| group).collect();
+    Ok(())
+}
+
+/// A channel's identity across the views of one target: its uuid and how many
+/// channels with that uuid came before it in the view.
+type ChnoKey = (UUIDType, u32);
+
+/// Plugin channel numbers of one target, computed once for the first view and
+/// reused for the second so a channel has one number in both.
+type PluginChnos = Option<HashMap<ChnoKey, u32>>;
+
+fn chno_keys(items: &[&PlaylistItem]) -> Vec<ChnoKey> {
+    let mut seen: HashMap<UUIDType, u32> = HashMap::new();
+    items
+        .iter()
+        .map(|item| {
+            let uuid = *item.header.get_uuid();
+            let seen_before = seen.entry(uuid).or_insert(0);
+            let key = (uuid, *seen_before);
+            *seen_before += 1;
+            key
+        })
+        .collect()
+}
+
+/// `assign-channel-numbers` decision for the first view, keyed by item
+/// identity. Zero chnos and indices outside the view are dropped.
+async fn plugin_chno_numbers<P: PluginHost>(
+    plugins: &P,
+    plugin: &str,
+    ctx: &HookCtx<'_>,
+    playlist: &[PlaylistGroup],
+    report: &mut PluginRunReport,
+) -> Result<HashMap<ChnoKey, u32>, PluginAbort> {
+    let items = flat_items(playlist);
+    if items.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let Some(chnos) = plugins.assign_chno(plugin, ctx, &items, report).await? else {
+        return Ok(HashMap::new());
+    };
+    let keys = chno_keys(&items);
+    Ok(chnos
+        .into_iter()
+        .filter(|(_, chno)| *chno != 0)
+        .filter_map(|(index, chno)| keys.get(index).map(|key| (*key, chno)))
+        .collect())
+}
+
+/// Give the listed channels their plugin number; the host numbers the rest
+/// (`assign_channel_no_playlist` skips every number already taken).
+pub(crate) fn apply_plugin_chnos(playlist: &mut [PlaylistGroup], numbers: &HashMap<ChnoKey, u32>) -> usize {
+    let keys = chno_keys(&flat_items(playlist));
+    let mut assigned = 0;
+    for (channel, key) in playlist.iter_mut().flat_map(|group| group.channels.iter_mut()).zip(keys) {
+        if let Some(chno) = numbers.get(&key) {
+            channel.header.chno = *chno;
+            assigned += 1;
+        }
+    }
+    assigned
+}
+
+/// Runs once per view (base, and Xtream when curation emits one).
+///
+/// Async per plan §7 *Sync/async boundary*, pattern 1 ("lift the loop, keep the
+/// work sync"): the stage arms stay sync, and `after-sort` is awaited between
+/// the `Sort` and `AssignChannelNumbers` arms. `sort-key` and
+/// `assign-channel-numbers` are prepare -> apply data computed here, before the
+/// sync arm that consumes them.
+///
+/// `locked` holds the target's manual overrides, re-applied after the appearance merge and
+/// before channel numbers are assigned so no later stage can undo them.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finalize_playlist_view<P: PluginHost>(
+    plugins: &P,
     target: &ConfigTarget,
     playlist: Vec<PlaylistGroup>,
     step: &mut StepMeasure,
     view_kind: PlaylistViewKind,
+    chnos: &mut PluginChnos,
+    report: &mut PluginRunReport,
     locked: Option<&HashMap<UUIDType, Arc<ItemOverride>>>,
-) -> Vec<PlaylistGroup> {
+) -> Result<Vec<PlaylistGroup>, PluginAbort> {
+    let view = view_kind.label();
     let mut playlist = flatten_groups(playlist);
-    step.tick(&finalization_step_label(view_kind.label(), "appearance merge"));
+    step.tick(&finalization_step_label(view, "appearance merge"));
     if let Some(locked) = locked.filter(|l| !l.is_empty()) {
         reapply_to_groups(&mut playlist, locked);
     }
+    let ctx = HookCtx::new(&target.name).with_view(view);
+    let strategies = &target.execution_plan.plugin_strategies;
 
     for stage in FINALIZATION_ORDER.into_iter().skip(2) {
         match stage {
@@ -676,14 +952,43 @@ fn finalize_playlist_view(
                 unreachable!("eligibility merge and deduplication are completed before curation")
             }
             FinalizationStage::Sort => {
-                if sort_playlist(target, &mut playlist) {
-                    step.tick(&finalization_step_label(view_kind.label(), "playlist sort"));
-                    log_memory_snapshot(
-                        format!("target '{}' {} after_playlist_sort", target.name, view_kind.label()).as_str(),
-                    );
+                let keys = match &strategies.sort_key {
+                    Some(plugin) => plugin_sort_keys(plugins, plugin.id(), &ctx, &playlist, report).await?,
+                    None => None,
+                };
+                if sort_playlist(target, &mut playlist, keys.as_ref()) {
+                    step.tick(&finalization_step_label(view, "playlist sort"));
+                    log_memory_snapshot(format!("target '{}' {view} after_playlist_sort", target.name).as_str());
+                }
+                if plugins.wants(PluginHook::AfterSort, &target.name) {
+                    let order = {
+                        let items = flat_items(&playlist);
+                        if items.is_empty() {
+                            None
+                        } else {
+                            plugins.after_sort(&ctx, &items, report).await?
+                        }
+                    };
+                    if let Some(order) = order {
+                        match apply_after_sort(&mut playlist, &order) {
+                            Ok(()) => step.tick(&finalization_step_label(view, "plugin sort")),
+                            Err(err) => warn!(
+                                "Target '{}' {view}: after-sort returned an invalid order ({err}); keeping the host order",
+                                target.name
+                            ),
+                        }
+                    }
                 }
             }
             FinalizationStage::AssignChannelNumbers => {
+                if let Some(plugin) = &strategies.assign_chno {
+                    if chnos.is_none() {
+                        *chnos = Some(plugin_chno_numbers(plugins, plugin.id(), &ctx, &playlist, report).await?);
+                    }
+                    if let Some(numbers) = chnos.as_ref().filter(|numbers| !numbers.is_empty()) {
+                        apply_plugin_chnos(&mut playlist, numbers);
+                    }
+                }
                 if let Some(locked) = locked.filter(|l| !l.is_empty()) {
                     reapply_to_groups(&mut playlist, locked);
                 }
@@ -712,7 +1017,7 @@ fn finalize_playlist_view(
     }
 
     apply_persist_filter(target, &mut playlist);
-    playlist
+    Ok(playlist)
 }
 
 // Keep construction and its diagnostic seam private to the processing boundary.
@@ -739,10 +1044,15 @@ pub(super) fn build_target_tmdb_client(
         None
     }
 }
-pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: Arc<PlaylistProcessingContext<E, M>>,
+
+/// What finalizing a target produced: the persist result, the errors that do
+/// not fail the target, and what plugins did on its finalize-side hooks.
+pub(crate) type FinalizeOutcome = (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>, PluginRunReport);
+
+pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: Arc<PlaylistProcessingContext<E, M, P>>,
     prepared: PreparedTarget,
-) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
+) -> FinalizeOutcome {
     // Keep TMDB transport settings independent of the generic client.
     let tmdb_client = build_target_tmdb_client(
         &prepared.target,
@@ -754,11 +1064,26 @@ pub(crate) async fn finalize_prepared_target<E: EventSink + Clone + 'static, M: 
     finalize_prepared_target_with_tmdb(ctx, prepared, tmdb_client.as_ref()).await
 }
 
-#[allow(clippy::too_many_lines)]
-pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: Arc<PlaylistProcessingContext<E, M>>,
+pub(super) async fn finalize_prepared_target_with_tmdb<
+    E: EventSink + Clone + 'static,
+    M: MetadataUpdateSink,
+    P: PluginHost,
+>(
+    ctx: Arc<PlaylistProcessingContext<E, M, P>>,
     prepared: PreparedTarget,
     tmdb_client: Option<&reqwest::Client>,
+) -> FinalizeOutcome {
+    let mut report = PluginRunReport::default();
+    let (result, errors) = finalize_target_views(ctx, prepared, tmdb_client, &mut report).await;
+    (result, errors, report)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn finalize_target_views<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: Arc<PlaylistProcessingContext<E, M, P>>,
+    prepared: PreparedTarget,
+    tmdb_client: Option<&reqwest::Client>,
+    report: &mut PluginRunReport,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let config = ctx.config.config.load_full();
     let target = &prepared.target;
@@ -786,7 +1111,13 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         return (Ok(()), errors);
     }
 
-    let eligible_catalog = prepare_eligible_catalog(target, new_playlist, &mut step);
+    let eligible_catalog = match prepare_eligible_catalog(&ctx.plugins, target, new_playlist, &mut step, report).await {
+        Ok(catalog) => catalog,
+        Err(abort) => {
+            step.stop("");
+            return (Err(vec![TuliproxError::Plugin(abort.to_string())]), errors);
+        }
+    };
     let mut views = prepare_target_playlist_views(&ctx.client, tmdb_client, target, eligible_catalog).await;
     if views.base.is_empty()
         && views.xtream.is_none()
@@ -817,10 +1148,49 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         log_memory_snapshot(format!("target '{}' after_curation", target.name).as_str());
     }
 
-    let mut finalized_base = finalize_playlist_view(target, views.base, &mut step, PlaylistViewKind::Base, locked);
-    let mut finalized_xtream = views
-        .xtream
-        .map(|playlist| finalize_playlist_view(target, playlist, &mut step, PlaylistViewKind::Xtream, locked));
+    // Plugin channel numbers are computed on the first view and reused on the second.
+    let mut chnos = PluginChnos::default();
+    let finalized = finalize_playlist_view(
+        &ctx.plugins,
+        target,
+        views.base,
+        &mut step,
+        PlaylistViewKind::Base,
+        &mut chnos,
+        report,
+        locked,
+    )
+    .await;
+    let mut finalized_base = match finalized {
+        Ok(playlist) => playlist,
+        Err(abort) => {
+            step.stop("");
+            return (Err(vec![TuliproxError::Plugin(abort.to_string())]), errors);
+        }
+    };
+    let mut finalized_xtream = match views.xtream {
+        Some(playlist) => {
+            match finalize_playlist_view(
+                &ctx.plugins,
+                target,
+                playlist,
+                &mut step,
+                PlaylistViewKind::Xtream,
+                &mut chnos,
+                report,
+                locked,
+            )
+            .await
+            {
+                Ok(playlist) => Some(playlist),
+                Err(abort) => {
+                    step.stop("");
+                    return (Err(vec![TuliproxError::Plugin(abort.to_string())]), errors);
+                }
+            }
+        }
+        None => None,
+    };
     drop(locked_map);
     retain_epg_referenced_by_groups(&finalized_base, &mut new_epg);
 
@@ -874,6 +1244,10 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
         },
     )
     .await;
+    // `type: plugin` outputs (plan §7 *Output providers*): the repository has no
+    // plugin seam, so they render here, each failing on its own.
+    let result =
+        super::plugin_output::persist_plugin_outputs(&ctx.plugins, &ctx.config, target, &finalized_base, result).await;
     let outcome = if result.is_ok() { TargetAnalyticsOutcome::Published } else { TargetAnalyticsOutcome::Failed };
     persist_target_analytics(&config, &target.name, analytics_dto, &unmapped_csv, outcome).await;
     let watch_playlist = target_watch_view(&finalized_base, finalized_xtream.as_deref());
@@ -886,21 +1260,22 @@ pub(super) async fn finalize_prepared_target_with_tmdb<E: EventSink + Clone + 's
     (result, errors)
 }
 
-pub(crate) async fn playlist_resolve<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn playlist_resolve<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
     provider_fpl: &mut FetchedPlaylist<'_>,
     processed_fpl: &mut FetchedPlaylist<'_>,
-) {
+) -> PluginRunReport {
     // Resolve and probe talk to the provider; an input in maintenance keeps what it has.
     if ctx.is_input_in_maintenance(&processed_fpl.input.name) {
-        return;
+        return PluginRunReport::default();
     }
-    playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
+    let series_report = playlist_resolve_series(ctx, target, errors, pipe, provider_fpl, processed_fpl).await;
     playlist_resolve_vod(ctx, target, errors, provider_fpl, processed_fpl).await;
     playlist_probe(ctx, target, processed_fpl).await;
+    series_report
 }
 
 pub(crate) fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
@@ -966,8 +1341,8 @@ pub(crate) fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdTyp
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn playlist_probe<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub(crate) async fn playlist_probe<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     target: &ConfigTarget,
     fpl: &mut FetchedPlaylist<'_>,
 ) {
@@ -1458,4 +1833,38 @@ pub(crate) async fn process_watch<E: EventSink>(
     }
 
     true
+}
+
+#[cfg(test)]
+mod filter_plugin_tests {
+    use super::*;
+    use shared::model::NoPlugins;
+    use tuliprox_core::model::ConfigTarget;
+
+    fn target_with_filter(filter: &str) -> ConfigTarget {
+        let mut dto: shared::model::ConfigTargetDto =
+            serde_json::from_value(serde_json::json!({"name": "t1"})).expect("target fixture");
+        dto.filter.t_processing =
+            Some(shared::foundation::get_target_processing_filter(filter, None).expect("filter compiles"));
+        ConfigTarget::from(&dto)
+    }
+
+    /// A filter term whose plugin is gone must not empty the target behind a `success`: the target
+    /// fails, keeps its previous output, and the message names the plugin.
+    #[test]
+    fn a_filter_term_without_its_plugin_fails_the_target() {
+        let target = target_with_filter(r#"Group ~ ".*" and plugin.youtube-input.is_live("News")"#);
+
+        let err = ensure_filter_plugins_available(&NoPlugins, &target).expect_err("the target cannot run");
+
+        let message = err.to_string();
+        assert!(message.contains("target 't1' is inactive"), "{message}");
+        assert!(message.contains("youtube-input"), "{message}");
+    }
+
+    #[test]
+    fn a_filter_without_plugin_terms_runs() {
+        let target = target_with_filter(r#"Group ~ "News""#);
+        assert!(ensure_filter_plugins_available(&NoPlugins, &target).is_ok());
+    }
 }

@@ -371,4 +371,106 @@ mod scss_tests {
         let ratio = contrast(text, surface);
         assert!(ratio >= 4.5, "secondary text contrast is {ratio:.3}, expected at least 4.5");
     }
+
+    /// Every theme file, by the `data-theme` value it serves.
+    const ALL_THEME_STYLES: [(&str, &str); 20] = [
+        ("aurora", include_str!("../../../scss/themes/_theme-aurora.scss")),
+        ("banana-yellow", include_str!("../../../scss/themes/_theme-banana-yellow.scss")),
+        ("bright", include_str!("../../../scss/themes/_theme-bright.scss")),
+        ("clubroom-contrast", include_str!("../../../scss/themes/_theme-clubroom-contrast.scss")),
+        ("cool-elegance", include_str!("../../../scss/themes/_theme-cool-elegance.scss")),
+        ("cvd-friendly-bright", include_str!("../../../scss/themes/_theme-cvd-friendly-bright.scss")),
+        ("cvd-friendly-dark", include_str!("../../../scss/themes/_theme-cvd-friendly-dark.scss")),
+        ("dark", include_str!("../../../scss/themes/_theme-dark.scss")),
+        ("dopamine", include_str!("../../../scss/themes/_theme-dopamine.scss")),
+        ("dracula", include_str!("../../../scss/themes/_theme-dracula.scss")),
+        ("graperoot-dark", include_str!("../../../scss/themes/_theme-graperoot-dark.scss")),
+        ("mermaidcore", include_str!("../../../scss/themes/_theme-mermaidcore.scss")),
+        ("monokai", include_str!("../../../scss/themes/_theme-monokai.scss")),
+        ("nature-pure", include_str!("../../../scss/themes/_theme-nature-pure.scss")),
+        ("nord", include_str!("../../../scss/themes/_theme-nord.scss")),
+        ("paper", include_str!("../../../scss/themes/_theme-paper.scss")),
+        ("refined-dark", include_str!("../../../scss/themes/_theme-refined-dark.scss")),
+        ("sun-washed-soft", include_str!("../../../scss/themes/_theme-sun-washed-soft.scss")),
+        ("vibrant-elegance", include_str!("../../../scss/themes/_theme-vibrant-elegance.scss")),
+        ("vintage-neutral", include_str!("../../../scss/themes/_theme-vintage-neutral.scss")),
+    ];
+
+    /// The hue of a hex colour, or `None` for a grey (its hue carries no identity).
+    fn hue(value: &str) -> Option<f64> {
+        let (r, g, b) = hex_rgb(value);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let delta = max - min;
+        if delta < 1.0 {
+            return None;
+        }
+        let hue = if max == r {
+            60.0 * (((g - b) / delta) % 6.0)
+        } else if max == g {
+            60.0 * ((b - r) / delta + 2.0)
+        } else {
+            60.0 * ((r - g) / delta + 4.0)
+        };
+        Some(if hue < 0.0 { hue + 360.0 } else { hue })
+    }
+
+    fn hue_distance(a: f64, b: f64) -> f64 {
+        let delta = (a - b).abs() % 360.0;
+        delta.min(360.0 - delta)
+    }
+
+    #[test]
+    fn every_theme_colours_plugin_bricks_and_no_plugin_hue_meets_a_built_in_one() {
+        const BUILT_IN_BRICKS: [&str; 13] = [
+            "--theme-palette-graph-input-xtream",
+            "--theme-palette-graph-input-m3u",
+            "--theme-palette-graph-input-library",
+            "--theme-palette-graph-input-staged",
+            "--theme-palette-graph-input-stalker",
+            "--theme-palette-graph-input-jellyfin",
+            "--theme-palette-graph-input-emby",
+            "--theme-palette-graph-input-plex",
+            "--theme-palette-graph-target",
+            "--theme-palette-graph-output-xtream",
+            "--theme-palette-graph-output-m3u",
+            "--theme-palette-graph-output-hdhomerun",
+            "--theme-palette-graph-output-strm",
+        ];
+        assert_eq!(ALL_THEME_STYLES.len(), Theme::ALL.len(), "every theme must be checked");
+        for (name, scss) in ALL_THEME_STYLES {
+            let plugin = hue(resolved_value(scss, "--theme-palette-graph-plugin"))
+                .unwrap_or_else(|| panic!("{name}: the plugin brick colour must not be a grey"));
+            for brick in BUILT_IN_BRICKS {
+                let built_in =
+                    hue(resolved_value(scss, brick)).unwrap_or_else(|| panic!("{name}: {brick} must not be a grey"));
+                let distance = hue_distance(plugin, built_in);
+                assert!(
+                    distance >= 20.0,
+                    "{name}: the plugin brick hue {plugin:.0}° is {distance:.0}° from {brick}; give the plugin \
+                     bricks a colour of their own"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_plugin_brick_variables_are_wired_for_bricks_and_blocks() {
+        let theme = include_str!("../../../scss/_theme.scss");
+        let bricks = include_str!("../../../scss/app/components/source_editor/_source_editor_block.scss");
+        assert!(theme.contains("--theme-brand-brick-plugin: var(--theme-palette-graph-plugin)"));
+        // The palette declares the same three derivatives every built-in brick has; the rules use
+        // the border and the fill (the shadow is reserved, like the built-ins').
+        for suffix in ["border", "background", "shadow"] {
+            let name = format!("--brick-plugin-{suffix}-color");
+            assert!(theme.contains(&format!("{name}:")), "{name} is not derived from the plugin colour");
+        }
+        for suffix in ["border", "background"] {
+            let name = format!("--brick-plugin-{suffix}-color");
+            assert!(bricks.contains(&name), "no brick or block rule uses {name}");
+        }
+        for block_type in ["InputPlugin", "OutputPlugin"] {
+            assert!(bricks.contains(&format!("&-{block_type}")), "{block_type} has no brick rule");
+        }
+    }
 }

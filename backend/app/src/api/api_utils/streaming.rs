@@ -36,8 +36,8 @@ use shared::{
     defaults::HLS_EXT,
     error::TuliproxError,
     model::{
-        ConfigTargetOptions, FailureStage, PlaylistEntry, PlaylistItemType, StreamChannel, StreamInfo,
-        UserConnectionPermission, VirtualId, XtreamCluster,
+        ConfigTargetOptions, FailureStage, PlaylistEntry, PlaylistItemType, PluginHeaderInjector,
+        PluginUpstreamRequest, StreamChannel, StreamInfo, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
         extract_extension_from_url, human_readable_kbps, is_sanitize_sensitive_info_enabled, sanitize_sensitive_info,
@@ -136,6 +136,42 @@ pub(crate) async fn resolve_stream_user_agent_index(
     } else {
         None
     }
+}
+
+/// The extra upstream headers the plugins inject for one stream-session setup
+/// (plan §7 *Session-edge header injection*). `None` when no plugin injects
+/// headers or none returned any. Fail-open and hard-clamped inside the plugin
+/// host, so the stream never waits longer than that clamp. Call it once per
+/// setup, never per chunk or segment.
+pub(crate) async fn plugin_upstream_headers(
+    app_state: &AppState,
+    stream_channel: &StreamChannel,
+    virtual_id: VirtualId,
+    url: &Url,
+    username: &str,
+    input_headers: Option<&HashMap<String, String>>,
+    session_headers: Option<&HashMap<String, String>>,
+) -> Option<Vec<(String, String)>> {
+    if !app_state.plugins.wants_upstream_headers() {
+        return None;
+    }
+    // What the request carries so far: the configured input headers, then the session's.
+    let mut carried: HashMap<&String, &String> = input_headers.into_iter().flatten().collect();
+    carried.extend(session_headers.into_iter().flatten());
+    let mut carried: Vec<(String, String)> =
+        carried.into_iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+    carried.sort();
+    let injected = app_state
+        .plugins
+        .inject_upstream_headers(&PluginUpstreamRequest {
+            target_id: stream_channel.target_id,
+            virtual_id: virtual_id.get(),
+            url: url.as_str(),
+            headers: &carried,
+            user: username,
+        })
+        .await;
+    (!injected.is_empty()).then_some(injected)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
@@ -335,10 +371,21 @@ pub(super) async fn create_stream_response_details(
                 } else {
                     let parsed_url = Url::parse(&request_url);
                     let request_url_valid = parsed_url.is_ok();
+                    let mut plugin_headers: Option<Vec<(String, String)>> = None;
                     let ((mut stream, mut stream_info, mut provider_session_headers), mut reconnect_flag) =
                         if let Ok(url) = parsed_url {
                             let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
                             let disabled_headers = app_state.get_disabled_headers();
+                            plugin_headers = plugin_upstream_headers(
+                                app_state,
+                                stream_channel,
+                                virtual_id,
+                                &url,
+                                username,
+                                streaming_strategy.input_headers.as_ref(),
+                                session_headers,
+                            )
+                            .await;
                             let mut provider_stream_factory_options =
                                 ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
                                     addr: fingerprint.addr,
@@ -356,6 +403,7 @@ pub(super) async fn create_stream_response_details(
                                     stream_channel: Some(stream_channel),
                                     connect_failure_stage: Some(FailureStage::ProviderOpen),
                                     content_representation,
+                                    plugin_headers: plugin_headers.as_deref(),
                                 });
 
                             if let Some(stream_index) = user_agent_stream_index {
@@ -429,6 +477,8 @@ pub(super) async fn create_stream_response_details(
                                             stream_channel: Some(stream_channel),
                                             connect_failure_stage: Some(FailureStage::ProviderOpen),
                                             content_representation,
+                                            // The same session setup, re-resolved: reuse its injection.
+                                            plugin_headers: plugin_headers.as_deref(),
                                         },
                                     );
                                     if let Some(stream_index) = user_agent_stream_index {

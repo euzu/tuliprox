@@ -44,7 +44,10 @@ pub(crate) use self::{admission::create_active_client_stream, error::StreamAdmis
 use self::{
     admission::{ActiveClientStreamState, GracePeriodParams},
     grace::{resolve_grace_period_provisioning, stream_grace_period},
-    provider_open::{create_deferred_provider_open_future, DeferredProviderOpenOutcome, DeferredProviderOpenState},
+    provider_open::{
+        create_deferred_provider_open_future, deferred_open_plugin_headers, DeferredProviderOpenOutcome,
+        DeferredProviderOpenState,
+    },
     state::{
         should_use_direct_body_idle_timeout, store_stream_mode, CustomVideoBuffers, DirectBodyIdleTimeout,
         GraceProvisioningInfo, StreamMode, TimedStreamContext,

@@ -112,8 +112,8 @@ pub fn FinishStep() -> Html {
     let step_message = format!(
         "{} {}/{}: {}",
         translate.t(LABEL_SETUP_STEP),
-        step.position(),
-        SetupStep::total(),
+        setup_ctx.step_position(step),
+        setup_ctx.step_total(),
         translate.t(step.description_key())
     );
 

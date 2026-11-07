@@ -1,0 +1,21 @@
+{
+  "settings.title": "إشعارات Telegram",
+  "settings.bot_token.title": "رمز البوت",
+  "settings.bot_token.description": "رمز بوت Telegram الخاص بك من @BotFather. إنه بيانات اعتماد: للكتابة فقط ويُخفى عند القراءة. استخدم ${env:VAR} لتجنّب حفظه في ملف الإعدادات.",
+  "settings.chat_ids.title": "المحادثات",
+  "settings.chat_ids.description": "أين يُرسل، إدخال لكل وجهة: معرّف محادثة (-1001234567890) أو قناة (@mychannel) أو موضوع في مجموعة بصيغة chat_id:topic_id (-1001234567890:5). تستقبل كل محادثة كل إشعار ويجب أن يكون البوت عضواً فيها.",
+  "settings.style.title": "النمط",
+  "settings.style.description": "html: العنوان وأقسام الحدث كعناوين عريضة وتحتها أسطرها. text: الشيء نفسه كنص عادي. الرسالة التي لا تتسع تُقسَّم إلى عدة رسائل.",
+  "settings.routing.title": "التوجيه (تطبّقه tuliprox وليس الإضافة)",
+  "settings.routing.description": "توجيه القناة في صندوق الإشعارات الصادرة، وهو الكتلة نفسها التي تقبلها أي قناة. جميع الحقول اختيارية؛ الكتلة الفارغة ترث notify_on العام.",
+  "settings.routing.notify_on.title": "تجاوز notify_on",
+  "settings.routing.notify_on.description": "أنماط معرّفات الأحداث التي تحلّ محل notify_on العام لهذه القناة (مثل playlist.update.*).",
+  "settings.routing.min_severity.title": "الحد الأدنى للخطورة (التوجيه)",
+  "settings.routing.min_severity.description": "حد الخطورة على جانب المضيف، يُقيَّم بحسب خطورة الحدث في السجل قبل استدعاء الإضافة.",
+  "settings.routing.quiet_hours.title": "ساعات الهدوء",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM بالتوقيت المحلي. تُؤجَّل الإشعارات داخل هذه الفترة ولا تُحذف أبداً.",
+  "settings.routing.max_per_hour.title": "الحد الأقصى في الساعة",
+  "settings.routing.max_per_hour.description": "قاطع الدائرة: بعد هذا العدد من الإشعارات في الساعة ترسل القناة إشعار كتم واحداً ثم تصمت.",
+  "settings.routing.dedup_window_secs.title": "نافذة إزالة التكرار (ثوانٍ)",
+  "settings.routing.dedup_window_secs.description": "كتم مفتاح إزالة التكرار المتكرر لهذا العدد من الثواني."
+}

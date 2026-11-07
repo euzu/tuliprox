@@ -19,6 +19,7 @@ macro_rules! set_genre {
                     $header.additional_properties =
                         Some($crate::model::StreamProperties::Video(Box::from($crate::model::VideoStreamProperties {
                             name: $header.title.clone(),
+                            plugin_fingerprint: None,
                             category_id: $header.category_id,
                             stream_id: $header.virtual_id.get(),
                             stream_icon: $header.logo.clone(),
@@ -45,6 +46,7 @@ macro_rules! set_genre {
                     $header.additional_properties = Some($crate::model::StreamProperties::Series(Box::from(
                         $crate::model::SeriesStreamProperties {
                             name: $header.title.clone(),
+                            plugin_fingerprint: None,
                             category_id: $header.category_id,
                             series_id: $header.virtual_id.get(),
                             backdrop_path: None,

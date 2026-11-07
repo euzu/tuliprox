@@ -1,0 +1,17 @@
+# The provider-probe component under a 100 ms hook deadline (a provider call
+# gets ten of them) and 32 MiB, for the isolation tests.
+id: provider-evil
+name: Provider probe (attack target, 100 ms hook deadline)
+version: 0.1.0
+api_version: 1
+hooks:
+  - input.fetch
+  - output.render
+provides:
+  input_type: true
+  output_format: probe-txt
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 100
+  max_instances: 4
+  fail_mode: continue

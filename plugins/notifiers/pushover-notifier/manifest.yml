@@ -1,0 +1,19 @@
+id: pushover-notifier
+name: Pushover Notifier
+version: 1.0.0
+api_version: 1
+category: notifier
+author: tuliprox
+description: >
+  Delivers tuliprox notifications to Pushover as push messages, as plain text or
+  as HTML. Routing, quiet hours, suppression and retries are the host's; this
+  plugin formats the message and speaks to Pushover.
+capabilities:
+  notifications: true
+  network: true
+hooks:
+  - notifications.send
+ui:
+  locales: [en, ru, es, ar]   # ui/locales/<lang>.json; en is the fallback
+  config_section:
+    schema: config-schema.json

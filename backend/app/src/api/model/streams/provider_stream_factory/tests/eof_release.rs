@@ -91,6 +91,7 @@ fn segment_options(stream_url: &Url, response_mode: StreamResponseMode) -> Provi
         stream_channel: None,
         connect_failure_stage: None,
         content_representation: ProviderContentRepresentationMode::Identity,
+        plugin_headers: None,
     })
 }
 

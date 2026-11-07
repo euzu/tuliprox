@@ -1,0 +1,13 @@
+#EXTM3U
+#EXTINF:-1 tvg-name="BBC One" group-title="UK",BBC One
+http://127.0.0.1:18999/live/bbc-one.ts
+#EXTINF:-1 tvg-name="BBC Two" group-title="UK",BBC Two
+http://127.0.0.1:18999/live/bbc-two.ts
+#EXTINF:-1 tvg-name="BBC Too" group-title="UK",BBC Too
+http://127.0.0.1:18999/live/bbc-too.ts
+#EXTINF:-1 tvg-name="Channel Four" group-title="UK",Channel Four
+http://127.0.0.1:18999/live/channel-four.ts
+#EXTINF:-1 tvg-name="Channel Fore" group-title="UK",Channel Fore
+http://127.0.0.1:18999/live/channel-fore.ts
+#EXTINF:-1 tvg-name="Mystery Box" group-title="UK",Mystery Box
+http://127.0.0.1:18999/live/mystery-box.ts

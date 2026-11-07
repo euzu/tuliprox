@@ -206,7 +206,9 @@ async fn persist_playlist_views_with_mode(
             TargetOutput::Strm(strm_output) => {
                 write_strm_playlist(app_config, target, strm_output, pl, allows_empty_base).await
             }
-            TargetOutput::HdHomeRun(_hdhomerun_output) => Ok(()),
+            // Rendered afterwards by the processing crate, which owns the plugin host (plan §18
+            // *W6a seam freeze*, output providers); like HdHomeRun there is nothing to persist here.
+            TargetOutput::HdHomeRun(_) | TargetOutput::Plugin(_) => Ok(()),
         };
 
         match result {

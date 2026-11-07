@@ -456,6 +456,7 @@ fn create_test_vod_item(url: &str, container_extension: &str, item_type: Playlis
         xtream_cluster: XtreamCluster::Video,
         additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
             name: "Test".intern(),
+            plugin_fingerprint: None,
             category_id: 0,
             stream_id: 813_563,
             stream_icon: "".intern(),

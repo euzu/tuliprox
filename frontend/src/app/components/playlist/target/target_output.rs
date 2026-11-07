@@ -46,6 +46,11 @@ pub fn TargetOutput(props: &TargetOutputProps) -> Html {
                             <StrmOutput output={strm.clone()}/>
                         </RevealContent>
                     },
+                    TargetOutputDto::Plugin(plugin) => html! {
+                        <span class={"tp__target-output__plugin"}>
+                            { format!("{} ({})", translate.t("LABEL.PLUGINS"), plugin.plugin) }
+                        </span>
+                    },
                     TargetOutputDto::HdHomeRun(hdhr) => html! {
                         <RevealContent preview={ html!{
                             <span class={"tp__target-output__hdhomerun"}>

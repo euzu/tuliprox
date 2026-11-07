@@ -1,0 +1,22 @@
+{
+  "form.title": "Entrada de YouTube",
+  "form.description": "Qué obtiene esta entrada y cómo. Todo lo de aquí pertenece solo a esta entrada.",
+  "form.channels.title": "Canales y listas de YouTube",
+  "form.channels.description": "Destinos de esta entrada: @handle, id de canal UC..., id de lista PL..., o un vídeo. Se suman a la URL de arriba; los duplicados se descargan una vez.",
+  "form.channels.placeholder": "@handle, UC…, PL… o una URL de vídeo",
+  "form.invidious_instances.title": "Instancias de Invidious",
+  "form.invidious_instances.description": "Réplicas por las que esta entrada resuelve los streams, en orden de failover (al menos una).",
+  "form.invidious_instances.placeholder": "https://invidious.example",
+  "form.invidious_instances.pattern": "una URL http:// o https:// sin espacios, consulta ni fragmento",
+  "form.mode.title": "Modo de ingesta",
+  "form.mode.description": "Subidas recientes lee los vídeos más nuevos de cada destino; Solo directos conserva únicamente la emisión en curso.",
+  "form.mode.recent_uploads": "Subidas recientes",
+  "form.mode.live_only": "Solo directos",
+  "form.max_uploads.title": "Máximo de subidas",
+  "form.max_uploads.description": "Cuántas subidas recientes tomar por canal (1 a 15).",
+  "form.cache_ttl_minutes.title": "TTL de la caché de streams (minutos)",
+  "form.cache_ttl_minutes.description": "Cuánto reutiliza esta entrada una URL de stream resuelta (10 a 360).",
+  "form.check": "Comprobar destinos e instancias",
+  "tile.title": "YouTube",
+  "tile.description": "Canales, listas de reproducción y directos de YouTube como canales de la lista."
+}

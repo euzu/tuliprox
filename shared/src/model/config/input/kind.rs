@@ -34,6 +34,13 @@ pub enum InputType {
     Jellyfin,
     Plex,
     Staged,
+    /// Provided by a plugin: `type: plugin` plus `plugin: <id>` (plan §18 Q6).
+    ///
+    /// A unit variant on purpose: `Copy`, `Default`, `EnumIter`, `EnumString`,
+    /// `AsRefStr` and `Display` all survive, and the id lives in
+    /// `ConfigInputDto::plugin`. The source editor offers it with a picker over
+    /// the installed plugins that export `input.fetch`.
+    Plugin,
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, Display, EnumString)]
@@ -84,6 +91,7 @@ impl InputType {
     pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
     pub fn is_batch(&self) -> bool { matches!(self, Self::M3uBatch | Self::XtreamBatch | Self::StalkerBatch) }
     pub fn is_staged(&self) -> bool { matches!(self, Self::Staged) }
+    pub fn is_plugin(&self) -> bool { matches!(self, Self::Plugin) }
 
     /// Single source of truth for the categorical behavior of an input type.
     ///
@@ -121,6 +129,14 @@ impl InputType {
                 served_on_custom_provider_endpoint: false,
             },
             Self::Staged => InputCapabilities {
+                persistence: InputPersistence::M3u,
+                requires_provider_connection_for_probe: false,
+                served_on_custom_provider_endpoint: false,
+            },
+            // Plugin items enter the M3U path (grouping, caching, `on-playlist-loaded`). The plugin, not
+            // a provider account, supplies the playlist and the stream URLs, so the host holds no
+            // provider connection for probing and the custom-provider endpoint has nothing to serve.
+            Self::Plugin => InputCapabilities {
                 persistence: InputPersistence::M3u,
                 requires_provider_connection_for_probe: false,
                 served_on_custom_provider_endpoint: false,

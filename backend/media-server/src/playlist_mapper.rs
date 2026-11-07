@@ -192,6 +192,7 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
             item_type: PlaylistItemType::Video,
             additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                 name: movie.title.clone(),
+                plugin_fingerprint: None,
                 stream_id: 0,
                 stream_icon: logo,
                 direct_source: "".intern(),
@@ -241,6 +242,7 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
             item_type: PlaylistItemType::SeriesInfo,
             additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                 name: series.title.clone(),
+                plugin_fingerprint: None,
                 series_id: 0,
                 cover: logo,
                 backdrop_path: None,

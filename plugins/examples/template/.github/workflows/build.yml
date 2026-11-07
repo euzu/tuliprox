@@ -1,0 +1,48 @@
+# Builds the component and assembles the .tlpx package. This file is rendered by
+# cargo-generate too, so it must not contain double-brace expressions.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      # Add --locked once Cargo.lock is committed.
+      - name: Build the component
+        run: cargo build --release --target wasm32-wasip2
+
+      - name: Assemble the .tlpx package
+        run: |
+          set -euo pipefail
+          id="$(sed -n 's/^id: *"\([^"]*\)".*/\1/p' manifest.yml)"
+          crate="$(sed -n 's/^name *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1 | tr - _)"
+          stage="$(mktemp -d)"
+          cp manifest.yml config-schema.json "$stage/"
+          cp -R ui "$stage/"
+          find "$stage/ui" -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.tsbuildinfo' \) -delete
+          if [ -d rpc ]; then cp -R rpc "$stage/"; fi
+          cp "target/wasm32-wasip2/release/${crate}.wasm" "$stage/plugin.wasm"
+          mkdir -p dist
+          (cd "$stage" && zip -X -D -r -q "$GITHUB_WORKSPACE/dist/${id}.tlpx" .)
+          unzip -l "dist/${id}.tlpx"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-package
+          path: dist/*.tlpx
+          if-no-files-found: error

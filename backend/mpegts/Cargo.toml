@@ -18,7 +18,7 @@ workspace = true
 test-support = []
 
 [dependencies]
-aes = "0.8.4"
+aes.workspace = true
 bytes.workspace = true
 futures.workspace = true
 mpeg2ts-reader = "0.18.2"

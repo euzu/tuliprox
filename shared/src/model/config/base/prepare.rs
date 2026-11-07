@@ -81,6 +81,10 @@ impl ConfigDto {
             mcp.prepare()?;
         }
 
+        if let Some(plugins) = self.plugins.as_mut() {
+            crate::model::Prepare::prepare(plugins, ())?;
+        }
+
         if let Some(messaging) = &mut self.messaging {
             messaging.prepare(include_computed)?;
         }

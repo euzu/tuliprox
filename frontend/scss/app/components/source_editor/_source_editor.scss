@@ -101,12 +101,36 @@
          }
 
          .tp__source-editor__brick {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--gap-small);
             color: var(--text-color);
             border: 1px solid var(--border-color);
             cursor: grab;
             padding: var(--padding-small) var(--padding-default);
             border-radius: var(--border-radius);
             text-align: center;
+
+            &-icon {
+               display: inline-flex;
+               flex: 0 0 auto;
+               width: 1em;
+               height: 1em;
+               pointer-events: none;
+            }
+
+            &-label {
+               min-width: 0;
+               overflow: hidden;
+               text-overflow: ellipsis;
+               pointer-events: none;
+            }
+
+            &--disabled {
+               cursor: not-allowed;
+               opacity: 0.5;
+            }
          }
       }
    }

@@ -71,6 +71,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
         active_user_streams,
         cache,
         reentry_suppressed_total: app_state.active_users.reentry_suppressed_total(),
+        plugin_metrics: super::plugins_metrics_api::plugin_metrics(app_state).await,
     }
 }
 async fn status(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> axum::response::Response {
@@ -201,6 +202,9 @@ pub fn v1_api_register(
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
             .merge(target_bouquet_api_register_with_permissions(app_state))
             .merge(super::maintenance_api::maintenance_api_register_with_permissions(app_state))
+            .merge(super::plugins_api::plugins_api_register_with_permissions(app_state))
+            .merge(super::plugins_rpc_api::plugins_rpc_api_register_with_permissions(app_state))
+            .merge(super::plugins_ui_api::plugins_ui_api_register_with_permissions(app_state))
             .merge(rbac_api_register(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             // `recording.enabled: false` turns the DVR off end to end:
@@ -222,6 +226,9 @@ pub fn v1_api_register(
             .merge(library_api_register(axum::routing::Router::new(), None))
             .merge(target_bouquet_api_register_unprotected())
             .merge(super::maintenance_api::maintenance_api_register_unprotected())
+            .merge(super::plugins_api::plugins_api_register_unprotected())
+            .merge(super::plugins_rpc_api::plugins_rpc_api_register_unprotected())
+            .merge(super::plugins_ui_api::plugins_ui_api_register_unprotected())
             .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
             .merge(recording_availability_register(axum::routing::Router::new()))
             .merge(

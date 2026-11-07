@@ -77,7 +77,13 @@ pub fn delivery_for_status(status: reqwest::StatusCode, retry_after: Option<std:
             None => Delivery::retry(reason),
         };
     }
-    if status.is_server_error() {
+    // 501 and 505 say the endpoint will never take this request, so retrying
+    // them only burns the outbox's attempts (the REST breaker agrees: it does not
+    // count them as transient).
+    if status.is_server_error()
+        && status != reqwest::StatusCode::NOT_IMPLEMENTED
+        && status != reqwest::StatusCode::HTTP_VERSION_NOT_SUPPORTED
+    {
         return Delivery::retry(reason);
     }
     Delivery::permanent(reason)
@@ -188,6 +194,11 @@ mod tests {
         assert!(matches!(delivery_for_status(StatusCode::NOT_FOUND, None), Delivery::Permanent { .. }));
         assert!(matches!(delivery_for_status(StatusCode::UNAUTHORIZED, None), Delivery::Permanent { .. }));
         assert!(matches!(delivery_for_status(StatusCode::BAD_REQUEST, None), Delivery::Permanent { .. }));
+        assert!(matches!(delivery_for_status(StatusCode::NOT_IMPLEMENTED, None), Delivery::Permanent { .. }));
+        assert!(matches!(
+            delivery_for_status(StatusCode::HTTP_VERSION_NOT_SUPPORTED, None),
+            Delivery::Permanent { .. }
+        ));
     }
 
     #[test]

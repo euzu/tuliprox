@@ -155,9 +155,12 @@ fn options_kind_for(input_type: InputType, staged_type: StagedInputType) -> Opti
         InputType::Staged if staged_type == StagedInputType::Xtream => OptionsKind::Xtream,
         InputType::M3u | InputType::M3uBatch => OptionsKind::M3u,
         InputType::Staged if staged_type == StagedInputType::M3u => OptionsKind::M3u,
-        InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Staged => {
-            OptionsKind::Basic
-        }
+        InputType::Library
+        | InputType::Emby
+        | InputType::Jellyfin
+        | InputType::Plex
+        | InputType::Staged
+        | InputType::Plugin => OptionsKind::Basic,
     }
 }
 
@@ -871,9 +874,14 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let options_input = !library_input && !media_server_input;
 
     let render_main = || match input_form_state.form.input_type {
-        shared::model::InputType::M3u | shared::model::InputType::M3uBatch => html! {
-            <M3uInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
-        },
+        // A plugin input has its own view (`PluginInputView`), chosen in `SourceEditorForm`; this
+        // form only renders the built-in downloaders.
+        shared::model::InputType::Plugin => html! {},
+        shared::model::InputType::M3u | shared::model::InputType::M3uBatch => {
+            html! {
+                <M3uInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
+            }
+        }
         shared::model::InputType::Xtream | shared::model::InputType::XtreamBatch => html! {
             <XtreamInputForm state={input_form_state.clone()} providers={(*providers_state).clone()} allow_write={props.allow_write} />
         },

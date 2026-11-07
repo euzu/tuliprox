@@ -1,8 +1,8 @@
 use super::stream_display::is_background_transfer_stream;
 use crate::{
     app::components::{
-        use_metrics_history, Card, CollapsePanel, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
-        SparklineFormat, SparklineSeries, StatusCard, StatusContext, StreamsView,
+        use_metrics_history, Card, CollapsePanel, MetricsHistory, PlaylistProgressStatusCard, PluginMetricCards,
+        Sparkline, SparklineFormat, SparklineSeries, StatusCard, StatusContext, StreamsView,
     },
     i18n::use_translation,
     utils::format_uptime,
@@ -142,6 +142,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 <div class="tp__stats__body-group">
                     <Card><PlaylistProgressStatusCard /></Card>
                 </div>
+                <PluginMetricCards />
             </div>
         </div>
         }
@@ -247,6 +248,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 <div class="tp__stats__body-group">
                     <Card><PlaylistProgressStatusCard /></Card>
                 </div>
+                <PluginMetricCards />
             </div>
           </div>
         }

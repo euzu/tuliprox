@@ -1,0 +1,11 @@
+id: probe-oom
+name: Host probe (16 MiB memory)
+version: 0.1.0
+api_version: 1
+hooks:
+  - playlist.after-filter
+resources:
+  max_memory_mb: 16
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

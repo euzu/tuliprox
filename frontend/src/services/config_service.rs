@@ -254,6 +254,13 @@ impl ConfigService {
                                                 .ok()
                                         });
                                     }
+                                    TargetOutputDto::Plugin(o) => {
+                                        o.t_filter = o.filter.as_ref().and_then(|flt| {
+                                            get_filter(flt, prepared_templates)
+                                                .map_err(|e| error!("Failed to parse Plugin output filter: {e}"))
+                                                .ok()
+                                        });
+                                    }
                                     TargetOutputDto::HdHomeRun(_) => {}
                                 }
                             }

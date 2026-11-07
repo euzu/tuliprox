@@ -5,14 +5,13 @@
 //! import (Plex, Emby, Jellyfin) all reach into `tuliprox-repository` and this crate's own processors, and `tuliprox-iptv`
 //! sits below both. The trait is what lets them keep that dependency direction and still
 //! answer the dispatcher in one shape.
-
 use super::{
     library::download_library_playlist, stalker::download_stalker_playlist, stalker_refresh::StalkerRefreshMode,
 };
 use crate::{metadata_sink::MetadataUpdateSink, parser::xmltv::TVGuide, processor::PlaylistProcessingContext};
 use shared::{
     error::TuliproxError,
-    model::{EventSink, PlaylistGroup},
+    model::{EventSink, PlaylistGroup, PluginHost},
 };
 use tuliprox_core::model::ConfigInput;
 use tuliprox_iptv::{
@@ -117,13 +116,13 @@ async fn download_media_server_playlist(
 /// [`EpgOutcome`](tuliprox_iptv::epg::EpgOutcome) exists to say - forcing a
 /// several-hundred-megabyte XMLTV document through a record sink would mean materialising
 /// all of it in memory to answer a question nobody asked.
-pub struct XmltvEpgProvider<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink> {
-    ctx: &'a PlaylistProcessingContext<E, M>,
+pub struct XmltvEpgProvider<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> {
+    ctx: &'a PlaylistProcessingContext<E, M, P>,
     errors: parking_lot::Mutex<Vec<TuliproxError>>,
 }
 
-impl<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink> XmltvEpgProvider<'a, E, M> {
-    pub fn new(ctx: &'a PlaylistProcessingContext<E, M>) -> Self {
+impl<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> XmltvEpgProvider<'a, E, M, P> {
+    pub fn new(ctx: &'a PlaylistProcessingContext<E, M, P>) -> Self {
         Self { ctx, errors: parking_lot::Mutex::new(Vec::new()) }
     }
 
@@ -135,7 +134,9 @@ impl<'a, E: EventSink + Clone + 'static, M: MetadataUpdateSink> XmltvEpgProvider
     pub fn take_errors(&self) -> Vec<TuliproxError> { std::mem::take(&mut *self.errors.lock()) }
 }
 
-impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink> EpgProvider for XmltvEpgProvider<'_, E, M> {
+impl<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost> EpgProvider
+    for XmltvEpgProvider<'_, E, M, P>
+{
     type Guide = TVGuide;
 
     fn name(&self) -> &'static str { "xmltv" }

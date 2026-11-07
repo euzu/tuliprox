@@ -1,0 +1,22 @@
+{
+  "form.title": "إدخال YouTube",
+  "form.description": "ما يجلبه هذا الإدخال وكيف. كل ما هنا يخص هذا الإدخال وحده.",
+  "form.channels.title": "قنوات وقوائم YouTube",
+  "form.channels.description": "أهداف هذا الإدخال: @handle أو معرّف قناة UC... أو معرّف قائمة PL... أو فيديو. تُضاف إلى حقل URL أعلاه؛ والمكرر يُجلب مرة واحدة.",
+  "form.channels.placeholder": "@handle أو UC… أو PL… أو رابط فيديو",
+  "form.invidious_instances.title": "نسخ Invidious",
+  "form.invidious_instances.description": "النسخ التي يحل عبرها هذا الإدخال روابط البث، بترتيب التبديل عند الفشل (واحدة على الأقل).",
+  "form.invidious_instances.placeholder": "https://invidious.example",
+  "form.invidious_instances.pattern": "رابط http:// أو https:// بلا مسافات أو استعلام أو جزء",
+  "form.mode.title": "وضع الاستيعاب",
+  "form.mode.description": "التحميلات الحديثة يقرأ أحدث فيديوهات كل هدف، والبث المباشر فقط يحتفظ بالبث الجاري وحده.",
+  "form.mode.recent_uploads": "التحميلات الحديثة",
+  "form.mode.live_only": "البث المباشر فقط",
+  "form.max_uploads.title": "الحد الأقصى للتحميلات",
+  "form.max_uploads.description": "عدد التحميلات الحديثة المأخوذة لكل قناة (من 1 إلى 15).",
+  "form.cache_ttl_minutes.title": "مدة كاش البث (دقائق)",
+  "form.cache_ttl_minutes.description": "مدة إعادة استخدام هذا الإدخال لعنوان بث مُستخرَج (من 10 إلى 360).",
+  "form.check": "فحص الأهداف والنسخ",
+  "tile.title": "يوتيوب",
+  "tile.description": "قنوات يوتيوب وقوائم التشغيل والبث المباشر كقنوات في قائمة التشغيل."
+}

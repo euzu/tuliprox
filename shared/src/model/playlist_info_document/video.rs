@@ -179,7 +179,13 @@ impl StreamProperties {
                     .intern(),
                 release_date: details.release_date.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 episode_run_time: details.episode_run_time.unwrap_or_default(),
-                youtube_trailer: details.youtube_trailer.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
+                // The detail field first; the top-level `trailer` (as `get_vod_streams` carries it, and as
+                // an `enrich-metadata` plugin may set it) otherwise.
+                youtube_trailer: details
+                    .youtube_trailer
+                    .as_ref()
+                    .or(video.trailer.as_ref())
+                    .map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 director: details.director.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 actors: details.actors.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 cast: details.cast.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
@@ -219,7 +225,7 @@ impl StreamProperties {
                 movie_image: stream_icon.clone(),
                 release_date: Arc::clone(&empty_str),
                 episode_run_time: 0,
-                youtube_trailer: Arc::clone(&empty_str),
+                youtube_trailer: video.trailer.as_ref().map_or_else(|| Arc::clone(&empty_str), Arc::clone),
                 director: Arc::clone(&empty_str),
                 actors: Arc::clone(&empty_str),
                 cast: Arc::clone(&empty_str),

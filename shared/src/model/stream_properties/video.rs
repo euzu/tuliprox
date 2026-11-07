@@ -105,12 +105,18 @@ pub struct VideoStreamProperties {
     pub is_adult: i32,
     #[serde(default)]
     pub details: Option<VideoStreamDetailProperties>,
+    /// Fingerprint of the `enrich-metadata` plugins that last amended this record
+    /// (plugin plan §7). Kept last: the record is stored positionally, and an
+    /// older record without it decodes to `None`.
+    #[serde(default)]
+    pub plugin_fingerprint: Option<Arc<str>>,
 }
 
 impl VideoStreamProperties {
     pub(super) fn from_info_base(info: &XtreamVideoInfo) -> VideoStreamProperties {
         VideoStreamProperties {
             name: info.info.name.clone(),
+            plugin_fingerprint: None,
             category_id: info.movie_data.category_id,
             stream_id: info.movie_data.stream_id,
             stream_icon: info.info.movie_image.as_ref().map_or_else(|| "".intern(), Clone::clone),

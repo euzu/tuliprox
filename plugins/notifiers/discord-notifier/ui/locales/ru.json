@@ -1,0 +1,19 @@
+{
+  "settings.title": "Уведомления Discord",
+  "settings.url.title": "URL вебхука",
+  "settings.url.description": "URL вебхука Discord. Это учётные данные: поле только для записи и скрывается при чтении. Используйте ${env:VAR}, чтобы не хранить его в файле конфигурации.",
+  "settings.style.title": "Стиль",
+  "settings.style.description": "embed: одно вложение с заголовком, текстом, цветом по важности и именем экземпляра. text: текст как обычное сообщение.",
+  "settings.routing.title": "Маршрутизация (применяется tuliprox, а не плагином)",
+  "settings.routing.description": "Маршрутизация канала в исходящей очереди уведомлений, тот же блок, что и у любого канала. Все поля необязательны; пустой блок наследует глобальный notify_on.",
+  "settings.routing.notify_on.title": "Переопределение notify_on",
+  "settings.routing.notify_on.description": "Шаблоны идентификаторов событий, заменяющие глобальный notify_on для этого канала (например, playlist.update.*).",
+  "settings.routing.min_severity.title": "Минимальная важность (маршрутизация)",
+  "settings.routing.min_severity.description": "Порог важности на стороне хоста, оценивается по важности события из реестра до вызова плагина.",
+  "settings.routing.quiet_hours.title": "Тихие часы",
+  "settings.routing.quiet_hours.description": "ЧЧ:ММ-ЧЧ:ММ по местному времени. Уведомления в этом окне откладываются, но не теряются.",
+  "settings.routing.max_per_hour.title": "Максимум в час",
+  "settings.routing.max_per_hour.description": "Предохранитель: после этого числа уведомлений за час канал отправляет одно сообщение о подавлении и замолкает.",
+  "settings.routing.dedup_window_secs.title": "Окно дедупликации (секунды)",
+  "settings.routing.dedup_window_secs.description": "Подавлять повторный ключ дедупликации в течение этого числа секунд."
+}

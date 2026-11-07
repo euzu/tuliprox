@@ -537,6 +537,9 @@ fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static
         // not a Web UI one, and there is no panel that renders it.
         | EventMessage::NotificationDeadLettered(_)
         | EventMessage::ScheduledTaskFailed(_)
+        // The Plugin Manager re-reads its list when it acts; the outcome of a
+        // boot update is in the boot report.
+        | EventMessage::PluginUpdate(_)
         // Auth decisions reach notification channels and plugins, not the
         // Web UI socket: there is no panel that renders them, and pushing
         // every sign-in to every connected admin is noise.
@@ -748,8 +751,11 @@ mod tests {
         // every notification-only kind against `expected = true` and the
         // test failed on `DiskAlert` - it has been red since the lifecycle
         // events joined the bus.
-        const NOT_ON_THE_WIRE: [EventKind; 28] = [
+        const NOT_ON_THE_WIRE: [EventKind; 31] = [
             EventKind::ConnectionDenied,
+            EventKind::PluginUpdateAvailable,
+            EventKind::PluginUpdateApplied,
+            EventKind::PluginUpdateFailed,
             EventKind::ScheduledTaskFailed,
             EventKind::ProviderFetchFailed,
             EventKind::ProviderPoolExhausted,
@@ -832,6 +838,18 @@ mod tests {
     ///
     /// Long by construction, and it has to stay one list for that assert to
     /// mean anything.
+    #[allow(clippy::too_many_lines)]
+    fn plugin_update(outcome: shared::model::PluginUpdateOutcome) -> EventMessage {
+        EventMessage::PluginUpdate(shared::model::PluginUpdateEvent {
+            outcome,
+            plugin: "p".into(),
+            from: "1.0.0".into(),
+            to: "1.1.0".into(),
+            source: "s".into(),
+            reason: None,
+        })
+    }
+
     #[allow(clippy::too_many_lines)]
     fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
         use shared::model::{
@@ -941,6 +959,9 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
             EventMessage::MaintenanceChanged(Arc::default()),
+            plugin_update(shared::model::PluginUpdateOutcome::Available),
+            plugin_update(shared::model::PluginUpdateOutcome::Applied),
+            plugin_update(shared::model::PluginUpdateOutcome::Failed),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples

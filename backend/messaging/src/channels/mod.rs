@@ -13,6 +13,7 @@ pub mod command;
 pub mod discord;
 pub mod gotify;
 pub mod ntfy;
+pub mod plugin;
 pub mod pushover;
 pub mod rest;
 pub mod slack;
@@ -20,7 +21,10 @@ pub mod telegram;
 
 use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
 use log::warn;
-use shared::model::notification::{EventId, Severity};
+use shared::model::{
+    notification::{EventId, Severity},
+    PluginNotifier,
+};
 use std::sync::{Arc, OnceLock, RwLock};
 use tuliprox_core::{
     model::{AppConfig, ChannelRouting, MessagingConfig},
@@ -43,6 +47,9 @@ pub enum Channel {
     Gotify(gotify::GotifyChannel),
     Slack(slack::SlackChannel),
     Command(command::CommandChannel),
+    /// A wasm plugin that exports `send-notification`; reached through the
+    /// registered [`PluginNotifier`].
+    Plugin(plugin::PluginChannel),
 }
 
 /// Forward one `&self` method to whichever variant is present.
@@ -57,6 +64,7 @@ macro_rules! delegate {
             Channel::Gotify($inner) => $call,
             Channel::Slack($inner) => $call,
             Channel::Command($inner) => $call,
+            Channel::Plugin($inner) => $call,
         }
     };
 }
@@ -92,6 +100,7 @@ impl Channel {
             Channel::Gotify(c) => c.send(msg).await,
             Channel::Slack(c) => c.send(msg).await,
             Channel::Command(c) => c.send(msg).await,
+            Channel::Plugin(c) => c.send(msg).await,
         }
     }
 }
@@ -123,12 +132,29 @@ static CACHE: OnceLock<RwLock<Option<ChannelSet>>> = OnceLock::new();
 
 fn cache() -> &'static RwLock<Option<ChannelSet>> { CACHE.get_or_init(|| RwLock::new(None)) }
 
-/// Drop the cached channel set. Call on config reload.
-pub fn invalidate() {
+fn drop_cache() {
     if let Ok(mut guard) = cache().write() {
         *guard = None;
     }
+}
+
+/// Drop the cached channel set. Call on config reload and on every plugin
+/// registry change (`PluginSystem::changes()`).
+pub fn invalidate() {
+    drop_cache();
     crate::rate_limit::reset();
+}
+
+/// The plugin host's notification seam, `None` while plugins are off.
+static PLUGIN_NOTIFIER: RwLock<Option<Arc<dyn PluginNotifier>>> = RwLock::new(None);
+
+/// Register (or clear) the plugin notifier. [`build`] appends one
+/// `Channel::Plugin` per channel it declares, so the cached set is dropped.
+pub fn set_plugin_notifier(notifier: Option<Arc<dyn PluginNotifier>>) {
+    if let Ok(mut guard) = PLUGIN_NOTIFIER.write() {
+        *guard = notifier;
+    }
+    drop_cache();
 }
 
 /// Every channel the current config declares, in a stable order.
@@ -182,6 +208,10 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
     if let Some(cfg) = messaging.command.as_ref() {
         // No HTTP client: this one shells out.
         channels.push(Channel::Command(command::CommandChannel::new(cfg.clone())));
+    }
+    let notifier = PLUGIN_NOTIFIER.read().ok().and_then(|guard| guard.clone());
+    if let Some(notifier) = notifier {
+        channels.extend(plugin::channels_of(&notifier).into_iter().map(Channel::Plugin));
     }
     channels
 }

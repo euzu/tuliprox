@@ -638,6 +638,8 @@ mod tests {
             playback_provider: None,
             cache_duration_seconds: 0,
             stalker: None,
+            plugin: None,
+            plugin_options: Vec::new(),
         };
         let conn = Arc::new(RwLock::new(ProviderConfigConnection::default()));
         let counter = Arc::new(AtomicUsize::new(0));

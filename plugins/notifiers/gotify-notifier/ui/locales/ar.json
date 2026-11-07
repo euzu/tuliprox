@@ -1,0 +1,21 @@
+{
+  "settings.title": "إشعارات Gotify",
+  "settings.url.title": "رابط الخادم",
+  "settings.url.description": "الرابط الأساسي لخادم Gotify، مثل https://gotify.example.org (بدون /message).",
+  "settings.token.title": "رمز التطبيق",
+  "settings.token.description": "رمز تطبيق في Gotify. إنه بيانات اعتماد: للكتابة فقط ويُخفى عند القراءة. استخدم ${env:VAR} لتجنّب حفظه في ملف الإعدادات.",
+  "settings.style.title": "النمط",
+  "settings.style.description": "text: النص كرسالة نصية عادية. markdown: أقسام الحدث كعناوين عريضة وتحتها أسطرها، وتعرضها عملاء Gotify منسّقة.",
+  "settings.routing.title": "التوجيه (تطبّقه tuliprox وليس الإضافة)",
+  "settings.routing.description": "توجيه القناة في صندوق الإشعارات الصادرة، وهو الكتلة نفسها التي تقبلها أي قناة. جميع الحقول اختيارية؛ الكتلة الفارغة ترث notify_on العام.",
+  "settings.routing.notify_on.title": "تجاوز notify_on",
+  "settings.routing.notify_on.description": "أنماط معرّفات الأحداث التي تحلّ محل notify_on العام لهذه القناة (مثل playlist.update.*).",
+  "settings.routing.min_severity.title": "الحد الأدنى للخطورة (التوجيه)",
+  "settings.routing.min_severity.description": "حد الخطورة على جانب المضيف، يُقيَّم بحسب خطورة الحدث في السجل قبل استدعاء الإضافة.",
+  "settings.routing.quiet_hours.title": "ساعات الهدوء",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM بالتوقيت المحلي. تُؤجَّل الإشعارات داخل هذه الفترة ولا تُحذف أبداً.",
+  "settings.routing.max_per_hour.title": "الحد الأقصى في الساعة",
+  "settings.routing.max_per_hour.description": "قاطع الدائرة: بعد هذا العدد من الإشعارات في الساعة ترسل القناة إشعار كتم واحداً ثم تصمت.",
+  "settings.routing.dedup_window_secs.title": "نافذة إزالة التكرار (ثوانٍ)",
+  "settings.routing.dedup_window_secs.description": "كتم مفتاح إزالة التكرار المتكرر لهذا العدد من الثواني."
+}

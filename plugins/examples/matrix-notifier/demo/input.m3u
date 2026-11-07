@@ -1,0 +1,7 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="one" group-title="News",Mock One
+http://127.0.0.1:18972/live/1.ts
+#EXTINF:-1 tvg-id="two" group-title="News",Mock Two
+http://127.0.0.1:18972/live/2.ts
+#EXTINF:-1 tvg-id="dead" group-title="Broken",Mock Dead
+http://127.0.0.1:18972/live/404.ts

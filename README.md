@@ -323,6 +323,7 @@ Supported notification channels include:
 - Gotify
 - Slack
 - Local command execution with structured event JSON on stdin
+- Each of them is also available as an optional plugin (under `plugins/notifiers/`)
 
 Notification capabilities include:
 

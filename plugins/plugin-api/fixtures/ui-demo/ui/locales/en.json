@@ -1,0 +1,14 @@
+{
+  "hello": "Hello from the ui-demo plugin",
+  "tab.title": "UI demo",
+  "toast.msg": "Toast sent from the demo frame",
+  "slot.menu": "Demo menu",
+  "slot.config-section": "Demo config section",
+  "slot.config-tab": "Demo config tab",
+  "slot.source-editor-tile": "Demo source tile",
+  "slot.dashboard-card": "Demo dashboard card",
+  "slot.playlist-explorer-action": "Demo explorer action",
+  "slot.channel-detail-panel": "Demo channel panel",
+  "slot.epg-overlay": "Demo EPG overlay",
+  "slot.setup-wizard-step": "Demo wizard step"
+}

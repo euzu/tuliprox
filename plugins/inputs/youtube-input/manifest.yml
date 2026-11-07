@@ -1,0 +1,42 @@
+id: youtube-input
+name: YouTube Input
+version: 0.1.0
+api_version: 1
+category: input
+author: tuliprox
+description: >
+  Ingests YouTube channels, playlists, and live streams as native playlist channels.
+capabilities:
+  network: true
+  storage: true
+provides:
+  input_type: true
+hooks:
+  - input.fetch
+  # The input form's "Check" button (`ui.input_form` actions -> `ui.rpc_exports`).
+  - rpc.call
+# Everything an input needs is configured on the input itself (`ui.input_form`).
+# There is no settings schema: update policy and boot updates are host settings
+# (`plugins.plugins[].update_policy`).
+ui:
+  locales: [ar, en, es, ru]
+  # The tile in the source editor sidebar; dropping it adds an input bound to this plugin.
+  input_tile:
+    title: YouTube
+    title_key: tile.title
+    icon: PlayCircle
+    description: YouTube channels, playlists and live streams as playlist channels.
+    description_key: tile.description
+  # Not an MCP tool: it only serves the input form's button.
+  rpc_exports:
+    - name: check-input
+      kind: read
+      description: Checks an input form's unsaved channels and Invidious instances.
+  input_form:
+    - id: main
+      schema: forms/input.json
+      actions:
+        - id: check
+          title: Check targets and instances
+          title_key: form.check
+          rpc: check-input

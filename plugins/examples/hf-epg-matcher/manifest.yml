@@ -1,0 +1,19 @@
+id: hf-epg-matcher
+name: HF EPG Matcher
+version: 0.1.0
+api_version: 1
+category: epg
+author: tuliprox
+description: >
+  Matches playlist channels that the built-in EPG matcher left without a guide
+  id to one of its shortlisted guide channels, by asking a HuggingFace
+  sentence-similarity model. Decisions are cached in the plugin KV, so the model
+  is asked once per unknown channel name.
+capabilities:
+  network: true
+  storage: true
+hooks:
+  - epg.match-channel
+ui:
+  config_section:
+    schema: config-schema.json

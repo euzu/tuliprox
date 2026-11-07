@@ -226,6 +226,131 @@ testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<n
 		$(if $(RUN_ID),--run-id $(RUN_ID),)
 	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
 
+.PHONY: plugin-sdk-version
+plugin-sdk-version: ## Set the plugin API/SDK/macros version (VERSION=x.y.z) and refresh every plugin Cargo.lock
+	@test -n "$(VERSION)" || { echo "usage: make plugin-sdk-version VERSION=x.y.z" >&2; exit 2; }
+	@./bin/plugin-sdk-version.sh "$(VERSION)"
+
+.PHONY: plugin-fixtures
+plugin-fixtures: ## Build the wasm plugin test fixtures (wasm32-wasip2) into target/plugin-fixtures
+	@echo "==> Building plugin test fixtures (wasm32-wasip2)"
+	@./bin/build_plugin_fixture.sh
+	@echo "✅ Plugin fixtures written to target/plugin-fixtures/plugins"
+
+PLUGIN_EXAMPLES := sports-enricher hf-epg-matcher matrix-notifier
+
+.PHONY: plugin-examples
+plugin-examples: ## Build + package the example plugins and the rendered template (wasm32-wasip2) into target/plugin-examples
+	@echo "==> Building example plugins (wasm32-wasip2)"
+	@for example in $(PLUGIN_EXAMPLES); do ./bin/package-plugin.sh plugins/examples/$$example || exit 1; done
+	@echo "==> Rendering and building the plugin template"
+	@rm -rf target/plugin-examples/template
+	@./bin/new-plugin.sh my-plugin target/plugin-examples/template/my-plugin
+	@./bin/package-plugin.sh target/plugin-examples/template/my-plugin
+	@echo "✅ Example plugins written to target/plugin-examples/*.tlpx"
+
+# The notification plugins that live in this repository, under plugins/notifiers/<id>.
+NOTIFIER_PLUGINS := discord-notifier slack-notifier gotify-notifier ntfy-notifier pushover-notifier rest-notifier telegram-notifier command-notifier
+
+.PHONY: plugin-notifiers
+plugin-notifiers: ## Build + package every notifier plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
+	@echo "==> Building the notifier plugins (wasm32-wasip2): $(NOTIFIER_PLUGINS)"
+	@for id in $(NOTIFIER_PLUGINS); do \
+		mkdir -p target/plugin-$$id; \
+		./bin/package-plugin.sh plugins/notifiers/$$id --out target/plugin-$$id/$$id.tlpx || exit 1; \
+	done
+	@echo "✅ Notifier plugins written to target/plugin-<id>/<id>.tlpx"
+
+.PHONY: plugin-discord-notifier
+plugin-discord-notifier: ## Build + package the discord-notifier plugin (wasm32-wasip2) into target/plugin-discord-notifier
+	@echo "==> Building discord-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-discord-notifier
+	@./bin/package-plugin.sh plugins/notifiers/discord-notifier --out target/plugin-discord-notifier/discord-notifier.tlpx
+	@echo "✅ discord-notifier written to target/plugin-discord-notifier/discord-notifier.tlpx"
+
+.PHONY: plugin-slack-notifier
+plugin-slack-notifier: ## Build + package the slack-notifier plugin (wasm32-wasip2) into target/plugin-slack-notifier
+	@echo "==> Building slack-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-slack-notifier
+	@./bin/package-plugin.sh plugins/notifiers/slack-notifier --out target/plugin-slack-notifier/slack-notifier.tlpx
+	@echo "✅ slack-notifier written to target/plugin-slack-notifier/slack-notifier.tlpx"
+
+.PHONY: plugin-gotify-notifier
+plugin-gotify-notifier: ## Build + package the gotify-notifier plugin (wasm32-wasip2) into target/plugin-gotify-notifier
+	@echo "==> Building gotify-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-gotify-notifier
+	@./bin/package-plugin.sh plugins/notifiers/gotify-notifier --out target/plugin-gotify-notifier/gotify-notifier.tlpx
+	@echo "✅ gotify-notifier written to target/plugin-gotify-notifier/gotify-notifier.tlpx"
+
+.PHONY: plugin-ntfy-notifier
+plugin-ntfy-notifier: ## Build + package the ntfy-notifier plugin (wasm32-wasip2) into target/plugin-ntfy-notifier
+	@echo "==> Building ntfy-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-ntfy-notifier
+	@./bin/package-plugin.sh plugins/notifiers/ntfy-notifier --out target/plugin-ntfy-notifier/ntfy-notifier.tlpx
+	@echo "✅ ntfy-notifier written to target/plugin-ntfy-notifier/ntfy-notifier.tlpx"
+
+.PHONY: plugin-pushover-notifier
+plugin-pushover-notifier: ## Build + package the pushover-notifier plugin (wasm32-wasip2) into target/plugin-pushover-notifier
+	@echo "==> Building pushover-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-pushover-notifier
+	@./bin/package-plugin.sh plugins/notifiers/pushover-notifier --out target/plugin-pushover-notifier/pushover-notifier.tlpx
+	@echo "✅ pushover-notifier written to target/plugin-pushover-notifier/pushover-notifier.tlpx"
+
+.PHONY: plugin-rest-notifier
+plugin-rest-notifier: ## Build + package the rest-notifier plugin (wasm32-wasip2) into target/plugin-rest-notifier
+	@echo "==> Building rest-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-rest-notifier
+	@./bin/package-plugin.sh plugins/notifiers/rest-notifier --out target/plugin-rest-notifier/rest-notifier.tlpx
+	@echo "✅ rest-notifier written to target/plugin-rest-notifier/rest-notifier.tlpx"
+
+.PHONY: plugin-telegram-notifier
+plugin-telegram-notifier: ## Build + package the telegram-notifier plugin (wasm32-wasip2) into target/plugin-telegram-notifier
+	@echo "==> Building telegram-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-telegram-notifier
+	@./bin/package-plugin.sh plugins/notifiers/telegram-notifier --out target/plugin-telegram-notifier/telegram-notifier.tlpx
+	@echo "✅ telegram-notifier written to target/plugin-telegram-notifier/telegram-notifier.tlpx"
+
+.PHONY: plugin-command-notifier
+plugin-command-notifier: ## Build + package the command-notifier plugin (wasm32-wasip2) into target/plugin-command-notifier
+	@echo "==> Building command-notifier (wasm32-wasip2)"
+	@mkdir -p target/plugin-command-notifier
+	@./bin/package-plugin.sh plugins/notifiers/command-notifier --out target/plugin-command-notifier/command-notifier.tlpx
+	@echo "✅ command-notifier written to target/plugin-command-notifier/command-notifier.tlpx"
+
+# The input plugins that live in this repository, under plugins/inputs/<id>.
+INPUT_PLUGINS := youtube-input
+
+.PHONY: plugin-inputs
+plugin-inputs: ## Build + package every input plugin (wasm32-wasip2) into target/plugin-<id>/<id>.tlpx
+	@echo "==> Building the input plugins (wasm32-wasip2): $(INPUT_PLUGINS)"
+	@for id in $(INPUT_PLUGINS); do \
+		mkdir -p target/plugin-$$id; \
+		./bin/package-plugin.sh plugins/inputs/$$id --out target/plugin-$$id/$$id.tlpx || exit 1; \
+	done
+	@echo "✅ Input plugins written to target/plugin-<id>/<id>.tlpx"
+
+.PHONY: plugin-youtube-input
+plugin-youtube-input: ## Build + package the youtube-input plugin (wasm32-wasip2) into target/plugin-youtube-input
+	@echo "==> Building youtube-input (wasm32-wasip2)"
+	@mkdir -p target/plugin-youtube-input
+	@./bin/package-plugin.sh plugins/inputs/youtube-input --out target/plugin-youtube-input/youtube-input.tlpx
+	@echo "✅ youtube-input written to target/plugin-youtube-input/youtube-input.tlpx"
+
+.PHONY: plugins
+plugins: plugin-notifiers plugin-inputs ## Build + stage every official plugin into target/staged-plugins/<id>/
+	@echo "==> Staging official plugins into target/staged-plugins"
+	@rm -rf target/staged-plugins
+	@mkdir -p target/staged-plugins
+	@for id in $(NOTIFIER_PLUGINS); do \
+		mkdir -p target/staged-plugins/$$id; \
+		unzip -qo target/plugin-$$id/$$id.tlpx -d target/staged-plugins/$$id || exit 1; \
+	done
+	@for id in $(INPUT_PLUGINS); do \
+		mkdir -p target/staged-plugins/$$id; \
+		unzip -qo target/plugin-$$id/$$id.tlpx -d target/staged-plugins/$$id || exit 1; \
+	done
+	@echo "✅ Official plugins staged into target/staged-plugins"
+
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
@@ -256,6 +381,8 @@ architecture-check: ## Verify workspace dependency direction and Docker crate li
 	./bin/check-workspace-deps.sh
 	@echo "==> Checking Docker skeleton crate lists"
 	./bin/check-docker-crates.sh
+	@echo "==> Checking the plugin SDK version"
+	./bin/plugin-sdk-version.sh --check
 
 .PHONY: i18n-check
 i18n-check: ## Report every locale whose keys drift from en.json
@@ -285,13 +412,31 @@ lint-fix: ## Automatically fix clippy suggestions (Nightly)
 fmt: ## Format all code using nightly rules (Compact)
 	@echo "==> Formatting code (nightly)"
 	$(CARGO_NIGHTLY) fmt --all
+	@$(MAKE) --no-print-directory plugin-fmt
+
+.PHONY: plugin-fmt
+plugin-fmt: ## Format all plugin crates using nightly rules
+	@for d in plugins/inputs/* plugins/notifiers/*; do \
+		if [ -d "$$d" ] && [ -f "$$d/Cargo.toml" ]; then \
+			$(CARGO_NIGHTLY) fmt --manifest-path "$$d/Cargo.toml"; \
+		fi; \
+	done
 
 .PHONY: fmt-check
 fmt-check: ## Check if code follows formatting rules (Nightly)
 	@echo "==> Checking formatting (nightly)"
 	$(CARGO_NIGHTLY) fmt --all -- --check
+	@$(MAKE) --no-print-directory plugin-fmt-check
 	@echo "==> Checking git diff for whitespace errors"
 	git diff --check
+
+.PHONY: plugin-fmt-check
+plugin-fmt-check: ## Check formatting on all plugin crates
+	@for d in plugins/inputs/* plugins/notifiers/*; do \
+		if [ -d "$$d" ] && [ -f "$$d/Cargo.toml" ]; then \
+			$(CARGO_NIGHTLY) fmt --manifest-path "$$d/Cargo.toml" -- --check || exit 1; \
+		fi; \
+	done
 
 .PHONY: markdown-lint mdlint
 markdown-lint: ## Lint markdown files

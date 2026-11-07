@@ -1,0 +1,18 @@
+# One manifest that lists a hook for every interface the component exports:
+# the registry rejects a plugin whose exports are not all used, and silently
+# never runs it.
+id: provider-probe
+name: Provider probe (W6a fixture)
+version: 0.1.0
+api_version: 1
+hooks:
+  - input.fetch
+  - output.render
+provides:
+  input_type: true
+  output_format: probe-txt
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

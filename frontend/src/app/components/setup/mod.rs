@@ -4,6 +4,7 @@ mod setup_step;
 mod step_api_users;
 mod step_config;
 mod step_finish;
+mod step_plugins;
 mod step_sources;
 mod step_welcome;
 

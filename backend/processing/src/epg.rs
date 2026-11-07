@@ -3,7 +3,7 @@ use log::{debug, warn};
 use shared::{
     concat_string,
     error::TuliproxError,
-    model::EventSink,
+    model::{EventSink, PluginHost},
     utils::{sanitize_sensitive_info, short_hash},
 };
 use std::{
@@ -84,9 +84,9 @@ fn epg_source_cache_extension(source_type: EpgSourceType) -> &'static str {
     }
 }
 
-async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
+async fn download_epg_file<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
     epg_source: &EpgSource,
-    ctx: &PlaylistProcessingContext<E, M>,
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,
@@ -218,8 +218,8 @@ enum EpgFetchOutcome {
     Failure { source_idx: usize, label: String, timestamp: u64, error: String },
 }
 
-pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,
@@ -300,8 +300,8 @@ pub async fn get_xmltv<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
 
 /// The EPG files fetched last, without contacting any source and without cleanup:
 /// deleting "unlisted" files here would throw away exactly what maintenance keeps.
-async fn persisted_epg_for_maintenance<E: EventSink + Clone + 'static, M: MetadataUpdateSink>(
-    ctx: &PlaylistProcessingContext<E, M>,
+async fn persisted_epg_for_maintenance<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
+    ctx: &PlaylistProcessingContext<E, M, P>,
     input: &ConfigInput,
     epg_config: &EpgConfig,
     storage_dir: &str,
