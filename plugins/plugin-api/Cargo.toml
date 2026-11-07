@@ -1,6 +1,6 @@
 [package]
 name = "tuliprox-plugin-api"
-version.workspace = true
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Tuliprox plugin contract: the WIT package and, behind `host`, its wasmtime host bindings"

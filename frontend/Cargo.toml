@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 blake3.workspace = true
-shared = { version = "3.3.185", path = "../shared" }
+shared = { workspace = true, path = "../shared" }
 chrono.workspace = true
 yew = "0.23.0"
 yew-router = "0.20.0"
@@ -20,7 +20,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 serde.workspace = true
 wasm-bindgen = {version = "0.2.127", features = ["serde-serialize"]}
 #anyhow = "1.0.102"
-thiserror = "2.0.20"
+thiserror.workspace = true
 gloo-net = { version = "0.7.0", default-features = false, features = ["http", "json"] }
 log.workspace = true
 wasm-logger = "0.2.0"
@@ -33,7 +33,7 @@ gloo-timers = { version = "0", features = ["futures"] }
 futures-signals = "0.3.34"
 futures.workspace = true
 wasm-bindgen-futures = "0.4.77"
-js-sys = "0.3.104"
+js-sys.workspace = true
 bytes.workspace = true
 regex.workspace = true
 base64.workspace = true

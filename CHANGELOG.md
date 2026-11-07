@@ -220,6 +220,10 @@
   a channel to be a plugin; nothing is removed or renamed. The plugin system and its SDK gained what these plugins needed
   (see the entries below), so a channel can move into a plugin later without further host work.
 
+- **The plugin SDK has its own version.** `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros`
+  are versioned 1.x as the plugin contract instead of following the tuliprox release, so a plugin's `Cargo.lock` stays
+  valid across tuliprox updates and `cargo build --locked` no longer breaks after a release. The three crates share
+  one version: `make plugin-sdk-version VERSION=x.y.z` bumps all of them together and refreshes the plugin lock files.
 - **Source editor: one sidebar tile per input and output plugin.** Every enabled plugin that provides inputs
   (`input.fetch`) or renders outputs (`output.render`) now has its own tile in the source editor sidebar, titled with
   the plugin's name, in place of the single generic **Plugin** tile. Dropping it adds a block that already names the

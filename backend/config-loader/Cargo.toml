@@ -19,9 +19,9 @@ log.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 serde-saphyr.workspace = true
-tempfile = "3.27.0"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "macros"] }
 url.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

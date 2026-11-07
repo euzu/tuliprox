@@ -506,11 +506,11 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-plugin-api"
-version = "3.3.181"
+version = "1.0.0"
 
 [[package]]
 name = "tuliprox-plugin-sdk"
-version = "3.3.181"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "tuliprox-plugin-sdk-macros"
-version = "3.3.181"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",

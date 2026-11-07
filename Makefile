@@ -226,9 +226,10 @@ testkit-scenario: ## Run one testkit scenario: make testkit-scenario SCENARIO=<n
 		$(if $(RUN_ID),--run-id $(RUN_ID),)
 	@echo "==> Report: testkit-report/$(SCENARIO)/summary.txt"
 
-.PHONY: plugin-locks
-plugin-locks: ## Refresh the Cargo.lock of every plugin crate after a workspace version bump
-	@./bin/refresh-plugin-locks.sh
+.PHONY: plugin-sdk-version
+plugin-sdk-version: ## Set the plugin API/SDK/macros version (VERSION=x.y.z) and refresh every plugin Cargo.lock
+	@test -n "$(VERSION)" || { echo "usage: make plugin-sdk-version VERSION=x.y.z" >&2; exit 2; }
+	@./bin/plugin-sdk-version.sh "$(VERSION)"
 
 .PHONY: plugin-fixtures
 plugin-fixtures: ## Build the wasm plugin test fixtures (wasm32-wasip2) into target/plugin-fixtures
@@ -380,6 +381,8 @@ architecture-check: ## Verify workspace dependency direction and Docker crate li
 	./bin/check-workspace-deps.sh
 	@echo "==> Checking Docker skeleton crate lists"
 	./bin/check-docker-crates.sh
+	@echo "==> Checking the plugin SDK version"
+	./bin/plugin-sdk-version.sh --check
 
 .PHONY: i18n-check
 i18n-check: ## Report every locale whose keys drift from en.json

@@ -31,6 +31,12 @@ The package layout and limits are in [Packaging](./packaging.md). A plugin is bu
 `tuliprox-plugin-sdk` (`plugins/plugin-sdk/`) in Rust, from `plugins/examples/template`. The repository has three more
 examples: `sports-enricher`, `hf-epg-matcher` and `matrix-notifier`.
 
+`tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros` have their own version (1.x), the
+version of the plugin contract. A tuliprox release does not change it, so a plugin's `Cargo.lock` stays valid across
+tuliprox updates. The three crates always share one version: `make plugin-sdk-version VERSION=x.y.z` sets it on all
+three and refreshes the `Cargo.lock` of every plugin in the repository, and `make architecture-check` fails when they
+drift apart.
+
 The manifest declares what the plugin does. The component exports the matching interfaces. The host checks both
 sides: a manifest hook without an export, or an export without a manifest hook, makes the plugin invalid. Unknown
 top-level keys in the manifest are ignored.
