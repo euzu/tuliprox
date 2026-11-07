@@ -447,6 +447,10 @@ repairs it from verified recovery history, or from the fully decoded records, an
 The [step-by-step example](./troubleshooting.md#6-api-user-database-migration-manual-docker-repair) uses a backup of the
 original configuration and a separate working copy. It covers export, editing, validation, repair and the final check.
 
+When `api_user_recovery/` exists but cannot be used, for example because it belongs to another database, the commands
+fall back to the live records. `--user-db-check` prints the cause as `Recovery History Reason`, and `--user-db-set`
+reports it as `Previous History`; the unusable history is moved into the repair archive and replaced.
+
 Repair archives named `api_user_repair_backup_*` are excluded from startup scanning.
 
 #### Pending write-ahead log after an unclean shutdown

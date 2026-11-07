@@ -297,6 +297,7 @@ where
         Ok((report, restored))
     }
 
+    /// Shared open path; `force_rebuild` replaces a current database from history, and an existing maintenance lease replaces the shared use lease.
     fn open_inner(
         paths: RecoveryPaths,
         schema: S,
@@ -932,6 +933,7 @@ where
     fn check_fault(&mut self, _point: RecoveryFaultPointCheck) -> io::Result<()> { Ok(()) }
 }
 
+/// Rebuilds the full record map of one generation: checkpoint first, then its journal.
 fn restore_generation<K, V, S>(
     schema: &S,
     database_id: &str,
@@ -956,6 +958,7 @@ where
     Ok(state)
 }
 
+/// Applies one generation's journal transactions to `state`, migrating each record to the current schema.
 fn replay_generation_journal<K, V, S>(
     schema: &S,
     database_id: &str,
@@ -1060,6 +1063,7 @@ where
     }
 }
 
+/// Classifies the database header without replaying or removing a pending write-ahead log.
 fn read_database_state_read_only<K, V>(database: &Path) -> DatabaseState
 where
     K: Ord + Clone + Serialize + DeserializeOwned,

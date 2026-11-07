@@ -65,6 +65,7 @@ where
     Ok(tree)
 }
 
+/// Returns a temporary V2-normalized copy for a V1 source, or `None` when the V2 source can be read directly.
 fn migration_source(path: &Path, version: u32) -> io::Result<Option<tempfile::NamedTempFile>> {
     if version == LEGACY_V2 {
         return Ok(None);
@@ -72,7 +73,10 @@ fn migration_source(path: &Path, version: u32) -> io::Result<Option<tempfile::Na
     if version != LEGACY_V1 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported legacy B+Tree version"));
     }
-    let temporary = tempfile::NamedTempFile::new()?;
+    // Beside the source, not in the system temp directory: the copy can be as
+    // large as the database, and the source volume already has room for it.
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(parent)?;
     std::fs::copy(path, temporary.path())?;
     normalize_v1_copy(temporary.path())?;
     Ok(Some(temporary))

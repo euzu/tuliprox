@@ -209,6 +209,7 @@ struct Args {
 }
 
 impl Args {
+    /// Maps the parsed offline database flags to one command; `None` starts the normal application.
     fn database_command(&self) -> Option<repository::DatabaseCommand<'_>> {
         use repository::DatabaseCommand;
 

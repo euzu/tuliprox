@@ -35,6 +35,7 @@ pub const USER_DB_REPAIR_GUIDE: &str =
 /// Quote paths in the POSIX-shell command examples without interpreting their contents.
 fn user_db_shell_path(path: &Path) -> String { format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'")) }
 
+/// Appends the offline repair workflow to a user database error.
 pub(crate) fn user_db_repair_error(db_path: &Path, error: &io::Error) -> io::Error {
     io::Error::new(
         error.kind(),
@@ -53,6 +54,7 @@ pub(crate) fn user_db_repair_error(db_path: &Path, error: &io::Error) -> io::Err
     )
 }
 
+/// Adds the repair workflow only to `InvalidData`; lock, permission and I/O errors pass through unchanged.
 pub(crate) fn with_repair_hint_for_data_errors(db_path: &Path, error: io::Error) -> io::Error {
     if error.kind() == io::ErrorKind::InvalidData {
         user_db_repair_error(db_path, &error)
@@ -89,6 +91,7 @@ fn pending_wal_remedy(db_path: &Path) -> String {
     )
 }
 
+/// Refusal for read-only commands while a write-ahead log is pending, naming the remedy.
 fn pending_wal_error(db_path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::WouldBlock,
@@ -100,6 +103,7 @@ fn pending_wal_error(db_path: &Path) -> io::Error {
     )
 }
 
+/// Reports whether an active or temporary write-ahead log exists beside the database.
 fn has_pending_wal(db_path: &Path) -> io::Result<bool> {
     Ok(tuliprox_btree::wal_path(db_path).try_exists()? || tuliprox_btree::wal_temporary_path(db_path).try_exists()?)
 }
@@ -159,8 +163,11 @@ pub struct UserDbRepairReport {
     pub records: usize,
     pub source: UserDbRepairSource,
     pub backup_path: PathBuf,
+    /// Why existing recovery history was not used for this repair; it was archived and replaced.
+    pub recovery_history_error: Option<String>,
 }
 
+/// Archives the database and history, then rebuilds the database from verified history under the held lease.
 fn rebuild_from_verified_history(
     db_path: &Path,
     root: &Path,
@@ -180,11 +187,13 @@ fn rebuild_from_verified_history(
             records: usize::try_from(records).map_err(|_| invalid("recovery record count exceeds usize"))?,
             source: UserDbRepairSource::VerifiedHistory,
             backup_path: backup.clone(),
+            recovery_history_error: None,
         })
     })();
     result.map_err(|error: io::Error| with_backup(&error, &backup))
 }
 
+/// Stages resolved live records with fresh recovery history, verifies both, archives the source and publishes them.
 fn rebuild_from_live_records(
     db_path: &Path,
     root: &Path,
@@ -261,9 +270,11 @@ fn rebuild_from_live_records(
         records: users.len(),
         source: UserDbRepairSource::ExplicitLiveRecords,
         backup_path: backup,
+        recovery_history_error: None,
     })
 }
 
+/// Swaps in the staged history and database, moving the previous history into the archive and rolling back on failure.
 fn publish_fresh_recovery(
     db_path: &Path,
     staging_db: &Path,
@@ -302,6 +313,7 @@ fn publish_fresh_recovery(
     Ok(())
 }
 
+/// Confirms the published database loads as V7 and agrees with its recovery history.
 fn verify_published_database(db_path: &Path, expected_records: u64) -> io::Result<()> {
     let strict = BPlusTree::<String, StoredApiUserV7>::load(db_path)?;
     if u64::try_from(strict.len()).map_err(|_| invalid("record count exceeds u64"))? != expected_records {
@@ -315,6 +327,7 @@ fn verify_published_database(db_path: &Path, expected_records: u64) -> io::Resul
     Ok(())
 }
 
+/// Copies the database, its companion files, the merge guard and optionally the recovery history into a new archive directory.
 fn create_repair_archive(db_path: &Path, include_recovery: bool) -> io::Result<PathBuf> {
     let root = database_root(db_path)?;
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
@@ -342,6 +355,7 @@ fn create_repair_archive(db_path: &Path, include_recovery: bool) -> io::Result<P
     Ok(archive)
 }
 
+/// Database file plus sorted index and write-ahead log companions.
 fn related_database_files(db_path: &Path) -> [PathBuf; 4] {
     [
         db_path.to_path_buf(),
@@ -351,6 +365,7 @@ fn related_database_files(db_path: &Path) -> [PathBuf; 4] {
     ]
 }
 
+/// Recursively copies a directory of regular files, refusing symlinks and special files.
 fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
     reject_symlink(source)?;
     fs::create_dir(destination)?;
@@ -373,6 +388,7 @@ fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Fails when `path` itself is a symbolic link.
 fn reject_symlink(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(invalid("user database repair refuses symbolic links"));
@@ -380,6 +396,7 @@ fn reject_symlink(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Removes staging artifacts, logging instead of failing because the repair outcome is already decided.
 fn cleanup_staging(artifacts: &BPlusTreeStagingArtifacts, staging_root: &Path) {
     if let Err(error) = artifacts.remove_owned_staging_artifacts() {
         log::warn!("Could not remove user repair staging artifacts: {error}");
@@ -391,6 +408,7 @@ fn cleanup_staging(artifacts: &BPlusTreeStagingArtifacts, staging_root: &Path) {
     }
 }
 
+/// Reads the B+Tree storage version, accepting only V1, V2 and the current version.
 fn user_storage_version(db_path: &Path) -> io::Result<u32> {
     let version = typed_migration::storage_version(db_path)?.ok_or_else(|| invalid("user database is not a B+Tree"))?;
     if !matches!(version, 1 | 2) && version != STORAGE_VERSION {
@@ -399,18 +417,22 @@ fn user_storage_version(db_path: &Path) -> io::Result<u32> {
     Ok(version)
 }
 
+/// Returns the directory that holds the database and its recovery history.
 fn database_root(db_path: &Path) -> io::Result<&Path> {
     db_path.parent().ok_or_else(|| invalid("user database has no parent directory"))
 }
 
+/// Quotes a user key as JSON so control characters cannot alter terminal output.
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<invalid-user-key>\"".to_string())
 }
 
+/// Appends the archive path to an error so the operator can find the pre-repair state.
 fn with_backup(error: &io::Error, backup: &Path) -> io::Error {
     io::Error::new(error.kind(), format!("{error}; automatic repair archive: {}", backup.display()))
 }
 
+/// Builds an `InvalidData` error.
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
 
 #[cfg(test)]

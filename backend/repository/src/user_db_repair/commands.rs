@@ -45,6 +45,8 @@ pub struct UserDbCheckReport {
     /// Ambiguous records in the database whose `plan`/`filter` field is unknown.
     pub unassigned_records: usize,
     pub recovery_verified: bool,
+    /// Why existing recovery history was not used; `None` when it verified or no history directory exists.
+    pub recovery_history_error: Option<String>,
 }
 
 struct Snapshot {
@@ -52,6 +54,7 @@ struct Snapshot {
     users: BTreeMap<String, StoredApiUserV7>,
     unassigned: BTreeMap<String, String>,
     verified_history_records: Option<u64>,
+    history_error: Option<String>,
 }
 
 /// Reads all repair fields, or a selected user, without opening a mutable journal.
@@ -117,6 +120,7 @@ pub fn check_user_database(db_path: &Path, input: Option<&Path>) -> io::Result<U
         records: users.len(),
         unassigned_records: snapshot.unassigned.len(),
         recovery_verified: snapshot.verified_history_records.is_some(),
+        recovery_history_error: snapshot.history_error,
     })
 }
 
@@ -143,10 +147,13 @@ pub fn set_user_database(db_path: &Path, input: Option<&Path>) -> io::Result<Use
     if let Some(records) = snapshot.verified_history_records {
         rebuild_from_verified_history(db_path, root, records, &maintenance)
     } else {
-        rebuild_from_live_records(db_path, root, &users)
+        let mut report = rebuild_from_live_records(db_path, root, &users)?;
+        report.recovery_history_error = snapshot.history_error;
+        Ok(report)
     }
 }
 
+/// Reads users from verified history, or from live records when history is unusable, and fails if the source changes meanwhile.
 fn read_snapshot(db_path: &Path) -> io::Result<Snapshot> {
     // A pending log means the last shutdown was unclean; reading around it
     // would report stale records, so refuse and name the way forward.
@@ -157,13 +164,20 @@ fn read_snapshot(db_path: &Path) -> io::Result<Snapshot> {
     let fingerprint = source_fingerprint(db_path)?;
     let mut users = BTreeMap::new();
     let mut unassigned = BTreeMap::new();
-    let verified_history_records =
-        if let Ok((report, records)) = ApiUserRepository::read_verified_history(db_path, database_root(db_path)?) {
+    let mut history_error = None;
+    let verified_history_records = match ApiUserRepository::read_verified_history(db_path, database_root(db_path)?) {
+        Ok((report, records)) => {
             for (key, record) in records {
                 users.insert(key, StoredApiUserV7::from(&record));
             }
             Some(report.live_records)
-        } else {
+        }
+        Err(error) => {
+            // Live records stay the fallback. A reason is only worth reporting
+            // when history exists; a missing directory is the normal legacy case.
+            if recovery_directory_exists(db_path)? {
+                history_error = Some(error.to_string());
+            }
             let records = load_user_records_read_only(db_path, storage_version)?;
             for (key, record) in &records {
                 let user = match classify_user_record(record.clone())? {
@@ -176,7 +190,8 @@ fn read_snapshot(db_path: &Path) -> io::Result<Snapshot> {
                 users.insert(key.clone(), user);
             }
             None
-        };
+        }
+    };
     // Re-check the source fingerprint to detect any concurrent writer during the read.
     let fingerprint_after = source_fingerprint(db_path)?;
     if fingerprint != fingerprint_after {
@@ -197,14 +212,16 @@ fn read_snapshot(db_path: &Path) -> io::Result<Snapshot> {
             })
             .collect(),
     };
-    Ok(Snapshot { export, users, unassigned, verified_history_records })
+    Ok(Snapshot { export, users, unassigned, verified_history_records, history_error })
 }
 
+/// Parses an edited export without quoting its contents in the error.
 fn read_document(path: &Path) -> io::Result<UserDbExport> {
     serde_json::from_slice(&fs::read(path)?)
         .map_err(|_| invalid("invalid user DB input file; use an export from --user-db-get"))
 }
 
+/// Checks an edited export against the snapshot and returns the resolved users; only unassigned values may change.
 fn validate_document(
     snapshot: &Snapshot,
     document: Option<&UserDbExport>,
@@ -260,22 +277,19 @@ fn validate_document(
     Ok(resolved)
 }
 
+/// Resolves an output path through its existing parent so aliases of reserved paths compare equal.
 fn output_identity(path: &Path) -> io::Result<PathBuf> {
     let parent = path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let name = path.file_name().ok_or_else(|| invalid("output has no file name"))?;
     Ok(fs::canonicalize(parent)?.join(name))
 }
 
+/// Hashes the database and recovery history so a stale export can be detected.
 fn source_fingerprint(db_path: &Path) -> io::Result<String> {
     let mut hasher = blake3::Hasher::new_derive_key("tuliprox user DB repair export v1");
     hash_file(&mut hasher, b"database", db_path)?;
     let recovery = database_root(db_path)?.join(RECOVERY_DIRECTORY);
-    let has_recovery = match fs::symlink_metadata(&recovery) {
-        Ok(_) => true,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
-    };
-    if has_recovery {
+    if recovery_directory_exists(db_path)? {
         let mut files = Vec::new();
         collect_history_files(&recovery, &mut files)?;
         files.sort();
@@ -292,6 +306,16 @@ fn source_fingerprint(db_path: &Path) -> io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// Reports whether the recovery directory entry exists, without following a symbolic link.
+fn recovery_directory_exists(db_path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(database_root(db_path)?.join(RECOVERY_DIRECTORY)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Collects every regular file below the recovery directory, refusing symlinks and special files.
 fn collect_history_files(directory: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     reject_symlink(directory)?;
     for entry in fs::read_dir(directory)? {
@@ -311,6 +335,7 @@ fn collect_history_files(directory: &Path, files: &mut Vec<PathBuf>) -> io::Resu
     Ok(())
 }
 
+/// Feeds a length-prefixed label, the file length and its contents into the fingerprint.
 fn hash_file(hasher: &mut blake3::Hasher, label: &[u8], path: &Path) -> io::Result<()> {
     reject_symlink(path)?;
     hasher.update(&u64::try_from(label.len()).map_err(io::Error::other)?.to_le_bytes());
@@ -424,8 +449,34 @@ mod tests {
         assert_eq!(report.records, 1);
         assert_eq!(report.unassigned_records, 0);
         assert!(!report.recovery_verified);
+        assert_eq!(report.recovery_history_error, None, "a missing history directory is not an error");
         assert_eq!(fs::read(&db_path)?, before);
         assert!(!dir.path().join(RECOVERY_DIRECTORY).exists());
+        Ok(())
+    }
+
+    /// History that exists but cannot be used still falls back to the live
+    /// records, and the reason reaches both the check and the repair report.
+    #[test]
+    fn an_unusable_history_reason_is_reported_and_live_records_are_used() -> io::Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("api_user.db");
+        write_compact_database(&db_path, &[("bob", None, None)])?;
+        fs::create_dir(dir.path().join(RECOVERY_DIRECTORY))?;
+
+        let check = check_user_database(&db_path, None)?;
+        assert!(!check.recovery_verified);
+        let reason = check.recovery_history_error.ok_or_else(|| io::Error::other("the reason must be reported"))?;
+        assert!(reason.contains("recovery identity"), "{reason}");
+
+        let report = set_user_database(&db_path, None)?;
+        assert_eq!(report.source, UserDbRepairSource::ExplicitLiveRecords);
+        assert!(report.recovery_history_error.is_some(), "the repair report must keep the reason");
+        assert!(report.backup_path.join(RECOVERY_DIRECTORY).is_dir(), "the unusable history must be archived");
+
+        let after = check_user_database(&db_path, None)?;
+        assert!(after.recovery_verified);
+        assert_eq!(after.recovery_history_error, None);
         Ok(())
     }
 

@@ -372,6 +372,7 @@ impl StoredApiUserV7 {
 // The persisted credentials and the V7 layout carry the same 21 fields, so a
 // recovery snapshot converts without a `MessagePack` round trip.
 impl From<&StoredProxyUserCredentials> for StoredApiUserV7 {
+    /// Copies all 21 stored fields; both types share the V7 layout.
     fn from(stored: &StoredProxyUserCredentials) -> Self {
         Self {
             target: stored.target.clone(),
@@ -410,6 +411,7 @@ pub(crate) enum UserRecordDecode {
     Ambiguous { user: StoredApiUserV7, value: String },
 }
 
+/// Decodes any historical positional layout, reporting a single unnamed trailing string as ambiguous instead of guessing.
 pub(crate) fn classify_user_record(value: Value) -> io::Result<UserRecordDecode> {
     let Value::Array(mut fields) = value else {
         return Err(invalid("stored user record is not a positional array"));
@@ -457,6 +459,7 @@ pub(crate) fn classify_user_record(value: Value) -> io::Result<UserRecordDecode>
     Ok(UserRecordDecode::Complete(user))
 }
 
+/// Decodes a stored record into V7, failing on an ambiguous compact layout.
 pub(crate) fn decode_user_record(value: Value) -> io::Result<StoredApiUserV7> {
     match classify_user_record(value)? {
         UserRecordDecode::Complete(user) => Ok(user),
@@ -464,11 +467,13 @@ pub(crate) fn decode_user_record(value: Value) -> io::Result<StoredApiUserV7> {
     }
 }
 
+/// Deserializes one stored value without echoing field contents, which may hold credentials, into the error.
 fn decode_record<T: serde::de::DeserializeOwned>(value: Value) -> io::Result<T> {
     // Serde errors can quote a value; database credentials must never enter logs.
     serde_json::from_value(value).map_err(|_| invalid("stored user record contains an invalid field"))
 }
 
+/// Error for a compact record whose single trailing string cannot be assigned to `plan` or `filter`.
 fn ambiguous_user_record() -> io::Error {
     invalid(
         "ambiguous compact V7 user record: the remaining string may be either plan or filter; \
@@ -648,6 +653,7 @@ pub(crate) struct ApiUserRepository {
 }
 
 impl ApiUserRepository {
+    /// Reads the verified history snapshot bound to this database without changing any file.
     pub(crate) fn read_verified_history(
         db_path: &Path,
         recovery_root: &Path,
@@ -660,6 +666,7 @@ impl ApiUserRepository {
         Journal::read_rebuild_history(&paths, &ApiUserRecoverySchema)
     }
 
+    /// Checks that verified history bound to this database exists and covers its revision, without changing any file.
     pub(crate) fn verify_history(
         db_path: &Path,
         recovery_root: &Path,
@@ -676,6 +683,7 @@ impl ApiUserRepository {
         Journal::rebuild_from_history(paths, ApiUserRecoverySchema, RecoveryPolicy::default())
     }
 
+    /// Rebuilds from history while the caller already holds the exclusive maintenance lease.
     pub(crate) fn rebuild_with_maintenance(
         db_path: &Path,
         recovery_root: &Path,

@@ -176,6 +176,7 @@ impl BPlusTreeStartupMigrator {
         final_roots
     }
 
+    /// Reports whether any path component names a user DB repair archive.
     fn is_repair_archive_path(path: &Path) -> bool {
         path.components().any(|component| {
             component
@@ -185,6 +186,7 @@ impl BPlusTreeStartupMigrator {
         })
     }
 
+    /// Canonicalizes a scan root, skipping missing directories and repair archives before and after resolution.
     fn resolve_scan_root(root: &Path) -> Option<PathBuf> {
         if Self::is_repair_archive_path(root) || !root.is_dir() {
             return None;
@@ -193,6 +195,7 @@ impl BPlusTreeStartupMigrator {
         (!Self::is_repair_archive_path(&resolved)).then_some(resolved)
     }
 
+    /// Like `is_repair_archive_path`, but also resolves the nearest existing ancestor so symlinks and not-yet-created paths are caught.
     fn is_repair_archive_location(path: &Path) -> bool {
         // Marker paths may not exist yet, or may reach an archive through a
         // symlink. Resolve the nearest existing ancestor before any marker I/O.
@@ -864,6 +867,7 @@ fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VE
 // writes a merge-guard marker so that config-driven user merges cannot
 // overwrite the freshly migrated data.
 
+/// Creates the empty merge-guard marker that stops config-driven user merges after a migration.
 pub(crate) fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
     if !merge_guard_path.exists() {
         std::fs::write(merge_guard_path, b"")?;
@@ -896,6 +900,7 @@ pub(crate) fn load_user_records_read_only(
     scan_user_records(db_path, storage_version, UserRecordScan::Refusing)
 }
 
+/// Loads every user record as raw values, rejecting duplicate keys; `scan` decides whether a pending WAL is replayed.
 fn scan_user_records(
     db_path: &Path,
     storage_version: u32,

@@ -23,6 +23,7 @@ pub fn run_database_command(command: DatabaseCommand<'_>) -> ! {
     }
 }
 
+/// Formats a 16-byte database identity as lowercase hex.
 fn format_hex_id(id: &[u8; 16]) -> String {
     use std::fmt::Write;
     let mut hex = String::with_capacity(32);
@@ -32,6 +33,7 @@ fn format_hex_id(id: &[u8; 16]) -> String {
     hex
 }
 
+/// Runs `--inspect-db` and exits.
 fn handle_inspect_db(db_path: &Path, db_type: Option<&str>) -> ! {
     match crate::inspect_single_database(db_path, db_type) {
         Ok(report) => {
@@ -68,6 +70,7 @@ fn handle_inspect_db(db_path: &Path, db_type: Option<&str>) -> ! {
     }
 }
 
+/// Runs `--migrate-db` and exits.
 fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) -> ! {
     let make_backup = !no_backup;
     match crate::migrate_single_database(db_path, db_type, make_backup) {
@@ -104,6 +107,7 @@ fn handle_migrate_db(db_path: &Path, db_type: Option<&str>, no_backup: bool) -> 
     }
 }
 
+/// Runs `--user-db-get`, printing JSON to stdout or writing a new export file, and exits.
 fn handle_user_db_get(db_path: &Path, output: Option<&Path>, user: Option<&str>) -> ! {
     let result = crate::get_user_database(db_path, user).and_then(|export| {
         if let Some(path) = output {
@@ -121,6 +125,7 @@ fn handle_user_db_get(db_path: &Path, output: Option<&Path>, user: Option<&str>)
     finish_user_db_command(result);
 }
 
+/// Runs `--user-db-check` and exits.
 fn handle_user_db_check(db_path: &Path, input: Option<&Path>) -> ! {
     let result = crate::check_user_database(db_path, input).map(|report| {
         println!("Status: VALID");
@@ -133,11 +138,15 @@ fn handle_user_db_check(db_path: &Path, input: Option<&Path>) -> ! {
             "Recovery History: {}",
             if report.recovery_verified { "VERIFIED" } else { "UNAVAILABLE (set will create verified history)" }
         );
+        if let Some(reason) = &report.recovery_history_error {
+            println!("Recovery History Reason: {reason}");
+        }
         println!("Database and recovery files were not changed.");
     });
     finish_user_db_command(result);
 }
 
+/// Exits with status 0 on success, or prints the error and repair guide and exits with status 1.
 fn finish_user_db_command(result: std::io::Result<()>) -> ! {
     match result {
         Ok(()) => std::process::exit(0),
@@ -149,6 +158,7 @@ fn finish_user_db_command(result: std::io::Result<()>) -> ! {
     }
 }
 
+/// Prints the repair summary and exits, or prints the error and repair guide and exits with status 1.
 fn finish_user_db_repair(result: std::io::Result<crate::UserDbRepairReport>) -> ! {
     match result {
         Ok(report) => {
@@ -162,6 +172,9 @@ fn finish_user_db_repair(result: std::io::Result<crate::UserDbRepairReport>) -> 
                     crate::UserDbRepairSource::ExplicitLiveRecords => "verified live records",
                 }
             );
+            if let Some(reason) = &report.recovery_history_error {
+                println!("Previous History:  UNUSABLE ({reason}); archived and replaced");
+            }
             println!("Archive Created:   {}", report.backup_path.display());
             println!("Status:            SUCCESS (complete V7 database with verified recovery history)");
             std::process::exit(0);
