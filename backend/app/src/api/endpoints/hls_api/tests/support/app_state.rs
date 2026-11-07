@@ -19,6 +19,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn path_has_extension(path: &str, 
     std::path::Path::new(path).extension().is_some_and(|actual| actual.eq_ignore_ascii_case(extension))
 }
 
+/// App config with one `hls-user` limited to one connection.
 pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppConfig> {
     let mut hls_user = ProxyUserCredentials::default();
     hls_user.username = "hls-user".to_string();
@@ -62,6 +63,17 @@ pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppCon
         encrypt_secret: [0; 16],
         media_tools: Arc::new(crate::model::MediaToolCapabilities::default()),
     })
+}
+
+/// Returns the test app config with `storage_dir` set to the given path.
+pub(in crate::api::endpoints::hls_api::tests) fn test_app_config_with_storage_dir(
+    storage_dir: &std::path::Path,
+) -> Arc<AppConfig> {
+    let app_config = test_app_config();
+    let mut config = (**app_config.config.load()).clone();
+    config.storage_dir = storage_dir.to_string_lossy().to_string();
+    app_config.config.store(Arc::new(config));
+    app_config
 }
 
 pub(in crate::api::endpoints::hls_api::tests) fn hls_custom_video_test_user() -> ProxyUserCredentials {

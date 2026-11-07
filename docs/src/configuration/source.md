@@ -150,8 +150,19 @@ mappings:
             @Url = concat("provider://cdn/", parts.rest)
 ```
 
-The field does not change the playlist download, credentials, or connection limits. It only makes `provider://cdn/...`
-URLs resolvable and enables the provider's URL failover for them. Aliases inherit the binding.
+The field does not change playlist download, credentials, or connection limits. It makes `provider://<name>/...`
+URLs resolvable and enables profile-aware failover and recovery across playback:
+
+* **HLS entry resolution**: Mapped `provider://<profile>/...` media URLs retain their profile; unknown profiles fail
+  closed. Plain HTTP URLs remain unchanged.
+* **M3U catchup and archive**: Stream URLs maintain the `provider://` scheme and encoded query parameters through
+  playback resolution.
+* **Alias token lookup**: M3U alias accounts resolve upstream tokens from their own indexed streams rather than
+  spending root account credentials.
+* **Pinned session recovery**: Live HLS outage recovery cycles across alternative profile URLs within the active
+  attempt without consuming duplicate retry budget.
+
+Aliases inherit the binding.
 
 ## 2. Inputs (Data Sources) (`inputs`)
 

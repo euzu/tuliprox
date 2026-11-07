@@ -11,7 +11,9 @@
 
 use super::{
     commit::{materialize_normal_key_resources, HlsCommittedAcceptanceReadPin},
-    current_time_millis, OriginRefreshRequest,
+    current_time_millis,
+    startup_revision::{complete_startup_revision, startup_revision_kind},
+    OriginRefreshRequest,
 };
 use crate::{
     critical_handoff::{
@@ -77,6 +79,7 @@ pub(super) struct HlsStagedSwitchCommit {
     pub(super) ready_segment_origin_digest: [u8; 32],
     pub(super) content_anchor: Option<HlsVerifiedContentAnchor>,
     pub(super) ready_map: Option<(crate::ProxyMapId, u64)>,
+    pub(super) ready_segment_revision: Option<crate::SegmentRevisionGuard>,
     pub(super) segment_cleanup: crate::gc::HlsSwitchCacheCleanupReservation,
     pub(super) map_cleanup: Option<crate::gc::HlsSwitchCacheCleanupReservation>,
     pub(super) critical_handoff: Option<HlsCriticalHandoffPreparation>,
@@ -399,10 +402,18 @@ pub(super) async fn stage_alternative_manifest_switch(
         ready_segment_origin_digest: committed_media.origin_digest,
         content_anchor: None,
         ready_map: committed_media.ready_map,
+        ready_segment_revision: None,
         segment_cleanup: committed_media.segment_cleanup,
         map_cleanup: committed_media.map_cleanup,
         critical_handoff: None,
     };
+    match prepare_switch_startup_revision(request, &first_segment).await {
+        Ok(revision) => staged_switch.ready_segment_revision = revision,
+        Err(error) => {
+            remove_uncommitted_staged_switch_files(request, &mut staged_switch).await;
+            return Err(error);
+        }
+    }
     if let Err(error) =
         advance_alternative_switch_candidate_workload(request, &staged_switch, &first_segment, &candidate_key_resources)
             .await
@@ -412,6 +423,45 @@ pub(super) async fn stage_alternative_manifest_switch(
     }
 
     Ok(staged_switch)
+}
+
+/// Registers a complete startup revision for a committed switch segment.
+///
+/// Returns `Ok(None)` when the session has no startup store or the segment is
+/// not fast-start eligible.
+async fn prepare_switch_startup_revision(
+    request: &OriginRefreshRequest,
+    segment: &SegmentEntry,
+) -> Result<Option<crate::SegmentRevisionGuard>, HlsManifestCommitError> {
+    let startup = {
+        let session = request.session.read().await;
+        session
+            .startup
+            .as_ref()
+            .filter(|_| segment.is_fast_start_eligible())
+            .map(|startup| (Arc::clone(&startup.store), startup.config.mode))
+    };
+    let Some((store, mode)) = startup else {
+        return Ok(None);
+    };
+    let target_duration = request.session.read().await.target_duration;
+    let timeout_ms = request.segment_worker_pool.policy().segment_timeout_ms(target_duration).max(1);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let committed_path = request.segment_cache.object_path(&segment.cache_key);
+    // The switch object was committed without segment repair, so this committed
+    // cache file is already the complete segment body.
+    let guard = store
+        .create(segment.cache_key.proxy_session_id().clone(), segment.proxy_seq, startup_revision_kind(mode))
+        .map_err(|_| switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable))?;
+    if complete_startup_revision(&request.segment_cache, &guard, &committed_path, deadline).await.is_err() {
+        let key = guard.revision().key.clone();
+        drop(guard);
+        if request.segment_cache.delete(&key).await.is_err() {
+            warn!("Failed to remove uncommitted HLS switch revision; cleanup deferred");
+        }
+        return Err(switch_staging_error(HlsManifestRejectLogReason::SwitchResourceUnavailable));
+    }
+    Ok(Some(guard))
 }
 
 pub(super) fn alternative_switch_fetch_context(
@@ -1293,6 +1343,7 @@ pub(super) async fn inspect_cache_object_tracks(
         .into()
 }
 
+/// Removes staged switch segment and map files that the session did not commit.
 pub(super) async fn remove_uncommitted_staged_switch_files(
     request: &OriginRefreshRequest,
     staged: &mut HlsStagedSwitchCommit,
@@ -1335,5 +1386,12 @@ pub(super) async fn remove_uncommitted_staged_switch_files(
         }
     } else if let Some(cleanup) = staged.map_cleanup.as_mut() {
         cleanup.disarm();
+    }
+    if let Some(revision) = staged.ready_segment_revision.take() {
+        let key = revision.revision().key.clone();
+        drop(revision);
+        if request.segment_cache.delete(&key).await.is_err() {
+            warn!("Failed to remove uncommitted HLS switch revision; cleanup deferred");
+        }
     }
 }

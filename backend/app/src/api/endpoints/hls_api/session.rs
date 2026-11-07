@@ -1,7 +1,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
-use tuliprox_core::model::{AppConfig, ProviderBindingTag};
+use tuliprox_core::model::{resolve_provider_scheme_url_with_provider_index, AppConfig, ProviderBindingTag};
 
 #[derive(Clone, Debug)]
 pub(super) enum HlsOriginEntryUrl {
@@ -220,6 +220,8 @@ pub(super) fn build_hls_origin_fetch_url(
     }
 }
 
+/// Origin fetch URL for the selected account. A playback-profile M3U URL takes the account's token and keeps the
+/// profile authority; other URLs are rewritten for the account.
 pub(super) async fn resolve_hls_origin_fetch_url(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
@@ -231,6 +233,17 @@ pub(super) async fn resolve_hls_origin_fetch_url(
         .into_iter()
         .any(|url| hls_url_failover_provider_for_origin_url(input, url).is_some())
     {
+        if input.input_type.is_m3u() && input.playback_provider.is_some() {
+            if let Some(account) = provider_config {
+                if let Some(entry) = [session_entry_url, raw_request_url].into_iter().find(|url| {
+                    input
+                        .get_resolve_provider(url)
+                        .is_some_and(|profile| input.playback_provider.as_deref() == Some(profile.name.as_ref()))
+                }) {
+                    return resolve_hls_m3u_profile_account_url(app_config, input, entry, account).await;
+                }
+            }
+        }
         return build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config);
     }
 
@@ -247,6 +260,41 @@ pub(super) async fn resolve_hls_origin_fetch_url(
     }
 
     build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, provider_config)
+}
+
+/// Keep the CDN profile while taking the token from the selected real M3U account's
+/// raw URL index. Probe only explicitly configured mirror origins, never arbitrary hosts.
+async fn resolve_hls_m3u_profile_account_url(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    entry: &str,
+    account: &Arc<RuntimeProviderConfig>,
+) -> Option<String> {
+    let profile = input.get_resolve_provider(entry)?;
+    for index in 0..profile.urls.len() {
+        let (_, candidate) =
+            resolve_provider_scheme_url_with_provider_index(entry, Some(Arc::clone(&profile)), index).ok()?;
+        let selected =
+            match crate::api::api_utils::lookup_account_m3u_stream_url(app_config, &account.name, &candidate).await {
+                Ok(Some((url, _))) => url,
+                Ok(None) => continue,
+                Err(error) => {
+                    debug_if_enabled!(
+                        "HLS M3U CDN profile account lookup failed: {}",
+                        sanitize_sensitive_info(&error.to_string())
+                    );
+                    return None;
+                }
+            };
+        let selected = Url::parse(&selected).ok()?;
+        let mut result = Url::parse(entry).ok()?;
+        result.set_path(selected.path());
+        result.set_query(selected.query());
+        // URL-failover authority and the selected account's exact encoded query are retained.
+        return Some(result.to_string());
+    }
+    // Never spend the root account's token under an alias reservation if its URL is missing.
+    (account.name == input.name).then(|| entry.to_string())
 }
 
 pub(super) fn rewrite_hls_provider_scheme_origin_account(
@@ -652,6 +700,8 @@ pub(super) async fn hls_session_origin_playback_kind(session: &HlsSessionHandle)
     session.read().await.origin_playback_kind()
 }
 
+/// Acquires a provider account (preferring `preferred_account`) and resolves its origin fetch URL; the slot is
+/// released when no URL or binding results.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     app_state: &Arc<AppState>,
@@ -773,25 +823,44 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     })
 }
 
+/// Falls back to the session entry URL only for the root account. The entry URL carries the root account's token,
+/// so an alias binding without a resolved URL fails instead.
+pub(super) fn known_binding_fetch_url(
+    resolved_url: Option<String>,
+    input: &ConfigInput,
+    account_name: &str,
+    session_entry_url: &str,
+) -> Option<String> {
+    resolved_url.or_else(|| (account_name == input.name.as_ref()).then(|| session_entry_url.to_string()))
+}
+
+/// Builds the origin runtime for an active binding whose account is still known, without a new acquisition.
+/// Fails when the bound alias has no resolvable URL.
 pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     raw_request_url: &str,
     session_entry_url: &str,
     binding: &HlsOriginAccountBinding,
-) -> HlsOriginRuntimeAllocation {
+) -> Result<HlsOriginRuntimeAllocation, HlsOriginRuntimeAcquireError> {
     let runtime_provider_config = app_state.active_provider.find_provider_config(&binding.account_name);
-    let fetch_url = resolve_hls_origin_fetch_url(
+    let resolved_url = resolve_hls_origin_fetch_url(
         &app_state.app_config,
         input,
         raw_request_url,
         session_entry_url,
         runtime_provider_config.as_ref(),
     )
-    .await
-    .unwrap_or_else(|| session_entry_url.to_string());
+    .await;
+    let Some(fetch_url) = known_binding_fetch_url(resolved_url, input, &binding.account_name, session_entry_url) else {
+        debug!(
+            "HLS origin URL unresolved for bound alias account={}",
+            sanitize_sensitive_info(binding.account_name.as_ref())
+        );
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
 
-    HlsOriginRuntimeAllocation {
+    Ok(HlsOriginRuntimeAllocation {
         runtime_provider_config,
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
@@ -803,7 +872,7 @@ pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
         binding_to_publish: None,
         prepared_snapshot: None,
         preacquired_origin_account_handle: None,
-    }
+    })
 }
 
 pub(super) async fn log_hls_origin_binding_reacquire_started(session: &HlsSessionHandle, work_kind: HlsOriginWorkKind) {

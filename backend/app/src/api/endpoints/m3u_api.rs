@@ -549,11 +549,21 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     .into_response()
 }
 
+/// Source URL for archive construction; a playback-profile URL stays unresolved so failover still picks the host.
 fn resolve_effective_source_url<'a>(
     item: &'a shared::model::M3uPlaylistItem,
     input: &'a crate::model::ConfigInput,
 ) -> Result<Cow<'a, str>, TuliproxError> {
     if !item.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Ok(Cow::Borrowed(item.url.as_ref()));
+    }
+    if input
+        .playback_provider
+        .as_deref()
+        .is_some_and(|name| input.get_resolve_provider(&item.url).is_some_and(|profile| profile.name.as_ref() == name))
+    {
+        // Archive construction must keep the explicit media profile until fetch
+        // time, otherwise the URL is pinned to the first CDN before failover.
         return Ok(Cow::Borrowed(item.url.as_ref()));
     }
     input.resolve_url(&item.url)
@@ -1367,5 +1377,37 @@ mod tests {
             assert!(archive.as_ref().is_some_and(|value| native_archive_matches_mode("flussonic-ts", value)));
             assert!(!archive.as_ref().is_some_and(|value| native_archive_matches_mode("flussonic", value)));
         }
+    }
+
+    /// A native Flussonic archive keeps the `provider://cdn` URL and its encoded query; without a playback profile
+    /// it uses the concrete host.
+    #[test]
+    fn token_only_m3u_archive_keeps_explicit_playback_profile_and_encoded_query() {
+        let profile = std::sync::Arc::new(crate::model::ConfigProvider::from(&shared::model::ConfigProviderDto {
+            name: "cdn".into(),
+            urls: vec!["http://pl.example.com".into(), "http://eu.example.com".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+        let mut input = ConfigInput {
+            url: "http://playlist.example.com/list.m3u?access_key=fixture".into(),
+            playback_provider: Some("cdn".into()),
+            provider_configs: Some(vec![profile]),
+            ..ConfigInput::default()
+        };
+        let item = native_flussonic_item("flussonic", "provider://cdn/ChannelA/mono.m3u8?token=fixture%2Btoken&keep=1");
+        let kind =
+            FlussonicArchiveKind::Archive { start: "1784898000".into(), duration: "60".into(), extension: ".m3u8" };
+        let (archive, _) = apply_native_flussonic_archive(&item, &input, &kind).unwrap();
+        assert_eq!(
+            archive.url.as_ref(),
+            "provider://cdn/ChannelA/mono-1784898000-60.m3u8?token=fixture%2Btoken&keep=1"
+        );
+        input.playback_provider = None;
+        let (legacy_archive, _) = apply_native_flussonic_archive(&item, &input, &kind).unwrap();
+        assert_eq!(
+            legacy_archive.url.as_ref(),
+            "http://pl.example.com/ChannelA/mono-1784898000-60.m3u8?token=fixture%2Btoken&keep=1"
+        );
     }
 }

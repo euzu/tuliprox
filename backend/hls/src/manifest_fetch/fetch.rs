@@ -64,6 +64,7 @@ impl<'a> HlsOriginManifestFetchRequest<'a> {
     }
 }
 
+/// Fetches an origin manifest in the requested mode; a pinned recovery may fall back to the profile mirrors.
 pub async fn fetch_hls_origin_manifest_request(
     request: HlsOriginManifestFetchRequest<'_>,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
@@ -79,6 +80,17 @@ pub async fn fetch_hls_origin_manifest_request(
             match fetch_hls_origin_manifest_recovery_direct_target(request.context, binding, reason, log_context).await
             {
                 Ok(fetched) => resolve_archive_master_manifest(request.context, fetched).await,
+                Err(error)
+                    if recovery_profile_failover_allowed(
+                        &request.context.origin_entry,
+                        &error,
+                        request.context.attempt.as_deref(),
+                    ) =>
+                {
+                    // The recovery owner already began this logical attempt. Try one
+                    // bounded URL-profile cycle without resetting its shared budget.
+                    fetch_hls_origin_manifest_global_policy(request.context, 1, true).await
+                }
                 Err(error) => Err(error),
             }
         }
@@ -89,11 +101,57 @@ pub async fn fetch_hls_origin_manifest_request(
     }
 }
 
-#[allow(clippy::too_many_lines, reason = "One loop owns the shared attempt budget and its original failure.")]
+/// Initial fetch with the full global retry budget.
 async fn fetch_hls_origin_manifest_initial_global_policy(
     context: &HlsOriginManifestFetchContext,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    log_manifest_initial_attempt(context).await;
+    fetch_hls_origin_manifest_global_policy(context, context.retry_policy.attempt_count(), false).await
+}
+
+/// Returns `true` when a failed pinned recovery fetch may retry through the
+/// other URLs of the entry's `provider://` profile.
+///
+/// Requires the opt-in flag, a profile with more than one URL, and a failure
+/// class that triggers URL failover.
+pub(super) fn recovery_profile_failover_allowed(
+    entry: &super::model::LiveHlsOriginEntry,
+    error: &OriginManifestFetchError,
+    attempt: Option<&super::model::HlsManifestAttemptContext>,
+) -> bool {
+    let supported_failure = match error {
+        OriginManifestFetchError::RetryableStatus(status, _)
+            if *status == axum::http::StatusCode::PROXY_AUTHENTICATION_REQUIRED =>
+        {
+            attempt.is_none_or(super::model::HlsManifestAttemptContext::permits_407_retry)
+        }
+        OriginManifestFetchError::PermanentStatus(status) | OriginManifestFetchError::RetryableStatus(status, _) => {
+            tuliprox_core::utils::request::should_trigger_failover(*status)
+        }
+        OriginManifestFetchError::Request(_)
+        | OriginManifestFetchError::Redirect(_)
+        | OriginManifestFetchError::Timeout => true,
+        _ => false,
+    };
+    entry.profile_recovery_failover()
+        && entry.url().scheme() == "provider"
+        && entry.url_failover_provider().is_some_and(|profile| profile.urls.len() > 1)
+        && supported_failure
+}
+
+#[allow(clippy::too_many_lines, reason = "One loop owns the shared attempt budget and its original failure.")]
+/// Fetches the origin manifest with the global URL-failover policy across
+/// `attempts` attempts.
+///
+/// `reuse_recovery_attempt` skips the initial-attempt log when a recovery owner
+/// already started this logical attempt.
+async fn fetch_hls_origin_manifest_global_policy(
+    context: &HlsOriginManifestFetchContext,
+    attempts: usize,
+    reuse_recovery_attempt: bool,
+) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
+    if !reuse_recovery_attempt {
+        log_manifest_initial_attempt(context).await;
+    }
     let input_source = context.origin_entry.to_input_source();
     let (account_binding, progress_generation) = {
         let session = context.session.read().await;
@@ -110,14 +168,19 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
     .with_content_coding(OutboundContentCodingPolicy::Identity)
     .with_proxy_authentication_failover(context.attempt.as_ref().is_none_or(|attempt| attempt.permits_407_retry()))
     .without_resource_retries();
-    let attempts = context.retry_policy.attempt_count();
 
     // This HLS loop owns the logical manifest-attempt budget. Each iteration may traverse one bounded provider URL
     // failover cycle and redirect chain, but the generic resource-retry counter is not nested beneath it.
     for attempt_index in 0..attempts {
         context.ensure_current_origin().await?;
-        let shared_index = context.attempt.as_ref().map_or(attempt_index, |attempt| attempt.logical_attempts());
-        if context.attempt.as_ref().is_some_and(|attempt| !attempt.begin_logical_attempt()) {
+        let shared_index = context.attempt.as_ref().map_or(attempt_index, |attempt| {
+            if reuse_recovery_attempt {
+                attempt.logical_attempts().saturating_sub(1)
+            } else {
+                attempt.logical_attempts()
+            }
+        });
+        if !reuse_recovery_attempt && context.attempt.as_ref().is_some_and(|attempt| !attempt.begin_logical_attempt()) {
             return Err(OriginManifestFetchError::RetryExhausted);
         }
         let fetch_result = observe_manifest_attempt(context, shared_index, async {
@@ -339,6 +402,7 @@ pub(super) fn next_retry_delay_ms(
 
 pub(super) use tuliprox_core::utils::current_time_millis;
 
+/// Fetches the live entry manifest with the retry policy's delays and per-attempt timeout.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(
     origin_entry: &LiveHlsOriginEntry,
@@ -451,4 +515,88 @@ pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(
     }
 
     Err(OriginManifestFetchError::RetryExhausted)
+}
+
+#[cfg(test)]
+mod playback_profile_recovery_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
+    use std::sync::Arc;
+    use tuliprox_core::model::ConfigProvider;
+
+    /// Live entry on the two-mirror `cdn` profile.
+    fn entry() -> super::super::model::LiveHlsOriginEntry {
+        let profile = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "cdn".into(),
+            urls: vec!["http://pl.example.com".into(), "http://eu.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+        super::super::model::LiveHlsOriginEntry::parse_with_url_failover_provider(
+            "provider://cdn/ChannelA/mono.m3u8?token=fixture%2Btoken",
+            Some(profile),
+        )
+        .unwrap()
+    }
+
+    /// Mirror recovery is off by default and, when on, follows only the qualifying HTTP failures.
+    #[test]
+    fn playback_profile_recovery_is_opt_in_and_preserves_http_policy() {
+        let entry = entry();
+        assert!(!recovery_profile_failover_allowed(&entry, &OriginManifestFetchError::Timeout, None));
+        let entry = entry.with_profile_recovery_failover(true);
+        for status in [StatusCode::NOT_FOUND, StatusCode::GONE] {
+            assert!(recovery_profile_failover_allowed(
+                &entry,
+                &OriginManifestFetchError::PermanentStatus(status),
+                None
+            ));
+        }
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN, StatusCode::BAD_REQUEST] {
+            assert!(!recovery_profile_failover_allowed(
+                &entry,
+                &OriginManifestFetchError::PermanentStatus(status),
+                None
+            ));
+        }
+        assert!(recovery_profile_failover_allowed(
+            &entry,
+            &OriginManifestFetchError::RetryableStatus(StatusCode::SERVICE_UNAVAILABLE, None),
+            None
+        ));
+        assert!(!recovery_profile_failover_allowed(
+            &entry,
+            &OriginManifestFetchError::RetryableStatus(StatusCode::NOT_IMPLEMENTED, None),
+            None
+        ));
+        assert!(!recovery_profile_failover_allowed(
+            &entry,
+            &OriginManifestFetchError::NonRetryableStatus(StatusCode::PROXY_AUTHENTICATION_REQUIRED),
+            None
+        ));
+        let retryable_407 = OriginManifestFetchError::RetryableStatus(StatusCode::PROXY_AUTHENTICATION_REQUIRED, None);
+        let permit_attempt = super::super::model::HlsManifestAttemptContext::new(
+            crate::HlsManifestCommitRequirement::CommittedManifestAllowed,
+            true,
+            None,
+        );
+        let forbid_attempt = super::super::model::HlsManifestAttemptContext::new(
+            crate::HlsManifestCommitRequirement::CommittedManifestAllowed,
+            false,
+            None,
+        );
+        assert!(recovery_profile_failover_allowed(&entry, &retryable_407, Some(&permit_attempt)));
+        assert!(!recovery_profile_failover_allowed(&entry, &retryable_407, Some(&forbid_attempt)));
+        assert!(recovery_profile_failover_allowed(
+            &entry,
+            &OriginManifestFetchError::Request("transport".into()),
+            None
+        ));
+        assert!(recovery_profile_failover_allowed(&entry, &OriginManifestFetchError::Timeout, None));
+        let concrete = super::super::model::LiveHlsOriginEntry::parse("http://pl.example.com/ChannelA/mono.m3u8")
+            .unwrap()
+            .with_profile_recovery_failover(true);
+        assert!(!recovery_profile_failover_allowed(&concrete, &OriginManifestFetchError::Timeout, None));
+    }
 }
