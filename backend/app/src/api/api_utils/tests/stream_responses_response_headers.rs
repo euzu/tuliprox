@@ -7,7 +7,10 @@ use super::{
     user_with_network_access, NetworkAccessDecision,
 };
 use crate::{
-    api::model::{SharedStreamCtx, SharedStreamManager},
+    api::{
+        api_utils::streaming::session_headers_belong_to_allocation,
+        model::{SharedStreamCtx, SharedStreamManager},
+    },
     model::{ConfigInput, NetworkAccess, ProxyUserCredentials},
     repository::GeoIp,
 };
@@ -80,6 +83,20 @@ fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
         assert!(is_hop_by_hop_response_header(&HeaderName::from_static(name)));
     }
     assert!(!is_hop_by_hop_response_header(&header::CONTENT_TYPE));
+}
+
+/// Session headers follow the account they were captured for: a fallback away from the forced provider or from the
+/// stream URL owner drops them.
+#[test]
+fn session_headers_are_dropped_when_allocation_leaves_owner_or_forced_provider() {
+    let main = "main".intern();
+    let alias = "alias".intern();
+    assert!(session_headers_belong_to_allocation(Some(&main), None, None));
+    assert!(session_headers_belong_to_allocation(None, Some(&main), Some(&main)));
+    assert!(session_headers_belong_to_allocation(Some(&main), Some(&main), Some(&main)));
+    assert!(!session_headers_belong_to_allocation(Some(&alias), Some(&main), None));
+    assert!(!session_headers_belong_to_allocation(Some(&alias), None, Some(&main)));
+    assert!(!session_headers_belong_to_allocation(Some(&alias), Some(&alias), Some(&main)));
 }
 
 #[test]

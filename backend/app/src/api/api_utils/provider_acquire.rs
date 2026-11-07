@@ -34,6 +34,7 @@ use shared::{
 use std::{borrow::Cow, sync::Arc, time::Duration};
 use tuliprox_session::ProviderSessionHeaders;
 
+/// Custom channel-unavailable response for a stream URL that maps to no account of the allocated provider.
 pub(super) fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
     ProviderStreamState::Custom {
         response: create_channel_unavailable_stream(app_config, &[], StatusCode::OK),
@@ -120,6 +121,8 @@ pub(super) async fn acquire_exact_stream_provider_handle(
     acquire_exact_provider_handle(app_state, &request, options.capacity_wait_timeout).await
 }
 
+/// Acquires a provider slot for a stream: the forced provider first, then lineup allocation when fallback is
+/// allowed. Without a forced provider the lineup decides.
 pub(super) async fn acquire_stream_provider_handle(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
@@ -176,6 +179,7 @@ pub(super) async fn acquire_stream_provider_handle(
     }
 }
 
+/// Returns `true` for VOD and series items, whose streams may fail over to another account of the provider pool.
 pub(super) fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool {
     matches!(
         item_type,
@@ -312,6 +316,8 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
     }
 }
 
+/// Admits the user session, allocates a provider connection and builds the client stream response.
+///
 /// # Panics
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn stream_response_with_provider_handle(
