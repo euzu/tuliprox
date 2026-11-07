@@ -1451,6 +1451,11 @@
   cache and resolve serialization are keyed per account. HLS playlist refreshes resolve a fresh link for the
   pinned account instead of rewriting the stored URL.
 
+- **CDN playback failover and recovery preserve provider bindings across all streams.** For inputs configuring
+  `playback_provider`, standard HLS, catchup, and archive streams retain their provider profiles and query parameters,
+  and alias accounts resolve their own upstream tokens instead of falling back to the root account. Established live
+  sessions now switch to the next CDN mirror after an outage (404/5xx/timeout), while 401/403 never switch.
+
 - **Removing a plugin no longer keeps the server down.** A `source.yml` that still named the plugin refused to start
   (``Can't start server: config source error: invalid plugin references: input x: no loaded plugin y provides
   fetch-input``), so uninstalling a plugin left an instance that could not boot. The start and a running server's hot

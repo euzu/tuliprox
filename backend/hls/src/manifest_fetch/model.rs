@@ -119,6 +119,7 @@ pub struct LiveHlsOriginEntry {
     url: Url,
     url_failover_provider: Option<Arc<ConfigProvider>>,
     runtime_provider_config: Option<Arc<ProviderConfig>>,
+    profile_recovery_failover: bool,
 }
 
 impl LiveHlsOriginEntry {
@@ -136,8 +137,22 @@ impl LiveHlsOriginEntry {
         url_failover_provider: Option<Arc<ConfigProvider>>,
         runtime_provider_config: Option<Arc<ProviderConfig>>,
     ) -> Option<Self> {
-        Url::parse(url).ok().map(|url| Self { url, url_failover_provider, runtime_provider_config })
+        Url::parse(url).ok().map(|url| Self {
+            url,
+            url_failover_provider,
+            runtime_provider_config,
+            profile_recovery_failover: false,
+        })
     }
+
+    /// Opt-in mirror recovery; ordinary concrete pinned recovery remains unchanged.
+    pub fn with_profile_recovery_failover(mut self, enabled: bool) -> Self {
+        self.profile_recovery_failover = enabled;
+        self
+    }
+
+    /// Whether pinned recovery may move to another mirror of the profile.
+    pub const fn profile_recovery_failover(&self) -> bool { self.profile_recovery_failover }
 
     pub fn url(&self) -> &Url { &self.url }
 
@@ -174,6 +189,7 @@ impl fmt::Debug for LiveHlsOriginEntry {
                 "runtime_provider_config",
                 &self.runtime_provider_config.as_ref().map(|provider| provider.name.as_ref()),
             )
+            .field("profile_recovery_failover", &self.profile_recovery_failover)
             .finish()
     }
 }

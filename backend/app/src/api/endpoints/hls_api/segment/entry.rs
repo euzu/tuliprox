@@ -426,7 +426,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     // breaks forced same-account reuse on the next HLS/Catchup stream request.
     app_state.connection_manager.release_provider_handle(provider_handle);
 
-    let input_source = InputSource::from(input).with_url(request_url);
+    let input_source = InputSource::for_request_url(input, request_url);
     let download_result = match download_legacy_hls_manifest(app_state, &input_source, &headers).await {
         Ok((content, response_url, response_headers)) => match classify_hls_playlist(&content) {
             // A refresh keeps its session on a malformed body; the player retries the playlist.
@@ -531,6 +531,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 }
 
+/// Stream channel of `virtual_id` in the target's Xtream output, else its M3U output.
 pub(in crate::api::endpoints::hls_api) async fn get_stream_channel(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
@@ -548,4 +549,70 @@ pub(in crate::api::endpoints::hls_api) async fn get_stream_channel(
         .await
         .ok()
         .map(|pli| pli.to_stream_channel(target_id))
+}
+
+#[cfg(test)]
+mod playback_provider_tests {
+    use super::*;
+    use crate::model::ConfigProvider;
+    use shared::model::{ConfigProviderDto, InputType, ProviderUrlSelectionPolicy};
+
+    /// M3U input whose playlist URL is plain HTTP and whose `cdn` profile serves playback only.
+    fn independent_playlist_input() -> ConfigInput {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "cdn".into(),
+            urls: vec!["http://pl.example.com".into(), "http://eu.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+        ConfigInput {
+            name: "Provider".into(),
+            input_type: InputType::M3u,
+            url: "http://playlist.example.com/list.m3u?access_key=fixture".into(),
+            playback_provider: Some("cdn".into()),
+            provider_configs: Some(vec![provider]),
+            ..ConfigInput::default()
+        }
+    }
+
+    /// A `provider://cdn` manifest binds the playback profile although the playlist download stays unbound.
+    #[test]
+    fn standard_hls_binds_explicit_profile_for_token_only_mapped_manifest() {
+        let input = independent_playlist_input();
+        assert!(InputSource::from(&input).provider.is_none(), "playlist download must remain independent");
+        let url = "provider://cdn/ChannelA/mono.m3u8?token=fixture%2Btoken&keep=1";
+        let source = InputSource::for_request_url(&input, url.into());
+        assert_eq!(source.url, url);
+        let profile = source.provider.expect("mapped standard-HLS URL must retain its registered CDN profile");
+        assert_eq!(profile.name.as_ref(), "cdn");
+        assert_eq!(profile.urls.len(), 2);
+    }
+
+    /// A plain HTTP manifest URL gets no profile.
+    #[test]
+    fn standard_hls_keeps_plain_http_manifest_unbound() {
+        let input = independent_playlist_input();
+        let url = "http://pl.example.com/ChannelA/mono.m3u8?token=fixture%2Btoken";
+        let source = InputSource::for_request_url(&input, url.into());
+        assert_eq!(source.url, url);
+        assert!(source.provider.is_none());
+    }
+
+    /// An unknown profile name does not fall back to the playback profile.
+    #[test]
+    fn standard_hls_unknown_profile_does_not_borrow_another_profile() {
+        let input = independent_playlist_input();
+        let source = InputSource::for_request_url(&input, "provider://unknown/ChannelA/mono.m3u8".into());
+        assert!(source.provider.is_none());
+    }
+
+    /// An unknown profile name does not fall back to the playlist URL's profile.
+    #[test]
+    fn standard_hls_unknown_profile_does_not_reuse_the_playlist_profile() {
+        let mut input = independent_playlist_input();
+        input.url = "provider://cdn/playlist.m3u?access_key=fixture".into();
+        assert!(InputSource::from(&input).provider.is_some());
+        let source = InputSource::for_request_url(&input, "provider://unknown/ChannelA/mono.m3u8".into());
+        assert!(source.provider.is_none(), "an unknown mapped profile must fail closed");
+    }
 }

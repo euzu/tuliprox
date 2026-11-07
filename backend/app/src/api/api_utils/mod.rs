@@ -333,7 +333,7 @@ pub(crate) use self::{
     local_files::local_stream_response,
     maintenance::{blocks_new_playback, is_running_playback, maintenance_rejection_response},
     provider_acquire::stream_response_with_provider_handle,
-    provider_urls::select_provider_stream_url,
+    provider_urls::{lookup_account_m3u_stream_url, select_provider_stream_url},
     resources::force_hls_resource_response,
     response::admission_failure_response,
     serialization::coalesce_byte_stream,

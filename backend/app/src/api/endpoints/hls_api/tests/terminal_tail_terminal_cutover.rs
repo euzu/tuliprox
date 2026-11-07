@@ -410,16 +410,22 @@ async fn terminal_notification_client_abort_drops_observer_without_aborting_orig
     assert_eq!(fixture.session.read().await.terminal_commit_observer_count_for_test(), 0);
     assert!(fixture.session.read().await.origin_refresh.in_flight);
     controlled.release.send_replace(true);
+    // The refresh clears `in_flight` before its origin work guard releases the counter, so wait for both;
+    // a leaked counter still fails through the timeout.
     within_real_second(async {
-        while fixture.session.read().await.origin_refresh.in_flight {
+        loop {
+            {
+                let session = fixture.session.read().await;
+                if !session.origin_refresh.in_flight
+                    && session.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire) == 0
+                {
+                    break;
+                }
+            }
             tokio::task::yield_now().await;
         }
     })
     .await;
-    assert_eq!(
-        fixture.session.read().await.activity.active_origin_work_count.load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
 }
 
 #[tokio::test]
