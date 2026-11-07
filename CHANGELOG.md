@@ -214,6 +214,10 @@
 
 ## 🌟 New Features
 
+- **Playlist stats show the full EPG source URL.** Each row in the EPG coverage source list now shows the configured
+  source URL below its short label, so sources on the same host are distinguishable. The URL is masked according to
+  `sanitize_sensitive_info`. The **Plugins** sidebar entry moved into the **Settings** group.
+
 - **Notifier plugins, next to the built-in channels.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and
   local commands are all still built into the server and configured under `messaging`, exactly as before. Each also exists
   as an optional plugin under `plugins/notifiers/<id>` (`make plugin-notifiers` builds them all), for anyone who wants

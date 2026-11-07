@@ -399,6 +399,7 @@ mod tests {
             sources: vec![EpgSourceAnalytics {
                 input: "p1".into(),
                 label: "guide.xml".into(),
+                url: "http://example.com/guide.xml".into(),
                 kind: EpgSourceTypeDto::Xmltv,
                 mapped_channels: 90,
                 guide_days: Some(7),

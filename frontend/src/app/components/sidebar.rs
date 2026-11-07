@@ -266,9 +266,6 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(auth.has_permission(Permission::SystemRead), {
                 <MenuItem class={if is_active(ViewType::Logs) { "active" } else {""}} icon="Log" name={ViewType::Logs.to_string()} label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></MenuItem>
             })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if is_active(ViewType::Plugins) { "active" } else {""}} icon="Nodes" name={ViewType::Plugins.to_string()} label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></MenuItem>
-            })}
             {html_if!(show_stream_history, {
                 <MenuItem class={if is_active(ViewType::StreamHistory) { "active" } else {""}} icon="Clock" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
@@ -278,7 +275,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                         | Permission::SourceRead
                         | Permission::UserRead
                         | Permission::UserWrite
-                        | Permission::PlaylistRead,
+                        | Permission::PlaylistRead
+                        | Permission::SystemRead,
                 ),
                 {
                     <CollapsePanel title={translate.t("LABEL.SETTINGS")}>
@@ -299,6 +297,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       })}
                       {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                           <MenuItem class={if is_active(ViewType::PlaylistSettings) { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
+                      })}
+                      {html_if!(auth.has_permission(Permission::SystemRead), {
+                          <MenuItem class={if is_active(ViewType::Plugins) { "active" } else {""}} icon="Nodes" name={ViewType::Plugins.to_string()} label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></MenuItem>
                       })}
                     </CollapsePanel>
                 }
@@ -356,9 +357,6 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(auth.has_permission(Permission::SystemRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Logs, if is_active(ViewType::Logs) { " active" } else {""})} icon="Log" name={ViewType::Logs.to_string()} hint={translate.t("LABEL.LOGS")} aria_label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></IconButton>
             })}
-            {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plugins, if is_active(ViewType::Plugins) { " active" } else {""})} icon="Nodes" name={ViewType::Plugins.to_string()} hint={translate.t("LABEL.PLUGINS")} aria_label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></IconButton>
-            })}
             {html_if!(show_stream_history, {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if is_active(ViewType::StreamHistory) { " active" } else {""})} icon="Clock" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
             })}
@@ -368,7 +366,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                         | Permission::SourceRead
                         | Permission::UserRead
                         | Permission::UserWrite
-                        | Permission::PlaylistRead,
+                        | Permission::PlaylistRead
+                        | Permission::SystemRead,
                 ),
                 {
                     <span class="tp__app-sidebar__content-space"></span>
@@ -391,6 +390,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             })}
             {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if is_active(ViewType::PlaylistSettings) { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plugins, if is_active(ViewType::Plugins) { " active" } else {""})} icon="Nodes" name={ViewType::Plugins.to_string()} hint={translate.t("LABEL.PLUGINS")} aria_label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),
