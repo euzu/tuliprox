@@ -9,8 +9,6 @@ pub enum DatabaseCommand<'a> {
     UserGet { path: &'a Path, output: Option<&'a Path>, user: Option<&'a str> },
     UserCheck { path: &'a Path, input: Option<&'a Path> },
     UserSet { path: &'a Path, input: Option<&'a Path> },
-    InspectUser { path: &'a Path, template: Option<&'a Path> },
-    RepairUser { path: &'a Path, decisions: Option<&'a Path> },
 }
 
 /// Runs an offline operation and exits with its CLI status. Call before logging
@@ -21,15 +19,7 @@ pub fn run_database_command(command: DatabaseCommand<'_>) -> ! {
         DatabaseCommand::Migrate { path, db_type, no_backup } => handle_migrate_db(path, db_type, no_backup),
         DatabaseCommand::UserGet { path, output, user } => handle_user_db_get(path, output, user),
         DatabaseCommand::UserCheck { path, input } => handle_user_db_check(path, input),
-        DatabaseCommand::UserSet { path, input } => {
-            let result = input.map_or_else(
-                || Err(std::io::Error::other("--user-db-set requires --input")),
-                |input| crate::set_user_database(path, input),
-            );
-            finish_user_db_repair(result);
-        }
-        DatabaseCommand::InspectUser { path, template } => handle_inspect_user_db(path, template),
-        DatabaseCommand::RepairUser { path, decisions } => handle_repair_user_db(path, decisions),
+        DatabaseCommand::UserSet { path, input } => finish_user_db_repair(crate::set_user_database(path, input)),
     }
 }
 
@@ -120,7 +110,9 @@ fn handle_user_db_get(db_path: &Path, output: Option<&Path>, user: Option<&str>)
             crate::write_user_database_export(db_path, &export, path)?;
             println!("Output Created: {}", path.display());
             println!("Users Exported: {}", export.users.len());
-            println!("Resolve unassigned_value entries, then run --user-db-check with --input before --user-db-set.");
+            println!(
+                "Resolve unassigned_value entries, then run --user-db-check with --user-db-input before --user-db-set."
+            );
         } else {
             println!("{}", serde_json::to_string_pretty(&export).map_err(std::io::Error::other)?);
         }
@@ -133,7 +125,10 @@ fn handle_user_db_check(db_path: &Path, input: Option<&Path>) -> ! {
     let result = crate::check_user_database(db_path, input).map(|report| {
         println!("Status: VALID");
         println!("Records: {}", report.records);
-        println!("Resolved Assignments: {}", report.resolved_assignments);
+        println!("Unassigned Values: {}", report.unassigned_records);
+        if input.is_some() && report.unassigned_records > 0 {
+            println!("Assignments Applied: {}", report.unassigned_records);
+        }
         println!(
             "Recovery History: {}",
             if report.recovery_verified { "VERIFIED" } else { "UNAVAILABLE (set will create verified history)" }
@@ -152,76 +147,6 @@ fn finish_user_db_command(result: std::io::Result<()>) -> ! {
             std::process::exit(1);
         }
     }
-}
-
-fn handle_inspect_user_db(db_path: &Path, template_path: Option<&Path>) -> ! {
-    match crate::inspect_user_database(db_path) {
-        Ok(report) => {
-            println!("=== API User Database Inspection ===");
-            println!("Path:                {}", report.path.display());
-            println!("Storage Version:     V{}", report.storage_version);
-            println!("Records:             {}", report.records);
-            if report.live_records_inspected {
-                println!("Live Record Scan:    VERIFIED");
-                println!("Unambiguous Records: {}", report.unambiguous_records);
-                println!("Ambiguous Records:   {}", report.ambiguous_user_keys.len());
-            } else {
-                println!("Live Record Scan:    UNAVAILABLE (verified recovery history will be used)");
-                println!("Unambiguous Records: unknown");
-                println!("Ambiguous Records:   unknown");
-            }
-            match &report.history {
-                crate::UserDbHistoryInspection::Verified { database_revision, recovery_revision, records } => {
-                    println!("Recovery History:    VERIFIED");
-                    println!("Database Revision:   {database_revision}");
-                    println!("Recovery Revision:   {recovery_revision}");
-                    println!("Recovery Records:    {records}");
-                    println!("Repair Strategy:     verified field-named recovery history");
-                }
-                crate::UserDbHistoryInspection::Unavailable { reason } => {
-                    println!("Recovery History:    UNAVAILABLE ({reason})");
-                    if report.ambiguous_user_keys.is_empty() {
-                        println!("Repair Strategy:     verified live records and fresh recovery history");
-                    } else {
-                        println!("Repair Strategy:     explicit plan/filter decisions required");
-                    }
-                }
-            }
-            for key in &report.ambiguous_user_keys {
-                let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"<invalid-user-key>\"".to_string());
-                println!("Ambiguous User Key:  {encoded}");
-            }
-            println!("{}", crate::user_db_repair_advice(&report, template_path));
-            if let Some(path) = template_path {
-                if let Err(error) = crate::write_user_db_decision_template(&report, path) {
-                    eprintln!("Error creating API user decision template: {error}");
-                    std::process::exit(1);
-                }
-                println!("Template Created:   {}", path.display());
-                println!("The template contains usernames, targets and stored values. Leave source unchanged; edit only field.");
-                println!(
-                    "Resolve every null field from a reliable source, then pass this file to --user-db-decisions."
-                );
-            }
-            std::process::exit(0);
-        }
-        Err(error) => {
-            eprintln!("Error inspecting API user database: {error}");
-            eprintln!(
-                "Keep the database, WAL and recovery history together; do not delete them or skip invalid users."
-            );
-            eprintln!("Repair guide: {}", crate::USER_DB_REPAIR_GUIDE);
-            std::process::exit(1);
-        }
-    }
-}
-
-fn handle_repair_user_db(db_path: &Path, decisions_path: Option<&Path>) -> ! {
-    let result = match decisions_path {
-        Some(path) => crate::repair_user_database_with_decision_file(db_path, path),
-        None => crate::repair_user_database(db_path, &crate::UserDbRepairDecisions::new()),
-    };
-    finish_user_db_repair(result);
 }
 
 fn finish_user_db_repair(result: std::io::Result<crate::UserDbRepairReport>) -> ! {

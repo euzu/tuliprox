@@ -278,6 +278,20 @@ docker run --rm --network none \
 
 Expected: exit code `0` and a JSON file containing your users. Stop here if the export fails.
 
+If the export refuses because a pending write-ahead log (`api_user.db.wal`) was left by an unclean shutdown, replay it
+first. `--user-db-set` takes exclusive access and replays the log, so run it **without** `--user-db-input` at this point:
+
+```bash
+docker run --rm --network none \
+  --volume "$REPAIR_DIR/working:/app/config" \
+  --entrypoint /app/tuliprox "$IMAGE" \
+  --user-db-set /app/config/api_user.db
+```
+
+When the log cannot be replayed, stop and keep `original/` unchanged. Do not delete the `.wal` files of a V3 database:
+they hold the data needed to roll back a partially written transaction. A legacy V1/V2 database has no log of its own,
+so a stray one there can be moved out of `working/` before Step 2 is repeated.
+
 ### Step 3: Check the unedited file
 
 ```bash
@@ -285,7 +299,7 @@ docker run --rm --network none \
   --volume "$REPAIR_DIR/working:/app/config" \
   --volume "$REPAIR_DIR/users.json:/repair/users.json:ro" \
   --entrypoint /app/tuliprox "$IMAGE" \
-  --user-db-check /app/config/api_user.db --input /repair/users.json
+  --user-db-check /app/config/api_user.db --user-db-input /repair/users.json
 ```
 
 Unresolved values produce a message referring to `unassigned_value`. If the result is `Status: VALID`, continue with Step 5.
@@ -309,7 +323,7 @@ docker run --rm --network none \
   --volume "$REPAIR_DIR/working:/app/config" \
   --volume "$REPAIR_DIR/users.json:/repair/users.json:ro" \
   --entrypoint /app/tuliprox "$IMAGE" \
-  --user-db-set /app/config/api_user.db --input /repair/users.json
+  --user-db-set /app/config/api_user.db --user-db-input /repair/users.json
 ```
 
 Expected: `Status: SUCCESS` and `Archive Created`.

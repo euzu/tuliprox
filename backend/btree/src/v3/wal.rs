@@ -631,7 +631,7 @@ where
     ))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn ordered_prepared_pages(prepared: &[(u64, [u8; PAGE_SIZE])]) -> io::Result<Vec<(u64, &[u8; PAGE_SIZE])>> {
     let mut ordered = Vec::new();
     ordered.try_reserve_exact(prepared.len()).map_err(out_of_memory("prepared-page ordering allocation failed"))?;
@@ -717,7 +717,7 @@ pub(crate) fn commit_ordered_page_refs_under_existing_lock(
     commit_ordered_page_refs_with_hook_under_existing_lock(database, prepared, |_| Ok(()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn commit_prepared_pages_with_hook(
     database: &Path,
     prepared: &[(u64, [u8; PAGE_SIZE])],
@@ -763,7 +763,7 @@ pub(super) fn leave_uncommitted_test_wal_after_database_write(database: &Path) -
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn leave_committed_test_wal(database: &Path) -> io::Result<()> {
     let mut header_page = [0u8; PAGE_SIZE];
     File::open(database)?.read_exact(&mut header_page)?;
@@ -797,7 +797,7 @@ pub(crate) fn leave_committed_test_wal(database: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn commit_prepared_pages_with_hook_under_existing_lock(
     database_path: &Path,
     prepared: &[(u64, [u8; PAGE_SIZE])],
@@ -939,9 +939,11 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-pub(crate) fn wal_path(database: &Path) -> PathBuf { append_suffix(database, ".wal") }
+/// Returns the path to the write-ahead log companion for the given database.
+pub fn wal_path(database: &Path) -> PathBuf { append_suffix(database, ".wal") }
 
-pub(crate) fn wal_temporary_path(database: &Path) -> PathBuf { append_suffix(database, ".wal.tmp") }
+/// Returns the path to the temporary write-ahead log companion for the given database.
+pub fn wal_temporary_path(database: &Path) -> PathBuf { append_suffix(database, ".wal.tmp") }
 
 pub(crate) fn recovery_required(database: &Path, cause: io::Error) -> io::Error {
     let active = wal_path(database);

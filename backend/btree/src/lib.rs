@@ -27,10 +27,11 @@ pub(crate) mod v3;
 // --- Errors ----------------------------------------------------------------
 pub use common::BPlusTreeError;
 // --- On-disk layout --------------------------------------------------------
-// A published database has two companion files whose names the engine derives:
-// the sorted-index sidecar and the sidecar lock. Callers that stage, publish or
-// clean up databases need both, and they must agree with the engine or a
-// staging database can end up sharing a lock domain with a published one.
+// A published database has companion files whose names the engine derives: the
+// sorted-index sidecar, the sidecar lock and the write-ahead log pair. Callers
+// that stage, publish, clean up or inspect databases need them, and they must
+// agree with the engine or a staging database can end up sharing a lock domain
+// with a published one.
 pub use common::{ensure_distinct_sidecar_lock_domains, get_file_path_for_db_index, sidecar_lock_path};
 #[cfg(any(test, feature = "test-support"))]
 pub use recovery::RecoveryFaultPoint;
@@ -39,10 +40,10 @@ pub use recovery::RecoveryFaultPoint;
 // stores its bookkeeping in the database header and knows nothing about what a
 // record means; the application supplies that through `RecoverySchema`.
 pub use recovery::{
-    BPlusTreeRecoveryJournal, CheckpointOutcome, RecoveryBatch, RecoveryCommitReport, RecoveryErrorClass,
-    RecoveryHealth, RecoveryMaintenanceGuard, RecoveryOpenAction, RecoveryOpenReport, RecoveryOperation, RecoveryPaths,
-    RecoveryPolicy, RecoveryRepositoryState, RecoverySchema, RecoveryStoragePlacement, RecoveryUseGuard,
-    RecoveryVerificationReport,
+    maintenance_lease_path, BPlusTreeRecoveryJournal, CheckpointOutcome, RecoveryBatch, RecoveryCommitReport,
+    RecoveryErrorClass, RecoveryHealth, RecoveryMaintenanceGuard, RecoveryOpenAction, RecoveryOpenReport,
+    RecoveryOperation, RecoveryPaths, RecoveryPolicy, RecoveryRepositoryState, RecoverySchema,
+    RecoveryStoragePlacement, RecoveryUseGuard, RecoveryVerificationReport,
 };
 // --- Sorted-index sidecar --------------------------------------------------
 /// Snapshot of a sorted-index sidecar that the database writer rewrites after its own commit.
@@ -58,6 +59,7 @@ pub use v3::migration as typed_migration;
 // --- Staged publication ----------------------------------------------------
 pub use v3::{publish_staged_database, BPlusTreeStagingArtifacts};
 pub use v3::{
+    wal::{wal_path, wal_temporary_path},
     BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeKeyIterator, BPlusTreeMetadata,
     BPlusTreeQuery, BPlusTreeRangeIterator, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy, RecoveryIdentity,
     MAGIC, STORAGE_VERSION,
@@ -86,6 +88,13 @@ pub mod test_support {
         V: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
     {
         query.collect_with_locators()
+    }
+
+    /// Leaves a committed write-ahead log behind, exactly as an interrupted
+    /// shutdown does. Callers can then prove that a replay consumes it.
+    #[cfg(feature = "test-support")]
+    pub fn leave_committed_test_wal(database: &std::path::Path) -> io::Result<()> {
+        crate::v3::wal::leave_committed_test_wal(database)
     }
 
     /// The identity a sorted-index sidecar has to carry to be accepted for a

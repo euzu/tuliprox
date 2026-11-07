@@ -25,7 +25,7 @@ use generation::{
     prune_generations, read_checkpoint_entries, read_current, scan_generations, scan_journal, write_current,
     CheckpointWriter, GenerationPaths, GenerationScan, RETAINED_GENERATIONS,
 };
-pub use lock::{RecoveryMaintenanceGuard, RecoveryUseGuard};
+pub use lock::{maintenance_lease_path, RecoveryMaintenanceGuard, RecoveryUseGuard};
 pub use schema::RecoverySchema;
 use schema::{migrate_key_to_current, migrate_value_to_current, schema_fingerprint};
 use serde::{de::DeserializeOwned, Serialize};

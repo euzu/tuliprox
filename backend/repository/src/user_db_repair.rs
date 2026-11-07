@@ -1,16 +1,15 @@
-//! Explicit offline inspection and repair for historical User API records.
+//! Explicit offline repair for historical User API records.
 //!
 //! Normal startup must never guess whether a compact positional string was a
 //! `plan` or a `filter`. This module gives an operator a separate, auditable
-//! path: verified field-named history wins; otherwise every ambiguous database
-//! key needs an explicit assignment before a staged replacement is published.
+//! path: verified field-named history wins; otherwise an export names every
+//! ambiguous value and requires an explicit assignment before a staged
+//! replacement is published.
 
 mod commands;
 use crate::{
-    api_user_recovery::{classify_user_record, ApiUserRecovery, ApiUserRepository, StoredApiUserV7, UserRecordDecode},
-    startup_migration::{
-        create_user_db_merge_guard, load_user_records, load_user_records_read_only, user_db_merge_guard_path,
-    },
+    api_user_recovery::{ApiUserRecovery, ApiUserRepository, StoredApiUserV7},
+    startup_migration::{create_user_db_merge_guard, load_user_records, user_db_merge_guard_path},
     storage_const::API_USER_REPAIR_BACKUP_PREFIX,
     user_repository::StoredProxyUserCredentials,
 };
@@ -18,17 +17,14 @@ pub use commands::{
     check_user_database, get_user_database, set_user_database, write_user_database_export, UserDbCheckReport,
     UserDbExport, UserDbExportUser,
 };
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
-    fs,
-    io::{self, Write},
+    collections::BTreeMap,
+    fs, io,
     path::{Path, PathBuf},
 };
 use tuliprox_btree::{
-    get_file_path_for_db_index, publish_staged_database, typed_migration, BPlusTree, BPlusTreeMetadata,
-    BPlusTreeStagingArtifacts, RecoveryMaintenanceGuard, RecoveryOpenAction, RecoveryPaths, STORAGE_VERSION,
+    get_file_path_for_db_index, publish_staged_database, typed_migration, BPlusTree, BPlusTreeStagingArtifacts,
+    RecoveryMaintenanceGuard, RecoveryOpenAction, STORAGE_VERSION,
 };
 
 const RECOVERY_DIRECTORY: &str = "api_user_recovery";
@@ -45,8 +41,8 @@ pub(crate) fn user_db_repair_error(db_path: &Path, error: &io::Error) -> io::Err
         format!(
             "API user database {}: {error}\n\
              Stop all Tuliprox processes using this database and back up the complete configuration directory.\n\
-             Export offline: tuliprox --user-db-get {} --output users.json\n\
-             Resolve unassigned_value entries, then run --user-db-check with --input users.json before --user-db-set.\n\
+             Export offline: tuliprox --user-db-get {} --user-db-output users.json\n\
+             Resolve unassigned_value entries, then run --user-db-check with --user-db-input users.json before --user-db-set.\n\
              Run the CLI with a native binary or, for Docker installations, in a one-off container using the service's \
              image and config volume while the service is stopped.\n\
              Do not delete the user database or api_user_recovery, and do not guess plan/filter assignments.\n\
@@ -57,89 +53,98 @@ pub(crate) fn user_db_repair_error(db_path: &Path, error: &io::Error) -> io::Err
     )
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum UserDbOptionalField {
-    Plan,
-    Filter,
-}
-
-pub type UserDbRepairDecisions = BTreeMap<String, UserDbOptionalField>;
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct UserDbRepairDecision {
-    user_key: String,
-    field: Option<UserDbOptionalField>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    source: Option<UserDbRepairDecisionSource>,
-}
-
-/// Read-only reference data for an ambiguous field assignment. Exported only
-/// when an operator explicitly requests a decision template.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct UserDbRepairDecisionSource {
-    pub username: String,
-    pub target: String,
-    pub stored_value: String,
-    pub fingerprint: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UserDbHistoryInspection {
-    Verified { database_revision: u64, recovery_revision: u64, records: u64 },
-    Unavailable { reason: String },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UserDbInspectionReport {
-    pub path: PathBuf,
-    pub storage_version: u32,
-    pub records: usize,
-    pub live_records_inspected: bool,
-    pub unambiguous_records: usize,
-    pub ambiguous_user_keys: Vec<String>,
-    pub ambiguous_user_sources: BTreeMap<String, UserDbRepairDecisionSource>,
-    pub history: UserDbHistoryInspection,
-}
-
-/// User-facing next steps; keeps credentials and compact field values out of stdout.
-pub fn user_db_repair_advice(report: &UserDbInspectionReport, template_path: Option<&Path>) -> String {
-    let database = user_db_shell_path(&report.path);
-    let next = if matches!(report.history, UserDbHistoryInspection::Verified { .. }) {
-        format!(
-            "Automatic Repair:   AVAILABLE from verified matching recovery history; do not supply manual decisions.\n\
-             Next step: tuliprox --repair-user-db {database}"
-        )
-    } else if report.ambiguous_user_keys.is_empty() {
-        format!(
-            "Automatic Repair:   AVAILABLE from fully validated live records; fresh recovery history will be created.\n\
-             Next step: tuliprox --repair-user-db {database}"
-        )
+pub(crate) fn with_repair_hint_for_data_errors(db_path: &Path, error: io::Error) -> io::Error {
+    if error.kind() == io::ErrorKind::InvalidData {
+        user_db_repair_error(db_path, &error)
     } else {
-        let default_path = report.path.with_file_name("api_user-repair-decisions.json");
-        let template = user_db_shell_path(template_path.unwrap_or(&default_path));
-        format!(
-            "Automatic Repair:   BLOCKED: field names were lost for the listed users.\n\
-             Create a decision template:\n\
-               tuliprox --inspect-user-db {database} --user-db-decision-template {template}\n\
-             The template includes each user's username, target and stored value under source. Leave source unchanged \
-             and set only field to plan or filter using a reliable field-named source for that \
-             user's database state, such as a matching export or provisioning record. An api-proxy.yml file can be \
-             stale or omit database-managed users; a plan name or valid filter syntax is not proof.\n\
-             Without a reliable source, lossless reconstruction is impossible. Restore a complete matching backup, \
-             or deliberately establish a new policy for the affected users; do not guess.\n\
-             After resolving every decision:\n\
-               tuliprox --repair-user-db {database} --user-db-decisions {template}"
-        )
-    };
+        error
+    }
+}
+
+/// What an operator must do with a log the build cannot replay.
+///
+/// The V3 log is an undo log: database pages are written after the
+/// before-images are synced, so without a commit record the database file can
+/// hold a partially written transaction. Deleting the log would make that
+/// state permanent.
+fn keep_wal_advice(db_path: &Path) -> String {
     format!(
-        "{next}\n\
-         Stop every process using this database and back up the complete configuration directory before repair.\n\
-         Docker: run these options in a one-off container with the service stopped (see guide).\n\
-         Repair guide: {USER_DB_REPAIR_GUIDE}"
+        "Do not delete '{wal}' or '{wal_temporary}': they hold the before-images needed to roll back a partially \
+         written database. Back up the complete configuration directory, keep the database, write-ahead log and \
+         recovery history together, and follow the repair guide.",
+        wal = tuliprox_btree::wal_path(db_path).display(),
+        wal_temporary = tuliprox_btree::wal_temporary_path(db_path).display(),
     )
+}
+
+/// How the operator can leave the state behind a pending write-ahead log when
+/// nothing has been replayed yet.
+fn pending_wal_remedy(db_path: &Path) -> String {
+    format!(
+        "A pending write-ahead log means the last shutdown was unclean.\n\
+         Replay it under exclusive access: tuliprox --user-db-set {database}\n\
+         If the log cannot be replayed: {}",
+        keep_wal_advice(db_path),
+        database = user_db_shell_path(db_path),
+    )
+}
+
+fn pending_wal_error(db_path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!(
+            "API user database {} has a pending write-ahead log; offline export and validation refuse to change it.\n{}",
+            serde_json::to_string(&db_path.to_string_lossy()).unwrap_or_default(),
+            pending_wal_remedy(db_path),
+        ),
+    )
+}
+
+fn has_pending_wal(db_path: &Path) -> io::Result<bool> {
+    Ok(tuliprox_btree::wal_path(db_path).try_exists()? || tuliprox_btree::wal_temporary_path(db_path).try_exists()?)
+}
+
+/// Replays a valid pending log so the following read observes committed state.
+///
+/// Only commands that already hold the exclusive maintenance lease may call
+/// this: replaying writes the database. The database, its log and the
+/// recovery history are archived first, so the pre-replay state survives. A
+/// log that cannot be replayed stays a hard error.
+fn replay_pending_wal(db_path: &Path) -> io::Result<()> {
+    if !has_pending_wal(db_path)? {
+        return Ok(());
+    }
+    let archive = create_repair_archive(db_path, true)?;
+    let storage_version = user_storage_version(db_path).map_err(|error| with_backup(&error, &archive))?;
+    if let Err(error) = load_user_records(db_path, storage_version) {
+        // The remedy only applies while a log is actually still pending; a
+        // duplicate key or an undecodable record needs its own repair.
+        let message = if has_pending_wal(db_path)? {
+            format!("{error}\nThe log could not be replayed. {}", keep_wal_advice(db_path))
+        } else {
+            error.to_string()
+        };
+        return Err(with_backup(&io::Error::new(error.kind(), message), &archive));
+    }
+    // A legacy V1/V2 container never writes this log, so the file cannot
+    // belong to it and the scan above leaves it in place. Say so instead of
+    // repeating the replay advice on the next read.
+    if has_pending_wal(db_path)? {
+        let error = io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "API user database {} did not consume its write-ahead log in this format; a V1/V2 database never \
+                 writes this log, so it does not belong to this file. Back up the complete configuration directory, \
+                 then move '{}' and '{}' out of the configuration directory.\n\
+                 Repair guide: {USER_DB_REPAIR_GUIDE}",
+                serde_json::to_string(&db_path.to_string_lossy()).unwrap_or_default(),
+                tuliprox_btree::wal_path(db_path).display(),
+                tuliprox_btree::wal_temporary_path(db_path).display(),
+            ),
+        );
+        return Err(with_backup(&error, &archive));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,210 +159,6 @@ pub struct UserDbRepairReport {
     pub records: usize,
     pub source: UserDbRepairSource,
     pub backup_path: PathBuf,
-}
-
-/// Reads field choices for programmatic callers. File-backed CLI repairs use
-/// `repair_user_database_with_decision_file` to retain and check source context.
-pub fn load_user_db_repair_decisions(path: &Path) -> io::Result<UserDbRepairDecisions> {
-    read_user_db_decision_file(path).map(|(decisions, _)| decisions)
-}
-
-fn read_user_db_decision_file(
-    path: &Path,
-) -> io::Result<(UserDbRepairDecisions, BTreeMap<String, UserDbRepairDecisionSource>)> {
-    let encoded = fs::read(path)?;
-    let entries: Vec<UserDbRepairDecision> = serde_json::from_slice(&encoded)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("invalid decision file: {error}")))?;
-    let mut decisions = BTreeMap::new();
-    let mut sources = BTreeMap::new();
-    for entry in entries {
-        let field = entry.field.ok_or_else(|| {
-            invalid(format!(
-                "user key {} has an unresolved decision (field is null or missing); set field to plan or filter only \
-                 after checking a reliable field-named source for this user's database state. Without one, a lossless \
-                 reconstruction is impossible; restore a complete matching backup or deliberately establish a new policy",
-                json_string(&entry.user_key)
-            ))
-        })?;
-        if decisions.insert(entry.user_key.clone(), field).is_some() {
-            return Err(invalid("decision file assigns the same user key more than once"));
-        }
-        if let Some(source) = entry.source {
-            sources.insert(entry.user_key, source);
-        }
-    }
-    Ok((decisions, sources))
-}
-
-/// Prefills a new decision file with the surviving user context and value.
-/// The field assignment remains unresolved; existing files are never replaced.
-pub fn write_user_db_decision_template(report: &UserDbInspectionReport, path: &Path) -> io::Result<()> {
-    if matches!(report.history, UserDbHistoryInspection::Verified { .. }) {
-        return Err(invalid("verified matching recovery history takes precedence; no decision template is needed"));
-    }
-    if report.ambiguous_user_keys.is_empty() {
-        return Err(invalid("all live records are unambiguous; no decision template is needed"));
-    }
-    let entries: Vec<_> = report
-        .ambiguous_user_keys
-        .iter()
-        .map(|key| {
-            let source = report.ambiguous_user_sources.get(key).cloned().ok_or_else(|| {
-                invalid("inspection lacks reference data for an ambiguous user; inspect the database again")
-            })?;
-            Ok(UserDbRepairDecision { user_key: key.clone(), field: None, source: Some(source) })
-        })
-        .collect::<io::Result<_>>()?;
-    let mut encoded = serde_json::to_vec_pretty(&entries).map_err(io::Error::other)?;
-    encoded.push(b'\n');
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::AlreadyExists {
-            io::Error::new(
-                error.kind(),
-                "decision template already exists; edit it or choose a new path; it was not overwritten",
-            )
-        } else {
-            error
-        }
-    })?;
-    file.write_all(&encoded)?;
-    file.sync_all()
-}
-
-/// Inspects the complete database and matching recovery history without
-/// changing either one.
-pub fn inspect_user_database(db_path: &Path) -> io::Result<UserDbInspectionReport> {
-    let storage_version = user_storage_version(db_path)?;
-    let root = database_root(db_path)?;
-    let history = match ApiUserRepository::verify_history(db_path, root) {
-        Ok(report) => UserDbHistoryInspection::Verified {
-            database_revision: report.database_revision,
-            recovery_revision: report.recovery_revision,
-            records: report.live_records,
-        },
-        Err(error) => UserDbHistoryInspection::Unavailable { reason: error.to_string() },
-    };
-    let live_scan = (|| {
-        let records = load_user_records_read_only(db_path, storage_version)?;
-        let mut ambiguous_user_keys = Vec::new();
-        let mut ambiguous_user_sources = BTreeMap::new();
-        for (key, value) in &records {
-            if let UserRecordDecode::Ambiguous { user, value: stored_value } = classify_user_record(value.clone())? {
-                ambiguous_user_keys.push(key.clone());
-                ambiguous_user_sources.insert(
-                    key.clone(),
-                    user_db_decision_source(records.get_metadata(), key, value, &user, stored_value)?,
-                );
-            }
-        }
-        Ok::<_, io::Error>((records.len(), ambiguous_user_keys, ambiguous_user_sources))
-    })();
-    let (total, ambiguous_user_keys, ambiguous_user_sources, live_records_inspected) = match live_scan {
-        Ok((total, keys, sources)) => (total, keys, sources, true),
-        Err(error) => match &history {
-            UserDbHistoryInspection::Verified { records, .. } => (
-                usize::try_from(*records).map_err(|_| invalid("recovery record count exceeds usize"))?,
-                Vec::new(),
-                BTreeMap::new(),
-                false,
-            ),
-            UserDbHistoryInspection::Unavailable { .. } => return Err(error),
-        },
-    };
-    Ok(UserDbInspectionReport {
-        path: db_path.to_path_buf(),
-        storage_version,
-        records: total,
-        live_records_inspected,
-        unambiguous_records: total.saturating_sub(ambiguous_user_keys.len()),
-        ambiguous_user_keys,
-        ambiguous_user_sources,
-        history,
-    })
-}
-
-fn user_db_decision_source(
-    metadata: &BPlusTreeMetadata,
-    key: &str,
-    record: &serde_json::Value,
-    user: &StoredApiUserV7,
-    stored_value: String,
-) -> io::Result<UserDbRepairDecisionSource> {
-    // Bind the choice to the exact record and, for tracked databases, its
-    // database identity and revision. The digest never exposes credentials.
-    let encoded = match metadata {
-        BPlusTreeMetadata::Empty => rmp_serde::to_vec(&("empty", key, record)),
-        BPlusTreeMetadata::TargetIdMapping(id) => rmp_serde::to_vec(&("target", id, key, record)),
-        BPlusTreeMetadata::Recovery(identity) => rmp_serde::to_vec(&(
-            "recovery",
-            identity.database_id,
-            identity.schema_fingerprint,
-            identity.schema_version,
-            identity.applied_revision,
-            key,
-            record,
-        )),
-    }
-    .map_err(io::Error::other)?;
-    Ok(UserDbRepairDecisionSource {
-        username: user.username.clone(),
-        target: user.target.clone(),
-        stored_value,
-        fingerprint: blake3::hash(&encoded).to_hex().to_string(),
-    })
-}
-
-/// Repairs a User API database while Tuliprox is stopped.
-///
-/// A matching verified history is always preferred. Without one, all live
-/// records must decode and every compact single string must have an explicit
-/// `plan`/`filter` decision. The source database and previous history are
-/// archived before a staged, fully verified replacement is published.
-pub fn repair_user_database(db_path: &Path, decisions: &UserDbRepairDecisions) -> io::Result<UserDbRepairReport> {
-    repair_user_database_inner(db_path, decisions, &BTreeMap::new())
-}
-
-/// Imports the edited template and validates its reference data under the same
-/// exclusive lease that protects the repair. Older field-only lists are valid.
-pub fn repair_user_database_with_decision_file(db_path: &Path, path: &Path) -> io::Result<UserDbRepairReport> {
-    let (decisions, sources) = read_user_db_decision_file(path)?;
-    repair_user_database_inner(db_path, &decisions, &sources)
-}
-
-fn repair_user_database_inner(
-    db_path: &Path,
-    decisions: &UserDbRepairDecisions,
-    sources: &BTreeMap<String, UserDbRepairDecisionSource>,
-) -> io::Result<UserDbRepairReport> {
-    let root = database_root(db_path)?;
-    fs::metadata(db_path)?;
-    // Fence both existing journal handles and new opens before taking a
-    // snapshot or touching recovery. Hold through final verification/guard.
-    let maintenance = RecoveryMaintenanceGuard::try_acquire(&RecoveryPaths {
-        database: db_path.to_path_buf(),
-        directory: root.join(RECOVERY_DIRECTORY),
-    })?;
-    let inspection = inspect_user_database(db_path)?;
-    if let UserDbHistoryInspection::Verified { records, .. } = inspection.history {
-        if !decisions.is_empty() {
-            return Err(invalid(
-                "a verified matching recovery history is available; remove manual decisions because history takes precedence",
-            ));
-        }
-        return rebuild_from_verified_history(db_path, root, records, &maintenance);
-    }
-
-    let storage_version = user_storage_version(db_path)?;
-    let records = load_user_records(db_path, storage_version)?;
-    let users = resolve_live_records(&records, decisions, sources)?;
-    rebuild_from_live_records(db_path, root, &users)
 }
 
 fn rebuild_from_verified_history(
@@ -382,52 +183,6 @@ fn rebuild_from_verified_history(
         })
     })();
     result.map_err(|error: io::Error| with_backup(&error, &backup))
-}
-
-fn resolve_live_records(
-    records: &BPlusTree<String, serde_json::Value>,
-    decisions: &UserDbRepairDecisions,
-    sources: &BTreeMap<String, UserDbRepairDecisionSource>,
-) -> io::Result<BTreeMap<String, StoredApiUserV7>> {
-    let mut users = BTreeMap::new();
-    let mut resolved_keys = BTreeSet::new();
-    for (key, record) in records {
-        let user = match classify_user_record(record.clone())? {
-            UserRecordDecode::Complete(user) => user,
-            UserRecordDecode::Ambiguous { mut user, value } => {
-                if let Some(expected) = sources.get(key) {
-                    let actual = user_db_decision_source(records.get_metadata(), key, record, &user, value.clone())?;
-                    if &actual != expected {
-                        return Err(invalid(format!(
-                            "reference data for user key {} does not match the current database; inspect again, \
-                             generate a new decision template and edit only field; the source database has not been replaced",
-                            json_string(key)
-                        )));
-                    }
-                }
-                let field = decisions.get(key).ok_or_else(|| {
-                    invalid(format!(
-                        "user key {} has an ambiguous compact string; add an explicit plan/filter decision",
-                        json_string(key)
-                    ))
-                })?;
-                match field {
-                    UserDbOptionalField::Plan => user.plan = Some(value),
-                    UserDbOptionalField::Filter => user.filter = Some(value),
-                }
-                resolved_keys.insert(key.clone());
-                user
-            }
-        };
-        users.insert(key.clone(), user);
-    }
-    if let Some(unused) = decisions.keys().find(|key| !resolved_keys.contains(*key)) {
-        return Err(invalid(format!(
-            "decision for user key {} is unused; decisions are accepted only for reported ambiguous records",
-            json_string(unused)
-        )));
-    }
-    Ok(users)
 }
 
 fn rebuild_from_live_records(
@@ -591,15 +346,9 @@ fn related_database_files(db_path: &Path) -> [PathBuf; 4] {
     [
         db_path.to_path_buf(),
         get_file_path_for_db_index(db_path),
-        append_suffix(db_path, ".wal"),
-        append_suffix(db_path, ".wal.tmp"),
+        tuliprox_btree::wal_path(db_path),
+        tuliprox_btree::wal_temporary_path(db_path),
     ]
-}
-
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.file_name().map_or_else(OsString::new, OsString::from);
-    name.push(suffix);
-    path.with_file_name(name)
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
@@ -663,3 +412,26 @@ fn with_backup(error: &io::Error, backup: &Path) -> io::Error {
 }
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_hint_only_for_invalid_data() {
+        let db_path = Path::new("/test/path/api_user.db");
+        let data_err = io::Error::new(io::ErrorKind::InvalidData, "corrupted records");
+        let wrapped = with_repair_hint_for_data_errors(db_path, data_err);
+        assert_eq!(wrapped.kind(), io::ErrorKind::InvalidData);
+        let msg = wrapped.to_string();
+        assert!(msg.contains("corrupted records"), "{msg}");
+        assert!(msg.contains(USER_DB_REPAIR_GUIDE), "{msg}");
+        assert!(msg.contains("--user-db-output"), "{msg}");
+        assert!(msg.contains("--user-db-input"), "{msg}");
+
+        let would_block_err = io::Error::new(io::ErrorKind::WouldBlock, "lock acquisition would block");
+        let unchanged = with_repair_hint_for_data_errors(db_path, would_block_err);
+        assert_eq!(unchanged.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(unchanged.to_string(), "lock acquisition would block");
+    }
+}

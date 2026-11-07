@@ -369,11 +369,42 @@ impl StoredApiUserV7 {
     pub(crate) fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v6(&StoredApiUserV6::from_v1(v1)) }
 }
 
+// The persisted credentials and the V7 layout carry the same 21 fields, so a
+// recovery snapshot converts without a `MessagePack` round trip.
+impl From<&StoredProxyUserCredentials> for StoredApiUserV7 {
+    fn from(stored: &StoredProxyUserCredentials) -> Self {
+        Self {
+            target: stored.target.clone(),
+            username: stored.username.clone(),
+            password: stored.password.clone(),
+            token: stored.token.clone(),
+            proxy: stored.proxy,
+            server: stored.server.clone(),
+            epg_timeshift: stored.epg_timeshift.clone(),
+            epg_request_timeshift: stored.epg_request_timeshift.clone(),
+            created_at: stored.created_at,
+            exp_date: stored.exp_date,
+            max_connections: stored.max_connections,
+            status: stored.status,
+            output_clusters: stored.output_clusters,
+            ui_enabled: stored.ui_enabled,
+            comment: stored.comment.clone(),
+            priority: stored.priority,
+            soft_connections: stored.soft_connections,
+            soft_priority: stored.soft_priority,
+            network_access: stored.network_access.clone(),
+            plan: stored.plan.clone(),
+            filter: stored.filter.clone(),
+        }
+    }
+}
+
 /// Reads one historical record without guessing which optional string was omitted.
 ///
 /// The former V7 writer skipped empty trailing fields individually. A single
 /// surviving string can be either a plan or a filter, so only field-named
 /// recovery history can resolve that case automatically.
+#[derive(Debug)]
 pub(crate) enum UserRecordDecode {
     Complete(StoredApiUserV7),
     Ambiguous { user: StoredApiUserV7, value: String },
@@ -702,11 +733,81 @@ impl ApiUserRepository {
 }
 
 #[cfg(test)]
+pub(crate) mod test_fixtures {
+    use serde::{Deserialize, Serialize};
+    use shared::model::{ClusterFlags, ProxyType, ProxyUserStatus};
+
+    /// The writer that shipped before this fix skipped each empty trailing
+    /// optional field, so a record with only `plan` set ends in a bare string.
+    #[derive(Clone, Serialize, Deserialize)]
+    pub(crate) struct CompactUserRecord {
+        pub(crate) target: String,
+        pub(crate) username: String,
+        pub(crate) password: String,
+        pub(crate) token: Option<String>,
+        pub(crate) proxy: ProxyType,
+        pub(crate) server: Option<String>,
+        pub(crate) epg_timeshift: Option<String>,
+        pub(crate) epg_request_timeshift: Option<String>,
+        pub(crate) created_at: Option<i64>,
+        pub(crate) exp_date: Option<i64>,
+        pub(crate) max_connections: Option<u32>,
+        pub(crate) status: ProxyUserStatus,
+        pub(crate) output_clusters: ClusterFlags,
+        pub(crate) ui_enabled: bool,
+        pub(crate) comment: Option<String>,
+        pub(crate) priority: Option<i8>,
+        pub(crate) soft_connections: Option<u16>,
+        pub(crate) soft_priority: Option<i8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) network_access: Option<shared::model::NetworkAccessDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) plan: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) filter: Option<String>,
+    }
+
+    pub(crate) fn compact_user(username: &str, plan: Option<&str>, filter: Option<&str>) -> CompactUserRecord {
+        CompactUserRecord {
+            target: "channels".to_string(),
+            username: username.to_string(),
+            password: "not-a-real-password".to_string(),
+            token: None,
+            proxy: ProxyType::Reverse(None),
+            server: None,
+            epg_timeshift: None,
+            epg_request_timeshift: None,
+            created_at: None,
+            exp_date: None,
+            max_connections: None,
+            status: ProxyUserStatus::Active,
+            output_clusters: ClusterFlags::all(),
+            ui_enabled: true,
+            comment: None,
+            priority: None,
+            soft_connections: None,
+            soft_priority: None,
+            network_access: None,
+            plan: plan.map(str::to_string),
+            filter: filter.map(str::to_string),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        ApiUserRecovery, StoredApiUserV1, StoredApiUserV7, SUPPORTED_CONTAINER_VERSIONS, SUPPORTED_VALUE_VERSIONS,
+        classify_user_record, ApiUserRecovery, StoredApiUserV1, StoredApiUserV2, StoredApiUserV3, StoredApiUserV4,
+        StoredApiUserV5, StoredApiUserV7, UserRecordDecode, SUPPORTED_CONTAINER_VERSIONS, SUPPORTED_VALUE_VERSIONS,
     };
-    use shared::model::{ClusterFlags, ProxyType};
+    use serde_json::Value;
+    use shared::model::{ClusterFlags, NetworkAccessDto, ProxyType};
+
+    fn user_to_value_array<T: serde::Serialize>(user: &T) -> Vec<Value> {
+        let bytes = rmp_serde::to_vec(user).expect("serialize with rmp_serde");
+        let val: Value = rmp_serde::from_slice(&bytes).expect("deserialize into Value");
+        val.as_array().expect("value is an array").clone()
+    }
 
     /// Obviously fake. A fixture that looks like a real credential invites
     /// someone to paste it somewhere real.
@@ -725,6 +826,26 @@ mod tests {
             status: None,
             ui_enabled: true,
             comment: Some("fixture".to_string()),
+        }
+    }
+
+    fn v2() -> StoredApiUserV2 {
+        let v1 = v1();
+        StoredApiUserV2 {
+            target: v1.target,
+            username: v1.username,
+            password: v1.password,
+            token: v1.token,
+            proxy: v1.proxy,
+            server: v1.server,
+            epg_timeshift: v1.epg_timeshift,
+            epg_request_timeshift: Some("+2".to_string()),
+            created_at: v1.created_at,
+            exp_date: v1.exp_date,
+            max_connections: v1.max_connections,
+            status: v1.status,
+            ui_enabled: v1.ui_enabled,
+            comment: v1.comment,
         }
     }
 
@@ -787,6 +908,166 @@ mod tests {
         let encoded = serde_json::to_string(&recovery).expect("serialize");
         let decoded: ApiUserRecovery = serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(decoded, recovery);
+    }
+
+    #[test]
+    fn classify_user_record_complete_layouts() {
+        let v1_record = v1();
+        let v2_record = v2();
+        let v3_record = StoredApiUserV3::from_v2(&v2_record);
+        let v4_record = StoredApiUserV4::from_v3(&v3_record);
+        let v5_record = StoredApiUserV5::from_v4(&v4_record);
+
+        let network_dto = NetworkAccessDto { allowed_countries: Some(vec!["DE".to_string()]), allowed_networks: None };
+        let mut v7_record = StoredApiUserV7::from_v5(&v5_record);
+        v7_record.network_access = Some(network_dto.clone());
+        v7_record.plan = Some("gold".to_string());
+        v7_record.filter = Some("Group ~ \"DE.*\"".to_string());
+
+        let arr_13 = user_to_value_array(&v1_record);
+        let arr_14 = user_to_value_array(&v2_record);
+        let arr_15 = user_to_value_array(&v3_record);
+        let arr_17 = user_to_value_array(&v4_record);
+        let arr_21 = user_to_value_array(&v7_record);
+
+        assert_eq!(arr_13.len(), 13);
+        assert_eq!(arr_14.len(), 14);
+        assert_eq!(arr_15.len(), 15);
+        assert_eq!(arr_17.len(), 17);
+        assert_eq!(arr_21.len(), 21);
+
+        assert!(matches!(classify_user_record(Value::Array(arr_13)), Ok(UserRecordDecode::Complete(_))));
+        assert!(matches!(classify_user_record(Value::Array(arr_14)), Ok(UserRecordDecode::Complete(_))));
+        assert!(matches!(classify_user_record(Value::Array(arr_15)), Ok(UserRecordDecode::Complete(_))));
+        assert!(matches!(classify_user_record(Value::Array(arr_17)), Ok(UserRecordDecode::Complete(_))));
+        match classify_user_record(Value::Array(arr_21)) {
+            Ok(UserRecordDecode::Complete(user)) => {
+                assert_eq!(user.network_access, Some(network_dto));
+                assert_eq!(user.plan.as_deref(), Some("gold"));
+                assert_eq!(user.filter.as_deref(), Some("Group ~ \"DE.*\""));
+            }
+            other => panic!("expected Complete for 21 fields, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_user_record_compact_variants() {
+        let v5_record = StoredApiUserV5::from_v4(&StoredApiUserV4::from_v3(&StoredApiUserV3::from_v2(&v2())));
+        let arr_18_base = user_to_value_array(&v5_record);
+        assert_eq!(arr_18_base.len(), 18);
+
+        // 18 fields (no trailing) -> Complete with network/plan/filter None
+        match classify_user_record(Value::Array(arr_18_base.clone())) {
+            Ok(UserRecordDecode::Complete(user)) => {
+                assert_eq!(user.network_access, None);
+                assert_eq!(user.plan, None);
+                assert_eq!(user.filter, None);
+            }
+            other => panic!("expected Complete for 18 fields, got {other:?}"),
+        }
+
+        // 19 fields [Null] -> Complete
+        let mut arr_19_null = arr_18_base.clone();
+        arr_19_null.push(Value::Null);
+        match classify_user_record(Value::Array(arr_19_null)) {
+            Ok(UserRecordDecode::Complete(user)) => {
+                assert_eq!(user.network_access, None);
+                assert_eq!(user.plan, None);
+                assert_eq!(user.filter, None);
+            }
+            other => panic!("expected Complete for 19 fields [Null], got {other:?}"),
+        }
+
+        // 19 fields [String] -> Ambiguous with that value
+        let mut arr_19_string = arr_18_base.clone();
+        arr_19_string.push(Value::String("ambiguous-string".to_string()));
+        match classify_user_record(Value::Array(arr_19_string)) {
+            Ok(UserRecordDecode::Ambiguous { user, value }) => {
+                assert_eq!(value, "ambiguous-string");
+                assert_eq!(user.network_access, None);
+                assert_eq!(user.plan, None);
+                assert_eq!(user.filter, None);
+            }
+            other => panic!("expected Ambiguous for 19 fields [String], got {other:?}"),
+        }
+
+        // 19 fields [network object] -> Complete with network_access set
+        let network_dto = NetworkAccessDto { allowed_countries: Some(vec!["DE".to_string()]), allowed_networks: None };
+        let network_value = serde_json::to_value(&network_dto).expect("network dto to value");
+        let mut arr_19_network = arr_18_base.clone();
+        arr_19_network.push(network_value.clone());
+        match classify_user_record(Value::Array(arr_19_network)) {
+            Ok(UserRecordDecode::Complete(user)) => {
+                assert_eq!(user.network_access, Some(network_dto.clone()));
+                assert_eq!(user.plan, None);
+                assert_eq!(user.filter, None);
+            }
+            other => panic!("expected Complete for 19 fields [network object], got {other:?}"),
+        }
+
+        // 20 fields [String, String] -> Complete with plan and filter
+        let mut arr_20_strings = arr_18_base.clone();
+        arr_20_strings.push(Value::String("plan-only".to_string()));
+        arr_20_strings.push(Value::String("filter-only".to_string()));
+        match classify_user_record(Value::Array(arr_20_strings)) {
+            Ok(UserRecordDecode::Complete(user)) => {
+                assert_eq!(user.network_access, None);
+                assert_eq!(user.plan.as_deref(), Some("plan-only"));
+                assert_eq!(user.filter.as_deref(), Some("filter-only"));
+            }
+            other => panic!("expected Complete for 20 fields [String, String], got {other:?}"),
+        }
+
+        // 20 fields [network, String] -> Ambiguous with network_access set
+        let mut arr_20_network_string = arr_18_base;
+        arr_20_network_string.push(network_value);
+        arr_20_network_string.push(Value::String("ambiguous-trailing".to_string()));
+        match classify_user_record(Value::Array(arr_20_network_string)) {
+            Ok(UserRecordDecode::Ambiguous { user, value }) => {
+                assert_eq!(value, "ambiguous-trailing");
+                assert_eq!(user.network_access, Some(network_dto));
+                assert_eq!(user.plan, None);
+                assert_eq!(user.filter, None);
+            }
+            other => panic!("expected Ambiguous for 20 fields [network, String], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_user_record_error_cases_and_secrets() {
+        let v1_record = v1();
+        let password = v1_record.password.clone();
+        let v5_record = StoredApiUserV5::from_v4(&StoredApiUserV4::from_v3(&StoredApiUserV3::from_v2(&v2())));
+        let arr_18_base = user_to_value_array(&v5_record);
+
+        // 20 fields [Null, String] -> Err
+        let mut arr_20_null_string = arr_18_base.clone();
+        arr_20_null_string.push(Value::Null);
+        arr_20_null_string.push(Value::String("trailing".to_string()));
+        let err =
+            classify_user_record(Value::Array(arr_20_null_string)).expect_err("20 fields [Null, String] must fail");
+        assert!(!err.to_string().contains(&password), "error message leaked password: {err}");
+
+        // Unsupported counts (12, 16, 22) -> Err
+        for count in [12, 16, 22] {
+            let mut fields = arr_18_base.clone();
+            fields.resize(count, Value::Null);
+            let err = classify_user_record(Value::Array(fields)).expect_err("unsupported count must fail");
+            assert!(!err.to_string().contains(&password), "error message leaked password: {err}");
+        }
+
+        // Non-array -> Err
+        let non_arrays = [
+            Value::String("not-an-array".to_string()),
+            Value::Null,
+            Value::Bool(false),
+            Value::Number(42.into()),
+            serde_json::json!({"target": "channels"}),
+        ];
+        for non_arr in non_arrays {
+            let err = classify_user_record(non_arr).expect_err("non-array must fail");
+            assert!(!err.to_string().contains(&password), "error message leaked password: {err}");
+        }
     }
 }
 

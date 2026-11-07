@@ -75,9 +75,7 @@ use tuliprox_repository as repository;
 #[command(author = "euzu <euzu@proton.me>")]
 #[command(version)]
 #[command(about = "Extended playlist proxy", long_about = None)]
-#[command(group(ArgGroup::new("user_db_operation").args([
-    "user_db_get", "user_db_check", "user_db_set", "inspect_user_db", "repair_user_db"
-])))]
+#[command(group(ArgGroup::new("user_db_operation").args(["user_db_get", "user_db_check", "user_db_set"])))]
 #[command(group(ArgGroup::new("user_db_input_operation").args(["user_db_check", "user_db_set"])))]
 struct Args {
     /// Path to .env file for environment variable overrides
@@ -193,47 +191,21 @@ struct Args {
     #[arg(long = "user-db-check", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
     user_db_check: Option<PathBuf>,
 
-    /// Import a checked user repair export offline, creating a backup before replacement
-    #[arg(long = "user-db-set", value_name = "PATH", requires = "user_db_input", conflicts_with_all = ["inspect_db", "migrate_db"])]
+    /// Import a checked user repair export, or repair from verified history without one
+    #[arg(long = "user-db-set", value_name = "PATH", conflicts_with_all = ["inspect_db", "migrate_db"])]
     user_db_set: Option<PathBuf>,
 
     /// Edited JSON export to validate or import
-    #[arg(long = "input", value_name = "PATH", requires = "user_db_input_operation", conflicts_with_all = ["user_db_get", "inspect_user_db", "repair_user_db", "inspect_db", "migrate_db"])]
+    #[arg(long = "user-db-input", value_name = "PATH", requires = "user_db_input_operation", conflicts_with_all = ["user_db_get", "inspect_db", "migrate_db"])]
     user_db_input: Option<PathBuf>,
 
     /// Write a new JSON export file instead of printing JSON to stdout
-    #[arg(long = "output", value_name = "PATH", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_user_db", "repair_user_db", "inspect_db", "migrate_db"])]
+    #[arg(long = "user-db-output", value_name = "PATH", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_db", "migrate_db"])]
     user_db_output: Option<PathBuf>,
 
     /// Read only this user key; partial exports cannot be imported
-    #[arg(long = "user", value_name = "KEY", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_user_db", "repair_user_db", "inspect_db", "migrate_db"])]
+    #[arg(long = "user-db-key", value_name = "KEY", requires = "user_db_get", conflicts_with_all = ["user_db_check", "user_db_set", "inspect_db", "migrate_db"])]
     user_db_user: Option<String>,
-
-    /// Inspect an API user database and its recovery history without changing either
-    #[arg(
-        long = "inspect-user-db",
-        hide = true,
-        value_name = "PATH",
-        conflicts_with_all = ["repair_user_db", "inspect_db", "migrate_db"]
-    )]
-    inspect_user_db: Option<PathBuf>,
-
-    /// Repair an API user database offline, creating an automatic archive first
-    #[arg(
-        long = "repair-user-db",
-        hide = true,
-        value_name = "PATH",
-        conflicts_with_all = ["inspect_user_db", "inspect_db", "migrate_db"]
-    )]
-    repair_user_db: Option<PathBuf>,
-
-    /// JSON decisions for ambiguous API users; valid only with --repair-user-db
-    #[arg(long = "user-db-decisions", hide = true, value_name = "PATH", requires = "repair_user_db", conflicts_with_all = ["user_db_get", "user_db_check", "user_db_set"])]
-    user_db_decisions: Option<PathBuf>,
-
-    /// Write a new decision template with stored user context and unresolved fields; valid only with --inspect-user-db
-    #[arg(long = "user-db-decision-template", hide = true, value_name = "PATH", requires = "inspect_user_db", conflicts_with_all = ["user_db_get", "user_db_check", "user_db_set"])]
-    user_db_decision_template: Option<PathBuf>,
 }
 
 impl Args {
@@ -263,12 +235,7 @@ impl Args {
         if let Some(path) = self.user_db_set.as_deref() {
             return Some(DatabaseCommand::UserSet { path, input: self.user_db_input.as_deref() });
         }
-        if let Some(path) = self.inspect_user_db.as_deref() {
-            return Some(DatabaseCommand::InspectUser { path, template: self.user_db_decision_template.as_deref() });
-        }
-        self.repair_user_db
-            .as_deref()
-            .map(|path| DatabaseCommand::RepairUser { path, decisions: self.user_db_decisions.as_deref() })
+        None
     }
 
     fn db_viewer_args(&self) -> repository::DbViewerArgs<'_> {
@@ -698,5 +665,30 @@ async fn healthcheck(config_file: &str) -> bool {
             error!("Failed to open config file for healthcheck {err:?}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_db_cli_flags_are_renamed() {
+        assert!(Args::try_parse_from([
+            "tuliprox",
+            "--user-db-get",
+            "db",
+            "--user-db-output",
+            "f",
+            "--user-db-key",
+            "k",
+        ])
+        .is_ok());
+
+        assert!(Args::try_parse_from(["tuliprox", "--user-db-check", "db", "--user-db-input", "f"]).is_ok());
+
+        assert!(Args::try_parse_from(["tuliprox", "--user-db-check", "db", "--input", "f"]).is_err());
+
+        assert!(Args::try_parse_from(["tuliprox", "--user-db-output", "f"]).is_err());
     }
 }

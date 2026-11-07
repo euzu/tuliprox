@@ -4,18 +4,20 @@
 
 ## ⚠️ Breaking Changes
 
-- **API user database migration refuses unresolved field assignments or unverifiable recovery history.** Untracked legacy
-  databases migrate automatically when every record is unambiguous. Tracked databases requiring reconstruction need
-  verified field-named recovery history bound to their identity and revision.
+- **API user database migration refuses unresolved field assignments or unverifiable recovery history.** Untracked
+  legacy databases migrate automatically when every record is unambiguous. Tracked databases requiring reconstruction
+  need verified field-named recovery history bound to their identity and revision.
   Unresolved `plan`/`filter` assignments and missing, invalid, foreign, or stale bound history require offline repair;
-  refused migrations preserve the original database. Back up the complete configuration directory, including the database,
-  WAL files and `api_user_recovery/`, before upgrading. Use the following repair workflow:
-  `--user-db-get /app/config/api_user.db --output users.json`, edit unresolved field assignments,
-  `--user-db-check /app/config/api_user.db --input users.json`, then
-  `--user-db-set /app/config/api_user.db --input users.json`. Get exports all users without passwords or tokens. Check is
-  read-only; set repeats validation, creates a backup and publishes the complete repaired user set. Stale exports, open
-  assignments and missing or duplicate users prevent replacement. Each assignment requires a reliable field-named source;
-  otherwise restore a complete matching backup or explicitly establish a new access policy. See
+  refused migrations preserve the original database. Back up the complete configuration directory, including
+  the database, WAL files and `api_user_recovery/`, before upgrading. Use the following repair workflow:
+  `--user-db-get /app/config/api_user.db --user-db-output users.json`, edit unresolved field assignments,
+  `--user-db-check /app/config/api_user.db --user-db-input users.json`, then
+  `--user-db-set /app/config/api_user.db --user-db-input users.json`. Get exports all users without passwords or tokens.
+  Check is read-only; set repeats validation, creates a backup and publishes the complete repaired user set. A database
+  whose records are already unambiguous is repaired by `--user-db-set` alone. A pending write-ahead log blocks get and
+  check; set archives the database, log and recovery history first and then replays it. Stale exports, open
+  assignments and missing or duplicate users prevent replacement. Each assignment requires a reliable field-named
+  source; otherwise restore a complete matching backup or explicitly establish a new access policy. See
   [API User Database Offline Repair](docs/src/operations-debugging.md#api-user-database-offline-repair).
 
 - **The in-memory log ring buffer behind the Web-UI Live Logs now follows the root log filter.** Previously,

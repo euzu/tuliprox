@@ -873,34 +873,41 @@ pub(crate) fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<
 
 pub fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf { config_dir.join(MARKER_FILE_API_USER_GUARD) }
 
-/// Reads the complete source without silently overwriting duplicate user keys.
-pub(crate) fn load_user_records(db_path: &Path, storage_version: u32) -> io::Result<BPlusTree<String, Value>> {
-    if storage_version != STORAGE_VERSION {
-        return typed_migration::load_legacy_typed(db_path);
-    }
-    let mut query = BPlusTreeQuery::<String, Value>::try_new(db_path)?;
-    let mut records = BPlusTree::new();
-    records.set_metadata(query.metadata().clone());
-    for entry in query.iter() {
-        let (key, value) = entry?;
-        if records.query(&key).is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "user database contains duplicate keys"));
-        }
-        records.insert(key, value);
-    }
-    Ok(records)
+/// How a full-record scan treats a pending write-ahead log.
+#[derive(Clone, Copy)]
+enum UserRecordScan {
+    /// Replays the log; only the process that owns the write lease may use this.
+    Replaying,
+    /// Refuses to open, so a caller that promises read-only access keeps it.
+    Refusing,
 }
 
-/// Read-only variant for the offline inspector. A pending V3 WAL is reported
+/// Reads the complete source without silently overwriting duplicate user keys.
+pub(crate) fn load_user_records(db_path: &Path, storage_version: u32) -> io::Result<BPlusTree<String, Value>> {
+    scan_user_records(db_path, storage_version, UserRecordScan::Replaying)
+}
+
+/// Read-only variant for offline inspection. A pending V3 WAL is reported
 /// instead of being replayed as a side effect of opening the database.
 pub(crate) fn load_user_records_read_only(
     db_path: &Path,
     storage_version: u32,
 ) -> io::Result<BPlusTree<String, Value>> {
+    scan_user_records(db_path, storage_version, UserRecordScan::Refusing)
+}
+
+fn scan_user_records(
+    db_path: &Path,
+    storage_version: u32,
+    scan: UserRecordScan,
+) -> io::Result<BPlusTree<String, Value>> {
     if storage_version != STORAGE_VERSION {
         return typed_migration::load_legacy_typed(db_path);
     }
-    let mut query = BPlusTreeQuery::<String, Value>::try_new_read_only(db_path)?;
+    let mut query = match scan {
+        UserRecordScan::Replaying => BPlusTreeQuery::<String, Value>::try_new(db_path)?,
+        UserRecordScan::Refusing => BPlusTreeQuery::<String, Value>::try_new_read_only(db_path)?,
+    };
     let mut records = BPlusTree::new();
     records.set_metadata(query.metadata().clone());
     for entry in query.iter() {
@@ -1772,6 +1779,154 @@ mod tests {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "frank missing after v7 detection"))?;
         assert_eq!(user.plan.as_deref(), Some("basic"));
         assert_eq!(user.filter.as_deref(), Some(r#"Group ~ "^DE.*""#));
+
+        Ok(())
+    }
+
+    #[test]
+    fn repair_archive_directories_are_not_scanned() -> io::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().to_path_buf();
+        let archive_dir = root.join("api_user_repair_backup_test");
+        std::fs::create_dir_all(&archive_dir)?;
+        let series_db = archive_dir.join("series.db");
+        let mut tree = crate::bplustree::v2::BPlusTree::<u32, XtreamPlaylistItem>::new();
+        tree.store(&series_db)?;
+        assert_eq!(crate::bplustree::typed_migration::storage_version(&series_db)?, Some(2));
+
+        let marker = root.join("migration.marker");
+        let stats = BPlusTreeStartupMigrator::new_with_marker(vec![root], marker).run()?;
+        assert_eq!(stats.migrated_files, 0);
+        assert_eq!(crate::bplustree::typed_migration::storage_version(&series_db)?, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn repair_archive_scan_root_is_ignored() -> io::Result<()> {
+        let temp = tempdir()?;
+        let archive_dir = temp.path().join("api_user_repair_backup_test");
+        std::fs::create_dir_all(&archive_dir)?;
+        let series_db = archive_dir.join("series.db");
+        let mut tree = crate::bplustree::v2::BPlusTree::<u32, XtreamPlaylistItem>::new();
+        tree.store(&series_db)?;
+
+        let roots = vec![archive_dir.clone()];
+        let resolved = BPlusTreeStartupMigrator::resolve_scan_roots(&roots);
+        assert!(resolved.is_empty(), "repair archive scan root must be ignored");
+
+        let marker = temp.path().join("migration.marker");
+        let stats = BPlusTreeStartupMigrator::new_with_marker(roots, marker).run()?;
+        assert_eq!(stats.migrated_files, 0);
+        assert_eq!(crate::bplustree::typed_migration::storage_version(&series_db)?, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn repair_archive_marker_location_is_not_written() -> io::Result<()> {
+        let temp = tempdir()?;
+        let archive_dir = temp.path().join("api_user_repair_backup_x");
+        std::fs::create_dir_all(&archive_dir)?;
+        let marker = archive_dir.join("migration.marker");
+
+        let stats = BPlusTreeStartupMigrator::new_with_marker(vec![temp.path().to_path_buf()], marker.clone()).run()?;
+        assert_eq!(stats.migrated_files, 0);
+        assert!(!marker.exists(), "marker inside a repair archive directory must not be written");
+        Ok(())
+    }
+
+    use crate::api_user_recovery::test_fixtures::{compact_user, CompactUserRecord};
+
+    fn create_tracked_compact_fixture(dir: &Path) -> io::Result<(PathBuf, PathBuf)> {
+        let db_path = dir.join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(dir);
+
+        let (mut repository, _report) = ApiUserRepository::open(&db_path, dir)?;
+        let cred = crate::user_repository::StoredProxyUserCredentials {
+            target: "channels".to_string(),
+            username: "alice".to_string(),
+            password: "not-a-real-password".to_string(),
+            token: None,
+            proxy: ProxyType::Reverse(None),
+            server: None,
+            epg_timeshift: None,
+            epg_request_timeshift: None,
+            created_at: None,
+            exp_date: None,
+            max_connections: None,
+            status: Some(ProxyUserStatus::Active),
+            output_clusters: ClusterFlags::all(),
+            ui_enabled: true,
+            comment: None,
+            priority: None,
+            soft_connections: None,
+            soft_priority: None,
+            network_access: None,
+            plan: Some("premium".to_string()),
+            filter: Some(r#"Group ~ "^DE.*""#.to_string()),
+        };
+        repository.commit(vec![("alice".to_string(), cred)])?;
+        drop(repository);
+
+        let metadata = {
+            let query = BPlusTreeQuery::<String, Value>::try_new(&db_path)?;
+            query.metadata().clone()
+        };
+        let mut compact_tree = BPlusTree::<String, CompactUserRecord>::new();
+        compact_tree.set_metadata(metadata);
+        compact_tree.insert("alice".to_string(), compact_user("alice", Some("premium"), None));
+        compact_tree.store(&db_path)?;
+
+        Ok((db_path, merge_guard_path))
+    }
+
+    #[test]
+    fn migrate_user_db_schema_tracked_compact_with_matching_history() -> io::Result<()> {
+        let temp = tempdir()?;
+        let (db_path, merge_guard_path) = create_tracked_compact_fixture(temp.path())?;
+
+        assert!(!merge_guard_path.exists());
+        assert!(BPlusTree::<String, StoredApiUserV7>::load(&db_path).is_err(), "compact records must fail V7 load");
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(migrated, "migration should return Ok(true)");
+        assert!(merge_guard_path.exists(), "merge guard must exist");
+
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
+            .query(&"alice".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after rebuild"))?;
+        assert_eq!(user.plan.as_deref(), Some("premium"));
+        assert_eq!(user.filter.as_deref(), Some(r#"Group ~ "^DE.*""#));
+
+        let mut query = BPlusTreeQuery::<String, Value>::try_new(&db_path)?;
+        let mut count = 0;
+        for entry in query.iter() {
+            let (_, val) = entry?;
+            let arr = val.as_array().ok_or_else(|| io::Error::other("stored record is not an array"))?;
+            assert_eq!(arr.len(), 21, "all records must have 21 fields");
+            count += 1;
+        }
+        assert_eq!(count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_user_db_schema_tracked_compact_without_recovery_dir_fails_and_leaves_db_unchanged() -> io::Result<()> {
+        let temp = tempdir()?;
+        let (db_path, merge_guard_path) = create_tracked_compact_fixture(temp.path())?;
+
+        std::fs::remove_dir_all(temp.path().join("api_user_recovery"))?;
+        let before_bytes = std::fs::read(&db_path)?;
+
+        let err = migrate_user_db_schema(&db_path, &merge_guard_path)
+            .expect_err("migration must fail when recovery directory is removed");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("no verifiable recovery generation was found"), "unexpected error message: {err_msg}");
+        assert!(!err_msg.contains("not-a-real-password"), "error message leaked password: {err_msg}");
+        assert_eq!(std::fs::read(&db_path)?, before_bytes, "database file bytes must be unchanged");
+        assert!(!merge_guard_path.exists(), "merge guard must not exist");
 
         Ok(())
     }

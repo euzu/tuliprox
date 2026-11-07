@@ -12,6 +12,17 @@ use std::{
     path::PathBuf,
 };
 
+/// Derives the path to the offline maintenance lease file for the given recovery paths.
+pub fn maintenance_lease_path(paths: &RecoveryPaths) -> io::Result<PathBuf> {
+    let directory = resolved_path_identity(&paths.directory)?;
+    let parent = directory.parent().ok_or_else(|| io::Error::other("recovery directory has no parent"))?;
+    let name = directory.file_name().ok_or_else(|| io::Error::other("recovery directory has no name"))?;
+    let mut lease = OsString::from(".");
+    lease.push(name);
+    lease.push(".maintenance.lock");
+    Ok(parent.join(lease))
+}
+
 fn open_lease(paths: &RecoveryPaths) -> io::Result<File> {
     if let Some(parent) = paths.directory.parent() {
         fs::create_dir_all(parent)?;
@@ -19,13 +30,7 @@ fn open_lease(paths: &RecoveryPaths) -> io::Result<File> {
     if let Some(parent) = paths.database.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let directory = resolved_path_identity(&paths.directory)?;
-    let parent = directory.parent().ok_or_else(|| io::Error::other("recovery directory has no parent"))?;
-    let name = directory.file_name().ok_or_else(|| io::Error::other("recovery directory has no name"))?;
-    let mut lease = OsString::from(".");
-    lease.push(name);
-    lease.push(".maintenance.lock");
-    let path = parent.join(lease);
+    let path = maintenance_lease_path(paths)?;
     let identity = resolved_path_identity(&path)?;
     if identity == resolved_path_identity(&sidecar_lock_path(&paths.database))?
         || identity == resolved_path_identity(&paths.database)?
@@ -47,6 +52,7 @@ fn lock_error(error: TryLockError) -> io::Error {
 
 /// Pins the recovery location while a journal or schema migration can use it.
 /// This never replaces the B+Tree's per-operation sidecar locks.
+#[derive(Debug)]
 pub struct RecoveryUseGuard {
     _file: File,
 }

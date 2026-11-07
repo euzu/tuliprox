@@ -146,7 +146,7 @@ fn open_api_user_repository(cfg: &AppConfig) -> Result<ApiUserRepository, Error>
     let recovery_root = api_user_recovery_root(cfg);
     ApiUserRepository::open(&db_path, &recovery_root)
         .map(|(repository, _report)| repository)
-        .map_err(|error| crate::user_db_repair::user_db_repair_error(&db_path, &error))
+        .map_err(|error| crate::user_db_repair::with_repair_hint_for_data_errors(&db_path, error))
 }
 
 fn add_target_user_to_user_tree(
