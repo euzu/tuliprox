@@ -47,8 +47,10 @@ use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
 use tuliprox_core::model::{AppConfig, HlsManifestRecoveryBurstConfig, ReverseProxyDisabledHeaderConfig, StripConfig};
 
+pub(crate) mod anchor_probe;
 mod commit;
 pub(crate) mod failure;
+pub(crate) mod origin_probe;
 mod provider;
 mod short_manifest;
 pub(crate) use short_manifest::observe_target_duration;
@@ -59,14 +61,13 @@ mod work_guard;
 pub use self::timing::cold_start_retry_after_seconds;
 use self::{
     commit::{
-        commit_fetched_manifest, commit_fetched_manifest_with_acceptance_mode,
-        ensure_refresh_origin_work_generation_is_current, refresh_origin_work_generation_is_current,
-        HlsManifestCommitProgressEvidence,
+        commit_fetched_manifest_with_acceptance_mode, ensure_refresh_origin_work_generation_is_current,
+        refresh_origin_work_generation_is_current, HlsManifestCommitProgressEvidence,
     },
     failure::{apply_manifest_fetch_failure_signal, refresh_failure_backoff_schedule},
     switch_staging::{
         critical_handoff_snapshot_is_current, prepare_critical_handoff, remove_uncommitted_staged_switch_files,
-        stage_alternative_manifest_switch, switch_staging_error, verify_staged_content_anchor,
+        stage_alternative_manifest_switch, switch_staging_error, verify_content_anchor,
         verify_staged_emergency_handoff, HlsStagedSwitchCommit,
     },
     timing::{
@@ -1044,7 +1045,7 @@ async fn fetch_and_commit_manifest_with_policy(
         } else {
             manifest_recovery_trigger(request)
         };
-        (session.established_manifest_recovery_binding(), trigger)
+        (manifest_recovery_binding_for_request(&session, request), trigger)
     };
     let fetch_context = manifest_fetch_context(request, request.session.read().await.target_duration);
     if let Some(result) = short_manifest::resume_qualification(request, &fetch_context).await {
@@ -1087,7 +1088,7 @@ async fn fetch_and_commit_manifest_with_policy(
             session.origin_control.manifest_origin_binding = url::Url::parse(&fetched.resolved_request_url)
                 .ok()
                 .and_then(|url| HlsManifestOriginBinding::new(url, fetched.provider_url_index).ok());
-            established_recovery_binding = session.established_manifest_recovery_binding();
+            established_recovery_binding = manifest_recovery_binding_for_request(&session, request);
         }
     }
     Box::pin(commit_initial_fetched_manifest(
@@ -1098,6 +1099,30 @@ async fn fetch_and_commit_manifest_with_policy(
         recovery_suppression_logged,
     ))
     .await
+}
+
+fn manifest_recovery_binding_for_request(
+    session: &crate::HlsSession,
+    request: &OriginRefreshRequest,
+) -> Option<HlsManifestOriginBinding> {
+    session.established_manifest_recovery_binding().or_else(|| {
+        // Terminal leases do not make the old origin healthy again. A distinct,
+        // generation-bound live-entry attempt may nevertheless spend its
+        // remaining budget on the already resolved concrete target.
+        let generation = session.live_entry_revalidation_generation()?;
+        (request.manifest_commit_requirement.fresh_reason().is_some()
+            && request
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| !attempt.is_closed() && attempt.revalidation_generation == Some(generation))
+            && matches!(session.mode, crate::HlsSessionMode::NormalCacheTimeline)
+            && session.origin_control.pinned_host.is_some()
+            && session.origin_seq_highwater.is_some()
+            && session.last_rendered_manifest.is_some()
+            && session.published_live_origin_baseline.is_some())
+        .then(|| session.origin_control.manifest_origin_binding.clone())
+        .flatten()
+    })
 }
 
 async fn log_manifest_recovery_burst_suppressed(request: &OriginRefreshRequest, trigger: HlsManifestAcceptanceTrigger) {
@@ -1169,7 +1194,7 @@ async fn recover_manifest_for_request(
 ) -> Result<CommittedOriginManifest, OriginManifestFetchError> {
     let binding_is_current = {
         let session = request.session.read().await;
-        session.established_manifest_recovery_binding().as_ref() == Some(&path.binding)
+        manifest_recovery_binding_for_request(&session, request).as_ref() == Some(&path.binding)
     };
     if !binding_is_current {
         return Err(OriginManifestFetchError::RecoveryUnavailable {
@@ -1210,10 +1235,7 @@ async fn commit_initial_fetched_manifest(
     let acceptance_mode = request.manifest_commit_requirement.acceptance_mode();
     let selected_report =
         score_hls_manifest_candidate_for_selection_log(fetch_context, &fetched, acceptance_mode).await;
-    let commit_result = {
-        let mut session = request.session.write().await;
-        commit_fetched_manifest(&mut session, &fetched, request, request.hls_proxy.now_ms())
-    };
+    let commit_result = origin_probe::commit_pinned_manifest(request, &fetched, acceptance_mode).await;
     cancel_superseded_terminal_work_after_media_progress(request, &commit_result).await;
     if commit_result.is_err() {
         let session = request.session.read().await;
@@ -1353,6 +1375,13 @@ async fn commit_manifest_recovery_candidate(
         let session = request.session.read().await;
         ensure_refresh_origin_work_generation_is_current(&session, request)?;
     }
+    switch_staging::reject_final_content_mismatch(request, &fetched, acceptance_mode).await?;
+    let content_anchor =
+        if acceptance_mode == HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate {
+            Some(Box::pin(verify_content_anchor(request, &fetched)).await?)
+        } else {
+            None
+        };
     let critical_handoff =
         if matches!(acceptance_mode, HlsManifestCommitAcceptanceMode::AllowVerifiedEmergencyHostSwitchCandidate) {
             Some(Box::pin(prepare_critical_handoff(request)).await?)
@@ -1369,13 +1398,20 @@ async fn commit_manifest_recovery_candidate(
     } else {
         None
     };
+    if let Some(staged) = staged_switch.as_mut() {
+        staged.content_anchor = content_anchor;
+    }
     if let (Some(staged), Some(preparation)) = (staged_switch.as_mut(), critical_handoff) {
         staged.critical_handoff = Some(preparation);
     }
     if let Some(staged) = staged_switch.as_mut() {
         let verification = match acceptance_mode {
             HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate => {
-                Box::pin(verify_staged_content_anchor(request, &fetched, &*staged)).await
+                if staged.content_anchor.as_ref().is_some_and(|proof| proof.matches(&staged.generation)) {
+                    Ok(())
+                } else {
+                    Err(switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))
+                }
             }
             HlsManifestCommitAcceptanceMode::AllowVerifiedEmergencyHostSwitchCandidate => {
                 Box::pin(verify_staged_emergency_handoff(request, &fetched, &*staged)).await
@@ -1392,6 +1428,7 @@ async fn commit_manifest_recovery_candidate(
             return Err(error);
         }
     }
+    let mut origin_update = origin_probe::prepare_origin_update(request, &fetched, acceptance_mode).await?;
     let has_critical_handoff = staged_switch.as_ref().is_some_and(|staged| staged.critical_handoff.is_some());
     let commit_result = if has_critical_handoff {
         let staged = staged_switch
@@ -1399,22 +1436,23 @@ async fn commit_manifest_recovery_candidate(
             .ok_or_else(|| switch_staging_error(HlsManifestRejectLogReason::StagedSwitchInvalidated))?;
         commit_verified_critical_handoff(request, &fetched, acceptance_mode, staged).await
     } else {
-        let mut session = request.session.write().await;
-        let commit_now_ms = request.hls_proxy.now_ms();
-        commit_fetched_manifest_with_acceptance_mode(
-            &mut session,
-            &fetched,
+        commit::commit_recovery_manifest(
             request,
-            commit_now_ms,
+            &fetched,
             acceptance_mode,
-            staged_switch.as_ref(),
+            staged_switch.as_mut(),
+            origin_update.as_ref(),
         )
+        .await
     };
     cancel_superseded_terminal_work_after_media_progress(request, &commit_result).await;
     match commit_result {
         Ok((progress_evidence, wake_segment_scheduler, wake_map_scheduler)) => {
             if let Some(staged) = staged_switch.as_mut() {
                 staged.disarm_cleanup();
+            }
+            if let Some(update) = &mut origin_update {
+                update.disarm_cleanup();
             }
             Ok(CommittedOriginManifest { fetched, progress_evidence, wake_segment_scheduler, wake_map_scheduler })
         }

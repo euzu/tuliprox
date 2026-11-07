@@ -261,7 +261,7 @@ pub(super) fn persisted_cluster_snapshot(
     }
 }
 
-pub(super) fn persist_finalized_cluster_snapshots(
+pub(super) async fn persist_finalized_cluster_snapshots(
     playlist_download_result: &mut PlaylistDownloadResult,
     request_policy: Option<InputRefreshPolicy>,
     storage_error: Option<&TuliproxError>,
@@ -301,9 +301,8 @@ pub(super) fn persist_finalized_cluster_snapshots(
     let Some(mut pending_status) = playlist_download_result.pending_status.take() else {
         return;
     };
-    let mut changed = pending_status.status_changed;
     for (cluster, snapshot) in snapshots {
-        changed |= match pending_status.cluster_status_source {
+        match pending_status.cluster_status_source {
             ClusterStatusSource::PerCluster => {
                 input_cache::replace_cluster_snapshot(&mut pending_status.status, cluster.as_ref(), snapshot)
             }
@@ -314,7 +313,27 @@ pub(super) fn persist_finalized_cluster_snapshots(
             ),
         };
     }
-    if changed {
-        input_cache::save_input_status(&pending_status.storage_path, &pending_status.status);
+    let previous = pending_status.previous_clusters;
+    let updated = pending_status.status.clusters;
+    if previous == updated {
+        return;
     }
+    input_cache::update_input_status(&pending_status.storage_path, move |current| {
+        // Only apply this acquisition's changes to entries that still match its starting snapshot.
+        let mut changed = false;
+        current.clusters.retain(|key, entry| {
+            let remove = !updated.contains_key(key) && previous.get(key) == Some(entry);
+            changed |= remove;
+            !remove
+        });
+        for (key, entry) in updated {
+            let baseline = previous.get(&key);
+            if baseline != Some(&entry) && current.clusters.get(&key) == baseline {
+                current.clusters.insert(key, entry);
+                changed = true;
+            }
+        }
+        changed
+    })
+    .await;
 }

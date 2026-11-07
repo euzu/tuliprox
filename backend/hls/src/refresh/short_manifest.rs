@@ -268,24 +268,20 @@ async fn run_qualification(
     diagnostics: &mut HlsManifestRecoveryDiagnostics,
 ) -> Result<CommittedOriginManifest, OriginManifestFetchError> {
     let trigger = {
-        let session = request.session.read().await;
-        session
-            .origin_qualification_retry_target()
-            .and_then(|_| {
-                session
-                    .origin_control
-                    .acceptance_episode
-                    .as_ref()
-                    .map(crate::manifest_acceptance::HlsManifestAcceptanceEpisode::trigger)
-            })
-            .unwrap_or_else(|| {
-                let trigger = super::manifest_recovery_trigger(request);
-                if trigger.starts_episode() {
-                    trigger
-                } else {
-                    HlsManifestAcceptanceTrigger::Observe
-                }
-            })
+        let mut session = request.session.write().await;
+        let current = super::manifest_recovery_trigger(request);
+        if session.origin_qualification_retry_target().is_some() {
+            if let Some(episode) = session.origin_control.acceptance_episode.as_mut() {
+                episode.promote_trigger(current);
+                episode.trigger()
+            } else {
+                current
+            }
+        } else if current.starts_episode() {
+            current
+        } else {
+            HlsManifestAcceptanceTrigger::Observe
+        }
     };
     Box::pin(retry_hls_origin_manifest_recovery_chain_with_diagnostics(
         context,

@@ -2,7 +2,9 @@ use super::{
     origin, prepare_revisions, response_body, test_app_state_with_hls_proxy, try_test_hls_cached_manifest_response,
 };
 use crate::api::{
-    endpoints::hls_api::manifest::{HlsManifestPublicationBarrier, HLS_MANIFEST_PUBLICATION_BARRIER},
+    endpoints::hls_api::manifest::{
+        HlsManifestPublicationBarrier, HlsManifestPublicationStage, HLS_MANIFEST_PUBLICATION_BARRIER,
+    },
     model::AppState,
 };
 use axum::{
@@ -72,6 +74,15 @@ impl Fixture {
     }
 
     async fn request(app: &Arc<AppState>, session: &HlsSessionHandle, lease_id: &HlsAccessLeaseId) -> Response {
+        Self::request_with_wait(app, session, lease_id, Duration::ZERO).await
+    }
+
+    async fn request_with_wait(
+        app: &Arc<AppState>,
+        session: &HlsSessionHandle,
+        lease_id: &HlsAccessLeaseId,
+        wait: Duration,
+    ) -> Response {
         try_test_hls_cached_manifest_response(
             app,
             session,
@@ -79,24 +90,32 @@ impl Fixture {
             HlsAccessLeaseState::Pending,
             &StripConfig { mode: HlsStripMode::Segments, value: 3 },
             None,
-            HlsCachedManifestOptions::initial(Duration::ZERO),
+            HlsCachedManifestOptions::initial(wait),
         )
         .await
-        .unwrap()
+        .expect("cached response required after reevaluating the lease")
     }
 
     async fn paused_request(&self) -> (Arc<HlsManifestPublicationBarrier>, tokio::task::JoinHandle<Response>) {
-        let barrier = Arc::new(HlsManifestPublicationBarrier::default());
+        self.paused_request_at(HlsManifestPublicationStage::Commit, Duration::ZERO).await
+    }
+
+    async fn paused_request_at(
+        &self,
+        stage: HlsManifestPublicationStage,
+        wait: Duration,
+    ) -> (Arc<HlsManifestPublicationBarrier>, tokio::task::JoinHandle<Response>) {
+        let barrier = Arc::new(HlsManifestPublicationBarrier { stage, ..Default::default() });
         let scoped = Arc::clone(&barrier);
         let app = Arc::clone(&self.app);
         let session = Arc::clone(&self.session);
         let lease_id = self.lease_id.clone();
         let task = tokio::spawn(async move {
             HLS_MANIFEST_PUBLICATION_BARRIER
-                .scope(RefCell::new(Some(scoped)), Self::request(&app, &session, &lease_id))
+                .scope(RefCell::new(Some(scoped)), Self::request_with_wait(&app, &session, &lease_id, wait))
                 .await
         });
-        barrier.prepared.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), barrier.prepared.notified()).await.unwrap();
         (barrier, task)
     }
 
@@ -116,6 +135,52 @@ impl Fixture {
     async fn lease(&self) -> HlsAccessLease {
         self.manager.access_lease_response_snapshot(&self.lease_id, &self.proxy, self.manager.now_ms()).await.unwrap()
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ap8_terminal_transition_before_guard_returns_terminal_playlist() {
+    let fixture = Fixture::new(HlsStartupMode::FirstReady).await;
+    let (barrier, request) = fixture.paused_request_at(HlsManifestPublicationStage::Guard, Duration::ZERO).await;
+    super::super::terminalize_existing_test_lease(&fixture.app, &fixture.proxy.0, &fixture.lease_id.0, 2).await;
+    barrier.resume.notify_one();
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(response_body(response).await.to_vec()).unwrap();
+    assert!(body.contains("#EXT-X-ENDLIST") && body.contains("/terminal/"));
+    println!("ap8_guard_race status=200 terminal_endlist=true");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ap8_activation_before_entry_wait_uses_current_strip_view() {
+    let fixture = Fixture::new(HlsStartupMode::FirstReady).await;
+    let (barrier, request) =
+        fixture.paused_request_at(HlsManifestPublicationStage::EntryWait, Duration::from_millis(100)).await;
+    fixture.activate().await;
+    barrier.resume.notify_one();
+    assert_eq!(request.await.unwrap().status(), StatusCode::OK);
+    let current = fixture.lease().await;
+    assert_eq!(current.state, HlsAccessLeaseState::Activated);
+    let published = current.last_manifest_snapshot.unwrap();
+    assert_eq!(published.visible_proxy_seqs().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    assert_eq!(published.snapshot_generation, fixture.pending.last_manifest_snapshot.unwrap().snapshot_generation + 1);
+    println!("ap8_entry_wait_race status=200 state=Activated strip_reapplied=false visible=0..3");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ap8_unavailable_guard_respects_the_publication_wait_budget() {
+    let fixture = Fixture::new(HlsStartupMode::FirstReady).await;
+    let wait = Duration::from_millis(50);
+    let (barrier, request) = fixture.paused_request_at(HlsManifestPublicationStage::Guard, wait).await;
+    let key = fixture.session.read().await.key.clone();
+    fixture.manager.sessions().remove_session(&key, &fixture.proxy).await.unwrap();
+    let started = tokio::time::Instant::now();
+    barrier.resume.notify_one();
+    let response = tokio::time::timeout(Duration::from_millis(100), request).await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.headers().contains_key(header::RETRY_AFTER));
+    assert!(started.elapsed() >= wait);
+    assert_eq!(fixture.lease().await.last_manifest_snapshot, fixture.pending.last_manifest_snapshot);
+    println!("ap8_guard_contention status=503 retry_after=true budget_ms=50");
 }
 
 #[tokio::test(start_paused = true)]

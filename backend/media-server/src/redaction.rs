@@ -56,7 +56,7 @@ fn redact_query_like_tokens(value: &str) -> String {
         let matched = SENSITIVE_QUERY_KEYS.iter().find_map(|key| matched_sensitive_key(value, i, key));
 
         if let Some((key, separator)) = matched {
-            result.push_str(key);
+            result.push_str(&value[i..i + key.len()]);
             result.push(separator);
             result.push_str(REDACTED_VALUE);
             i += key.len() + separator.len_utf8();
@@ -108,49 +108,44 @@ mod tests {
 
     #[test]
     fn redacts_media_server_query_tokens_case_insensitively() {
-        let redacted = redact_media_server_text(
-            "https://media.example.invalid/video?X-Plex-Token=secret-token&api_key=secret-key&safe=value",
-        );
+        let redacted = redact_media_server_text("GET /video?X-Plex-Token=secret-token&api_key=secret-key&safe=value");
 
         assert!(!redacted.contains("secret-token"));
         assert!(!redacted.contains("secret-key"));
         assert!(redacted.contains("X-Plex-Token=***") || redacted.contains("x-plex-token=***"));
         assert!(redacted.contains("api_key=***"));
-        assert!(redacted.contains("safe=value"));
+        assert!(redacted.contains("safe=***"));
     }
 
     #[test]
     fn redacts_query_tokens_without_corrupting_non_ascii_text() {
-        let redacted = redact_media_server_text("https://media.example.invalid/épisode?token=sëcret&title=café");
+        let redacted = redact_media_server_text("épisode GET /épisode?token=sëcret&title=café après");
 
         assert!(!redacted.contains("sëcret"));
         assert!(redacted.contains("épisode"));
-        assert!(redacted.contains("title=café"));
+        assert!(redacted.contains("title=***"));
+        assert!(redacted.ends_with(" après"));
         assert!(redacted.contains("token=***"));
     }
 
     #[test]
     fn redacts_quoted_query_like_tokens() {
-        let redacted = redact_media_server_text(
-            "https://media.example.invalid/video?token=\"secret\"&api_key='another-secret'&safe=visible",
-        );
+        let redacted = redact_media_server_text("GET /video?token=\"secret\"&api_key='another-secret'&safe=visible");
 
         assert!(!redacted.contains("secret"));
         assert!(!redacted.contains("another-secret"));
         assert!(redacted.contains("token=***"));
         assert!(redacted.contains("api_key=***"));
-        assert!(redacted.contains("safe=visible"));
+        assert!(redacted.contains("safe=***"));
     }
 
     #[test]
     fn redacts_media_browser_query_token() {
-        let redacted = redact_media_server_text(
-            "https://media.example.invalid/video?X-MediaBrowser-Token=secret-token&safe=visible",
-        );
+        let redacted = redact_media_server_text("GET /video?X-MediaBrowser-Token=secret-token&safe=visible");
 
         assert!(!redacted.contains("secret-token"));
         assert!(redacted.contains("X-MediaBrowser-Token=***") || redacted.contains("x-mediabrowser-token=***"));
-        assert!(redacted.contains("safe=visible"));
+        assert!(redacted.contains("safe=***"));
     }
 
     #[test]
@@ -163,5 +158,29 @@ mod tests {
 
         assert!(rendered.iter().any(|(name, value)| name == "authorization" && value == "***"));
         assert!(rendered.iter().any(|(name, value)| name == "content-type" && value == "video/mp4"));
+    }
+
+    #[test]
+    fn network_urls_keep_components_with_masked_values() {
+        for (value, expected) in [
+            (
+                "https://media.example.invalid/video?X-Plex-Token=secret-token&api_key=secret-key&safe=value",
+                "https://***/video?X-Plex-Token=***&api_key=***&safe=***",
+            ),
+            (
+                "https://media.example.invalid/épisode?token=sëcret&title=café",
+                "https://***/épisode?token=***&title=***",
+            ),
+            (
+                "https://media.example.invalid/video?token=\"secret\"&api_key='another-secret'&safe=visible",
+                "https://***/video?token=***&api_key=***&safe=***",
+            ),
+            (
+                "https://media.example.invalid/video?X-MediaBrowser-Token=secret-token&safe=visible",
+                "https://***/video?X-MediaBrowser-Token=***&safe=***",
+            ),
+        ] {
+            assert_eq!(redact_media_server_text(value), expected);
+        }
     }
 }

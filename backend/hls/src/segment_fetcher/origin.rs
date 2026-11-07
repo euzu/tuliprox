@@ -138,16 +138,19 @@ pub(super) async fn fetch_segment_with_retries_into_cache(
             }
             .boxed()
         },
-        move |response, _attempt, body_deadline, guard| {
+        move |mut response, _attempt, body_deadline, guard| {
             let context = context.clone();
             let snapshot = snapshot.clone();
             async move {
+                let digest = crate::refresh::origin_probe::OriginContentDigest::default();
+                response.body = digest.observe(response.body);
                 let commit_result =
                     commit_segment_response_into_cache(&context, &snapshot, response, body_deadline).await;
                 let origin_work = finish_segment_origin_attempt(context, guard).await;
                 commit_result.map(|metadata| SegmentFetchCommit {
                     content_length: metadata.size,
                     generation_valid: origin_work.generation_valid,
+                    origin_digest: digest.completed(),
                 })
             }
             .boxed()

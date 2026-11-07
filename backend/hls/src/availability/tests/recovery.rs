@@ -679,3 +679,164 @@ async fn publication_late_origin_keeps_live_base_after_the_splice_deadline() {
         .expect("terminal lease");
     assert!(matches!(lease.playback_mode, HlsLeasePlaybackMode::TerminalTail(_)));
 }
+
+struct ObserveReserveFixture {
+    session: HlsSession,
+    manager: crate::HlsProxyManager,
+    manifest: HlsLeaseManifestSnapshot,
+    cursor: HlsLeasePlaybackCursor,
+    leases: HlsAccessLeaseStore,
+}
+
+async fn observe_reserve_fixture() -> ObserveReserveFixture {
+    use std::fmt::Write as _;
+    let mut body = "#EXTM3U\n#EXT-X-TARGETDURATION:8\n#EXT-X-MEDIA-SEQUENCE:432\n".to_string();
+    for seq in 432..438 {
+        writeln!(body, "#EXTINF:8,\n{seq}.ts").unwrap();
+    }
+    let mut session = HlsSession::new(HlsSessionKey::new(1, "observe-reserve"), b"fixture", 0);
+    let OriginManifestParseOutcome::Normal(parsed) =
+        parse_origin_media_manifest(&body, "http://origin.example/index.m3u8")
+    else {
+        panic!("normal fixture")
+    };
+    session.apply_origin_manifest(&parsed).unwrap();
+    let manager = crate::HlsProxyManager::with_private_cache(&shared::model::HlsCacheConfigDto::default());
+    for entry in session.segments.values_mut() {
+        let metadata = manager
+            .segment_cache()
+            .write_temp_and_commit(&entry.cache_key, std::io::Cursor::new(TERMINAL_ASSET_BYTES))
+            .await
+            .unwrap();
+        entry.status = SegmentCacheStatus::Ready { content_length: metadata.size, ready_at_ms: 1 };
+    }
+    session.origin_control.path_condition = HlsOriginPathCondition::AcceptanceConflict;
+    session.origin_control.last_media_progress_at_ms = Some(0);
+    session.origin_control.target_duration_snapshot_ms = Some(8_000);
+    let mut manifest = pressure_manifest(8_000);
+    manifest.last_proxy_seq = 5;
+    manifest.playlist_duration_ms = 48_000;
+    manifest.last_visible_media_end_ms = 48_000;
+    manifest.visible_segments = (0..6)
+        .map(|seq| HlsLeaseManifestSegment {
+            proxy_seq: seq,
+            duration_ms: 8_000,
+            uri: format!("{seq}.ts").into(),
+            discontinuity_before: false,
+            map_ref_ready: true,
+            encryption: None,
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let mut lease = HlsAccessLease::pending(
+        HlsAccessLeaseId("observe-reserve".into()),
+        HlsPlaybackFamilyKey::new("fixture", "fixture"),
+        session.proxy_session_id.clone(),
+        "fixture".into(),
+        "fixture".into(),
+        1,
+        "stream".into(),
+        1,
+        0,
+        100_000,
+    );
+    let token = lease.playback_cursor.record_request_started(1, 1_000);
+    let token = lease.playback_cursor.bind_request_timing(token, &session.segments[&1]);
+    assert!(lease.playback_cursor.record_transfer_started(token, 1_000));
+    let cursor = lease.playback_cursor.clone();
+    let id = lease.lease_id.clone();
+    let proxy = session.proxy_session_id.clone();
+    let mut leases = HlsAccessLeaseStore::default();
+    leases.prepare_access_lease(lease);
+    let guard = leases.prepare_manifest_publication(&id, &proxy, 1).unwrap();
+    assert!(leases.commit_manifest_publication(&id, &proxy, guard, manifest.clone(), 1).is_committed());
+    assert!(leases
+        .activate_access_lease(
+            &id,
+            &proxy,
+            2,
+            HlsAccessLeaseTiming { active_window_ms: 100_000, valid_window_ms: 100_000 }
+        )
+        .is_activated());
+    ObserveReserveFixture { session, manager, manifest, cursor, leases }
+}
+
+#[tokio::test]
+async fn expired_observe_round_preserves_forty_then_twenty_two_seconds_of_real_ready_reserve() {
+    use crate::manifest_acceptance::{manifest_acceptance_episode_status, HlsManifestAcceptanceEpisodeStatus};
+    let ObserveReserveFixture { mut session, manager, manifest, cursor, mut leases } = observe_reserve_fixture().await;
+    let proxy = session.proxy_session_id.clone();
+    let policy = atomic_pressure_policy();
+    let plan = policy.burst_plan;
+    let timing = HlsAcceptanceEpisodeTiming::from_input(&HlsAcceptanceEpisodeTimingInput {
+        started_at_ms: 1_000,
+        burst_plan: plan,
+        target_duration_ms: 8_000,
+        transition_margin: HlsTransitionMarginMs::from_millis(8_000),
+        workload: HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling(),
+        observed_latency: HlsObservedRecoveryLatency::default(),
+        required_terminal_media_key: None,
+        terminal_media_preparation: HlsTerminalMediaPreparationState::Failed { key: None },
+        policy: policy.timing,
+    });
+    let generation =
+        session.origin_control.begin_acceptance_episode(1_000, plan, HlsManifestAcceptanceTrigger::Observe, &timing);
+    session.origin_control.acceptance_episode.as_mut().unwrap().record_full_burst();
+    session.origin_control.acceptance_episode.as_mut().unwrap().hold_after_uncommitted_burst(None, Some(2_000));
+    for (now, expected_reserve) in [(1_000, 40_000), (19_000, 22_000)] {
+        let ready =
+            session.ready_timeline_snapshot(cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq), now);
+        let reserve = evaluate_lease_reserve(HlsLeaseReserveInput {
+            manifest: &manifest,
+            cursor: &cursor,
+            ready_timeline: &ready,
+            now_ms: now,
+            recovery_trigger_budget: HlsRecoveryTriggerBudgetMs::from_millis(16_000),
+            origin_path_degraded: true,
+            recovery_committed: false,
+        });
+        for entry in session.segments.values() {
+            use tokio::io::AsyncReadExt as _;
+            let mut cached = Vec::new();
+            manager
+                .segment_cache()
+                .open_range(&entry.cache_key, 0)
+                .await
+                .unwrap()
+                .read_to_end(&mut cached)
+                .await
+                .unwrap();
+            assert_eq!(cached, TERMINAL_ASSET_BYTES, "READY bytes remain readable at each controlled clock sample");
+        }
+        assert_eq!(reserve.guaranteed_reserve_ms, expected_reserve);
+        assert!(!reserve.cutover_required);
+        assert!(live_reserve_deadline(
+            now,
+            reserve,
+            HlsLeaseCutoverTiming::from_reserve(now, reserve.guaranteed_reserve_ms, reserve.transition_margin, None)
+        )
+        .is_some());
+        let pressure =
+            evaluate_and_commit_session_recovery_pressure(&mut leases, &mut session, &proxy, now, policy).unwrap();
+        assert!(!pressure.decision.evaluate_lease_cutovers, "round expiry alone cannot cut over");
+        println!(
+            "controlled_now_ms={now} actual_ready_reserve_ms={} cutover_required=false",
+            reserve.guaranteed_reserve_ms
+        );
+    }
+    assert!(matches!(
+        manifest_acceptance_episode_status(session.origin_control.acceptance_episode.as_ref(), generation, 19_000),
+        HlsManifestAcceptanceEpisodeStatus::Expired { .. }
+    ));
+    let episode = session.origin_control.acceptance_episode.as_mut().unwrap();
+    episode.promote_trigger(HlsManifestAcceptanceTrigger::RecoveryRequired);
+    assert_eq!(episode.trigger(), HlsManifestAcceptanceTrigger::RecoveryRequired);
+    assert_eq!(episode.timing(), timing, "pressure cannot renew the acceptance deadline");
+    assert_eq!(episode.full_bursts_completed, 1);
+    let pressure =
+        evaluate_and_commit_session_recovery_pressure(&mut leases, &mut session, &proxy, 35_000, policy).unwrap();
+    assert!(
+        pressure.decision.evaluate_lease_cutovers,
+        "unchanged no-progress stream still reaches the real safety boundary"
+    );
+}

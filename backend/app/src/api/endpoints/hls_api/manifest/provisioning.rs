@@ -547,6 +547,24 @@ pub(in crate::api::endpoints::hls_api) async fn commit_shared_hls_provisioning_s
                 return None;
             }
         };
+        // Local provisioning bytes need the same immutable publication handle
+        // while a session is configured for accelerated live startup.
+        {
+            let mut state = session.write().await;
+            let proxy_id = state.proxy_session_id.clone();
+            if let Some(startup) = state.startup.as_mut() {
+                if !startup.revisions.contains_key(&plan.proxy_seq) {
+                    let kind = if startup.config.mode == shared::model::HlsStartupMode::FirstReady {
+                        tuliprox_hls::SegmentRevisionKind::Processed
+                    } else {
+                        tuliprox_hls::SegmentRevisionKind::Raw
+                    };
+                    let revision = startup.store.create(proxy_id, plan.proxy_seq, kind).ok()?;
+                    revision.revision().complete(metadata.clone());
+                    startup.revisions.insert(plan.proxy_seq, revision);
+                }
+            }
+        }
         committed.push((plan.clone(), metadata.size, duration_ms));
     }
     Some(committed)

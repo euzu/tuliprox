@@ -56,7 +56,20 @@ fn terminal_media_requirement_is_bound_to_preparation(preparation: &HlsTerminalT
     }
 }
 
+fn lease_path_is_degraded(
+    leases: &HlsAccessLeaseStore,
+    session: &super::super::HlsSession,
+    lease_id: &HlsAccessLeaseId,
+    now_ms: u64,
+) -> bool {
+    session.origin_control.path_is_degraded_at(now_ms)
+        || leases
+            .live_playback_lease(lease_id, &session.proxy_session_id, now_ms)
+            .is_some_and(|lease| session.has_retained_playback_gap(lease))
+}
+
 fn evaluate_terminal_commit_authorization(
+    leases: &HlsAccessLeaseStore,
     session: &super::super::HlsSession,
     lease_id: &HlsAccessLeaseId,
     preparation: &HlsTerminalTailPreparation,
@@ -65,7 +78,7 @@ fn evaluate_terminal_commit_authorization(
 ) -> HlsTerminalCommitAuthorization {
     let recovery_snapshot = hls_acceptance_recovery_snapshot(session, now_ms);
     if !preparation.trigger.is_runtime_policy()
-        && (!preparation.reserve.is_exhausted() || !session.origin_control.path_is_degraded_at(now_ms))
+        && (!preparation.reserve.is_exhausted() || !lease_path_is_degraded(leases, session, lease_id, now_ms))
     {
         return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::CutoverNoLongerRequired);
     }
@@ -110,7 +123,7 @@ fn evaluate_terminal_commit_authorization(
         ) => (HlsTerminalCutoverCapability::TailUnavailable(*reason), preparation.terminal_media_preparation),
     };
     if matches!(decision, HlsTerminalLeaseDecision::UnavailableAfterOwnerFailure(_)) {
-        if !session.origin_control.path_is_degraded_at(now_ms) {
+        if !lease_path_is_degraded(leases, session, lease_id, now_ms) {
             return HlsTerminalCommitAuthorization::Rejected(HlsTerminalCommitOutcome::CutoverNoLongerRequired);
         }
         // This fallback publishes no media bytes. Submission arbitration gives it
@@ -317,6 +330,7 @@ impl HlsProxyManager {
             last_media_progress_at_ms: expected_last_media_progress_at_ms,
         } = request;
         let session = self.sessions.get_by_proxy_session_id(proxy_session_id).await?;
+        let leases = self.access_leases.read().await;
         let (
             origin_progress_generation,
             media_readiness_generation,
@@ -332,7 +346,7 @@ impl HlsProxyManager {
                 session.activity.media_readiness_generation,
                 session.origin_control.origin_epoch,
                 session.origin_control.last_media_progress_at_ms,
-                session.origin_control.path_is_degraded_at(now_ms),
+                lease_path_is_degraded(&leases, &session, lease_id, now_ms),
                 recovery_snapshot,
             )
         };
@@ -367,7 +381,7 @@ impl HlsProxyManager {
             return None;
         }
         let terminal_media_requirement_origin = terminal_media_requirement_origin(&recovery_snapshot);
-        self.access_leases.read().await.prepare_terminal_tail(
+        leases.prepare_terminal_tail(
             lease_id,
             proxy_session_id,
             &HlsTerminalTailPreparationInput {
@@ -543,7 +557,7 @@ impl HlsProxyManager {
             }
         }
         let protection_capacity_exceeded =
-            match evaluate_terminal_commit_authorization(&session, lease_id, preparation, decision, now_ms) {
+            match evaluate_terminal_commit_authorization(&leases, &session, lease_id, preparation, decision, now_ms) {
                 HlsTerminalCommitAuthorization::Authorized { protection_capacity_exceeded } => {
                     protection_capacity_exceeded
                 }
@@ -747,7 +761,8 @@ impl HlsProxyManager {
         } else {
             HlsTerminalLeaseDecision::Unavailable(reason)
         };
-        match evaluate_terminal_commit_authorization(session, lease_id, &command.preparation, &decision, now_ms) {
+        match evaluate_terminal_commit_authorization(leases, session, lease_id, &command.preparation, &decision, now_ms)
+        {
             HlsTerminalCommitAuthorization::Authorized { .. } => {}
             HlsTerminalCommitAuthorization::Rejected(outcome) => return outcome,
         }
@@ -777,15 +792,16 @@ impl HlsProxyManager {
     ) {
         let proxy_session_id = &command.key.proxy_session_id;
         let preparation = &command.preparation;
-        if !preparation.trigger.is_runtime_policy() && preparation.reserve.is_exhausted() {
+        let origin_path_degraded = session.origin_control.path_is_degraded_at(now_ms);
+        if !preparation.trigger.is_runtime_policy() && preparation.reserve.is_exhausted() && origin_path_degraded {
             session.require_live_entry_revalidation(preparation.origin_progress_generation);
         }
-        let all_terminal = leases.all_live_leases_terminal_for_session(proxy_session_id);
-        session.origin_control.progress_phase = if all_terminal {
-            super::super::origin_progress::HlsOriginProgressPhase::Terminal
-        } else {
-            super::super::origin_progress::HlsOriginProgressPhase::TerminalPartial
-        };
+        if leases.all_live_leases_terminal_for_session(proxy_session_id) {
+            session.origin_control.progress_phase = super::super::origin_progress::HlsOriginProgressPhase::Terminal;
+        } else if preparation.trigger.is_runtime_policy() || origin_path_degraded {
+            session.origin_control.progress_phase =
+                super::super::origin_progress::HlsOriginProgressPhase::TerminalPartial;
+        }
         if let Some(plan) = tail {
             log::debug!(
                 "HLS runtime custom tail committed: proxy_session={} lease={} reason={} \

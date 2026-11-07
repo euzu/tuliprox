@@ -183,7 +183,7 @@ async fn terminal_fixture() -> (PreparedTerminalCutoverFixture, HlsAccessLeaseSt
             .app_state
             .hls
             .proxy
-            .prepare_access_lease_manifest_publication(
+            .prepare_access_lease_manifest_publication_for_test(
                 &fixture.lease_id,
                 &fixture.proxy_session_id,
                 current_time_millis(),
@@ -198,7 +198,7 @@ async fn terminal_fixture() -> (PreparedTerminalCutoverFixture, HlsAccessLeaseSt
             .app_state
             .hls
             .proxy
-            .prepare_access_lease_manifest_publication(
+            .prepare_access_lease_manifest_publication_for_test(
                 &fixture.lease_id,
                 &fixture.proxy_session_id,
                 current_time_millis(),

@@ -44,10 +44,7 @@ pub use self::{
 };
 use self::{
     fetch::{current_time_millis, next_retry_delay_ms},
-    model::{
-        request_hls_session_idle_timeout_secs_from_config, DEFAULT_HLS_TARGET_DURATION_SECS,
-        HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT,
-    },
+    model::{request_hls_session_idle_timeout_secs_from_config, DEFAULT_HLS_TARGET_DURATION_SECS},
 };
 pub(crate) use self::{
     model::HlsManifestRecoveryDiagnostics, recovery::retry_hls_origin_manifest_recovery_chain_with_diagnostics,

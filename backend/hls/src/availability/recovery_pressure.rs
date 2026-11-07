@@ -200,8 +200,10 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
     let effective_origin_degraded = session.origin_control.path_condition.is_degraded() || publication_late;
     let observed_latency = session.origin_control.recovery_samples.latency_snapshot();
     let workload = HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling();
+    let mut retained_gap_pressure = false;
     let pressure = aggregate_session_recovery_pressure(active_leases.iter().filter_map(|lease| {
         let manifest = lease.last_manifest_snapshot.as_ref()?;
+        let retained_gap = !effective_origin_degraded && session.has_retained_playback_gap(lease);
         let ready_timeline = session.ready_timeline_snapshot(
             lease.playback_cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq),
             now_ms,
@@ -214,9 +216,10 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
             ready_timeline: &ready_timeline,
             now_ms,
             recovery_trigger_budget,
-            origin_path_degraded: effective_origin_degraded,
+            origin_path_degraded: effective_origin_degraded || retained_gap,
             recovery_committed: false,
         });
+        retained_gap_pressure |= retained_gap && (reserve.recovery_required || reserve.cutover_required);
         let recovery_boundary_ms =
             recovery_trigger_budget.as_millis().saturating_add(reserve.transition_margin.as_millis());
         let cutover_timing =
@@ -236,9 +239,11 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
     }))?;
     let progress_phase_before = session.origin_control.progress_phase;
     let progress_condition_before = session.origin_control.path_condition;
+    let decision_condition =
+        if retained_gap_pressure { HlsOriginPathCondition::SegmentReadinessFailure } else { progress_condition_before };
     let decision = evaluate_origin_progress(HlsOriginProgressSnapshot {
         phase: progress_phase_before,
-        condition: progress_condition_before,
+        condition: decision_condition,
         target_duration_ms: publication_target_duration_ms,
         last_media_progress_at_ms: session.origin_control.last_media_progress_at_ms,
         session_recovery_required: pressure.any_recovery_required,
@@ -246,16 +251,20 @@ pub(super) fn evaluate_and_commit_session_recovery_pressure(
         recovery_committed: false,
         now_ms,
     });
-    session.origin_control.progress_phase = decision.next_phase;
-    if session.origin_control.path_condition == HlsOriginPathCondition::ProgressExpected
-        && matches!(
-            decision.next_phase,
-            HlsOriginProgressPhase::PublicationLate
-                | HlsOriginProgressPhase::RecoveryRequired
-                | HlsOriginProgressPhase::Critical
-        )
-    {
-        session.origin_control.path_condition = HlsOriginPathCondition::PublicationLate;
+    // A retained gap can trigger recovery for the blocked cursor while the
+    // shared origin continues publishing healthy media for other leases.
+    if !retained_gap_pressure {
+        session.origin_control.progress_phase = decision.next_phase;
+        if progress_condition_before == HlsOriginPathCondition::ProgressExpected
+            && matches!(
+                decision.next_phase,
+                HlsOriginProgressPhase::PublicationLate
+                    | HlsOriginProgressPhase::RecoveryRequired
+                    | HlsOriginProgressPhase::Critical
+            )
+        {
+            session.origin_control.path_condition = HlsOriginPathCondition::PublicationLate;
+        }
     }
     let controlling = pressure.controlling;
     let trigger_source = recovery_trigger_source(

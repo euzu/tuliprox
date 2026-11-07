@@ -914,7 +914,7 @@ async fn hls_cutover_policy_advanced_commit_supersedes_preparation_and_keeps_lea
         60_000,
     ));
     let publication_guard = hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 1_000)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, 1_000)
         .await
         .expect("live manifest publication");
     assert!(hls_proxy

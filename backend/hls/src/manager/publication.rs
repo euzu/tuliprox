@@ -542,13 +542,98 @@ impl HlsProxyManager {
         Arc::clone(&self.access_leases).write_owned().await
     }
 
-    pub async fn prepare_access_lease_manifest_publication(
+    /// Seeds lower-level publication fixtures which have no rendered cache source.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn prepare_access_lease_manifest_publication_for_test(
         &self,
         lease_id: &HlsAccessLeaseId,
         proxy_session_id: &ProxySessionId,
         now_ms: u64,
     ) -> Option<HlsLeaseManifestPublicationGuard> {
         self.access_leases.write().await.prepare_manifest_publication(lease_id, proxy_session_id, now_ms)
+    }
+
+    pub async fn prepare_access_lease_manifest_publication(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Option<HlsLeaseManifestPublicationGuard> {
+        let current = self.sessions.hold_current_proxy_session(proxy_session_id).await?;
+        let mut leases = self.access_leases.write().await;
+        let mut guard = leases.prepare_manifest_publication(lease_id, proxy_session_id, now_ms)?;
+        if leases.response_snapshot(lease_id, proxy_session_id, now_ms)?.uses_entry_view() {
+            guard.bind_strip_policy(&self.strip());
+        }
+        guard.bind_source(Arc::as_ptr(current.session()) as usize, &*current.session().read().await);
+        Some(guard)
+    }
+
+    pub(super) fn validate_entry_manifest_publication(
+        &self,
+        expected: HlsLeaseManifestPublicationGuard,
+        snapshot: &HlsLeaseManifestSnapshot,
+        session: &crate::HlsSession,
+        session_address: usize,
+    ) -> Result<HlsLeaseManifestPublicationGuard, HlsLeaseManifestPublicationRejectReason> {
+        if !expected.source_is_current(session_address, session)
+            || (expected.has_source_binding() && session.is_gc_marked_for_removal())
+        {
+            return Err(HlsLeaseManifestPublicationRejectReason::SnapshotChanged);
+        }
+        if !expected.strip_policy_matches(&self.strip()) {
+            return Err(HlsLeaseManifestPublicationRejectReason::StripPolicyChanged);
+        }
+        if expected.entry_strip_policy().is_some() {
+            let current_source =
+                if snapshot.startup_revisions.as_ref().is_some_and(|revisions| revisions.window_plan.is_some()) {
+                    session.live_window_source_identity()
+                } else if snapshot.delivery_mode == HlsManifestDeliveryMode::NormalCacheTimeline {
+                    session.last_normal_manifest_commit_identity()
+                } else {
+                    session.transient.last_manifest_commit_identity()
+                };
+            if current_source != Some(snapshot.source_commit_identity) {
+                return Err(HlsLeaseManifestPublicationRejectReason::ManifestGenerationUnavailable);
+            }
+            if snapshot.delivery_mode == HlsManifestDeliveryMode::NormalCacheTimeline
+                && snapshot.startup_revisions.is_none()
+                && snapshot.visible_segments.iter().any(|segment| {
+                    session.segments.get(&segment.proxy_seq).is_none_or(|entry| {
+                        !matches!(entry.status, crate::SegmentCacheStatus::Ready { .. })
+                            || entry.duration_ms != segment.duration_ms
+                            || entry.map_ref.is_some_and(|id| {
+                                session
+                                    .maps
+                                    .get(&id)
+                                    .is_none_or(|map| !matches!(map.status, crate::MapCacheStatus::Ready { .. }))
+                            })
+                    })
+                })
+            {
+                return Err(HlsLeaseManifestPublicationRejectReason::RevisionConflict);
+            }
+        }
+        let only_provisioning = !snapshot.visible_segments.is_empty()
+            && snapshot
+                .visible_proxy_seqs()
+                .all(|seq| session.segments.get(&seq).is_some_and(crate::is_hls_provisioning_segment));
+        Ok(if only_provisioning { expected.without_live_entry_admission() } else { expected })
+    }
+
+    pub async fn bound_access_lease_entry_wait(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        entry_generation: u64,
+        requested_deadline_ms: u64,
+    ) -> Option<u64> {
+        self.access_leases.write().await.bound_entry_wait(
+            lease_id,
+            proxy_session_id,
+            entry_generation,
+            requested_deadline_ms,
+        )
     }
 
     #[allow(
@@ -559,7 +644,7 @@ impl HlsProxyManager {
         &self,
         lease_id: &HlsAccessLeaseId,
         proxy_session_id: &ProxySessionId,
-        expected: HlsLeaseManifestPublicationGuard,
+        mut expected: HlsLeaseManifestPublicationGuard,
         snapshot: HlsLeaseManifestSnapshot,
         published_transient_resource_ids: HlsPublishedTransientResourceIds,
         now_ms: u64,
@@ -580,7 +665,13 @@ impl HlsProxyManager {
         let finalized_manifest_generation = snapshot.finalized_transient_manifest_generation;
         let lease_issued_at_ms = expected.lease_issued_at_ms();
         let Some(finalized_manifest_generation) = finalized_manifest_generation else {
-            let session = self.sessions.get_by_proxy_session_id(proxy_session_id).await;
+            let current_session = self.sessions.hold_current_proxy_session(proxy_session_id).await;
+            if current_session.is_none() && expected.has_source_binding() {
+                return HlsLeaseManifestPublicationOutcome::Rejected(
+                    HlsLeaseManifestPublicationRejectReason::SessionMismatch,
+                );
+            }
+            let session = current_session.as_ref().map(|current| Arc::clone(current.session()));
             // The lease-store write lock keeps the previous lease membership stable while the
             // session read produces an immutable merged membership snapshot. The snapshot can then
             // be committed without reopening the lease-store transaction.
@@ -616,6 +707,17 @@ impl HlsProxyManager {
                 return HlsLeaseManifestPublicationOutcome::Rejected(
                     HlsLeaseManifestPublicationRejectReason::ManifestGenerationUnavailable,
                 );
+            }
+            if let (Some(state), Some(handle)) = (session_guard.as_ref(), session.as_ref()) {
+                expected = match self.validate_entry_manifest_publication(
+                    expected,
+                    &snapshot,
+                    state,
+                    Arc::as_ptr(handle) as usize,
+                ) {
+                    Ok(expected) => expected,
+                    Err(reason) => return HlsLeaseManifestPublicationOutcome::Rejected(reason),
+                };
             }
             let published = snapshot.clone();
             let outcome = leases.commit_manifest_publication_with_resources(
@@ -661,6 +763,15 @@ impl HlsProxyManager {
                 HlsLeaseManifestPublicationRejectReason::ManifestGenerationUnavailable,
             );
         }
+        expected = match self.validate_entry_manifest_publication(
+            expected,
+            &snapshot,
+            &session,
+            Arc::as_ptr(current_session.session()) as usize,
+        ) {
+            Ok(expected) => expected,
+            Err(reason) => return HlsLeaseManifestPublicationOutcome::Rejected(reason),
+        };
         let outcome = leases.commit_manifest_publication_with_resources(
             lease_id,
             proxy_session_id,

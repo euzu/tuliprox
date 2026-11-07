@@ -895,7 +895,11 @@ async fn playlist_publication_uses_the_same_recovery_and_never_reinstalls_an_old
     let retry = install_completed_retry(&fixture).await?;
     let guard = fixture
         .manager
-        .prepare_access_lease_manifest_publication(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
+        .prepare_access_lease_manifest_publication_for_test(
+            &fixture.lease_id,
+            &fixture.proxy_session_id,
+            current_time_millis(),
+        )
         .await
         .expect("publication");
     assert!(fixture
@@ -923,7 +927,11 @@ async fn playlist_publication_uses_the_same_recovery_and_never_reinstalls_an_old
     assert!(!failed.revision().complete(crate::CachedSegmentMetadata { path: "retired.ts".into(), size: 1 }));
     let guard = fixture
         .manager
-        .prepare_access_lease_manifest_publication(&fixture.lease_id, &fixture.proxy_session_id, current_time_millis())
+        .prepare_access_lease_manifest_publication_for_test(
+            &fixture.lease_id,
+            &fixture.proxy_session_id,
+            current_time_millis(),
+        )
         .await
         .expect("publication");
     assert!(fixture
