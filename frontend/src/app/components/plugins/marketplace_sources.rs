@@ -1,7 +1,11 @@
 //! Marketplace source management: the list of configured sources with their sync state, the add/edit dialog, remove and sync.
 use crate::{
-    app::components::{input::Input, ConfirmDialog, ContentDialog, TextButton, ToggleSwitch},
+    app::components::{
+        input::Input, menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, ConfirmDialog, ContentDialog, Table,
+        TableDefinition, TextButton, ToggleSwitch,
+    },
     hooks::use_service_context,
+    html_if,
     i18n::use_translation,
     model::{DialogAction, DialogActions, DialogResult},
     services::PluginActionError,
@@ -10,7 +14,24 @@ use js_sys::Date;
 use shared::model::{PluginRepositoryAddDto, PluginRepositoryDto, PluginRepositoryInfoDto};
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
-use yew::{component, html, platform::spawn_local, use_state, Callback, Html, Properties};
+use web_sys::MouseEvent;
+use yew::{component, html, platform::spawn_local, use_memo, use_state, Callback, Html, Properties, TargetCast};
+
+crate::app::components::define_table_columns! {
+    enum MarketplaceSourceColumn {
+        Actions => ("actions", "TABLE_COLUMNS.ACTIONS") {
+            can_hide: false,
+            content: false,
+            header_label: Some("LABEL.EMPTY"),
+        },
+        Name => ("name", "LABEL.NAME") { can_hide: false },
+        Url => ("url", "LABEL.URL"),
+        Enabled => ("enabled", "LABEL.ENABLED"),
+        LastSync => ("last_sync", "LABEL.PLUGIN_MARKETPLACE_LAST_SYNC"),
+        LastError => ("last_error", "LABEL.PLUGIN_LAST_ERROR"),
+        Plugins => ("plugins", "LABEL.PLUGINS"),
+    }
+}
 
 /// Local time as `YYYY-MM-DD HH:MM:SS` of a unix-seconds timestamp.
 fn format_sync_time(seconds: i64) -> String {
@@ -169,11 +190,16 @@ pub struct MarketplaceSourcesProps {
 pub fn MarketplaceSources(props: &MarketplaceSourcesProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let columns = use_memo((), |()| MarketplaceSourceColumn::columns());
     // `Some(None)` is the add dialog, `Some(Some(source))` the edit dialog.
     let dialog = use_state(|| None::<Option<PluginRepositoryInfoDto>>);
     let remove_for = use_state(|| None::<PluginRepositoryInfoDto>);
     let syncing = use_state(|| None::<String>);
     let acting = use_state(|| false);
+
+    let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
+    let popup_is_open = use_state(|| false);
+    let selected_source = use_state(|| None::<Rc<PluginRepositoryInfoDto>>);
 
     let on_add = {
         let dialog = dialog.clone();
@@ -267,79 +293,172 @@ pub fn MarketplaceSources(props: &MarketplaceSourcesProps) -> Html {
         })
     };
 
-    let render_row = |source: &PluginRepositoryInfoDto| {
-        let edit = {
-            let dialog = dialog.clone();
-            let source = source.clone();
-            Callback::from(move |_: String| dialog.set(Some(Some(source.clone()))))
-        };
-        let remove = {
-            let remove_for = remove_for.clone();
-            let source = source.clone();
-            Callback::from(move |_: String| remove_for.set(Some(source.clone())))
-        };
-        let sync = {
-            let on_sync = on_sync.clone();
-            let source = source.clone();
-            Callback::from(move |_: String| on_sync.emit(source.clone()))
-        };
-        let toggle = {
-            let on_toggle = on_toggle.clone();
-            let source = source.clone();
-            Callback::from(move |enabled: bool| on_toggle.emit((source.clone(), enabled)))
-        };
-        let is_syncing = syncing.as_deref() == Some(source.id.as_str());
-        html! {
-            <tr key={source.id.clone()}>
-                <td>{ source.name.clone() }<br/><code class="tp__plugins__muted">{ source.id.clone() }</code></td>
-                <td class="tp__plugins__source-url"><code>{ source.url.clone() }</code></td>
-                <td>
-                    <ToggleSwitch
-                        key={format!("{}-{}", source.id, source.enabled)}
-                        value={source.enabled}
-                        readonly={!props.can_write || *acting}
-                        aria_label={format!("{} {}", translate.t("LABEL.ENABLED"), source.name)}
-                        on_change={toggle}
-                    />
-                </td>
-                <td>{ source.last_sync.map_or_else(|| translate.t("LABEL.PLUGIN_MARKETPLACE_NEVER_SYNCED"), format_sync_time) }</td>
-                <td>
-                    if let Some(last_error) = source.last_error.as_ref() {
-                        <span class="tp__plugins__source-error tp__input-error">{ last_error.clone() }</span>
-                    }
-                </td>
-                <td>{ source.plugin_count }</td>
-                if props.can_write {
-                    <td class="tp__plugins__source-actions">
-                        <TextButton
-                            name={format!("sync-{}", source.id)}
-                            icon="Refresh"
-                            title={translate.t(if is_syncing { "LABEL.PLUGIN_MARKETPLACE_SYNCING" } else { "LABEL.PLUGIN_MARKETPLACE_SYNC" })}
-                            aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_MARKETPLACE_SYNC"), source.name)}
-                            disabled={syncing.is_some() || !source.enabled}
-                            onclick={sync}
-                        />
-                        <TextButton
-                            name={format!("edit-source-{}", source.id)}
-                            icon="Edit"
-                            title={translate.t("LABEL.EDIT")}
-                            aria_label={format!("{} {}", translate.t("LABEL.EDIT"), source.name)}
-                            disabled={*acting}
-                            onclick={edit}
-                        />
-                        <TextButton
-                            name={format!("remove-source-{}", source.id)}
-                            icon="Delete"
-                            title={translate.t("LABEL.PLUGIN_MARKETPLACE_REMOVE_SOURCE")}
-                            aria_label={format!("{} {}", translate.t("LABEL.PLUGIN_MARKETPLACE_REMOVE_SOURCE"), source.name)}
-                            disabled={*acting}
-                            onclick={remove}
-                        />
-                    </td>
-                }
-            </tr>
-        }
+    let handle_popup_close = {
+        let popup_is_open = popup_is_open.clone();
+        Callback::from(move |()| popup_is_open.set(false))
     };
+
+    let handle_popup_onclick = {
+        let set_selected = selected_source.clone();
+        let set_anchor = popup_anchor_ref.clone();
+        let set_open = popup_is_open.clone();
+        Callback::from(move |(dto, event): (Rc<PluginRepositoryInfoDto>, MouseEvent)| {
+            if let Some(target) = event.target_dyn_into::<web_sys::Element>() {
+                set_selected.set(Some(dto));
+                set_anchor.set(Some(target));
+                set_open.set(true);
+            }
+        })
+    };
+
+    let handle_menu_click = {
+        let popup_is_open = popup_is_open.clone();
+        let selected_source = selected_source.clone();
+        let dialog = dialog.clone();
+        let remove_for = remove_for.clone();
+        let on_sync = on_sync.clone();
+        let syncing = syncing.clone();
+        let can_write = props.can_write;
+        Callback::from(move |(name, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if !can_write {
+                popup_is_open.set(false);
+                return;
+            }
+            match name.as_str() {
+                "edit" => {
+                    if let Some(source) = &*selected_source {
+                        dialog.set(Some(Some(source.as_ref().clone())));
+                    }
+                }
+                "sync" => {
+                    if let Some(source) = &*selected_source {
+                        if source.enabled && syncing.is_none() {
+                            on_sync.emit(source.as_ref().clone());
+                        }
+                    }
+                }
+                "delete" => {
+                    if let Some(source) = &*selected_source {
+                        remove_for.set(Some(source.as_ref().clone()));
+                    }
+                }
+                _ => {}
+            }
+            popup_is_open.set(false);
+        })
+    };
+
+    let render_header_cell = {
+        let translate = translate.clone();
+        Callback::<usize, Html>::from(move |col| {
+            html! {
+                if let Some(column) = MarketplaceSourceColumn::from_index(col) {
+                    { translate.t(column.header_label()) }
+                }
+            }
+        })
+    };
+
+    let on_sort = Callback::<Option<(usize, shared::model::SortOrder)>, ()>::from(|_| {});
+
+    let table_definition = {
+        let columns = columns.clone();
+        let render_header = render_header_cell.clone();
+        let on_sort = on_sort.clone();
+        let popup_onclick = handle_popup_onclick.clone();
+        let on_toggle = on_toggle.clone();
+        let translate = translate.clone();
+
+        use_memo((props.sources.clone(), props.can_write, *acting), move |(sources, can_write, acting)| {
+            let items = Some(Rc::new(sources.iter().map(|s| Rc::new(s.clone())).collect::<Vec<_>>()));
+            let can_write = *can_write;
+            let acting = *acting;
+            let popup_onclick = popup_onclick.clone();
+            let on_toggle = on_toggle.clone();
+            let translate = translate.clone();
+            let render_data_cell = Callback::<(usize, usize, Rc<PluginRepositoryInfoDto>), Html>::from(
+                move |(_row, col, dto): (usize, usize, Rc<PluginRepositoryInfoDto>)| {
+                    match MarketplaceSourceColumn::from_index(col) {
+                        Some(MarketplaceSourceColumn::Actions) => {
+                            if !can_write {
+                                return html! {};
+                            }
+                            let popup_onclick = popup_onclick.clone();
+                            html! {
+                                <button class="tp__icon-button"
+                                    onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((dto.clone(), event)))}>
+                                    <AppIcon name="Popup" />
+                                </button>
+                            }
+                        }
+                        Some(MarketplaceSourceColumn::Name) => {
+                            html! {
+                                <>
+                                    { dto.name.clone() }
+                                    <br/>
+                                    <code class="tp__plugins__muted">{ dto.id.clone() }</code>
+                                </>
+                            }
+                        }
+                        Some(MarketplaceSourceColumn::Url) => {
+                            html! {
+                                <code class="tp__plugins__source-url">{ dto.url.clone() }</code>
+                            }
+                        }
+                        Some(MarketplaceSourceColumn::Enabled) => {
+                            let toggle = {
+                                let on_toggle = on_toggle.clone();
+                                let source = dto.as_ref().clone();
+                                Callback::from(move |enabled: bool| on_toggle.emit((source.clone(), enabled)))
+                            };
+                            html! {
+                                <ToggleSwitch
+                                    key={format!("{}-{}", dto.id, dto.enabled)}
+                                    value={dto.enabled}
+                                    readonly={!can_write || acting}
+                                    aria_label={format!("{} {}", translate.t("LABEL.ENABLED"), dto.name)}
+                                    on_change={toggle}
+                                />
+                            }
+                        }
+                        Some(MarketplaceSourceColumn::LastSync) => {
+                            html! {
+                                { dto.last_sync.map_or_else(|| translate.t("LABEL.PLUGIN_MARKETPLACE_NEVER_SYNCED"), format_sync_time) }
+                            }
+                        }
+                        Some(MarketplaceSourceColumn::LastError) => {
+                            html! {
+                                if let Some(last_error) = dto.last_error.as_ref() {
+                                    <span class="tp__plugins__source-error tp__input-error">{ last_error.clone() }</span>
+                                }
+                            }
+                        }
+                        Some(MarketplaceSourceColumn::Plugins) => html! { dto.plugin_count },
+                        _ => html! {},
+                    }
+                },
+            );
+
+            TableDefinition::<PluginRepositoryInfoDto> {
+                table_id: "plugins.marketplace_sources".into(),
+                columns: columns.clone(),
+                row_key: Callback::from(|(_, item): (usize, Rc<PluginRepositoryInfoDto>)| item.id.clone().into()),
+                items,
+                on_sort,
+                render_header_cell: render_header,
+                render_data_cell,
+            }
+        })
+    };
+
+    let is_selected_syncing = selected_source.as_ref().is_some_and(|s| syncing.as_deref() == Some(s.id.as_str()));
+    let sync_label = translate.t(if is_selected_syncing {
+        "LABEL.PLUGIN_MARKETPLACE_SYNCING"
+    } else {
+        "LABEL.PLUGIN_MARKETPLACE_SYNC"
+    });
 
     html! {
         <section class="tp__plugins__sources">
@@ -353,22 +472,7 @@ pub fn MarketplaceSources(props: &MarketplaceSourcesProps) -> Html {
             if props.sources.is_empty() {
                 <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_MARKETPLACE_NO_SOURCES") }</p>
             } else {
-                <table class="tp__plugins__sources-table">
-                    <thead>
-                        <tr>
-                            <th>{ translate.t("LABEL.NAME") }</th>
-                            <th>{ translate.t("LABEL.URL") }</th>
-                            <th>{ translate.t("LABEL.ENABLED") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_MARKETPLACE_LAST_SYNC") }</th>
-                            <th>{ translate.t("LABEL.PLUGIN_LAST_ERROR") }</th>
-                            <th>{ translate.t("LABEL.PLUGINS") }</th>
-                            if props.can_write {
-                                <th></th>
-                            }
-                        </tr>
-                    </thead>
-                    <tbody>{ for props.sources.iter().map(render_row) }</tbody>
-                </table>
+                <Table::<PluginRepositoryInfoDto> definition={table_definition} />
             }
             if let Some(initial) = (*dialog).clone().filter(|_| props.can_write) {
                 <SourceDialog
@@ -387,6 +491,18 @@ pub fn MarketplaceSources(props: &MarketplaceSourcesProps) -> Html {
                     close_on_backdrop_click=false
                 />
             }
+            <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
+                { html_if!(props.can_write, {
+                    <>
+                        <MenuItem icon="Edit" name="edit" label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click} />
+                        { html_if!(selected_source.as_ref().is_some_and(|s| s.enabled), {
+                            <MenuItem icon="Refresh" name="sync" label={sync_label} onclick={&handle_menu_click} />
+                        })}
+                        <hr/>
+                        <MenuItem icon="Delete" name="delete" label={translate.t("LABEL.PLUGIN_MARKETPLACE_REMOVE_SOURCE")} onclick={&handle_menu_click} class="tp__delete_action" />
+                    </>
+                })}
+            </PopupMenu>
         </section>
     }
 }

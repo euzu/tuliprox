@@ -479,7 +479,7 @@ fn test_preview_request_diagnostics_for_logging_includes_effective_target_and_ho
 
     assert_eq!(
         diagnostics,
-        "request_url=http://***/stream, effective_url=http://***/stream, host_header=example.com:8080, connect_ip=0.***"
+        "request_url=http://***:8080/stream, effective_url=http://***:8080/stream, host_header=example.com:8080, connect_ip=0.***"
     );
 }
 
@@ -493,10 +493,7 @@ fn test_preview_request_diagnostics_for_logging_sanitizes_each_stream_url() -> R
     assert!(!diagnostics.contains("example.com"));
     assert!(!diagnostics.contains("abcd"));
     assert!(!diagnostics.contains("efgh"));
-    assert_eq!(
-        diagnostics,
-        "request_url=http://***/live/***/1092671.ts, effective_url=http://***/live/***/1092671.ts, host_header=0.***, connect_ip=0.***"
-    );
+    assert_eq!(diagnostics, "request_url=http://***/live/***/1092671.ts, effective_url=http://***/live/***/1092671.ts, host_header=0.***, connect_ip=0.***");
     Ok(())
 }
 

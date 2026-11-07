@@ -219,6 +219,16 @@ pub(in crate::api::endpoints::hls_api::tests) fn enable_hls_cache(app_state: &Ar
     app_state.app_config.config.store(Arc::new(config));
 }
 
+pub(in crate::api::endpoints::hls_api::tests) async fn configure_test_hls_strip(
+    app_state: &Arc<AppState>,
+    strip: &tuliprox_core::model::StripConfig,
+) {
+    let mut config = app_state.app_config.config.load().as_ref().clone();
+    config.reverse_proxy.as_mut().unwrap().hls_cache.as_mut().unwrap().strip = strip.clone();
+    app_state.app_config.config.store(Arc::new(config));
+    app_state.hls.proxy.update_config(&app_state.app_config).await;
+}
+
 pub(in crate::api::endpoints::hls_api::tests) fn test_app_state_with_hls_proxy(
     hls_proxy: Arc<HlsProxyManager>,
 ) -> Arc<AppState> {
@@ -412,7 +422,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn publish_test_transient_re
     let publication = app_state
         .hls
         .proxy
-        .prepare_access_lease_manifest_publication(&access_lease_id, &proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&access_lease_id, &proxy_session_id, now_ms)
         .await
         .expect("test resource lease accepts manifest publication");
     let snapshot = HlsLeaseManifestSnapshot {

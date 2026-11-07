@@ -73,11 +73,11 @@ async fn manifest_publication_manager_rejects_delayed_source_and_expiry_races() 
     let lease_id = HlsAccessLeaseId("lease-a".to_string());
     manager.access_leases.write().await.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id));
     let older_request = manager
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 2_000)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, 2_000)
         .await
         .expect("older request guard");
     let newer_request = manager
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 2_000)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, 2_000)
         .await
         .expect("newer request guard");
 
@@ -109,7 +109,7 @@ async fn manifest_publication_manager_rejects_delayed_source_and_expiry_races() 
     let expiry_lease_id = HlsAccessLeaseId("expiry".to_string());
     manager.access_leases.write().await.prepare_access_lease(access_lease(&expiry_lease_id.0, &proxy_session_id));
     let expiry_request = manager
-        .prepare_access_lease_manifest_publication(&expiry_lease_id, &proxy_session_id, 2_000)
+        .prepare_access_lease_manifest_publication_for_test(&expiry_lease_id, &proxy_session_id, 2_000)
         .await
         .expect("pre-expiry request guard");
     assert_eq!(
@@ -134,7 +134,7 @@ async fn rolling_manifest_publication_uses_lease_store_when_session_is_gc_marked
     let lease_id = HlsAccessLeaseId("lease-a".to_string());
     manager.access_leases.write().await.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id));
     let publication = manager
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 2_000)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, 2_000)
         .await
         .expect("rolling publication guard");
     let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(

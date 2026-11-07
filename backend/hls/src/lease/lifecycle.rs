@@ -251,6 +251,10 @@ impl HlsAccessLeaseStore {
         self.availability_evidence_can_advance()?;
         if let Some(lease) = self.by_lease_id.get_mut(lease_id) {
             lease.state = HlsAccessLeaseState::Idle;
+            if lease.playback_mode == HlsLeasePlaybackMode::Live {
+                lease.entry_generation = lease.entry_generation.and_then(|generation| generation.checked_add(1));
+                lease.entry_wait_deadline_ms = None;
+            }
         }
         self.advance_availability_evidence(&proxy_session_id)?;
         Ok(Some(release))
@@ -404,6 +408,21 @@ impl HlsAccessLeaseStore {
             return None;
         }
         self.by_lease_id.get(lease_id).cloned()
+    }
+
+    /// Reads current live playback evidence without mutating lease validity.
+    pub(crate) fn live_playback_lease(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Option<&HlsAccessLease> {
+        self.by_lease_id.get(lease_id).filter(|lease| {
+            lease.proxy_session_id == *proxy_session_id
+                && lease_state_allows_use(lease.state)
+                && lease.validity_due_at_ms() > now_ms
+                && lease.playback_mode == HlsLeasePlaybackMode::Live
+        })
     }
 
     /// Returns immutable playback evidence for leases that are actively consuming this shared session.
@@ -629,7 +648,8 @@ impl HlsAccessLeaseStore {
             return HlsAccessLeaseActivation::Expired;
         }
         if new_lease.playback_mode == HlsLeasePlaybackMode::Live
-            && new_lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+            && (new_lease.manifest_start_attempt.as_ref().is_some_and(|attempt| attempt.failed())
+                || (new_lease.state == HlsAccessLeaseState::Idle && !new_lease.has_current_entry_manifest()))
         {
             return HlsAccessLeaseActivation::AvailabilityPending;
         }

@@ -52,6 +52,8 @@ What the host does limit, in `backend/plugins/src/process.rs`:
 - At most 256 arguments and 1 MiB of input; stdout and stderr are each cut to their first 64 KiB.
 - The wait is 1 to 300 seconds; after that the child is killed and the call fails. A call the host drops (a plugin call
   has a 30 s deadline) kills its child too.
+- On Unix the program runs in its own process group. When the program exits, times out or the call is dropped, the whole
+  group is killed, so a background job it started can neither outlive the call nor hold it open until the timeout.
 - Every run is logged as `plugin <id> runs the program <program>`, by program name and never by arguments, which may carry
   a credential.
 

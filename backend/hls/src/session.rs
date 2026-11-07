@@ -335,6 +335,7 @@ pub struct HlsSession {
     pub next_media_start_ms: u64,
     pub origin_to_proxy: HashMap<OriginSegmentKey, u64>,
     pub published_resource_history: HlsPublishedResourceHistory,
+    pub(crate) origin_content: crate::refresh::origin_probe::HlsOriginContentEvidence,
     pub discontinuity_sequence: u64,
     pub transient_discontinuity_sequence: Option<u64>,
     pub pending_handoff_discontinuity_sequence: Option<u64>,
@@ -435,6 +436,7 @@ impl HlsSession {
             next_media_start_ms: 0,
             origin_to_proxy: HashMap::new(),
             published_resource_history: HlsPublishedResourceHistory::default(),
+            origin_content: crate::refresh::origin_probe::HlsOriginContentEvidence::default(),
             discontinuity_sequence: 0,
             transient_discontinuity_sequence: None,
             pending_handoff_discontinuity_sequence: None,
@@ -1134,6 +1136,7 @@ impl fmt::Debug for HlsSession {
             .field("activity", &self.activity)
             .field("origin_control", &self.origin_control)
             .field("origin_epoch", &self.origin_epoch)
+            .field("origin_content", &self.origin_content)
             .field("origin_epoch_host_bound", &self.origin_epoch_effective_host_id.is_some())
             .field("origin_epoch_sequence_base", &self.origin_epoch_sequence_base)
             .field("origin_seq_highwater", &self.origin_seq_highwater)

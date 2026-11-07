@@ -8,6 +8,7 @@ pub(crate) mod test_config;
 // `utils`, which must not depend on this layer.
 mod alias_repository;
 mod api_user_recovery;
+mod db_cli;
 mod db_viewer;
 mod epg_group_index;
 mod epg_repository;
@@ -40,11 +41,13 @@ mod stream_history;
 mod strm_repository;
 pub mod target_bouquet_repository;
 pub mod token_revocations;
+mod user_db_repair;
 mod user_repository;
 mod xtream_playlist_iterator;
 mod xtream_repository;
 
 pub use alias_repository::*;
+pub use db_cli::{run_database_command, DatabaseCommand};
 pub use db_viewer::*;
 pub use epg_group_index::*;
 pub use epg_repository::*;
@@ -82,6 +85,7 @@ pub use target_id_mapping::*;
 // module name so every `crate::bplustree::X` path keeps resolving.
 pub use tuliprox_btree as bplustree;
 pub use tuliprox_btree::*;
+pub use user_db_repair::*;
 pub use user_repository::*;
 pub use xtream_playlist_iterator::*;
 pub use xtream_repository::*;

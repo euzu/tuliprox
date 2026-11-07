@@ -264,8 +264,11 @@ pub(in crate::api::endpoints::hls_api::tests) async fn assert_recovery_after_out
         assert_eq!(session.proxy_next_seq, Some(7));
         assert!(session.origin_control.progress_generation > progress_generation);
         assert!(session.origin_control.acceptance_episode.is_none());
-        assert!(last_episode_generation
-            .is_some_and(|generation| session.origin_control.acceptance_generation.0 > generation));
+        assert_eq!(
+            last_episode_generation,
+            Some(session.origin_control.acceptance_generation.0),
+            "pinned progress completes the existing episode without another full burst"
+        );
     }
     let response = try_test_hls_cached_manifest_response(
         &fixture.app_state,
@@ -1474,7 +1477,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn publish_test_manifest_and
     let publication_guard = app_state
         .hls
         .proxy
-        .prepare_access_lease_manifest_publication(lease_id, proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(lease_id, proxy_session_id, now_ms)
         .await
         .expect("live lease accepts publication preparation");
     assert!(app_state

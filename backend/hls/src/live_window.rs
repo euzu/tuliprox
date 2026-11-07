@@ -40,7 +40,7 @@ pub(crate) struct HlsLiveWindowDemand {
 
 impl HlsLiveWindowView {
     pub fn for_lease(lease: &HlsAccessLease) -> Self {
-        if lease.state == HlsAccessLeaseState::Activated {
+        if lease.state == HlsAccessLeaseState::Activated && !lease.uses_entry_view() {
             if let Some(snapshot) = &lease.last_manifest_snapshot {
                 return Self::Active { first_published: snapshot.first_proxy_seq };
             }
@@ -54,7 +54,7 @@ impl HlsLiveWindowPlan {
         session.plan_live_window(self.view).as_ref() == Some(self)
     }
 
-    pub(crate) fn is_startup_recovery(&self) -> bool { self.recovered_startup }
+    pub fn is_startup_recovery(&self) -> bool { self.recovered_startup }
 
     pub(crate) fn is_ready(&self, session: &HlsSession) -> bool {
         self.visible.iter().all(|seq| {
@@ -64,6 +64,16 @@ impl HlsLiveWindowPlan {
 }
 
 impl HlsSession {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn qualify_short_entry_window_for_test(&mut self) {
+        self.origin_control.qualification = crate::short_manifest::HlsOriginQualification::Qualified {
+            basis: crate::short_manifest::HlsOriginQualificationBasis::capture(self),
+            generation: self.origin_control.acceptance_generation,
+            windows: crate::short_manifest::HlsQualifiedOriginWindows::ShortAllowed,
+            publication_boundary: self.last_normal_manifest_commit_identity(),
+        };
+    }
+
     pub(crate) fn live_origin_sequences(&self) -> &[u64] {
         self.origin_window_proxy_seqs.as_deref().unwrap_or_default()
     }

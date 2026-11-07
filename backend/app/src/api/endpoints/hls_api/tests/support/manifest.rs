@@ -136,7 +136,7 @@ pub(in crate::api::endpoints::hls_api::tests) async fn publish_ready_test_manife
     let publication_guard = app_state
         .hls
         .proxy
-        .prepare_access_lease_manifest_publication(access_lease_id, proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(access_lease_id, proxy_session_id, now_ms)
         .await
         .expect("test lease accepts publication");
     let snapshot = HlsLeaseManifestSnapshot {

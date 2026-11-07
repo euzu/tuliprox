@@ -37,6 +37,9 @@ sha2.workspace = true
 zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
 tokio = { workspace = true, features = ["time", "sync", "rt", "process", "io-util", "macros"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }

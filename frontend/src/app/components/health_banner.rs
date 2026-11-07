@@ -552,3 +552,80 @@ mod tests {
         assert!(compute_saturated(&capacity, Some(&connections), &groups));
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    use super::*;
+    use crate::{hooks::ServiceContext, i18n::I18nProvider, services::FlagsService};
+    use gloo_timers::future::TimeoutFuture;
+    use shared::model::StatusCheck;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use web_sys::{Element, HtmlElement, KeyboardEventInit};
+
+    #[component]
+    fn FocusHarness() -> Html {
+        let services = use_state(|| ServiceContext::new(&Default::default(), FlagsService::new()));
+        let status = StatusContext {
+            status: Some(Rc::new(StatusCheck {
+                active_provider_connections: Some(BTreeMap::from([(Arc::from("Provider"), 1)])),
+                ..StatusCheck::default()
+            })),
+            system_info: None,
+        };
+        html! {
+            <ContextProvider<UseStateHandle<ServiceContext>> context={services}>
+                <ContextProvider<StatusContext> context={status}>
+                    <I18nProvider supported_languages={Vec::new()}>
+                        <style>{".tp__health-banner__popover { position: fixed; top: 0; left: 0; }"}</style>
+                        <HealthBanner />
+                        <button id="health-test-next">{"Next"}</button>
+                    </I18nProvider>
+                </ContextProvider<StatusContext>>
+            </ContextProvider<UseStateHandle<ServiceContext>>>
+        }
+    }
+
+    fn element(root: &Element, selector: &str) -> HtmlElement {
+        root.query_selector(selector).unwrap().expect(selector).dyn_into().unwrap()
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn escape_closes_health_popup_and_restores_focus_only_from_inside() {
+        let document = gloo_utils::document();
+        let root = document.create_element("div").unwrap();
+        root.set_attribute("style", "position:fixed;top:20px;left:20px").unwrap();
+        document.body().unwrap().append_child(&root).unwrap();
+        let handle = yew::Renderer::<FocusHarness>::with_root(root.clone()).render();
+        TimeoutFuture::new(0).await;
+
+        let badge = element(&root, ".tp__health-banner");
+        let next = element(&root, "#health-test-next");
+        let escape = KeyboardEventInit::new();
+        escape.set_key("Escape");
+        escape.set_bubbles(true);
+
+        for selector in ["#tp-health-details", ".tp__health-banner__providers", "#health-test-next"] {
+            next.focus().unwrap();
+            badge.focus().unwrap();
+            TimeoutFuture::new(0).await;
+            assert_eq!(badge.get_attribute("aria-expanded").as_deref(), Some("true"), "before Escape from {selector}");
+            let target = element(&root, selector);
+            target.focus().unwrap();
+            assert_eq!(document.active_element(), Some(target.clone().into()));
+            target
+                .dispatch_event(&KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &escape).unwrap())
+                .unwrap();
+            TimeoutFuture::new(0).await;
+
+            let expected = if target == next { &next } else { &badge };
+            assert_eq!(document.active_element().as_ref(), Some(expected.as_ref()), "Escape from {selector}");
+            assert_eq!(badge.get_attribute("aria-expanded").as_deref(), Some("false"));
+            assert!(root.query_selector("#tp-health-details").unwrap().is_none());
+        }
+
+        handle.destroy();
+        TimeoutFuture::new(0).await;
+        root.remove();
+    }
+}

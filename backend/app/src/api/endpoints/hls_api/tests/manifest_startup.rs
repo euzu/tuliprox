@@ -1182,6 +1182,7 @@ async fn hls_cache_pending_normal_manifest_applies_initial_strip_without_mutatin
     };
     let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
     let strip = StripConfig { mode: HlsStripMode::Segments, value: 3 };
+    super::support::configure_test_hls_strip(&app_state, &strip).await;
     let stored_before = session.read().await.last_rendered_manifest.as_ref().expect("normal manifest").body.clone();
 
     let response = try_test_hls_cached_manifest_response(

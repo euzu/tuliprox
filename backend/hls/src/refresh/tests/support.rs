@@ -946,7 +946,7 @@ pub(in crate::refresh::tests) async fn prepare_active_critical_handoff_lease(
         .await
         .is_activated());
     let publication_guard = hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, &proxy_session_id, now_ms)
         .await
         .expect("active lease accepts authoritative manifest publication");
     assert!(hls_proxy
@@ -1009,9 +1009,17 @@ pub(in crate::refresh::tests) async fn mark_full_burst_ready_for_switch_staging(
     session: &Arc<RwLock<HlsSession>>,
     fetched: &FetchedOriginManifest,
 ) {
+    mark_full_burst_ready_for_switch_staging_at(session, fetched, 100).await;
+}
+
+pub(in crate::refresh::tests) async fn mark_full_burst_ready_for_switch_staging_at(
+    session: &Arc<RwLock<HlsSession>>,
+    fetched: &FetchedOriginManifest,
+    now_ms: u64,
+) {
     let candidate_workload = {
         let session = session.read().await;
-        let (_, key_resources, preview) = candidate_handoff_preview(&session, &fetched.body, 100);
+        let (_, key_resources, preview) = candidate_handoff_preview(&session, &fetched.body, now_ms);
         let first_segment = preview.segments.first().expect("switch candidate recovery segment");
         let required_map =
             first_segment.map_ref.and_then(|map_id| preview.maps.iter().find(|map| map.proxy_map_id == map_id));
@@ -1020,16 +1028,16 @@ pub(in crate::refresh::tests) async fn mark_full_burst_ready_for_switch_staging(
             first_segment,
             required_map,
             &key_resources,
-            100,
+            now_ms,
         )
     };
     let mut session = session.write().await;
     let burst_plan = HlsManifestRecoveryBurstLevel::Friendly.plan();
     session.origin_control.begin_acceptance_episode(
-        100,
+        now_ms,
         burst_plan,
         HlsManifestAcceptanceTrigger::RecoveryRequired,
-        &test_switch_staging_acceptance_episode_timing(100, burst_plan),
+        &test_switch_staging_acceptance_episode_timing(now_ms, burst_plan),
     );
     let episode = session.origin_control.acceptance_episode.as_mut().expect("acceptance episode");
     episode.record_full_burst();

@@ -24,7 +24,7 @@
 use crate::{
     app::components::{
         input::Input, number_input::NumberInput, Accordion, AccordionPanel, AppIcon, DropDownOption, DropDownSelection,
-        HideContent, RadioButtonGroup, Select, Tag, TagList, TextArea, ToggleSwitch,
+        HideContent, IconButton, RadioButtonGroup, Select, Tag, TagList, TextArea, ToggleSwitch,
     },
     i18n::use_translation,
     model::{DialogAction, DialogActions, DialogResult},
@@ -879,9 +879,7 @@ fn SchemaFieldLabel(props: &SchemaFieldLabelProps) -> Html {
         let dialog = dialog.clone();
         let title = props.label.clone();
         let description = props.description.clone();
-        Callback::from(move |event: MouseEvent| {
-            event.prevent_default();
-            event.stop_propagation();
+        Callback::from(move |(_name, _e): (String, MouseEvent)| {
             if let (Some(dialog), Some(description)) = (dialog.as_ref(), description.as_ref()) {
                 let actions = DialogActions {
                     left: None,
@@ -911,14 +909,13 @@ fn SchemaFieldLabel(props: &SchemaFieldLabelProps) -> Html {
         <div class="tp__field-label">
             <label for={props.field_id.clone()}>{ props.label.clone() }</label>
             if props.description.is_some() && dialog.is_some() {
-                <button
-                    class="tp__icon-button tp__field-label__help"
-                    type="button"
-                    title={translate.t("LABEL.HELP")}
+                <IconButton
+                    name="help"
+                    icon="QuestionMark"
+                    class="tp__field-label__help"
+                    hint={translate.t("LABEL.HELP")}
                     onclick={on_help}
-                >
-                    <AppIcon name="QuestionMark"/>
-                </button>
+                />
             }
             if let Some(url) = props.help_url.clone() {
                 <a class="tp__icon-button tp__field-label__help tp__schema-form__doc-link" href={url}

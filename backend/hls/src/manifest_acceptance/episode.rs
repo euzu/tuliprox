@@ -84,11 +84,11 @@ pub enum HlsRecoveryWorkloadBindingUpdate {
     OutsideEnvelope,
 }
 
-/// Immutable pressure snapshot that authorizes one manifest-acceptance episode.
+/// Authorized pressure snapshot for one manifest-acceptance episode.
 ///
 /// Entering `Recovering` is an execution-state transition, not evidence that
 /// reserve pressure exists. Consumers must therefore derive acceptance policy
-/// from this trigger captured before the episode starts.
+/// from authorized pressure evidence, including a later guarded promotion.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HlsManifestAcceptanceTrigger {
     #[default]
@@ -170,6 +170,20 @@ impl HlsManifestAcceptanceEpisode {
                     HlsManifestAcceptanceExhaustionReason::DeterministicTimelineConflict,
                 );
             }
+        }
+    }
+
+    /// A later, independently authorized reserve/lifecycle decision may raise
+    /// pressure on a held episode. It cannot renew its timing or burst budget.
+    pub(crate) fn promote_trigger(&mut self, trigger: HlsManifestAcceptanceTrigger) {
+        let rank = |value| match value {
+            HlsManifestAcceptanceTrigger::None => 0,
+            HlsManifestAcceptanceTrigger::Observe => 1,
+            HlsManifestAcceptanceTrigger::RecoveryRequired => 2,
+            HlsManifestAcceptanceTrigger::Critical => 3,
+        };
+        if self.state != HlsManifestAcceptanceState::Completed && rank(trigger) > rank(self.trigger) {
+            self.trigger = trigger;
         }
     }
 

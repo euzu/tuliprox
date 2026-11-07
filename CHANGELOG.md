@@ -4,6 +4,22 @@
 
 ## ⚠️ Breaking Changes
 
+- **API user database migration refuses unresolved field assignments or unverifiable recovery history.** Untracked
+  legacy databases migrate automatically when every record is unambiguous. Tracked databases requiring reconstruction
+  need verified field-named recovery history bound to their identity and revision.
+  Unresolved `plan`/`filter` assignments and missing, invalid, foreign, or stale bound history require offline repair;
+  refused migrations preserve the original database. Back up the complete configuration directory, including
+  the database, WAL files and `api_user_recovery/`, before upgrading. Use the following repair workflow:
+  `--user-db-get /app/config/api_user.db --user-db-output users.json`, edit unresolved field assignments,
+  `--user-db-check /app/config/api_user.db --user-db-input users.json`, then
+  `--user-db-set /app/config/api_user.db --user-db-input users.json`. Get exports all users without passwords or tokens.
+  Check is read-only; set repeats validation, creates a backup and publishes the complete repaired user set. A database
+  whose records are already unambiguous is repaired by `--user-db-set` alone. A pending write-ahead log blocks get and
+  check; set archives the database, log and recovery history first and then replays it. Stale exports, open
+  assignments and missing or duplicate users prevent replacement. Each assignment requires a reliable field-named
+  source; otherwise restore a complete matching backup or explicitly establish a new access policy. See
+  [API User Database Offline Repair](docs/src/operations-debugging.md#api-user-database-offline-repair).
+
 - **The in-memory log ring buffer behind the Web-UI Live Logs now follows the root log filter.** Previously,
   the ring buffer stored every record that passed the global maximum log level, exposing noisy dependency logs
   and foreign-crate debug records even when stdout filtered them out. The ring buffer is now gated directly on the
@@ -243,7 +259,8 @@
   leaves the sandbox, so it has its own entry in the admin's review ("Run local programs: ... Grant it only to a plugin you
   would trust with a shell"). The program is started directly, never through a shell, with an empty environment except
   `PATH` and what the plugin passes; input is at most 1 MiB, stdout and stderr are each cut to 64 KiB, the wait is 1 to 300
-  seconds and then the child is killed, and every run is logged by program name. See
+  seconds and then the child is killed (on Unix with its whole process group, background jobs included), and every run
+  is logged by program name. See
   [Running programs](docs/src/plugins/security.md#running-programs).
 
 - **Local commands are also available as a plugin.** The `command-notifier` plugin (`plugins/notifiers/command-notifier`,
@@ -1436,6 +1453,14 @@
   Web UI forwarded the browser's User-Agent to the provider; providers that block browsers answered 403, so most VOD
   and series posters stayed empty in the Playlist Explorer. The proxy now drops the browser's User-Agent and sends the
   headers of the input that hosts the image, or the configured `default_user_agent`.
+
+- **API user records retain every optional field position.** Runtime writes preserve empty network, plan and filter fields
+  in the complete V7 layout, so subsequent starts do not repeatedly migrate records with omitted trailing fields.
+
+- **User database repair archives are excluded from startup migration.** Directories whose names start with
+  `api_user_repair_backup_` and their contents remain untouched by the automatic database scanner, including when supplied
+  as scan roots or marker locations. Legacy V1/V2 backups can remain beside the repaired database without blocking startup;
+  archived V3 databases do not acquire new lock files.
 
 - **Playlist Update: "All" selects, status badges use status dots.** Clicking "All" under "Affected targets" now
   always selects every target instead of toggling all of them off on a second click; single targets still switch on

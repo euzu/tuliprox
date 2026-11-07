@@ -322,6 +322,24 @@ impl<K, V> BPlusTreeQuery<K, V> {
         }
     }
 
+    /// Opens a stable snapshot without replaying or removing pending WAL files.
+    ///
+    /// Offline inspection uses this variant so its read-only promise includes
+    /// crash-recovery artifacts. A database with pending recovery is refused
+    /// instead of being changed as a side effect of opening it.
+    pub fn try_new_read_only(filepath: &Path) -> io::Result<Self> {
+        let sidecar_guard = SharedSidecarGuard::acquire(filepath)?;
+        if wal_path(filepath).try_exists()? || wal_temporary_path(filepath).try_exists()? {
+            return Err(io::Error::other("B+Tree has pending WAL recovery; read-only inspection refuses to modify it"));
+        }
+        let mut query = Self::from_file_unlocked(File::open(filepath)?)?;
+        let snapshot = Arc::get_mut(&mut query.snapshot)
+            .ok_or_else(|| invalid_data("new read-only query snapshot is unexpectedly shared"))?;
+        snapshot.filepath = filepath.to_path_buf();
+        snapshot.sidecar_guard = Some(sidecar_guard);
+        Ok(query)
+    }
+
     pub fn try_clone(&self) -> io::Result<Self> {
         if self.snapshot.filepath.as_os_str().is_empty() {
             return Err(invalid_input("mapped query without a path cannot be cloned"));

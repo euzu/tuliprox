@@ -268,7 +268,7 @@ pub(super) async fn publish_post_refresh_terminal_lease(
         .await;
     let publication = ctx
         .hls_proxy
-        .prepare_access_lease_manifest_publication(&lease_id, proxy_session_id, now_ms)
+        .prepare_access_lease_manifest_publication_for_test(&lease_id, proxy_session_id, now_ms)
         .await
         .expect("terminal fixture publication guard");
     let mut manifest_snapshot = pressure_manifest(target_duration_ms);

@@ -21,8 +21,18 @@ pub(crate) struct PlaylistDownloadResult {
 struct PendingInputStatusUpdate {
     storage_path: PathBuf,
     status: input_cache::InputStatus,
-    status_changed: bool,
+    previous_clusters: HashMap<String, input_cache::ClusterStatus>,
     cluster_status_source: ClusterStatusSource,
+}
+
+impl PendingInputStatusUpdate {
+    fn new(
+        storage_path: PathBuf,
+        status: input_cache::InputStatus,
+        cluster_status_source: ClusterStatusSource,
+    ) -> Self {
+        Self { storage_path, previous_clusters: status.clusters.clone(), status, cluster_status_source }
+    }
 }
 
 #[derive(Clone, Copy)]

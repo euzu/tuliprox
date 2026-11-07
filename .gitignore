@@ -57,9 +57,6 @@ backend/app/Cargo.lock
 !README.md
 !CHANGELOG.md
 !CONTRIBUTING.md
-!plugin-system-plan.md
-!plugin-system-phases.md
-!plugin-system-history.md
 
 # Ignore ai documentation files
 # no ai files
@@ -69,8 +66,6 @@ backend/app/Cargo.lock
 /.claude/
 /.mcp.json
 AGENTS.md
-# ...except the plugin authoring guide: it is project documentation, not local tooling.
-!/plugins/AGENTS.md
 GOAL.md
 
 # Local refactoring measurements (clippy inventories, cargo metadata, timings).

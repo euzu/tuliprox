@@ -12,8 +12,8 @@ use crate::{
             },
             plugin_upload::PluginUpload,
         },
-        Card, Chip, ConfirmDialog, ContentDialog, LoadingIndicator, NoContent, TabItem, TabSet, Table, TableDefinition,
-        TextButton, ToggleSwitch,
+        Card, Checkbox, Chip, ConfirmDialog, ContentDialog, LoadingIndicator, NoContent, TabItem, TabSet, Table,
+        TableDefinition, TextButton, ToggleSwitch,
     },
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
@@ -495,10 +495,10 @@ fn PluginUninstall(props: &PluginUninstallProps) -> Html {
                     </ul>
                 </div>
             }
-            <label class="tp__plugin-uninstall__purge">
-                <input type="checkbox" checked={*purge} onchange={on_purge} />
-                { " " }{ translate.t("LABEL.PLUGIN_PURGE_DATA") }
-            </label>
+            <div class="tp__plugin-uninstall__purge">
+                <Checkbox checked={*purge} aria_label={Some(translate.t("LABEL.PLUGIN_PURGE_DATA"))} onchange={on_purge} />
+                <span>{ translate.t("LABEL.PLUGIN_PURGE_DATA") }</span>
+            </div>
             <p class="tp__plugins__muted">{ translate.t("MESSAGES.PLUGIN_PURGE_HINT") }</p>
         </div>
     };

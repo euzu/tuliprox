@@ -76,6 +76,34 @@ async fn read_capped<R: AsyncRead + Unpin>(mut reader: R) -> Vec<u8> {
     kept
 }
 
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pgid: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(child_id: Option<u32>) -> Self {
+        let pgid = child_id.and_then(|id| libc::pid_t::try_from(id).ok()).filter(|&id| id > 1);
+        Self { pgid }
+    }
+
+    fn kill(&mut self) {
+        if let Some(pgid) = self.pgid.take() {
+            // SAFETY: `pgid` is guaranteed to be a valid PID > 1 returned by `spawn()` and converted to `pid_t`.
+            // Sending `SIGKILL` to this process group cleans up the child and any grandchildren spawned in its group.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) { self.kill(); }
+}
+
 /// Run `request` for plugin `plugin`, if it holds the `process` capability.
 pub(crate) async fn run(plugin: &str, capable: bool, request: Request) -> Result<Output, String> {
     if !capable {
@@ -94,6 +122,8 @@ pub(crate) async fn run(plugin: &str, capable: bool, request: Request) -> Result
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().map_err(|err| format!("could not run the program: {err}"))?;
 
     let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -109,10 +139,19 @@ pub(crate) async fn run(plugin: &str, capable: bool, request: Request) -> Result
         drop(stdin);
     };
 
+    #[cfg(unix)]
+    let mut guard = ProcessGroupGuard::new(child.id());
+
     let wait = Duration::from_secs(u64::from(request.timeout_secs.clamp(1, MAX_TIMEOUT_SECS)));
     let finished = tokio::time::timeout(wait, async {
-        let ((), stdout, stderr, status) = tokio::join!(write, read_capped(stdout), read_capped(stderr), child.wait());
-        (stdout, stderr, status)
+        let write_task = tokio::spawn(write);
+        let stdout_task = tokio::spawn(read_capped(stdout));
+        let stderr_task = tokio::spawn(read_capped(stderr));
+        let status = child.wait().await;
+        #[cfg(unix)]
+        guard.kill();
+        let (stdout, stderr, _) = tokio::join!(stdout_task, stderr_task, write_task);
+        (stdout.unwrap_or_default(), stderr.unwrap_or_default(), status)
     })
     .await;
     match finished {
@@ -219,5 +258,31 @@ mod tests {
         assert!(run_as_capable(bad).await.is_err());
         let many: Vec<&str> = vec!["x"; MAX_ARGS + 1];
         assert!(run_as_capable(request("/bin/echo", &many)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn grandchild_does_not_hang_call() {
+        let mut req = request("/bin/sh", &["-c", "sleep 30 & echo done"]);
+        req.timeout_secs = 20;
+        let started = std::time::Instant::now();
+        let output = run_as_capable(req).await.unwrap();
+        assert_eq!(output.status, Some(0));
+        assert_eq!(output.stdout, b"done\n");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn grandchild_is_killed_when_call_ends() {
+        let mut req = request("/bin/sh", &["-c", "sleep 30 & echo $!; echo done"]);
+        req.timeout_secs = 20;
+        let output = run_as_capable(req).await.unwrap();
+        assert_eq!(output.status, Some(0));
+        let text = String::from_utf8(output.stdout).unwrap();
+        let pid: i32 = text.lines().next().unwrap().trim().parse().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // SAFETY: `pid` was reported by the test child via `echo $!`. Signal 0 performs error checking
+        // without sending a signal, probing whether the process is still alive.
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        assert!(!alive, "grandchild process {pid} should have been killed");
     }
 }

@@ -132,14 +132,17 @@ fn test_resolve_request_url_for_logging_respects_sanitization_setting() {
     let m3u_input = ConfigInput { input_type: InputType::M3u, ..ConfigInput::default() };
     let media_ref = "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fsecret_key";
     let standard_url = "http://provider.example/live/stream.m3u8";
+    let transport_stream_url = "http://provider.example/session/auth-path/stream.ts?opaque=synthetic-opaque";
 
     // 1. When sanitization is enabled:
     shared::utils::set_sanitize_sensitive_info(true);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, transport_stream_url).as_ref(), transport_stream_url);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), "media-server://<redacted>");
     assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 
     // 2. When sanitization is disabled:
     shared::utils::set_sanitize_sensitive_info(false);
+    assert_eq!(resolve_request_url_for_logging(&m3u_input, transport_stream_url).as_ref(), transport_stream_url);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, media_ref).as_ref(), media_ref);
     assert_eq!(resolve_request_url_for_logging(&m3u_input, standard_url).as_ref(), standard_url);
 }

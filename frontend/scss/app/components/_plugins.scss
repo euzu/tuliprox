@@ -179,6 +179,12 @@
       padding-left: 1.25em;
     }
   }
+
+  &__purge {
+    display: flex;
+    align-items: center;
+    gap: var(--margin-mini);
+  }
 }
 
 // Notices on a plugin row (a staged update, settings that need a look).
@@ -331,25 +337,8 @@
   gap: var(--margin-small);
 }
 
-.tp__plugins__sources-table {
-  width: 100%;
-  border-collapse: collapse;
-
-  th,
-  td {
-    padding: var(--margin-mini) var(--margin-small);
-    text-align: left;
-    vertical-align: middle;
-    border-bottom: 1px solid var(--theme-brand-border-soft);
-  }
-}
-
 .tp__plugins__source-url {
   word-break: break-all;
-}
-
-.tp__plugins__source-actions {
-  white-space: nowrap;
 }
 
 .tp__plugins__source-dialog {

@@ -80,7 +80,7 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
 
     // Check Status
     let storage_path = input_cache::resolve_input_storage_path(storage_dir, &input.name).await;
-    let mut status = input_cache::load_input_status(&storage_path);
+    let status = input_cache::load_input_status(&storage_path);
     let cache_duration = input.cache_duration_seconds;
 
     // Ensure data directory exists
@@ -121,13 +121,9 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
         ClusterStatusSource::Default
     };
 
+    let mut pending_status = PendingInputStatusUpdate::new(storage_path, status, cluster_status_source);
     if fully_cached {
-        return cached_playlist_download_result(input, refresh_policy).with_pending_status(PendingInputStatusUpdate {
-            storage_path,
-            status,
-            status_changed: false,
-            cluster_status_source,
-        });
+        return cached_playlist_download_result(input, refresh_policy).with_pending_status(pending_status);
     }
 
     let provider_clusters = if is_cluster_input(download_input_type) {
@@ -212,12 +208,12 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
     } else {
         CacheStatusScope::Default
     };
-    let save_status = apply_playlist_fetch_outcome(
+    apply_playlist_fetch_outcome(
         events,
         execution.run_id,
         execution.execution_order,
         input,
-        &mut status,
+        &mut pending_status.status,
         cache_scope,
         &fetch,
     );
@@ -229,9 +225,7 @@ async fn playlist_download_from_input<E: EventSink, P: PluginHost>(
         &provider_clusters,
         Some(&fetch),
     );
-    PlaylistDownloadResult::from(fetch).with_input_telemetry(input_telemetry).with_pending_status(
-        PendingInputStatusUpdate { storage_path, status, status_changed: save_status, cluster_status_source },
-    )
+    PlaylistDownloadResult::from(fetch).with_input_telemetry(input_telemetry).with_pending_status(pending_status)
 }
 
 /// `type: plugin`: the playlist is whatever the named plugin's `fetch-playlist` returns, grouped the
@@ -277,9 +271,7 @@ async fn plugin_playlist_fetch<P: PluginHost>(plugins: &P, input: &ConfigInput) 
     }
 }
 
-/// `invalidate_input_cache_status` performs a non-atomic file I/O sequence
-/// (`input_cache::load_input_status` + `input_cache::save_input_status`).
-/// Call this only while holding the per-input lock from
+/// This read-modify-write operation requires holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
 pub(crate) async fn invalidate_input_cache_status<
     E: EventSink + Clone + 'static,
@@ -291,11 +283,12 @@ pub(crate) async fn invalidate_input_cache_status<
 ) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
     let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
-    let mut status = input_cache::load_input_status(&storage_path);
-    if !status.clusters.is_empty() {
+    input_cache::update_input_status(&storage_path, |status| {
+        let changed = !status.clusters.is_empty();
         status.clusters.clear();
-        input_cache::save_input_status(&storage_path, &status);
-    }
+        changed
+    })
+    .await;
 }
 
 pub(crate) async fn load_cached_input_playlist<E: EventSink + Clone + 'static, M: MetadataUpdateSink, P: PluginHost>(
@@ -554,7 +547,7 @@ pub(crate) async fn download_input<E: EventSink + Clone + 'static, M: MetadataUp
         .input_refresh
         .filter(|input_refresh| input_refresh.input_id == input.id)
         .map(|input_refresh| input_refresh.policy);
-    persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref());
+    persist_finalized_cluster_snapshots(&mut playlist_download_result, request_policy, error.as_ref()).await;
 
     // Explicitly release per-input lock after load/persist/mark steps are completed.
     drop(input_lock);

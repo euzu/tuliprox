@@ -62,7 +62,7 @@ With `body: event` the request body is the event as JSON, with `Content-Type: ap
 detail beyond its body. With `body: text` the request body is the plain-text `body` with `Content-Type: text/plain; charset=utf-8`.
 
 There are no templates. A body shaped for one particular service (a chat webhook that wants its own JSON) belongs in a notifier
-plugin for that service; see `plugins/AGENTS.md` for how to write one.
+plugin for that service; see [Quickstart](quickstart.md) for how to write one.
 
 ## Signing
 

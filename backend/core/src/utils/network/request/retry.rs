@@ -262,7 +262,7 @@ async fn send_with_provider_failover_only_with_options(
                     let last_provider_failure = format!(
                         "connection error while trying {}: {}",
                         sanitize_sensitive_info(attempt_target.request_url.as_str()),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     );
 
                     if err.is_timeout() || err.is_connect() {
@@ -284,7 +284,7 @@ async fn send_with_provider_failover_only_with_options(
                         }
                     }
 
-                    let message = format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    let message = format!("Request error: {}", sanitize_sensitive_info(&err.to_string()));
                     return Err(if err.is_timeout() {
                         Error::new(ErrorKind::TimedOut, message)
                     } else if err.is_connect() {
@@ -980,7 +980,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                 last_provider_failure = Some(format!(
                                     "connection error while trying {}: {}",
                                     sanitize_sensitive_info(attempt_target.request_url.as_str()),
-                                    sanitize_sensitive_info(err.to_string().as_str())
+                                    sanitize_sensitive_info(&err.to_string())
                                 ));
 
                                 let provider_failover_exhausted = (err.is_timeout() || err.is_connect())
@@ -1019,7 +1019,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
 
                                 let error_message = format!(
                                     "Request error: {}",
-                                    sanitize_sensitive_info(err.to_string().as_str())
+                                    sanitize_sensitive_info(&err.to_string())
                                 );
                                 return Err(if err.is_timeout() {
                                     Error::new(ErrorKind::TimedOut, error_message)

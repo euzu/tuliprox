@@ -5,7 +5,7 @@
 //! capability names back, so the server can refuse a package that changed in
 //! between. Nothing is installed before that.
 use crate::{
-    app::components::{AppIcon, Chip, ContentDialog},
+    app::components::{AppIcon, Checkbox, Chip, ContentDialog},
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
     model::{DialogAction, DialogActions, DialogResult},
@@ -233,10 +233,10 @@ fn render_review(
             }
             if review.mcp_requested {
                 // separate from the approval, and off until the admin ticks it
-                <label class="tp__plugin-upload__mcp">
-                    <input type="checkbox" checked={expose_mcp} onchange={on_mcp.clone()} />
-                    { " " }{ translate.t("LABEL.PLUGIN_EXPOSE_MCP") }
-                </label>
+                <div class="tp__plugin-upload__mcp">
+                    <Checkbox checked={expose_mcp} aria_label={Some(translate.t("LABEL.PLUGIN_EXPOSE_MCP"))} onchange={on_mcp.clone()} />
+                    <span>{ translate.t("LABEL.PLUGIN_EXPOSE_MCP") }</span>
+                </div>
             }
         </>
     }

@@ -79,6 +79,7 @@ use tuliprox_hls::api::{
 };
 
 mod origin_account_rebind;
+mod origin_restart;
 mod owner_token;
 mod reduced_retry;
 mod same_account_resume;
@@ -103,6 +104,7 @@ mod provider_admission_retry_reservation;
 mod provider_admission_startup_reservation;
 mod runtime_policy;
 mod segment_responses;
+mod strip_entry;
 mod support;
 mod terminal_resources;
 mod terminal_tail;
