@@ -19,6 +19,7 @@ pub(in crate::api::endpoints::hls_api::tests) fn path_has_extension(path: &str, 
     std::path::Path::new(path).extension().is_some_and(|actual| actual.eq_ignore_ascii_case(extension))
 }
 
+/// App config with one `hls-user` limited to one connection.
 pub(in crate::api::endpoints::hls_api::tests) fn test_app_config() -> Arc<AppConfig> {
     let mut hls_user = ProxyUserCredentials::default();
     hls_user.username = "hls-user".to_string();

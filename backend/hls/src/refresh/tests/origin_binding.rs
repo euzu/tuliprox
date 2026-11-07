@@ -451,6 +451,7 @@ async fn fresh_pinned_revalidation_rejects_reset_without_ready_media_evidence() 
     assert!(session.segments.values().all(|entry| entry.origin_key.origin_epoch == baseline_epoch));
 }
 
+/// Marks the baseline segment ready with `bytes` and records it as the content anchor.
 pub(in crate::refresh::tests) async fn prepare_ready_content_anchor(
     session: &Arc<RwLock<HlsSession>>,
     cache: &HlsSegmentCache,
@@ -611,6 +612,7 @@ async fn recovery_required_orchestrator_accepts_pinned_progress_without_another_
     assert_eq!(episode.state, super::super::super::manifest_acceptance::HlsManifestAcceptanceState::Completed);
 }
 
+/// With mirror recovery on, a pinned 503 moves the fetch to the next profile URL.
 #[tokio::test]
 async fn pinned_recovery_moves_to_alternative_provider_url_on_qualifying_failure() {
     let first = spawn_test_origin(Arc::new(|_path| (503, Vec::new(), "unavailable".to_string()))).await;
@@ -851,21 +853,25 @@ async fn assert_forward_content_anchor_with_mode(
     }
 }
 
+/// Unchanged overlap bytes after the trimmed prefix verify the anchor.
 #[tokio::test]
 async fn forward_content_anchor_verifies_overlap_after_trimming_published_prefix() {
     assert_forward_content_anchor_after_published_prefix("committed-anchor-bytes", true, false).await;
 }
 
+/// Changed overlap bytes after the trimmed prefix reject the anchor.
 #[tokio::test]
 async fn forward_content_anchor_rejects_changed_overlap_after_trimming_published_prefix() {
     assert_forward_content_anchor_after_published_prefix("changed-anchor-bytes", false, false).await;
 }
 
+/// An accepted optimistic handoff registers its revision as ready.
 #[tokio::test]
 async fn forward_content_anchor_registers_ready_optimistic_handoff_revision() {
     assert_forward_content_anchor_after_published_prefix("committed-anchor-bytes", true, true).await;
 }
 
+/// An accepted conservative handoff registers its revision as ready.
 #[tokio::test]
 async fn forward_content_anchor_registers_ready_conservative_handoff_revision() {
     assert_forward_content_anchor_with_mode(
@@ -876,6 +882,7 @@ async fn forward_content_anchor_registers_ready_conservative_handoff_revision() 
     .await;
 }
 
+/// A rejected optimistic handoff removes its unpublished revision.
 #[tokio::test]
 async fn forward_content_anchor_cleans_rejected_optimistic_handoff_revision() {
     assert_forward_content_anchor_after_published_prefix("changed-anchor-bytes", false, true).await;

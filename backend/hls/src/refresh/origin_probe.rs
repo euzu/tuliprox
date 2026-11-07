@@ -752,6 +752,7 @@ fn compare_probe(
     ProbeComparison { query: None, new_media: !unverified_reused_url && !known_content.contains(&hash) }
 }
 
+/// Writes the staged restart segments into the cache with their revisions.
 async fn write_restart_media(
     request: &OriginRefreshRequest,
     update: &mut PreparedOriginUpdate,

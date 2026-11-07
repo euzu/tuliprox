@@ -506,6 +506,8 @@ pub(crate) async fn lookup_account_m3u_stream_url(
     }
 }
 
+/// Stream URL of `stream_url` for the provider account: the account's indexed M3U URL, the URL itself when it
+/// targets the account, else its alternative URL.
 pub(crate) async fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,

@@ -1343,6 +1343,7 @@ pub(super) async fn inspect_cache_object_tracks(
         .into()
 }
 
+/// Removes staged switch segment and map files that the session did not commit.
 pub(super) async fn remove_uncommitted_staged_switch_files(
     request: &OriginRefreshRequest,
     staged: &mut HlsStagedSwitchCommit,

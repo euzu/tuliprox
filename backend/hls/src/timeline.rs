@@ -2449,6 +2449,7 @@ mod tests {
         assert_eq!(session.next_media_start_ms, 24_000);
     }
 
+    /// After a host handoff, a later refresh past the old published prefix keeps the epoch and sequence mapping.
     #[test]
     fn sliding_refresh_after_handoff_keeps_current_mapping_after_old_published_prefix() {
         let mut session = session();
@@ -2469,6 +2470,7 @@ mod tests {
         assert_eq!(session.proxy_next_seq, Some(10));
     }
 
+    /// After a host handoff, a refresh that reorders already published segments is rejected.
     #[test]
     fn sliding_refresh_after_handoff_rejects_current_mapping_behind_trimmed_prefix() {
         let mut session = session();

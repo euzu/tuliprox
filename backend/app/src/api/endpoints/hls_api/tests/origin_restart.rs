@@ -47,6 +47,7 @@ async fn enable_unstripped_cache(app: &Arc<crate::api::model::AppState>, mode: H
     app.hls.proxy.update_config(&app.app_config).await;
 }
 
+/// Runs an origin restart in `mode`; `reuse_urls` keeps the segment namespace, `next_count` sets the new segment count.
 async fn restarted_origin_case(mode: HlsStartupMode, reuse_urls: bool, next_count: u64) {
     let phase = Arc::new(AtomicU8::new(0));
     let origin_phase = Arc::clone(&phase);

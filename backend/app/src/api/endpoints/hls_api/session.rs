@@ -220,6 +220,8 @@ pub(super) fn build_hls_origin_fetch_url(
     }
 }
 
+/// Origin fetch URL for the selected account. A playback-profile M3U URL takes the account's token and keeps the
+/// profile authority; other URLs are rewritten for the account.
 pub(super) async fn resolve_hls_origin_fetch_url(
     app_config: &Arc<AppConfig>,
     input: &ConfigInput,
@@ -698,6 +700,8 @@ pub(super) async fn hls_session_origin_playback_kind(session: &HlsSessionHandle)
     session.read().await.origin_playback_kind()
 }
 
+/// Acquires a provider account (preferring `preferred_account`) and resolves its origin fetch URL; the slot is
+/// released when no URL or binding results.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     app_state: &Arc<AppState>,
@@ -819,25 +823,44 @@ pub(super) async fn prepare_hls_origin_runtime_with_new_account(
     })
 }
 
+/// Falls back to the session entry URL only for the root account. The entry URL carries the root account's token,
+/// so an alias binding without a resolved URL fails instead.
+pub(super) fn known_binding_fetch_url(
+    resolved_url: Option<String>,
+    input: &ConfigInput,
+    account_name: &str,
+    session_entry_url: &str,
+) -> Option<String> {
+    resolved_url.or_else(|| (account_name == input.name.as_ref()).then(|| session_entry_url.to_string()))
+}
+
+/// Builds the origin runtime for an active binding whose account is still known, without a new acquisition.
+/// Fails when the bound alias has no resolvable URL.
 pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     raw_request_url: &str,
     session_entry_url: &str,
     binding: &HlsOriginAccountBinding,
-) -> HlsOriginRuntimeAllocation {
+) -> Result<HlsOriginRuntimeAllocation, HlsOriginRuntimeAcquireError> {
     let runtime_provider_config = app_state.active_provider.find_provider_config(&binding.account_name);
-    let fetch_url = resolve_hls_origin_fetch_url(
+    let resolved_url = resolve_hls_origin_fetch_url(
         &app_state.app_config,
         input,
         raw_request_url,
         session_entry_url,
         runtime_provider_config.as_ref(),
     )
-    .await
-    .unwrap_or_else(|| session_entry_url.to_string());
+    .await;
+    let Some(fetch_url) = known_binding_fetch_url(resolved_url, input, &binding.account_name, session_entry_url) else {
+        debug!(
+            "HLS origin URL unresolved for bound alias account={}",
+            sanitize_sensitive_info(binding.account_name.as_ref())
+        );
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
 
-    HlsOriginRuntimeAllocation {
+    Ok(HlsOriginRuntimeAllocation {
         runtime_provider_config,
         url_failover_provider: hls_url_failover_provider_for_origin_context(
             input,
@@ -849,7 +872,7 @@ pub(super) async fn prepared_hls_origin_runtime_for_known_binding(
         binding_to_publish: None,
         prepared_snapshot: None,
         preacquired_origin_account_handle: None,
-    }
+    })
 }
 
 pub(super) async fn log_hls_origin_binding_reacquire_started(session: &HlsSessionHandle, work_kind: HlsOriginWorkKind) {

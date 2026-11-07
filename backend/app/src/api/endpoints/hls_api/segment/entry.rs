@@ -495,6 +495,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 }
 
+/// Stream channel of `virtual_id` in the target's Xtream output, else its M3U output.
 pub(in crate::api::endpoints::hls_api) async fn get_stream_channel(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
@@ -520,6 +521,7 @@ mod playback_provider_tests {
     use crate::model::ConfigProvider;
     use shared::model::{ConfigProviderDto, InputType, ProviderUrlSelectionPolicy};
 
+    /// M3U input whose playlist URL is plain HTTP and whose `cdn` profile serves playback only.
     fn independent_playlist_input() -> ConfigInput {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "cdn".into(),
@@ -537,6 +539,7 @@ mod playback_provider_tests {
         }
     }
 
+    /// A `provider://cdn` manifest binds the playback profile although the playlist download stays unbound.
     #[test]
     fn standard_hls_binds_explicit_profile_for_token_only_mapped_manifest() {
         let input = independent_playlist_input();
@@ -549,6 +552,7 @@ mod playback_provider_tests {
         assert_eq!(profile.urls.len(), 2);
     }
 
+    /// A plain HTTP manifest URL gets no profile.
     #[test]
     fn standard_hls_keeps_plain_http_manifest_unbound() {
         let input = independent_playlist_input();
@@ -558,6 +562,7 @@ mod playback_provider_tests {
         assert!(source.provider.is_none());
     }
 
+    /// An unknown profile name does not fall back to the playback profile.
     #[test]
     fn standard_hls_unknown_profile_does_not_borrow_another_profile() {
         let input = independent_playlist_input();
@@ -565,6 +570,7 @@ mod playback_provider_tests {
         assert!(source.provider.is_none());
     }
 
+    /// An unknown profile name does not fall back to the playlist URL's profile.
     #[test]
     fn standard_hls_unknown_profile_does_not_reuse_the_playlist_profile() {
         let mut input = independent_playlist_input();

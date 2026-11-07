@@ -549,6 +549,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     .into_response()
 }
 
+/// Source URL for archive construction; a playback-profile URL stays unresolved so failover still picks the host.
 fn resolve_effective_source_url<'a>(
     item: &'a shared::model::M3uPlaylistItem,
     input: &'a crate::model::ConfigInput,
@@ -1378,6 +1379,8 @@ mod tests {
         }
     }
 
+    /// A native Flussonic archive keeps the `provider://cdn` URL and its encoded query; without a playback profile
+    /// it uses the concrete host.
     #[test]
     fn token_only_m3u_archive_keeps_explicit_playback_profile_and_encoded_query() {
         let profile = std::sync::Arc::new(crate::model::ConfigProvider::from(&shared::model::ConfigProviderDto {

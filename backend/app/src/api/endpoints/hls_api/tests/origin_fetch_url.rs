@@ -1,6 +1,9 @@
 use super::{test_app_config_with_storage_dir, AppConfig, ConfigInput, InputType};
 use crate::{
-    api::{endpoints::hls_api::resolve_hls_origin_fetch_url, model::ProviderConfig as RuntimeProviderConfig},
+    api::{
+        endpoints::hls_api::{known_binding_fetch_url, resolve_hls_origin_fetch_url},
+        model::ProviderConfig as RuntimeProviderConfig,
+    },
     model::ConfigProvider,
 };
 use shared::{
@@ -77,6 +80,7 @@ async fn cdn_alias_fixture(
     (temp, app_config, root_input, root_account, alias_account)
 }
 
+/// The alias token indexed under the first mirror replaces the root token; the profile authority stays.
 #[tokio::test]
 async fn alias_hit_pl_candidate() {
     let (_temp, app_config, input, _root, alias) =
@@ -86,6 +90,7 @@ async fn alias_hit_pl_candidate() {
     assert_eq!(result, Some("provider://cdn/ChannelA/mono.m3u8?token=alias-token-pl&keep=1".to_string()));
 }
 
+/// The alias token indexed under the second mirror is found as well.
 #[tokio::test]
 async fn alias_hit_eu_candidate() {
     let (_temp, app_config, input, _root, alias) =
@@ -95,6 +100,7 @@ async fn alias_hit_eu_candidate() {
     assert_eq!(result, Some("provider://cdn/ChannelA/mono.m3u8?token=alias-token-eu&keep=1".to_string()));
 }
 
+/// A Flussonic archive URL takes the token of the alias's indexed live URL.
 #[tokio::test]
 async fn archive_sibling() {
     let (_temp, app_config, input, _root, alias) =
@@ -107,6 +113,7 @@ async fn archive_sibling() {
     );
 }
 
+/// An alias without an indexed URL yields no URL instead of the root token.
 #[tokio::test]
 async fn alias_missing_fails_closed() {
     let (_temp, app_config, input, _root, alias) = cdn_alias_fixture(&[]).await;
@@ -115,6 +122,7 @@ async fn alias_missing_fails_closed() {
     assert_eq!(result, None);
 }
 
+/// The root account keeps the entry URL.
 #[tokio::test]
 async fn root_unchanged() {
     let (_temp, app_config, input, root, _alias) = cdn_alias_fixture(&[]).await;
@@ -123,6 +131,7 @@ async fn root_unchanged() {
     assert_eq!(result, Some(entry.to_string()));
 }
 
+/// Without a playback profile the entry URL is not rewritten.
 #[tokio::test]
 async fn unbound_input_unchanged() {
     let (_temp, app_config, mut input, _root, alias) = cdn_alias_fixture(&[]).await;
@@ -130,4 +139,23 @@ async fn unbound_input_unchanged() {
     let entry = "provider://cdn/ChannelA/mono.m3u8?token=root-token";
     let result = resolve_hls_origin_fetch_url(&app_config, &input, entry, entry, Some(&alias)).await;
     assert_eq!(result, Some(entry.to_string()));
+}
+
+/// A known alias binding without a resolved URL fails instead of reusing the root-token entry URL.
+#[tokio::test]
+async fn known_alias_binding_without_url_does_not_fall_back_to_root_entry() {
+    let (_temp, app_config, input, _root, alias) = cdn_alias_fixture(&[]).await;
+    let entry = "provider://cdn/ChannelA/mono.m3u8?token=root-token";
+    let resolved = resolve_hls_origin_fetch_url(&app_config, &input, entry, entry, Some(&alias)).await;
+    assert_eq!(known_binding_fetch_url(resolved, &input, &alias.name, entry), None);
+}
+
+/// The root account keeps the entry URL fallback; a resolved URL always wins.
+#[test]
+fn known_root_binding_keeps_the_entry_url_fallback() {
+    let input = ConfigInput { name: "root-account".intern(), ..ConfigInput::default() };
+    let entry = "provider://cdn/ChannelA/mono.m3u8?token=root-token";
+    assert_eq!(known_binding_fetch_url(None, &input, "root-account", entry), Some(entry.to_string()));
+    let resolved = Some("http://pl.example.com/x.m3u8".to_string());
+    assert_eq!(known_binding_fetch_url(resolved.clone(), &input, "alias-account", entry), resolved);
 }

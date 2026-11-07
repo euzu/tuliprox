@@ -151,6 +151,7 @@ impl LiveHlsOriginEntry {
         self
     }
 
+    /// Whether pinned recovery may move to another mirror of the profile.
     pub const fn profile_recovery_failover(&self) -> bool { self.profile_recovery_failover }
 
     pub fn url(&self) -> &Url { &self.url }

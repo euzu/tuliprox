@@ -64,6 +64,7 @@ impl<'a> HlsOriginManifestFetchRequest<'a> {
     }
 }
 
+/// Fetches an origin manifest in the requested mode; a pinned recovery may fall back to the profile mirrors.
 pub async fn fetch_hls_origin_manifest_request(
     request: HlsOriginManifestFetchRequest<'_>,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
@@ -100,6 +101,7 @@ pub async fn fetch_hls_origin_manifest_request(
     }
 }
 
+/// Initial fetch with the full global retry budget.
 async fn fetch_hls_origin_manifest_initial_global_policy(
     context: &HlsOriginManifestFetchContext,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
@@ -400,6 +402,7 @@ pub(super) fn next_retry_delay_ms(
 
 pub(super) use tuliprox_core::utils::current_time_millis;
 
+/// Fetches the live entry manifest with the retry policy's delays and per-attempt timeout.
 #[cfg(any(test, feature = "test-support"))]
 pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(
     origin_entry: &LiveHlsOriginEntry,
@@ -522,6 +525,7 @@ mod playback_profile_recovery_tests {
     use std::sync::Arc;
     use tuliprox_core::model::ConfigProvider;
 
+    /// Live entry on the two-mirror `cdn` profile.
     fn entry() -> super::super::model::LiveHlsOriginEntry {
         let profile = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "cdn".into(),
@@ -536,6 +540,7 @@ mod playback_profile_recovery_tests {
         .unwrap()
     }
 
+    /// Mirror recovery is off by default and, when on, follows only the qualifying HTTP failures.
     #[test]
     fn playback_profile_recovery_is_opt_in_and_preserves_http_policy() {
         let entry = entry();

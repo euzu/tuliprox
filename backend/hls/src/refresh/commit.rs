@@ -982,6 +982,7 @@ struct HlsNormalManifestCommitInput<'a> {
     origin_update: Option<&'a super::origin_probe::PreparedOriginUpdate>,
 }
 
+/// Commits a fetched normal manifest into the session timeline and returns the refresh timing.
 fn commit_normal_manifest(
     session: &mut crate::HlsSession,
     request: &OriginRefreshRequest,
