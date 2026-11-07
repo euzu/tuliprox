@@ -1,5 +1,5 @@
 use super::{
-    format_http_status, is_retryable_text_response_status, perform_backoff,
+    is_retryable_text_response_status, perform_backoff, request_failed_message,
     send_input_with_retry_and_provider_policy_with_options_result, should_retry_text_body_error,
     sleep_before_text_body_retry, text_body_retry_values, DynReader, RequestFetchOptions, TextContentBodyOptions,
     TextContentFetchOptions,
@@ -149,11 +149,7 @@ async fn get_remote_content_as_stream_with_options(
 }
 
 pub(super) fn text_response_status_error(status: StatusCode, url: &Url) -> Error {
-    string_to_io_error(format!(
-        "Request failed ({}): {}",
-        format_http_status(status),
-        sanitize_sensitive_info(url.as_str())
-    ))
+    string_to_io_error(request_failed_message(status, url.as_str()))
 }
 
 pub(super) async fn get_remote_content_with_options(

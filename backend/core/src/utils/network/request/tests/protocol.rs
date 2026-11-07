@@ -640,3 +640,28 @@ async fn manual_redirect_provider_failover_restarts_from_provider_entry() {
     successful_mirror.2.abort();
     redirect_handle.abort();
 }
+
+#[test]
+fn request_failed_status_round_trips_producer_messages_and_rejects_malformed() {
+    use crate::utils::network::request::{request_failed_message, request_failed_status};
+    use reqwest::StatusCode;
+
+    let non_canonical = StatusCode::from_u16(499).expect("valid status code");
+    for status in [
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        non_canonical,
+    ] {
+        assert_eq!(
+            request_failed_status(&request_failed_message(status, "http://x/y")),
+            Some(status),
+            "failed round-trip for status {status}"
+        );
+    }
+
+    for malformed in ["timeout", "Request failed (abc)", ""] {
+        assert_eq!(request_failed_status(malformed), None, "expected None for {malformed:?}");
+    }
+}

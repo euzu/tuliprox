@@ -576,9 +576,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
 
 type ClassifiedHlsManifest = (String, String, HeaderMap, HlsPlaylistKind);
 
-/// A failed download or a body that is no playlist; a portal may answer an expired link either way.
+/// A 4xx response or a non-playlist body, the two ways a portal answers an expired link.
+/// Timeouts, 5xx and transport errors do not trigger a fresh `create_link`.
 fn is_rejected_hls_manifest_download(result: &Result<ClassifiedHlsManifest, std::io::Error>) -> bool {
-    matches!(result, Err(_) | Ok((_, _, _, HlsPlaylistKind::Invalid)))
+    match result {
+        Ok((_, _, _, kind)) => *kind == HlsPlaylistKind::Invalid,
+        Err(err) => request::request_failed_status(&err.to_string()).is_some_and(|status| status.is_client_error()),
+    }
 }
 
 /// Downloads a legacy HLS playlist and classifies its body.
@@ -683,7 +687,14 @@ mod playback_provider_tests {
     #[test]
     fn pinned_stalker_playlist_retry_triggers_only_on_rejection() {
         let manifest = |kind| Ok((String::new(), String::new(), HeaderMap::new(), kind));
-        assert!(is_rejected_hls_manifest_download(&Err(std::io::Error::other("Request failed (403)"))));
+        let http_err =
+            |status| std::io::Error::other(request::request_failed_message(status, "http://example.com/live.m3u8"));
+        assert!(is_rejected_hls_manifest_download(&Err(http_err(StatusCode::FORBIDDEN))));
+        assert!(is_rejected_hls_manifest_download(&Err(http_err(StatusCode::NOT_FOUND))));
+        assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::INTERNAL_SERVER_ERROR))));
+        assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::SERVICE_UNAVAILABLE))));
+        assert!(!is_rejected_hls_manifest_download(&Err(std::io::Error::from(std::io::ErrorKind::TimedOut))));
+        assert!(!is_rejected_hls_manifest_download(&Err(std::io::Error::other("connection reset by peer"))));
         assert!(is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Invalid)));
         assert!(!is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Media)));
         assert!(!is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Master)));

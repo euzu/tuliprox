@@ -211,7 +211,10 @@ pub use self::{
     },
     jitter::{equal_jitter, full_jitter, FastrandJitter, JitterSource, JitterStrategy},
     options::enforce_request_transport_limits,
-    protocol::{classify_content_type, content_type_from_ext, format_http_status, is_file_url, is_uri, parse_range},
+    protocol::{
+        classify_content_type, content_type_from_ext, format_http_status, is_file_url, is_uri, parse_range,
+        request_failed_message, request_failed_status,
+    },
     rate_limit::{
         KeyedRateLimiter, RateLimitConfig, RateLimitRegisterError, RateLimitRejection, RateLimitSnapshot,
         DEFAULT_MAX_QUEUED, DEFAULT_MAX_RATE_LIMIT_KEYS,
