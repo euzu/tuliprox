@@ -66,6 +66,8 @@ pub(in crate::api) fn build_virtual_hls_entry_path(
     }
 }
 
+/// Serves an HLS manifest request for the selected provider account; a Stalker manifest URL is accepted, resolved or
+/// rejected per [`stalker_manifest_url`].
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api) async fn handle_hls_stream_request(
     fingerprint: &Fingerprint,

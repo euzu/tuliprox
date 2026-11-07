@@ -9,10 +9,12 @@ use std::sync::Arc;
 
 const SELECTED: &str = "alias-a";
 
+/// Variant request stage for `source` sealed by `origin_provider`.
 fn variant(source: HlsManifestSource, origin_provider: Option<&str>) -> super::super::HlsRequestStage<'_> {
     super::super::HlsRequestStage::Variant { source, origin_provider }
 }
 
+/// An entry refresh resolves a fresh link; a legacy token without a kind is rejected.
 #[test]
 fn stalker_entry_resolves_a_fresh_link_and_legacy_variant_is_rejected() {
     use super::super::StalkerManifestUrl::{Reject, Resolve};
@@ -20,6 +22,7 @@ fn stalker_entry_resolves_a_fresh_link_and_legacy_variant_is_rejected() {
     assert_eq!(super::super::stalker_manifest_url(super::super::HlsRequestStage::LegacyVariant, SELECTED), Reject);
 }
 
+/// A sealed variant URL is accepted only for its origin account, for entry and child sources.
 #[test]
 fn stalker_variant_is_accepted_only_for_its_origin_account() {
     use super::super::StalkerManifestUrl::{Accept, Reject};
@@ -30,6 +33,7 @@ fn stalker_variant_is_accepted_only_for_its_origin_account() {
     }
 }
 
+/// Only a numeric stream ref is a portal id; the archive flag selects the kind.
 #[test]
 fn stalker_hls_stream_requires_a_portal_id_and_maps_the_kind() {
     use shared::model::StalkerStreamKind::{Archive, Live};
@@ -39,6 +43,7 @@ fn stalker_hls_stream_requires_a_portal_id_and_maps_the_kind() {
     assert_eq!(super::super::stalker_hls_stream("", false), None);
 }
 
+/// A Stalker entry without a portal stream does not fall back to the stored URL and releases its provider slot.
 #[tokio::test]
 async fn stalker_entry_reservation_without_portal_stream_fails_and_releases_the_slot() {
     let input = ConfigInput { input_type: InputType::Stalker, ..single_hls_provider_input("stalker-provider") };

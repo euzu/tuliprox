@@ -188,6 +188,8 @@ pub(super) fn allows_provider_pool_failover(item_type: PlaylistItemType) -> bool
     )
 }
 
+/// Allocates (or takes over) a provider connection and selects the stream URL for the allocated account. A Stalker
+/// URL owned by another account is replaced by a freshly resolved link for the allocated account.
 pub(super) async fn resolve_streaming_strategy_with_provider_handle(
     app_state: &Arc<AppState>,
     stream_url: &str,

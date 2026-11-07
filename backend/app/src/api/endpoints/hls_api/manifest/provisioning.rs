@@ -44,6 +44,8 @@ pub(in crate::api::endpoints::hls_api) struct HlsEntryOriginAccountReservation {
     pub(in crate::api::endpoints::hls_api) selected_provider_config: Option<Arc<RuntimeProviderConfig>>,
 }
 
+/// Reserves a provider account for an HLS entry and selects its stream URL; a Stalker entry resolves a fresh link for
+/// the allocated account. Returns `None` and releases the slot when no account or URL is available.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_account_for_redirect(
     app_state: &Arc<AppState>,
@@ -124,6 +126,7 @@ pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_entry_origin_acc
     })
 }
 
+/// Admits the virtual HLS entry and reserves its origin account; `false` when admission or reservation fails.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::api::endpoints::hls_api) async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     app_state: &Arc<AppState>,

@@ -87,6 +87,8 @@ pub(super) fn accepts_requested_stream_url(
             && force_provider.map_or(input.name.as_ref(), |forced| forced.as_ref()) == allocated_provider)
 }
 
+/// Resolves the first playable link for the input's own account when the playlist holds no Stalker URL yet.
+/// Returns `stream_url` unchanged when no resolution is needed or new playback is blocked.
 pub(crate) async fn resolve_initial_stalker_playback_url(
     app_state: &Arc<AppState>,
     input: &ConfigInput,

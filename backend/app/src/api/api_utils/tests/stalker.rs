@@ -22,10 +22,12 @@ fn stalker_playback_refreshes_invalid_or_rejected_urls() {
     assert!(!should_refresh_stalker_playback(InputType::Xtream, false, None));
 }
 
+/// Input named `main` of the given type.
 fn input_of_type(input_type: InputType) -> ConfigInput {
     ConfigInput { name: "main".intern(), input_type, ..ConfigInput::default() }
 }
 
+/// A Stalker URL is kept only when the allocated account owns it: the forced provider, else the input.
 #[test]
 fn stalker_url_is_accepted_only_for_the_account_that_owns_it() {
     let input = input_of_type(InputType::Stalker);
@@ -43,6 +45,7 @@ fn stalker_url_is_accepted_only_for_the_account_that_owns_it() {
     assert!(!accepts_requested_stream_url(&input, Some(&main), false, "saray8"));
 }
 
+/// A non-Stalker URL is kept only with the accept flag and a matching (or absent) forced provider.
 #[test]
 fn non_stalker_url_acceptance_follows_the_accept_flag_and_forced_provider() {
     let input = input_of_type(InputType::Xtream);

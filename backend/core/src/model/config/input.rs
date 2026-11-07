@@ -1061,6 +1061,7 @@ impl ConfigInput {
             .map(|alias| Cow::Owned(self.as_input(alias)))
     }
 
+    /// The alias with the given name, enabled or not.
     pub fn alias_by_name(&self, name: &str) -> Option<&ConfigInputAlias> {
         self.aliases.iter().flatten().find(|alias| alias.name.as_ref() == name)
     }

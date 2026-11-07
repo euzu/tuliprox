@@ -197,6 +197,7 @@ fn parse_stalker_resource(resource: &str) -> Option<(u16, XtreamCluster, u32)> {
     parts.next().is_none().then_some((input_id, cluster, provider_id))
 }
 
+/// Resolves a Stalker preview link for the input's own account and redirects to it after the public URL check.
 async fn stalker_resource_response(
     app_state: &Arc<AppState>,
     input_id: u16,

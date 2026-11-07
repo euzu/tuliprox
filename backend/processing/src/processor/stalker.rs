@@ -650,6 +650,7 @@ mod tests {
         item
     }
 
+    /// Stalker config whose device profile carries `mac`.
     fn stalker_cfg_with_mac(mac: &str) -> StalkerInputConfig {
         StalkerInputConfig {
             device: Some(tuliprox_core::model::StalkerDeviceProfile {
@@ -660,6 +661,7 @@ mod tests {
         }
     }
 
+    /// Stalker input `main` with one enabled alias `saray8`; each account has its own MAC.
     fn input_with_alias() -> ConfigInput {
         ConfigInput {
             id: 1,
@@ -682,11 +684,13 @@ mod tests {
         }
     }
 
+    /// Portal identity fingerprint of an account, which keys its client and link cache.
     fn account_fingerprint(account: &ConfigInput) -> u64 {
         let url = resolve_stalker_portal_url(account).expect("portal url");
         account.stalker.as_ref().expect("stalker cfg").identity_fingerprint(&url)
     }
 
+    /// An alias resolves to its own MAC, id and portal identity.
     #[test]
     fn stalker_account_resolves_alias_with_its_own_mac() {
         let input = input_with_alias();
@@ -703,6 +707,7 @@ mod tests {
         assert_ne!(account_fingerprint(&main), account_fingerprint(&alias));
     }
 
+    /// The input's own name borrows the input instead of building an alias view.
     #[test]
     fn stalker_account_returns_the_input_for_its_own_name() {
         let input = input_with_alias();
@@ -713,6 +718,7 @@ mod tests {
         assert_eq!(main.id, input.id);
     }
 
+    /// An unknown account name yields no account.
     #[test]
     fn stalker_account_is_none_for_unknown_name() {
         let input = input_with_alias();
