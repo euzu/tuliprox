@@ -1,0 +1,86 @@
+id: ui-demo
+name: UI demo (W6b fixture)
+version: 0.1.0
+api_version: 1
+description: >
+  Demo plugin for manual checks: sandboxed frames in all nine UI slots, a
+  config section, extension and tab, rpc methods (also MCP tools), en and es
+  locales and toasts.
+capabilities:
+  storage: true
+hooks:
+  - rpc.call
+ui:
+  config_section:
+    schema: config-schema.json
+  config_extensions:
+    - section: messaging
+      schema:
+        type: object
+        properties:
+          notify_demo:
+            type: boolean
+            title: Notify from the UI demo
+  config_tab:
+    title: UI demo
+    title_key: tab.title
+    schema: tab-schema.json
+  locales: [en, es]
+  contributions:
+    - slot: menu
+      title: Demo menu
+      title_key: slot.menu
+      element: ui/menu.html
+    - slot: config-section
+      title: Demo config section
+      title_key: slot.config-section
+      element: ui/config-section.html
+    - slot: config-tab
+      title: Demo config tab
+      title_key: slot.config-tab
+      element: ui/config-tab.html
+    - slot: source-editor-tile
+      title: Demo source tile
+      title_key: slot.source-editor-tile
+      element: ui/source-editor-tile.html
+    - slot: dashboard-card
+      title: Demo dashboard card
+      title_key: slot.dashboard-card
+      element: ui/dashboard-card.html
+    - slot: playlist-explorer-action
+      title: Demo explorer action
+      title_key: slot.playlist-explorer-action
+      element: ui/playlist-explorer-action.html
+    - slot: channel-detail-panel
+      title: Demo channel panel
+      title_key: slot.channel-detail-panel
+      element: ui/channel-detail-panel.html
+    - slot: epg-overlay
+      title: Demo EPG overlay
+      title_key: slot.epg-overlay
+      element: ui/epg-overlay.html
+    - slot: setup-wizard-step
+      title: Demo wizard step
+      title_key: slot.setup-wizard-step
+      element: ui/setup-wizard-step.html
+  rpc_exports:
+    - name: echo
+      kind: read
+      mcp: true
+      description: Returns the payload and the configured greeting.
+      input_schema: rpc/echo.schema.json
+    - name: counter
+      kind: read
+      mcp: true
+      description: Returns the stored counter.
+      input_schema: rpc/counter.schema.json
+    - name: bump
+      kind: write
+      mcp: true
+      description: Adds `by` (1 to 100) to the stored counter and returns it.
+      input_schema: rpc/bump.schema.json
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

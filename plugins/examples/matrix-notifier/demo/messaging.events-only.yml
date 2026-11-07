@@ -1,0 +1,7 @@
+# Replace the `messaging:` block of config.yml with this one for check (c3): only
+# playlist refreshes are delivered, so user.connection.changed and
+# stream.probe.failed reach the plugin ONLY through on-event (counted and
+# logged), and the mock must see no message for them.
+messaging:
+  notify_on:
+    - playlist.update.*

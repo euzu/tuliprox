@@ -1,6 +1,9 @@
 use crate::{
-    app::components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
-    hooks::use_service_context,
+    app::components::{
+        is_plugin_route, menu_item::MenuItem, svg_icon::AppIcon, use_plugin_ui, CollapsePanel, IconButton,
+        PluginMenuEntry,
+    },
+    hooks::{use_icon_context, use_service_context},
     i18n::use_translation,
     model::ViewType,
     utils::{get_local_storage_item, html_if, set_local_storage_item, MOBILE_BREAKPOINT_PX},
@@ -34,6 +37,12 @@ pub struct SidebarProps {
     pub show_recording: bool,
     #[prop_or_default]
     pub active_page: ViewType,
+    /// Called with the `plugin/{id}/{element}` route of a plugin menu entry.
+    #[prop_or_default]
+    pub onplugin: Callback<String>,
+    /// The route of the plugin page that is open, if one is.
+    #[prop_or_default]
+    pub active_plugin: Option<String>,
 }
 
 fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
@@ -72,6 +81,41 @@ pub const fn show_stream_history_nav(has_system_read: bool, stream_history_enabl
     has_system_read && stream_history_enabled
 }
 
+/// The expanded sidebar entry of a plugin menu contribution; greyed out when the plugin is not enabled.
+fn render_plugin_item(
+    entry: &PluginMenuEntry,
+    active_plugin: Option<&str>,
+    onclick: &Callback<(String, MouseEvent)>,
+) -> Html {
+    let class = classes!(
+        (active_plugin == Some(entry.route.as_str())).then_some("active"),
+        (!entry.available).then_some("tp__plugin--disabled")
+    )
+    .to_string();
+    html! {
+        <MenuItem key={entry.route.clone()} class={class} icon={entry.icon.clone()} name={entry.route.clone()}
+            label={entry.title.clone()} onclick={onclick}></MenuItem>
+    }
+}
+
+/// The collapsed sidebar entry of a plugin menu contribution.
+fn render_plugin_icon(
+    entry: &PluginMenuEntry,
+    active_plugin: Option<&str>,
+    onclick: &Callback<(String, MouseEvent)>,
+) -> Html {
+    let class = classes!(
+        "tp__app-sidebar-menu--plugin",
+        (active_plugin == Some(entry.route.as_str())).then_some("active"),
+        (!entry.available).then_some("tp__plugin--disabled")
+    )
+    .to_string();
+    html! {
+        <IconButton key={entry.route.clone()} class={class} icon={entry.icon.clone()} name={entry.route.clone()}
+            hint={entry.title.clone()} aria_label={entry.title.clone()} onclick={onclick}></IconButton>
+    }
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -83,7 +127,10 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     });
     let is_mobile = use_state(|| false);
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
-    let active_menu = props.active_page;
+    let plugin_ui = use_plugin_ui();
+    let icons = use_icon_context();
+    let plugin_entries = plugin_ui.map(|ui| ui.menu_entries(&icons)).unwrap_or_default();
+    let is_active = |view: ViewType| props.active_plugin.is_none() && props.active_page == view;
     let show_recording =
         show_recording_nav(services.auth.has_permission(Permission::RecordingRead), props.show_recording);
     let show_stream_history =
@@ -91,15 +138,22 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
+        let pluginchange = props.onplugin.clone();
         let is_mobile = is_mobile.clone();
         let collapsed = collapsed.clone();
         Callback::from(move |(name, _): (String, _)| {
-            if let Ok(view_type) = ViewType::from_str(&name) {
+            let navigated = if is_plugin_route(&name) {
+                pluginchange.emit(name);
+                true
+            } else if let Ok(view_type) = ViewType::from_str(&name) {
                 viewchange.emit(view_type);
-                if *is_mobile {
-                    set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, "collapsed");
-                    collapsed.set(CollapseState::ManualCollapsed);
-                }
+                true
+            } else {
+                false
+            };
+            if navigated && *is_mobile {
+                set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, "collapsed");
+                collapsed.set(CollapseState::ManualCollapsed);
             }
         })
     };
@@ -202,18 +256,21 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let auth = &services.auth;
         html! {
           <div class="tp__app-sidebar__content">
-            <MenuItem class={if active_menu == ViewType::Dashboard { "active" } else {""}} icon="DashboardOutline" name={ViewType::Dashboard.to_string()} label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></MenuItem>
+            <MenuItem class={if is_active(ViewType::Dashboard) { "active" } else {""}} icon="DashboardOutline" name={ViewType::Dashboard.to_string()} label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></MenuItem>
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if active_menu == ViewType::Stats { "active" } else {""}} icon="Stats" name={ViewType::Stats.to_string()} label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if is_active(ViewType::Stats) { "active" } else {""}} icon="Stats" name={ViewType::Stats.to_string()} label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if is_active(ViewType::Streams) { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if active_menu == ViewType::Logs { "active" } else {""}} icon="Log" name={ViewType::Logs.to_string()} label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if is_active(ViewType::Logs) { "active" } else {""}} icon="Log" name={ViewType::Logs.to_string()} label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></MenuItem>
+            })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <MenuItem class={if is_active(ViewType::Plugins) { "active" } else {""}} icon="Nodes" name={ViewType::Plugins.to_string()} label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(show_stream_history, {
-                <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Clock" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if is_active(ViewType::StreamHistory) { "active" } else {""}} icon="Clock" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(
                 auth.has_any_permissions(
@@ -226,22 +283,22 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 {
                     <CollapsePanel title={translate.t("LABEL.SETTINGS")}>
                       {html_if!(auth.is_admin(), {
-                        <MenuItem class={if active_menu == ViewType::Rbac { "active" } else {""}} icon="Shield" name={ViewType::Rbac.to_string()} label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></MenuItem>
+                        <MenuItem class={if is_active(ViewType::Rbac) { "active" } else {""}} icon="Shield" name={ViewType::Rbac.to_string()} label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
-                          <MenuItem class={if active_menu == ViewType::Config { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::Config) { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
-                          <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::Users) { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
-                          <MenuItem class={if active_menu == ViewType::Plans { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::Plans) { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::SourceRead), {
-                          <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::SourceEditor) { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistSettings { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::PlaylistSettings) { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
                       })}
                     </CollapsePanel>
                 }
@@ -251,18 +308,18 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 {
                     <CollapsePanel title={translate.t("LABEL.PLAYLIST")}>
                       {html_if!(auth.has_permission(Permission::PlaylistWrite), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistUpdate { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::PlaylistUpdate) { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::PlaylistRead), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistStats { "active" } else {""}} icon="Stats" name={ViewType::PlaylistStats.to_string()} label={translate.t("LABEL.PLAYLIST_STATS")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::PlaylistStats) { "active" } else {""}} icon="Stats" name={ViewType::PlaylistStats.to_string()} label={translate.t("LABEL.PLAYLIST_STATS")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::PlaylistRead), {
                           <>
-                          <MenuItem class={if active_menu == ViewType::PlaylistExplorer { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::PlaylistExplorer) { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
                           </>
                       })}
                       {html_if!(auth.has_permission(Permission::EpgRead), {
-                          <MenuItem class={if active_menu == ViewType::PlaylistEpg { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if is_active(ViewType::PlaylistEpg) { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
                       })}
                     </CollapsePanel>
                 }
@@ -271,11 +328,16 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 show_recording,
                 {
                     <CollapsePanel title={translate.t("LABEL.RECORDING")}>
-                      <MenuItem class={if active_menu == ViewType::RecordingLibrary { "active" } else {""}} icon="VideoLibrary" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
-                      <MenuItem class={if active_menu == ViewType::RecordingRules { "active" } else {""}} icon="Calendar" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if is_active(ViewType::RecordingLibrary) { "active" } else {""}} icon="VideoLibrary" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if is_active(ViewType::RecordingRules) { "active" } else {""}} icon="Calendar" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
                     </CollapsePanel>
                 }
             )}
+            {html_if!(!plugin_entries.is_empty(), {
+                <CollapsePanel title={translate.t("LABEL.PLUGINS")}>
+                  { for plugin_entries.iter().map(|entry| render_plugin_item(entry, props.active_plugin.as_deref(), &handle_menu_click)) }
+                </CollapsePanel>
+            })}
           </div>
         }
     };
@@ -284,18 +346,21 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let auth = &services.auth;
         html! {
           <div class="tp__app-sidebar__content">
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Dashboard, if active_menu == ViewType::Dashboard { " active" } else {""})}  icon="DashboardOutline" name={ViewType::Dashboard.to_string()} hint={translate.t("LABEL.DASHBOARD")} aria_label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Dashboard, if is_active(ViewType::Dashboard) { " active" } else {""})}  icon="DashboardOutline" name={ViewType::Dashboard.to_string()} hint={translate.t("LABEL.DASHBOARD")} aria_label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></IconButton>
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Stats, if active_menu == ViewType::Stats { " active" } else {""})} icon="Stats" name={ViewType::Stats.to_string()} hint={translate.t("LABEL.STATS")} aria_label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Stats, if is_active(ViewType::Stats) { " active" } else {""})} icon="Stats" name={ViewType::Stats.to_string()} hint={translate.t("LABEL.STATS")} aria_label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
-             <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
+             <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if is_active(ViewType::Streams) { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Logs, if active_menu == ViewType::Logs { " active" } else {""})} icon="Log" name={ViewType::Logs.to_string()} hint={translate.t("LABEL.LOGS")} aria_label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Logs, if is_active(ViewType::Logs) { " active" } else {""})} icon="Log" name={ViewType::Logs.to_string()} hint={translate.t("LABEL.LOGS")} aria_label={translate.t("LABEL.LOGS")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plugins, if is_active(ViewType::Plugins) { " active" } else {""})} icon="Nodes" name={ViewType::Plugins.to_string()} hint={translate.t("LABEL.PLUGINS")} aria_label={translate.t("LABEL.PLUGINS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(show_stream_history, {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Clock" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if is_active(ViewType::StreamHistory) { " active" } else {""})} icon="Clock" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(
@@ -310,22 +375,22 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 }
             )}
             {html_if!(auth.is_admin(), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if active_menu == ViewType::Rbac { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} hint={translate.t("LABEL.RBAC")} aria_label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if is_active(ViewType::Rbac) { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} hint={translate.t("LABEL.RBAC")} aria_label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::ConfigRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if is_active(ViewType::Config) { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_any_permissions(Permission::UserRead | Permission::UserWrite), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if is_active(ViewType::Users) { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::ConfigRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if active_menu == ViewType::Plans { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if is_active(ViewType::Plans) { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SourceRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if is_active(ViewType::SourceEditor) { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_any_permissions(Permission::SourceRead | Permission::PlaylistRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if active_menu == ViewType::PlaylistSettings { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if is_active(ViewType::PlaylistSettings) { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::PlaylistRead | Permission::PlaylistWrite | Permission::EpgRead),
@@ -334,24 +399,30 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 }
             )}
             {html_if!(auth.has_permission(Permission::PlaylistWrite), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if active_menu == ViewType::PlaylistUpdate { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} hint={translate.t("LABEL.UPDATE")} aria_label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if is_active(ViewType::PlaylistUpdate) { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} hint={translate.t("LABEL.UPDATE")} aria_label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::PlaylistRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistStats, if active_menu == ViewType::PlaylistStats { " active" } else {""})} icon="Stats" name={ViewType::PlaylistStats.to_string()} hint={translate.t("LABEL.PLAYLIST_STATS")} aria_label={translate.t("LABEL.PLAYLIST_STATS")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistStats, if is_active(ViewType::PlaylistStats) { " active" } else {""})} icon="Stats" name={ViewType::PlaylistStats.to_string()} hint={translate.t("LABEL.PLAYLIST_STATS")} aria_label={translate.t("LABEL.PLAYLIST_STATS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::PlaylistRead), {
                <>
-               <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if active_menu == ViewType::PlaylistExplorer { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} hint={translate.t("LABEL.PLAYLIST_VIEWER")} aria_label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></IconButton>
+               <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if is_active(ViewType::PlaylistExplorer) { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} hint={translate.t("LABEL.PLAYLIST_VIEWER")} aria_label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></IconButton>
                </>
             })}
             {html_if!(auth.has_permission(Permission::EpgRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if is_active(ViewType::PlaylistEpg) { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(show_recording, {
                 <>
                 <span class="tp__app-sidebar__content-space"></span>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if active_menu == ViewType::RecordingLibrary { " active" } else {""})} icon="VideoLibrary" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if active_menu == ViewType::RecordingRules { " active" } else {""})} icon="Calendar" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if is_active(ViewType::RecordingLibrary) { " active" } else {""})} icon="VideoLibrary" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if is_active(ViewType::RecordingRules) { " active" } else {""})} icon="Calendar" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
+                </>
+            })}
+            {html_if!(!plugin_entries.is_empty(), {
+                <>
+                <span class="tp__app-sidebar__content-space"></span>
+                { for plugin_entries.iter().map(|entry| render_plugin_icon(entry, props.active_plugin.as_deref(), &handle_menu_click)) }
                 </>
             })}
           </div>

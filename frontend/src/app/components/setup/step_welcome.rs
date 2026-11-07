@@ -40,11 +40,11 @@ pub fn WelcomeStep() -> Html {
     let step_message = format!(
         "{} {}/{}: {}",
         translate.t(LABEL_SETUP_STEP),
-        SetupStep::Welcome.position(),
-        SetupStep::total(),
+        setup_ctx.step_position(SetupStep::Welcome),
+        setup_ctx.step_total(),
         translate.t(SetupStep::Welcome.description_key())
     );
-    let next_title = SetupStep::Welcome.next().map_or_else(
+    let next_title = setup_ctx.next_step(SetupStep::Welcome).map_or_else(
         || translate.t("SETUP.LABEL.NEXT"),
         |next_step| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next_step.title_key())),
     );

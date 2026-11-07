@@ -248,7 +248,7 @@ fn player_resource_url(
     policy: ResourceOutputPolicy,
 ) -> Arc<str> {
     match policy {
-        ResourceOutputPolicy::Direct if source_url.starts_with("/api/v1/library/thumbnail/") => {
+        ResourceOutputPolicy::Direct if shared::model::is_internal_resource_path(source_url) => {
             concat_path(ctx.base_url, source_url).intern()
         }
         ResourceOutputPolicy::Direct => Arc::clone(source_url),

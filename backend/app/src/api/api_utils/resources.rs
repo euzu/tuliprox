@@ -342,6 +342,23 @@ pub fn resource_input_for_url<'a>(input: Option<&'a ConfigInput>, resource_url: 
     is_same_origin(&input.url, &resource).then_some(input)
 }
 
+/// The cached copy of `cache_key`, if the resource cache holds one.
+async fn cached_resource_response(app_state: &Arc<AppState>, cache_key: &str) -> Option<axum::response::Response> {
+    let cache = app_state.cache.load();
+    let cache = cache.as_ref()?;
+    let (resource_path, mime_type) = cache.write().await.get_content(cache_key)?;
+    trace_if_enabled!("Responding resource from cache {}", sanitize_sensitive_info(cache_key));
+    Some(
+        serve_file(
+            &resource_path,
+            mime_type.unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM.to_string()),
+            Some("public, max-age=14400"),
+        )
+        .await
+        .into_response(),
+    )
+}
+
 pub async fn resource_redirect_or_proxy(
     app_state: &Arc<AppState>,
     resource_url: &str,
@@ -352,7 +369,7 @@ pub async fn resource_redirect_or_proxy(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let resource_url = resource_url.as_ref();
-    if resource_url.starts_with("/api/v1/library/thumbnail/") {
+    if shared::model::is_internal_resource_path(resource_url) {
         return redirect(resource_url).into_response();
     }
     if resource_url.starts_with("media-server://image/") {
@@ -386,9 +403,15 @@ pub async fn resource_proxy_response(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let resource_url = resource_url.as_ref();
+    // An exact cache entry is served whatever its destination class. The core
+    // caches public destinations only, so any other entry was stored by a
+    // plugin's `cache-image`, fetched under the network grant the admin approved.
+    if let Some(cached) = cached_resource_response(app_state, resource_url).await {
+        return cached;
+    }
     let input = resource_input_for_url(input, resource_url);
     match classify_output_resource_url(resource_url).await {
-        ResourceOutputPolicy::Direct if resource_url.starts_with("/api/v1/library/thumbnail/") => {
+        ResourceOutputPolicy::Direct if shared::model::is_internal_resource_path(resource_url) => {
             redirect(resource_url).into_response()
         }
         ResourceOutputPolicy::Direct => {
@@ -435,22 +458,9 @@ pub async fn resource_response(
     }
     let filter: HeaderFilter = Some(Box::new(request::is_safe_cross_origin_redirect_header));
     let req_headers = get_headers_from_request(req_headers, &filter);
-    let cache_key = fetch_policy.cache_key(resource_url);
-    if let (Some(cache_key), Some(cache)) = (cache_key, app_state.cache.load().as_ref()) {
-        let cache_hit = {
-            let mut guard = cache.write().await;
-            guard.get_content(cache_key)
-        };
-
-        if let Some((resource_path, mime_type)) = cache_hit {
-            trace_if_enabled!("Responding resource from cache {}", sanitize_sensitive_info(resource_url));
-            return serve_file(
-                &resource_path,
-                mime_type.unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM.to_string()),
-                Some("public, max-age=14400"),
-            )
-            .await
-            .into_response();
+    if let Some(cache_key) = fetch_policy.cache_key(resource_url) {
+        if let Some(cached) = cached_resource_response(app_state, cache_key).await {
+            return cached;
         }
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));

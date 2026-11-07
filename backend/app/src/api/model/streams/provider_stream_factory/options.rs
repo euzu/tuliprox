@@ -8,7 +8,7 @@ use crate::{
     model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::request::{get_request_headers, preview_request_target_for_logging},
 };
-use reqwest::header::{HeaderMap, HeaderValue, RANGE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use shared::{
     model::{FailureStage, PlaylistItemType, StreamChannel, StreamInfo},
     utils::is_sanitize_sensitive_info_enabled,
@@ -40,6 +40,10 @@ pub(crate) struct ProviderStreamFactoryParams<'a> {
     pub stream_channel: Option<&'a StreamChannel>,
     pub connect_failure_stage: Option<FailureStage>,
     pub content_representation: ProviderContentRepresentationMode,
+    /// Extra upstream headers of `inject-upstream-headers`, already
+    /// denylist-filtered (plan §7 *Session-edge header injection*). `Some` only
+    /// at a stream-session setup; every other constructor passes `None`.
+    pub plugin_headers: Option<&'a [(String, String)]>,
 }
 
 impl ProviderStreamFactoryOptions {
@@ -60,6 +64,7 @@ impl ProviderStreamFactoryOptions {
             stream_channel,
             connect_failure_stage,
             content_representation,
+            plugin_headers,
         } = request;
         let buffer_size = if stream_options.buffer_enabled { stream_options.buffer_size } else { 0 };
         let buffer_max_bytes = stream_options.buffer_max_bytes;
@@ -89,6 +94,9 @@ impl ProviderStreamFactoryOptions {
             stream_channel.as_ref().and_then(|channel| channel.upstream_user_agent.as_deref()),
             *disabled_headers,
         );
+        if let Some(plugin_headers) = plugin_headers {
+            apply_plugin_headers(&mut headers, plugin_headers);
+        }
 
         let default_user_agent = default_user_agent
             .and_then(|ua| {
@@ -97,28 +105,7 @@ impl ProviderStreamFactoryOptions {
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
         let url = (*stream_url).clone();
-        let mut flags = ProviderStreamFactoryFlagsSet::new();
-        if stream_options.stream_retry {
-            flags.set(ProviderStreamFactoryFlags::RetryEnabled);
-            if !item_type.is_live_adaptive() && stream_options.response_mode != StreamResponseMode::HlsResource {
-                flags.set(ProviderStreamFactoryFlags::InitialRetryLoopEnabled);
-            }
-        }
-        if stream_options.pipe_provider_stream {
-            flags.set(ProviderStreamFactoryFlags::PipeStream);
-        }
-        if stream_options.buffer_enabled {
-            flags.set(ProviderStreamFactoryFlags::BufferEnabled);
-        }
-        if stream_options.response_mode == StreamResponseMode::HlsResource {
-            flags.set(ProviderStreamFactoryFlags::HlsResource);
-        }
-        if *share_stream {
-            flags.set(ProviderStreamFactoryFlags::ShareStream);
-        }
-        if requested_range.is_some() {
-            flags.set(ProviderStreamFactoryFlags::RangeRequested);
-        }
+        let flags = factory_flags(stream_options, *item_type, *share_stream, requested_range.is_some());
 
         Self {
             item_type: *item_type,
@@ -285,6 +272,49 @@ impl ProviderStreamFactoryOptions {
     #[cfg(test)]
     pub(crate) fn hls_content_coding_object_kind(&self) -> Option<HlsOriginContentCodingObjectKind> {
         self.hls_content_coding_object_kind
+    }
+}
+
+/// The behaviour flags a stream session opens with.
+fn factory_flags(
+    stream_options: &StreamOptions,
+    item_type: PlaylistItemType,
+    share_stream: bool,
+    range_requested: bool,
+) -> ProviderStreamFactoryFlagsSet {
+    let mut flags = ProviderStreamFactoryFlagsSet::new();
+    if stream_options.stream_retry {
+        flags.set(ProviderStreamFactoryFlags::RetryEnabled);
+        if !item_type.is_live_adaptive() && stream_options.response_mode != StreamResponseMode::HlsResource {
+            flags.set(ProviderStreamFactoryFlags::InitialRetryLoopEnabled);
+        }
+    }
+    if stream_options.pipe_provider_stream {
+        flags.set(ProviderStreamFactoryFlags::PipeStream);
+    }
+    if stream_options.buffer_enabled {
+        flags.set(ProviderStreamFactoryFlags::BufferEnabled);
+    }
+    if stream_options.response_mode == StreamResponseMode::HlsResource {
+        flags.set(ProviderStreamFactoryFlags::HlsResource);
+    }
+    if share_stream {
+        flags.set(ProviderStreamFactoryFlags::ShareStream);
+    }
+    if range_requested {
+        flags.set(ProviderStreamFactoryFlags::RangeRequested);
+    }
+    flags
+}
+
+/// Set the plugin headers on the request headers, replacing a header of the
+/// same name. The host already screened them, so an unparsable one (which can
+/// only be a bug) is skipped rather than failing the stream.
+fn apply_plugin_headers(headers: &mut HeaderMap, plugin_headers: &[(String, String)]) {
+    for (name, value) in plugin_headers {
+        if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
+            headers.insert(name, value);
+        }
     }
 }
 

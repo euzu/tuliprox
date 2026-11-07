@@ -60,8 +60,7 @@ impl XtreamMappingOptions {
     pub fn is_reverse(&self, item_type: PlaylistItemType) -> bool { self.reverse_item_types.is_set(item_type) }
 
     pub(super) fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
-        const TRUSTED_WEB_UI_RESOURCE_PREFIXES: [&str; 1] = ["/api/v1/library/thumbnail/"];
-        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.starts_with(prefix))
+        crate::model::is_internal_resource_path(resource_url)
     }
 
     pub(super) fn build_reverse_proxy_base_url(

@@ -6,9 +6,9 @@ use super::{
 use shared::{
     foundation::get_filter,
     model::{
-        ConfigTargetDto, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, TargetOutputDto,
-        TraktApiConfigDto, TraktCatalogSelection, TraktConfigDto, TraktContentType, TraktListConfigDto, UUIDType,
-        XtreamCluster, XtreamTargetOutputDto,
+        ConfigTargetDto, NoPlugins, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, PluginRunReport,
+        TargetOutputDto, TraktApiConfigDto, TraktCatalogSelection, TraktConfigDto, TraktContentType,
+        TraktListConfigDto, UUIDType, XtreamCluster, XtreamTargetOutputDto,
     },
     utils::Internable,
 };
@@ -35,8 +35,8 @@ fn current_target_finalization_order_merges_before_dedup_and_presentation() {
     );
 }
 
-#[test]
-fn curation_eligible_catalog_is_merged_and_deduplicated_before_matching() {
+#[tokio::test]
+async fn curation_eligible_catalog_is_merged_and_deduplicated_before_matching() {
     let mut target = ConfigTarget::from(&ConfigTargetDto::default());
     target.execution_plan.post_merge_content_dedup = Some(shared::model::DeduplicateConfig::default());
     let losing_uuid = UUIDType::from_valid_uuid("00000000-0000-4000-8000-000000000051");
@@ -69,7 +69,9 @@ fn curation_eligible_catalog_is_merged_and_deduplicated_before_matching() {
     ];
     let mut step = StepMeasure::new("test", |_, _| {});
 
-    let eligible = prepare_eligible_catalog(&target, playlist, &mut step);
+    let eligible = prepare_eligible_catalog(&NoPlugins, &target, playlist, &mut step, &mut PluginRunReport::default())
+        .await
+        .expect("no plugin to abort");
 
     assert_eq!(eligible.len(), 1);
     assert_eq!(eligible[0].channels.len(), 1);

@@ -1,0 +1,48 @@
+# Fragment of config.yml for the Sports Enricher demo. Merge it into the base config of the run
+# (api.port 18980; keep the base working_dir, web_root and log settings).
+api:
+  host: 127.0.0.1
+  port: 18980
+
+# The first update runs at boot. The VOD metadata check needs a SECOND boot: the input VOD store does not
+# exist yet on the first pass, so the VOD titles resolve on boot 2.
+update_on_boot: true
+
+web_ui:
+  enabled: true        # the /api/v1 routes (plugins, rpc, tasks) and the frames exist only with the web UI
+  user_ui_enabled: true
+  # No `auth:` block, to keep the curl lines short. Without it MCP is forced read-only, which is enough:
+  # get-fixtures is a `read` export.
+
+plugins:
+  enabled: true
+  directory: plugins   # relative to the config directory: plugins/sports-enricher/{manifest.yml,plugin.wasm,...}
+  plugins:
+    - id: sports-enricher
+      enabled: true
+      priority: 100
+      settings:
+        api_key: demo-token                    # the mock's bearer token; a real key may be `${env:SPORTS_API_KEY}`
+        api_base_url: http://127.0.0.1:18970
+        leagues: [epl, laliga, nba]
+        group_emoji: true
+
+schedules:
+  - schedule: "0 */15 * * * *"
+    type: plugin_task
+    plugin: sports-enricher
+    task: refresh-fixtures
+
+# MCP: switch 3 of 3 is `plugin_tools`. The other two are `mcp: true` in the manifest export and
+# `"mcp": true` in the approval (see CHECKS.md).
+mcp:
+  enabled: true
+  plugin_tools: true
+
+# cache-image stores into the resource cache, which is off by default; the cached logos are then served
+# from that cache on the resource route.
+reverse_proxy:
+  rewrite_secret: ${env:TULIPROX_PROXY_REWRITE_SECRET} # openssl rand -hex 16
+  cache:
+    enabled: true
+    size: 64MB

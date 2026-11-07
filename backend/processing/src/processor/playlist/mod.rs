@@ -6,8 +6,9 @@ use crate::{
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator},
     playlist_watch::{assemble_watch_changes, diff_target_groups, process_group_watch},
     processor::{
+        deduplicate::{group_duplicates, plugin_duplicate_groups},
         epg::{
-            adopt_guide_live_epg_id_case, clear_invalid_live_epg_ids, process_playlist_epg,
+            adopt_guide_live_epg_id_case, clear_invalid_live_epg_ids, enrich_playlist_programmes, process_playlist_epg,
             retain_epg_referenced_by_groups, EpgAssignOptions,
         },
         sort::sort_playlist,
@@ -25,12 +26,13 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, ConfigTargetOptions, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet,
-        InputRefreshOverride, InputRefreshPolicy, InputStats, InputType, InputUpdateAction, InputUpdateRequest,
-        MappingStage, PipelineStats, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
-        PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId, PlaylistUpdateRunOrder,
-        PlaylistUpdateState, PlaylistUpdateSummary, StreamProperties, TargetStats, UUIDType, WatchContext,
-        WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
+        ClusterFlags, ConfigTargetOptions, CounterModifier, DeduplicateConfig, EventMessage, EventSink, FieldGet,
+        FieldSet, HookCtx, InputRefreshOverride, InputRefreshPolicy, InputStats, InputType, InputUpdateAction,
+        InputUpdateRequest, MappingStage, NoPlugins, PipelineStats, PlaylistEntry, PlaylistGroup, PlaylistItem,
+        PlaylistItemType, PlaylistUpdateInputTelemetry, PlaylistUpdateProgressEvent, PlaylistUpdateRunId,
+        PlaylistUpdateRunOrder, PlaylistUpdateState, PlaylistUpdateSummary, PluginAbort, PluginGroupMerge, PluginHook,
+        PluginHost, PluginKeepers, PluginRunReport, PluginSortKeys, StreamProperties, TargetStats, UUIDType,
+        WatchContext, WatchDisabled, WatchDisabledReason, WatchUnmatched, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -83,6 +85,8 @@ mod m3u_quality;
 mod manual_update;
 use manual_update::LibraryUpdateMode;
 pub(crate) mod overrides;
+mod plugin_epg;
+mod plugin_output;
 mod target;
 mod transform;
 
@@ -133,6 +137,7 @@ pub struct ProcessingRun<
     E: EventSink + Clone + 'static,
     B: UpdateBootstrap = NoBootstrap,
     M: MetadataUpdateSink = NoopMetadataSink,
+    P: PluginHost = NoPlugins,
 > {
     client: reqwest::Client,
     run_id: PlaylistUpdateRunId,
@@ -150,6 +155,7 @@ pub struct ProcessingRun<
     input_refresh: Option<InputRefreshOverride>,
     library_update_mode: LibraryUpdateMode,
     maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
+    plugins: P,
     override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
 }
 
@@ -184,18 +190,21 @@ impl<E: EventSink + Clone + 'static> ProcessingRun<E, NoBootstrap, NoopMetadataS
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,
+            plugins: NoPlugins,
             override_status: None,
         }
     }
 }
 
-impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> ProcessingRun<E, B, M> {
+impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink, P: PluginHost>
+    ProcessingRun<E, B, M, P>
+{
     /// Work the composition root runs once the lock is held, before the update
     /// proper starts.
     ///
     /// Changes the run's bootstrap type, so it rebuilds rather than mutates.
     #[must_use]
-    pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2, M> {
+    pub fn with_bootstrap<B2: UpdateBootstrap>(self, bootstrap: B2) -> ProcessingRun<E, B2, M, P> {
         ProcessingRun {
             client: self.client,
             run_id: self.run_id,
@@ -213,6 +222,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance,
+            plugins: self.plugins,
             override_status: self.override_status,
         }
     }
@@ -256,7 +266,7 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
     ///
     /// Changes the run's sink type, so it rebuilds rather than mutates.
     #[must_use]
-    pub fn with_metadata_manager<M2: MetadataUpdateSink>(self, manager: Arc<M2>) -> ProcessingRun<E, B, M2> {
+    pub fn with_metadata_manager<M2: MetadataUpdateSink>(self, manager: Arc<M2>) -> ProcessingRun<E, B, M2, P> {
         ProcessingRun {
             client: self.client,
             run_id: self.run_id,
@@ -274,6 +284,34 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
             input_refresh: self.input_refresh,
             library_update_mode: self.library_update_mode,
             maintenance: self.maintenance,
+            plugins: self.plugins,
+            override_status: self.override_status,
+        }
+    }
+
+    /// The plugin host whose hooks this run awaits.
+    ///
+    /// Changes the run's host type, so it rebuilds rather than mutates.
+    #[must_use]
+    pub fn with_plugins<P2: PluginHost>(self, plugins: P2) -> ProcessingRun<E, B, M, P2> {
+        ProcessingRun {
+            client: self.client,
+            run_id: self.run_id,
+            app_config: self.app_config,
+            targets: self.targets,
+            events: self.events,
+            bootstrap: self.bootstrap,
+            playlist_state: self.playlist_state,
+            update_guard: self.update_guard,
+            disabled_headers: self.disabled_headers,
+            provider_manager: self.provider_manager,
+            metadata_manager: self.metadata_manager,
+            pre_processed_inputs: self.pre_processed_inputs,
+            acquired_permit: self.acquired_permit,
+            input_refresh: self.input_refresh,
+            library_update_mode: self.library_update_mode,
+            maintenance: self.maintenance,
+            plugins,
             override_status: self.override_status,
         }
     }
@@ -327,8 +365,13 @@ impl<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink> 
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap, M: MetadataUpdateSink>(
-    run: ProcessingRun<E, B, M>,
+pub async fn exec_processing<
+    E: EventSink + Clone + 'static,
+    B: UpdateBootstrap,
+    M: MetadataUpdateSink,
+    P: PluginHost,
+>(
+    run: ProcessingRun<E, B, M, P>,
 ) {
     let ProcessingRun {
         client,
@@ -347,6 +390,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
         input_refresh,
         library_update_mode,
         maintenance,
+        plugins,
         override_status,
     } = run;
 
@@ -426,6 +470,7 @@ pub async fn exec_processing<E: EventSink + Clone + 'static, B: UpdateBootstrap,
         input_refresh,
         library_update_mode,
         maintenance,
+        plugins,
         override_status,
     };
 

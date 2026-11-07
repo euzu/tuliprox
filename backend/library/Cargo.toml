@@ -23,18 +23,18 @@ fancy-regex = "0.20.0"
 log.workspace = true
 paste.workspace = true
 path-clean.workspace = true
-quick-xml = { version = "0.42", features = ["async-tokio", "serialize"] }
+quick-xml = { workspace = true, features = ["async-tokio", "serialize"] }
 regex.workspace = true
-reqwest = { version = "0.13.5", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+reqwest = { workspace = true, features = ["default", "json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
-strsim = "0.11.1"
+strsim.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "process", "time", "macros"] }
 url.workspace = true
-uuid = { version = "1.26.0", features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"
-filetime = "0.2.29"
+tempfile.workspace = true
+filetime.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }

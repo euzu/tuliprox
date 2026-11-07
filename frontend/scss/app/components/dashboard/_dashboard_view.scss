@@ -1,5 +1,3 @@
-@use "../../../size";
-
 .tp__dashboard {
   display: flex;
   flex-flow: column;
@@ -18,23 +16,24 @@
     display: flex;
     flex-flow: column;
     gap: var(--gap-large);
-    overflow: auto; pointer-events: auto;
+    min-width: 0;
+    overflow: auto;
+    pointer-events: auto;
     touch-action: pan-x pan-y;
     -webkit-overflow-scrolling: touch;
 
     &-actions {
       display: grid;
-      grid-template-columns: var(--action-card-width) var(--action-card-width);
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--action-card-width)), 1fr));
       gap: var(--gap-large);
-      padding-right: var(--padding-default);
       padding-bottom: var(--padding-default);
 
-      @media (max-width: size.$dashboard-mobile-breakpoint) {
-        grid-template-columns: var(--action-card-width);
+      .span-two {
+        grid-column: 1 / -1;
       }
 
-      .span-two {
-        grid-column: span 2;
+      > .tp__card {
+        min-width: 0;
       }
     }
 

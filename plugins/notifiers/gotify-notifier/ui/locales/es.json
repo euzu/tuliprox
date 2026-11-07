@@ -1,0 +1,21 @@
+{
+  "settings.title": "Notificador de Gotify",
+  "settings.url.title": "URL del servidor",
+  "settings.url.description": "URL base del servidor Gotify, por ejemplo https://gotify.example.org (sin /message).",
+  "settings.token.title": "Token de la aplicación",
+  "settings.token.description": "El token de una aplicación de Gotify. Es una credencial: solo se puede escribir y se oculta al leerla. Usa ${env:VAR} para no guardarla en el archivo de configuración.",
+  "settings.style.title": "Estilo",
+  "settings.style.description": "text: el cuerpo como mensaje de texto simple. markdown: las secciones del evento como títulos en negrita con sus líneas debajo, que los clientes de Gotify muestran con formato.",
+  "settings.routing.title": "Enrutamiento (lo aplica tuliprox, no el plugin)",
+  "settings.routing.description": "Enrutamiento por canal de la bandeja de salida de mensajes, el mismo bloque que admite cualquier canal. Todos los campos son opcionales; un bloque vacío hereda el notify_on global.",
+  "settings.routing.notify_on.title": "Reemplazo de notify_on",
+  "settings.routing.notify_on.description": "Patrones de ids de evento que sustituyen al notify_on global en este canal (por ejemplo, playlist.update.*).",
+  "settings.routing.min_severity.title": "Gravedad mínima (enrutamiento)",
+  "settings.routing.min_severity.description": "Umbral de gravedad en el host, evaluado con la gravedad del evento en el registro antes de llamar al plugin.",
+  "settings.routing.quiet_hours.title": "Horas de silencio",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM en hora local. Las notificaciones dentro de la ventana se aplazan, nunca se descartan.",
+  "settings.routing.max_per_hour.title": "Máximo por hora",
+  "settings.routing.max_per_hour.description": "Cortacircuitos: tras este número de notificaciones en una hora, el canal envía un aviso de supresión y se silencia.",
+  "settings.routing.dedup_window_secs.title": "Ventana de deduplicación (segundos)",
+  "settings.routing.dedup_window_secs.description": "Suprime una clave de deduplicación repetida durante estos segundos."
+}

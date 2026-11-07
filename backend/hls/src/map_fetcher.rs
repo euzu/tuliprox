@@ -848,7 +848,7 @@ mod tests {
             HlsAvailabilityReevaluationRegistration::Scheduled
         );
         let mut observer = availability.observe_owner(&proxy_session_id).expect("availability owner observation");
-        let mut evidence_change = Box::pin(observer.changed());
+        let mut evidence_change = std::pin::pin!(observer.changed());
         assert!(matches!(futures::poll!(evidence_change.as_mut()), std::task::Poll::Pending));
         let context = MapFetchContext {
             session: Arc::clone(&session),

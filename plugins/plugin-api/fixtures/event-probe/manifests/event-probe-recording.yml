@@ -1,0 +1,15 @@
+# The same component as event-probe.yml, subscribed to the one coalescable
+# kind, so a test can see the 250 ms coalescing from the plugin side.
+id: event-probe-recording
+name: "Event probe - on-event (recording)"
+version: 0.1.0
+api_version: 1
+hooks:
+  - events.on-event
+events:
+  - recording.changed
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

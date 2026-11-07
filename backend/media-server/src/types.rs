@@ -37,7 +37,8 @@ impl TryFrom<InputType> for MediaServerKind {
             | InputType::Stalker
             | InputType::StalkerBatch
             | InputType::Library
-            | InputType::Staged => Err("input type is not a media-server input"),
+            | InputType::Staged
+            | InputType::Plugin => Err("input type is not a media-server input"),
         }
     }
 }

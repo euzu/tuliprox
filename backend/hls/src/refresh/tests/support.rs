@@ -92,6 +92,7 @@ pub(in crate::refresh::tests) fn test_app_config() -> Arc<AppConfig> {
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::empty()),
         file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {

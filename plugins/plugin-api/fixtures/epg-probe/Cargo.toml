@@ -1,0 +1,22 @@
+[package]
+name = "plugin-fixture-epg-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "W5 fixture plugin: settings-driven EPG and metadata hooks (rename channel, rewrite categories, inject a programme, match a misnamed channel, amend VOD metadata JSON); one wasm, one manifest per scenario"
+
+# Not a member of the tuliprox workspace: it targets wasm32-wasip2 and is built
+# by bin/build_plugin_fixture.sh, never committed as a binary.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.63.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

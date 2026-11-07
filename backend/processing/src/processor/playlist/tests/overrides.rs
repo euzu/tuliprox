@@ -49,6 +49,7 @@ fn test_app_config(storage_dir: &Path, config_dir: &Path) -> Arc<AppConfig> {
         access_token_secret: [0; 32],
         encrypt_secret: [0; 16],
         media_tools: Arc::new(MediaToolCapabilities::new()),
+        plugins: Arc::default(),
     })
 }
 
@@ -83,6 +84,7 @@ fn test_processing_context(
         input_refresh: None,
         library_update_mode: LibraryUpdateMode::ExistingCatalog,
         override_status,
+        plugins: shared::model::NoPlugins,
     }
 }
 
@@ -102,8 +104,8 @@ fn make_live_item(id: &str, input_name: &str, name: &str, group: &str) -> Playli
     PlaylistItem { header }
 }
 
-#[test]
-fn no_override_files_output_identical() {
+#[tokio::test]
+async fn no_override_files_output_identical() {
     let input = ConfigInput { name: "test-input".intern(), ..ConfigInput::default() };
     let item1 = make_live_item("1", "test-input", "Alpha", "News");
     let item2 = make_live_item("2", "test-input", "Beta", "Sports");
@@ -128,8 +130,10 @@ fn no_override_files_output_identical() {
     let target = ConfigTarget::from(&ConfigTargetDto::default());
     let pipe = get_processing_pipe(&target);
 
-    let (mut processed1, _) = execute_pipe(&target, &pipe, &mut fetched1, &mut duplicates1, false, None, None)
-        .expect("execution without overrides must succeed");
+    let (mut processed1, _) =
+        execute_pipe(&target, &pipe, &mut fetched1, &mut duplicates1, false, None, &NoPlugins, None)
+            .await
+            .expect("execution without overrides must succeed");
     let golden_groups = processed1.source.take_groups();
     let golden_serialized = serde_json::to_string(&golden_groups).expect("serialize golden");
 
@@ -154,7 +158,8 @@ fn no_override_files_output_identical() {
     let non_matching_set = TargetOverrideSet::new(non_matching_map, HashMap::new(), aliases, Vec::new());
 
     let (mut processed2, _) =
-        execute_pipe(&target, &pipe, &mut fetched2, &mut duplicates2, false, None, Some(&non_matching_set))
+        execute_pipe(&target, &pipe, &mut fetched2, &mut duplicates2, false, None, &NoPlugins, Some(&non_matching_set))
+            .await
             .expect("execution with non-matching overrides must succeed");
     let test_groups = processed2.source.take_groups();
     let test_serialized = serde_json::to_string(&test_groups).expect("serialize test");
@@ -162,8 +167,8 @@ fn no_override_files_output_identical() {
     assert_eq!(golden_serialized, test_serialized, "output through override collection path must be byte-identical");
 }
 
-#[test]
-fn input_override_visible_to_filter_and_mapper() {
+#[tokio::test]
+async fn input_override_visible_to_filter_and_mapper() {
     let input = ConfigInput { name: "live-input".intern(), ..ConfigInput::default() };
     let item = make_live_item("101", "live-input", "Old Name", "News");
 
@@ -198,8 +203,10 @@ fn input_override_visible_to_filter_and_mapper() {
     let aliases = InputAliasMap::from_inputs(&[Arc::new(input.clone())]);
     let set = TargetOverrideSet::new(input_map, HashMap::new(), aliases, Vec::new());
 
-    let (mut processed, outcome) = execute_pipe(&target, &pipe, &mut fetched, &mut duplicates, false, None, Some(&set))
-        .expect("pipeline execution must succeed");
+    let (mut processed, outcome) =
+        execute_pipe(&target, &pipe, &mut fetched, &mut duplicates, false, None, &NoPlugins, Some(&set))
+            .await
+            .expect("pipeline execution must succeed");
 
     assert_eq!(outcome.filter.map(|f| f.retained), Some(1));
     let groups = processed.source.take_groups();
@@ -332,8 +339,8 @@ fn duplicate_ids_marked_ambiguous_not_applied() {
     assert_eq!(items[1].header.name.as_ref(), "Original 2");
 }
 
-#[test]
-fn bouquet_filter_sees_edited_group() {
+#[tokio::test]
+async fn bouquet_filter_sees_edited_group() {
     let input = ConfigInput { name: "input-bq".intern(), ..ConfigInput::default() };
     let item = make_live_item("99", "input-bq", "Channel", "Excluded");
 
@@ -362,7 +369,8 @@ fn bouquet_filter_sees_edited_group() {
     let set = TargetOverrideSet::new(HashMap::new(), target_map, aliases, Vec::new());
 
     let (mut processed, _) =
-        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), Some(&set))
+        execute_pipe(&target, &vec![], &mut fetched, &mut duplicates, false, Some(&filter), &NoPlugins, Some(&set))
+            .await
             .expect("pipe execution must succeed");
 
     let groups = processed.source.take_groups();
@@ -474,8 +482,8 @@ fn nil_uuid_warns_when_both_nil() {
     );
 }
 
-#[test]
-fn alias_runtime_name_input_override_applies() {
+#[tokio::test]
+async fn alias_runtime_name_input_override_applies() {
     let input_dto = ConfigInputDto {
         name: "parent-src".intern(),
         aliases: Some(vec![ConfigInputAliasDto { name: "alias-src".intern(), ..Default::default() }]),
@@ -587,8 +595,8 @@ live:
     assert_eq!(set.revisions[0].0, OverrideScope::Input("parent-valid".to_string()));
 }
 
-#[test]
-fn target_group_override_filtered_in_any_processing_order() {
+#[tokio::test]
+async fn target_group_override_filtered_in_any_processing_order() {
     let input = ConfigInput { name: "src".intern(), ..ConfigInput::default() };
     let item = make_live_item("1", "src", "Channel 1", "News");
     let key = OverrideKey::new(OverrideItemKind::Live, "1");
@@ -631,9 +639,18 @@ fn target_group_override_filtered_in_any_processing_order() {
         let mut fpl = FetchedPlaylist { input: &input, source, epg: None };
         let mut duplicates = std::collections::HashSet::new();
 
-        let (mut processed, _) =
-            execute_pipe(&target_excluding_fav, &pipe_order, &mut fpl, &mut duplicates, false, None, Some(&set))
-                .expect("pipeline execution");
+        let (mut processed, _) = execute_pipe(
+            &target_excluding_fav,
+            &pipe_order,
+            &mut fpl,
+            &mut duplicates,
+            false,
+            None,
+            &NoPlugins,
+            Some(&set),
+        )
+        .await
+        .expect("pipeline execution");
         let groups = processed.source.take_groups();
         assert!(
             groups.is_empty() || groups.iter().all(|g| g.channels.is_empty()),
@@ -662,9 +679,18 @@ fn target_group_override_filtered_in_any_processing_order() {
         let mut fpl = FetchedPlaylist { input: &input, source, epg: None };
         let mut duplicates = std::collections::HashSet::new();
 
-        let (mut processed, _) =
-            execute_pipe(&target_excluding_news, &pipe_order, &mut fpl, &mut duplicates, false, None, Some(&set))
-                .expect("pipeline execution");
+        let (mut processed, _) = execute_pipe(
+            &target_excluding_news,
+            &pipe_order,
+            &mut fpl,
+            &mut duplicates,
+            false,
+            None,
+            &NoPlugins,
+            Some(&set),
+        )
+        .await
+        .expect("pipeline execution");
         let groups = processed.source.take_groups();
         assert_eq!(
             groups.iter().map(|g| g.channels.len()).sum::<usize>(),
@@ -675,8 +701,8 @@ fn target_group_override_filtered_in_any_processing_order() {
     }
 }
 
-#[test]
-fn rename_and_both_mapper_stages_cannot_change_target_field() {
+#[tokio::test]
+async fn rename_and_both_mapper_stages_cannot_change_target_field() {
     let input = ConfigInput { name: "src".intern(), ..ConfigInput::default() };
     let item = make_live_item("1", "src", "OriginalName", "News");
     let key = OverrideKey::new(OverrideItemKind::Live, "1");
@@ -726,7 +752,9 @@ fn rename_and_both_mapper_stages_cannot_change_target_field() {
     let mut duplicates = std::collections::HashSet::new();
 
     let (mut processed, _) =
-        execute_pipe(&target, &pipe, &mut fpl, &mut duplicates, false, None, Some(&set)).expect("pipeline execution");
+        execute_pipe(&target, &pipe, &mut fpl, &mut duplicates, false, None, &NoPlugins, Some(&set))
+            .await
+            .expect("pipeline execution");
 
     // Late mapper stage
     if let Some(mut groups) = map_playlist_at_stage(&mut processed.source, &target, MappingStage::AfterEpg, None) {
@@ -954,8 +982,8 @@ fn late_mapper_moves_group_item_returns_to_target_group() {
     assert_eq!(groups[0].channels[0].header.group.as_ref(), "TargetGroup");
 }
 
-#[test]
-fn mapper_changing_id_does_not_break_reapply() {
+#[tokio::test]
+async fn mapper_changing_id_does_not_break_reapply() {
     let input = ConfigInput { name: "src".intern(), ..ConfigInput::default() };
     let item = make_live_item("1", "src", "Original", "News");
     let key = OverrideKey::new(OverrideItemKind::Live, "1");
@@ -987,7 +1015,9 @@ fn mapper_changing_id_does_not_break_reapply() {
     let mut duplicates = std::collections::HashSet::new();
 
     let (mut processed, _) =
-        execute_pipe(&target, &pipe, &mut fpl, &mut duplicates, false, None, Some(&set)).expect("pipeline execution");
+        execute_pipe(&target, &pipe, &mut fpl, &mut duplicates, false, None, &NoPlugins, Some(&set))
+            .await
+            .expect("pipeline execution");
     let groups = processed.source.take_groups();
     assert_eq!(groups[0].channels[0].header.name.as_ref(), "LockedName");
 }
@@ -1074,13 +1104,14 @@ async fn end_to_end_pipeline_test() {
         &mut errors,
         ClusterFlags::empty(),
         false,
+        &HashMap::new(),
         &analytics_info,
         &input_overrides,
     )
     .await
     .expect("prepare_playlist_for_target");
 
-    let (result, final_errors) = finalize_prepared_target(Arc::new(ctx), prepared).await;
+    let (result, final_errors, _) = finalize_prepared_target(Arc::new(ctx), prepared).await;
     assert!(result.is_ok(), "finalization must succeed: {final_errors:?}");
 
     let m3u_path = storage_dir.join("output.m3u");
@@ -1164,9 +1195,17 @@ async fn status_hook_records_on_success_and_not_on_failure_through_process_targe
     let mut errors = Vec::new();
 
     let target_ok_arc = Arc::new(target_ok);
-    let results =
-        process_targets(&ctx, &mut playlists, &[&target_ok_arc], &mut stats, &mut errors, ClusterFlags::empty(), false)
-            .await;
+    let results = process_targets(
+        &ctx,
+        &mut playlists,
+        &[&target_ok_arc],
+        &mut stats,
+        &mut errors,
+        ClusterFlags::empty(),
+        false,
+        &HashMap::new(),
+    )
+    .await;
 
     assert_eq!(results.len(), 1);
     assert!(results[0].success);
@@ -1202,6 +1241,7 @@ async fn status_hook_records_on_success_and_not_on_failure_through_process_targe
         &mut errors,
         ClusterFlags::Live,
         false,
+        &HashMap::new(),
     )
     .await;
 
@@ -1385,9 +1425,9 @@ fn test_b10_regroup_preserves_pre_existing_empty_groups() {
     assert!(titles.contains(&"TargetGroup"), "New group created by move must exist");
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "manual benchmark test"]
-fn benchmark_pipeline_100k_items() {
+async fn benchmark_pipeline_100k_items() {
     let mut items = Vec::with_capacity(100_000);
     for i in 0..100_000 {
         let mut item = make_live_item(&i.to_string(), "bench", "Name", "Group");
@@ -1410,7 +1450,9 @@ fn benchmark_pipeline_100k_items() {
     let items_locked = items;
 
     let start_clean = std::time::Instant::now();
-    let (groups_clean, _) = execute_pipeline_on_items(items_clean, &target, &pipe, None);
+    let (groups_clean, _) = execute_pipeline_on_items(items_clean, &target, "bench", &pipe, &NoPlugins, None)
+        .await
+        .expect("no plugin aborts");
     let dur_clean = start_clean.elapsed();
 
     let mut locked = HashMap::new();
@@ -1422,7 +1464,10 @@ fn benchmark_pipeline_100k_items() {
     }
 
     let start_locked = std::time::Instant::now();
-    let (groups_locked, _) = execute_pipeline_on_items(items_locked, &target, &pipe, Some(&locked));
+    let (groups_locked, _) =
+        execute_pipeline_on_items(items_locked, &target, "bench", &pipe, &NoPlugins, Some(&locked))
+            .await
+            .expect("no plugin aborts");
     let dur_locked = start_locked.elapsed();
 
     assert_eq!(groups_clean.iter().map(|g| g.channels.len()).sum::<usize>(), 100_000);

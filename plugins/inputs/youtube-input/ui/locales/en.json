@@ -1,0 +1,22 @@
+{
+  "form.title": "YouTube input",
+  "form.description": "What this input fetches and how. Everything here belongs to this input alone.",
+  "form.channels.title": "YouTube Channels and Playlists",
+  "form.channels.description": "Targets for this input: @handle, channel id UC..., playlist id PL..., or a video. Added to the Url above; duplicates are fetched once.",
+  "form.channels.placeholder": "@handle, UC…, PL… or a video URL",
+  "form.invidious_instances.title": "Invidious Instances",
+  "form.invidious_instances.description": "Mirrors this input resolves streams through, in failover order (at least one).",
+  "form.invidious_instances.placeholder": "https://invidious.example",
+  "form.invidious_instances.pattern": "an http:// or https:// URL without spaces, query or fragment",
+  "form.mode.title": "Ingest Mode",
+  "form.mode.description": "Recent uploads reads the newest videos of each target; Live streams only keeps just the running broadcast.",
+  "form.mode.recent_uploads": "Recent uploads",
+  "form.mode.live_only": "Live streams only",
+  "form.max_uploads.title": "Max Uploads",
+  "form.max_uploads.description": "How many recent uploads to take per channel (1 to 15).",
+  "form.cache_ttl_minutes.title": "Stream Cache TTL (Minutes)",
+  "form.cache_ttl_minutes.description": "How long this input reuses a resolved stream URL (10 to 360).",
+  "form.check": "Check targets and instances",
+  "tile.title": "YouTube",
+  "tile.description": "YouTube channels, playlists and live streams as playlist channels."
+}

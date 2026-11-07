@@ -1,0 +1,24 @@
+# Demo config for the HF EPG Matcher: server mode on port 18980.
+# Copy to <config dir>/config.yml. The plugin is unpacked into <config dir>/plugins/hf-epg-matcher/
+# (see CHECKS.md); the first time it is seen it is enabled by this plugins: entry.
+api:
+  host: 127.0.0.1
+  port: 18980
+working_dir: ./data
+update_on_boot: true # the first refresh runs at boot; see CHECKS.md for the second one
+log:
+  log_level: debug
+web_ui:
+  enabled: true # mounts /api/v1 (plugin list, stats, logs)
+plugins:
+  enabled: true
+  directory: plugins
+  plugins:
+    - id: hf-epg-matcher
+      enabled: true
+      settings:
+        model_id: sentence-transformers/all-MiniLM-L6-v2
+        hf_token: hf_demo_token # the mock accepts any non-empty token
+        threshold: 0.6
+        batch_size: 16
+        api_base_url: http://127.0.0.1:18971

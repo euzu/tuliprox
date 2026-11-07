@@ -86,7 +86,8 @@ struct InputCompletionFacts {
     had_quality_rejections: bool,
 }
 
-pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopMetadataSink> {
+pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopMetadataSink, P: PluginHost = NoPlugins>
+{
     pub client: reqwest::Client,
     pub run_id: PlaylistUpdateRunId,
     pub execution_order: PlaylistUpdateRunOrder,
@@ -126,6 +127,8 @@ pub struct PlaylistProcessingContext<E: EventSink, M: MetadataUpdateSink = NoopM
     pub(crate) library_update_mode: LibraryUpdateMode,
     /// Inputs in maintenance: their persisted state is reused, their provider is not contacted.
     pub maintenance: Option<Arc<dyn tuliprox_core::model::MaintenanceGate>>,
+    /// Plugin hooks awaited by the pipeline; [`NoPlugins`] compiles them out.
+    pub plugins: P,
     pub override_status: Option<Arc<tuliprox_repository::OverrideStatusStore>>,
 }
 
@@ -159,6 +162,7 @@ impl PlaylistProcessingContext<shared::model::NoopSink> {
             input_refresh: None,
             library_update_mode: LibraryUpdateMode::ExistingCatalog,
             maintenance: None,
+            plugins: NoPlugins,
             override_status: None,
         }
     }
@@ -173,7 +177,9 @@ mod overlay;
 mod status;
 mod telemetry;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
-pub(crate) use acquisition::{download_input, invalidate_input_cache_status, load_cached_input_playlist};
+pub(crate) use acquisition::{
+    apply_playlist_loaded_hook, download_input, invalidate_input_cache_status, load_cached_input_playlist,
+};
 pub(super) use jobs::report_input_completion;
 #[allow(unused_imports, reason = "Retains the existing module interface in production and test builds.")]
 pub(crate) use jobs::{

@@ -214,6 +214,123 @@
 
 ## 🌟 New Features
 
+- **Notifier plugins, next to the built-in channels.** Telegram, Discord, Slack, Gotify, ntfy, Pushover, REST webhooks and
+  local commands are all still built into the server and configured under `messaging`, exactly as before. Each also exists
+  as an optional plugin under `plugins/notifiers/<id>` (`make plugin-notifiers` builds them all), for anyone who wants
+  a channel to be a plugin; nothing is removed or renamed. The plugin system and its SDK gained what these plugins needed
+  (see the entries below), so a channel can move into a plugin later without further host work.
+
+- **The plugin SDK has its own version.** `tuliprox-plugin-api`, `tuliprox-plugin-sdk` and `tuliprox-plugin-sdk-macros`
+  are versioned 1.x as the plugin contract instead of following the tuliprox release, so a plugin's `Cargo.lock` stays
+  valid across tuliprox updates and `cargo build --locked` no longer breaks after a release. The three crates share
+  one version: `make plugin-sdk-version VERSION=x.y.z` bumps all of them together and refreshes the plugin lock files.
+- **Source editor: one sidebar tile per input and output plugin.** Every enabled plugin that provides inputs
+  (`input.fetch`) or renders outputs (`output.render`) now has its own tile in the source editor sidebar, titled with
+  the plugin's name, in place of the single generic **Plugin** tile. Dropping it adds a block that already names the
+  plugin, so its form opens with the plugin's fields. A plugin block shows the plugin's name on the canvas, and a block
+  whose plugin is not chosen, not installed, disabled, failed or no longer a provider gets a red badge saying why.
+  Plugins can set the tile's title, icon and tooltip, translated or not, with the new optional manifest entries
+  `ui.input_tile` / `ui.output_tile` (see `docs/src/plugins/settings.md#source-editor-tiles`). `youtube-input` uses
+  it. `GET /api/v1/plugins/ui` now lists every provider, also one without a `ui:` part, with its resolved
+  `inputTile` / `outputTile`.
+
+- **`youtube-input` plugin: Ingest YouTube channels, playlists, and live streams as playlist channels.**
+  The `youtube-input` plugin (`plugins/inputs/youtube-input`) provides an input source (`type: plugin`) that discovers
+  YouTube videos via lightweight Atom feeds and resolves streams using standard Invidious REST endpoints with instance
+  failover, accurate live status extraction, and automatic stream URL caching in the plugin's KV store.
+
+- **Plugin categories: filter and search the Marketplace by what a plugin does.** A plugin declares its kind in its
+  manifest (`category: notifier`; one lowercase id, optional), the Plugin Manager shows it as a badge, and the Marketplace
+  replaces the category dropdown with chips: `All` and every category of the current search with its count (`Notifiers (6)`).
+  Choosing a category keeps the other chips, and the counts follow the search and the source. The ids the Web UI knows are
+  `notifier`, `playlist`, `epg`, `metadata`, `input`, `output`, `stream`, `automation` and `monitoring`, each with a name in
+  English, Russian, Spanish and Arabic; any other valid id is shown with its words capitalised. Catalog categories are now
+  normalised (lower case, separators become `-`), so `EPG`, `epg` and `Live TV` / `live_tv` are one filter each instead of
+  separate entries. The search now takes several words, all of which must start a word in the id, name, description, author or
+  category, in any order (`live` finds the category `live-tv`, not "delivers"), and it applies a moment after the last keystroke.
+  The in-repository plugins and examples declare their category.
+  API: `GET /api/v1/plugins/marketplace` returns `categories` as `[{id, count}]` and a `total` (it was a list of names),
+  and `GET /api/v1/plugins` rows carry `category`. See [Publishing a Marketplace](docs/src/plugins/marketplace-publishing.md#categories).
+
+- **Notification events carry their detail as neutral `sections`.** A playlist update lists its sources, targets and
+  errors, and a watch change its groups, as blocks of plain-text lines (`heading`, `lines`) built once by the host. They
+  are in the `payload` of every plugin notification and in every template as `event.sections`, so any channel or plugin
+  can lay them out in its own format; `body` stays the complete plain-text fallback and an event with no detail has no
+  `sections` key.
+
+- **Plugins can run local programs: the `process` capability.** A new host function, `run-process`
+  (SDK: `tuliprox_plugin_sdk::process`), starts a program on the server and waits for it. It is the one capability that
+  leaves the sandbox, so it has its own entry in the admin's review ("Run local programs: ... Grant it only to a plugin you
+  would trust with a shell"). The program is started directly, never through a shell, with an empty environment except
+  `PATH` and what the plugin passes; input is at most 1 MiB, stdout and stderr are each cut to 64 KiB, the wait is 1 to 300
+  seconds and then the child is killed (on Unix with its whole process group, background jobs included), and every run
+  is logged by program name. See
+  [Running programs](docs/src/plugins/security.md#running-programs).
+
+- **Local commands are also available as a plugin.** The `command-notifier` plugin (`plugins/notifiers/command-notifier`,
+  `make plugin-command-notifier`) runs a program for each notification with the event as JSON on its standard input, and
+  `TULIPROX_EVENT_ID`, `TULIPROX_EVENT_SEVERITY` and `TULIPROX_EVENT_TITLE` in its environment. A non-zero exit or a timeout is
+  retried with the program's first line of standard error as the reason; a program that cannot be started is dead-lettered
+  at once. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [Command Notifier](docs/src/plugins/command-notifier.md).
+
+- **Telegram notifications are also available as a plugin.** The `telegram-notifier` plugin (`plugins/notifiers/telegram-notifier`,
+  `make plugin-telegram-notifier`) sends each notification to one or more Telegram chats through a bot: a bold title (marked
+  `⚠️` for a warning and `🚨` for an error), the event's sections as bold headings with their lines, and Telegram's own HTML
+  mode with only `& < >` escaped, so nothing in an event can become markup. A message that would pass Telegram's limit is
+  split between lines into up to 8 parts (counted in UTF-16 units, as Telegram counts), the last one ending in `…`; HTML
+  that Telegram still refuses is sent again as plain text. Chats are `<chat_id>`, `<chat_id>:<thread_id>` (a forum topic) or
+  `@channel`. The plugin remembers, in its key-value store, which part reached which chat, so when one chat is rate limited or
+  down the outbox's retry sends only what is missing instead of repeating the message to the others; a chat the bot was
+  removed from is given up on without failing the rest. A `429` honours Telegram's own `retry_after`. The bot token is part of
+  every request URL, so no error or log line is ever built from a URL or a transport error. Its settings form ships its own
+  translations (English, Russian, Spanish, Arabic). See [Telegram Notifier](docs/src/plugins/telegram-notifier.md).
+
+- **REST webhooks are also available as a plugin.** The `rest-notifier` plugin (`plugins/notifiers/rest-notifier`, `make plugin-rest-notifier`) sends
+  each notification to any HTTP endpoint with POST, PUT or PATCH: the event as JSON (`id`, `severity`, `timestamp`,
+  `instance`, `title`, `body`, `fields`, `sections`) or the plain-text body, your own headers, and a list of secret headers
+  (such as `Authorization: Bearer ...`) whose whole entries are masked in the Web UI. An optional `signing_secret` adds the
+  HMAC-SHA256 signature. A malformed header entry is reported by its position, never by its text, so a credential cannot
+  reach a log. The breaker, rate limit and concurrency cap the built-in channel carried are the host's own per-plugin
+  outbound limits. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [REST Notifier](docs/src/plugins/rest-notifier.md).
+
+- **Pushover notifications are also available as a plugin.** The `pushover-notifier` plugin (`plugins/notifiers/pushover-notifier`,
+  `make plugin-pushover-notifier`) sends notifications to Pushover. The message carries the event's own time as the
+  Pushover timestamp, so one delivered late through the outbox still shows when it happened. With `style: html` the event's
+  sections are sent as bold headings with their lines below; the message is assembled from whole lines, so the
+  1024-character limit can never cut a tag or an entity in half. The token and the user key stay in the request body, never in a
+  URL, and in no error or log line. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [Pushover Notifier](docs/src/plugins/pushover-notifier.md).
+
+- **ntfy notifications are also available as a plugin.** The `ntfy-notifier` plugin (`plugins/notifiers/ntfy-notifier`,
+  `make plugin-ntfy-notifier`) publishes to an ntfy topic through ntfy's JSON API, so a title or a message can carry any
+  Unicode text (the header form had to strip emoji from titles). Events carry their domain and, for a warning or an error,
+  a warning or alarm tag as ntfy tags; the message is cut at ntfy's 4096-byte limit on a character boundary; with
+  `style: markdown` the event's sections are sent as markdown for the ntfy web app. A protected topic's token is only sent in the
+  `Authorization` header. Its settings form ships its own translations (English, Russian, Spanish, Arabic). See
+  [ntfy Notifier](docs/src/plugins/ntfy-notifier.md). The SDK's `notify` module gained `Section`, `sections_of` and a
+  `markdown` helper (escaping, hard line breaks, sections as bold headings), which the Gotify plugin now uses too.
+
+- **Gotify notifications are also available as a plugin.** The `gotify-notifier` plugin (`plugins/notifiers/gotify-notifier`,
+  `make plugin-gotify-notifier`) pushes notifications to a Gotify server, as plain text or, with `style: markdown`, as the
+  event's sections in markdown that Gotify clients render. The application token travels in the `X-Gotify-Key` header
+  instead of the URL, so it cannot end up in a proxy log or an error. Its settings form ships its own translations
+  (English, Russian, Spanish, Arabic). See [Gotify Notifier](docs/src/plugins/gotify-notifier.md).
+
+- **Slack notifications are also available as a plugin.** The `slack-notifier` plugin (`plugins/notifiers/slack-notifier`,
+  `make plugin-slack-notifier`) delivers notifications to a Slack incoming webhook as Block Kit blocks (a header, the
+  event's sections, a footer with the event id, instance and time) or as plain text. `&`, `<` and `>` are escaped, so event
+  text cannot become a mention or a link. Its settings form ships its own translations (English, Russian, Spanish,
+  Arabic). See [Slack Notifier](docs/src/plugins/slack-notifier.md). The SDK gained `tuliprox_plugin_sdk::notify`
+  (HTTP status to `DeliveryError`, `Retry-After`, ISO 8601 times) for notification plugins, which the Discord plugin now uses too.
+
+- **Discord notifications are also available as a plugin.** The `discord-notifier` plugin (`plugins/notifiers/discord-notifier`,
+  `make plugin-discord-notifier`) delivers notifications to a Discord webhook as an embed (a colour per severity, the
+  instance name as footer, the event's detail as fields) or as plain text, with `@everyone` and role pings disabled. Routing, quiet hours,
+  suppression and the retrying outbox apply as for every channel. Its settings form ships its own translations
+  (English, Russian, Spanish, Arabic) through `ui/locales`. See [Discord Notifier](docs/src/plugins/discord-notifier.md).
+  Notification plugin calls now run under a 30 s deadline instead of `plugins.max_exec`.
 - **Manual item overrides and a redesigned Playlist Explorer.** Single playlist items can now be corrected without a
   mapper script: an override file per input (`overrides/input/<name>.yml`) or per target
   (`overrides/target/<name>.yml`, keyed by `inputs:`) stores field changes for individual live channels, movies and
@@ -1328,6 +1445,14 @@
 
 ## 🐛 Fixes
 
+- **Removing a plugin no longer keeps the server down.** A `source.yml` that still named the plugin refused to start
+  (``Can't start server: config source error: invalid plugin references: input x: no loaded plugin y provides
+  fetch-input``), so uninstalling a plugin left an instance that could not boot. The start and a running server's hot
+  reload now report every unsatisfied plugin reference once and continue; only the entries that name the missing
+  plugin are inactive and keep their last playlist. A target whose processing filter calls `plugin.<id>.<fn>(…)` for a
+  missing plugin now fails as a target (``target 'x' is inactive: its filter calls plugin 'y' …``) instead of silently
+  dropping every item and reporting success. Saving `source.yml` through the API still rejects such a reference.
+
 - **Web UI posters and logos no longer fail with providers that only serve players.** The image proxy behind the
   Web UI forwarded the browser's User-Agent to the provider; providers that block browsers answered 403, so most VOD
   and series posters stayed empty in the Playlist Explorer. The proxy now drops the browser's User-Agent and sends the
@@ -1947,6 +2072,13 @@
   episodes are unchanged: their properties carry no provider URL at that layer.
 
 ## ⚙️ New Settings
+
+- **`plugins.directories` and `TULIPROX_PLUGINS_DIRS`: search plugins in several directories.** Directories are
+  searched in order; a plugin id found again in a later directory overrides the earlier one, and installs and uploads
+  go to the last directory. Relative entries resolve against the config dir. Unset, the list is `plugins.directory`
+  alone, preceded by `/app/plugins` when it exists: container images bundle the official plugins there, so Docker
+  searches `[/app/plugins, /app/config/plugins]` and Web UI installs persist on the config volume.
+  `TULIPROX_PLUGINS_DIRS` (separated by `,` or the platform path separator) replaces the configured list.
 
 - **`container_extension` is no longer served empty; input option `default_container_extension`.** Movies and series
   episodes whose provider reports none and whose stream URL carries none now publish `mp4`. Stalker portals reveal the

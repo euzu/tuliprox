@@ -32,6 +32,7 @@ fn session_headers_are_forwarded_to_provider_requests() {
         stream_channel: None,
         connect_failure_stage: None,
         content_representation: ProviderContentRepresentationMode::PreserveOrigin,
+        plugin_headers: None,
     });
 
     assert_eq!(

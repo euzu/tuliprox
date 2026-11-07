@@ -1,0 +1,68 @@
+{
+  "type": "object",
+  "title": "Matrix Notifier",
+  "required": ["room_id", "access_token"],
+  "properties": {
+    "homeserver": {
+      "type": "string",
+      "title": "Homeserver",
+      "description": "Base URL of the Matrix homeserver (client-server API), without a trailing path.",
+      "default": "http://127.0.0.1:18972"
+    },
+    "room_id": {
+      "type": "string",
+      "title": "Room id",
+      "description": "Internal room id, for example !abcdef:example.org (not the #alias)."
+    },
+    "access_token": {
+      "type": "string",
+      "title": "Access token",
+      "description": "Access token of the bot user that is a member of the room. Write-only: it is masked when read back and has no default. Use ${env:VAR} to keep it out of the config file.",
+      "writeOnly": true
+    },
+    "min_severity": {
+      "type": "string",
+      "title": "Minimum severity",
+      "description": "Notifications below this severity are acknowledged without being sent. The host-side routing.min_severity below is applied first.",
+      "enum": ["info", "warn", "error"],
+      "default": "info"
+    },
+    "routing": {
+      "type": "object",
+      "title": "Routing (applied by tuliprox, not by the plugin)",
+      "description": "Per-channel routing of the messaging outbox, the same block a built-in channel takes. Every field is optional; an empty block inherits the global notify_on.",
+      "additionalProperties": false,
+      "properties": {
+        "notify_on": {
+          "type": "array",
+          "title": "notify_on override",
+          "description": "Event id globs that replace the global notify_on for this channel (for example playlist.update.*).",
+          "items": { "type": "string" }
+        },
+        "min_severity": {
+          "type": "string",
+          "title": "Minimum severity (routing)",
+          "description": "Host-side severity floor, judged on the event's registry severity before the plugin is called.",
+          "enum": ["info", "warn", "error", "critical"]
+        },
+        "quiet_hours": {
+          "type": "string",
+          "title": "Quiet hours",
+          "description": "HH:MM-HH:MM local time. Notifications inside the window are deferred, never dropped."
+        },
+        "max_per_hour": {
+          "type": "integer",
+          "title": "Max per hour",
+          "description": "Circuit breaker: after this many notifications in an hour the channel sends one suppression notice and goes quiet.",
+          "minimum": 1
+        },
+        "dedup_window_secs": {
+          "type": "integer",
+          "title": "Dedup window (seconds)",
+          "description": "Suppress a repeated dedup key for this many seconds.",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

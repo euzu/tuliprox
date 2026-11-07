@@ -1,0 +1,44 @@
+# Matrix Notifier demo: server mode on :18980, mock homeserver on :18972.
+# __RUN__ is replaced by demo/CHECKS.md step 0 with the run directory.
+api:
+  host: 127.0.0.1
+  port: 18980
+  web_root: __RUN__/web
+working_dir: __RUN__/work
+backup_dir: __RUN__/backup
+process_parallel: false
+update_on_boot: true
+log:
+  # The outbox logs each retry at debug, with the reason the plugin gave.
+  log_level: info,tuliprox_messaging=debug
+web_ui:
+  enabled: true
+
+# What reaches the plugin channel. Note the ids: a playlist refresh is
+# `playlist.update.completed` / `playlist.update.failed` as a NOTIFICATION
+# (the bus event `playlist.update` that on-event sees is a different thing).
+messaging:
+  notify_on:
+    - playlist.update.*
+    - user.connection.changed
+    - stream.probe.failed
+    - scheduled_task.failed
+
+plugins:
+  enabled: true
+  directory: __RUN__/plugins
+  plugins:
+    - id: matrix-notifier
+      enabled: true
+      settings:
+        homeserver: http://127.0.0.1:18972
+        room_id: "!demo:localhost"
+        access_token: demo-token       # or ${env:MATRIX_TOKEN}
+        min_severity: info             # the plugin's own floor (second)
+        routing:                       # applied by tuliprox BEFORE the plugin runs
+          max_per_hour: 60
+
+# Only needed for the stream.probe.failed check (needs ffprobe on PATH).
+metadata_update:
+  ffprobe:
+    enabled: true

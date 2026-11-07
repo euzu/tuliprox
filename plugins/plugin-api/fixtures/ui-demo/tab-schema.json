@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "title": "UI demo tab",
+  "properties": {
+    "refresh_seconds": {
+      "type": "integer",
+      "title": "Refresh interval (seconds)",
+      "minimum": 5,
+      "maximum": 3600,
+      "default": 60
+    },
+    "show_banner": {
+      "type": "boolean",
+      "title": "Show banner",
+      "default": true
+    }
+  }
+}

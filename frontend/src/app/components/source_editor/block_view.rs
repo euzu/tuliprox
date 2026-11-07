@@ -1,8 +1,10 @@
+use super::layout::PLUGIN_TILE_WIDTH;
 use crate::{
-    app::components::{Block, BlockId, BlockInstance, PortStatus},
+    app::components::{Block, BlockId, BlockInstance, PluginSlot, PortStatus},
     html_if,
     i18n::use_translation,
 };
+use shared::model::PluginSlotDto;
 use web_sys::{HtmlElement, MouseEvent, TouchEvent};
 use yew::{
     classes, component, html, use_effect_with, use_mut_ref, use_node_ref, Callback, Html, Properties, TargetCast,
@@ -28,6 +30,38 @@ pub struct BlockProps {
     pub(crate) on_touch_start: Callback<(BlockId, TouchEvent)>,
     pub(crate) on_connection_drop: Callback<BlockId>,  // to_id
     pub(crate) on_connection_start: Callback<BlockId>, // from_id
+    /// A plugin block: the name of the plugin it runs on, shown instead of the
+    /// generic "Plugin" type.
+    #[prop_or_default]
+    pub(crate) plugin_label: Option<String>,
+    /// A plugin block whose plugin cannot run: why, already localized.
+    #[prop_or_default]
+    pub(crate) plugin_issue: Option<String>,
+}
+
+#[derive(Properties, PartialEq)]
+pub struct PluginTileProps {
+    /// Screen position of the tile, as for a block (pan applied, zoom not).
+    pub position: (f32, f32),
+    pub zoom_factor: f32,
+}
+
+/// The canvas block of the plugins that contribute to the `source-editor-tile`
+/// slot. It is placed like a graph block and scales with the canvas, but it has
+/// no ports and is not part of the saved sources.
+#[component]
+pub fn PluginTileView(props: &PluginTileProps) -> Html {
+    let (x, y) = props.position;
+    let style = format!(
+        "position:absolute;top:0;left:0;width:{PLUGIN_TILE_WIDTH}px;\
+         transform:translate3d({x}px,{y}px,0) scale({});transform-origin:top left",
+        props.zoom_factor
+    );
+    html! {
+        <div class="tp__source-editor__plugin-tile no-select" style={style}>
+            <PluginSlot slot={PluginSlotDto::SourceEditorTile} />
+        </div>
+    }
 }
 
 #[component]
@@ -118,6 +152,8 @@ pub fn BlockView(props: &BlockProps) -> Html {
         });
     }
 
+    let type_label =
+        props.plugin_label.clone().unwrap_or_else(|| translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")));
     let (title, show_type, is_batch) = {
         let (dto_title, show_type, is_batch) = match &block.instance {
             BlockInstance::Input(dto) => dto.aliases.as_ref().map_or((dto.name.to_string(), true, false), |a| {
@@ -128,18 +164,21 @@ pub fn BlockView(props: &BlockProps) -> Html {
                 }
             }),
             BlockInstance::Target(dto) => (dto.name.clone(), true, false),
-            BlockInstance::Output(_output) => (translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")), false, false),
+            BlockInstance::Output(_output) => (type_label.clone(), false, false),
         };
         if dto_title.is_empty() {
-            (translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")), false, is_batch)
+            (type_label.clone(), false, is_batch)
         } else {
             (dto_title, show_type, is_batch)
         }
     };
 
+    let plugin_issue = props.plugin_issue.clone();
+    let tooltip = plugin_issue.as_ref().map_or_else(|| title.clone(), |issue| format!("{title}\n{issue}"));
+
     html! {
-        <div id={format!("block-{block_id}")} class={format!("tp__source-editor__block no-select tp__source-editor__block-{}{}{}", block_type, if props.edited {" tp__source-editor__block-editing"} else {""}, if props.selected {" tp__source-editor__block-selected"} else {""})}
-              ref={block_ref} title={title.clone()}>
+        <div id={format!("block-{block_id}")} class={format!("tp__source-editor__block no-select tp__source-editor__block-{}{}{}{}", block_type, if props.edited {" tp__source-editor__block-editing"} else {""}, if props.selected {" tp__source-editor__block-selected"} else {""}, if plugin_issue.is_some() {" tp__source-editor__block--plugin-issue"} else {""})}
+              ref={block_ref} title={tooltip}>
             <div class={"tp__source-editor__block-header"}>
                 // Block handle (drag)
                 <div class="tp__source-editor__block-handle" onmousedown={handle_mouse_down.clone()} ontouchstart={handle_touch_start.clone()} />
@@ -155,13 +194,17 @@ pub fn BlockView(props: &BlockProps) -> Html {
                 }
             </div>
             <div class={if is_batch { "tp__source-editor__block-content  tp__source-editor__block-batch" } else { "tp__source-editor__block-content" }} onmousedown={handle_mouse_down} ontouchstart={handle_touch_start} ontouchend={handle_touch_end} ondblclick={handle_edit}>
+                // A `div`, not a `span`: a span target is a port and does not start a block drag.
+                if let Some(issue) = plugin_issue {
+                    <div class="tp__source-editor__block-issue" role="img" aria-label={issue.clone()} title={issue}>{"!"}</div>
+                }
                 <div class={"tp__source-editor__block-content-body"}>
                     <div class="tp__source-editor__block-label">
                         { title }
                     </div>
                     {
                         html_if!(show_type, {
-                          <span class="tp__source-editor__block-sub-label">{translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}"))}</span>
+                          <span class="tp__source-editor__block-sub-label">{type_label.clone()}</span>
                         })
                     }
                 </div>

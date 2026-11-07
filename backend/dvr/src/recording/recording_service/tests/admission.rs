@@ -65,6 +65,7 @@ async fn edit_recording_re_validates_quota_against_new_duration_atomically() {
         config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
         sources: Arc::new(arc_swap::ArcSwap::from_pointee(tuliprox_core::model::SourcesConfig::default())),
         hdhomerun: Arc::new(arc_swap::ArcSwapOption::empty()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(arc_swap::ArcSwapOption::empty()),
         file_locks: Arc::new(tuliprox_core::utils::FileLockManager::default()),
         paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {

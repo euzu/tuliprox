@@ -1,0 +1,21 @@
+{
+  "settings.title": "Telegram Notifier",
+  "settings.bot_token.title": "Bot token",
+  "settings.bot_token.description": "The token of your Telegram bot, from @BotFather. It is a credential: write-only, masked when read back. Use ${env:VAR} to keep it out of the config file.",
+  "settings.chat_ids.title": "Chats",
+  "settings.chat_ids.description": "Where to send, one entry each: a chat id (-1001234567890), a channel (@mychannel), or a topic of a group written chat_id:topic_id (-1001234567890:5). Every chat receives every notification, and the bot has to be a member.",
+  "settings.style.title": "Style",
+  "settings.style.description": "html: the title and the event's sections as bold headings with their lines below. text: the same as plain text. A message that does not fit is split into several.",
+  "settings.routing.title": "Routing (applied by tuliprox, not by the plugin)",
+  "settings.routing.description": "Per-channel routing of the messaging outbox, the same block every messaging channel takes. Every field is optional; an empty block inherits the global notify_on.",
+  "settings.routing.notify_on.title": "notify_on override",
+  "settings.routing.notify_on.description": "Event id globs that replace the global notify_on for this channel (for example playlist.update.*).",
+  "settings.routing.min_severity.title": "Minimum severity (routing)",
+  "settings.routing.min_severity.description": "Host-side severity floor, judged on the event's registry severity before the plugin is called.",
+  "settings.routing.quiet_hours.title": "Quiet hours",
+  "settings.routing.quiet_hours.description": "HH:MM-HH:MM local time. Notifications inside the window are deferred, never dropped.",
+  "settings.routing.max_per_hour.title": "Max per hour",
+  "settings.routing.max_per_hour.description": "Circuit breaker: after this many notifications in an hour the channel sends one suppression notice and goes quiet.",
+  "settings.routing.dedup_window_secs.title": "Dedup window (seconds)",
+  "settings.routing.dedup_window_secs.description": "Suppress a repeated dedup key for this many seconds."
+}

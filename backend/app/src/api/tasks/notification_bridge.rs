@@ -23,10 +23,10 @@ use log::{debug, warn};
 use shared::model::{
     notification::{EventId, Severity},
     AuthAuditEvent, AuthAuditOutcome, ConnectionDenied, EventKind, EventKindMask, EventMessage,
-    LibraryScanSummaryStatus, MetadataUpdateFailure, ProviderFetchFailure, ProviderPoolExhausted,
-    ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState, StreamProbeFailure,
-    StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled, WatchDisabledReason,
-    WatchUnmatched,
+    LibraryScanSummaryStatus, MetadataUpdateFailure, PluginUpdateEvent, PluginUpdateOutcome, ProviderFetchFailure,
+    ProviderPoolExhausted, ProviderPriorityFallback, ScheduledTaskFailure, ServerLifecycleEvent, ServerLifecycleState,
+    StreamProbeFailure, StreamProbeFailureReason, UserLifecycleEvent, UserLifecycleState, WatchDisabled,
+    WatchDisabledReason, WatchUnmatched,
 };
 use std::{fmt::Write, sync::Arc};
 use tokio::sync::broadcast::error::RecvError;
@@ -106,6 +106,9 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
     .with(EventKind::ConnectionDenied)
     .with(EventKind::StreamProbeFailed)
     .with(EventKind::ScheduledTaskFailed)
+    .with(EventKind::PluginUpdateAvailable)
+    .with(EventKind::PluginUpdateApplied)
+    .with(EventKind::PluginUpdateFailed)
     .with(EventKind::AuthSignInSucceeded)
     .with(EventKind::AuthSignInFailed)
     .with(EventKind::AuthSignInThrottled)
@@ -260,6 +263,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         }
 
         EventMessage::UserLifecycle(event) => Some(user_lifecycle_notification(id, event, message.severity())),
+        EventMessage::PluginUpdate(event) => Some(plugin_update_notification(id, event, message.severity())),
         EventMessage::ConnectionDenied(denied) => Some(connection_denied_notification(id, denied, message.severity())),
         EventMessage::StreamProbeFailed(failure) => Some(probe_failure_notification(id, failure, message.severity())),
 
@@ -393,7 +397,11 @@ fn priority_fallback_notification(
 }
 
 fn scheduled_task_notification(id: EventId, failure: &ScheduledTaskFailure, severity: Severity) -> NotificationEvent {
-    let title = format!("Scheduled {:?} failed", failure.task);
+    // A plugin task shares `PluginTask`; the plugin and task name say which.
+    let title = failure.plugin_task.as_ref().map_or_else(
+        || format!("Scheduled {:?} failed", failure.task),
+        |plugin_task| format!("Scheduled {:?} {plugin_task} failed", failure.task),
+    );
     let mut body = format!("{title}\n\n{}", failure.error);
     if let Some(schedule) = &failure.schedule {
         let _ = write!(body, "\n\nSchedule: {schedule}");
@@ -424,6 +432,24 @@ fn user_lifecycle_notification(id: EventId, event: &UserLifecycleEvent, severity
         .with_severity(severity)
         .with_dedup_key(event.dedup_key())
         .with_fields(event)
+}
+
+/// Word a plugin update outcome.
+fn plugin_update_notification(id: EventId, event: &PluginUpdateEvent, severity: Severity) -> NotificationEvent {
+    let title = match event.outcome {
+        PluginUpdateOutcome::Available => {
+            format!("Plugin {} {} is waiting for approval (installed: {})", event.plugin, event.to, event.from)
+        }
+        PluginUpdateOutcome::Applied => format!("Plugin {} updated from {} to {}", event.plugin, event.from, event.to),
+        PluginUpdateOutcome::Failed => {
+            format!("Plugin {} update to {} failed; {} still runs", event.plugin, event.to, event.from)
+        }
+    };
+    let mut body = format!("{title}\n\nSource: {}", event.source);
+    if let Some(reason) = &event.reason {
+        let _ = write!(body, "\n\n{reason}");
+    }
+    NotificationEvent::new(id, title, body).with_severity(severity).with_dedup_key(event.dedup_key()).with_fields(event)
 }
 
 /// Word an authentication decision.
@@ -516,6 +542,17 @@ mod tests {
             needs_operator: false,
             partial: false,
         }
+    }
+
+    fn plugin_update(outcome: shared::model::PluginUpdateOutcome) -> EventMessage {
+        EventMessage::PluginUpdate(shared::model::PluginUpdateEvent {
+            outcome,
+            plugin: "p".into(),
+            from: "1.0.0".into(),
+            to: "1.1.0".into(),
+            source: "s".into(),
+            reason: None,
+        })
     }
 
     fn auth_audit(outcome: AuthAuditOutcome) -> EventMessage {
@@ -631,6 +668,9 @@ mod tests {
             auth_audit(AuthAuditOutcome::SignInFailed),
             auth_audit(AuthAuditOutcome::SignInThrottled),
             auth_audit(AuthAuditOutcome::PermissionDenied),
+            plugin_update(shared::model::PluginUpdateOutcome::Available),
+            plugin_update(shared::model::PluginUpdateOutcome::Applied),
+            plugin_update(shared::model::PluginUpdateOutcome::Failed),
         ];
         assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
         samples
@@ -680,6 +720,20 @@ mod tests {
         .expect("mapped");
         assert_eq!(event.id, registry::PLAYLIST_UPDATE_COMPLETED);
         assert_eq!(event.severity, Severity::Info);
+    }
+
+    #[test]
+    fn a_failed_plugin_task_names_the_plugin_and_the_task() {
+        let failure = ScheduledTaskFailure::for_plugin_task("sports", "refresh", "boom".to_string())
+            .with_schedule("0 0 4 * * *".to_string());
+        let event = to_notification(&EventMessage::ScheduledTaskFailed(failure)).expect("mapped");
+        assert_eq!(event.title, "Scheduled PluginTask plugin:sports/refresh failed");
+        assert!(event.body.contains("boom"));
+        assert!(event.body.contains("Schedule: 0 0 4 * * *"));
+
+        let built_in = ScheduledTaskFailure::new(shared::model::ScheduleTaskType::GeoIpUpdate, "boom".to_string());
+        let event = to_notification(&EventMessage::ScheduledTaskFailed(built_in)).expect("mapped");
+        assert_eq!(event.title, "Scheduled GeoIpUpdate failed");
     }
 
     #[test]

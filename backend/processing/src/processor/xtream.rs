@@ -1,10 +1,11 @@
-use crate::fetched_playlist::FetchedPlaylist;
+use crate::{fetched_playlist::FetchedPlaylist, processor::stream_probe::emit_probe_failure};
 use log::{debug, warn};
 use parking_lot::Mutex;
 use shared::{
     error::TuliproxError,
     model::{
-        LiveStreamProperties, PlaylistEntry, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem,
+        EventSink, LiveStreamProperties, PlaylistEntry, PlaylistItemType, StreamProbeFailureReason, StreamProperties,
+        XtreamCluster, XtreamPlaylistItem,
     },
 };
 use std::{collections::HashMap, sync::Arc};
@@ -21,7 +22,8 @@ use tuliprox_session::ActiveProviderManager;
 
 /// Updates metadata for a single Live stream (primarily probing)
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn update_live_stream_metadata(
+pub async fn update_live_stream_metadata<E: EventSink>(
+    events: &E,
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
@@ -168,10 +170,18 @@ pub async fn update_live_stream_metadata(
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Live stream probe target returned 404 for ID {} (Input: {})", display_id, input.name);
+            emit_probe_failure(events, input, &display_id, probe_url_cow.as_ref(), StreamProbeFailureReason::NotFound);
             not_found = true;
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed for Live Stream ID {} (Input: {})", display_id, input.name);
+            emit_probe_failure(
+                events,
+                input,
+                &display_id,
+                probe_url_cow.as_ref(),
+                StreamProbeFailureReason::Unreachable,
+            );
             // We still persist the updated last_probed_timestamp so we don't retry immediately
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {

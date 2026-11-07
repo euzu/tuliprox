@@ -50,6 +50,7 @@ impl PlaylistItem {
                             .unwrap_or_default();
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
+                            plugin_fingerprint: None,
                             category_id: header.category_id,
                             stream_id: header.virtual_id.get(),
                             stream_icon: "".intern(),
@@ -89,6 +90,7 @@ impl PlaylistItem {
                         } else if header.item_type == PlaylistItemType::SeriesInfo {
                             Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                                 name: header.name.clone(),
+                                plugin_fingerprint: None,
                                 category_id: header.category_id,
                                 tmdb: None,
                                 series_id: 0,

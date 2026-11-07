@@ -64,6 +64,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         config: Arc::new(ArcSwap::from_pointee(Config::default())),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(paths)),
@@ -98,6 +99,7 @@ fn processing_context() -> PlaylistProcessingContext<shared::model::NoopSink> {
         partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         had_quality_rejections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         maintenance: None,
+        plugins: shared::model::NoPlugins,
         override_status: None,
     }
 }
@@ -287,6 +289,7 @@ fn persist_filter_runs_after_after_epg_mapping() {
             &mut errors,
             ClusterFlags::empty(),
             false,
+            &HashMap::new(),
             &Arc::default(),
             &Arc::default(),
         )
@@ -426,6 +429,7 @@ match {
                     &mut errors,
                     ClusterFlags::empty(),
                     false,
+                    &HashMap::new(),
                     &Arc::default(),
                     &Arc::default(),
                 )
@@ -522,6 +526,7 @@ fn clear_invalid_epg_ids_clears_ids_invalidated_by_after_epg_mapping() {
                     &mut errors,
                     ClusterFlags::empty(),
                     false,
+                    &HashMap::new(),
                     &Arc::default(),
                     &Arc::default(),
                 )
@@ -551,8 +556,8 @@ fn live_item_for_epg(name: &str) -> PlaylistItem {
     }
 }
 
-#[test]
-fn after_epg_hook_runs_on_source_already_deduplicated_by_processing_pipe() {
+#[tokio::test]
+async fn after_epg_hook_runs_on_source_already_deduplicated_by_processing_pipe() {
     let processing = build_mapping("processing", MappingStage::Processing, r#"@group = "PROCESSED""#);
     let after_epg = build_mapping("after_epg", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
     let target = build_target(vec![processing, after_epg], true);
@@ -562,9 +567,18 @@ fn after_epg_hook_runs_on_source_already_deduplicated_by_processing_pipe() {
     let mut fetched =
         FetchedPlaylist { input: &input, source: memory_source(vec![channel.clone(), channel]), epg: None };
     let mut duplicates = HashSet::new();
-    let (mut processed, _outcome) =
-        execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false, None, None)
-            .expect("processing pipe must run");
+    let (mut processed, _outcome) = execute_pipe(
+        &target,
+        &get_processing_pipe(&target),
+        &mut fetched,
+        &mut duplicates,
+        false,
+        None,
+        &NoPlugins,
+        None,
+    )
+    .await
+    .expect("processing pipe must run");
     assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");
 
     let groups = map_playlist_at_stage(&mut processed.source, &target, MappingStage::AfterEpg, None)
@@ -599,6 +613,7 @@ fn prepare_target_deduplicates_virtual_items_created_by_after_epg_mappings() {
             &mut errors,
             ClusterFlags::empty(),
             false,
+            &HashMap::new(),
             &Arc::default(),
             &Arc::default(),
         )

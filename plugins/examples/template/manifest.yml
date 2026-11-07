@@ -1,0 +1,32 @@
+# Plugin manifest. Replace the placeholders,
+# then see README.md for the packaging and install steps.
+id: "{{project-name}}"        # ^[a-z][a-z0-9-]{2,40}$, unique on the host
+name: My plugin
+version: 0.1.0               # semver, the plugin's own version
+api_version: 1               # host ABI major version
+category: playlist   # what kind of plugin: notifier, playlist, epg, metadata, input, output, stream, automation, monitoring
+author: Your Name <you@example.com>
+description: >
+  Renames one playlist group in the after-filter stage. Replace this text.
+
+# No capabilities are requested. Add the ones you need (network, storage, ...);
+# the admin approves them at install time.
+
+hooks:
+  - playlist.after-filter    # the component must export playlist-hooks for this id
+
+ui:
+  config_section:
+    schema: config-schema.json
+  locales: [en, de]          # ui/locales/<lang>.json; en is the fallback
+  contributions:
+    - slot: menu
+      title: My plugin
+      title_key: menu.title
+      element: ui/menu.html
+
+resources:
+  max_memory_mb: 16
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue        # continue | abort-target

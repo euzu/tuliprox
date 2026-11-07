@@ -1,0 +1,17 @@
+# One component serves both manifests; each one subscribes to its own kinds.
+id: event-probe
+name: "Event probe - on-event"
+version: 0.1.0
+api_version: 1
+hooks:
+  - events.on-event
+events:
+  - playlist.update
+  - user.connection.changed
+  - user.created
+  - stream.probe.failed
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

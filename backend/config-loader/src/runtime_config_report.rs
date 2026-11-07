@@ -50,7 +50,7 @@ async fn render_runtime_config_report(
     let report = build_runtime_config_report(app_config).await?;
     let mut value = serde_json::to_value(&report)
         .map_err(|err| TuliproxError::Config(format!("Failed to convert runtime config report to value: {err}")))?;
-    redact_value(None, None, None, &mut value);
+    redact_report(&mut value);
     serialize_report_value(&value, format)
 }
 
@@ -104,6 +104,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         ipcheck: config.ipcheck.as_ref().map(shared::model::IpCheckConfigDto::from),
         library: config.library.as_ref().map(library_config_to_dto),
         mcp: config.mcp.as_ref().map(shared::model::McpConfigDto::from),
+        plugins: config.plugins.as_ref().map(shared::model::PluginsConfigDto::from),
     }
 }
 
@@ -184,6 +185,64 @@ fn serialize_report_value(value: &Value, format: RuntimeConfigReportFormat) -> R
     }
 }
 
+/// Redact a serialized runtime config report.
+///
+/// Plugin settings are free-form, so the key-based rules of [`redact_value`]
+/// cannot tell a secret from a harmless value in them. They are lifted out first,
+/// masked by [`redact_plugin_settings`] (everything except `${env:VAR}`
+/// references, which are the recommended and harmless way to configure a secret),
+/// and put back afterwards.
+fn redact_report(value: &mut Value) {
+    let mut settings = take_plugin_settings(value);
+    redact_value(None, None, None, value);
+    for (_, setting) in &mut settings {
+        redact_plugin_settings(setting);
+    }
+    restore_plugin_settings(value, settings);
+}
+
+fn plugin_entries(report: &mut Value) -> Option<&mut Vec<Value>> {
+    report.get_mut("config")?.get_mut("plugins")?.get_mut("plugins")?.as_array_mut()
+}
+
+fn take_plugin_settings(report: &mut Value) -> Vec<(usize, Value)> {
+    let Some(entries) = plugin_entries(report) else {
+        return Vec::new();
+    };
+    entries
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.get_mut("settings").map(|settings| (index, settings.take())))
+        .collect()
+}
+
+fn restore_plugin_settings(report: &mut Value, settings: Vec<(usize, Value)>) {
+    let Some(entries) = plugin_entries(report) else {
+        return;
+    };
+    for (index, setting) in settings {
+        if let Some(slot) = entries.get_mut(index).and_then(|entry| entry.get_mut("settings")) {
+            *slot = setting;
+        }
+    }
+}
+
+/// `true` for a string that is exactly one `${env:VAR}` reference.
+fn is_env_reference(text: &str) -> bool {
+    shared::utils::CONSTANTS.re_env_var.find(text).is_some_and(|found| found.start() == 0 && found.end() == text.len())
+}
+
+/// Mask every leaf of a plugin's `settings`, whatever its key or type, except
+/// strings that are exactly a `${env:VAR}` reference. Keys and structure stay.
+fn redact_plugin_settings(value: &mut Value) {
+    match value {
+        Value::Object(map) => map.values_mut().for_each(redact_plugin_settings),
+        Value::Array(items) => items.iter_mut().for_each(redact_plugin_settings),
+        Value::String(text) if is_env_reference(text) => {}
+        other => *other = Value::String("***".to_string()),
+    }
+}
+
 fn redact_value(current_key: Option<&str>, parent_key: Option<&str>, grandparent_key: Option<&str>, value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -256,7 +315,7 @@ fn redact_url_like_value(value: &str) -> String { shared::utils::sanitize_sensit
 
 #[cfg(test)]
 mod tests {
-    use super::{build_runtime_config_report, redact_value, render_runtime_config_report};
+    use super::{build_runtime_config_report, redact_report, redact_value, render_runtime_config_report};
     use crate::read_initial_app_config;
     use shared::model::{ConfigPaths, RuntimeConfigReportFormat};
     use tempfile::tempdir;
@@ -349,6 +408,75 @@ sources:
         assert_eq!(value["secret"], "***");
         assert_eq!(value["headers"]["Authorization"], "***");
         assert_eq!(value["url"], "http://***/get.php?username=***&password=***");
+    }
+
+    fn plugins_report(settings: &serde_json::Value) -> serde_json::Value {
+        let mut first = shared::model::PluginEntryDto::new("first-plugin");
+        first.settings = settings.as_object().cloned().expect("settings are an object");
+        let second = shared::model::PluginEntryDto::new("second-plugin");
+        let dto = shared::model::PluginsConfigDto { plugins: vec![first, second], ..Default::default() };
+        serde_json::json!({"config": {"plugins": dto}, "sources": {}})
+    }
+
+    #[test]
+    fn plugin_settings_are_masked_except_exact_env_references() {
+        let mut value = plugins_report(&serde_json::json!({
+            "token": "${env:HF_TOKEN}",
+            "literal_token": "hf_abc123",
+            "innocent_name": "plain text",
+            "mixed": "prefix-${env:HF_TOKEN}",
+            "two": "${env:A}${env:B}",
+            "partial": "${env:A",
+            "limit": 5,
+            "enabled": true,
+            "nothing": null,
+            "nested": {"password": "hunter2", "ref": "${env:DB_PASSWORD}", "list": ["${env:K1}", "k2", 3]}
+        }));
+
+        redact_report(&mut value);
+
+        let settings = &value["config"]["plugins"]["plugins"][0]["settings"];
+        assert_eq!(settings["token"], "${env:HF_TOKEN}", "an exact env reference is shown");
+        assert_eq!(settings["literal_token"], "***");
+        assert_eq!(settings["innocent_name"], "***", "every value is masked, not only secret looking keys");
+        assert_eq!(settings["mixed"], "***");
+        assert_eq!(settings["two"], "***");
+        assert_eq!(settings["partial"], "***");
+        assert_eq!(settings["limit"], "***");
+        assert_eq!(settings["enabled"], "***");
+        assert_eq!(settings["nothing"], "***");
+        assert_eq!(settings["nested"]["password"], "***");
+        assert_eq!(settings["nested"]["ref"], "${env:DB_PASSWORD}");
+        assert_eq!(settings["nested"]["list"], serde_json::json!(["${env:K1}", "***", "***"]));
+        let rendered = value.to_string();
+        for secret in ["hf_abc123", "hunter2", "plain text"] {
+            assert!(!rendered.contains(secret), "{secret} leaked");
+        }
+    }
+
+    #[test]
+    fn plugin_redaction_keeps_ids_other_entries_and_other_sections() {
+        let mut value = plugins_report(&serde_json::json!({"api_key": "k"}));
+        value["config"]["password"] = serde_json::json!("pw");
+        value["config"]["plugins"]["enabled"] = serde_json::json!(true);
+
+        redact_report(&mut value);
+
+        assert_eq!(value["config"]["plugins"]["plugins"][0]["id"], "first-plugin");
+        assert_eq!(value["config"]["plugins"]["plugins"][1]["id"], "second-plugin");
+        assert!(value["config"]["plugins"]["plugins"][1].get("settings").is_none());
+        assert_eq!(value["config"]["plugins"]["enabled"], true);
+        assert_eq!(value["config"]["password"], "***", "the ordinary rules still apply");
+    }
+
+    #[test]
+    fn redact_report_without_plugins_behaves_like_redact_value() {
+        let mut value = serde_json::json!({"config": {"api": {"password": "pw"}}});
+        redact_report(&mut value);
+        assert_eq!(value["config"]["api"]["password"], "***");
+        let mut no_config = serde_json::json!({"sources": {"token": "t"}});
+        redact_report(&mut no_config);
+        assert_eq!(no_config["sources"]["token"], "***");
     }
 
     #[test]

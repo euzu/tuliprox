@@ -53,7 +53,7 @@ async fn curation_tmdb_client_construction_reports_safe_phases_and_continues_pub
                     analytics_input: TargetAnalyticsInput::default(),
                     overrides: Arc::new(crate::processor::playlist::overrides::TargetOverrideSet::empty(None)),
                 };
-                let (result, errors) = tokio::time::timeout(
+                let (result, errors, _) = tokio::time::timeout(
                     Duration::from_secs(5),
                     target::finalize_prepared_target_with_tmdb(
                         Arc::clone(&run.context),

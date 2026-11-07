@@ -181,11 +181,22 @@ fn every_registered_event_appears_in_the_docs_table() {
         .map(|(table, _)| table)
         .expect("docs must contain the generated event table markers");
 
+    let table_rows: Vec<Vec<&str>> = table
+        .lines()
+        .filter(|line| line.trim_start().starts_with("| `"))
+        .map(|line| line.split('|').map(str::trim).filter(|col| !col.is_empty()).collect())
+        .collect();
+
     for descriptor in registry::ALL {
-        let row = format!("| `{}` | {} | {} |", descriptor.id, descriptor.severity, descriptor.description);
+        let expected_id = format!("`{}`", descriptor.id);
+        let expected_sev = descriptor.severity.to_string();
+        let found = table_rows.iter().any(|cols| {
+            cols.len() >= 3 && cols[0] == expected_id && cols[1] == expected_sev && cols[2] == descriptor.description
+        });
         assert!(
-            table.contains(&row),
-            "docs/src/configuration/config.md is missing this row - add it inside the generated table:\n{row}"
+            found,
+            "docs/src/configuration/config.md is missing row for event `{}` with severity `{}` and description `{}`",
+            descriptor.id, descriptor.severity, descriptor.description
         );
     }
 

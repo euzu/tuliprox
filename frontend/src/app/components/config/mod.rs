@@ -19,6 +19,7 @@ mod messaging_config_view;
 mod metadata_update_config_view;
 mod panel_config_view;
 mod plans_view;
+mod plugin_config;
 mod proxy_config_view;
 mod recording_config_cards;
 mod recording_config_view;

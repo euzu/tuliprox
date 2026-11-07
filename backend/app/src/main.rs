@@ -31,6 +31,7 @@ extern crate pest;
 pub mod api;
 mod env_loader;
 mod mcp_stdio;
+mod seed;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
@@ -373,6 +374,12 @@ async fn main() {
         }
     }
 
+    // The Plugin Manager needs the `plugins:` section; the server adds a minimal one when it is missing.
+    #[cfg(feature = "plugins")]
+    if args.server {
+        seed::plugins::ensure_section(&config_paths.config_file_path).await;
+    }
+
     let app_config = crate::config_loader::read_initial_app_config(&mut config_paths, true, true, args.server)
         .await
         .unwrap_or_else(|err| exit!("{err}"));
@@ -563,12 +570,15 @@ async fn start_in_cli_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>) {
     let storage_dir = cfg.resolve_storage_dir();
     let maintenance_path = storage_dir.join(tuliprox_core::model::MAINTENANCE_FILE);
     let maintenance = Arc::new(tuliprox_core::model::MaintenanceRegistry::load_read_only(maintenance_path).await);
+    let plugins = crate::api::model::load_validated_plugins(&cfg, None).await;
+    crate::api::model::migrate_settings_for_run(&plugins, &cfg).await;
     // The status store holds no cache and writes under a cross-process lock, so recording the
     // applied override revisions here never overwrites what a running server recorded.
     let override_status = Arc::new(tuliprox_repository::OverrideStatusStore::new(storage_dir));
     exec_processing(
         ProcessingRun::new(client, cfg, targets, shared::model::NoopSink)
             .with_maintenance(maintenance)
+            .with_plugins(plugins)
             .with_override_status(override_status),
     )
     .await;

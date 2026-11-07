@@ -1,0 +1,15 @@
+# The event-probe component under a 1 s deadline, for the isolation tests: with
+# the setting `mode: loop` its on-event never returns.
+id: event-probe-hang
+name: "Event probe - on-event (attack target, 1 s deadline)"
+version: 0.1.0
+api_version: 1
+hooks:
+  - events.on-event
+events:
+  - playlist.update
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 1000
+  max_instances: 4
+  fail_mode: continue

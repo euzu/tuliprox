@@ -11,7 +11,7 @@ use shared::{
     model::{
         ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, EpgConfigDto,
         EpgSourceTypeDto, FlussonicHlsCatchup, InputFetchMethod, InputType, MediaServerCatalogConfigDto,
-        MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderAccountIdentity, StagedInputType,
+        MediaServerInputConfigDto, MediaServerLibrarySelector, PluginHook, ProviderAccountIdentity, StagedInputType,
         StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
@@ -620,9 +620,25 @@ pub struct ConfigInput {
     pub playback_provider: Option<String>,
     /// Resolved Stalker device identity + portal hints.
     pub stalker: Option<StalkerInputConfig>,
+    /// Id of the providing plugin; `Some` exactly for `InputType::Plugin`.
+    pub plugin: Option<Arc<str>>,
+    /// The plugin's settings for this input, flattened to the `options` pairs of
+    /// `input-request`. Empty unless `InputType::Plugin`.
+    pub plugin_options: Vec<(String, String)>,
 }
 
 impl ConfigInput {
+    /// The plugin hook this input needs, for the check against the loaded
+    /// plugins right after plugin load (core does not validate it, plugins load
+    /// after the config). `None` for a disabled input, which never runs.
+    #[must_use]
+    pub fn plugin_ref(&self) -> Option<(PluginHook, &str)> {
+        if !self.enabled || !self.input_type.is_plugin() {
+            return None;
+        }
+        self.plugin.as_deref().map(|plugin| (PluginHook::FetchInput, plugin))
+    }
+
     fn resolve_provider_config(
         url: &str,
         provider_configs: &[Arc<ConfigProvider>],
@@ -815,7 +831,8 @@ impl ConfigInput {
             | InputType::Stalker
             | InputType::StalkerBatch
             | InputType::Library
-            | InputType::Staged => {}
+            | InputType::Staged
+            | InputType::Plugin => {}
         }
         Ok(())
     }
@@ -1022,6 +1039,8 @@ impl ConfigInput {
                 let password = alias.password.clone().or_else(|| cfg.password.clone());
                 StalkerInputConfig { username, password, ..cfg }
             }),
+            plugin: self.plugin.clone(),
+            plugin_options: self.plugin_options.clone(),
         }
     }
 
@@ -1133,6 +1152,8 @@ impl From<&ConfigInputDto> for ConfigInput {
                 .stalker
                 .as_ref()
                 .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
+            plugin: dto.plugin.clone(),
+            plugin_options: shared::model::plugin_options(&dto.plugin_config),
         }
     }
 }
@@ -1226,6 +1247,58 @@ fn assemble_provider_url_at_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_input_carries_its_plugin_and_names_the_fetch_hook() {
+        let mut dto = ConfigInputDto {
+            name: "from-plugin".intern(),
+            input_type: InputType::Plugin,
+            plugin: Some("my-plugin".intern()),
+            ..ConfigInputDto::default()
+        };
+        dto.prepare(0, false, &std::collections::HashSet::new(), None).unwrap();
+        let input = ConfigInput::from(&dto);
+
+        assert_eq!(input.input_type, InputType::Plugin);
+        assert_eq!(input.plugin.as_deref(), Some("my-plugin"));
+        assert_eq!(input.plugin_ref(), Some((PluginHook::FetchInput, "my-plugin")));
+
+        let disabled = ConfigInput { enabled: false, ..input.clone() };
+        assert_eq!(disabled.plugin_ref(), None, "a disabled input never runs, so it needs no plugin");
+        let built_in = ConfigInput { input_type: InputType::M3u, plugin: None, ..input };
+        assert_eq!(built_in.plugin_ref(), None);
+    }
+    #[test]
+    fn a_plugin_input_flattens_its_plugin_config_into_the_request_options() {
+        let mut dto = ConfigInputDto {
+            name: "from-plugin".intern(),
+            input_type: InputType::Plugin,
+            plugin: Some("youtube-input".intern()),
+            plugin_config: serde_json::Map::from_iter([
+                ("mode".to_string(), serde_json::json!("live_only")),
+                ("max_uploads".to_string(), serde_json::json!(5)),
+                ("flag".to_string(), serde_json::json!(true)),
+                ("nested".to_string(), serde_json::json!({"a": "b"})),
+            ]),
+            ..ConfigInputDto::default()
+        };
+        dto.prepare(0, false, &std::collections::HashSet::new(), None).unwrap();
+        let input = ConfigInput::from(&dto);
+
+        let mut options = input.plugin_options.clone();
+        options.sort();
+        assert_eq!(
+            options,
+            [
+                ("flag".to_string(), "true".to_string()),
+                ("max_uploads".to_string(), "5".to_string()),
+                ("mode".to_string(), "live_only".to_string()),
+                ("nested.a".to_string(), "b".to_string()),
+            ],
+            "a string keeps its text, anything else its JSON text, an object flattens with dots"
+        );
+    }
+
     use crate::model::ConfigProvider;
     use shared::model::{
         ConfigInputUpdateQualityDto, ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector,

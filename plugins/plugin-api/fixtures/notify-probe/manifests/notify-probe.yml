@@ -1,0 +1,16 @@
+# The registry rejects a component whose exports are not all used by a hook;
+# the one export here is notification-hooks, which `notifications.send` binds.
+# The `mode` setting picks the scenario: ok | transient | trap.
+id: notify-probe
+name: Notification probe
+version: 0.1.0
+api_version: 1
+capabilities:
+  notifications: true
+hooks:
+  - notifications.send
+resources:
+  max_memory_mb: 32
+  max_exec_ms: 5000
+  max_instances: 4
+  fail_mode: continue

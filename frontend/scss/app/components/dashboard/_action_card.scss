@@ -6,7 +6,8 @@
   gap: var(--gap-default);
   fill: var(--card-color);
   box-sizing: border-box;
-  max-width: var(--action-card-width);
+  min-width: 0;
+  max-width: 100%;
 
   &__icon {
     fill: inherit;
@@ -32,6 +33,7 @@
     align-content: flex-start;
     flex: 1 1 auto;
     gap: var(--gap-small);
+    min-width: 0;
   }
 
   &__body {

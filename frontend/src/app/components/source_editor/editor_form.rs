@@ -1,5 +1,5 @@
 use crate::app::components::{
-    BlockInstance, ConfigInputView, ConfigOutputView, ConfigTargetView, EditMode, SourceEditorContext,
+    BlockInstance, ConfigInputView, ConfigOutputView, ConfigTargetView, EditMode, PluginInputView, SourceEditorContext,
 };
 use yew::{classes, component, html, use_context, use_effect_with, use_state, Html};
 
@@ -25,6 +25,11 @@ pub fn SourceEditorForm() -> Html {
             {
                 if let EditMode::Active(block) = &*source_editor_ctx.edit_mode {
                     match &block.instance {
+                        // A plugin input shows only the fields the host owns plus the forms its
+                        // plugin ships; the built-in downloader form does not apply to it.
+                        BlockInstance::Input(input) if input.input_type.is_plugin() => html! {
+                            <PluginInputView block_id={block.id} input={Some(input.clone())} allow_write={source_editor_ctx.allow_write} />
+                        },
                         BlockInstance::Input(input) => html! { <ConfigInputView block_id={block.id} input={Some(input.clone())} allow_write={source_editor_ctx.allow_write}></ConfigInputView> },
                         BlockInstance::Target(target) => html! { <ConfigTargetView block_id={block.id} target={Some(target.clone())} allow_write={source_editor_ctx.allow_write}></ConfigTargetView> },
                         BlockInstance::Output(output) => html! { <ConfigOutputView block_id={block.id} output={Some(output.clone())} allow_write={source_editor_ctx.allow_write}></ConfigOutputView> },

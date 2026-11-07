@@ -332,6 +332,15 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
+#[strum(serialize_all = "snake_case")]
+enum StreamDisplayAction {
+    Kick,
+    CopyLinkTuliproxVirtualId,
+    CopyLinkTuliproxWebPlayerUrl,
+    CopyLinkProviderUrl,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_user_comments, stream_display_key};
@@ -413,13 +422,4 @@ mod tests {
 
         assert_ne!(stream_display_key(&first), stream_display_key(&second));
     }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, strum_macros::Display, strum_macros::EnumString)]
-#[strum(serialize_all = "snake_case")]
-enum StreamDisplayAction {
-    Kick,
-    CopyLinkTuliproxVirtualId,
-    CopyLinkTuliproxWebPlayerUrl,
-    CopyLinkProviderUrl,
 }

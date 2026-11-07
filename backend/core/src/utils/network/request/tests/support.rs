@@ -32,6 +32,7 @@ pub(in crate::utils::network::request::tests) fn make_test_app_config(config: Co
         config: Arc::new(ArcSwap::from_pointee(config)),
         sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
         hdhomerun: Arc::new(ArcSwapOption::default()),
+        plugins: Arc::default(),
         api_proxy: Arc::new(ArcSwapOption::default()),
         file_locks: Arc::new(FileLockManager::default()),
         paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {

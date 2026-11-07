@@ -131,7 +131,7 @@ pub(in crate::api) fn get_epg_path_for_target_by_type(
             }
             None
         }
-        TargetType::Strm | TargetType::HdHomeRun => None,
+        TargetType::Strm | TargetType::HdHomeRun | TargetType::Plugin => None,
     }
 }
 

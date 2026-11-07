@@ -84,6 +84,9 @@ create_release_bundle() {
     chmod +x "${bundle_root}/tuliprox/$(basename "${binary_path}")"
     cp -r "${FRONTEND_BUILD_DIR}" "${bundle_root}/tuliprox/web"
     cp -r "${WORKING_DIR}/resources" "${bundle_root}/tuliprox/resources"
+    if [ -d "${WORKING_DIR}/target/staged-plugins" ]; then
+        cp -r "${WORKING_DIR}/target/staged-plugins" "${bundle_root}/tuliprox/plugins"
+    fi
 
     if [[ "${architecture}" == *-windows-* ]]; then
         bundle_name="tuliprox-v${VERSION}-${architecture}.zip"
@@ -109,6 +112,9 @@ if [ "$PHASE" != "publish" ]; then
     "${WORKING_DIR}/bin/build_fe.sh" release
 
     cd "$WORKING_DIR"
+
+    echo "🔌 Building official plugins..."
+    make plugins
 
     # -----------------------------------------
     # 2. Binary Compilation (Multi-Arch)
@@ -144,9 +150,10 @@ if [ "$PHASE" != "publish" ]; then
 
     echo "📋 Preparing Docker context..."
     # Remove a context left by an earlier build-only run; cp -r would nest into it.
-    rm -rf "${DOCKER_DIR}/web" "${DOCKER_DIR}/resources"
+    rm -rf "${DOCKER_DIR}/web" "${DOCKER_DIR}/resources" "${DOCKER_DIR}/plugins"
     cp -r "${FRONTEND_BUILD_DIR}" "${DOCKER_DIR}/web"
     cp -r "resources" "${DOCKER_DIR}/resources"
+    cp -r "target/staged-plugins" "${DOCKER_DIR}/plugins"
 fi
 
 if [ "$PHASE" == "build" ]; then
@@ -158,6 +165,7 @@ for ARCHITECTURE in "${ARCHITECTURES[@]}"; do
 done
 test -d "${DOCKER_DIR}/web"
 test -d "${DOCKER_DIR}/resources"
+test -d "${DOCKER_DIR}/plugins"
 
 # -----------------------------------------
 # 3. Docker Build & Push (Optimized Caching)
@@ -199,4 +207,4 @@ done
 # Cleanup
 # -----------------------------------------
 echo "🗑️ Final cleanup..."
-rm -rf "${DOCKER_DIR}/binaries" "${DOCKER_DIR}/web" "${DOCKER_DIR}/resources"
+rm -rf "${DOCKER_DIR}/binaries" "${DOCKER_DIR}/web" "${DOCKER_DIR}/resources" "${DOCKER_DIR}/plugins"

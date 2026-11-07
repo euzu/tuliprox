@@ -4,6 +4,10 @@ pub enum ScheduleTaskType {
     PlaylistUpdate,
     LibraryScan,
     GeoIpUpdate,
+    /// A plugin's `tasks:` entry, named by the schedule's `plugin` + `task`
+    /// (plan §7 *Scheduled plugin tasks*). A unit variant, like `InputType::Plugin`
+    /// (§18 Q6), so the enum stays `Copy`.
+    PluginTask,
 }
 
 const fn default_schedule_task_type() -> ScheduleTaskType { ScheduleTaskType::PlaylistUpdate }
@@ -15,6 +19,7 @@ fn parse_schedule_task_type(value: &str) -> Option<ScheduleTaskType> {
         "geoipupdate" | "geo_ip_update" | "geoip_update" | "geoip-update" | "geoip" => {
             Some(ScheduleTaskType::GeoIpUpdate)
         }
+        "plugintask" | "plugin_task" | "plugin-task" => Some(ScheduleTaskType::PluginTask),
         _ => None,
     }
 }
@@ -43,7 +48,7 @@ where
                 Ok(task_type)
             } else {
                 Err(serde::de::Error::custom(format!(
-                    "invalid schedule type '{raw}', expected one of: PlaylistUpdate, LibraryScan, GeoIpUpdate"
+                    "invalid schedule type '{raw}', expected one of: PlaylistUpdate, LibraryScan, GeoIpUpdate, PluginTask"
                 )))
             }
         }
@@ -64,6 +69,12 @@ pub struct ScheduleConfigDto {
     pub task_type: ScheduleTaskType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<String>>,
+    /// `type: plugin_task` only: the plugin id and its manifest `tasks[].id`.
+    /// Checked against the loaded plugins after they load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 #[cfg(test)]
@@ -100,5 +111,16 @@ mod tests {
         let legacy: ScheduleConfigDto =
             serde_saphyr::from_str("schedule: \"0 0 * * * * *\"\ntype: geoip").expect("geoip alias should parse");
         assert_eq!(legacy.task_type, ScheduleTaskType::GeoIpUpdate);
+    }
+
+    #[test]
+    fn parses_a_plugin_task_schedule() {
+        let dto: ScheduleConfigDto = serde_saphyr::from_str(
+            "schedule: \"0 0 4 * * *\"\ntype: plugin_task\nplugin: sports-enricher\ntask: refresh-fixtures",
+        )
+        .expect("plugin task schedule should parse");
+        assert_eq!(dto.task_type, ScheduleTaskType::PluginTask);
+        assert_eq!(dto.plugin.as_deref(), Some("sports-enricher"));
+        assert_eq!(dto.task.as_deref(), Some("refresh-fixtures"));
     }
 }

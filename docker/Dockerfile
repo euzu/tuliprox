@@ -17,6 +17,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/reqwest ./vendor/reqwest/
 COPY shared ./shared/
+COPY plugins/plugin-api ./plugins/plugin-api/
+COPY plugins/plugin-sdk ./plugins/plugin-sdk/
+COPY plugins/plugin-sdk-macros ./plugins/plugin-sdk-macros/
 COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
 COPY backend/app/Cargo.toml backend/app/build.rs ./backend/app/
 COPY backend/auth/Cargo.toml ./backend/auth/
@@ -33,6 +36,7 @@ COPY backend/metadata/Cargo.toml ./backend/metadata/
 COPY backend/messaging/Cargo.toml ./backend/messaging/
 COPY backend/mpegts/Cargo.toml ./backend/mpegts/
 COPY backend/parser/Cargo.toml ./backend/parser/
+COPY backend/plugins/Cargo.toml ./backend/plugins/
 COPY backend/processing/Cargo.toml ./backend/processing/
 COPY backend/repository/Cargo.toml ./backend/repository/
 COPY backend/scripting/Cargo.toml ./backend/scripting/
@@ -45,7 +49,7 @@ RUN mkdir -p frontend/src backend/app/src/tools tools/tuliprox-testkit/src && \
     printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
     printf '\n' > tools/tuliprox-testkit/src/lib.rs && \
     printf 'fn main() {}\n' > tools/tuliprox-testkit/src/main.rs && \
-    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser processing repository scripting session; do \
+    for crate in auth btree config-loader core curation dvr hls iptv library media-server metadata messaging mpegts parser plugins processing repository scripting session; do \
       mkdir -p "backend/${crate}/src"; \
       printf '\n' > "backend/${crate}/src/lib.rs"; \
     done && \
@@ -165,6 +169,17 @@ RUN apk add --no-cache tzdata \
   && ln -sf /usr/share/zoneinfo/${TZ} /output/etc/localtime
 
 
+# -----------------------------------------------------------------
+# Stage 5: Build official plugins
+# -----------------------------------------------------------------
+FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS plugin-build
+
+WORKDIR /src
+COPY . .
+RUN apt-get update && apt-get install -y --no-install-recommends unzip make python3 && \
+    rustup target add wasm32-wasip2 && \
+    make plugins
+
 # =================================================================
 #
 # Part 2: Final Image Stages
@@ -197,6 +212,7 @@ RUN rustup target add $RUST_TARGET
 WORKDIR /app
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
+COPY --from=plugin-build /src/target/staged-plugins ./plugins
 
 # Create a separate directory for the source code
 WORKDIR /usr/src/tuliprox
@@ -236,6 +252,7 @@ WORKDIR /app
 COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
+COPY --from=plugin-build /src/target/staged-plugins ./plugins
 
 ENTRYPOINT ["/app/tuliprox"]
 CMD ["-s", "-p", "/app/config"]
@@ -266,6 +283,7 @@ WORKDIR /app
 COPY --from=rust-build /src/target/${RUST_TARGET}/release/tuliprox ./tuliprox
 COPY --from=trunk-build /src/frontend/dist ./web
 COPY --from=resource-build /src/resources ./resources
+COPY --from=plugin-build /src/target/staged-plugins ./plugins
 
 ENTRYPOINT ["/sbin/tini", "--", "/app/tuliprox"]
 CMD ["-s", "-p", "/app/config"]

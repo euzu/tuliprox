@@ -12,11 +12,19 @@ pub enum SparklineFormat {
     Percent,
     BytesPerSec,
     Count,
+    /// The number as it is, with at most two decimals: for values whose unit is not known here.
+    Plain,
+}
+
+fn plain_number(value: f64) -> String {
+    let text = format!("{value:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 impl SparklineFormat {
     fn render(&self, value: f64) -> String {
         match self {
+            SparklineFormat::Plain => plain_number(value),
             SparklineFormat::Percent => format!("{value:.1}%"),
             SparklineFormat::BytesPerSec => format!("{}/s", human_readable_byte_size(value.max(0.0) as u64)),
             SparklineFormat::Count => format!("{value:.0}"),
@@ -260,5 +268,20 @@ pub fn Sparkline(props: &SparklineProps) -> Html {
             { dots_overlay }
             { hover_overlay.unwrap_or_default() }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod plain_format_tests {
+    use super::{plain_number, SparklineFormat};
+
+    #[test]
+    fn plain_numbers_keep_up_to_two_decimals() {
+        assert_eq!(plain_number(3.0), "3");
+        assert_eq!(plain_number(3.5), "3.5");
+        assert_eq!(plain_number(7.12345), "7.12");
+        assert_eq!(plain_number(0.0), "0");
+        assert_eq!(plain_number(-12.5), "-12.5");
+        assert_eq!(SparklineFormat::Plain.render(10.0), "10");
     }
 }

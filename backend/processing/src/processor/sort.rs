@@ -1,6 +1,6 @@
 use shared::{
     foundation::ValueProvider,
-    model::{PlaylistGroup, SortOrder, SortTarget},
+    model::{PlaylistGroup, PluginSortKeys, SortOrder, SortTarget},
     utils::natural_cmp,
 };
 use std::{cmp::Ordering, sync::Arc};
@@ -313,7 +313,15 @@ fn planned_first_channel<'a>(group: &'a PlaylistGroup, indices: &[usize]) -> Opt
     indices.first().and_then(|index| group.channels.get(*index))
 }
 
-pub(in crate::processor) fn calculate_sort_plan(target: &ConfigTarget, groups: &[PlaylistGroup]) -> SortPlan {
+/// `plugin_keys` is the `sort-key` decision, prepared by the async caller: one
+/// key per channel, in the view's current order (groups, then channels). The
+/// channels of each group are stable-sorted by key after the rules; a key list
+/// of the wrong length is ignored.
+pub(in crate::processor) fn calculate_sort_plan(
+    target: &ConfigTarget,
+    groups: &[PlaylistGroup],
+    plugin_keys: Option<&PluginSortKeys>,
+) -> SortPlan {
     let (rules, match_as_ascii) =
         target.sort.as_ref().map_or((&[][..], false), |sort| (sort.rules.as_slice(), sort.match_as_ascii));
     let channel_rules: Vec<_> = rules
@@ -342,6 +350,7 @@ pub(in crate::processor) fn calculate_sort_plan(target: &ConfigTarget, groups: &
             indices
         })
         .collect::<Vec<_>>();
+    let channel_indices = apply_plugin_sort_keys(groups, channel_indices, plugin_keys);
 
     let group_rules: Vec<_> = rules
         .iter()
@@ -381,6 +390,28 @@ pub(in crate::processor) fn calculate_sort_plan(target: &ConfigTarget, groups: &
     SortPlan { group_indices, channel_indices }
 }
 
+/// Stable-sort each group's planned channel order by the plugin's keys.
+fn apply_plugin_sort_keys(
+    groups: &[PlaylistGroup],
+    mut channel_indices: Vec<Vec<usize>>,
+    plugin_keys: Option<&PluginSortKeys>,
+) -> Vec<Vec<usize>> {
+    let Some(keys) = plugin_keys else {
+        return channel_indices;
+    };
+    let total: usize = groups.iter().map(|group| group.channels.len()).sum();
+    if keys.len() != total {
+        log::warn!("sort-key returned {} keys for {total} channels; ignoring them", keys.len());
+        return channel_indices;
+    }
+    let mut offset = 0;
+    for (group, indices) in groups.iter().zip(&mut channel_indices) {
+        indices.sort_by(|left, right| keys[offset + *left].cmp(&keys[offset + *right]));
+        offset += group.channels.len();
+    }
+    channel_indices
+}
+
 pub(in crate::processor) fn apply_sort_plan(groups: &mut Vec<PlaylistGroup>, plan: &SortPlan) -> Result<(), String> {
     plan.validate(groups)?;
     for (group, indices) in groups.iter_mut().zip(&plan.channel_indices) {
@@ -390,8 +421,12 @@ pub(in crate::processor) fn apply_sort_plan(groups: &mut Vec<PlaylistGroup>, pla
     Ok(())
 }
 
-pub(in crate::processor) fn sort_playlist(target: &ConfigTarget, playlist: &mut Vec<PlaylistGroup>) -> bool {
-    let plan = calculate_sort_plan(target, playlist);
+pub(in crate::processor) fn sort_playlist(
+    target: &ConfigTarget,
+    playlist: &mut Vec<PlaylistGroup>,
+    plugin_keys: Option<&PluginSortKeys>,
+) -> bool {
+    let plan = calculate_sort_plan(target, playlist, plugin_keys);
     if let Err(error) = apply_sort_plan(playlist, &plan) {
         log::error!("{error}");
         return false;

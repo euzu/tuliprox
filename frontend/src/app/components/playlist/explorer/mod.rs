@@ -18,8 +18,8 @@ use crate::{
             recording::{
                 ensure_recording_available, target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill,
             },
-            DropDownOption, DropDownSelection, HorizontalShrinkPanel, IconButton, NoContent, Search, Select,
-            SplitButton, TextButton,
+            DropDownOption, DropDownSelection, HorizontalShrinkPanel, IconButton, NoContent, PluginActionDialog,
+            PluginActionMenuItems, PluginActionRequest, PluginSlot, Search, Select, SplitButton, TextButton,
         },
         context::{ConfigContext, PlaylistExplorerContext},
     },
@@ -43,12 +43,13 @@ use identity::{use_identity_revision, Id};
 pub use live_view::*;
 pub use orphans_view::ExplorerOrphansView;
 pub use poster_grid::*;
+use serde_json::{json, Value};
 use shared::{
     error::TuliproxError,
     model::{
         recording::RecordingVisibility, OverrideScopeDto, Permission, PlaylistRequest, PlaylistUrlResolveRequest,
-        SearchRequest, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, UiPlaylistCategories,
-        UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
+        PluginChannelContextDto, PluginSlotDto, SearchRequest, SeriesStreamDetailEpisodeProperties,
+        SeriesStreamProperties, UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::format_float_localized,
 };
@@ -78,6 +79,23 @@ pub struct ChannelSelection {
     pub url: String,
     pub title: String,
     pub input_name: String,
+    /// What a plugin may see of the channel; never carries a URL.
+    pub plugin_context: PluginChannelContextDto,
+}
+
+/// The slot context of a playlist item. Stream and catch-up URLs embed provider
+/// credentials, so none of them is copied.
+#[must_use]
+pub fn plugin_channel_context(item: &UiPlaylistItem) -> PluginChannelContextDto {
+    PluginChannelContextDto {
+        virtual_id: item.virtual_id,
+        name: item.name.to_string(),
+        title: item.title.to_string(),
+        group: item.group.to_string(),
+        item_type: item.item_type.as_str().to_string(),
+        epg_channel_id: item.epg_channel_id.as_ref().map(ToString::to_string),
+        input_name: (!item.input_name.is_empty()).then(|| item.input_name.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -235,6 +253,8 @@ pub fn PlaylistExplorer() -> Html {
 
     // Context popup & selection
     let selected_channel = use_state(|| None::<ChannelSelection>);
+    // The plugin action being shown in its dialog, with the context it was opened with.
+    let plugin_action = use_state(|| None::<(PluginActionRequest, Value)>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let copy_to_clipboard = use_clipboard_copy();
@@ -529,11 +549,34 @@ pub fn PlaylistExplorer() -> Html {
                     url: dto.url.to_string(),
                     title: dto.title.to_string(),
                     input_name: dto.input_name.to_string(),
+                    plugin_context: plugin_channel_context(&dto),
                 }));
                 set_anchor_ref.set(Some(target));
                 set_is_open.set(true);
             }
         })
+    };
+
+    let handle_plugin_action = {
+        let plugin_action = plugin_action.clone();
+        let selected_channel = selected_channel.clone();
+        let set_is_open = popup_is_open.clone();
+        Callback::from(move |request: PluginActionRequest| {
+            if let Some(selection) = selected_channel.as_ref() {
+                let context = if request.slot == PluginSlotDto::ChannelDetailPanel {
+                    json!({ "channel": selection.plugin_context.clone() })
+                } else {
+                    json!({ "channels": [selection.plugin_context.clone()] })
+                };
+                plugin_action.set(Some((request, context)));
+            }
+            set_is_open.set(false);
+        })
+    };
+
+    let handle_plugin_action_close = {
+        let plugin_action = plugin_action.clone();
+        Callback::from(move |()| plugin_action.set(None))
     };
 
     let handle_episode_popup_onclick = {
@@ -1071,6 +1114,15 @@ pub fn PlaylistExplorer() -> Html {
                     url: chan.direct_source.to_string(),
                     title: chan.title.to_string(),
                     input_name: String::new(),
+                    plugin_context: PluginChannelContextDto {
+                        virtual_id: chan.id,
+                        name: chan.title.to_string(),
+                        title: chan.title.to_string(),
+                        group: series_info.group.to_string(),
+                        item_type: shared::model::PlaylistItemType::Series.as_str().to_string(),
+                        epg_channel_id: None,
+                        input_name: None,
+                    },
                 };
                 let popup_onclick = handle_episode_popup_onclick.clone();
                 let ep_rating = chan.rating.unwrap_or_default();
@@ -1143,6 +1195,10 @@ pub fn PlaylistExplorer() -> Html {
                     <div class="in">
                         { episodes_html }
                     </div>
+                    <PluginSlot
+                        slot={PluginSlotDto::ChannelDetailPanel}
+                        context={Some(json!({ "channel": plugin_channel_context(series_info) }))}
+                    />
                 </div>
             }
         };
@@ -1599,7 +1655,31 @@ pub fn PlaylistExplorer() -> Html {
                         />
                     })
                 }
+                // Live and VOD channels have no detail view: their `channel-detail-panel`
+                // contributions open from the menu (series show theirs in the series view).
+                {
+                    html_if!(
+                        selected_channel.as_ref().is_some_and(|selection| selection.cluster != XtreamCluster::Series),
+                        { <PluginActionMenuItems slot={PluginSlotDto::ChannelDetailPanel} onselect={handle_plugin_action.clone()} /> }
+                    )
+                }
+                <PluginActionMenuItems onselect={handle_plugin_action} />
             </PopupMenu>
+
+            // PLUGIN ACTION DIALOG
+            {
+                if let Some((request, context)) = (*plugin_action).as_ref() {
+                    html! {
+                        <PluginActionDialog
+                            request={request.clone()}
+                            context={Some(context.clone())}
+                            on_close={handle_plugin_action_close}
+                        />
+                    }
+                } else {
+                    html! {}
+                }
+            }
 
             // ORPHANS CLEANUP DIALOG
             {

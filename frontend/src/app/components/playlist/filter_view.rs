@@ -142,6 +142,14 @@ impl Render<'_> {
                         </span>
                     </>
                 },
+                Some(call @ Leaf::PluginCall { .. }) => html! {
+                    <>
+                       { indent(level, do_indent && pretty) }
+                        <span class="comparison">
+                            <span class="regex">{call.to_string()}</span>
+                        </span>
+                    </>
+                },
                 None => html! {},
             },
             Node::Not(inner) => html! {

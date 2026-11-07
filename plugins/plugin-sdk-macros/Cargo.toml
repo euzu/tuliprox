@@ -1,0 +1,22 @@
+[package]
+name = "tuliprox-plugin-sdk-macros"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Proc macros of the tuliprox plugin SDK: #[tuliprox_plugin] and #[tuliprox_plugin_settings]"
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+
+[dev-dependencies]
+tuliprox-plugin-api = { workspace = true }

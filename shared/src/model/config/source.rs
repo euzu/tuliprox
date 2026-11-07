@@ -311,6 +311,49 @@ sources: []
     }
 
     #[test]
+    fn plugin_config_round_trips_through_source_yaml_with_its_types() {
+        let yaml = r#"
+inputs:
+  - name: youtube-live
+    type: plugin
+    plugin: youtube-input
+    url: https://www.youtube.com/@tagesschau
+    plugin_config:
+      mode: live_only
+      max_uploads: 5
+      notify: true
+      groups:
+        - News
+sources:
+  - inputs: [youtube-live]
+    targets:
+      - name: t
+        output:
+          - type: plugin
+            plugin: csv-writer
+            plugin_config:
+              delimiter: ";"
+              header: false
+"#;
+
+        let parsed: SourcesConfigDto = serde_saphyr::from_str(yaml).expect("plugin config should parse");
+        let input = &parsed.inputs[0];
+        assert_eq!(input.plugin.as_deref(), Some("youtube-input"));
+        assert_eq!(input.plugin_config["max_uploads"], serde_json::json!(5), "an integer stays an integer");
+        assert_eq!(input.plugin_config["notify"], serde_json::json!(true));
+        assert_eq!(input.plugin_config["groups"], serde_json::json!(["News"]));
+        let TargetOutputDto::Plugin(output) = &parsed.sources[0].targets[0].output[0] else {
+            panic!("a plugin output");
+        };
+        assert_eq!(output.plugin_config["header"], serde_json::json!(false));
+
+        let serialized = serde_saphyr::to_string(&parsed).expect("plugin config should serialize");
+        let reparsed: SourcesConfigDto = serde_saphyr::from_str(&serialized).expect("and parse again");
+        assert_eq!(reparsed, parsed);
+        assert!(serialized.contains("max_uploads: 5"), "the value keeps its type: {serialized}");
+    }
+
+    #[test]
     fn source_yaml_round_trip_preserves_all_update_quality_thresholds() {
         let yaml = r"
 inputs:
