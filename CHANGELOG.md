@@ -1445,6 +1445,12 @@
 
 ## 🐛 Fixes
 
+- **Shared HLS sessions continue on a healthy mirror after the active origin fails.** When the active origin
+  failed during playback, the content check against the alternative mirror tried to pin the reference segment
+  file a second time. A completed startup segment already holds that pin, so the check failed with
+  `switch-resource-unavailable` and the session never switched, even though the mirror served matching media.
+  The check now reuses the existing pin of the completed segment. Content comparison is unchanged.
+
 - **Stalker aliases now play with their own MAC and session.** An alias with its own MAC received the main
   account's resolved URL, so playback ran on the main account's MAC instead of the allocated alias. Playback now
   uses the alias's own `create_link` result, and a 4xx refresh re-resolves with the allocated account. The link

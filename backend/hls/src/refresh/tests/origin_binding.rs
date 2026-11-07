@@ -704,6 +704,19 @@ async fn assert_forward_content_anchor_with_mode(
     should_commit: bool,
     startup_mode: Option<shared::model::HlsStartupMode>,
 ) {
+    assert_forward_content_anchor_with_revision_pin(anchor_bytes, should_commit, startup_mode, false).await;
+}
+
+/// Like [`assert_forward_content_anchor_with_mode`]. When `keep_revision_pin`
+/// is set, the completed startup revisions keep their active-file pins, as
+/// production revisions do while a guard serves them.
+#[allow(clippy::too_many_lines)]
+async fn assert_forward_content_anchor_with_revision_pin(
+    anchor_bytes: &'static str,
+    should_commit: bool,
+    startup_mode: Option<shared::model::HlsStartupMode>,
+    keep_revision_pin: bool,
+) {
     const COMMITTED: &[u8] = b"committed-anchor-bytes";
     const NOVEL: &str = "different-new-segment-bytes";
     super::short_manifest::init_qualification_logger();
@@ -782,7 +795,9 @@ async fn assert_forward_content_anchor_with_mode(
                 .await
                 .unwrap();
             revision.revision().complete(metadata);
-            revision.revision().file_pin.lock().unwrap().take();
+            if !keep_revision_pin {
+                revision.revision().file_pin.lock().unwrap().take();
+            }
             revision.revision().bind_origin(&*session.read().await);
             revisions.insert(seq, revision);
         }
@@ -886,4 +901,42 @@ async fn forward_content_anchor_registers_ready_conservative_handoff_revision() 
 #[tokio::test]
 async fn forward_content_anchor_cleans_rejected_optimistic_handoff_revision() {
     assert_forward_content_anchor_after_published_prefix("changed-anchor-bytes", false, true).await;
+}
+
+/// A completed optimistic startup revision keeps its own active-file pin while
+/// a guard serves it. The content anchor probe must not pin that path again.
+#[tokio::test]
+async fn forward_content_anchor_accepts_already_pinned_optimistic_reference() {
+    assert_forward_content_anchor_with_revision_pin(
+        "committed-anchor-bytes",
+        true,
+        Some(shared::model::HlsStartupMode::Optimistic),
+        true,
+    )
+    .await;
+}
+
+/// A completed conservative startup revision keeps its own active-file pin
+/// while a guard serves it. The content anchor probe must not pin it again.
+#[tokio::test]
+async fn forward_content_anchor_accepts_already_pinned_conservative_reference() {
+    assert_forward_content_anchor_with_revision_pin(
+        "committed-anchor-bytes",
+        true,
+        Some(shared::model::HlsStartupMode::Conservative),
+        true,
+    )
+    .await;
+}
+
+/// A pinned reference with different origin bytes is still rejected.
+#[tokio::test]
+async fn forward_content_anchor_rejects_already_pinned_changed_reference() {
+    assert_forward_content_anchor_with_revision_pin(
+        "changed-anchor-bytes",
+        false,
+        Some(shared::model::HlsStartupMode::Optimistic),
+        true,
+    )
+    .await;
 }
