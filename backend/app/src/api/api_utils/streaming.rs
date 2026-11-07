@@ -106,6 +106,8 @@ pub(crate) fn record_connect_failed_attempt(attempt: ConnectFailedAttempt<'_>) {
 
 pub(super) struct StreamingAcquireOptions<'a> {
     pub(super) force_provider: Option<&'a Arc<str>>,
+    /// Account that owns `stream_url` when it differs from the input, e.g. a session URL of an alias.
+    pub(super) stream_url_owner: Option<&'a Arc<str>>,
     pub(super) allow_forced_provider_fallback: bool,
     pub(super) allow_provider_grace: bool,
     pub(super) user_priority: i8,
@@ -189,6 +191,7 @@ pub(super) async fn create_stream_response_details(
     share_stream: bool,
     connection_permission: UserConnectionPermission,
     force_provider: Option<&Arc<str>>,
+    stream_url_owner: Option<&Arc<str>>,
     allow_forced_provider_fallback: bool,
     allow_provider_grace: bool,
     virtual_id: VirtualId,
@@ -210,6 +213,7 @@ pub(super) async fn create_stream_response_details(
         input,
         StreamingAcquireOptions {
             force_provider,
+            stream_url_owner,
             allow_forced_provider_fallback,
             allow_provider_grace,
             user_priority,
@@ -797,6 +801,7 @@ pub(super) async fn force_stream_response(
         share_stream,
         connection_permission,
         preferred_provider,
+        Some(&user_session.provider).filter(|provider| !provider.is_empty()),
         allow_forced_provider_fallback,
         allow_provider_grace,
         VirtualId::new(stream_channel.virtual_id),

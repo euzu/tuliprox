@@ -1457,7 +1457,9 @@
   cache and resolve serialization are keyed per account. HLS playlist refreshes resolve a fresh link for the
   pinned account instead of rewriting the stored URL. When the portal rejects a cached link on a playlist refresh
   (4xx or a body that is no playlist), tuliprox requests one fresh `create_link` for the same account, retries once
-  and binds the session to the new link. Timeouts and 5xx do not trigger an extra portal call.
+  and binds the session to the new link. The retry sends the session cookie of the new link's host, not the old one.
+  Timeouts, 5xx, 408, 429 and 407 do not trigger an extra portal call. A replayed alias URL stays bound to its alias
+  when the account pin is cleared; another account resolves its own link.
 
 - **CDN playback failover and recovery preserve provider bindings across all streams.** For inputs configuring
   `playback_provider`, standard HLS, catchup, and archive streams retain their provider profiles and query parameters,

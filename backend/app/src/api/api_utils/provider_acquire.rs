@@ -227,6 +227,7 @@ pub(super) async fn resolve_streaming_strategy_with_provider_handle(
                 let accept_requested_stream_url = accepts_requested_stream_url(
                     input,
                     options.force_provider,
+                    options.stream_url_owner,
                     options.accept_requested_stream_url,
                     &provider_cfg.name,
                 );
@@ -460,6 +461,11 @@ pub(crate) async fn stream_response_with_provider_handle(
 
     let stream_options = get_stream_options(&app_state.app_config, StreamResponseMode::Stream);
     let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
+    // A replayed session URL stays owned by the session account, even when the pin below is cleared.
+    let stream_url_owner = session_state
+        .as_ref()
+        .filter(|session| !session.provider.is_empty() && session.stream_url.as_ref() == stream_url)
+        .map(|session| Arc::clone(&session.provider));
     let pinned_provider = pinned_provider.filter(|provider| {
         item_type.is_live()
             || session_state
@@ -487,6 +493,7 @@ pub(crate) async fn stream_response_with_provider_handle(
         share_stream,
         connection_permission,
         pinned_provider,
+        stream_url_owner.as_ref(),
         pinned_provider.is_none() || allows_provider_pool_failover(item_type),
         true,
         VirtualId::new(stream_channel.virtual_id),

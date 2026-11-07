@@ -48,6 +48,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
         &input,
         StreamingAcquireOptions {
             force_provider: Some(&pinned_provider),
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,
@@ -76,6 +77,7 @@ async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
         &input,
         StreamingAcquireOptions {
             force_provider: Some(&pinned_provider),
+            stream_url_owner: None,
             allow_forced_provider_fallback: true,
             allow_provider_grace: false,
             user_priority: 0,
@@ -156,6 +158,7 @@ async fn create_stream_response_details_preserves_stored_headers_when_fallback_o
         false,
         UserConnectionPermission::Allowed,
         Some(&pinned_provider),
+        None,
         true,
         false,
         VirtualId::new(channel.virtual_id),
@@ -307,6 +310,7 @@ async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_pr
         &input,
         StreamingAcquireOptions {
             force_provider: None,
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,
@@ -375,6 +379,7 @@ async fn resolve_streaming_strategy_rewrites_opaque_m3u_token_after_alias_alloca
         &input,
         StreamingAcquireOptions {
             force_provider: None,
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,
@@ -413,6 +418,7 @@ async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
         &input,
         StreamingAcquireOptions {
             force_provider: None,
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,
@@ -450,6 +456,7 @@ async fn resolve_streaming_strategy_accepts_media_server_stream_ref_without_requ
         &input,
         StreamingAcquireOptions {
             force_provider: None,
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,
@@ -487,6 +494,7 @@ async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
         &input,
         StreamingAcquireOptions {
             force_provider: None,
+            stream_url_owner: None,
             allow_forced_provider_fallback: false,
             allow_provider_grace: false,
             user_priority: 0,

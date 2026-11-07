@@ -53,6 +53,7 @@ pub(in crate::api::endpoints::hls_api) struct HlsCacheOriginResolution {
     pub(in crate::api::endpoints::hls_api) session_entry_url: HlsOriginEntryUrl,
 }
 
+/// Proxy path of the HLS entry playlist for `virtual_id`: the M3U path for M3U-only targets, else the Xtream path.
 pub(in crate::api) fn build_virtual_hls_entry_path(
     target: &ConfigTarget,
     input: &ConfigInput,
@@ -177,6 +178,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 
     let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
+    // Set when the session cookie for the pinned URL's host replaced the request cookie; holds the prior value.
+    let mut replaced_cookie: Option<Option<axum::http::HeaderValue>> = None;
     // `pinned_stalker_stream` is set when a pinned refresh resolved its Stalker link; a rejected playlist then
     // forces one fresh `create_link` for the same account.
     let (
@@ -292,6 +295,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
         if session.provider.as_ref() == selected_provider_config.name.as_ref() {
             if let tuliprox_session::SessionProviderHeaders::Headers(session_headers) = session_headers {
+                replaced_cookie = Some(headers.get(axum::http::header::COOKIE).cloned());
                 append_user_session_provider_headers(&mut headers, &session_headers);
             }
         }
@@ -466,6 +470,23 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         session_identity = None;
                     }
                 }
+                // The session cookie was chosen for the old URL's host; re-read it for the fresh URL.
+                if let Some(prior_cookie) = replaced_cookie.take() {
+                    let fresh_headers = match (session_token.as_deref(), session_identity) {
+                        (Some(token), Some(identity)) => {
+                            app_state
+                                .active_users
+                                .provider_headers_for_session_identity(&user.username, token, identity, &request_url)
+                                .await
+                        }
+                        _ => tuliprox_session::SessionProviderHeaders::NoSession,
+                    };
+                    let fresh_headers = match &fresh_headers {
+                        tuliprox_session::SessionProviderHeaders::Headers(headers) => Some(headers),
+                        _ => None,
+                    };
+                    rebind_session_cookie(&mut headers, prior_cookie, fresh_headers);
+                }
                 download_result = download_classified_hls_manifest(app_state, input, &request_url, &headers).await;
             }
         }
@@ -574,14 +595,40 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
 }
 
+/// Replaces the session cookie chosen for an earlier URL: restores the request cookie it replaced, then applies the
+/// session cookie valid for the new URL, if any. Other headers stay unchanged.
+fn rebind_session_cookie(
+    headers: &mut HeaderMap,
+    prior_cookie: Option<axum::http::HeaderValue>,
+    session_headers: Option<&std::collections::HashMap<String, String>>,
+) {
+    match prior_cookie {
+        Some(cookie) => headers.insert(axum::http::header::COOKIE, cookie),
+        None => headers.remove(axum::http::header::COOKIE),
+    };
+    if let Some(session_headers) = session_headers {
+        append_user_session_provider_headers(headers, session_headers);
+    }
+}
+
+/// Playlist body, final response URL, response headers and playlist kind of a manifest download.
 type ClassifiedHlsManifest = (String, String, HeaderMap, HlsPlaylistKind);
 
 /// A 4xx response or a non-playlist body, the two ways a portal answers an expired link.
-/// Timeouts, 5xx and transport errors do not trigger a fresh `create_link`.
+/// Timeouts, 5xx and transport errors do not trigger a fresh `create_link`. Neither do 4xx statuses that do not
+/// reject the link: rate limiting (429), request timeout (408) and proxy authentication (407).
 fn is_rejected_hls_manifest_download(result: &Result<ClassifiedHlsManifest, std::io::Error>) -> bool {
     match result {
         Ok((_, _, _, kind)) => *kind == HlsPlaylistKind::Invalid,
-        Err(err) => request::request_failed_status(&err.to_string()).is_some_and(|status| status.is_client_error()),
+        Err(err) => request::request_failed_status(&err.to_string()).is_some_and(|status| {
+            status.is_client_error()
+                && !matches!(
+                    status,
+                    StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                )
+        }),
     }
 }
 
@@ -684,6 +731,36 @@ mod playback_provider_tests {
         assert!(source.provider.is_none(), "an unknown mapped profile must fail closed");
     }
 
+    /// A fresh Stalker link drops the old host's session cookie and keeps unrelated headers.
+    #[test]
+    fn fresh_link_rebinds_the_session_cookie() {
+        use axum::http::{header, HeaderValue};
+        let stale = || {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, HeaderValue::from_static("old-host=1"));
+            headers.insert(header::USER_AGENT, HeaderValue::from_static("player"));
+            headers
+        };
+
+        // No session cookie for the new host and no request cookie before: no cookie is sent.
+        let mut headers = stale();
+        rebind_session_cookie(&mut headers, None, None);
+        assert!(headers.get(header::COOKIE).is_none());
+        assert_eq!(headers.get(header::USER_AGENT), Some(&HeaderValue::from_static("player")));
+
+        // A configured request cookie comes back.
+        let mut headers = stale();
+        rebind_session_cookie(&mut headers, Some(HeaderValue::from_static("configured=1")), None);
+        assert_eq!(headers.get(header::COOKIE), Some(&HeaderValue::from_static("configured=1")));
+
+        // The session cookie of the new host is applied.
+        let mut headers = stale();
+        let fresh = std::collections::HashMap::from([(header::COOKIE.as_str().to_string(), "new-host=2".to_string())]);
+        rebind_session_cookie(&mut headers, None, Some(&fresh));
+        assert_eq!(headers.get(header::COOKIE), Some(&HeaderValue::from_static("new-host=2")));
+    }
+
+    /// Only link rejections (most 4xx, non-playlist body) trigger a fresh `create_link`.
     #[test]
     fn pinned_stalker_playlist_retry_triggers_only_on_rejection() {
         let manifest = |kind| Ok((String::new(), String::new(), HeaderMap::new(), kind));
@@ -693,6 +770,11 @@ mod playback_provider_tests {
         assert!(is_rejected_hls_manifest_download(&Err(http_err(StatusCode::NOT_FOUND))));
         assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::INTERNAL_SERVER_ERROR))));
         assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::SERVICE_UNAVAILABLE))));
+        assert!(is_rejected_hls_manifest_download(&Err(http_err(StatusCode::UNAUTHORIZED))));
+        assert!(is_rejected_hls_manifest_download(&Err(http_err(StatusCode::GONE))));
+        assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::TOO_MANY_REQUESTS))));
+        assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::REQUEST_TIMEOUT))));
+        assert!(!is_rejected_hls_manifest_download(&Err(http_err(StatusCode::PROXY_AUTHENTICATION_REQUIRED))));
         assert!(!is_rejected_hls_manifest_download(&Err(std::io::Error::from(std::io::ErrorKind::TimedOut))));
         assert!(!is_rejected_hls_manifest_download(&Err(std::io::Error::other("connection reset by peer"))));
         assert!(is_rejected_hls_manifest_download(&manifest(HlsPlaylistKind::Invalid)));

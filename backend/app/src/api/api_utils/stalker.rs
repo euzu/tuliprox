@@ -13,6 +13,7 @@ use shared::{
 };
 use std::sync::Arc;
 
+/// True when a Stalker playback URL must be re-resolved: the URL is invalid or the provider answered with a 4xx.
 pub(super) fn should_refresh_stalker_playback(
     input_type: InputType,
     request_url_valid: bool,
@@ -21,10 +22,12 @@ pub(super) fn should_refresh_stalker_playback(
     input_type.is_stalker() && (!request_url_valid || status.is_some_and(|status| status.is_client_error()))
 }
 
+/// True when a Stalker playlist entry holds no playback URL yet and needs a first `create_link`.
 pub(super) fn needs_initial_stalker_resolution(input_type: InputType, stream_url: &str) -> bool {
     input_type.is_stalker() && stream_url.is_empty()
 }
 
+/// Maps a cluster and item type to the Stalker stream kind; catchup items are archive streams.
 pub(super) fn stalker_stream_kind(cluster: XtreamCluster, item_type: PlaylistItemType) -> StalkerStreamKind {
     if item_type == PlaylistItemType::Catchup {
         StalkerStreamKind::Archive
@@ -77,16 +80,19 @@ pub(crate) async fn resolve_stalker_stream_for_account(
 }
 
 /// Decides whether the requested stream URL is kept for the allocated provider account. A Stalker URL belongs to the
-/// account that owns it (the forced provider, else the input); any other account needs its own resolved link.
+/// account that supplied it: `stream_url_owner` (the session account whose URL is replayed), else the forced provider,
+/// else the input. The owner does not depend on the pin, so a cleared pin cannot hand an alias URL to another account.
+/// Any other account needs its own resolved link.
 pub(super) fn accepts_requested_stream_url(
     input: &ConfigInput,
     force_provider: Option<&Arc<str>>,
+    stream_url_owner: Option<&Arc<str>>,
     accept_requested_stream_url: bool,
     allocated_provider: &str,
 ) -> bool {
+    let url_owner = stream_url_owner.or(force_provider).map_or(input.name.as_ref(), AsRef::as_ref);
     (accept_requested_stream_url && force_provider.is_none_or(|forced| forced.as_ref() == allocated_provider))
-        || (input.input_type.is_stalker()
-            && force_provider.map_or(input.name.as_ref(), |forced| forced.as_ref()) == allocated_provider)
+        || (input.input_type.is_stalker() && url_owner == allocated_provider)
 }
 
 /// Resolves the first playable link for the input's own account when the playlist holds no Stalker URL yet.
